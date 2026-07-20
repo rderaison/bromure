@@ -338,7 +338,8 @@ final class CodingTaskEngine {
         Explore the repository read-only, then:
         1. File the implementation phases with the board_create_subtasks \
         tool: ordered, each roughly one reviewable pull request of work, \
-        with dependsOn set (1-based indices) for phases that need earlier \
+        with dependsOn set (1-based phase numbers, counting every phase \
+        you've filed for this task so far) for phases that need earlier \
         ones DONE first. The phases appear on the user's board as cards.
         2. Record a short overview of the plan with board_set_plan.
         Do NOT write any code, do NOT modify or commit anything. Explore in \
@@ -1419,9 +1420,33 @@ final class CodingTaskEngine {
     func merge(_ taskID: UUID, into targetOverride: String? = nil,
                squash: Bool = false) {
         guard let task = store.task(taskID), task.stage == .testing,
-              let branch = task.branch,
-              let target = targetOverride ?? task.parentBranch,
-              let root = task.rootRepo, let delegate else { return }
+              let branch = task.branch, let delegate else { return }
+        guard let target = targetOverride ?? task.parentBranch,
+              let root = task.rootRepo else {
+            // Metadata capture failed at hand-to-review (workspace down at
+            // the time?). Resolve it now and retry once — a silent return
+            // here looked like "merge did nothing" on the board.
+            Task { [weak self] in
+                guard let self else { return }
+                let m = await self.resolveWorktreeMetadata(
+                    profileID: task.profileID, branch: branch,
+                    repoPath: task.repoPath)
+                self.store.mutate(taskID) {
+                    if $0.worktreeDir == nil { $0.worktreeDir = m.dir }
+                    if $0.parentBranch == nil { $0.parentBranch = m.parent }
+                    if $0.rootRepo == nil { $0.rootRepo = m.root }
+                }
+                if let t = self.store.task(taskID),
+                   (targetOverride ?? t.parentBranch) != nil, t.rootRepo != nil {
+                    self.merge(taskID, into: targetOverride, squash: squash)
+                } else {
+                    self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
+                        "Couldn't determine the branch's parent or repo root — is the workspace running?",
+                        comment: "task merge") }
+                }
+            }
+            return
+        }
         let ok = delegate.automationWorktreeCommand(
             profileNameOrID: task.profileID.uuidString, action: "merge",
             args: [branch, target, root,

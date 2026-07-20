@@ -373,8 +373,9 @@ final class RemoteHostController {
         if model.vmListeningPorts != ports { model.vmListeningPorts = ports }
     }
 
-    /// Mirror the guest's docker state (containers / images / binfmt) into the
-    /// shared `TabsModel` — the remote Docker dashboard renders from these.
+    /// Mirror the guest's docker state (containers / images / volumes / binfmt)
+    /// into the shared `TabsModel` — the remote Docker dashboard renders from
+    /// these.
     private func applyRemoteDocker(_ model: TabsModel, _ vm: [String: Any]) {
         let containers = ((vm["dockerContainers"] as? [[String: Any]]) ?? []).map { d -> DockerContainer in
             var c = DockerContainer(
@@ -385,6 +386,7 @@ final class RemoteHostController {
                 state: d["state"] as? String ?? "",
                 ports: d["ports"] as? String ?? "",
                 runningFor: d["runningFor"] as? String ?? "",
+                mounts: d["mounts"] as? String ?? "",
                 cpuPerc: d["cpuPerc"] as? String ?? "",
                 memUsage: d["memUsage"] as? String ?? "")
             c.arch = d["arch"] as? String ?? ""
@@ -399,6 +401,14 @@ final class RemoteHostController {
                         created: $0["created"] as? String ?? "")
         }
         if model.dockerImages != images { model.dockerImages = images }
+        let volumes = ((vm["dockerVolumes"] as? [[String: Any]]) ?? []).map {
+            DockerVolume(name: $0["name"] as? String ?? "",
+                         driver: $0["driver"] as? String ?? "",
+                         mountpoint: $0["mountpoint"] as? String ?? "",
+                         createdAt: $0["createdAt"] as? String ?? "",
+                         size: $0["size"] as? String ?? "")
+        }
+        if model.dockerVolumes != volumes { model.dockerVolumes = volumes }
         if let arches = vm["dockerBinfmt"] as? [String], !arches.isEmpty {
             if !model.binfmtProbed { model.binfmtProbed = true }
             if model.binfmtArches != arches { model.binfmtArches = arches }
@@ -1910,6 +1920,10 @@ final class RemoteHostWindow: NSWindow {
         clearVMDashboard()
         clearDockerDashboard()
         hideShownBrowser()
+        // The boards are workspace-independent, but the file column sits
+        // OUTSIDE the stage in this window — it would linger next to the board
+        // showing some workspace's files. Collapse it (toolbar re-opens it).
+        setFilePaneOpen(false)
         if kanbanHost == nil {
             let c = controller
             let view = AutomationKanbanView(
@@ -2121,6 +2135,9 @@ final class RemoteHostWindow: NSWindow {
         clearVMDashboard()
         clearDockerDashboard()
         hideShownBrowser()
+        // Same as showAutomationBoard: the file column lives outside the
+        // stage here, so it would linger next to the board. Collapse it.
+        setFilePaneOpen(false)
         if taskBoardHost == nil {
             let c = controller
             let view = CodingKanbanView(
@@ -2786,8 +2803,8 @@ final class RemoteHostWindow: NSWindow {
     // MARK: Docker dashboard (mirrors the local overlay)
 
     /// Docker dashboard for a running remote workspace. Data comes from the
-    /// mirrored `TabsModel` (containers/images ride `/state`); actions ride
-    /// `POST /vms/{id}/docker`. Opening turns on the guest's gated stats
+    /// mirrored `TabsModel` (containers/images/volumes ride `/state`); actions
+    /// ride `POST /vms/{id}/docker`. Opening turns on the guest's gated stats
     /// polling for the duration, like the local dashboard.
     func showDockerDashboard(_ id: Profile.ID, container: String? = nil) {
         guard let model = controller.tabsModel(for: id) else { return }   // needs a running VM
@@ -2819,6 +2836,8 @@ final class RemoteHostWindow: NSWindow {
             onRemove: { cid in c.dockerAction(id, ["action": "remove", "container": cid]) },
             onAttach: { cid, shell in c.dockerAction(id, ["action": "attach", "container": cid, "shell": shell]) },
             onLogs:   { cid in c.dockerAction(id, ["action": "logs", "container": cid]) },
+            onVolumeCreate: { name in c.dockerAction(id, ["action": "volume-create", "volume": name]) },
+            onVolumeRemove: { name in c.dockerAction(id, ["action": "volume-remove", "volume": name]) },
             onInstallBinfmt:   { c.dockerAction(id, ["action": "binfmt"]) },
             onUninstallBinfmt: { c.dockerAction(id, ["action": "binfmt-off"]) },
             initialContainerID: container)

@@ -657,6 +657,7 @@ final class RunningSession {
     /// mirroring `SessionPane.applyDockerStats`/`applyDockerArch`.
     var dockerContainers: [DockerContainer] = []
     var dockerImages: [DockerImage] = []
+    var dockerVolumes: [DockerVolume] = []
     var dockerBinfmt: [String] = []
     private var dockerStatsByShortID: [String: (cpu: String, mem: String)] = [:]
     private var dockerArchByShortID: [String: String] = [:]
@@ -3065,12 +3066,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "dockerContainers": s.dockerContainers.map {
                     ["id": $0.id, "name": $0.name, "image": $0.image,
                      "status": $0.status, "state": $0.state, "ports": $0.ports,
-                     "runningFor": $0.runningFor, "cpuPerc": $0.cpuPerc,
+                     "runningFor": $0.runningFor, "mounts": $0.mounts,
+                     "cpuPerc": $0.cpuPerc,
                      "memUsage": $0.memUsage, "arch": $0.arch] as [String: Any]
                 },
                 "dockerImages": s.dockerImages.map {
                     ["id": $0.id, "repository": $0.repository, "tag": $0.tag,
                      "size": $0.size, "created": $0.created] as [String: Any]
+                },
+                "dockerVolumes": s.dockerVolumes.map {
+                    ["name": $0.name, "driver": $0.driver,
+                     "mountpoint": $0.mountpoint, "createdAt": $0.createdAt,
+                     "size": $0.size] as [String: Any]
                 },
                 "dockerBinfmt": s.dockerBinfmt,
             ]
@@ -7732,7 +7739,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.messageText = String(
             format: NSLocalizedString("Merge “%@”", comment: ""), tab.shownLabel)
         alert.informativeText = NSLocalizedString(
-            "Runs the merge in a new tab in the destination's checkout. Only committed work on this branch is merged. If it conflicts, the coding agent is started right there to resolve it automatically. The worktree isn't discarded — use “Discard worktree” once you're happy.",
+            "Runs the merge in a new tab in the destination's checkout. Uncommitted work on the branch is committed first by the coding agent, so nothing is left behind; conflicts start the agent right there to resolve them. The worktree isn't discarded — use “Discard worktree” once you're happy.",
             comment: "")
         alert.addButton(withTitle: NSLocalizedString("Merge", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
@@ -7837,6 +7844,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func requestDockerLogs(containerID: String, in pane: SessionPane) {
         guard let id = sanitizedDockerID(containerID) else { return }
         sendCommand("docker-logs \(id)", in: pane)
+    }
+
+    /// docker's volume-name rule: [a-zA-Z0-9][a-zA-Z0-9_.-]* — stricter than
+    /// `dockerIDAllowed` because create takes a user-typed name.
+    private static let volumeNameFirst = CharacterSet(charactersIn:
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+    private static let volumeNameRest = volumeNameFirst.union(.init(charactersIn: "_.-"))
+
+    static func sanitizedVolumeName(_ raw: String) -> String? {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = t.unicodeScalars.first, Self.volumeNameFirst.contains(first),
+              t.unicodeScalars.allSatisfy(Self.volumeNameRest.contains)
+        else { return nil }
+        return t
+    }
+
+    func requestDockerVolumeCreate(name: String, in pane: SessionPane) {
+        guard let n = Self.sanitizedVolumeName(name) else { return }
+        sendCommand("docker-volume-create \(n)", in: pane)
+    }
+    func requestDockerVolumeRemove(name: String, in pane: SessionPane) {
+        guard let n = Self.sanitizedVolumeName(name) else { return }
+        sendCommand("docker-volume-remove \(n)", in: pane)
     }
 
     /// Install cross-arch QEMU emulation (binfmt handlers) in the workspace.
@@ -7992,6 +8022,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             sendGuestCommand("docker-binfmt", profileID: id)
         case "binfmt-off":
             sendGuestCommand("docker-binfmt-off", profileID: id)
+        case "volume-create", "volume-remove":
+            guard let name = Self.sanitizedVolumeName(doc["volume"] as? String ?? "") else {
+                return ["ok": false, "error": "bad volume name"]
+            }
+            sendGuestCommand("docker-\(action) \(name)", profileID: id)
         case "run":
             var spec = DockerRunSpec(image: doc["image"] as? String ?? "")
             spec.name = doc["name"] as? String ?? ""
@@ -8594,6 +8629,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             Task { @MainActor in
                 self?.runningSessions[pid]?.dockerImages = images
                 self?.pane(for: pid)?.applyDockerImages(images)
+            }
+        }
+        sandbox.onDockerVolumes = { [weak self] volumes in
+            Task { @MainActor in
+                self?.runningSessions[pid]?.dockerVolumes = volumes
+                self?.pane(for: pid)?.applyDockerVolumes(volumes)
             }
         }
         sandbox.onDockerError = { [weak self] message in

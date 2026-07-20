@@ -2308,6 +2308,32 @@ _SQUASH_WINDOW_CMD = (
     'git commit -m "$WT_MSG" >/dev/null 2>&1; '
     'echo "bromure: squash-merged $WT_SRC into $WT_DST."; sleep 2; fi')
 
+# The branch's worktree holds UNCOMMITTED work: `git merge` would silently
+# leave it behind (the board's review diff shows the working tree, so the user
+# has seen and approved those changes). Hand the whole merge to the coding
+# agent instead, starting in the SOURCE checkout: commit everything intended,
+# then run the merge in the destination's checkout — the same agent-handoff
+# the conflict path uses.
+_DIRTY_MERGE_PROMPT = (
+    "You are on git branch '%(src)s', a worktree checkout with UNCOMMITTED"
+    " changes. The user asked to merge this branch into '%(dst)s', and the"
+    " uncommitted work must not be left behind.\n"
+    "1. Review what's outstanding: `git status` and `git diff`.\n"
+    "2. Commit ALL intended work on this branch with clear, imperative"
+    " commit messages. Leave out only obvious junk (build artifacts, scratch"
+    " files) — when in doubt, commit it.\n"
+    "3. Then merge into the destination's checkout: %(merge_step)s\n"
+    "4. If the merge conflicts, resolve every conflicted file keeping both"
+    " sides' intent and stage the resolutions with `git add` in that"
+    " checkout; summarize how you resolved each conflict and ask me to"
+    " confirm before finishing the merge with `git commit --no-edit`.\n"
+    "5. Reply with a one-line summary of what landed in '%(dst)s'.")
+
+_DIRTY_MERGE_STEP = "run `git -C '%(tdir)s' merge --no-edit '%(src)s'`."
+_DIRTY_SQUASH_STEP = (
+    "run `git -C '%(tdir)s' merge --squash '%(src)s'`, then"
+    " `git -C '%(tdir)s' commit -m 'Squash-merge %(src)s'`.")
+
 
 def _worktree_merge(branch, target, root, display, tool, mode="merge"):
     _ensure_seed_current()
@@ -2317,8 +2343,29 @@ def _worktree_merge(branch, target, root, display, tool, mode="merge"):
     if not os.path.isdir(tdir):
         worktree_err("merge: no checkout for '%s'" % target)
         return
-    rp64 = _b64e(_MERGE_PROMPT)
     squash = (mode == "squash")
+    # Uncommitted work on the source branch → agent-driven merge (see
+    # _DIRTY_MERGE_PROMPT). The clean/committed case keeps the fast path.
+    sdir = _worktree_dir_for_branch(root, branch)
+    if sdir and os.path.isdir(sdir) and \
+            _capture(["git", "-C", sdir, "status", "--porcelain"]).strip():
+        step = (_DIRTY_SQUASH_STEP if squash else _DIRTY_MERGE_STEP) \
+            % {"tdir": tdir, "src": branch}
+        p64 = _b64e(_DIRTY_MERGE_PROMPT
+                    % {"src": branch, "dst": target, "merge_step": step})
+        win = _new_window(command="bash -l", cwd=sdir,
+                          env={"BROMURE_AC_WT_TOOL": tool,
+                               "BROMURE_AC_WT_PROMPT": p64})
+        if not win:
+            worktree_err("merge: could not open a tab")
+            return
+        # Merge marker for the host, nested under the worktree like a PR tab.
+        _set_window_option(win, "@display", "Merge → " + target)
+        _set_window_option(win, "@parent_branch", branch)
+        _set_window_option(win, "@root_repo", root)
+        _set_window_option(win, "@label", tool)
+        return
+    rp64 = _b64e(_MERGE_PROMPT)
     win = _new_window(command=_SQUASH_WINDOW_CMD if squash else _MERGE_WINDOW_CMD,
                       cwd=tdir,
                       env={"WT_SRC": branch, "WT_DST": target,
@@ -2769,6 +2816,8 @@ def ports_loop_service():
 
 def docker_loop_service():
     """Container list (NDJSON) → docker.txt every 2s; gated dashboard extras."""
+    tick = 0
+    vol_sizes = {}   # name -> human size, from the slow `docker system df` probe
     while _RUNNING.is_set():
         out = _capture(["docker", "ps", "-a", "--no-trunc",
                         "--format", "{{json .}}"])
@@ -2804,6 +2853,34 @@ def docker_loop_service():
                      img]).strip()
                 a += "%s\t%s\n" % (cid, ar)
             _atomic_publish(".docker-arch.tmp", "docker-arch.txt", a)
+            # Volumes: one inspect call covers every volume (cheap). Sizes need
+            # `docker system df -v` — the daemon walks each volume tree for it —
+            # so probe those on a slower cadence and merge by name.
+            if tick % 5 == 0:
+                try:
+                    df = json.loads(_capture(
+                        ["docker", "system", "df", "-v",
+                         "--format", "{{json .}}"]) or "{}")
+                    vol_sizes = {d.get("Name", ""): d.get("Size", "")
+                                 for d in df.get("Volumes") or []}
+                except ValueError:
+                    vol_sizes = {}
+            names = _capture(["docker", "volume", "ls", "-q"]).split()
+            v = ""
+            if names:
+                for line in _capture(["docker", "volume", "inspect",
+                                      "--format", "{{json .}}"]
+                                     + names).splitlines():
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    d["Size"] = vol_sizes.get(d.get("Name", ""), "")
+                    v += json.dumps(d) + "\n"
+            _atomic_publish(".docker-volumes.tmp", "docker-volumes.txt", v)
+            tick += 1
+        else:
+            tick = 0   # next dashboard open re-probes sizes immediately
         time.sleep(2)
 
 
@@ -3064,6 +3141,12 @@ def _dispatch_command(action, arg):
         _bg(_docker_simple, ["stop"], arg)
     elif action == "docker-remove":
         _bg(_docker_simple, ["rm", "-f"], arg)
+    elif action == "docker-volume-create":
+        _bg(_docker_simple, ["volume", "create"], arg)
+    elif action == "docker-volume-remove":
+        # No -f: removing an in-use volume must fail loudly (docker-error.txt
+        # → dashboard banner), not silently skip.
+        _bg(_docker_simple, ["volume", "rm"], arg)
     elif action == "docker-binfmt":
         _bg(_docker_binfmt, True)
     elif action == "docker-binfmt-off":

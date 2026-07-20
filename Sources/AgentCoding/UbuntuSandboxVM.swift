@@ -47,9 +47,10 @@ private struct DockerPSJSON: Decodable {
     let Status: String
     let Ports: String?
     let RunningFor: String?
+    let Mounts: String?
     private let StateRaw: String?
     var State: String { StateRaw ?? (Status.hasPrefix("Up") ? "running" : "exited") }
-    enum CodingKeys: String, CodingKey { case ID, Names, Image, Status, Ports, RunningFor, StateRaw = "State" }
+    enum CodingKeys: String, CodingKey { case ID, Names, Image, Status, Ports, RunningFor, Mounts, StateRaw = "State" }
 }
 
 private struct DockerStatsJSON: Decodable {
@@ -64,6 +65,16 @@ private struct DockerImageJSON: Decodable {
     let Tag: String
     let Size: String?
     let CreatedSince: String?
+}
+
+/// One line of the guest's docker-volumes.txt — `docker volume inspect` fields
+/// plus the Size the agent merges in from its `docker system df -v` probe.
+private struct DockerVolumeJSON: Decodable {
+    let Name: String
+    let Driver: String?
+    let Mountpoint: String?
+    let CreatedAt: String?
+    let Size: String?
 }
 
 /// Boots an Ubuntu base image for an interactive session.
@@ -105,6 +116,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// Called ~every 2s WHILE a dashboard is open with the local image list
     /// (from `docker images`).
     public var onDockerImages: (([DockerImage]) -> Void)?
+
+    /// Called ~every 2s WHILE a dashboard is open with the named volume list
+    /// (from `docker volume inspect`, sizes from a slower `system df` probe).
+    public var onDockerVolumes: (([DockerVolume]) -> Void)?
 
     /// Called when a docker action (run / start / stop / remove) fails in the
     /// guest — carries docker's stderr. One-shot: the file is consumed on read.
@@ -700,7 +715,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                 containers.append(DockerContainer(
                                     id: ps.ID, name: ps.Names, image: ps.Image,
                                     status: ps.Status, state: ps.State.lowercased(),
-                                    ports: ps.Ports ?? "", runningFor: ps.RunningFor ?? ""))
+                                    ports: ps.Ports ?? "", runningFor: ps.RunningFor ?? "",
+                                    mounts: ps.Mounts ?? ""))
                             }
                             self?.onDockerList?(containers)
                             continue
@@ -767,6 +783,23 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                     size: im.Size ?? "", created: im.CreatedSince ?? ""))
                             }
                             self?.onDockerImages?(images)
+                            continue
+                        }
+                        // docker-volumes.txt — `docker volume inspect` NDJSON
+                        // (+ merged Size); dashboard-only.
+                        if name == "docker-volumes.txt" {
+                            let raw = (try? String(contentsOf: entry, encoding: .utf8)) ?? ""
+                            var volumes: [DockerVolume] = []
+                            for line in raw.split(whereSeparator: \.isNewline) {
+                                guard let data = line.data(using: .utf8),
+                                      let vol = try? JSONDecoder().decode(DockerVolumeJSON.self, from: data)
+                                else { continue }
+                                volumes.append(DockerVolume(
+                                    name: vol.Name, driver: vol.Driver ?? "",
+                                    mountpoint: vol.Mountpoint ?? "",
+                                    createdAt: vol.CreatedAt ?? "", size: vol.Size ?? ""))
+                            }
+                            self?.onDockerVolumes?(volumes)
                             continue
                         }
                         // docker-binfmt.txt — space-separated qemu arch suffixes

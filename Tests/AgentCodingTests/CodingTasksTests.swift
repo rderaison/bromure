@@ -230,6 +230,44 @@ struct CodingTasksTests {
         #expect(store.backlogTasks().count == 1)
     }
 
+    @Test("Subtask dependsOn numbers span board_create_subtasks calls")
+    @MainActor
+    func crossCallSubtaskDependencies() async throws {
+        let store = CodingTaskStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("kb-\(UUID().uuidString).json"))
+        let pid = UUID()
+        var parent = CodingTask(title: "Big plan", profileID: pid)
+        parent.branchSlug = "big-plan"
+        parent.stage = .inProgress
+        store.upsert(parent)
+        let server = TaskBoardMCPServer(profileID: pid,
+                                        store: { store }, engine: { nil })
+        func file(_ subtasks: [[String: Any]]) async {
+            let req: [String: Any] = [
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": ["name": "board_create_subtasks",
+                           "arguments": ["subtasks": subtasks]],
+            ]
+            let line = String(data: try! JSONSerialization.data(withJSONObject: req),
+                              encoding: .utf8)!
+            _ = await server.handle(line: line, branch: "wt/big-plan")
+        }
+        // Call 1 files phases 1+2 (2 depends on 1); call 2 files phase 3
+        // depending on phase 2 — a plan-wide number, out of range for call
+        // 2's own array. It used to be dropped, so phase 3 started early.
+        await file([["title": "Phase 1"],
+                    ["title": "Phase 2", "dependsOn": [1]]])
+        await file([["title": "Phase 3", "dependsOn": [2]]])
+        let phases = store.tasks.filter { $0.parentTaskID == parent.id }
+            .sorted { $0.createdAt < $1.createdAt }
+        try #require(phases.count == 3)
+        #expect(phases[0].dependsOn == nil)
+        #expect(phases[1].dependsOn == [phases[0].id])
+        #expect(phases[2].dependsOn == [phases[1].id])
+        // Phase 3 must therefore be blocked while phase 2 isn't Done.
+        #expect(!phases[2].unmetDependencies(in: store.tasks).isEmpty)
+    }
+
     @Test("planBrief extracts the user's brief from the planner meta-prompt")
     func planBriefExtraction() {
         let task = CodingTask(title: "VM scanner",

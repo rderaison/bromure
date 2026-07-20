@@ -32,19 +32,24 @@ struct DockerDashboardView: View {
     let onAttach: (String, String) -> Void
     /// containerID — opens `docker logs -f` in a new tab.
     let onLogs: (String) -> Void
+    /// volume name — `docker volume create` / `docker volume rm` in the guest.
+    let onVolumeCreate: (String) -> Void
+    let onVolumeRemove: (String) -> Void
     /// Install / uninstall cross-arch QEMU emulation in the workspace.
     let onInstallBinfmt: () -> Void
     let onUninstallBinfmt: () -> Void
     /// When set, open straight into this container's detail view.
     var initialContainerID: String? = nil
 
-    private enum Pane: Hashable { case containers, images }
+    private enum Pane: Hashable { case containers, images, volumes }
     @State private var pane: Pane = .containers
     @State private var query = ""
     @State private var showNew = false
+    @State private var showNewVolume = false
     @State private var prefillImage = ""
     @State private var detailID: String?
     @State private var deleteTarget: DockerContainer?
+    @State private var deleteVolumeTarget: DockerVolume?
     /// Rolling samples of total CPU% across running containers (drives the graph).
     @State private var cpuHistory: [Double] = []
 
@@ -73,6 +78,7 @@ struct DockerDashboardView: View {
                 switch pane {
                 case .containers: containersPane
                 case .images: imagesPane
+                case .volumes: volumesPane
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -98,6 +104,11 @@ struct DockerDashboardView: View {
                 prefillImage: prefillImage,
                 onRun: { spec in onRun(spec); showNew = false },
                 onCancel: { showNew = false })
+        }
+        .sheet(isPresented: $showNewVolume) {
+            NewVolumeSheet(
+                onCreate: { name in onVolumeCreate(name); showNewVolume = false },
+                onCancel: { showNewVolume = false })
         }
         .onAppear { if let initialContainerID { detailID = initialContainerID } }
         .confirmationDialog(
@@ -130,22 +141,39 @@ struct DockerDashboardView: View {
             Spacer()
             EmulationControl(probed: model.binfmtProbed, arches: model.binfmtArches,
                              onInstall: onInstallBinfmt, onUninstall: onUninstallBinfmt)
-            SearchField(text: $query, prompt: pane == .containers ? "Search containers" : "Search images")
+            SearchField(text: $query, prompt: searchPrompt)
                 .frame(width: 200)
             Picker("", selection: $pane) {
                 Text("Containers").tag(Pane.containers)
                 Text("Images").tag(Pane.images)
+                Text("Volumes").tag(Pane.volumes)
             }
             .pickerStyle(.segmented)
             .fixedSize()
-            Button { prefillImage = ""; showNew = true } label: {
-                Label("Run", systemImage: "plus")
+            if pane == .volumes {
+                Button { showNewVolume = true } label: {
+                    Label("New Volume", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .help("Create a named volume")
+            } else {
+                Button { prefillImage = ""; showNew = true } label: {
+                    Label("Run", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .help("Run a new container")
             }
-            .buttonStyle(.borderedProminent)
-            .help("Run a new container")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
+    }
+
+    private var searchPrompt: LocalizedStringKey {
+        switch pane {
+        case .containers: return "Search containers"
+        case .images: return "Search images"
+        case .volumes: return "Search volumes"
+        }
     }
 
     // MARK: Containers
@@ -261,6 +289,75 @@ struct DockerDashboardView: View {
                         .strokeBorder(Color.primary.opacity(0.06)))
                     .padding(18)
                 }
+            }
+        }
+    }
+
+    // MARK: Volumes
+
+    private var filteredVolumes: [DockerVolume] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return model.dockerVolumes }
+        return model.dockerVolumes.filter {
+            $0.name.lowercased().contains(q) || $0.driver.lowercased().contains(q)
+        }
+    }
+
+    /// volume name → display names of the containers mounting it (docker ps's
+    /// Mounts column, so stopped containers count too — matching `volume rm`,
+    /// which they'd also block).
+    private var volumeUsers: [String: [String]] {
+        var map: [String: [String]] = [:]
+        for c in model.dockerContainers {
+            for m in c.mountList { map[m, default: []].append(displayName(c)) }
+        }
+        return map
+    }
+
+    private var volumesPane: some View {
+        Group {
+            if model.dockerVolumes.isEmpty {
+                EmptyStateView(
+                    icon: "externaldrive",
+                    title: "No volumes yet",
+                    subtitle: "Named volumes hold data that outlives any single container — databases, caches, build artifacts.",
+                    actionTitle: "New volume",
+                    action: { showNewVolume = true })
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        VolumeHeaderRow()
+                        ForEach(filteredVolumes) { v in
+                            VolumeRow(volume: v, usedBy: volumeUsers[v.name] ?? [],
+                                      onDelete: { deleteVolumeTarget = v })
+                            if v.id != filteredVolumes.last?.id {
+                                Divider().opacity(0.35).padding(.leading, 14)
+                            }
+                        }
+                    }
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.primary.opacity(0.035)))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.06)))
+                    .padding(18)
+                }
+            }
+        }
+        .confirmationDialog(
+            "Delete volume?",
+            isPresented: Binding(get: { deleteVolumeTarget != nil },
+                                 set: { if !$0 { deleteVolumeTarget = nil } }),
+            presenting: deleteVolumeTarget
+        ) { v in
+            Button("Delete \(v.name)", role: .destructive) {
+                onVolumeRemove(v.name); deleteVolumeTarget = nil
+            }
+            Button("Cancel", role: .cancel) { deleteVolumeTarget = nil }
+        } message: { v in
+            if let users = volumeUsers[v.name], !users.isEmpty {
+                Text("This volume is mounted by \(users.joined(separator: ", ")) — docker will refuse to delete it until those containers are removed.")
+            } else {
+                Text("This permanently deletes the volume and its data (docker volume rm). This can't be undone.")
             }
         }
     }
@@ -405,6 +502,90 @@ private struct ImageRow: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
     }
+}
+
+// MARK: - Volume rows
+
+private enum VCol {
+    static let driver: CGFloat = 70
+    static let created: CGFloat = 110
+    static let size: CGFloat = 80
+    static let actions: CGFloat = 44
+}
+
+private struct VolumeHeaderRow: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            label("Name").frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
+            label("Driver").frame(width: VCol.driver, alignment: .leading)
+            label("Created").frame(width: VCol.created, alignment: .leading)
+            label("Size").frame(width: VCol.size, alignment: .trailing)
+            label("").frame(width: VCol.actions)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+    }
+    private func label(_ s: LocalizedStringKey) -> some View {
+        Text(s).font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+            .textCase(.uppercase).tracking(0.6)
+    }
+}
+
+private struct VolumeRow: View {
+    let volume: DockerVolume
+    let usedBy: [String]
+    let onDelete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(volume.name).font(.system(size: 13, weight: .medium))
+                        .lineLimit(1).truncationMode(.middle)
+                    if !usedBy.isEmpty {
+                        Text("in use").font(.system(size: 9, weight: .semibold))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.green.opacity(0.16)))
+                            .foregroundStyle(.green)
+                            .help("Mounted by \(usedBy.joined(separator: ", "))")
+                    }
+                }
+                Text(volume.mountpoint).font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                    .help(volume.mountpoint)
+            }
+            .frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
+            Text(volume.driver.isEmpty ? "—" : volume.driver)
+                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                .frame(width: VCol.driver, alignment: .leading)
+            Text(humanVolumeCreated(volume.createdAt))
+                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                .frame(width: VCol.created, alignment: .leading)
+            Text(volume.size.isEmpty || volume.size == "N/A" ? "—" : volume.size)
+                .font(.system(size: 12)).foregroundStyle(.secondary).monospacedDigit()
+                .frame(width: VCol.size, alignment: .trailing)
+            Button(action: onDelete) { Image(systemName: "trash").font(.system(size: 12)) }
+                .buttonStyle(.borderless)
+                .foregroundStyle(hovering ? Color.red : Color.secondary)
+                .help("Delete volume")
+                .frame(width: VCol.actions, alignment: .trailing)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(hovering ? Color.primary.opacity(0.05) : .clear)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+    }
+}
+
+/// docker's inspect CreatedAt (RFC3339) → "2 days ago"; the raw string when it
+/// doesn't parse (old docker), "—" when absent.
+private func humanVolumeCreated(_ iso: String) -> String {
+    guard !iso.isEmpty else { return "—" }
+    let f = ISO8601DateFormatter()
+    guard let date = f.date(from: iso) else { return iso }
+    let rel = RelativeDateTimeFormatter()
+    rel.unitsStyle = .full
+    return rel.localizedString(for: date, relativeTo: Date())
 }
 
 // MARK: - Stat cards + graph
@@ -905,6 +1086,9 @@ private struct ContainerDetailView: View {
                         Divider().opacity(0.35)
                         DetailRow("Ports", publishedPorts(container.ports).isEmpty
                                   ? "—" : publishedPorts(container.ports).joined(separator: ", "), mono: true)
+                        Divider().opacity(0.35)
+                        DetailRow("Mounts", container.mountList.isEmpty
+                                  ? "—" : container.mountList.joined(separator: "\n"), mono: true)
                         if container.isRunning {
                             Divider().opacity(0.35)
                             DetailRow("Started", humanStarted(container.runningFor))
@@ -1046,7 +1230,7 @@ private struct NewContainerSheet: View {
                         VStack(alignment: .leading, spacing: 16) {
                             kvEditor("Port mappings", $ports, "host", "container", "→", add: "Add port")
                             kvEditor("Environment variables", $envs, "KEY", "value", "=", add: "Add variable")
-                            kvEditor("Volumes", $vols, "host path", "container path", "→", add: "Add volume")
+                            kvEditor("Volumes", $vols, "volume or host path", "container path", "→", add: "Add volume")
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 8)
@@ -1118,5 +1302,64 @@ private struct NewContainerSheet: View {
             inheritEnv: inheritEnv,
             inheritProxy: inheritProxy,
             interactive: interactive))
+    }
+}
+
+// MARK: - New volume sheet
+
+/// Minimal "create a named volume" form: just the name, validated against
+/// docker's volume-name rule so the guest command can't fail on syntax.
+private struct NewVolumeSheet: View {
+    let onCreate: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var name = ""
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespaces) }
+    private var canCreate: Bool { Self.isValidName(trimmed) }
+
+    /// [a-zA-Z0-9][a-zA-Z0-9_.-]* — mirrors the host-side sanitizer.
+    static func isValidName(_ s: String) -> Bool {
+        let first = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        let rest = first.union(CharacterSet(charactersIn: "_.-"))
+        guard let f = s.unicodeScalars.first, first.contains(f) else { return false }
+        return s.unicodeScalars.allSatisfy(rest.contains)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "externaldrive.fill.badge.plus")
+                    .foregroundStyle(DockerDashboardView.dockerBlue)
+                Text("New volume").font(.system(size: 15, weight: .semibold))
+                Spacer()
+            }
+            .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 12)
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Name").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    .textCase(.uppercase).tracking(0.5)
+                TextField("e.g. pgdata", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13, design: .monospaced))
+                    .onSubmit { if canCreate { onCreate(trimmed) } }
+                Text("Letters and digits, then _ . - too. Mount it in a container as name → path.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button("Create") { onCreate(trimmed) }
+                    .keyboardShortcut(.defaultAction).disabled(!canCreate)
+            }
+            .padding(.horizontal, 20).padding(.vertical, 14)
+        }
+        .frame(width: 380)
     }
 }

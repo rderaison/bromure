@@ -478,6 +478,10 @@ final class SessionPane {
         if model.dockerImages != images { model.dockerImages = images }
     }
 
+    func applyDockerVolumes(_ volumes: [DockerVolume]) {
+        if model.dockerVolumes != volumes { model.dockerVolumes = volumes }
+    }
+
     func applyDockerError(_ message: String) {
         model.dockerError = message
     }

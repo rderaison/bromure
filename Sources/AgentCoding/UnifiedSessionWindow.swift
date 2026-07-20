@@ -1216,6 +1216,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onRemove: { [weak self] cid in if let p = self?.pane(id) { self?.acDelegate?.requestDockerRemove(containerID: cid, in: p) } },
             onAttach: { [weak self] cid, shell in self?.dockerAttach(profileID: id, containerID: cid, shell: shell) },
             onLogs:   { [weak self] cid in self?.dockerLogs(profileID: id, containerID: cid) },
+            onVolumeCreate: { [weak self] name in if let p = self?.pane(id) { self?.acDelegate?.requestDockerVolumeCreate(name: name, in: p) } },
+            onVolumeRemove: { [weak self] name in if let p = self?.pane(id) { self?.acDelegate?.requestDockerVolumeRemove(name: name, in: p) } },
             onInstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtInstall(in: p) } },
             onUninstallBinfmt: { [weak self] in if let p = self?.pane(id) { self?.acDelegate?.requestDockerBinfmtUninstall(in: p) } },
             initialContainerID: container)

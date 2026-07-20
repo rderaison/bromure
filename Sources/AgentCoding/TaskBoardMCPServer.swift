@@ -88,7 +88,7 @@ final class TaskBoardMCPServer {
         ],
         [
             "name": "board_create_subtasks",
-            "description": "File follow-up work as ordered cards in the board's Plan column, linked to this task (same workspace and repository). Use for work that is out of scope for this session. Each may declare dependsOn: 1-based indices of earlier entries that must be DONE before it can start.",
+            "description": "File follow-up work as ordered cards in the board's Plan column, linked to this task (same workspace and repository). Use for work that is out of scope for this session. Each may declare dependsOn: 1-based phase numbers (counting ALL phases filed for this task so far, across calls, in filing order) that must be DONE before it can start.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -100,7 +100,7 @@ final class TaskBoardMCPServer {
                                 "title": ["type": "string"],
                                 "details": ["type": "string", "description": "Markdown brief."],
                                 "dependsOn": ["type": "array", "items": ["type": "integer"],
-                                              "description": "1-based indices of earlier entries this one waits for."],
+                                              "description": "1-based phase numbers this one waits for, counting all phases filed for this task so far (earlier calls included)."],
                             ],
                             "required": ["title"],
                         ],
@@ -172,12 +172,29 @@ final class TaskBoardMCPServer {
                 return errorResult("subtasks (non-empty array) is required")
             }
             guard raw.count <= 20 else { return errorResult("at most 20 subtasks per call") }
+            // Phases already filed for this parent by EARLIER calls, in plan
+            // order. dependsOn indices number the parent's whole phase list —
+            // a planner that files its phases across several calls used to get
+            // its cross-call dependencies silently dropped (out of range for
+            // "this call's array"), so "Phase 3 depends on Phase 2" started
+            // Phase 3 immediately.
+            let priorTasks = store.tasks
+                .filter { $0.parentTaskID == task.id }
+                .sorted { $0.createdAt < $1.createdAt }
+            let prior = priorTasks.map(\.id)
             var titles: [String] = []
-            var ids: [UUID] = []
-            let base = Date()
+            var slotIDs: [UUID?] = []   // one slot per raw entry; nil = skipped
+            // Anchor after the last prior phase: within a call phases are
+            // spaced 1s apart, so a later call's raw Date() could land BETWEEN
+            // them and scramble plan order (and with it the numbering above).
+            let base = max(Date(),
+                           priorTasks.last?.createdAt.addingTimeInterval(1) ?? .distantPast)
             for item in raw {
                 guard let title = item["title"] as? String,
-                      !title.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+                      !title.trimmingCharacters(in: .whitespaces).isEmpty else {
+                    slotIDs.append(nil)
+                    continue
+                }
                 let sub = CodingTask(
                     title: title,
                     details: item["details"] as? String ?? "",
@@ -185,19 +202,23 @@ final class TaskBoardMCPServer {
                     repoPath: task.repoPath,
                     tool: task.tool,
                     stage: .planning,
-                    createdAt: base.addingTimeInterval(Double(ids.count) * 1.0),
+                    createdAt: base.addingTimeInterval(Double(titles.count) * 1.0),
                     parentTaskID: task.id)
                 store.upsert(sub)
                 titles.append(title)
-                ids.append(sub.id)
+                slotIDs.append(sub.id)
             }
-            // Second pass: dependsOn as 1-based indices into THIS call's array.
-            for (i, item) in raw.enumerated() where i < ids.count {
+            // Second pass: resolve dependsOn phase numbers against prior
+            // phases + this call's, in filing order. (With no prior phases
+            // this matches the old "indices into this call" numbering.)
+            let all = prior + slotIDs.compactMap { $0 }
+            for (i, item) in raw.enumerated() {
+                guard let selfID = slotIDs[i] else { continue }
                 let deps = ((item["dependsOn"] as? [Int]) ?? []).compactMap { idx -> UUID? in
-                    guard idx >= 1, idx <= ids.count, idx != i + 1 else { return nil }
-                    return ids[idx - 1]
+                    guard idx >= 1, idx <= all.count, all[idx - 1] != selfID else { return nil }
+                    return all[idx - 1]
                 }
-                if !deps.isEmpty { store.mutate(ids[i]) { $0.dependsOn = deps } }
+                if !deps.isEmpty { store.mutate(selfID) { $0.dependsOn = deps } }
             }
             guard !titles.isEmpty else { return errorResult("no valid subtasks") }
             store.mutate(task.id) {

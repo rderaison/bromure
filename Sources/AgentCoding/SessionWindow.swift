@@ -16,6 +16,9 @@ public struct DockerContainer: Identifiable, Equatable {
     public var state: String    // "running", "exited", "paused", "created", …
     public var ports: String
     public var runningFor: String   // "2 hours ago" / "5 minutes ago"
+    /// docker ps's Mounts column (comma-separated volume names + bind source
+    /// paths, un-truncated). Matches named volumes to their using containers.
+    public var mounts: String
     /// Filled from `docker stats` (gated, dashboard-only); "" when unknown.
     public var cpuPerc: String
     public var memUsage: String
@@ -25,10 +28,15 @@ public struct DockerContainer: Identifiable, Equatable {
     public var isRunning: Bool { state == "running" }
     /// CPU as a number (docker reports "12.34%"); nil while unknown.
     public var cpuValue: Double? { Double(cpuPerc.replacingOccurrences(of: "%", with: "")) }
+    /// The Mounts column as individual entries.
+    public var mountList: [String] {
+        mounts.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
 
     public init(id: String, name: String, image: String, status: String,
                 state: String, ports: String, runningFor: String = "",
-                cpuPerc: String = "", memUsage: String = "") {
+                mounts: String = "", cpuPerc: String = "", memUsage: String = "") {
         self.id = id
         self.name = name
         self.image = image
@@ -36,6 +44,7 @@ public struct DockerContainer: Identifiable, Equatable {
         self.state = state
         self.ports = ports
         self.runningFor = runningFor
+        self.mounts = mounts
         self.cpuPerc = cpuPerc
         self.memUsage = memUsage
     }
@@ -76,6 +85,27 @@ public struct DockerImage: Identifiable, Equatable {
         self.tag = tag
         self.size = size
         self.created = created
+    }
+}
+
+/// One named docker volume, from `docker volume inspect` (gated, dashboard-only)
+/// — feeds the dashboard's Volumes view.
+public struct DockerVolume: Identifiable, Equatable {
+    public var id: String { name }
+    public let name: String
+    public var driver: String       // "local"
+    public var mountpoint: String   // /var/lib/docker/volumes/<name>/_data
+    public var createdAt: String    // ISO8601 from inspect; "" on old docker
+    /// Human size from the slower `docker system df -v` probe; "" until known.
+    public var size: String
+
+    public init(name: String, driver: String, mountpoint: String,
+                createdAt: String = "", size: String = "") {
+        self.name = name
+        self.driver = driver
+        self.mountpoint = mountpoint
+        self.createdAt = createdAt
+        self.size = size
     }
 }
 
@@ -195,6 +225,8 @@ final class TabsModel {
     var dockerContainers: [DockerContainer] = []
     /// Local docker images — only refreshed while a dashboard is open (gated).
     var dockerImages: [DockerImage] = []
+    /// Named docker volumes — only refreshed while a dashboard is open (gated).
+    var dockerVolumes: [DockerVolume] = []
     /// Most recent docker action failure (run/start/stop/remove), shown as a
     /// banner in the dashboard until dismissed.
     var dockerError: String?
