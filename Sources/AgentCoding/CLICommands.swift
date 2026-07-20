@@ -568,8 +568,10 @@ struct FatClientAuthProbe: ParsableCommand {
     func run() throws {
         var host = RemoteHost(name: address, address: address, port: port, user: user)
         host.pinnedHostKey = pinned
+        var scannedLine: String?
         if let info = RemoteTransport.scanHostKey(address: address, port: port) {
             print("host-key fingerprint: \(info.fingerprint)")
+            scannedLine = info.line
         } else {
             print("host-key: UNREACHABLE (couldn't scan)")
         }
@@ -577,8 +579,10 @@ struct FatClientAuthProbe: ParsableCommand {
         print("pubkey probe: \(keyProbe)")
         if let pw = password {
             // Password auth goes through the embedded NIOSSH client (no askpass);
-            // on success it also enrolls this Mac's key for passwordless reconnect.
-            let r = FatClientNIOSSH.enrollWithPassword(host: host, password: pw)
+            // on success it also enrolls this Mac's key for passwordless
+            // reconnect. Pinned to the key the scan above just saw.
+            let r = FatClientNIOSSH.enrollWithPassword(host: host, password: pw,
+                                                       hostKeyLine: scannedLine)
             print("niossh password result: \(r)")
         }
     }

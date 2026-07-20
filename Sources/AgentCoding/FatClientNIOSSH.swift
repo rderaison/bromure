@@ -26,20 +26,45 @@ enum FatClientNIOSSH {
 
     /// Password-authenticate to `host` and enroll our client public key via
     /// `POST /remote/keys` over the control bridge. Synchronous.
-    static func enrollWithPassword(host: RemoteHost, password: String) -> AuthResult {
-        guard let pub = RemoteTransport.ensureClientKey() else { return .unreachable("no client key") }
+    static func enrollWithPassword(host: RemoteHost, password: String,
+                                   hostKeyLine: String?) -> AuthResult {
+        // The password must never transit a connection whose host key we
+        // haven't verified: the scan/TOFU happened on a DIFFERENT TCP
+        // connection, and accepting any key here would hand the macOS login
+        // password to whoever answers this dial. Parse the scanned key and
+        // pin THIS handshake to it.
+        guard let expected = hostKeyLine.flatMap(parseHostKey) else {
+            return .unreachable("host key not pinned — restart the connection")
+        }
+        guard let pub = RemoteTransport.ensureClientKey() else {
+            return .unreachable("no client key")
+        }
         let body = "{\"key\":\(jsonString(pub))}"
         let request = "POST /remote/keys HTTP/1.1\r\nHost: localhost\r\n"
             + "Content-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n"
             + "Connection: close\r\n\r\n\(body)"
-        return runControlRequest(host: host, password: password, request: Data(request.utf8))
+        return runControlRequest(host: host, password: password,
+                                 request: Data(request.utf8), expectedHostKey: expected)
+    }
+
+    /// Parse a known_hosts / authorized_keys style line ("[host] type b64
+    /// [comment]") into the key it carries.
+    private static func parseHostKey(_ line: String) -> NIOSSHPublicKey? {
+        var tokens = line.split(separator: " ").map(String.init)
+        if let first = tokens.first, !first.hasPrefix("ssh-"), !first.hasPrefix("ecdsa-") {
+            tokens.removeFirst()   // known_hosts host field
+        }
+        guard tokens.count >= 2 else { return nil }
+        return try? NIOSSHPublicKey(openSSHPublicKey: tokens.prefix(2).joined(separator: " "))
     }
 
     /// Connect (password auth), open a session channel bridged to control.sock,
     /// and send `request`. Success = the password authenticated and the request
     /// was flushed; we can't wait for the 200 because enrolling a key restarts
     /// the server's SSH listener, which drops this connection first.
-    private static func runControlRequest(host: RemoteHost, password: String, request: Data) -> AuthResult {
+    private static func runControlRequest(host: RemoteHost, password: String,
+                                          request: Data,
+                                          expectedHostKey: NIOSSHPublicKey) -> AuthResult {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { try? group.syncShutdownGracefully() }
 
@@ -54,7 +79,9 @@ enum FatClientNIOSSH {
         let auth = PasswordAuthDelegate(username: host.user, password: password) {
             resolver.resolve(.authRejected)
         }
-        let serverAuth = AcceptHostKey()
+        let serverAuth = PinnedHostKey(expected: expectedHostKey) {
+            resolver.resolve(.incomplete)
+        }
 
         let bootstrap = ClientBootstrap(group: group)
             .channelInitializer { channel in
@@ -157,11 +184,27 @@ private final class PasswordAuthDelegate: NIOSSHClientUserAuthenticationDelegate
     }
 }
 
-/// Accepts the presented host key — trust was already established by the connect
-/// flow (ssh-keyscan TOFU + strict-host-key pubkey probe) before this runs.
-private final class AcceptHostKey: NIOSSHClientServerAuthenticationDelegate {
+/// Rejects any host key other than the one the connect flow just scanned
+/// and the user pinned. The scan happened on a different TCP connection —
+/// without this check, a redirect between scan and password entry would
+/// receive the user's macOS login password.
+private final class PinnedHostKey: NIOSSHClientServerAuthenticationDelegate {
+    struct Mismatch: Error {}
+    private let expected: NIOSSHPublicKey
+    private let onMismatch: () -> Void
+
+    init(expected: NIOSSHPublicKey, onMismatch: @escaping () -> Void) {
+        self.expected = expected
+        self.onMismatch = onMismatch
+    }
+
     func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
-        validationCompletePromise.succeed(())
+        if hostKey == expected {
+            validationCompletePromise.succeed(())
+        } else {
+            onMismatch()
+            validationCompletePromise.fail(Mismatch())
+        }
     }
 }
 

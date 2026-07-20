@@ -7188,7 +7188,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard p.count == 4, let port = Int(p[1]) else { return }
         let host = RemoteHost(name: p[0], address: p[0], port: port, user: p[2])
         DispatchQueue.global().async {
-            let r = FatClientNIOSSH.enrollWithPassword(host: host, password: p[3])
+            // Debug probe pins to a fresh scan — same contract as the GUI.
+            let line = RemoteTransport.scanHostKey(address: host.address,
+                                                   port: host.port)?.line
+            let r = FatClientNIOSSH.enrollWithPassword(host: host, password: p[3],
+                                                       hostKeyLine: line)
             FatClientLog.log("debugProbe (niossh) result: \(r)")
         }
     }

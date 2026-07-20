@@ -86,15 +86,22 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
             guard allowPassword else { responsePromise.succeed(.failure); return }
             let user = username
             let password = pw.password
-            // Per-IP rate limit. `reserve` returns how long this attempt must
-            // wait for a token; 0 while the per-IP burst budget lasts, then a
-            // short (capped) delay under sustained guessing. Each attempt is
-            // scheduled independently on a concurrent queue, so one IP's
-            // backoff never stalls another IP's login — the owner is unaffected
-            // by an attacker elsewhere. Nothing is ever refused outright; the
-            // door stays open, just slow to hammer.
-            let delay = throttle.reserve(ip: peerIP)
+            // Per-IP rate limit with TEETH. `reserve` hands each attempt a
+            // slot on a per-IP monotonic schedule (burst budget first, then
+            // one attempt per refill interval) and REFUSES once the queue is
+            // full — nil means fail now, without touching OpenDirectory.
+            // The old capped-delay version scheduled every guess concurrently
+            // ~8s out, which enforced no rate at all and let a flood queue
+            // unbounded verification work. A global in-flight cap bounds the
+            // verifier even across an IP spray.
+            guard let delay = throttle.reserve(ip: peerIP),
+                  throttle.beginVerification() else {
+                responsePromise.succeed(.failure)
+                return
+            }
+            let throttle = self.throttle
             let work: @Sendable () -> Void = {
+                defer { throttle.endVerification() }
                 let ok = SystemPassword.verify(user: user, password: password)
                 responsePromise.succeed(ok ? .success : .failure)
             }
@@ -151,7 +158,8 @@ final class RemoteAuthDelegateFactory: @unchecked Sendable {
 /// Public-key auth is never throttled.
 final class RemoteAuthThrottle: @unchecked Sendable {
     private let lock = NSLock()
-    private struct Bucket { var tokens: Double; var last: Date }
+    private struct Bucket { var tokens: Double; var last: Date; var nextSlot: Date }
+    private var inFlight = 0
     private var buckets: [String: Bucket] = [:]
     private let capacity: Double
     private let refillPerSec: Double
@@ -164,30 +172,50 @@ final class RemoteAuthThrottle: @unchecked Sendable {
         self.maxDelay = maxDelay
     }
 
-    /// Reserve one attempt for `ip`. Returns the delay (seconds) the caller
-    /// should wait before performing the password check — 0 when a token is
-    /// immediately available.
-    func reserve(ip: String) -> TimeInterval {
+    /// Reserve one attempt for `ip`, or nil to refuse it outright.
+    ///
+    /// Every accepted attempt takes a slot on the IP's MONOTONIC schedule:
+    /// the burst budget (`capacity`) runs at once, after which slots advance
+    /// by the refill interval — so N parallel guesses serialize to
+    /// ~refillPerSec regardless of how many connections carry them. Once
+    /// the schedule is more than `maxDelay` in the future the queue is
+    /// full and further attempts are refused instead of piled up.
+    func reserve(ip: String) -> TimeInterval? {
         lock.lock(); defer { lock.unlock() }
         let now = Date()
         prune(now: now)
-        var b = buckets[ip] ?? Bucket(tokens: capacity, last: now)
+        var b = buckets[ip] ?? Bucket(tokens: capacity, last: now, nextSlot: now)
         // Refill proportional to elapsed time, capped at capacity.
         b.tokens = min(capacity, b.tokens + now.timeIntervalSince(b.last) * refillPerSec)
         b.last = now
         let delay: TimeInterval
         if b.tokens >= 1 {
             delay = 0
+            b.nextSlot = max(b.nextSlot, now)
         } else {
-            // Wait for the next token. Cap the per-attempt wait so the bucket
-            // can't push the delay arbitrarily high.
-            delay = min(maxDelay, (1 - b.tokens) / refillPerSec)
+            let slot = max(b.nextSlot, now)
+            delay = slot.timeIntervalSince(now)
+            guard delay <= maxDelay else { return nil }   // queue full — refuse
+            b.nextSlot = slot.addingTimeInterval(1 / refillPerSec)
         }
-        // Consume a token; floor at -capacity so a long flood can't drive the
-        // recovery time unbounded (sustained rate stays ~refillPerSec).
-        b.tokens = max(-capacity, b.tokens - 1)
+        b.tokens = max(0, b.tokens - 1)
         buckets[ip] = b
         return delay
+    }
+
+    /// Global bound on concurrently-running password verifications — an IP
+    /// spray can't stack unbounded OpenDirectory work. Pair every true
+    /// return with `endVerification()`.
+    func beginVerification() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard inFlight < 16 else { return false }
+        inFlight += 1
+        return true
+    }
+
+    func endVerification() {
+        lock.lock(); defer { lock.unlock() }
+        inFlight -= 1
     }
 
     /// Drop idle, fully-refilled buckets and hard-cap the map so an IP-spray

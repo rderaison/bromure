@@ -65,6 +65,49 @@ struct HostKeyInfo: Equatable {
 /// building a `ControlClient` whose byte stream is an `ssh … bromure-fatclient
 /// control` channel. Free of `@MainActor` so the `__attach-window` subprocess
 /// (which runs off the main actor) can build a remote client by host id.
+/// The fat client's private key at rest: one generic-password item in the
+/// data-protection keychain (app-scoped by code signature, no UI — the
+/// SecretsVault choice). System ssh can't read it, so dials go through an
+/// in-memory ssh-agent (see RemoteTransport.keyAgentSock).
+enum FatClientKeyStore {
+    private static let service = "io.bromure.agentic-coding.fatclient"
+    private static let account = "client-key-ed25519"
+
+    static func load() -> String? {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        var out: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
+              let data = out as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    @discardableResult
+    static func store(_ pem: String) -> Bool {
+        SecItemDelete([
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecUseDataProtectionKeychain: true,
+        ] as CFDictionary)
+        let attrs: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecValueData: Data(pem.utf8),
+            kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        return SecItemAdd(attrs as CFDictionary, nil) == errSecSuccess
+    }
+}
+
 enum RemoteTransport {
     /// ~/Library/Application Support/BromureAC/remote-client/ (relocated with
     /// the rest of the support dir under CFFIXED_USER_HOME).
@@ -98,23 +141,68 @@ enum RemoteTransport {
         try? data.write(to: hostsFile, options: .atomic)
     }
 
-    /// Ensure the ed25519 client keypair exists; returns the OpenSSH public line
-    /// to enroll on the remote's `authorized_keys`.
+    /// Ensure the ed25519 client identity exists; returns the OpenSSH
+    /// public line to enroll on the remote's `authorized_keys`.
+    ///
+    /// ONE identity per client Mac, but the PRIVATE half lives in the
+    /// data-protection keychain (app-scoped by code signature, no prompt —
+    /// same choice as SecretsVault), not as a plaintext file: stealing the
+    /// remote-client directory yields only the public key. System ssh
+    /// can't read the keychain, so dials load the key into a private
+    /// in-memory ssh-agent via `ssh-add -` (stdin — never on disk) and
+    /// select it with the public-key file. A pre-keychain plaintext
+    /// id_ed25519 is migrated on first use and shredded.
     @discardableResult
     static func ensureClientKey() -> String? {
         ensureDirs()
         let fm = FileManager.default
-        if !fm.fileExists(atPath: privateKeyPath.path) {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
-            p.arguments = ["-t", "ed25519", "-N", "", "-C", "bromure-ac-fatclient",
-                           "-f", privateKeyPath.path]
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError = FileHandle.nullDevice
-            do { try p.run(); p.waitUntilExit() } catch { return nil }
-            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: privateKeyPath.path)
+        // Migrate: legacy plaintext private key → keychain, then delete.
+        if fm.fileExists(atPath: privateKeyPath.path),
+           let pem = try? String(contentsOf: privateKeyPath, encoding: .utf8) {
+            if FatClientKeyStore.store(pem) {
+                try? fm.removeItem(at: privateKeyPath)
+            }
         }
+        if FatClientKeyStore.load() != nil {
+            return clientPublicKey()
+        }
+        // Fresh identity: generate to a temp path, move the private half
+        // into the keychain, keep only the .pub on disk.
+        let tmp = dir.appendingPathComponent("keygen-\(UUID().uuidString)")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+        p.arguments = ["-t", "ed25519", "-N", "", "-C", "bromure-ac-fatclient",
+                       "-f", tmp.path]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run(); p.waitUntilExit() } catch { return nil }
+        defer {
+            try? fm.removeItem(at: tmp)
+            try? fm.removeItem(at: tmp.appendingPathExtension("pub"))
+        }
+        guard let pem = try? String(contentsOf: tmp, encoding: .utf8),
+              FatClientKeyStore.store(pem),
+              let pub = try? String(contentsOf: tmp.appendingPathExtension("pub"),
+                                    encoding: .utf8) else { return nil }
+        try? pub.write(to: publicKeyPath, atomically: true, encoding: .utf8)
         return clientPublicKey()
+    }
+
+    /// SHA256 fingerprint of the client's public key — the selector for
+    /// revoking it on a server at unpair time.
+    static func clientKeyFingerprint() -> String? {
+        guard FileManager.default.fileExists(atPath: publicKeyPath.path) else { return nil }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+        p.arguments = ["-lf", publicKeyPath.path]
+        let out = Pipe(); p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+            .split(separator: " ").map(String.init)
+            .first { $0.hasPrefix("SHA256:") }
     }
 
     static func clientPublicKey() -> String? {
@@ -142,10 +230,73 @@ enum RemoteTransport {
     /// Common ssh options (identity, known_hosts, keepalive). `-o KEY=VALUE`
     /// values with spaces are double-quoted inside the option string because
     /// ssh re-tokenizes them like a config line (the support dir has a space).
+    /// Socket of an ssh-agent holding the client key IN MEMORY, loaded from
+    /// the keychain via `ssh-add -` (the private key never touches disk).
+    /// One agent per uid at a fixed path — a stale one from a previous
+    /// process is probed and reused, so orphans don't accumulate.
+    private static let agentLock = NSLock()
+    private static var agentReady = false
+    static func keyAgentSock() -> String? {
+        agentLock.lock(); defer { agentLock.unlock() }
+        let sock = "/tmp/bromure-fc-agent-\(getuid()).sock"
+        func agentAlive() -> Bool {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
+            p.arguments = ["-l"]
+            p.environment = ["SSH_AUTH_SOCK": sock]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            do { try p.run(); p.waitUntilExit() } catch { return false }
+            return p.terminationStatus == 0 || p.terminationStatus == 1
+        }
+        if !agentAlive() {
+            agentReady = false
+            unlink(sock)
+            let agent = Process()
+            agent.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-agent")
+            agent.arguments = ["-D", "-a", sock]
+            agent.standardOutput = FileHandle.nullDevice
+            agent.standardError = FileHandle.nullDevice
+            do { try agent.run() } catch { return nil }
+            for _ in 0..<50 where !FileManager.default.fileExists(atPath: sock) {
+                usleep(100_000)
+            }
+        }
+        if !agentReady {
+            guard let pem = FatClientKeyStore.load() else { return nil }
+            let add = Process()
+            add.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
+            add.arguments = ["-"]
+            add.environment = ["SSH_AUTH_SOCK": sock]
+            let stdin = Pipe()
+            add.standardInput = stdin
+            add.standardOutput = FileHandle.nullDevice
+            add.standardError = FileHandle.nullDevice
+            do { try add.run() } catch { return nil }
+            stdin.fileHandleForWriting.write(Data(pem.utf8))
+            try? stdin.fileHandleForWriting.close()
+            add.waitUntilExit()
+            guard add.terminationStatus == 0 else { return nil }
+            agentReady = true
+        }
+        return sock
+    }
+
     private static func commonArgs(for host: RemoteHost) -> [String] {
-        [
+        // Keychain-backed identity through the in-memory agent; the -i
+        // PUBLIC key selects which agent key to offer (IdentitiesOnly
+        // honors it). A pre-migration plaintext private key falls back to
+        // the classic -i dial.
+        var identity: [String] = []
+        if !FileManager.default.fileExists(atPath: privateKeyPath.path),
+           let sock = keyAgentSock() {
+            identity = ["-o", "IdentityAgent=\"\(sock)\"",
+                        "-i", publicKeyPath.path]
+        } else {
+            identity = ["-i", privateKeyPath.path]
+        }
+        return identity + [
             "-p", String(host.port),
-            "-i", privateKeyPath.path,   // -i takes a separate argv → spaces are fine
             "-o", "IdentitiesOnly=yes",
             "-o", "UserKnownHostsFile=\"\(knownHostsPath.path)\"",
             "-o", "ServerAliveInterval=15",
@@ -365,7 +516,18 @@ final class RemoteHostStore {
         return host
     }
 
+    /// Forget = UNPAIR: best-effort revoke this client's key on the server
+    /// (over the still-authenticated tunnel), then drop the record.
+    /// Without the revoke, a "removed" server kept trusting this client
+    /// forever. The key itself stays — other pairings share it.
     func remove(_ id: UUID) {
+        if let host = hosts.first(where: { $0.id == id }),
+           let fp = RemoteTransport.clientKeyFingerprint() {
+            DispatchQueue.global(qos: .utility).async {
+                _ = try? RemoteTransport.client(for: host).request(
+                    "DELETE", "/remote/keys/\(ControlClient.encodeSegment(fp))")
+            }
+        }
         hosts.removeAll { $0.id == id }
         RemoteTransport.saveHosts(hosts)
     }

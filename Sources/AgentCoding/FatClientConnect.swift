@@ -117,6 +117,7 @@ final class RemoteConnectModel {
                     self.phase = .unreachable("Couldn't reach \(host.connectLabel).\n\nMake sure the remote Bromure is running with remote access enabled (Preferences → Remote Access, or `bromure-ac remote enable`), and that the address and port are correct.")
                     return
                 }
+                self.scannedHostKeyLine = info.line
                 if let pinned = self.host.pinnedHostKey {
                     if pinned == info.fingerprint {
                         RemoteTransport.pinHostKey(address: host.address, port: host.port, info: info)
@@ -132,6 +133,10 @@ final class RemoteConnectModel {
             }
         }
     }
+
+    /// The raw host-key line from the LAST scan — passed into the password
+    /// enrollment so that handshake is pinned to the key the user saw.
+    private var scannedHostKeyLine: String?
 
     /// User accepted the shown fingerprint (new host or an expected change).
     func trustHostKey(_ info: HostKeyInfo) {
@@ -174,8 +179,10 @@ final class RemoteConnectModel {
         guard !pw.isEmpty else { return }
         phase = .working("Signing in…")
         let host = self.host
+        let keyLine = scannedHostKeyLine
         work.async { [weak self] in
-            let r = FatClientNIOSSH.enrollWithPassword(host: host, password: pw)
+            let r = FatClientNIOSSH.enrollWithPassword(host: host, password: pw,
+                                                       hostKeyLine: keyLine)
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch r {
