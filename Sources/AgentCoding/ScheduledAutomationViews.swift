@@ -2,27 +2,118 @@ import SwiftUI
 
 // MARK: - Sidebar section
 
-/// "Automations" — the third sidebar group, after the Grid node and the
-/// workspace rows. One row per automation, colored by its owning workspace;
-/// selecting a row shows the editor as the stage surface (same overlay
-/// pattern as the Docker dashboard).
+/// Red numeric badge for the sidebar sections — "N items need you".
+/// Renders nothing at zero.
+/// A relative timestamp that stays current. A plain formatted string only
+/// re-renders when something else invalidates the view tree, so a quiet
+/// board shows "started 1 sec ago" forever — this recomputes on a timer.
+struct RelativeTimeText: View {
+    /// Format with one %@ placeholder for the relative time ("started %@"),
+    /// or nil for the bare relative time.
+    var format: String?
+    let date: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            let rel = date.formatted(.relative(presentation: .named))
+            Text(format.map { String(format: $0, rel) } ?? rel)
+        }
+    }
+}
+
+struct SidebarAttentionBadge: View {
+    let count: Int
+    var tint: Color = .red
+
+    var body: some View {
+        if count > 0 {
+            Text("\(count)")
+                .font(.system(size: 9.5, weight: .bold).monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1.5)
+                .background(Capsule().fill(tint))
+        }
+    }
+}
+
+/// "Automations" — a board-first sidebar section: header (title and icon
+/// open the board, "+" creates) plus ONE status row with the pulse — count,
+/// running, soonest next fire — and a red badge when runs need the user.
+/// The per-automation rows are gone: they duplicated the board's Scheduled
+/// column, and the board is one click (or ⇧⌘A) away.
 struct AutomationsSection: View {
     var store: ScheduledAutomationStore
     @Bindable var model: SessionListModel
-    let onSelect: (UUID) -> Void
     let onNew: () -> Void
-    let onRunNow: (UUID) -> Void
-    let onToggle: (UUID) -> Void
-    let onDelete: (UUID) -> Void
+    /// Open the kanban board (Scheduled / In Progress / Done) in the stage.
+    let onShowBoard: () -> Void
+
+    private static let fireFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE HH:mm"
+        return f
+    }()
+
+    /// Live launched runs and their agent status — resolved through the
+    /// sidebar's tab models, same matching as the board.
+    private var liveRuns: [AgentStatus] {
+        store.runs.compactMap { run in
+            guard run.outcome == .launched, run.completedAt == nil,
+                  let slug = run.branchSlug,
+                  let pid = run.runProfileID
+                      ?? store.automation(run.automationID)?.profileID,
+                  let entry = model.entries.first(where: { $0.id == pid })
+            else { return nil }
+            return entry.model.tabs.first {
+                AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
+            }?.agentStatus
+        }
+    }
+
+    /// What the badge counts: the board's Needs Attention column
+    /// (unacknowledged failed/blocked runs) plus live agents waiting on
+    /// the user.
+    private var attentionCount: Int {
+        let parked = store.runs.filter {
+            ($0.outcome == .failed || $0.outcome == .blocked)
+                && $0.acknowledgedAt == nil
+        }.count
+        return parked + liveRuns.filter { $0 == .needsInput }.count
+    }
+
+    private var statusLine: String {
+        guard !store.automations.isEmpty else {
+            return NSLocalizedString("Open the board", comment: "automations sidebar")
+        }
+        var parts = ["\(store.automations.count)"]
+        let running = liveRuns.count
+        if running > 0 {
+            parts.append(String(format: NSLocalizedString("%d running", comment: ""), running))
+        }
+        if let next = store.automations.filter(\.enabled)
+            .compactMap({ store.nextFire(for: $0.id) }).min() {
+            parts.append(String(format: NSLocalizedString("next %@", comment: ""),
+                                Self.fireFormatter.string(from: next)))
+        }
+        return parts.joined(separator: " · ")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack {
-                Text("Automations")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.7)
+                // The title itself opens the board — the icon alone was easy
+                // to miss.
+                Button(action: onShowBoard) {
+                    Text("Automations")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(model.automationBoardSelected
+                                         ? Color.accentColor : .secondary)
+                        .textCase(.uppercase)
+                        .tracking(0.7)
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("Open the automation board (⇧⌘A)", comment: ""))
                 Spacer()
                 Button(action: onNew) {
                     Image(systemName: "plus")
@@ -37,93 +128,26 @@ struct AutomationsSection: View {
             .padding(.top, 14)
             .padding(.bottom, 4)
 
-            ForEach(store.automations) { automation in
-                AutomationRow(
-                    automation: automation,
-                    accentHex: model.profileRows.first { $0.id == automation.profileID }?
-                        .accentHex ?? "#888888",
-                    nextFire: store.nextFire(for: automation.id),
-                    lastRun: store.lastRun(for: automation.id),
-                    isSelected: model.automationSelectedID == automation.id,
-                    onSelect: { onSelect(automation.id) },
-                    onRunNow: { onRunNow(automation.id) },
-                    onToggle: { onToggle(automation.id) },
-                    onDelete: { onDelete(automation.id) })
-            }
-        }
-    }
-}
-
-private struct AutomationRow: View {
-    let automation: ScheduledAutomation
-    let accentHex: String
-    let nextFire: Date?
-    let lastRun: AutomationRunRecord?
-    let isSelected: Bool
-    let onSelect: () -> Void
-    let onRunNow: () -> Void
-    let onToggle: () -> Void
-    let onDelete: () -> Void
-
-    private static let fireFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "EEE HH:mm"
-        return f
-    }()
-
-    private var metaText: String {
-        guard automation.enabled else {
-            return NSLocalizedString("Paused", comment: "automation row")
-        }
-        var parts = [scheduleSummary(automation)]
-        if let nextFire {
-            parts.append(String(format: NSLocalizedString("next %@", comment: "automation row"),
-                                Self.fireFormatter.string(from: nextFire)))
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Color(hex: accentHex))
-                    .frame(width: 8, height: 8)
-                    .opacity(automation.enabled ? 1 : 0.4)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(automation.name.isEmpty
-                         ? NSLocalizedString("Untitled automation", comment: "")
-                         : automation.name)
-                        .font(.system(size: 13, weight: .semibold))
+            Button(action: onShowBoard) {
+                HStack(spacing: 8) {
+                    Image(systemName: "bolt.badge.clock")
+                        .font(.system(size: 11))
+                        .foregroundStyle(attentionCount > 0 ? .red : .secondary)
+                    Text(statusLine)
+                        .font(.system(size: 12))
+                        .foregroundStyle(model.automationBoardSelected ? .primary : .secondary)
                         .lineLimit(1)
-                        .foregroundStyle(isSelected ? .primary : .secondary)
-                    Text(metaText)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    SidebarAttentionBadge(count: attentionCount)
                 }
-                Spacer(minLength: 4)
-                if let lastRun {
-                    Image(systemName: lastRun.outcome.glyph)
-                        .font(.system(size: 10))
-                        .foregroundStyle(lastRun.outcome.tint)
-                        .help(lastRun.outcome.helpText)
-                }
+                .padding(.vertical, 4)
+                .padding(.horizontal, 6)
+                .contentShape(Rectangle())
             }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(RoundedRectangle(cornerRadius: 6)
-            .fill(isSelected ? Color.accentColor.opacity(0.16) : .clear))
-        .contextMenu {
-            Button(NSLocalizedString("Run Now", comment: "")) { onRunNow() }
-            Button(automation.enabled
-                   ? NSLocalizedString("Pause", comment: "")
-                   : NSLocalizedString("Resume", comment: "")) { onToggle() }
-            Divider()
-            Button(NSLocalizedString("Delete…", comment: ""), role: .destructive) { onDelete() }
+            .buttonStyle(.plain)
+            .background(RoundedRectangle(cornerRadius: 6)
+                .fill(model.automationBoardSelected
+                      ? Color.accentColor.opacity(0.16) : .clear))
         }
     }
 }
@@ -1151,8 +1175,11 @@ struct AutomationEditorView: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.orange)
                 }
-                TextField(NSLocalizedString("Repository path in the workspace", comment: ""),
-                          text: $draft.repoPath, prompt: Text(verbatim: "~/my-repo"))
+                captioned(NSLocalizedString(
+                    "Start the agent in — a folder inside the workspace (\"~\" is home)",
+                    comment: "automation editor")) {
+                    TextField("", text: $draft.repoPath, prompt: Text(verbatim: "~/my-repo"))
+                }
                 VStack(alignment: .leading, spacing: 4) {
                     Text(NSLocalizedString("Prompt", comment: ""))
                         .font(.system(size: 11, weight: .medium))
@@ -1182,7 +1209,7 @@ struct AutomationEditorView: View {
                     .disabled(draft.tool != .claude)
                 hint(draft.tool == .claude
                      ? NSLocalizedString(
-                        "The transcript is saved to .bromure-automation/transcript.jsonl in the worktree first. Turn off to leave the session up for inspection.",
+                        "The transcript is saved first — readable any time from the run's card on the automation board. Turn off to leave the session up for inspection.",
                         comment: "")
                      : NSLocalizedString(
                         "Only Claude reports completion reliably (its Stop hook); other agents' tabs stay open.",

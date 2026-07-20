@@ -1858,7 +1858,121 @@ def _preaccept_yolo(tool):
         log("worktree", "yolo pre-accept failed:", e)
 
 
-def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
+def _pretrust(tool, *dirs):
+    """Claude Code shows a folder-trust dialog the first time it opens a
+    project directory it has never seen — which stalls an unattended run
+    when the target repo was never opened interactively (worktrees inherit
+    the parent repo's trust, so this bites first-ever-touch repos only,
+    but those are exactly what a fresh automation or board task creates).
+    Pre-record trust for the run's directories in ~/.claude.json
+    projects.<path>.hasTrustDialogAccepted. Best-effort and racy against a
+    concurrently-running interactive claude rewriting the file from memory
+    (same caveat as _preaccept_yolo) — worst case the dialog appears,
+    which is exactly today's behavior."""
+    if tool != "claude":
+        return
+    path = os.path.join(HOME, ".claude.json")
+    try:
+        cfg = {}
+        if os.path.exists(path):
+            with open(path) as f:
+                cfg = json.load(f)
+        projects = cfg.get("projects")
+        if not isinstance(projects, dict):
+            projects = {}
+            cfg["projects"] = projects
+        changed = False
+        for d in dirs:
+            if not d:
+                continue
+            entry = projects.get(d)
+            if not isinstance(entry, dict):
+                entry = {}
+                projects[d] = entry
+            if entry.get("hasTrustDialogAccepted") is not True:
+                entry["hasTrustDialogAccepted"] = True
+                changed = True
+        if changed:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cfg, f, indent=2)
+            os.replace(tmp, path)
+    except Exception as e:
+        # Non-fatal: the run still starts, worst case Claude prompts.
+        log("worktree", "pretrust failed:", e)
+
+
+_TASK_MCP_SHIM = "/mnt/bromure-meta/bromure-task-mcp.py"
+
+
+def _task_mcp_setup(branch, tool, workdir):
+    """For a coding-board session: wire the board MCP tools (a stdio shim
+    that pipes to the host over vsock, announcing the branch so the host
+    binds the connection to the right card). Per tool:
+
+      - claude: a per-branch JSON config + ` --mcp-config=<cfg>` flag.
+      - codex:  per-invocation `-c mcp_servers.…` TOML overrides — nothing
+                is written to ~/.codex, so concurrent tasks can't fight
+                over one config file.
+      - grok:   a project-scoped .grok/settings.json in the session's
+                directory (grok-cli reads mcpServers from there); the
+                .grok/ dir is added to the checkout's local git exclude so
+                it can never dirty the task's diff or get committed.
+
+    Returns the extra CLI flags for BROMURE_AC_WT_FLAGS (may be "" — grok
+    is wired purely through the settings file). Flag strings word-split in
+    the tab launcher, so every token must be space-free."""
+    if not os.path.exists(_TASK_MCP_SHIM):
+        return ""
+    if tool == "claude":
+        cfg_dir = os.path.join(HOME, ".bromure")
+        cfg = os.path.join(cfg_dir, "task-mcp-%s.json" % branch.replace("/", "-"))
+        try:
+            os.makedirs(cfg_dir, exist_ok=True)
+            with open(cfg, "w") as f:
+                json.dump({"mcpServers": {"bromure-board": {
+                    "command": "python3",
+                    "args": [_TASK_MCP_SHIM, branch]}}}, f, indent=2)
+        except OSError as e:
+            log("worktree", "task-mcp config write failed:", e)
+            return ""
+        # Equals form on purpose: one token per flag.
+        return " --mcp-config=" + cfg
+    if tool == "codex":
+        # json.dumps with no-space separators emits a valid, token-safe
+        # TOML array; the quoted values survive word splitting because the
+        # launcher never re-parses quotes.
+        args = json.dumps([_TASK_MCP_SHIM, branch], separators=(",", ":"))
+        return (' -c mcp_servers.bromure_board.command="python3"'
+                ' -c mcp_servers.bromure_board.args=' + args)
+    if tool == "grok":
+        try:
+            d = os.path.join(workdir, ".grok")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "settings.json"), "w") as f:
+                json.dump({"mcpServers": {"bromure-board": {
+                    "command": "python3",
+                    "args": [_TASK_MCP_SHIM, branch]}}}, f, indent=2)
+            ex = _capture(["git", "-C", workdir, "rev-parse",
+                           "--git-path", "info/exclude"]).strip()
+            if ex:
+                path = ex if os.path.isabs(ex) else os.path.join(workdir, ex)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                current = ""
+                if os.path.exists(path):
+                    with open(path) as f:
+                        current = f.read()
+                if ".grok/" not in current:
+                    with open(path, "a") as f:
+                        f.write("\n.grok/\n")
+        except OSError as e:
+            log("worktree", "grok task-mcp setup failed:", e)
+        return ""
+    return ""
+
+
+def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
+                     task=False):
     _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
@@ -1903,9 +2017,14 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     _worktree_include(main_root, wt_dir)
 
     _env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    flags = _YOLO_FLAGS.get(tool, "") if yolo else ""
+    if task:
+        flags += _task_mcp_setup(branch, tool, wt_dir)
+    if flags:
+        _env["BROMURE_AC_WT_FLAGS"] = flags
     if yolo and _YOLO_FLAGS.get(tool):
-        _env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
         _preaccept_yolo(tool)
+        _pretrust(tool, wt_dir, main_root)
     win = _new_window(command="bash -l", cwd=wt_dir, env=_env)
     if not win:
         worktree_err("worktree: could not open a tab (created %s at %s)"
@@ -1919,10 +2038,53 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False):
     _wt_registry_add(repo_name, branch, parent_branch, display, tool)
 
 
-def _automation_tab(cwd, display, tool, prompt_b64):
+def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
+    """Coding-board review feedback: reopen an agent tab in an EXISTING
+    worktree checkout (no new worktree) with a follow-up prompt. Yolo —
+    a task run is unattended until its next review. The host only sends
+    this when the task's tab is gone; a live tab gets the feedback typed
+    into its session instead."""
+    if prompt_b64 == "-":
+        prompt_b64 = ""
+    wt_dir = ""
+    cur = ""
+    for line in _capture(["git", "-C", main_root, "worktree", "list",
+                          "--porcelain"]).splitlines():
+        if line.startswith("worktree "):
+            cur = line.split(" ", 1)[1]
+        elif line == "branch refs/heads/" + branch:
+            wt_dir = cur
+            break
+    if not wt_dir or not os.path.isdir(wt_dir):
+        worktree_err("task-resume: no worktree checkout for %s" % branch)
+        return
+    env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    flags = _YOLO_FLAGS.get(tool, "") + _task_mcp_setup(branch, tool, wt_dir)
+    if flags:
+        env["BROMURE_AC_WT_FLAGS"] = flags
+    if _YOLO_FLAGS.get(tool):
+        _preaccept_yolo(tool)
+        _pretrust(tool, wt_dir, main_root)
+    win = _new_window(command="bash -l", cwd=wt_dir, env=env)
+    if not win:
+        worktree_err("task-resume: could not open a tab for %s" % branch)
+        return
+    _set_window_option(win, "@worktree", branch)
+    _set_window_option(win, "@parent_branch", parent)
+    _set_window_option(win, "@root_repo", main_root)
+    _set_window_option(win, "@label", tool)
+    _set_window_option(win, "@display", display)
+
+
+def _automation_tab(cwd, display, tool, prompt_b64, slug=""):
     """Plain agent tab for an automation whose path isn't a git repo: same
     launch env as a worktree tab, no git anything. Always yolo — an
-    automation is unattended."""
+    automation is unattended.
+
+    The synthetic wt/<slug> marker matters: the ENTIRE completion pipeline
+    (done-signal matching, transcript pull, automation-finish's close) keys
+    off @worktree. Without it a non-repo run's tab never closes — the agent
+    finishes and the session just sits there."""
     _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""
@@ -1932,23 +2094,130 @@ def _automation_tab(cwd, display, tool, prompt_b64):
     if _YOLO_FLAGS.get(tool):
         env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
         _preaccept_yolo(tool)
+        _pretrust(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("automation: could not open a tab at %s" % cwd)
         return
     _set_window_option(win, "@label", tool)
     _set_window_option(win, "@display", display)
+    if slug:
+        _set_window_option(win, "@worktree", "wt/" + slug)
 
 
-def _automation_run(cwd, slug, display, tool, prompt_b64):
+def _seed_question_hooks():
+    """Make a pending AskUserQuestion visible to the host. Claude Code only
+    writes an assistant turn to the session transcript when the turn
+    completes — while the question picker is up, the question exists
+    nowhere on disk, and the host's plan window would sit stale and look
+    stalled. A PreToolUse hook dumps the tool input to
+    ~/.bromure/pq-<cwd-enc>.json; PostToolUse (answered) removes it. The
+    host's transcript tail appends that file while it's fresh."""
+    path = os.path.join(HOME, ".claude", "settings.json")
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        cfg = {}
+    hooks = cfg.setdefault("hooks", {})
+    pq = "\"$HOME/.bromure/pq-$(pwd | tr './' '--').json\""
+    entries = {
+        "PreToolUse": {"matcher": "AskUserQuestion", "hooks": [
+            {"type": "command",
+             "command": "mkdir -p ~/.bromure && cat > " + pq}]},
+        "PostToolUse": {"matcher": "AskUserQuestion", "hooks": [
+            {"type": "command", "command": "rm -f " + pq}]},
+        # A declined picker doesn't reliably fire PostToolUse — sweep the
+        # dump whenever a turn ends so a dead question can't stay clickable.
+        "Stop": {"hooks": [
+            {"type": "command", "command": "rm -f " + pq}]},
+    }
+    changed = False
+    for key, entry in entries.items():
+        arr = hooks.setdefault(key, [])
+        if not any("/.bromure/pq-" in json.dumps(e) for e in arr):
+            arr.append(entry)
+            changed = True
+    if not changed:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, path)
+        log("plan", "question hooks seeded into ~/.claude/settings.json")
+    except OSError as e:
+        log("plan", "question hook seeding failed: %s" % e)
+
+
+def _plan_tab(cwd, slug, display, tool, prompt_b64):
+    """Planning interview for a coding-board task: runs IN the task's
+    configured directory — no worktree. Planning writes no code, and the
+    agent must see the tree exactly as the user left it (uncommitted work
+    included). The synthetic wt/ marker on @worktree lets the host find
+    the session (watchdog, typed answers, card jump); the board MCP tools
+    are wired in so phases land on the board."""
+    _ensure_seed_current()
+    if prompt_b64 == "-":
+        prompt_b64 = ""
+    if not os.path.isdir(cwd):
+        worktree_err("plan: no such directory: " + cwd)
+        return
+    branch = "wt/" + slug
+    if tool == "claude":
+        _seed_question_hooks()
+    # A pq file left by an earlier session in this directory would show a
+    # phantom question — start clean.
+    stale = os.path.join(HOME, ".bromure",
+                         "pq-" + cwd.replace(".", "-").replace("/", "-") + ".json")
+    try:
+        os.remove(stale)
+    except OSError:
+        pass
+    env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    flags = _YOLO_FLAGS.get(tool, "") + _task_mcp_setup(branch, tool, cwd)
+    if flags:
+        env["BROMURE_AC_WT_FLAGS"] = flags
+    if _YOLO_FLAGS.get(tool):
+        _preaccept_yolo(tool)
+        _pretrust(tool, cwd)
+    win = _new_window(command="bash -l", cwd=cwd, env=env)
+    if not win:
+        worktree_err("plan: could not open a tab at %s" % cwd)
+        return
+    _set_window_option(win, "@label", tool)
+    _set_window_option(win, "@display", display)
+    _set_window_option(win, "@worktree", branch)
+
+
+def _automation_run(cwd, slug, display, tool, prompt_b64, mode=""):
     """Automation fire: a worktree when cwd is inside a git repo, a plain
     agent tab otherwise (the host can't tell — the guest decides here).
     Unattended, so the agent launches in yolo mode (no trust/permission
-    prompt to hang on)."""
-    if os.path.isdir(cwd) and _worktree_main_root(cwd):
-        _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=True)
+    prompt to hang on). mode "task" = coding-board task: the run gets the
+    board MCP tools wired in. mode "plan" = planning interview, run in cwd
+    itself (no worktree)."""
+    if mode == "plan":
+        _plan_tab(cwd, slug, display, tool, prompt_b64)
+        return
+    root = _worktree_main_root(cwd) if os.path.isdir(cwd) else None
+    if mode == "task" and root == os.path.expanduser("~"):
+        # The guest home may itself be a git repo (dotfiles, experiments);
+        # cutting a worktree off it scoops the entire home. A board task
+        # must run on its own repo — fail loudly, never fall back.
+        worktree_err("task: %s resolves to the home repo — make it its own "
+                     "git repository first" % cwd)
+        return
+    if root:
+        _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=True,
+                         task=(mode == "task"))
+    elif mode == "task":
+        # A plain tab has no branch, so the card could never leave In
+        # Progress — refuse instead of degrading silently.
+        worktree_err("task: %s is not a git repo" % cwd)
     else:
-        _automation_tab(cwd, display, tool, prompt_b64)
+        _automation_tab(cwd, display, tool, prompt_b64, slug=slug)
 
 
 def _save_claude_transcript(wt_dir):
@@ -2018,17 +2287,29 @@ _MERGE_PROMPT = ("A git merge in this directory hit conflicts. Run 'git status'"
 # unless one is already in progress, then either hand the checkout to the coding
 # agent (conflicts → exec bash -l → .bashrc worktree-launch branch) or report a
 # clean merge and wait. Branch names arrive via -e (env VALUES, never re-parsed).
+# A clean merge closes its own tab after a beat (the tmux window dies with
+# the command); only a conflict keeps it open, handing off to the resolver.
 _MERGE_WINDOW_CMD = (
     'if ! git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then '
     'git merge --no-edit "$WT_SRC"; fi; echo; '
     'if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then '
     'echo "bromure: merge conflicts — starting $BROMURE_AC_WT_TOOL to resolve…";'
     ' echo; exec bash -l; else '
-    'echo "bromure: merged $WT_SRC into $WT_DST."; '
-    'echo; echo Press Enter to close; read _; fi')
+    'echo "bromure: merged $WT_SRC into $WT_DST."; sleep 2; fi')
+
+# Squash flavor: one commit on the target from the branch's whole diff.
+# `merge --squash` sets no MERGE_HEAD — conflicts show as unmerged index
+# entries instead, so that's the resolver trigger here.
+_SQUASH_WINDOW_CMD = (
+    'git merge --squash "$WT_SRC"; echo; '
+    'if [ -n "$(git ls-files -u)" ]; then '
+    'echo "bromure: squash-merge conflicts — starting $BROMURE_AC_WT_TOOL to resolve…";'
+    ' echo; exec bash -l; else '
+    'git commit -m "$WT_MSG" >/dev/null 2>&1; '
+    'echo "bromure: squash-merged $WT_SRC into $WT_DST."; sleep 2; fi')
 
 
-def _worktree_merge(branch, target, root, display, tool):
+def _worktree_merge(branch, target, root, display, tool, mode="merge"):
     _ensure_seed_current()
     tdir = _worktree_dir_for_branch(root, target)
     if not tdir:
@@ -2037,8 +2318,11 @@ def _worktree_merge(branch, target, root, display, tool):
         worktree_err("merge: no checkout for '%s'" % target)
         return
     rp64 = _b64e(_MERGE_PROMPT)
-    win = _new_window(command=_MERGE_WINDOW_CMD, cwd=tdir,
+    squash = (mode == "squash")
+    win = _new_window(command=_SQUASH_WINDOW_CMD if squash else _MERGE_WINDOW_CMD,
+                      cwd=tdir,
                       env={"WT_SRC": branch, "WT_DST": target,
+                           "WT_MSG": "Squash-merge %s" % branch,
                            "BROMURE_AC_WT_TOOL": tool,
                            "BROMURE_AC_WT_PROMPT": rp64})
     # @display "Merge → …" is the host's marker for a merge tab.
@@ -2738,17 +3022,25 @@ def _dispatch_command(action, arg):
             _b64d(f[3]), f[4])
     elif action == "automation-run":
         # Same field layout as worktree-create; falls back to a plain agent
-        # tab when the path isn't a git repo.
-        f = _fields(arg, 5)
+        # tab when the path isn't a git repo. Optional 6th field: run mode
+        # ("task" = coding-board task -> the run gets the board MCP tools).
+        f = _fields(arg, 6)
         _bg(_automation_run, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), f[4])
+            _b64d(f[3]), f[4], _b64d(f[5]) if f[5] else "")
     elif action == "automation-finish":
         f = _fields(arg, 1)
         _bg(_automation_finish, _b64d(f[0]))
+    elif action == "task-resume":
+        # Coding board: reopen the agent in an existing worktree with a
+        # follow-up prompt. Fields 1-5 base64, field 6 the raw prompt b64.
+        f = _fields(arg, 6)
+        _bg(_task_resume, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
+            _b64d(f[3]), _b64d(f[4]), f[5])
     elif action == "worktree-merge":
-        f = _fields(arg, 5)
+        # Optional 6th field: merge mode ("merge" default, "squash").
+        f = _fields(arg, 6)
         _bg(_worktree_merge, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), _b64d(f[4]))
+            _b64d(f[3]), _b64d(f[4]), _b64d(f[5]) if f[5] else "merge")
     elif action == "worktree-pr":
         f = _fields(arg, 5)
         _bg(_worktree_pr, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),

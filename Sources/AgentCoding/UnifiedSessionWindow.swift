@@ -82,6 +82,10 @@ final class SessionListModel {
     /// Set when an automation's editor is the active stage surface —
     /// highlights its row in the Automations section.
     var automationSelectedID: UUID?
+    /// True when the automation kanban board is the active stage surface.
+    var automationBoardSelected = false
+    /// True when the coding-task kanban board is the active stage surface.
+    var taskBoardSelected = false
     /// True when the sidebar is collapsed to the icon rail.
     var sidebarCollapsed = false
     /// True when the right-hand file-explorer pane is open. Drives the
@@ -258,6 +262,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// "Automations" section). nil id + visible slot = composing a new one.
     private let automationSlot = NSView()
     private var automationHosting: NSHostingView<AutomationEditorView>?
+    /// Automation kanban board overlay — same full-bleed slot pattern.
+    private let kanbanSlot = NSView()
+    private var kanbanHosting: NSHostingView<AutomationKanbanView>?
+    /// Coding-task kanban board overlay.
+    private let taskBoardSlot = NSView()
+    private var taskBoardHosting: NSHostingView<CodingKanbanView>?
     private var automationEditorVisible = false
     /// The editor's draft differs from what's stored (reported by the view).
     /// Consulted by clearAutomationEditor so navigating away warns first.
@@ -403,11 +413,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onDelete:    { [weak self] id in self?.acDelegate?.sidebarDeleteProfile(id) },
             onNewProfile: { [weak self] in self?.acDelegate?.openEditorWindow(editing: nil) },
             automationStore: acDelegate.scheduledAutomationStore,
-            onSelectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
             onNewAutomation:    { [weak self] in self?.showAutomationEditor(nil) },
-            onRunAutomation:    { [weak self] id in self?.acDelegate?.runAutomationNow(id) },
-            onToggleAutomation: { [weak self] id in self?.acDelegate?.toggleAutomation(id) },
-            onDeleteAutomation: { [weak self] id in self?.acDelegate?.confirmDeleteAutomation(id) })
+            onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
+            taskStore: acDelegate.codingTaskStore,
+            onShowTaskBoard: { [weak self] in self?.showTaskBoard() })
         // NonMovable so a drag inside the sidebar — notably dragging a tab
         // row onto the Grid — selects/drags the row instead of moving the
         // whole window (the window is isMovableByWindowBackground).
@@ -489,6 +498,18 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         automationSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         automationSlot.isHidden = true
         stage.addSubview(automationSlot)
+        // Automation kanban board overlay — same treatment.
+        kanbanSlot.translatesAutoresizingMaskIntoConstraints = false
+        kanbanSlot.wantsLayer = true
+        kanbanSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        kanbanSlot.isHidden = true
+        stage.addSubview(kanbanSlot)
+        // Coding-task kanban board overlay — same treatment.
+        taskBoardSlot.translatesAutoresizingMaskIntoConstraints = false
+        taskBoardSlot.wantsLayer = true
+        taskBoardSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        taskBoardSlot.isHidden = true
+        stage.addSubview(taskBoardSlot)
         // VM dashboard overlay — same treatment as the Docker overlay.
         vmDashboardSlot.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.wantsLayer = true
@@ -613,6 +634,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             automationSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
             automationSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
             automationSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            kanbanSlot.topAnchor.constraint(equalTo: stage.topAnchor),
+            kanbanSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
+            kanbanSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            kanbanSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            taskBoardSlot.topAnchor.constraint(equalTo: stage.topAnchor),
+            taskBoardSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
+            taskBoardSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            taskBoardSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
         ])
 
         // ---- Layout: resizable sidebar | divider | framebuffer stage ----
@@ -1031,6 +1060,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Show the terminal grid as the stage surface.
     func showGrid() {
         guard clearAutomationEditor() else { return }   // dirty draft kept
+        clearAutomationBoard()
+        clearTaskBoard()
         clearDockerDashboard()
         clearVMDashboard()
         listModel.gridSelected = true
@@ -1110,6 +1141,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// off/suspended one shows its Start card in the stage.
     func selectRow(_ id: Profile.ID) {
         hideGrid()
+        clearAutomationBoard()
+        clearTaskBoard()
         clearDockerDashboard()
         clearVMDashboard()
         selectedID = id
@@ -1158,6 +1191,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func showDockerDashboard(_ id: Profile.ID, container: String? = nil) {
         guard let selPane = pane(id) else { return }
         guard clearAutomationEditor() else { return }   // dirty draft kept
+        clearAutomationBoard()
+        clearTaskBoard()
         hideGrid()
         clearVMDashboard()
         if let prev = dockerSelectedID, prev != id, let p = pane(prev) {
@@ -1224,6 +1259,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func showVMDashboard(_ id: Profile.ID) {
         guard let profile = acDelegate?.profile(for: id) else { return }
         guard clearAutomationEditor() else { return }   // dirty draft kept
+        clearAutomationBoard()
+        clearTaskBoard()
         clearDockerDashboard()
         let p = pane(id)
         let state = listModel.profileRows.first { $0.id == id }?.state ?? (p != nil ? .running : .off)
@@ -1287,6 +1324,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             guard clearAutomationEditor() else { return }
         }
         hideGrid()
+        clearAutomationBoard()
+        clearTaskBoard()
         clearDockerDashboard()
         clearVMDashboard()
         automationEditorVisible = true
@@ -1358,6 +1397,153 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         return true
     }
 
+    /// Show the automation kanban board as the stage surface: Scheduled /
+    /// In Progress / (Needs Attention) / Done. The hosting view is built
+    /// once and kept — everything it renders reads live observable state.
+    func showAutomationBoard() {
+        guard let delegate = acDelegate else { return }
+        guard clearAutomationEditor() else { return }   // dirty draft kept
+        hideGrid()
+        clearTaskBoard()
+        clearDockerDashboard()
+        clearVMDashboard()
+        listModel.automationBoardSelected = true
+        if kanbanHosting == nil {
+            let view = AutomationKanbanView(
+                store: delegate.scheduledAutomationStore,
+                model: listModel,
+                actions: AutomationKanbanView.Actions(
+                    selectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
+                    newAutomation: { [weak self] in self?.showAutomationEditor(nil) },
+                    runNow: { [weak self] id in self?.acDelegate?.runAutomationNow(id) },
+                    toggle: { [weak self] id in self?.acDelegate?.toggleAutomation(id) },
+                    delete: { [weak self] id in self?.acDelegate?.confirmDeleteAutomation(id) },
+                    openRun: { [weak self] run in self?.acDelegate?.openAutomationRun(run) },
+                    acknowledge: { [weak self] id in
+                        self?.acDelegate?.scheduledAutomationStore.acknowledge(id)
+                    }))
+            let host = NSHostingView(rootView: view)
+            // The board's SwiftUI max-width must never resize the WINDOW —
+            // same required-constraint gotcha as the file pane (sizingOptions).
+            host.sizingOptions = []
+            host.translatesAutoresizingMaskIntoConstraints = false
+            kanbanSlot.addSubview(host)
+            NSLayoutConstraint.activate([
+                host.topAnchor.constraint(equalTo: kanbanSlot.topAnchor),
+                host.bottomAnchor.constraint(equalTo: kanbanSlot.bottomAnchor),
+                host.leadingAnchor.constraint(equalTo: kanbanSlot.leadingAnchor),
+                host.trailingAnchor.constraint(equalTo: kanbanSlot.trailingAnchor),
+            ])
+            kanbanHosting = host
+        }
+        kanbanSlot.isHidden = false
+    }
+
+    /// Hide the board (the hosting view is kept for the next show).
+    func clearAutomationBoard() {
+        guard listModel.automationBoardSelected else { return }
+        listModel.automationBoardSelected = false
+        kanbanSlot.isHidden = true
+    }
+
+    /// Show the coding-task kanban board (Backlog / In Progress / Testing /
+    /// Done) as the stage surface.
+    func showTaskBoard() {
+        guard let delegate = acDelegate else { return }
+        guard clearAutomationEditor() else { return }   // dirty draft kept
+        hideGrid()
+        clearAutomationBoard()
+        clearDockerDashboard()
+        clearVMDashboard()
+        listModel.taskBoardSelected = true
+        if taskBoardHosting == nil {
+            let view = CodingKanbanView(
+                store: delegate.codingTaskStore,
+                model: listModel,
+                profilesProvider: { [weak self] in self?.acDelegate?.profiles ?? [] },
+                actions: CodingKanbanView.Actions(
+                    start: { [weak self] id in self?.acDelegate?.codingTaskEngine.start(id) },
+                    plan: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.plan(id)
+                        // The interview happens HERE, in the native window —
+                        // the worktree tab is just the machinery underneath.
+                        self?.acDelegate?.planSessionWindows.open(taskID: id)
+                    },
+                    openReview: { [weak self] id in
+                        self?.acDelegate?.taskReviewWindows.open(taskID: id)
+                    },
+                    jumpToRun: { [weak self] task in
+                        guard let slug = task.branchSlug else { return }
+                        self?.focusWorktreeTab(profileID: task.profileID, slug: slug)
+                    },
+                    moveToTesting: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.moveToTesting(id)
+                    },
+                    backToInProgress: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.moveToInProgress(id)
+                    },
+                    merge: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.merge(id)
+                    },
+                    closeNoMerge: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.closeWithoutMerge(id)
+                    },
+                    delete: { [weak self] id in
+                        self?.acDelegate?.codingTaskStore.remove(id)
+                        self?.acDelegate?.codingTaskEngine.pumpQueue()
+                    },
+                    save: { [weak self] task in
+                        self?.acDelegate?.codingTaskStore.upsert(task)
+                    },
+                    validate: { [weak self] task in
+                        // Persist the draft first so the result has a home.
+                        self?.acDelegate?.codingTaskStore.upsert(task)
+                        self?.acDelegate?.codingTaskEngine.validate(task.id)
+                    },
+                    openPlanSession: { [weak self] id in
+                        self?.acDelegate?.planSessionWindows.open(taskID: id)
+                    },
+                    destroy: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.destroy(id)
+                    }))
+            let host = NSHostingView(rootView: view)
+            host.sizingOptions = []
+            host.translatesAutoresizingMaskIntoConstraints = false
+            taskBoardSlot.addSubview(host)
+            NSLayoutConstraint.activate([
+                host.topAnchor.constraint(equalTo: taskBoardSlot.topAnchor),
+                host.bottomAnchor.constraint(equalTo: taskBoardSlot.bottomAnchor),
+                host.leadingAnchor.constraint(equalTo: taskBoardSlot.leadingAnchor),
+                host.trailingAnchor.constraint(equalTo: taskBoardSlot.trailingAnchor),
+            ])
+            taskBoardHosting = host
+        }
+        taskBoardSlot.isHidden = false
+    }
+
+    func clearTaskBoard() {
+        guard listModel.taskBoardSelected else { return }
+        listModel.taskBoardSelected = false
+        taskBoardSlot.isHidden = true
+    }
+
+    /// Land on a worktree tab from a board card: leave any overlay and
+    /// select the tab (main-window position) — the grid's jump, reused.
+    func focusWorktreeTab(profileID: Profile.ID, slug: String) {
+        clearTaskBoard()
+        clearAutomationBoard()
+        hideGrid()
+        if let entry = listModel.entries.first(where: { $0.id == profileID }),
+           let position = entry.model.tabs.firstIndex(where: {
+               AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
+           }) {
+            selectTab(profileID: profileID, index: position)
+        } else {
+            selectRow(profileID)
+        }
+        makeKeyAndOrderFront(nil)
+    }
+
     /// Workspace name clicked in the source list → select it and surface its
     /// dashboard, whether the VM is running, suspended, or off.
     func selectWorkspaceName(_ id: Profile.ID) {
@@ -1392,6 +1578,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func selectTab(profileID id: Profile.ID, index: Int) {
         guard clearAutomationEditor() else { return }   // dirty draft kept
         hideGrid()
+        // The boards overlay the stage: without this, clicking a sidebar
+        // tab while a kanban is up switches the (hidden) terminal and
+        // looks like a dead click.
+        clearTaskBoard()
+        clearAutomationBoard()
         clearDockerDashboard()
         clearVMDashboard()
         if selectedID != id { select(profileID: id) }
@@ -1400,6 +1591,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func newTab(profileID id: Profile.ID) {
         guard clearAutomationEditor() else { return }   // dirty draft kept
         hideGrid()
+        clearTaskBoard()
+        clearAutomationBoard()
         clearDockerDashboard()
         clearVMDashboard()
         if selectedID != id { select(profileID: id) }
@@ -1575,11 +1768,12 @@ struct SessionSidebar: View {
     /// Scheduled automations — the third sidebar group, after the
     /// workspace rows.
     var automationStore: ScheduledAutomationStore
-    let onSelectAutomation: (UUID) -> Void
     let onNewAutomation: () -> Void
-    let onRunAutomation: (UUID) -> Void
-    let onToggleAutomation: (UUID) -> Void
-    let onDeleteAutomation: (UUID) -> Void
+    /// Open the automation kanban board as the stage surface.
+    let onShowAutomationBoard: () -> Void
+    /// Coding-task board (host window only — nil hides the Tasks section).
+    var taskStore: CodingTaskStore? = nil
+    var onShowTaskBoard: () -> Void = {}
 
     var body: some View {
         if model.sidebarCollapsed {
@@ -1595,21 +1789,33 @@ struct SessionSidebar: View {
 
     private var fullSidebar: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Workspaces")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.7)
-                Spacer()
-            }
-            .padding(.leading, 16)
-            .padding(.trailing, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
-
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
+                    // Boards first — the surfaces that summarize everything —
+                    // then the Workspaces group (label, Grid, rows).
+                    AutomationsSection(
+                        store: automationStore,
+                        model: model,
+                        onNew: onNewAutomation,
+                        onShowBoard: onShowAutomationBoard)
+                    if let taskStore {
+                        CodingTasksSection(
+                            store: taskStore,
+                            model: model,
+                            onShowBoard: onShowTaskBoard)
+                    }
+                    HStack {
+                        Text("Workspaces")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .textCase(.uppercase)
+                            .tracking(0.7)
+                        Spacer()
+                    }
+                    .padding(.leading, 8)
+                    .padding(.trailing, 6)
+                    .padding(.top, 14)
+                    .padding(.bottom, 4)
                     GridSection(
                         store: gridStore,
                         model: model,
@@ -1642,14 +1848,6 @@ struct SessionSidebar: View {
                             onDelete: onDelete,
                             onAddAllToGrid: onAddAllToGrid)
                     }
-                    AutomationsSection(
-                        store: automationStore,
-                        model: model,
-                        onSelect: onSelectAutomation,
-                        onNew: onNewAutomation,
-                        onRunNow: onRunAutomation,
-                        onToggle: onToggleAutomation,
-                        onDelete: onDeleteAutomation)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)

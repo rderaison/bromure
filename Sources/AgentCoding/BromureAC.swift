@@ -469,6 +469,24 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     addToGridItem.target = delegate
     wsMenu.addItem(addToGridItem)
 
+    wsMenu.addItem(NSMenuItem.separator())
+
+    // The two kanban boards — menu + shortcut peers of their (subtle)
+    // sidebar buttons.
+    let autoBoardItem = NSMenuItem(title: L("Automation Board"),
+                                   action: #selector(ACAppDelegate.showAutomationBoardAction(_:)),
+                                   keyEquivalent: "a")
+    autoBoardItem.keyEquivalentModifierMask = [.command, .shift]
+    autoBoardItem.target = delegate
+    wsMenu.addItem(autoBoardItem)
+
+    let taskBoardItem = NSMenuItem(title: L("Coding Board"),
+                                   action: #selector(ACAppDelegate.showTaskBoardAction(_:)),
+                                   keyEquivalent: "t")
+    taskBoardItem.keyEquivalentModifierMask = [.command, .shift]
+    taskBoardItem.target = delegate
+    wsMenu.addItem(taskBoardItem)
+
     let deleteWsItem = NSMenuItem(title: L("Delete"),
                                   action: #selector(ACAppDelegate.deleteWorkspaceAction(_:)),
                                   keyEquivalent: "")
@@ -952,9 +970,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// start is aborted and the automation records a failure instead of the
     /// interactive path's fresh-boot fallback, which would silently destroy
     /// the suspended session's terminals and running work.
-    func startProfileForAutomation(_ id: Profile.ID) {
+    /// `detached: true` boots the VM headless — used by flows that have
+    /// their own surface (the plan window) and must not raise the session
+    /// window over it. The terminal can be attached later on demand.
+    func startProfileForAutomation(_ id: Profile.ID, detached: Bool = false) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
-        launch(profile, freshBootFallback: false)
+        launch(profile, detached: detached, freshBootFallback: false)
     }
 
     /// Duplicate a workspace for a clone-first automation run: settings,
@@ -1206,9 +1227,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let tab = pane(for: id)?.model.tabs.first(where: { $0.index == index }) else { return }
         tab.agentStatus = status
         // A finished Claude tab may be an automation run — the engine saves
-        // its transcript and closes the tab if so.
+        // its transcript and closes the tab if so — or a coding task, which
+        // moves to Testing.
         if status == .done {
             scheduledAutomationEngine.agentFinished(
+                profileID: id, worktreeBranch: tab.worktreeBranch)
+            codingTaskEngine.agentFinished(
                 profileID: id, worktreeBranch: tab.worktreeBranch)
         }
     }
@@ -1262,6 +1286,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     let scheduledAutomationStore = ScheduledAutomationStore()
     private(set) lazy var scheduledAutomationEngine =
         ScheduledAutomationEngine(store: scheduledAutomationStore, delegate: self)
+
+    /// Coding kanban (sidebar "Tasks"): agent-driven tasks flowing Backlog →
+    /// In Progress → Testing → Done through git worktrees.
+    let codingTaskStore = CodingTaskStore()
+    private(set) lazy var codingTaskEngine =
+        CodingTaskEngine(store: codingTaskStore, delegate: self)
 
     /// Profiles created with `vm run --rm`: deleted (profile + disk) when their
     /// VM stops, mirroring `docker run --rm`.
@@ -1592,6 +1622,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Per-workspace browser MCP listeners (vsock 5830) — the in-VM agents'
     /// stdio shim connects here to drive the embedded browser.
     var browserMCPBridges: [Profile.ID: BrowserMCPVsockBridge] = [:]
+    /// Coding-board MCP listeners (vsock 5831), one per running workspace.
+    var taskMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
 
     /// Errors from `guestExec`.
     enum GuestExecError: LocalizedError {
@@ -1768,6 +1800,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // routes fires missed while the app was quit through each
         // automation's missed-run policy.
         scheduledAutomationEngine.start()
+        // Planning sessions that were in flight when the app last quit must
+        // not spin forever — re-arm their watchdogs (which abort with a
+        // clear reason if the session is gone).
+        codingTaskEngine.resumePlanningWatchdogs()
 
         // Default SSH key: every new profile inherits this keypair via
         // the user's preferences template. Generate it on first launch
@@ -2249,6 +2285,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "picker": window = self.mainWindow
                 case "editor": window = self.editorWindow
                 case "sheet":  window = self.editorWindow?.attachedSheet
+                case "board":
+                    // Kanban board as the stage surface, then the unified
+                    // window — E2E/doc-screenshot hook for the board. The
+                    // window is created on demand so a fresh headless launch
+                    // (the screenshot pipeline) can capture it.
+                    self.ensureUnifiedWindow().showAutomationBoard()
+                    window = self.unifiedWindow
+                case let w where w.hasPrefix("run:"):
+                    // A run-detail window ("run:<run-uuid>"): open (or find)
+                    // it and render it — E2E hook for the live-terminal /
+                    // transcript window.
+                    guard let runID = UUID(uuidString: String(w.dropFirst(4))),
+                          let run = self.scheduledAutomationStore.runs
+                              .first(where: { $0.id == runID })
+                              ?? AutomationRunArchive.loadArchivedRuns()
+                              .first(where: { $0.id == runID })
+                    else { return ["error": "unknown run"] }
+                    self.openAutomationRun(run)
+                    window = self.automationRunWindows.window(for: runID)
+                case "tasks":
+                    // Coding-task board as the stage surface.
+                    self.ensureUnifiedWindow().showTaskBoard()
+                    window = self.unifiedWindow
+                case let w where w.hasPrefix("plan:"):
+                    // A task's plan-session window ("plan:<task-uuid>").
+                    guard let taskID = UUID(uuidString: String(w.dropFirst(5))),
+                          self.codingTaskStore.task(taskID) != nil
+                    else { return ["error": "unknown task"] }
+                    self.planSessionWindows.open(taskID: taskID)
+                    window = self.planSessionWindows.window(for: taskID)
+                case let w where w.hasPrefix("review:"):
+                    // A task's review window ("review:<task-uuid>").
+                    guard let taskID = UUID(uuidString: String(w.dropFirst(7))),
+                          self.codingTaskStore.task(taskID) != nil
+                    else { return ["error": "unknown task"] }
+                    self.taskReviewWindows.open(taskID: taskID)
+                    window = self.taskReviewWindows.window(for: taskID)
                 default:       window = self.unifiedWindow
                 }
                 return self.debugRenderWindow(window, to: path)
@@ -2263,6 +2336,120 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return ["error": "no app"] }
                 let action = params["action"] as? String ?? ""
                 switch action {
+                case "seed-board-demo":
+                    // Screenshot/demo fixture: populate BOTH kanban boards
+                    // with representative cards. Everything is tagged with a
+                    // fixed marker so "clear-board-demo" removes it exactly.
+                    guard let profileName = params["profile"] as? String,
+                          let profile = self.profiles.first(where: {
+                              $0.name.lowercased() == profileName.lowercased()
+                          }) else { return ["error": "unknown profile"] }
+                    let pid = profile.id
+                    let marker = "bromure-demo"
+                    let now = Date()
+                    // Automations: one per trigger flavor in Scheduled.
+                    let autoReview = ScheduledAutomation(
+                        name: "Review incoming PRs", profileID: pid,
+                        trigger: .githubPullRequest, githubRepo: "acme/webapp",
+                        prompt: "Review this pull request.", repoPath: "~/webapp")
+                    let autoDeps = ScheduledAutomation(
+                        name: "Nightly dependency bump", profileID: pid,
+                        frequency: .daily, hour: 2, minute: 30,
+                        prompt: "Bump outdated dependencies and run the tests.",
+                        repoPath: "~/webapp")
+                    let autoTriage = ScheduledAutomation(
+                        name: "Triage new issues", profileID: pid,
+                        trigger: .githubIssue, githubRepo: "acme/webapp",
+                        prompt: "Label and triage this issue.", repoPath: "~/webapp")
+                    for a in [autoReview, autoDeps, autoTriage] {
+                        self.scheduledAutomationStore.upsert(a)
+                    }
+                    // Runs: Done (completed + skipped) and Needs Attention.
+                    self.scheduledAutomationStore.record(AutomationRunRecord(
+                        automationID: autoReview.id,
+                        firedAt: now.addingTimeInterval(-7000),
+                        outcome: .launched, detail: "PR #128: fix the login redirect",
+                        branchSlug: marker,
+                        completedAt: now.addingTimeInterval(-5400)))
+                    self.scheduledAutomationStore.record(AutomationRunRecord(
+                        automationID: autoDeps.id,
+                        firedAt: now.addingTimeInterval(-30_600),
+                        outcome: .launched, detail: "Nightly dependency bump",
+                        branchSlug: marker,
+                        completedAt: now.addingTimeInterval(-29_000)))
+                    self.scheduledAutomationStore.record(AutomationRunRecord(
+                        automationID: autoTriage.id,
+                        firedAt: now.addingTimeInterval(-3200),
+                        outcome: .failed,
+                        detail: "The workspace did not boot in time",
+                        branchSlug: marker))
+                    // Coding board: one card per column.
+                    let brief = CodingTask(
+                        title: "Add rate limiting to the API",
+                        details: "Protect the public endpoints with a token bucket.",
+                        profileID: pid, repoPath: "~/webapp")
+                    var phase1 = CodingTask(
+                        title: "Phase 1 — Token bucket core",
+                        details: "Bucket + refill logic, unit tests.",
+                        profileID: pid, repoPath: "~/webapp")
+                    phase1.stage = .planning
+                    phase1.parentTaskID = brief.id
+                    phase1.createdAt = now.addingTimeInterval(-500)
+                    var phase2 = CodingTask(
+                        title: "Phase 2 — Middleware + headers",
+                        details: "Wire the limiter into the request path.",
+                        profileID: pid, repoPath: "~/webapp")
+                    phase2.stage = .planning
+                    phase2.parentTaskID = brief.id
+                    phase2.dependsOn = [phase1.id]
+                    phase2.createdAt = now.addingTimeInterval(-499)
+                    var running = CodingTask(
+                        title: "Fix the flaky websocket test",
+                        profileID: pid, repoPath: "~/webapp")
+                    running.stage = .inProgress
+                    running.branchSlug = "fix-flaky-websocket-0719"
+                    running.startedAt = now.addingTimeInterval(-120)
+                    var review = CodingTask(
+                        title: "Migrate settings to SQLite",
+                        profileID: pid, repoPath: "~/webapp")
+                    review.stage = .testing
+                    review.branch = "wt/settings-sqlite-0719"
+                    review.testingAt = now.addingTimeInterval(-700)
+                    review.comments = [ReviewComment(text: "Use a prepared statement here",
+                                                     file: "store/db.py", line: 42)]
+                    var shipped = CodingTask(
+                        title: "Dark-mode palette cleanup",
+                        profileID: pid, repoPath: "~/webapp")
+                    shipped.stage = .done
+                    shipped.merged = true
+                    shipped.parentBranch = "main"
+                    shipped.completedAt = now.addingTimeInterval(-90_000)
+                    for t in [brief, phase1, phase2, running, review, shipped] {
+                        self.codingTaskStore.upsert(t)
+                    }
+                    return ["ok": true]
+
+                case "clear-board-demo":
+                    let marker = "bromure-demo"
+                    let demoNames = ["Review incoming PRs", "Nightly dependency bump",
+                                     "Triage new issues"]
+                    let demoTasks = ["Add rate limiting to the API",
+                                     "Phase 1 — Token bucket core",
+                                     "Phase 2 — Middleware + headers",
+                                     "Fix the flaky websocket test",
+                                     "Migrate settings to SQLite",
+                                     "Dark-mode palette cleanup"]
+                    for a in self.scheduledAutomationStore.automations
+                    where demoNames.contains(a.name) {
+                        self.scheduledAutomationStore.remove(a.id)
+                    }
+                    self.scheduledAutomationStore.removeRuns(where: { $0.branchSlug == marker })
+                    for t in self.codingTaskStore.tasks
+                    where demoTasks.contains(t.title) {
+                        self.codingTaskStore.remove(t.id)
+                    }
+                    return ["ok": true]
+
                 case "ensure-profile":
                     let name = (params["name"] as? String) ?? "Screenshot"
                     if let existing = self.profiles.first(where: { $0.name.lowercased() == name.lowercased() }) {
@@ -2483,6 +2670,78 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self, let uuid = UUID(uuidString: id) else { return false }
                 self.toggleAutomation(uuid)
                 return true
+            }
+        }
+        server.onAcknowledgeRun = { [weak self] runID in
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.scheduledAutomationStore.runs.contains(where: { $0.id == runID })
+                else { return false }
+                self.scheduledAutomationStore.acknowledge(runID)
+                return true
+            }
+        }
+        server.onListTasks = { [weak self] in
+            MainActor.assumeIsolated {
+                ["tasks": self?.codingTaskStore.tasks.compactMap(Self.codableToDict) ?? []]
+            }
+        }
+        server.onUpsertTask = { [weak self] doc in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let data = try? JSONSerialization.data(withJSONObject: doc)
+                else { return false }
+                let dec = JSONDecoder()
+                dec.dateDecodingStrategy = .iso8601
+                guard let task = try? dec.decode(CodingTask.self, from: data) else { return false }
+                self.codingTaskStore.upsert(task)
+                return true
+            }
+        }
+        server.onTaskCommand = { [weak self] id, action, body in
+            MainActor.assumeIsolated {
+                guard let self else { return ["error": "no app"] }
+                guard self.codingTaskStore.task(id) != nil else { return ["error": "unknown task"] }
+                switch action {
+                case "start":
+                    self.codingTaskEngine.start(id)
+                case "plan", "plan-start":   // plan-start: legacy alias
+                    self.codingTaskEngine.plan(id)
+                case "send-back":
+                    Task { @MainActor in await self.codingTaskEngine.sendBack(id) }
+                case "merge":
+                    self.codingTaskEngine.merge(
+                        id, into: body["target"] as? String,
+                        squash: body["squash"] as? Bool ?? false)
+                case "open-pr":
+                    self.codingTaskEngine.openPR(id)
+                case "validate":
+                    self.codingTaskEngine.validate(id)
+                case "to-testing":
+                    self.codingTaskEngine.moveToTesting(id)
+                case "to-in-progress":
+                    self.codingTaskEngine.moveToInProgress(id)
+                case "close-no-merge":
+                    self.codingTaskEngine.closeWithoutMerge(id)
+                case "comment":
+                    guard let text = body["text"] as? String, !text.isEmpty else {
+                        return ["error": "text required"]
+                    }
+                    self.codingTaskStore.mutate(id) {
+                        $0.comments.append(ReviewComment(
+                            text: text, file: body["file"] as? String,
+                            line: body["line"] as? Int))
+                    }
+                case "delete":
+                    self.codingTaskStore.remove(id)
+                    self.codingTaskEngine.pumpQueue()
+                case "destroy":
+                    self.codingTaskEngine.destroy(id)
+                default:
+                    return ["error": "unknown action", "action": action]
+                }
+                let stage = self.codingTaskStore.task(id)?.stage.rawValue ?? "deleted"
+                return ["ok": true, "stage": stage]
             }
         }
         server.onGuestFileOp = { [weak self] idOrName, op, timeout in
@@ -2849,9 +3108,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Scheduled automations + run history, JSON-encoded from the Codable
     /// models so the fat client mirrors (and can round-trip) them verbatim.
     @MainActor func automationScheduledList() -> [String: Any] {
-        [
+        let iso = ISO8601DateFormatter()
+        return [
             "automations": scheduledAutomationStore.automations.compactMap(Self.codableToDict),
             "runs": scheduledAutomationStore.runs.compactMap(Self.codableToDict),
+            "nextFires": scheduledAutomationStore.allNextFires()
+                .mapValues { iso.string(from: $0) },
         ]
     }
 
@@ -4357,6 +4619,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc func addTerminalToGridAction(_ sender: Any?) {
         if let ctx = currentWorkspaceContext() { addActiveTerminalToGrid(in: ctx.pane) }
+    }
+
+    @objc func showAutomationBoardAction(_ sender: Any?) {
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showAutomationBoard()
+    }
+
+    @objc func showTaskBoardAction(_ sender: Any?) {
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showTaskBoard()
     }
 
     @objc func deleteWorkspaceAction(_ sender: Any?) {
@@ -6359,6 +6635,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
                 self.browserMCPBridges[pid] =
                     BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
+                // Coding-board MCP listener (vsock 5831): typed task tools
+                // for board runs (plan, subtasks, hand-to-review).
+                self.taskMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: TaskBoardMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.codingTaskStore },
+                        engine: { [weak self] in self?.codingTaskEngine }))
             }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
                 var p = profile
@@ -6521,7 +6805,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: NSLocalizedString("Continue Anyway", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
 
-        let response = alert.runModal()
+        // A sheet on the session's window, NOT runModal: an app-modal alert
+        // parks the main thread, which freezes the control socket, the
+        // automation API, and every fat client until someone clicks — the
+        // whole app held hostage by one wedged boot.
+        guard let win = pane.host?.paneHostWindow else { return }
+        let response = await withCheckedContinuation { cont in
+            alert.beginSheetModal(for: win) { cont.resume(returning: $0) }
+        }
         switch response {
         case .alertFirstButtonReturn:
             // Tear down the wedged session before kickstarting — the
@@ -6653,17 +6944,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
         case "run":
             // Automation fire: same layout as "create", but the guest falls
-            // back to a plain agent tab when cwd isn't a git repo.
-            guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt]
+            // back to a plain agent tab when cwd isn't a git repo. Optional
+            // 6th arg: run mode ("task" wires the board MCP tools in).
+            guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt[, mode]]
             name = "automation-run"
             let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
             encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
+                + (args.count >= 6 && !args[5].isEmpty ? [b64(args[5])] : [])
         case "finish":
             guard args.count >= 1 else { return false }   // worktree branch
             name = "automation-finish"; encoded = [b64(args[0])]
+        case "task-resume":
+            // Coding board review round: reopen the agent on an existing
+            // worktree with a follow-up prompt.
+            guard args.count >= 6 else { return false }   // root, branch, parent, display, tool, prompt
+            name = "task-resume"
+            let prompt = args[5].isEmpty ? "-" : b64(args[5])
+            encoded = args.prefix(5).map(b64) + [prompt]
         case "merge":
-            guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
-            name = "worktree-merge"; encoded = args.prefix(5).map(b64)
+            // src, target, mainRoot, display, tool[, mode ("merge"/"squash")]
+            guard args.count >= 5 else { return false }
+            name = "worktree-merge"; encoded = args.prefix(6).map(b64)
         case "pr":
             guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
             name = "worktree-pr"; encoded = args.prefix(5).map(b64)
@@ -6951,6 +7252,206 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func saveAutomation(_ automation: ScheduledAutomation) {
         scheduledAutomationStore.upsert(automation)
         scheduledAutomationEngine.tick()
+    }
+
+    /// Standalone windows onto individual automation runs — the kanban
+    /// board's card-click target (live terminal while running, transcript
+    /// after).
+    private(set) lazy var automationRunWindows = AutomationRunWindowManager(
+        context: AutomationRunWindowManager.Context(
+            store: { [weak self] in self?.scheduledAutomationStore },
+            profile: { [weak self] id in self?.profile(for: id) },
+            tabsModel: { [weak self] id in self?.pane(for: id)?.model },
+            accentHex: { [weak self] id in
+                self?.profile(for: id)?.color.hexInUI ?? "#888888"
+            }))
+
+    func openAutomationRun(_ run: AutomationRunRecord) {
+        automationRunWindows.open(run: run)
+    }
+
+    /// Native planning-conversation windows (the Plan card's click target).
+    private(set) lazy var planSessionWindows = PlanSessionWindowManager(
+        context: PlanSessionWindowManager.Context(
+            store: { [weak self] in self?.codingTaskStore },
+            fetchTranscript: { [weak self] task in
+                await self?.fetchLivePlanTranscript(task)
+            },
+            send: { [weak self] profileID, branch, text in
+                await self?.codingTaskEngine.typeIntoSession(
+                    profileID: profileID, branch: branch, text: text) ?? false
+            },
+            sendKeys: { [weak self] profileID, branch, keys in
+                await self?.codingTaskEngine.answerInSession(
+                    profileID: profileID, branch: branch, keys: keys) ?? false
+            },
+            openTerminal: { [weak self] task in
+                guard let self, let slug = task.branchSlug else { return }
+                // Planning boots the VM detached, so the session may have no
+                // window yet — attach one first, then land on the tab.
+                if let profile = self.profile(for: task.profileID) {
+                    self.launch(profile)
+                }
+                self.unifiedWindow?.focusWorktreeTab(
+                    profileID: task.profileID, slug: slug)
+            },
+            accentHex: { [weak self] id in
+                self?.profile(for: id)?.color.hexInUI ?? "#888888"
+            },
+            workspaceName: { [weak self] id in
+                self?.profile(for: id)?.name ?? ""
+            },
+            liveBranch: { [weak self] task in
+                await self?.codingTaskEngine.liveBranchResolved(of: task)
+            }))
+
+    /// Tail of the live Claude transcript for a task's planning session.
+    func fetchLivePlanTranscript(_ task: CodingTask) async -> String? {
+        guard let since = task.validationRequestedAt,
+              let cmd = CodingTaskEngine.planTranscriptCommand(
+                  guestCwd: ScheduledAutomationEngine.guestPath(task.repoPath),
+                  since: Int(since.timeIntervalSince1970))
+        else { return nil }
+        return try? await guestExec(profileID: task.profileID, command: cmd, timeout: 15)
+    }
+
+    /// Review windows for the coding board's Testing cards.
+    private(set) lazy var taskReviewWindows = TaskReviewWindowManager(
+        context: TaskReviewWindowManager.Context(
+            store: { [weak self] in self?.codingTaskStore },
+            fetchReview: { [weak self] task in
+                await self?.fetchTaskReview(task)
+            },
+            openTerminal: { [weak self] task in
+                guard let self, let slug = task.branchSlug else { return }
+                self.unifiedWindow?.focusWorktreeTab(
+                    profileID: task.profileID, slug: slug)
+            },
+            accentHex: { [weak self] id in
+                self?.profile(for: id)?.color.hexInUI ?? "#888888"
+            },
+            workspaceName: { [weak self] id in
+                self?.profile(for: id)?.name ?? ""
+            },
+            sendBack: { [weak self] taskID in
+                guard let self else { return }
+                Task { @MainActor in await self.codingTaskEngine.sendBack(taskID) }
+            },
+            merge: { [weak self] taskID, target, squash in
+                self?.codingTaskEngine.merge(taskID, into: target, squash: squash)
+            },
+            openPR: { [weak self] taskID in
+                self?.codingTaskEngine.openPR(taskID)
+            },
+            fetchBranches: { [weak self] task in
+                await self?.fetchTaskBranches(task) ?? []
+            },
+            addComment: { [weak self] taskID, text, file, line in
+                self?.codingTaskStore.mutate(taskID) {
+                    $0.comments.append(ReviewComment(text: text, file: file, line: line))
+                }
+            }))
+
+    /// Repo branches for the review window's "Merge into…" picker.
+    func fetchTaskBranches(_ task: CodingTask) async -> [String] {
+        guard let root = task.rootRepo, !root.isEmpty else { return [] }
+        let cmd = "git -C '" + root.replacingOccurrences(of: "'", with: "'\\''")
+            + "' for-each-ref refs/heads --format='%(refname:short)' 2>/dev/null | head -50"
+        guard let out = try? await guestExec(profileID: task.profileID,
+                                             command: cmd, timeout: 15) else { return [] }
+        return out.split(whereSeparator: \.isNewline).map(String.init)
+            .filter { !$0.isEmpty && !$0.hasPrefix("wt/") }
+    }
+
+    /// The review window's data: commits, status, and full diff of the
+    /// task's branch against its parent — read live from the guest so it
+    /// always reflects the worktree as it is right now (including work the
+    /// agent hasn't committed).
+    func fetchTaskReview(_ task: CodingTask) async -> TaskReviewData? {
+        guard let wt = task.worktreeDir, !wt.isEmpty,
+              let parent = task.parentBranch, !parent.isEmpty else { return nil }
+        let cmd = TaskReviewData.guestCommand(worktreeDir: wt, parent: parent)
+        guard let out = try? await guestExec(profileID: task.profileID,
+                                             command: cmd, timeout: 30) else { return nil }
+        return TaskReviewData.parse(out)
+    }
+
+    /// Pre-seed Claude's folder trust for a guest directory — the host-side
+    /// twin of agentd's `_pretrust`, for workspaces resumed from suspend
+    /// that still run a pre-fix agentd. Worktrees inherit the main repo's
+    /// trust (git common dir), so trusting the repo path covers the run.
+    /// Best-effort; same clobber race as the guest version.
+    func pretrustGuestPath(profileID: Profile.ID, dir rawDir: String) async {
+        let dir = rawDir
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let py = """
+        import json, os
+        p = os.path.expanduser("~/.claude.json")
+        try:
+            cfg = json.load(open(p)) if os.path.exists(p) else {}
+        except Exception:
+            cfg = {}
+        pr = cfg.setdefault("projects", {})
+        e = pr.setdefault(os.path.expanduser("\(dir)"), {})
+        if e.get("hasTrustDialogAccepted") is not True:
+            e["hasTrustDialogAccepted"] = True
+            tmp = p + ".tmp"
+            json.dump(cfg, open(tmp, "w"), indent=2)
+            os.replace(tmp, p)
+        """
+        let b64 = Data(py.utf8).base64EncodedString()
+        _ = try? await guestExec(
+            profileID: profileID,
+            command: "echo \(b64) | base64 -d | python3 -", timeout: 10)
+    }
+
+    /// Copy a finished automation run's Claude transcript out of the guest
+    /// into the host-side per-run archive (runs/<runID>/transcript.jsonl).
+    /// Called by the engine BEFORE automation-finish: an empty run's worktree
+    /// (with its guest-side transcript copy) is removed there, and a
+    /// clone-first run's VM is destroyed moments later — the host copy is the
+    /// one that survives.
+    ///
+    /// The transcript is located by the worktree slug: Claude Code encodes
+    /// the project path with '/' and '.' mapped to '-', so the run's project
+    /// dir under ~/.claude/projects ends in "-<slug>". No tab roster needed —
+    /// this works for detached sessions and clones alike.
+    func pullAutomationTranscript(profileID: Profile.ID, branch: String, runID: UUID) async {
+        guard branch.hasPrefix("wt/") else { return }
+        let slug = String(branch.dropFirst(3))
+        // Slugs are [a-z0-9-] by construction (branchSlug(for:at:) plus the
+        // guest's -N suffix) — safe to splice into the shell line.
+        guard slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" }),
+              !slug.isEmpty else { return }
+        // First try the worktree layout (project dir ends in the slug).
+        // A NON-REPO run lives in a plain tab at the automation's own path,
+        // so its project dir is the Claude-encoded cwd — resolve the cwd
+        // through the tab's synthetic wt/ marker while the tab still exists
+        // (this pull runs before automation-finish closes it).
+        let cmd = """
+        d=$(ls -td ~/.claude/projects/*-\(slug) 2>/dev/null | head -1); \
+        if [ -z "$d" ]; then \
+        cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' \
+        2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); \
+        if [ -n "$cwd" ]; then \
+        e1=$(printf %s "$cwd" | tr / -); e2=$(printf %s "$cwd" | tr ./ --); \
+        d=$(ls -td "$HOME/.claude/projects/$e1" "$HOME/.claude/projects/$e2" \
+        2>/dev/null | head -1); fi; fi; \
+        if [ -n "$d" ]; then ls -t "$d"/*.jsonl 2>/dev/null | head -1 \
+        | xargs -r cat | head -c 25000000; fi
+        """
+        do {
+            let out = try await guestExec(profileID: profileID, command: cmd, timeout: 60)
+            guard !out.isEmpty else {
+                BACDebug.log("automation", "no transcript found in guest for \(branch)")
+                return
+            }
+            try AutomationRunArchive.saveTranscript(Data(out.utf8), runID: runID)
+            BACDebug.log("automation", "transcript for \(branch) archived (\(out.count) bytes)")
+        } catch {
+            BACDebug.log("automation", "transcript pull for \(branch) failed: \(error)")
+        }
     }
 
     func runAutomationNow(_ id: UUID) {
@@ -8008,6 +8509,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         shellBridges.removeValue(forKey: profile.id)
         browserMCPBridges[profile.id]?.stop()
         browserMCPBridges.removeValue(forKey: profile.id)
+        taskMCPBridges[profile.id]?.stop()
+        taskMCPBridges.removeValue(forKey: profile.id)
         unifiedWindow?.teardownBrowser(for: profile.id)
         // Drop this workspace's local models from the engine's union, unloading
         // any no longer wanted by an open workspace (stops the engine if none
@@ -8491,6 +8994,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
                 self.browserMCPBridges[pid] =
                     BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
+                // Coding-board MCP listener (vsock 5831): typed task tools
+                // for board runs (plan, subtasks, hand-to-review).
+                self.taskMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: TaskBoardMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.codingTaskStore },
+                        engine: { [weak self] in self?.codingTaskEngine }))
             }
             self.wireSandboxCallbacks(sandbox)
             self.registerSession(sandbox, profile: profile)

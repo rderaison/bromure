@@ -4194,6 +4194,15 @@ public final class ProfileStore {
             else
                 "$_wt_tool" $_wt_flags
             fi
+            # A nonzero exit means the agent DIED (bad flag, config error,
+            # crash) rather than finishing — flag the tab needs-input so the
+            # board card turns red instead of sitting "in progress" forever;
+            # the error is on screen in this terminal.
+            _wt_rc=$?
+            if [ "$_wt_rc" -ne 0 ]; then
+                printf '\033[31m[bromure-ac] %s exited with status %s\033[0m\n' "$_wt_tool" "$_wt_rc"
+                sh "$HOME/.bromure/agent-status.sh" needsInput 2>/dev/null || true
+            fi
         fi
         unset _wt_tool _wt_prompt _wt_flags _wt_dir
     fi

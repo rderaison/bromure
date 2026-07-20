@@ -107,9 +107,18 @@ final class RemoteHostController {
             .appendingPathComponent("hosts", isDirectory: true)
             .appendingPathComponent(host.id.uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        dataDir = base
         gridStore = GridLayoutStore(saveURL: base.appendingPathComponent("grid-layout.json"))
         automationStore = ScheduledAutomationStore(fileURL: base.appendingPathComponent("automations.json"))
+        taskStore = CodingTaskStore(fileURL: base.appendingPathComponent("tasks.json"))
     }
+
+    /// Mirror of the remote coding-task board (read model; edits ride the
+    /// tunnel and the mirror confirms on poll).
+    let taskStore: CodingTaskStore
+
+    /// Per-host client-side data dir (mirror JSONs, fetched-transcript cache).
+    let dataDir: URL
 
     // MARK: Polling
 
@@ -199,6 +208,7 @@ final class RemoteHostController {
         applyWorkspaces(workspaces, vms: vms)
         applyGrid(grid)
         applyAutomations(autos)
+        applyTasks((snapshot["tasks"] as? [String: Any]) ?? [:])
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         revision &+= 1
         if revision == 1 {
@@ -474,7 +484,19 @@ final class RemoteHostController {
         }
         let automations = decode((autos["automations"] as? [[String: Any]]) ?? [], ScheduledAutomation.self)
         let runs = decode((autos["runs"] as? [[String: Any]]) ?? [], AutomationRunRecord.self)
-        automationStore.mirror(automations: automations, runs: runs)
+        let iso = ISO8601DateFormatter()
+        let nextFires = ((autos["nextFires"] as? [String: String]) ?? [:])
+            .compactMapValues { iso.date(from: $0) }
+        automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires)
+    }
+
+    private func applyTasks(_ payload: [String: Any]) {
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let tasks = ((payload["tasks"] as? [[String: Any]]) ?? []).compactMap { dict -> CodingTask? in
+            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+            return try? dec.decode(CodingTask.self, from: data)
+        }
+        taskStore.mirror(tasks: tasks)
     }
 
     // MARK: Actions (client → remote), routed over the tunnel
@@ -844,6 +866,37 @@ final class RemoteHostController {
     func runAutomation(_ id: UUID) { send("POST", "/automations/\(ControlClient.encodeSegment(id.uuidString))/run") }
     func toggleAutomation(_ id: UUID) { send("POST", "/automations/\(ControlClient.encodeSegment(id.uuidString))/toggle") }
     func deleteAutomation(_ id: UUID) { send("DELETE", "/automations/\(ControlClient.encodeSegment(id.uuidString))") }
+    /// Dismiss a failed/blocked run from the board's Needs Attention column
+    /// (the acknowledged state lives on the host; the mirror confirms on poll).
+    func acknowledgeRun(_ id: UUID) {
+        send("POST", "/automation-runs/\(ControlClient.encodeSegment(id.uuidString))/acknowledge")
+    }
+
+    // Coding-board verbs, over the tunnel; the mirror confirms on poll.
+    func taskCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
+        send("POST", "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
+    }
+    func deleteTask(_ id: UUID) {
+        send("DELETE", "/tasks/\(ControlClient.encodeSegment(id.uuidString))")
+    }
+    func upsertTask(_ task: CodingTask) {
+        guard let doc = ACAppDelegate.codableToDict(task) else { return }
+        send("POST", "/tasks", body: doc)
+    }
+
+    /// Fetch a run's archived transcript from the host, over the tunnel.
+    /// nil = none captured (or transport failure) — the run window shows the
+    /// outcome view instead.
+    func fetchRunTranscript(_ id: UUID) async -> Data? {
+        let host = self.host
+        let path = "/automation-runs/\(ControlClient.encodeSegment(id.uuidString))/transcript"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("GET", path)
+        }.value
+        guard let resp, resp.status == 200,
+              let b64 = resp.json["transcript"] as? String, !b64.isEmpty else { return nil }
+        return Data(base64Encoded: b64)
+    }
     func upsertAutomation(_ automation: ScheduledAutomation) {
         guard let doc = ACAppDelegate.codableToDict(automation) else { return }
         send("POST", "/automations", body: doc)
@@ -1814,6 +1867,277 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.automationSelectedID = nil
     }
 
+    // MARK: Automation kanban board (mirrors the local stage surface)
+
+    private var kanbanHost: NSHostingView<AutomationKanbanView>?
+
+    /// Run-detail windows for the mirrored board: the live terminal is a
+    /// remote attach over SSH; transcripts are fetched from the host once
+    /// and cached per run.
+    private lazy var runWindowManager = AutomationRunWindowManager(
+        context: AutomationRunWindowManager.Context(
+            store: { [weak self] in self?.controller.automationStore },
+            profile: { [weak self] id in self?.controller.profile(for: id) },
+            tabsModel: { [weak self] id in self?.controller.tabsModel(for: id) },
+            accentHex: { [weak self] id in
+                self?.controller.profile(for: id)?.color.hexInUI ?? "#888888"
+            },
+            remoteHost: controller.host.id,
+            transcriptURL: { [weak self] runID in
+                await self?.cachedRunTranscript(runID)
+            }))
+
+    /// Local cache for a fetched transcript. Transcripts are immutable once
+    /// archived on the host, so cache-forever is correct.
+    private func cachedRunTranscript(_ runID: UUID) async -> URL? {
+        let dir = controller.dataDir
+            .appendingPathComponent("run-transcripts", isDirectory: true)
+        let url = dir.appendingPathComponent("\(runID.uuidString).jsonl")
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        guard let data = await controller.fetchRunTranscript(runID) else { return nil }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        do { try data.write(to: url, options: .atomic) } catch { return nil }
+        return url
+    }
+
+    func showAutomationBoard() {
+        controller.listModel.gridSelected = false
+        controller.listModel.selectedID = nil
+        controller.listModel.automationBoardSelected = true
+        gridView?.removeFromSuperview()
+        unmountTerminal()
+        clearTaskBoard()
+        clearVMDashboard()
+        clearDockerDashboard()
+        hideShownBrowser()
+        if kanbanHost == nil {
+            let c = controller
+            let view = AutomationKanbanView(
+                store: c.automationStore,
+                model: c.listModel,
+                actions: AutomationKanbanView.Actions(
+                    selectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
+                    newAutomation: { [weak self] in self?.showAutomationEditor(nil) },
+                    runNow: { c.runAutomation($0) },
+                    toggle: { c.toggleAutomation($0) },
+                    delete: { [weak self] id in self?.confirmDeleteAutomation(id) },
+                    openRun: { [weak self] run in self?.runWindowManager.open(run: run) },
+                    acknowledge: { c.acknowledgeRun($0) }))
+            let host = NSHostingView(rootView: view)
+            host.sizingOptions = []   // never let board sizing resize the mirror window
+            host.translatesAutoresizingMaskIntoConstraints = false
+            kanbanHost = host
+        }
+        mount(kanbanHost!)
+    }
+
+    private func clearAutomationBoard() {
+        guard controller.listModel.automationBoardSelected else { return }
+        controller.listModel.automationBoardSelected = false
+        kanbanHost?.removeFromSuperview()
+    }
+
+    // MARK: Coding-task board (mirrors the local stage surface)
+
+    private var taskBoardHost: NSHostingView<CodingKanbanView>?
+
+    /// Review windows for the mirrored board: the diff is read from the
+    /// remote guest over the tunnel; comments and stage moves POST to the
+    /// host and the mirror confirms on poll.
+    private lazy var taskReviewWindows = TaskReviewWindowManager(
+        context: TaskReviewWindowManager.Context(
+            store: { [weak self] in self?.controller.taskStore },
+            fetchReview: { [weak self] task in
+                guard let self, let wt = task.worktreeDir, !wt.isEmpty,
+                      let parent = task.parentBranch, !parent.isEmpty else { return nil }
+                let cmd = TaskReviewData.guestCommand(worktreeDir: wt, parent: parent)
+                guard let out = try? await self.controller.guestExec(
+                    task.profileID, command: cmd, timeout: 30) else { return nil }
+                return TaskReviewData.parse(out)
+            },
+            openTerminal: { [weak self] task in self?.jumpToTask(task) },
+            accentHex: { [weak self] id in
+                self?.controller.profile(for: id)?.color.hexInUI ?? "#888888"
+            },
+            workspaceName: { [weak self] id in
+                self?.controller.profile(for: id)?.name ?? ""
+            },
+            sendBack: { [weak self] id in self?.controller.taskCommand(id, "send-back") },
+            merge: { [weak self] id, target, squash in
+                var body: [String: Any] = ["squash": squash]
+                if let target { body["target"] = target }
+                self?.controller.taskCommand(id, "merge", body: body)
+            },
+            openPR: { [weak self] id in self?.controller.taskCommand(id, "open-pr") },
+            fetchBranches: { [weak self] task in
+                guard let self, let root = task.rootRepo, !root.isEmpty else { return [] }
+                let cmd = "git -C '" + root.replacingOccurrences(of: "'", with: "'\\''")
+                    + "' for-each-ref refs/heads --format='%(refname:short)' 2>/dev/null | head -50"
+                guard let out = try? await self.controller.guestExec(
+                    task.profileID, command: cmd, timeout: 15) else { return [] }
+                return out.split(whereSeparator: \.isNewline).map(String.init)
+                    .filter { !$0.isEmpty && !$0.hasPrefix("wt/") }
+            },
+            addComment: { [weak self] id, text, file, line in
+                var body: [String: Any] = ["text": text]
+                if let file { body["file"] = file }
+                if let line { body["line"] = line }
+                self?.controller.taskCommand(id, "comment", body: body)
+            }))
+
+    /// Native planning-conversation windows for the mirrored board — the
+    /// transcript is tailed from the remote guest over the tunnel and the
+    /// input box types into the remote session, so the fat client gets the
+    /// same "whole UI" plan experience as the host.
+    private lazy var planSessionWindows = PlanSessionWindowManager(
+        context: PlanSessionWindowManager.Context(
+            store: { [weak self] in self?.controller.taskStore },
+            fetchTranscript: { [weak self] task in
+                guard let self, let since = task.validationRequestedAt,
+                      let cmd = CodingTaskEngine.planTranscriptCommand(
+                          guestCwd: ScheduledAutomationEngine.guestPath(task.repoPath),
+                          since: Int(since.timeIntervalSince1970))
+                else { return nil }
+                return try? await self.controller.guestExec(
+                    task.profileID, command: cmd, timeout: 15)
+            },
+            send: { [weak self] profileID, branch, text in
+                guard let self,
+                      let index = await self.remoteTabIndex(profileID: profileID,
+                                                            branch: branch)
+                else { return false }
+                return (try? await self.controller.guestExec(
+                    profileID,
+                    command: CodingTaskEngine.typeCommand(tabIndex: index, text: text),
+                    timeout: 20)) != nil
+            },
+            sendKeys: { [weak self] profileID, branch, keys in
+                guard let self, !keys.isEmpty,
+                      let index = await self.remoteTabIndex(profileID: profileID,
+                                                            branch: branch)
+                else { return false }
+                // Same guard as the host engine: keys sent before the
+                // picker is ON SCREEN land in the chat input and interrupt
+                // the tool call ("user declined"). Wait for it.
+                let probe = "tmux capture-pane -p -t bromure:\(index) 2>/dev/null "
+                    + "| grep -q 'Enter to select'"
+                var visible = false
+                for _ in 0..<15 {
+                    if (try? await self.controller.guestExec(
+                        profileID, command: probe, timeout: 8)) != nil {
+                        visible = true
+                        break
+                    }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+                guard visible else { return false }
+                return (try? await self.controller.guestExec(
+                    profileID,
+                    command: CodingTaskEngine.answerKeysCommand(
+                        tabIndex: index, keys: keys),
+                    timeout: 60)) != nil
+            },
+            openTerminal: { [weak self] task in self?.jumpToTask(task) },
+            accentHex: { [weak self] id in
+                self?.controller.profile(for: id)?.color.hexInUI ?? "#888888"
+            },
+            workspaceName: { [weak self] id in
+                self?.controller.profile(for: id)?.name ?? ""
+            },
+            liveBranch: { [weak self] task in
+                guard let self, let slug = task.branchSlug else { return nil }
+                if let b = self.controller.tabsModel(for: task.profileID)?.tabs.first(where: {
+                    AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
+                })?.worktreeBranch { return b }
+                // Detached on the server: the mirror may not carry a tab
+                // roster — ask the remote guest's tmux directly.
+                guard slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" })
+                else { return nil }
+                let cmd = "tmux list-windows -t bromure -F '#{@worktree}' 2>/dev/null"
+                guard let out = try? await self.controller.guestExec(
+                    task.profileID, command: cmd, timeout: 8) else { return nil }
+                return out.split(whereSeparator: \.isNewline).map(String.init)
+                    .first { AutomationBoard.branchMatches($0, slug: slug) }
+            }))
+
+    /// tmux window index for a branch: mirrored roster first, remote
+    /// guest tmux when the session runs detached on the server.
+    private func remoteTabIndex(profileID: Profile.ID, branch: String) async -> Int? {
+        if let i = controller.tabsModel(for: profileID)?.tabs
+            .first(where: { $0.worktreeBranch == branch })?.index {
+            return i
+        }
+        guard CodingTaskEngine.isSafeBranch(branch) else { return nil }
+        let cmd = "tmux list-windows -t bromure -F '#{window_index} #{@worktree}' "
+            + "2>/dev/null | awk -v b='\(branch)' '$2==b {print $1; exit}'"
+        guard let out = try? await controller.guestExec(
+            profileID, command: cmd, timeout: 8) else { return nil }
+        return Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func jumpToTask(_ task: CodingTask) {
+        guard let slug = task.branchSlug,
+              let tab = controller.tabsModel(for: task.profileID)?.tabs.first(where: {
+                  AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
+              }) else { return }
+        showWorkspace(task.profileID, window: tab.index)
+        makeKeyAndOrderFront(nil)
+    }
+
+    func showTaskBoard() {
+        controller.listModel.gridSelected = false
+        controller.listModel.selectedID = nil
+        controller.listModel.taskBoardSelected = true
+        gridView?.removeFromSuperview()
+        unmountTerminal()
+        clearAutomationBoard()
+        clearVMDashboard()
+        clearDockerDashboard()
+        hideShownBrowser()
+        if taskBoardHost == nil {
+            let c = controller
+            let view = CodingKanbanView(
+                store: c.taskStore,
+                model: c.listModel,
+                profilesProvider: { c.profiles },
+                actions: CodingKanbanView.Actions(
+                    start: { c.taskCommand($0, "start") },
+                    plan: { [weak self] id in
+                        c.taskCommand(id, "plan")
+                        // The interview runs in the native plan window,
+                        // mirrored over the tunnel.
+                        self?.planSessionWindows.open(taskID: id)
+                    },
+                    openReview: { [weak self] id in self?.taskReviewWindows.open(taskID: id) },
+                    jumpToRun: { [weak self] task in self?.jumpToTask(task) },
+                    moveToTesting: { c.taskCommand($0, "to-testing") },
+                    backToInProgress: { c.taskCommand($0, "to-in-progress") },
+                    merge: { c.taskCommand($0, "merge") },
+                    closeNoMerge: { c.taskCommand($0, "close-no-merge") },
+                    delete: { c.deleteTask($0) },
+                    save: { c.upsertTask($0) },
+                    validate: { task in
+                        c.upsertTask(task)
+                        c.taskCommand(task.id, "validate")
+                    },
+                    openPlanSession: { [weak self] id in
+                        self?.planSessionWindows.open(taskID: id)
+                    },
+                    destroy: { c.taskCommand($0, "destroy") }))
+            let host = NSHostingView(rootView: view)
+            host.sizingOptions = []
+            host.translatesAutoresizingMaskIntoConstraints = false
+            taskBoardHost = host
+        }
+        mount(taskBoardHost!)
+    }
+
+    private func clearTaskBoard() {
+        guard controller.listModel.taskBoardSelected else { return }
+        controller.listModel.taskBoardSelected = false
+        taskBoardHost?.removeFromSuperview()
+    }
+
     // MARK: E2E debug control surface (POST /debug/fatclient; debug-gated)
 
     /// Drive rich-client features headlessly for the E2E harness. Control-plane
@@ -1857,6 +2181,49 @@ final class RemoteHostWindow: NSWindow {
             selectWorkspaceName(id)
             return ["ok": true, "selectedID": controller.listModel.selectedID?.uuidString ?? "",
                     "dashboardShown": shownDashboard?.id == id]
+        case "coding-board":
+            // Show the mirrored coding board and report its column counts.
+            // Optional "shot" writes an offscreen PNG of the window.
+            showTaskBoard()
+            let tasks = controller.taskStore.tasks
+            if let shot = p["shot"] as? String {
+                contentView?.layoutSubtreeIfNeeded()
+                writeSnapshot(to: shot)
+            }
+            return ["ok": true,
+                    "boardShown": controller.listModel.taskBoardSelected,
+                    "backlog": tasks.filter { $0.stage == .backlog }.count,
+                    "planning": tasks.filter { $0.stage == .planning }.count,
+                    "inProgress": tasks.filter { $0.stage == .inProgress }.count,
+                    "testing": tasks.filter { $0.stage == .testing }.count,
+                    "done": tasks.filter { $0.stage == .done }.count]
+        case "automation-board":
+            // Show the mirrored kanban board and report its column counts —
+            // the FC-board E2E assertion surface. Optional "shot" writes an
+            // offscreen PNG of the window.
+            showAutomationBoard()
+            let store = controller.automationStore
+            let cols = AutomationBoard.classify(runs: store.runs) { run in
+                guard let slug = run.branchSlug,
+                      let pid = run.runProfileID
+                          ?? store.automation(run.automationID)?.profileID,
+                      let tabs = controller.tabsModel(for: pid)?.tabs else { return false }
+                return tabs.contains {
+                    AutomationBoard.branchMatches($0.worktreeBranch, slug: slug)
+                }
+            }
+            if let shot = p["shot"] as? String {
+                contentView?.layoutSubtreeIfNeeded()
+                writeSnapshot(to: shot)
+            }
+            return ["ok": true,
+                    "boardShown": controller.listModel.automationBoardSelected,
+                    "automations": store.automations.count,
+                    "inProgress": cols.inProgress.count,
+                    "needsAttention": cols.needsAttention.count,
+                    "done": cols.done.count,
+                    "nextFiresMirrored": store.automations
+                        .filter { store.nextFire(for: $0.id) != nil }.count]
         case "mount-terminal":
             guard let id = resolveID() else { return ["error": "workspace not found"] }
             showWorkspace(id, window: p["window"] as? Int ?? 0)
@@ -2257,11 +2624,10 @@ final class RemoteHostWindow: NSWindow {
             onDelete: { _ in },
             onNewProfile: { [weak self] in self?.createWorkspace() },
             automationStore: c.automationStore,
-            onSelectAutomation: { [weak self] id in self?.showAutomationEditor(id) },
             onNewAutomation: { [weak self] in self?.showAutomationEditor(nil) },
-            onRunAutomation: { [weak self] id in self?.controller.runAutomation(id) },
-            onToggleAutomation: { [weak self] id in self?.controller.toggleAutomation(id) },
-            onDeleteAutomation: { [weak self] id in self?.controller.deleteAutomation(id) })
+            onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
+            taskStore: c.taskStore,
+            onShowTaskBoard: { [weak self] in self?.showTaskBoard() })
     }
 
     // MARK: Stage
@@ -2270,6 +2636,8 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.gridSelected = true
         controller.listModel.selectedID = nil
         unmountTerminal()
+        clearAutomationBoard()
+        clearTaskBoard()
         clearVMDashboard()
         clearDockerDashboard()
         // The Grid has no browser pane — collapse any shown browser (it stays
@@ -2300,6 +2668,8 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.gridSelected = false
         controller.listModel.selectedID = id
         gridView?.removeFromSuperview()
+        clearAutomationBoard()
+        clearTaskBoard()
         clearDockerDashboard()
         unmountTerminal()
         showVMDashboard(id)
@@ -2311,6 +2681,8 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.selectedID = id
         // Detach the grid so its surfaces don't fight for the stage.
         gridView?.removeFromSuperview()
+        clearAutomationBoard()
+        clearTaskBoard()
         clearDockerDashboard()
         // Same gate as the local window's `selectRow`: an off/suspended VM has
         // no terminal to attach — mounting one anyway left the login greeting
@@ -2392,6 +2764,8 @@ final class RemoteHostWindow: NSWindow {
         controller.listModel.selectedID = id
         gridView?.removeFromSuperview()
         unmountTerminal()
+        clearAutomationBoard()
+        clearTaskBoard()
         clearVMDashboard()
         if let prev = dockerShownFor, prev != id {
             controller.setDockerWatch(prev, on: false)

@@ -202,6 +202,12 @@ async function test(name, fn) {
   }
 }
 
+// A section's bring-up/teardown can be expensive or stateful (VM boots,
+// remote-access toggles, hosts.json rewrites). When --filter can't match any
+// of the section's test names, skip the whole block — running `--filter
+// "^26\\."` must not fire section 25's teardown on a developer machine.
+const sectionActive = (prefix) => !FILTER || new RegExp(FILTER, "i").test(prefix);
+
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || "Assertion failed");
 }
@@ -2180,7 +2186,7 @@ async function main() {
   // actually creates/merges/removes the git worktree and that the host roster
   // surfaces it as a worktree tab. Same session gate as sections 8/10.
   // ======================================================================
-  if (!SKIP_SESSIONS) {
+  if (!SKIP_SESSIONS && sectionActive("24.")) {
     console.log("\n--- 24. Worktrees (VM-side) ---");
 
     await test("24.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", async () => {
@@ -2347,7 +2353,7 @@ async function main() {
   // record so a persistent CI agent — and section 19's "disabled by default"
   // — start clean on the next run.
   // ======================================================================
-  {
+  if (sectionActive("25.")) {
     console.log("\n--- 25. Rich client (self-mirror) ---");
 
     const SUP = `${os.homedir()}/Library/Application Support/BromureAC`;
@@ -2550,6 +2556,43 @@ async function main() {
                 assert(closed.ok === true, `toggle-browser close failed: ${JSON.stringify(closed)}`);
                 assertEq(closed.browserWidth, 0, "browser pane did not collapse to width 0 on re-toggle");
               });
+
+              await test("25.9 automation kanban board renders in the mirror with counts", async () => {
+                const r = await fc("automation-board");
+                assert(r.ok === true && r.boardShown === true,
+                       `automation-board failed: ${JSON.stringify(r)}`);
+                for (const k of ["automations", "inProgress", "needsAttention", "done"]) {
+                  assert(typeof r[k] === "number", `automation-board missing count "${k}"`);
+                }
+              });
+
+              await test("25.10 coding board mirrors a server-side task with counts", async () => {
+                // A backlog task created on the SERVER must show in the
+                // MIRROR's board counts within a few polls.
+                const TID = "25252525-2525-4525-8525-252525252525";
+                const up = await api("POST", "/tasks", {
+                  id: TID, name: undefined, title: "ACE2E_RC_Task",
+                  details: "mirror me", profileID: wsID, repoPath: "~",
+                  tool: "claude", stage: "backlog", comments: [],
+                  createdAt: "2026-01-01T00:00:00Z", merged: false,
+                });
+                assert(up.ok === true, `server-side task upsert failed: ${JSON.stringify(up)}`);
+                try {
+                  let r = null, seen = false;
+                  for (let i = 0; i < 20; i++) {
+                    r = await fc("coding-board");
+                    if (r.ok === true && r.backlog >= 1) { seen = true; break; }
+                    await sleep(500);
+                  }
+                  assert(r && r.boardShown === true, `coding-board failed: ${JSON.stringify(r)}`);
+                  for (const k of ["backlog", "planning", "inProgress", "testing", "done"]) {
+                    assert(typeof r[k] === "number", `coding-board missing count "${k}"`);
+                  }
+                  assert(seen, "server-side task never surfaced in the mirrored board counts");
+                } finally {
+                  await api("DELETE", `/tasks/${TID}`);
+                }
+              });
             } finally {
               deleteProfile(wsID);
             }
@@ -2563,6 +2606,416 @@ async function main() {
           resetRemoteAccessDefaults();
           try { writeFileSync(`${KDIR}/hosts.json`, "[]"); } catch {}
         }
+      }
+    }
+  }
+
+  // ======================================================================
+  // 26. Kanban boards — coding tasks + automation runs
+  //
+  // The coding board's control plane (/tasks CRUD + verbs) and its full
+  // lifecycle through a session VM: start → worktree + agent tab, the
+  // done signal → Testing with captured worktree metadata, review comment
+  // + send-back → In Progress with the comment marked sent, merge → the
+  // commit lands on the parent branch. Plus the automation-run routes the
+  // board relies on: transcript pull to the host at completion (fabricated
+  // guest-side transcript, asserted byte-for-byte through
+  // /automation-runs/{id}/transcript) and acknowledge for failed runs.
+  // The agent itself is bypassed on purpose — commits and the done signal
+  // are simulated guest-side — so the section needs no Claude credentials
+  // and asserts the BOARD's machinery, not the model.
+  // ======================================================================
+  if (sectionActive("26.")) {
+    console.log("\n--- 26. Kanban boards ---");
+
+    const TID = "26262626-0000-4000-8000-000000000001";
+    const taskDoc = (over = {}) => ({
+      id: TID, title: "ACE2E kanban task", details: "# Brief\n- do the thing",
+      profileID: "00000000-0000-4000-8000-000000000000", repoPath: "~",
+      tool: "claude", stage: "backlog", comments: [],
+      createdAt: "2026-01-01T00:00:00Z", merged: false, ...over,
+    });
+
+    await test("26.0 /tasks CRUD: upsert, list, comment, bad action, delete", async () => {
+      const up = await api("POST", "/tasks", taskDoc());
+      assertEq(up._status, 200, `upsert: ${JSON.stringify(up)}`);
+      assert(up.ok === true, "upsert not acked (CodingTask schema drift?)");
+      let list = await api("GET", "/tasks");
+      assert((list.tasks || []).some((t) => String(t.id).toUpperCase() === TID.toUpperCase()),
+             "upserted task missing from GET /tasks");
+
+      const c = await api("POST", `/tasks/${TID}/comment`, { text: "note", file: "a.c" });
+      assertEq(c._status, 200, `comment: ${JSON.stringify(c)}`);
+      list = await api("GET", "/tasks");
+      const t = (list.tasks || []).find((x) => String(x.id).toUpperCase() === TID.toUpperCase());
+      assertEq((t.comments || []).length, 1, "comment did not append");
+      assertEq(t.comments[0].file, "a.c", "comment lost its file scope");
+      assert(!t.comments[0].sentAt, "fresh comment must not be marked sent");
+
+      const bad = await api("POST", `/tasks/${TID}/frobnicate`, {});
+      assertEq(bad._status, 400, "unknown task action must 400");
+      const noText = await api("POST", `/tasks/${TID}/comment`, {});
+      assertEq(noText._status, 400, "comment without text must 400");
+
+      const del = await api("DELETE", `/tasks/${TID}`);
+      assertEq(del._status, 200, `delete: ${JSON.stringify(del)}`);
+      list = await api("GET", "/tasks");
+      assert(!(list.tasks || []).some((x) => String(x.id).toUpperCase() === TID.toUpperCase()),
+             "task still listed after DELETE");
+      const gone = await api("POST", `/tasks/${TID}/start`);
+      assertEq(gone._status, 400, "verbs on a deleted task must 400");
+    });
+
+    if (SKIP_SESSIONS) {
+      console.log("  \x1b[33mSKIP\x1b[0m  26.1+ (VM-side — skipped via --no-sessions)");
+    } else {
+      // Same bootability probe as sections 8/24 — skip, don't hang, when
+      // there's no base image.
+      let canExec = true;
+      try {
+        const id = createProfile("ACE2E_KBProbe");
+        const r = ac(`open ac session "${id}"`);
+        if (r.startsWith("error:")) canExec = false;
+        await sleep(1000);
+        ac(`close ac session "${id}"`);
+        await sleep(500);
+        deleteProfile(id);
+      } catch {
+        canExec = false;
+      }
+
+      if (!canExec) {
+        console.log("  \x1b[33mSKIP\x1b[0m  Kanban VM tests (no base image — run `bromure-ac init` first)");
+      } else {
+        const REPO = "/home/ubuntu/kb-repo";
+        const WTBASE = "/home/ubuntu/.bromure/worktrees/kb-repo";
+        const KTID = "26262626-0000-4000-8000-000000000002";
+        const VTID = "26262626-0000-4000-8000-000000000003";
+        const AID  = "26262626-0000-4000-8000-00000000000A";
+        const BADAID = "26262626-0000-4000-8000-00000000000B";
+
+        async function withKBSession(profileName, cb) {
+          const id = createProfile(profileName);
+          try {
+            await api("POST", "/sessions", { profile: id });
+            let lastErr;
+            for (let attempt = 0; attempt < 6; attempt++) {
+              const r = await api("POST", `/sessions/${id}/exec`, { command: "true", timeout: 5 });
+              if (r._status === 200) { await cb(id); return; }
+              lastErr = `status=${r._status} error=${r.error}`;
+              await sleep(3000);
+            }
+            throw new Error(`VM shell never came up: ${lastErr}`);
+          } finally {
+            // Board state persists on the host — scrub it even on failure so
+            // the next run (and the user's real board) starts clean.
+            for (const tid of [KTID, VTID]) await api("DELETE", `/tasks/${tid}`);
+            for (const aid of [AID, BADAID]) await api("DELETE", `/automations/${aid}`);
+            await api("DELETE", `/sessions/${id}`);
+            await sleep(500);
+            deleteProfile(id);
+          }
+        }
+
+        async function sh(id, command, { timeout = 15, ok = true } = {}) {
+          const r = await api("POST", `/sessions/${id}/exec`, { command, timeout });
+          assertEq(r._status, 200, `exec HTTP ${r._status}: ${r.error}`);
+          if (ok) assertEq(r.exitCode, 0, `\`${command}\` exit ${r.exitCode}: ${(r.stderr || "").slice(0, 200)}`);
+          return r.stdout || "";
+        }
+
+        async function waitFor(id, command, pred, tries = 30, gapMs = 1000) {
+          let last = "";
+          for (let i = 0; i < tries; i++) {
+            const r = await api("POST", `/sessions/${id}/exec`, { command, timeout: 10 });
+            last = r.stdout || "";
+            if (r._status === 200 && pred(last)) return last;
+            await sleep(gapMs);
+          }
+          return last;
+        }
+
+        // Poll GET /tasks for one task until pred holds; returns the task.
+        async function waitForTask(tid, pred, tries = 30, gapMs = 1000) {
+          let t = null;
+          for (let i = 0; i < tries; i++) {
+            const list = await api("GET", "/tasks");
+            t = (list.tasks || []).find((x) => String(x.id).toUpperCase() === tid.toUpperCase());
+            if (t && pred(t)) return t;
+            await sleep(gapMs);
+          }
+          return t;
+        }
+
+        // Fire the per-tab done signal for a worktree branch — exactly what
+        // Claude's Stop hook does, minus Claude.
+        async function signalDone(id, branch) {
+          await sh(id,
+            `idx=$(tmux list-windows -t bromure -F '#{window_index} #{@worktree}' | ` +
+            `awk -v b='${branch}' '$2==b {print $1; exit}'); ` +
+            `[ -n "$idx" ] || exit 1; ` +
+            `pane=$(tmux list-panes -t bromure:$idx -F '#{pane_id}' | head -1); ` +
+            `TMUX_PANE=$pane sh /home/ubuntu/.bromure/agent-status.sh done`);
+        }
+
+        const freshRepo =
+          `rm -rf ${REPO} ${WTBASE} && mkdir -p ${REPO} && cd ${REPO} && git init -q && ` +
+          `git config user.email t@example.com && git config user.name Tester && ` +
+          `git commit -q --allow-empty -m init && git rev-parse --abbrev-ref HEAD`;
+
+        await withKBSession("ACE2E_Kanban", async (id) => {
+          const defBranch = (await sh(id, freshRepo)).trim().split("\n").pop();
+          let branch = "";     // the task's actual wt/ branch, set in 26.1
+          let wtDir = "";
+
+          await test("26.1 start: backlog task → agent worktree + In Progress", async () => {
+            const up = await api("POST", "/tasks",
+                                 taskDoc({ id: KTID, profileID: id, repoPath: REPO }));
+            assert(up.ok === true, `task upsert failed: ${JSON.stringify(up)}`);
+            const start = await api("POST", `/tasks/${KTID}/start`);
+            assertEq(start._status, 200, `start: ${JSON.stringify(start)}`);
+            // Start is async by design (boot check, repo check, trust
+            // pre-seed happen before the stage flips) — poll for it.
+            const started = await waitForTask(KTID, (x) => x.stage === "inProgress", 20, 1500);
+            assert(started && started.stage === "inProgress",
+                   `start never moved the task to In Progress: ${JSON.stringify(started)}`);
+
+            const wt = await waitFor(id, `git -C ${REPO} worktree list --porcelain 2>/dev/null`,
+                                     (s) => s.includes("wt/"));
+            assertIncludes(wt, "wt/", "no worktree appeared for the started task");
+            // Resolve the actual branch + checkout dir from the porcelain list.
+            const lines = wt.split("\n");
+            for (let i = 0; i < lines.length; i++) {
+              if (lines[i].startsWith("branch refs/heads/wt/")) {
+                branch = lines[i].slice("branch refs/heads/".length);
+                for (let j = i; j >= 0; j--) {
+                  if (lines[j].startsWith("worktree ")) { wtDir = lines[j].slice(9); break; }
+                }
+              }
+            }
+            assert(branch && wtDir, `couldn't resolve worktree from: ${wt.slice(0, 200)}`);
+            const t = await waitForTask(KTID, (x) => !!x.branchSlug, 10);
+            assert(t && t.branchSlug, "started task carries no branchSlug");
+          });
+
+          await test("26.2 done signal: In Progress → Testing with worktree metadata", async () => {
+            // Simulate the agent's work: a real commit on the task branch.
+            await sh(id, `cd ${wtDir} && echo kanban > KANBAN.txt && git add -A && ` +
+                         `git commit -qm 'add KANBAN.txt'`);
+            await signalDone(id, branch);
+            const t = await waitForTask(KTID, (x) => x.stage === "testing", 30);
+            assert(t && t.stage === "testing", `task never reached Testing: ${JSON.stringify(t)}`);
+            assertEq(t.branch, branch, "Testing task lost its actual branch");
+            assertEq(t.parentBranch, defBranch, "parent branch not captured");
+            assertEq(t.rootRepo, REPO, "root repo not captured");
+            assert(t.worktreeDir === wtDir, "worktree dir not captured");
+          });
+
+          await test("26.3 review round: comment + send-back → In Progress, comment sent", async () => {
+            const c = await api("POST", `/tasks/${KTID}/comment`,
+                                { text: "Also add a newline", file: "KANBAN.txt" });
+            assertEq(c._status, 200, `comment: ${JSON.stringify(c)}`);
+            const sb = await api("POST", `/tasks/${KTID}/send-back`);
+            assertEq(sb._status, 200, `send-back: ${JSON.stringify(sb)}`);
+            const t = await waitForTask(
+              KTID, (x) => x.stage === "inProgress" && (x.comments || []).every((y) => y.sentAt), 20);
+            assert(t && t.stage === "inProgress", "send-back did not return the task to In Progress");
+            assert((t.comments || []).every((y) => y.sentAt), "comments not marked sent");
+          });
+
+          await test("26.4 merge: Testing → Done, commit lands on the parent branch", async () => {
+            const tt = await api("POST", `/tasks/${KTID}/to-testing`);
+            assertEq(tt.stage, "testing", "manual to-testing failed");
+            const m = await api("POST", `/tasks/${KTID}/merge`, {});
+            assertEq(m._status, 200, `merge: ${JSON.stringify(m)}`);
+            assertEq(m.stage, "done", "merge did not close the task");
+            const log = await waitFor(id, `git -C ${REPO} log ${defBranch} --oneline 2>/dev/null`,
+                                      (s) => s.includes("add KANBAN.txt"));
+            assertIncludes(log, "add KANBAN.txt", "task commit never landed on the parent branch");
+            const t = await waitForTask(KTID, (x) => x.merged === true, 5);
+            assert(t && t.merged === true, "merged flag not set");
+          });
+
+          await test("26.5 validate: plan review runs headless and stamps a result", async () => {
+            const up = await api("POST", "/tasks",
+                                 taskDoc({ id: VTID, profileID: id, repoPath: REPO }));
+            assert(up.ok === true, `task upsert failed: ${JSON.stringify(up)}`);
+            const v = await api("POST", `/tasks/${VTID}/validate`);
+            assertEq(v._status, 200, `validate: ${JSON.stringify(v)}`);
+            // The reviewer runs `claude -p` in the guest. With no Claude
+            // credentials (CI) it errors fast — either way the round is
+            // REQUIRED to terminate with validatedAt + a non-empty result.
+            // The engine's own guest timeout is 240s, so poll past it.
+            const t = await waitForTask(VTID, (x) => !!x.validatedAt, 100, 3000);
+            assert(t && t.validatedAt, "validation round never terminated");
+            assert((t.validation || "").length > 0, "validation result is empty");
+          });
+
+          await test("26.6 automation run: transcript pulled to host, served, run acknowledged", async () => {
+            // A manual-fire automation on this workspace (25.7's doc shape).
+            const auto = {
+              id: AID, name: "ACE2E_KB_Auto", profileID: id, enabled: false,
+              trigger: "schedule", githubRepo: "", assignmentFilter: "unassigned",
+              linearTeam: "", ignoreBacklog: true, filters: {},
+              frequency: "weekdays", weekday: 2, hour: 9, minute: 0,
+              intervalMinutes: 60, missedRunPolicy: "skip", tool: "claude",
+              prompt: "echo hi", repoPath: REPO, closeWhenDone: true,
+              startWorkspaceIfNeeded: true, cloneWorkspaceFirst: false,
+              createdAt: "2026-01-01T00:00:00Z",
+            };
+            const up = await api("POST", "/automations", auto);
+            assert(up.ok === true, `automation upsert failed: ${JSON.stringify(up)}`);
+            const run = await api("POST", `/automations/${AID}/run`);
+            assertEq(run._status, 200, `run: ${JSON.stringify(run)}`);
+
+            // The fire creates a run record + a fresh worktree tab.
+            let runRec = null;
+            for (let i = 0; i < 20; i++) {
+              const l = await api("GET", "/automations");
+              runRec = (l.runs || []).find(
+                (r) => String(r.automationID).toUpperCase() === AID.toUpperCase()
+                    && r.outcome === "launched");
+              if (runRec) break;
+              await sleep(1000);
+            }
+            assert(runRec && runRec.branchSlug, "automation fire produced no launched run");
+            const aBranch = await waitFor(
+              id, `git -C ${REPO} worktree list --porcelain 2>/dev/null | ` +
+                  `grep 'refs/heads/wt/${runRec.branchSlug}' | head -1`,
+              (s) => s.includes(runRec.branchSlug), 30);
+            assertIncludes(aBranch, runRec.branchSlug, "automation worktree never appeared");
+            const branchName = aBranch.trim().replace("branch refs/heads/", "");
+
+            // Fabricate the Claude transcript the host pulls at completion —
+            // the project dir just has to match the host's `*-<slug>` glob.
+            const MARK = `{"type":"user","message":{"role":"user","content":"ace2e-transcript"}}`;
+            await sh(id, `mkdir -p ~/.claude/projects/ace2e-${runRec.branchSlug} && ` +
+                         `echo '${MARK}' > ~/.claude/projects/ace2e-${runRec.branchSlug}/t.jsonl`);
+            await signalDone(id, branchName);
+
+            // Completion: completedAt stamped, transcript archived on the host.
+            let done = null;
+            for (let i = 0; i < 30; i++) {
+              const l = await api("GET", "/automations");
+              done = (l.runs || []).find((r) => r.id === runRec.id && r.completedAt);
+              if (done) break;
+              await sleep(1000);
+            }
+            assert(done, "automation run never completed after the done signal");
+            let tr = null;
+            for (let i = 0; i < 20; i++) {
+              tr = await api("GET", `/automation-runs/${runRec.id}/transcript`);
+              if (tr._status === 200) break;
+              await sleep(1000);
+            }
+            assertEq(tr._status, 200, "transcript route never served the archived transcript");
+            const decoded = Buffer.from(tr.transcript || "", "base64").toString("utf-8");
+            assertIncludes(decoded, "ace2e-transcript",
+                           "served transcript is not the one written in the guest");
+
+            // A fire into a nonexistent workspace records .failed —
+            // acknowledge parks it out of Needs Attention.
+            const badAuto = { ...auto, id: BADAID, name: "ACE2E_KB_Broken",
+                              profileID: "99999999-9999-4999-8999-999999999999" };
+            await api("POST", "/automations", badAuto);
+            await api("POST", `/automations/${BADAID}/run`);
+            let failedRec = null;
+            for (let i = 0; i < 10; i++) {
+              const l = await api("GET", "/automations");
+              failedRec = (l.runs || []).find(
+                (r) => String(r.automationID).toUpperCase() === BADAID.toUpperCase()
+                    && r.outcome === "failed");
+              if (failedRec) break;
+              await sleep(1000);
+            }
+            assert(failedRec, "broken-workspace fire never recorded a failed run");
+            const ack = await api("POST", `/automation-runs/${failedRec.id}/acknowledge`);
+            assertEq(ack._status, 200, `acknowledge: ${JSON.stringify(ack)}`);
+            const l = await api("GET", "/automations");
+            const acked = (l.runs || []).find((r) => r.id === failedRec.id);
+            assert(acked && acked.acknowledgedAt, "acknowledge did not stamp acknowledgedAt");
+          });
+
+          await test("26.7 board MCP: subtasks land in Plan with deps; queue auto-starts on Done", async () => {
+            const PTID = "26262626-0000-4000-8000-000000000007";
+            const up = await api("POST", "/tasks",
+                                 taskDoc({ id: PTID, title: "ACE2E epic",
+                                           profileID: id, repoPath: REPO }));
+            assert(up.ok === true, `task upsert failed: ${JSON.stringify(up)}`);
+            const phaseIDs = [];
+            try {
+              // A running session binds the MCP channel to the parent task.
+              await api("POST", `/tasks/${PTID}/start`);
+              // Start is optimistic (stage flips immediately) — wait for the
+              // slug, then for THIS task's worktree (26.1's may still exist).
+              const started = await waitForTask(
+                PTID, (x) => x.stage === "inProgress" && !!x.branchSlug, 20, 1500);
+              assert(started && started.stage === "inProgress" && started.branchSlug,
+                     `parent never started: ${JSON.stringify(started)}`);
+              const wt = await waitFor(id, `git -C ${REPO} worktree list --porcelain 2>/dev/null | ` +
+                                       `grep 'refs/heads/wt/${started.branchSlug}' | head -1`,
+                                       (s) => s.includes(started.branchSlug), 30);
+              const branch = wt.trim().replace("branch refs/heads/", "");
+              assert(branch.startsWith("wt/"), `no branch for parent: ${wt.slice(0, 120)}`);
+
+              // Agent files two phases, the second depending on the first —
+              // driven over the real vsock MCP channel like the shim does.
+              const probe = [
+                "import socket, json",
+                "s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)",
+                "s.connect((2, 5831))",
+                "def send(o): s.sendall((json.dumps(o) + chr(10)).encode())",
+                "def recv():",
+                "    buf = b''",
+                "    while not buf.endswith(b'\\n'):",
+                "        c = s.recv(65536)",
+                "        if not c: break",
+                "        buf += c",
+                "    return json.loads(buf) if buf.strip() else {}",
+                `s.sendall(('bromure-hello ${branch}' + chr(10)).encode())`,
+                "send({'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'board_create_subtasks','arguments':{'subtasks':[{'title':'ACE2E phase one'},{'title':'ACE2E phase two','dependsOn':[1]}]}}})",
+                "print(recv().get('result',{}).get('content',[{}])[0].get('text',''))",
+              ].join("\n");
+              const b64 = Buffer.from(probe).toString("base64");
+              const out = await sh(id, `echo ${b64} | base64 -d | python3 -`, { timeout: 30 });
+              assertIncludes(out, "Plan column", "board_create_subtasks did not ack");
+
+              // Both phases sit in the Plan column, dependency wired.
+              let phases = [];
+              for (let i = 0; i < 10; i++) {
+                const list = await api("GET", "/tasks");
+                phases = (list.tasks || [])
+                  .filter((t) => t.parentTaskID && t.parentTaskID.toUpperCase() === PTID.toUpperCase())
+                  .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+                if (phases.length === 2) break;
+                await sleep(500);
+              }
+              assertEq(phases.length, 2, "phases never appeared");
+              phaseIDs.push(...phases.map((p) => p.id));
+              assert(phases.every((p) => p.stage === "planning"), "phases must land in Plan");
+              assertEq((phases[1].dependsOn || [])[0], phases[0].id, "dependency not wired");
+
+              // Starting the dependent phase QUEUES it (dep not Done).
+              await api("POST", `/tasks/${phases[1].id}/start`);
+              const queued = await waitForTask(phases[1].id,
+                (x) => x.stage === "planning" && !!x.queuedAt, 10);
+              assert(queued && queued.queuedAt, "dependent phase did not queue");
+
+              // Starting the free phase launches it; closing it Done pumps
+              // the queue and auto-starts the dependent one.
+              await api("POST", `/tasks/${phases[0].id}/start`);
+              const p1 = await waitForTask(phases[0].id, (x) => x.stage === "inProgress", 20, 1500);
+              assert(p1, "free phase never started");
+              await api("POST", `/tasks/${phases[0].id}/close-no-merge`);
+              const p2 = await waitForTask(phases[1].id, (x) => x.stage === "inProgress", 20, 1500);
+              assert(p2 && p2.stage === "inProgress",
+                     "queued phase did not auto-start when its dependency reached Done");
+            } finally {
+              for (const pid2 of phaseIDs) await api("DELETE", `/tasks/${pid2}`);
+              await api("DELETE", `/tasks/${PTID}`);
+            }
+          });
+        });
       }
     }
   }

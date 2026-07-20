@@ -512,9 +512,14 @@ public enum AnalyticsMTLSIdentity {
         let pkcs12 = PKCS12Builder.build(
             certDER: certDer, privateKeyDER: keyDer, password: password)
 
-        // No `kSecImportExportKeychain` option ⇒ items stay in memory,
-        // referenced only by the returned identity.
-        let options: [String: Any] = [kSecImportExportPassphrase as String: password]
+        // Memory-only must be EXPLICIT: without `kSecImportToMemoryOnly`,
+        // macOS imports the key into the login keychain, where each ad-hoc
+        // rebuild's new signature breaks the ACL and triggers keychain
+        // prompts on every signing operation.
+        var options: [String: Any] = [kSecImportExportPassphrase as String: password]
+        if #available(macOS 15.0, *) {
+            options[kSecImportToMemoryOnly as String] = true
+        }
         var items: CFArray?
         let status = SecPKCS12Import(pkcs12 as CFData, options as CFDictionary, &items)
         guard status == errSecSuccess, let itemsArr = items as? [[String: Any]] else {
