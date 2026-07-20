@@ -1595,12 +1595,38 @@ final class ACAutomationServer {
         response += "Connection: close\r\n"
         response += "\r\n"
         let headerData = Data(response.utf8)
-        let payload = headerData + bodyData
-        _ = payload.withUnsafeBytes { ptr -> Int in
-            guard let base = ptr.baseAddress else { return 0 }
-            return Darwin.write(fd, base, payload.count)
-        }
+        // Write-ALL, not write-once: a single write() takes only what the
+        // socket buffer holds, and closing right after silently truncated
+        // every response larger than ~the buffer — the fat client's file
+        // downloads (8 MB base64 chunks) arrived as invalid JSON while
+        // small control calls sailed through.
+        Self.writeAllData(fd, headerData + bodyData)
         Darwin.close(fd)
+    }
+
+    /// Loop a payload out over short writes; on EAGAIN wait for the fd to
+    /// drain (poll, bounded) instead of dropping the remainder. Gives up
+    /// after ~60s or on a hard error — the peer is gone either way.
+    private static func writeAllData(_ fd: Int32, _ data: Data) {
+        let deadline = Date().addingTimeInterval(60)
+        data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+            guard var base = ptr.baseAddress else { return }
+            var remaining = ptr.count
+            while remaining > 0, Date() < deadline {
+                let n = Darwin.write(fd, base, remaining)
+                if n > 0 {
+                    base += n
+                    remaining -= n
+                } else if n < 0 && errno == EINTR {
+                    continue
+                } else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                    _ = poll(&pfd, 1, 1000)
+                } else {
+                    return   // peer hung up
+                }
+            }
+        }
     }
 
     private func httpStatusText(_ status: Int) -> String {

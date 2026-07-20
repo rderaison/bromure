@@ -242,6 +242,36 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
     private var terminated = false
     private var readSource: DispatchSourceRead?
     private let ioQueue = DispatchQueue(label: "io.bromure.remote.pty")
+    /// The most recent pump write's completion. NIO does NOT flush queued
+    /// writes before an explicit close — closing on fd-EOF while megabytes
+    /// sat in the channel's outbound buffer truncated large control-plane
+    /// responses (fat-client file downloads arrived 4 MB short). The EOF
+    /// path waits on this before finish().
+    private var lastPumpWrite: EventLoopFuture<Void>?
+
+    /// Forward one pumped chunk and remember its completion; on fd EOF the
+    /// teardown chains behind the last write instead of racing it.
+    private func pumpWrite(_ channel: Channel, _ bb: ByteBuffer) {
+        let p = channel.eventLoop.makePromise(of: Void.self)
+        lastPumpWrite = p.futureResult
+        channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(bb)),
+                              promise: p)
+    }
+
+    /// finish() only after every queued pump write has actually left the
+    /// channel — then back on ioQueue, where the pump state lives.
+    private func finishAfterDrain(channel: Channel, pid: pid_t, master: Int32) {
+        let pending = lastPumpWrite
+        let el = channel.eventLoop
+        el.execute { [weak self] in
+            (pending ?? el.makeSucceededVoidFuture()).whenComplete { _ in
+                guard let self else { return }
+                self.ioQueue.async {
+                    self.finish(channel: channel, pid: pid, master: master)
+                }
+            }
+        }
+    }
     /// SSH→master bytes awaiting a writable `master` (a slow guest/control reader
     /// fills the send buffer). Drained by `writeSource` when the fd is writable,
     /// so a stalled reader never busy-spins or blocks the SSH event loop. Only
@@ -399,9 +429,9 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
             if n > 0 {
                 var bb = channel.allocator.buffer(capacity: n)
                 bb.writeBytes(buf[0..<n])
-                channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(bb)), promise: nil)
+                self.pumpWrite(channel, bb)
             } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK) {
-                self.finish(channel: channel, pid: pid, master: masterFD)
+                self.finishAfterDrain(channel: channel, pid: pid, master: masterFD)
             }
         }
         readSource = src
@@ -450,9 +480,9 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
             if n > 0 {
                 var bb = channel.allocator.buffer(capacity: n)
                 bb.writeBytes(buf[0..<n])
-                channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(bb)), promise: nil)
+                self.pumpWrite(channel, bb)
             } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK) {
-                self.finish(channel: channel, pid: -1, master: sockFD)
+                self.finishAfterDrain(channel: channel, pid: -1, master: sockFD)
             }
         }
         readSource = src
@@ -563,9 +593,9 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
             if n > 0 {
                 var bb = channel.allocator.buffer(capacity: n)
                 bb.writeBytes(buf[0..<n])
-                channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(bb)), promise: nil)
+                self.pumpWrite(channel, bb)
             } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK) {
-                self.finish(channel: channel, pid: -1, master: fd)
+                self.finishAfterDrain(channel: channel, pid: -1, master: fd)
             }
         }
         self.readSource = src
