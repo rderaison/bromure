@@ -1388,3 +1388,8 @@
 /* Plan column — batch selection bar */
 "Delete %d selected phase(s)?" = "Supprimer %d phase(s) sélectionnée(s) ?";
 "Remove every selected phase from the board" = "Retirer du tableau toutes les phases sélectionnées";
+
+/* Coding board — session restart */
+"Restart session" = "Redémarrer la session";
+"Restart Session" = "Redémarrer la session";
+"The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree." = "La session a disparu — démarre l'espace de travail si besoin et relance l'agent dans le worktree de cette tâche.";

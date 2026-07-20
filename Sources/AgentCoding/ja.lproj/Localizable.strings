@@ -1388,3 +1388,8 @@
 /* Plan column — batch selection bar */
 "Delete %d selected phase(s)?" = "選択した%d件のフェーズを削除しますか？";
 "Remove every selected phase from the board" = "選択したすべてのフェーズをボードから削除";
+
+/* Coding board — session restart */
+"Restart session" = "セッションを再起動";
+"Restart Session" = "セッションを再起動";
+"The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree." = "セッションが失われました — 必要ならワークスペースを起動し、このタスクのworktreeでエージェントを再起動します。";

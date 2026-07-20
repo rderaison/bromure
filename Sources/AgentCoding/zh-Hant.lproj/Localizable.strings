@@ -1391,3 +1391,8 @@
 /* Plan column — batch selection bar */
 "Delete %d selected phase(s)?" = "刪除所選的%d個階段？";
 "Remove every selected phase from the board" = "從看板移除所有所選階段";
+
+/* Coding board — session restart */
+"Restart session" = "重新啟動工作階段";
+"Restart Session" = "重新啟動工作階段";
+"The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree." = "工作階段已遺失——如需要會啟動工作區，並在此任務的工作樹中重新啟動代理程式。";

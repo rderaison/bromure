@@ -86,36 +86,47 @@ struct MarkdownBlocks: View {
         return Text(s)
     }
 
+    /// Compact (kanban cards) renders a step smaller than the editor
+    /// preview — card descriptions are a glance, not a reading surface.
+    private var bodySize: CGFloat { compact ? 11 : 12 }
+    private var codeSize: CGFloat { compact ? 10 : 11 }
+    private func headingSize(_ level: Int) -> CGFloat {
+        switch level {
+        case 1:  return compact ? 12.5 : 15
+        case 2:  return compact ? 12 : 13.5
+        default: return compact ? 11.5 : 12.5
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 3 : 7) {
             ForEach(blocks) { block in
                 switch block {
                 case .heading(let level, let s):
                     inline(s)
-                        .font(.system(size: level == 1 ? 15 : (level == 2 ? 13.5 : 12.5),
-                                      weight: .bold))
+                        .font(.system(size: headingSize(level), weight: .bold))
                         .padding(.top, compact ? 0 : 2)
                 case .bullet(let items):
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                             HStack(alignment: .top, spacing: 6) {
-                                Text("•").font(.system(size: 12))
+                                Text("•").font(.system(size: bodySize))
                                 inline(item)
-                                    .font(.system(size: 12))
+                                    .font(.system(size: bodySize))
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
                 case .code(let lines):
                     Text(lines.joined(separator: "\n"))
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: codeSize, design: .monospaced))
                         .padding(6)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(RoundedRectangle(cornerRadius: 5)
                             .fill(Color.primary.opacity(0.05)))
                 case .paragraph(let s):
                     inline(s)
-                        .font(.system(size: 12))
+                        .font(.system(size: bodySize))
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -246,6 +257,8 @@ struct CodingKanbanView: View {
         var openPlanSession: (UUID) -> Void = { _ in }
         /// Remove the card AND kill its agent + delete its worktree/branch.
         var destroy: (UUID) -> Void = { _ in }
+        /// Re-launch a lost session on the task's existing worktree.
+        var resume: (UUID) -> Void = { _ in }
     }
 
     var store: CodingTaskStore
@@ -467,11 +480,15 @@ struct CodingKanbanView: View {
                     task: task,
                     accentHex: accentHex(for: task.profileID),
                     status: liveStatus(of: task),
-                    onOpen: { actions.jumpToRun(task) })
+                    onOpen: { actions.jumpToRun(task) },
+                    onResume: { actions.resume(task.id) })
                     .modifier(RemovableCard(title: task.title, stage: task.stage,
                                             onRemove: { actions.delete(task.id) },
                                             onDestroy: { actions.destroy(task.id) }))
                     .contextMenu {
+                        Button(NSLocalizedString("Restart Session", comment: "")) {
+                            actions.resume(task.id)
+                        }
                         Button(NSLocalizedString("Move to Testing", comment: "")) {
                             actions.moveToTesting(task.id)
                         }
@@ -821,6 +838,7 @@ private struct InProgressTaskCard: View {
     let accentHex: String
     let status: AgentStatus?
     let onOpen: () -> Void
+    var onResume: () -> Void = {}
 
     var body: some View {
         Button(action: onOpen) {
@@ -859,9 +877,22 @@ private struct InProgressTaskCard: View {
                                     .font(.system(size: 10))
                                     .foregroundStyle(.tertiary)
                             } else {
-                                Text(NSLocalizedString("session gone", comment: "task card"))
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.orange)
+                                // A lost session isn't a dead end: reboot
+                                // the workspace and re-launch the agent on
+                                // the existing worktree.
+                                Button {
+                                    onResume()
+                                } label: {
+                                    Label(NSLocalizedString("Restart session",
+                                                            comment: "task card"),
+                                          systemImage: "arrow.clockwise")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(.orange)
+                                }
+                                .buttonStyle(.plain)
+                                .help(NSLocalizedString(
+                                    "The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree.",
+                                    comment: "task card"))
                             }
                         }
                     }

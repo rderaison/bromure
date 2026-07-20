@@ -1388,3 +1388,8 @@
 /* Plan column — batch selection bar */
 "Delete %d selected phase(s)?" = "删除所选的%d个阶段？";
 "Remove every selected phase from the board" = "从看板移除所有所选阶段";
+
+/* Coding board — session restart */
+"Restart session" = "重启会话";
+"Restart Session" = "重启会话";
+"The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree." = "会话已丢失——如需要会启动工作区，并在此任务的工作树中重新启动智能体。";

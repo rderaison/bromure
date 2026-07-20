@@ -1505,6 +1505,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     destroy: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.destroy(id)
+                    },
+                    resume: { [weak self] id in
+                        self?.acDelegate?.codingTaskEngine.resumeSession(id)
                     }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []

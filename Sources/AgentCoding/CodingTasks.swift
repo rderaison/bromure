@@ -300,6 +300,10 @@ final class CodingTaskEngine {
     Operating notes for this task (added automatically): You are working in \
     a dedicated git worktree on your own branch. Work autonomously — make \
     reasonable decisions on your own rather than waiting for confirmation. \
+    Do ALL of the work in THIS session yourself: do NOT spawn subagents or \
+    background tasks (the Task/Agent tools) — the board tracks only this \
+    session, and ending your turn while delegated work runs marks the task \
+    done prematurely. \
     When the task is complete, COMMIT all of your work to this branch with \
     clear commit messages: do not leave uncommitted changes, do not merge \
     into any other branch, and do not push. Then, as your VERY LAST action, \
@@ -337,9 +341,12 @@ final class CodingTaskEngine {
         with dependsOn set (1-based indices) for phases that need earlier \
         ones DONE first. The phases appear on the user's board as cards.
         2. Record a short overview of the plan with board_set_plan.
-        Do NOT write any code, do NOT modify or commit anything. When the \
-        phases are filed, summarize them here and run this command to end \
-        the planning session: `sh ~/.bromure/agent-status.sh done`
+        Do NOT write any code, do NOT modify or commit anything. Explore in \
+        THIS session directly — do NOT spawn subagents or background tasks \
+        (the Task/Agent tools): the board tracks only this session, and \
+        ending your turn while delegated work runs aborts the planning. \
+        When the phases are filed, summarize them here and run this command \
+        to end the planning session: `sh ~/.bromure/agent-status.sh done`
 
         The task brief:
 
@@ -778,7 +785,8 @@ final class CodingTaskEngine {
                                                           branch: branch)
                 guard let self else { return }
                 self.settling.remove(task.id)
-                self.finalizeTaskDone(task.id, profileID: profileID, branch: branch)
+                await self.finalizeTaskDone(task.id, profileID: profileID,
+                                            branch: branch)
             }
             return
         }
@@ -814,28 +822,76 @@ final class CodingTaskEngine {
         }
     }
 
-    /// The actual done transition: worktree metadata off the tab, stage →
-    /// Testing, session tab closed. Idempotent via the stage guard.
-    private func finalizeTaskDone(_ taskID: UUID, profileID: UUID, branch: String) {
+    /// The actual done transition: worktree metadata off the tab (or the
+    /// guest, for a DETACHED session — no window means no pane roster, and
+    /// a card without worktreeDir/parentBranch can never show its review
+    /// diff), stage → Testing, session tab closed. Idempotent via the
+    /// stage guard.
+    private func finalizeTaskDone(_ taskID: UUID, profileID: UUID,
+                                  branch: String) async {
         guard let task = store.task(taskID),
               task.stage == .inProgress || task.stage == .planning else { return }
         let tab = delegate?.pane(for: profileID)?.model.tabs
             .first { $0.worktreeBranch == branch }
+        var dir = tab?.repoRoot?.isEmpty == false ? tab?.repoRoot : tab?.cwd
+        var parent = tab?.parentBranch
+        var root = tab?.rootRepo
+        if dir == nil || parent == nil || root == nil {
+            let m = await resolveWorktreeMetadata(profileID: profileID,
+                                                  branch: branch,
+                                                  repoPath: task.repoPath)
+            dir = dir ?? m.dir
+            parent = parent ?? m.parent
+            root = root ?? m.root
+        }
         BACDebug.log("tasks", "“\(task.title)” agent done → testing (\(branch))")
         store.mutate(taskID) {
             $0.stage = .testing
             $0.testingAt = Date()
             $0.branch = branch
-            if let tab {
-                $0.worktreeDir = tab.repoRoot?.isEmpty == false ? tab.repoRoot : tab.cwd
-                $0.parentBranch = tab.parentBranch
-                $0.rootRepo = tab.rootRepo
-            }
+            if let dir { $0.worktreeDir = dir }
+            if let parent { $0.parentBranch = parent }
+            if let root { $0.rootRepo = root }
         }
         // The agent is done; a finished session left open is just an idle
         // claude eating a tab. Review send-back reopens the worktree via
         // task-resume when needed.
         closeSessionTab(profileID: profileID, branch: branch)
+    }
+
+    /// Tab-independent worktree metadata: the checkout dir from
+    /// `git worktree list` in the task's repo, the parent branch from the
+    /// guest agent's worktree registry (falling back to the repo's current
+    /// branch — worktrees are cut from HEAD).
+    func resolveWorktreeMetadata(profileID: UUID, branch: String,
+                                 repoPath: String) async
+        -> (dir: String?, parent: String?, root: String?) {
+            guard let delegate, Self.isSafeBranch(branch) else {
+                return (nil, nil, nil)
+            }
+            let root = ScheduledAutomationEngine.guestPath(repoPath)
+            let q = "'" + root.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            let cmd = "root=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); "
+                + "[ -n \"$root\" ] || exit 0; "
+                + "dir=$(git -C \"$root\" worktree list --porcelain 2>/dev/null "
+                + "| awk -v b='refs/heads/\(branch)' "
+                + "'/^worktree /{d=substr($0,10)} $0==\"branch \" b {print d; exit}'); "
+                + "reg=\"$HOME/.bromure/worktrees/$(basename \"$root\")/.registry\"; "
+                + "parent=$(awk -F'\\x1f' -v b='\(branch)' '$1==b {print $2; exit}' "
+                + "\"$reg\" 2>/dev/null); "
+                + "[ -n \"$parent\" ] || parent=$(git -C \"$root\" rev-parse "
+                + "--abbrev-ref HEAD 2>/dev/null); "
+                + "printf '%s\\n%s\\n%s\\n' \"$dir\" \"$parent\" \"$root\""
+            guard let out = try? await delegate.guestExec(
+                profileID: profileID, command: cmd, timeout: 15) else {
+                return (nil, nil, nil)
+            }
+            let lines = out.split(separator: "\n", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            func v(_ i: Int) -> String? {
+                lines.indices.contains(i) && !lines[i].isEmpty ? lines[i] : nil
+            }
+            return (v(0), v(1), v(2))
     }
 
     /// Immediate hand-to-review for the board_ready_for_review MCP tool: a
@@ -852,7 +908,37 @@ final class CodingTaskEngine {
             return slugPart == slug || (slugPart.hasPrefix(slug + "-")
                 && Int(slugPart.dropFirst(slug.count + 1)) != nil)
         }) else { return false }
-        finalizeTaskDone(task.id, profileID: profileID, branch: branch)
+        // The MCP response needs the transition NOW; metadata capture and
+        // the tab close follow asynchronously (the tab lives until then,
+        // so the guest queries still see it).
+        let tab = delegate?.pane(for: profileID)?.model.tabs
+            .first { $0.worktreeBranch == branch }
+        store.mutate(task.id) {
+            $0.stage = .testing
+            $0.testingAt = Date()
+            $0.branch = branch
+            if let tab {
+                $0.worktreeDir = tab.repoRoot?.isEmpty == false ? tab.repoRoot : tab.cwd
+                $0.parentBranch = tab.parentBranch
+                $0.rootRepo = tab.rootRepo
+            }
+        }
+        let taskID = task.id
+        Task { [weak self] in
+            guard let self else { return }
+            if let t = self.store.task(taskID),
+               t.worktreeDir == nil || t.parentBranch == nil || t.rootRepo == nil {
+                let m = await self.resolveWorktreeMetadata(profileID: profileID,
+                                                           branch: branch,
+                                                           repoPath: t.repoPath)
+                self.store.mutate(taskID) {
+                    if $0.worktreeDir == nil { $0.worktreeDir = m.dir }
+                    if $0.parentBranch == nil { $0.parentBranch = m.parent }
+                    if $0.rootRepo == nil { $0.rootRepo = m.root }
+                }
+            }
+            self.closeSessionTab(profileID: profileID, branch: branch)
+        }
         return store.task(task.id)?.stage == .testing
     }
 
@@ -878,8 +964,10 @@ final class CodingTaskEngine {
                        task.title, task.tool.rawValue, feedback])
         }
         guard delivered else {
-            store.mutate(taskID) { $0.lastError = NSLocalizedString(
-                "Couldn't reach the workspace — is it running?", comment: "task review") }
+            // Workspace down (or its session gone): don't strand the card —
+            // the full resume path boots the workspace and re-launches the
+            // agent on the existing worktree with this same feedback.
+            resumeSession(taskID)
             return
         }
         let now = Date()
@@ -891,6 +979,89 @@ final class CodingTaskEngine {
             }
         }
         BACDebug.log("tasks", "“\(task.title)”: \(unsent.count) comment(s) sent back")
+    }
+
+    /// Recovery for a task whose session can't be found (workspace
+    /// rebooted, tab closed, agent dead): boot the workspace if needed and
+    /// re-launch the agent on the EXISTING worktree via guest task-resume.
+    /// Unsent review comments ride along; otherwise the agent gets a
+    /// resume brief telling it to pick up where the worktree stands.
+    func resumeSession(_ taskID: UUID) {
+        guard let task = store.task(taskID),
+              task.stage == .inProgress || task.stage == .testing,
+              let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }),
+              delegate != nil else { return }
+        let profileID = task.profileID
+        let unsent = task.comments.filter { $0.sentAt == nil }
+        let prompt = unsent.isEmpty
+            ? Self.resumePrompt(for: task)
+            : Self.feedbackPrompt(comments: unsent)
+        store.mutate(taskID) { $0.lastError = nil }
+        BACDebug.log("tasks", "“\(task.title)”: restarting session (\(branch))")
+        Task { [weak self] in
+            guard let self, let delegate = self.delegate else { return }
+            var up = (try? await delegate.guestExec(profileID: profileID,
+                                                    command: "true", timeout: 5)) != nil
+            if !up {
+                if !self.pendingBoots.contains(profileID) {
+                    self.pendingBoots.insert(profileID)
+                    delegate.startProfileForAutomation(profileID)
+                }
+                let deadline = Date().addingTimeInterval(Self.bootTimeout)
+                while Date() < deadline {
+                    try? await Task.sleep(nanoseconds: Self.bootPollInterval)
+                    if (try? await delegate.guestExec(profileID: profileID,
+                                                      command: "true", timeout: 5)) != nil {
+                        up = true; break
+                    }
+                }
+                self.pendingBoots.remove(profileID)
+            }
+            guard up else {
+                self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
+                    "The workspace did not boot in time", comment: "task resume") }
+                return
+            }
+            // A live session may already exist (workspace was just slow):
+            // deliver the comments there instead of opening a second tab.
+            if await self.tabIndex(profileID: profileID, branch: branch) != nil {
+                if !unsent.isEmpty {
+                    _ = await self.typeIntoSession(profileID: profileID,
+                                                   branch: branch, text: prompt)
+                }
+            } else {
+                guard delegate.automationWorktreeCommand(
+                    profileNameOrID: profileID.uuidString, action: "task-resume",
+                    args: [self.store.task(taskID)?.rootRepo ?? "", branch,
+                           self.store.task(taskID)?.parentBranch ?? "",
+                           task.title, task.tool.rawValue, prompt])
+                else {
+                    self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
+                        "Couldn't reach the workspace — is it running?",
+                        comment: "task start") }
+                    return
+                }
+            }
+            let now = Date()
+            self.store.mutate(taskID) {
+                $0.stage = .inProgress
+                $0.startedAt = now   // restart the session-gone clock
+                for i in $0.comments.indices where $0.comments[i].sentAt == nil {
+                    $0.comments[i].sentAt = now
+                }
+            }
+        }
+    }
+
+    /// Prompt for re-launching an interrupted task session on its existing
+    /// worktree: orient in the checkout, then continue as originally
+    /// briefed (the full prompt, directives included, follows).
+    nonisolated static func resumePrompt(for task: CodingTask) -> String {
+        "This session was RESTARTED — you were already working on this task "
+            + "in this worktree before the session was interrupted. Run "
+            + "`git status` and `git log` to see where things stand, keep "
+            + "what's already done, and continue from there.\n\n"
+            + prompt(for: task)
     }
 
     /// The guest command that types text into a session's agent (base64
@@ -952,8 +1123,13 @@ final class CodingTaskEngine {
             + "e1=$(printf %s \"$cwd\" | tr / -); e2=$(printf %s \"$cwd\" | tr ./ --); "
             + "d=$(ls -td \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
             + "2>/dev/null | head -1); fi; fi; "
-            + "f=$(ls -t \"$d\"/*.jsonl 2>/dev/null | head -1); "
-            + "if [ -n \"$f\" ]; then echo $(( $(date +%s) - $(stat -c %Y \"$f\") )); fi"
+            // The WHOLE tree, recursively: subagent transcripts land as
+            // separate files (agent-*.jsonl, possibly nested), and a probe
+            // watching only the newest top-level session file reads "quiet"
+            // while five agents are hard at work.
+            + "newest=$(find \"$d\" -type f -name '*.jsonl' -printf '%T@\\n' "
+            + "2>/dev/null | sort -rn | head -1 | cut -d. -f1); "
+            + "if [ -n \"$newest\" ]; then echo $(( $(date +%s) - newest )); fi"
     }
 
     /// The guest command that makes a task's directory usable: mkdir -p,

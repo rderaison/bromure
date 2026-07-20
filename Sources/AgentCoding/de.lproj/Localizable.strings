@@ -1388,3 +1388,8 @@
 /* Plan column — batch selection bar */
 "Delete %d selected phase(s)?" = "%d ausgewählte Phase(n) löschen?";
 "Remove every selected phase from the board" = "Alle ausgewählten Phasen vom Board entfernen";
+
+/* Coding board — session restart */
+"Restart session" = "Sitzung neu starten";
+"Restart Session" = "Sitzung neu starten";
+"The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree." = "Die Sitzung ist verschwunden — startet bei Bedarf den Workspace und den Agenten im Worktree dieser Aufgabe neu.";

@@ -2737,6 +2737,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.pumpQueue()
                 case "destroy":
                     self.codingTaskEngine.destroy(id)
+                case "resume":
+                    self.codingTaskEngine.resumeSession(id)
                 default:
                     return ["error": "unknown action", "action": action]
                 }
@@ -7372,8 +7374,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// always reflects the worktree as it is right now (including work the
     /// agent hasn't committed).
     func fetchTaskReview(_ task: CodingTask) async -> TaskReviewData? {
-        guard let wt = task.worktreeDir, !wt.isEmpty,
-              let parent = task.parentBranch, !parent.isEmpty else { return nil }
+        var wt = task.worktreeDir
+        var parent = task.parentBranch
+        // Self-heal: a task that finished while its session was detached
+        // reached Testing without worktree metadata (there was no pane to
+        // capture it from) — resolve it from the guest now and persist,
+        // instead of showing a "workspace down" dead end.
+        if (wt ?? "").isEmpty || (parent ?? "").isEmpty, let branch = task.branch {
+            let m = await codingTaskEngine.resolveWorktreeMetadata(
+                profileID: task.profileID, branch: branch, repoPath: task.repoPath)
+            wt = (wt ?? "").isEmpty ? m.dir : wt
+            parent = (parent ?? "").isEmpty ? m.parent : parent
+            if m.dir != nil || m.parent != nil || m.root != nil {
+                codingTaskStore.mutate(task.id) {
+                    if ($0.worktreeDir ?? "").isEmpty { $0.worktreeDir = m.dir }
+                    if ($0.parentBranch ?? "").isEmpty { $0.parentBranch = m.parent }
+                    if ($0.rootRepo ?? "").isEmpty { $0.rootRepo = m.root }
+                }
+            }
+        }
+        guard let wt, !wt.isEmpty, let parent, !parent.isEmpty else { return nil }
         let cmd = TaskReviewData.guestCommand(worktreeDir: wt, parent: parent)
         guard let out = try? await guestExec(profileID: task.profileID,
                                              command: cmd, timeout: 30) else { return nil }

@@ -2123,7 +2123,8 @@ final class RemoteHostWindow: NSWindow {
                     openPlanSession: { [weak self] id in
                         self?.planSessionWindows.open(taskID: id)
                     },
-                    destroy: { c.taskCommand($0, "destroy") }))
+                    destroy: { c.taskCommand($0, "destroy") },
+                    resume: { c.taskCommand($0, "resume") }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = false

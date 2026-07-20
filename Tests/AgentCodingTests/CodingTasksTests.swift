@@ -19,6 +19,8 @@ struct CodingTasksTests {
         #expect(p.contains("agent-status.sh done"))
         // Board MCP tools are announced.
         #expect(p.contains("board_ready_for_review"))
+        // Delegation breaks completion detection — the prompt forbids it.
+        #expect(p.contains("do NOT spawn subagents"))
     }
 
     @Test("Planner prompt: visible, plans-only, files phases via the MCP")
@@ -31,6 +33,7 @@ struct CodingTasksTests {
         #expect(p.contains("dependsOn"))
         #expect(p.contains("board_set_plan"))
         #expect(p.contains("Do NOT write any code"))
+        #expect(p.contains("do NOT spawn subagents"))
         #expect(p.contains("agent-status.sh done"))
         #expect(p.contains("Create an EDR"))
     }
@@ -154,7 +157,8 @@ struct CodingTasksTests {
         let cmd = CodingTaskEngine.transcriptAgeCommand(slug: "fix-leak-0720")
         #expect(cmd?.contains("*-fix-leak-0720") == true)
         #expect(cmd?.contains("wt/fix-leak-0720") == true)   // plain-tab fallback
-        #expect(cmd?.contains("stat -c %Y") == true)
+        #expect(cmd?.contains("find") == true)   // recursive: subagent files count
+        #expect(cmd?.contains("%T@") == true)
         #expect(CodingTaskEngine.transcriptAgeCommand(slug: "bad'slug") == nil)
         #expect(CodingTaskEngine.transcriptAgeCommand(slug: "") == nil)
     }
@@ -236,6 +240,17 @@ struct CodingTasksTests {
         #expect(brief == "VM scanner\n\nWrite a **Nessus-like** vuln scanner.")
         // Ordinary user messages pass through untouched.
         #expect(CodingTaskEngine.planBrief(fromPrompt: "use Go please") == nil)
+    }
+
+    @Test("Resume prompt orients in the worktree, then carries the full brief")
+    func resumePrompt() {
+        let task = CodingTask(title: "Fix the leak", details: "pool leaks fds",
+                              profileID: UUID())
+        let p = CodingTaskEngine.resumePrompt(for: task)
+        #expect(p.hasPrefix("This session was RESTARTED"))
+        #expect(p.contains("git status"))
+        #expect(p.contains("Fix the leak"))
+        #expect(p.contains("agent-status.sh done"))   // full directives ride along
     }
 
     @Test("Tasks decode without optional fields (forward compat)")
