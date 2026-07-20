@@ -259,6 +259,9 @@ struct CodingKanbanView: View {
         var destroy: (UUID) -> Void = { _ in }
         /// Re-launch a lost session on the task's existing worktree.
         var resume: (UUID) -> Void = { _ in }
+        /// Open a finished task's session transcript (read from the
+        /// workspace's persistent home).
+        var openTranscript: (UUID) -> Void = { _ in }
     }
 
     var store: CodingTaskStore
@@ -561,11 +564,15 @@ struct CodingKanbanView: View {
                             emptyText: NSLocalizedString("Nothing shipped yet", comment: "kanban")) {
             ForEach(tasks) { task in
                 DoneTaskCard(task: task,
-                             accentHex: accentHex(for: task.profileID))
+                             accentHex: accentHex(for: task.profileID),
+                             onOpen: { actions.openTranscript(task.id) })
                     .modifier(RemovableCard(title: task.title, stage: task.stage) {
                         actions.delete(task.id)
                     })
                     .contextMenu {
+                        Button(NSLocalizedString("View Transcript", comment: "")) {
+                            actions.openTranscript(task.id)
+                        }
                         Button(NSLocalizedString("Delete", comment: ""), role: .destructive) {
                             actions.delete(task.id)
                         }
@@ -959,6 +966,7 @@ private struct TestingTaskCard: View {
 private struct DoneTaskCard: View {
     let task: CodingTask
     let accentHex: String
+    var onOpen: () -> Void = {}
 
     private var outcomeText: String {
         if task.merged {
@@ -978,6 +986,7 @@ private struct DoneTaskCard: View {
     }
 
     var body: some View {
+        Button(action: onOpen) {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: outcomeGlyph.name)
@@ -1001,6 +1010,11 @@ private struct DoneTaskCard: View {
                 }
             }
         }
+        .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(NSLocalizedString("Read the agent's full session transcript",
+                                comment: "task transcript"))
         .modifier(CardChrome())
     }
 }

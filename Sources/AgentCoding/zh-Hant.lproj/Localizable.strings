@@ -1396,3 +1396,11 @@
 "Restart session" = "重新啟動工作階段";
 "Restart Session" = "重新啟動工作階段";
 "The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree." = "工作階段已遺失——如需要會啟動工作區，並在此任務的工作樹中重新啟動代理程式。";
+
+/* Done cards — session transcripts */
+"Transcript — %@" = "轉錄 — %@";
+"Reading the transcript…" = "正在讀取轉錄…";
+"Transcript unavailable" = "轉錄不可用";
+"No transcript was found for this task in the workspace's home." = "在工作區的主目錄中未找到此任務的轉錄。";
+"View Transcript" = "查看轉錄";
+"Read the agent's full session transcript" = "閱讀代理程式的完整工作階段轉錄";

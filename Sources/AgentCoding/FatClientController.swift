@@ -2075,6 +2075,33 @@ final class RemoteHostWindow: NSWindow {
         return Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    /// Finished-task transcript windows for the mirrored board — read from
+    /// the remote workspace's home over the tunnel.
+    private lazy var taskTranscriptWindows = TaskTranscriptWindowManager(
+        context: TaskTranscriptWindowManager.Context(
+            store: { [weak self] in self?.controller.taskStore },
+            fetch: { [weak self] task in
+                // The HOST resolves the transcript (vsock when the
+                // workspace runs, ext4 home-image read when it's off) —
+                // the mirror just asks over the tunnel.
+                guard let self else { return nil }
+                let host = self.controller.host
+                let path = "/tasks/\(ControlClient.encodeSegment(task.id.uuidString))/transcript"
+                let resp = try? await Task.detached(priority: .userInitiated) {
+                    try RemoteTransport.client(for: host).request("GET", path)
+                }.value
+                guard let resp, resp.status == 200,
+                      let b64 = resp.json["transcript"] as? String,
+                      let data = Data(base64Encoded: b64) else { return nil }
+                return String(decoding: data, as: UTF8.self)
+            },
+            workspaceName: { [weak self] id in
+                self?.controller.profile(for: id)?.name ?? ""
+            },
+            accentHex: { [weak self] id in
+                self?.controller.profile(for: id)?.color.hexInUI ?? "#888888"
+            }))
+
     private func jumpToTask(_ task: CodingTask) {
         guard let slug = task.branchSlug,
               let tab = controller.tabsModel(for: task.profileID)?.tabs.first(where: {
@@ -2124,7 +2151,10 @@ final class RemoteHostWindow: NSWindow {
                         self?.planSessionWindows.open(taskID: id)
                     },
                     destroy: { c.taskCommand($0, "destroy") },
-                    resume: { c.taskCommand($0, "resume") }))
+                    resume: { c.taskCommand($0, "resume") },
+                    openTranscript: { [weak self] id in
+                        self?.taskTranscriptWindows.open(taskID: id)
+                    }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []
             host.translatesAutoresizingMaskIntoConstraints = false

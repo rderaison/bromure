@@ -1393,3 +1393,11 @@
 "Restart session" = "Sitzung neu starten";
 "Restart Session" = "Sitzung neu starten";
 "The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree." = "Die Sitzung ist verschwunden — startet bei Bedarf den Workspace und den Agenten im Worktree dieser Aufgabe neu.";
+
+/* Done cards — session transcripts */
+"Transcript — %@" = "Protokoll — %@";
+"Reading the transcript…" = "Protokoll wird gelesen …";
+"Transcript unavailable" = "Protokoll nicht verfügbar";
+"No transcript was found for this task in the workspace's home." = "Im Benutzerordner des Workspace wurde kein Protokoll für diese Aufgabe gefunden.";
+"View Transcript" = "Protokoll anzeigen";
+"Read the agent's full session transcript" = "Das vollständige Sitzungsprotokoll des Agenten lesen";

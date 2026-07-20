@@ -1508,6 +1508,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     resume: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.resumeSession(id)
+                    },
+                    openTranscript: { [weak self] id in
+                        self?.acDelegate?.taskTranscriptWindows.open(taskID: id)
                     }))
             let host = NSHostingView(rootView: view)
             host.sizingOptions = []

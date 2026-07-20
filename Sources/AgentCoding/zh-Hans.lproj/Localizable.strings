@@ -1393,3 +1393,11 @@
 "Restart session" = "重启会话";
 "Restart Session" = "重启会话";
 "The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree." = "会话已丢失——如需要会启动工作区，并在此任务的工作树中重新启动智能体。";
+
+/* Done cards — session transcripts */
+"Transcript — %@" = "转录 — %@";
+"Reading the transcript…" = "正在读取转录…";
+"Transcript unavailable" = "转录不可用";
+"No transcript was found for this task in the workspace's home." = "在工作区的主目录中未找到此任务的转录。";
+"View Transcript" = "查看转录";
+"Read the agent's full session transcript" = "阅读智能体的完整会话转录";

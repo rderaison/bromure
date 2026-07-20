@@ -56,7 +56,7 @@ shoot() {   # shoot WHICH FILENAME-BASE SUFFIX
     for attempt in 1 2 3; do
         rm -f "$tmp"
         if capture "$which" "$tmp" && [ -s "$tmp" ]; then
-            if sips -s format jpeg "$tmp" --out "$outfile" >/dev/null 2>&1 && [ -s "$outfile" ]; then
+            if sips -s format jpeg -s formatOptions best "$tmp" --out "$outfile" >/dev/null 2>&1 && [ -s "$outfile" ]; then
                 rm -f "$tmp"
                 printf "  %-16s → %s\n" "$which" "$(basename "$outfile")"
                 return 0

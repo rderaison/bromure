@@ -1395,3 +1395,11 @@
 "Restart session" = "Reiniciar la sesión";
 "Restart Session" = "Reiniciar la sesión";
 "The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree." = "La sesión desapareció: arranca el espacio de trabajo si hace falta y relanza el agente en el worktree de esta tarea.";
+
+/* Done cards — session transcripts */
+"Transcript — %@" = "Transcripción — %@";
+"Reading the transcript…" = "Leyendo la transcripción…";
+"Transcript unavailable" = "Transcripción no disponible";
+"No transcript was found for this task in the workspace's home." = "No se encontró transcripción para esta tarea en la carpeta personal del espacio de trabajo.";
+"View Transcript" = "Ver transcripción";
+"Read the agent's full session transcript" = "Leer la transcripción completa de la sesión del agente";

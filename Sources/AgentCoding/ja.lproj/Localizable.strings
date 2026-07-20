@@ -1393,3 +1393,11 @@
 "Restart session" = "セッションを再起動";
 "Restart Session" = "セッションを再起動";
 "The session is gone — boot the workspace if needed and relaunch the agent on this task's worktree." = "セッションが失われました — 必要ならワークスペースを起動し、このタスクのworktreeでエージェントを再起動します。";
+
+/* Done cards — session transcripts */
+"Transcript — %@" = "トランスクリプト — %@";
+"Reading the transcript…" = "トランスクリプトを読み込んでいます…";
+"Transcript unavailable" = "トランスクリプトを利用できません";
+"No transcript was found for this task in the workspace's home." = "ワークスペースのホームにこのタスクのトランスクリプトが見つかりませんでした。";
+"View Transcript" = "トランスクリプトを表示";
+"Read the agent's full session transcript" = "エージェントのセッション全体のトランスクリプトを読む";

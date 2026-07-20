@@ -922,8 +922,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             },
         ]
         let bounds = content.bounds
+        // An explicit 2x bitmap: an offscreen window that never touched a
+        // retina screen caches at 1x, and the doc screenshots came out
+        // blurry. Pixel dimensions double, rep.size stays in points.
+        let scale: CGFloat = 2
         if bounds.width > 0, bounds.height > 0,
-           let rep = content.bitmapImageRepForCachingDisplay(in: bounds) {
+           let rep = NSBitmapImageRep(
+               bitmapDataPlanes: nil,
+               pixelsWide: Int(bounds.width * scale),
+               pixelsHigh: Int(bounds.height * scale),
+               bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+               isPlanar: false, colorSpaceName: .deviceRGB,
+               bytesPerRow: 0, bitsPerPixel: 0) {
+            rep.size = bounds.size
             content.cacheDisplay(in: bounds, to: rep)
             if let data = rep.representation(using: .png, properties: [:]) {
                 try? data.write(to: URL(fileURLWithPath: path))
@@ -2745,6 +2756,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let stage = self.codingTaskStore.task(id)?.stage.rawValue ?? "deleted"
                 return ["ok": true, "stage": stage]
             }
+        }
+        server.onTaskTranscript = { [weak self] taskID in
+            guard let self, let task = await MainActor.run(body: {
+                self.codingTaskStore.task(taskID)
+            }) else { return nil }
+            return await self.fetchTaskTranscriptRaw(task)
         }
         server.onGuestFileOp = { [weak self] idOrName, op, timeout in
             guard let self else { return ["error": "unavailable"] }
@@ -7310,6 +7327,91 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             liveBranch: { [weak self] task in
                 await self?.codingTaskEngine.liveBranchResolved(of: task)
             }))
+
+    /// Finished-task transcript windows (Done cards) — the transcript is
+    /// read on demand from the workspace's persistent home: over vsock
+    /// when the workspace runs, straight out of the home.img ext4 image
+    /// when it's off.
+    private(set) lazy var taskTranscriptWindows = TaskTranscriptWindowManager(
+        context: TaskTranscriptWindowManager.Context(
+            store: { [weak self] in self?.codingTaskStore },
+            fetch: { [weak self] task in
+                await self?.fetchTaskTranscriptRaw(task)
+            },
+            workspaceName: { [weak self] id in
+                self?.profile(for: id)?.name ?? ""
+            },
+            accentHex: { [weak self] id in
+                self?.profile(for: id)?.color.hexInUI ?? "#888888"
+            }))
+
+    /// A finished task's full session transcript: guest first (live vsock
+    /// read), ext4 home-image second (workspace off). The home is a
+    /// persistent ext4 image, so a Done card's transcript stays readable
+    /// forever without booting anything.
+    func fetchTaskTranscriptRaw(_ task: CodingTask) async -> String? {
+        guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 })
+        else { return nil }
+        if let cmd = CodingTaskEngine.taskTranscriptCommand(branch: branch),
+           let out = try? await guestExec(profileID: task.profileID,
+                                          command: cmd, timeout: 30),
+           !out.isEmpty {
+            return out
+        }
+        // Offline: read the image directly (read-only; safe even if a VM
+        // has the disk attached — same tolerance as the ext4 browser).
+        guard let profile = profiles.first(where: { $0.id == task.profileID })
+        else { return nil }
+        let img = store.homeImageURL(for: profile)
+        guard FileManager.default.fileExists(atPath: img.path) else { return nil }
+        let slug = String(branch.dropFirst(3))
+        let guestCwd = ScheduledAutomationEngine.guestPath(task.repoPath)
+        return await Task.detached(priority: .userInitiated) {
+            Self.ext4Transcript(imagePath: img.path, slug: slug, guestCwd: guestCwd)
+        }.value
+    }
+
+    /// Locate + read the newest session transcript for a task inside a
+    /// home.img: candidate project dirs are any `*-<slug>` (worktree
+    /// sessions) plus the Claude-encoded cwd (plain-tab sessions); the
+    /// newest `.jsonl` by inode mtime wins. Pure file IO — run detached.
+    nonisolated static func ext4Transcript(imagePath: String, slug: String,
+                                           guestCwd: String) -> String? {
+        guard slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" }),
+              !slug.isEmpty,
+              let vol = try? Ext4Volume(path: imagePath) else { return nil }
+        // home.img is mounted at /home/ubuntu → in-image paths are
+        // home-relative.
+        guard let projIno = try? vol.resolve("/.claude/projects"),
+              let entries = try? vol.listDir(projIno) else { return nil }
+        var cwd = guestCwd
+        while cwd.count > 1 && cwd.hasSuffix("/") { cwd = String(cwd.dropLast()) }
+        let enc1 = cwd.replacingOccurrences(of: "/", with: "-")
+        let enc2 = cwd.replacingOccurrences(of: ".", with: "-")
+            .replacingOccurrences(of: "/", with: "-")
+        var newest: (mtime: UInt32, data: [UInt8])?
+        for entry in entries {
+            let name = entry.name
+            guard name != "." && name != "..",
+                  name.hasSuffix("-\(slug)") || name == enc1 || name == enc2,
+                  let dirInode = try? vol.inode(entry.ino), dirInode.isDir,
+                  let files = try? vol.listDir(entry.ino) else { continue }
+            for f in files where f.name.hasSuffix(".jsonl") {
+                guard let ino = try? vol.inode(f.ino), ino.isRegular else { continue }
+                // i_mtime: LE32 at 0x10 of the raw inode record.
+                let r = ino.raw
+                guard r.count >= 0x14 else { continue }
+                let mtime = UInt32(r[0x10]) | (UInt32(r[0x11]) << 8)
+                    | (UInt32(r[0x12]) << 16) | (UInt32(r[0x13]) << 24)
+                if newest == nil || mtime > newest!.mtime,
+                   let data = try? vol.readData(ino) {
+                    newest = (mtime, data)
+                }
+            }
+        }
+        guard let newest, !newest.data.isEmpty else { return nil }
+        return String(decoding: Data(newest.data.prefix(25_000_000)), as: UTF8.self)
+    }
 
     /// Tail of the live Claude transcript for a task's planning session.
     func fetchLivePlanTranscript(_ task: CodingTask) async -> String? {

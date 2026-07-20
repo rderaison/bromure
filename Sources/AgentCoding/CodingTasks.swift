@@ -1106,6 +1106,30 @@ final class CodingTaskEngine {
             + "then echo; tr -d '\\n' < \(pq); echo; fi"
     }
 
+    /// The guest command that dumps a task session's FULL transcript —
+    /// project dir by worktree-slug glob (transcripts live under
+    /// ~/.claude/projects, so this works long after the worktree itself
+    /// was merged away), with the plain-tab marker fallback. The home is
+    /// a persistent ext4 image, so this is readable for as long as the
+    /// workspace exists — the board's Done cards read it on demand.
+    nonisolated static func taskTranscriptCommand(branch: String) -> String? {
+        guard branch.hasPrefix("wt/") else { return nil }
+        let slug = String(branch.dropFirst(3))
+        guard !slug.isEmpty,
+              slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" })
+        else { return nil }
+        return "d=$(ls -td ~/.claude/projects/*-\(slug) 2>/dev/null | head -1); "
+            + "if [ -z \"$d\" ]; then "
+            + "cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
+            + "2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); "
+            + "if [ -n \"$cwd\" ]; then "
+            + "e1=$(printf %s \"$cwd\" | tr / -); e2=$(printf %s \"$cwd\" | tr ./ --); "
+            + "d=$(ls -td \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
+            + "2>/dev/null | head -1); fi; fi; "
+            + "f=$(ls -t \"$d\"/*.jsonl 2>/dev/null | head -1); "
+            + "if [ -n \"$f\" ]; then head -c 25000000 \"$f\"; fi"
+    }
+
     /// The guest command that prints the age (seconds) of the newest write
     /// to a session's transcript — the "are background subagents still
     /// working?" probe. Project dir by worktree-slug glob, with the

@@ -76,6 +76,9 @@ final class ACAutomationServer {
     /// Coding board verbs: start / send-back / merge / to-testing / comment /
     /// delete on one task. Returns a JSON-able result ("error" key on failure).
     var onTaskCommand: ((_ id: UUID, _ action: String, _ body: [String: Any]) -> [String: Any])?
+    /// A finished task's raw session transcript (vsock or ext4) — nil when
+    /// none exists.
+    var onTaskTranscript: ((_ id: UUID) async -> String?)?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -634,6 +637,31 @@ final class ACAutomationServer {
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let ok = DispatchQueue.main.sync { self.onUpsertTask?(bodyJSON) ?? false }
             sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
+
+        case ("GET", let p) where p.hasPrefix("/tasks/") && p.hasSuffix("/transcript"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return
+            }
+            let idStr = String(p.dropFirst("/tasks/".count).dropLast("/transcript".count))
+                .removingPercentEncoding ?? ""
+            guard let taskID = UUID(uuidString: idStr) else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad task id"]); return
+            }
+            // Async fetch (vsock or ext4) bridged onto this socket thread.
+            let sem = DispatchSemaphore(value: 0)
+            var b64: String?
+            Task { @MainActor [weak self] in
+                if let raw = await self?.onTaskTranscript?(taskID) {
+                    b64 = Data(raw.utf8).base64EncodedString()
+                }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 90)
+            if let b64 {
+                sendResponse(fd: fd, status: 200, body: ["transcript": b64])
+            } else {
+                sendResponse(fd: fd, status: 404, body: ["error": "No transcript"])
+            }
 
         case (let m, let p) where p.hasPrefix("/tasks/"):
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
