@@ -149,6 +149,16 @@ struct CodingTasksTests {
         #expect(q.options.count == 2)
     }
 
+    @Test("transcriptAgeCommand: slug glob, cwd-marker fallback, rejection")
+    func transcriptAge() {
+        let cmd = CodingTaskEngine.transcriptAgeCommand(slug: "fix-leak-0720")
+        #expect(cmd?.contains("*-fix-leak-0720") == true)
+        #expect(cmd?.contains("wt/fix-leak-0720") == true)   // plain-tab fallback
+        #expect(cmd?.contains("stat -c %Y") == true)
+        #expect(CodingTaskEngine.transcriptAgeCommand(slug: "bad'slug") == nil)
+        #expect(CodingTaskEngine.transcriptAgeCommand(slug: "") == nil)
+    }
+
     @Test("initRepoCommand: idempotent init with a root commit")
     func initRepoCmd() {
         let cmd = CodingTaskEngine.initRepoCommand(quotedPath: "'/home/ubuntu/new'")

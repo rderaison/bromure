@@ -1555,24 +1555,35 @@ final class ScheduledAutomationEngine {
         else { return }
         finishSent.insert(branch)
 
-        // The run is over — stamp it (the kanban board's In Progress → Done
-        // transition keys off completedAt).
-        store.markCompleted(run.id)
-
-        // Chained automations fire on the finish itself, independent of
-        // closeWhenDone (leaving the tab open for inspection shouldn't
-        // stall the pipeline).
-        fireChained(after: automation, branch: branch)
-
-        BACDebug.log("automation", "run done — saving transcript for \(branch)")
+        BACDebug.log("automation", "run done signal for \(branch)")
         let closeWhenDone = automation.closeWhenDone
         let cloneID = run.runProfileID
         let runID = run.id
-        // Small delay so the Stop hook's final transcript lines land on disk
-        // before the guest copies the file.
+        let automationID = automation.id
         Task { [weak self] in
+            // A done with background subagents still running isn't done —
+            // settle on transcript quiescence before stamping, chaining,
+            // and tearing the session down.
+            await self?.delegate?.waitForSessionQuiet(profileID: profileID,
+                                                      branch: branch)
+            guard let self else { return }
+
+            // The run is over — stamp it (the kanban board's In Progress →
+            // Done transition keys off completedAt).
+            self.store.markCompleted(runID)
+
+            // Chained automations fire on the finish itself, independent of
+            // closeWhenDone (leaving the tab open for inspection shouldn't
+            // stall the pipeline).
+            if let a = self.store.automation(automationID) {
+                self.fireChained(after: a, branch: branch)
+            }
+
+            BACDebug.log("automation", "run complete — saving transcript for \(branch)")
+            // Small delay so the Stop hook's final transcript lines land on
+            // disk before the guest copies the file.
             try? await Task.sleep(nanoseconds: 2_000_000_000)
-            guard let self, let delegate = self.delegate else { return }
+            guard let delegate = self.delegate else { return }
             // Host copy FIRST: automation-finish removes an empty run's
             // worktree (with the guest-side transcript in it), and a
             // clone-first run's whole VM is destroyed moments later.

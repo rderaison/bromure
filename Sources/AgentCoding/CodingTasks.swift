@@ -769,23 +769,17 @@ final class CodingTaskEngine {
         if let task = store.tasks.first(where: {
             ($0.stage == .inProgress || $0.stage == .planning) && matches($0)
         }) {
-            let tab = delegate?.pane(for: profileID)?.model.tabs
-                .first { $0.worktreeBranch == branch }
-            BACDebug.log("tasks", "“\(task.title)” agent done → testing (\(branch))")
-            store.mutate(task.id) {
-                $0.stage = .testing
-                $0.testingAt = Date()
-                $0.branch = branch
-                if let tab {
-                    $0.worktreeDir = tab.repoRoot?.isEmpty == false ? tab.repoRoot : tab.cwd
-                    $0.parentBranch = tab.parentBranch
-                    $0.rootRepo = tab.rootRepo
-                }
+            guard !settling.contains(task.id) else { return }
+            settling.insert(task.id)
+            // Finalize only after the session is quiet — a Stop-hook done
+            // with background subagents still running isn't done.
+            Task { [weak self] in
+                await self?.delegate?.waitForSessionQuiet(profileID: profileID,
+                                                          branch: branch)
+                guard let self else { return }
+                self.settling.remove(task.id)
+                self.finalizeTaskDone(task.id, profileID: profileID, branch: branch)
             }
-            // The agent is done; a finished session left open is just an
-            // idle claude eating a tab. Review send-back reopens the
-            // worktree via task-resume when needed.
-            closeSessionTab(profileID: profileID, branch: branch)
             return
         }
         // A planning session signaling done: the parent card sits in
@@ -794,17 +788,72 @@ final class CodingTaskEngine {
         if let parent = store.tasks.first(where: {
             $0.stage == .backlog && $0.validationRequestedAt != nil && matches($0)
         }) {
-            BACDebug.log("tasks", "planning session done for “\(parent.title)”")
-            closeSessionTab(profileID: profileID, branch: branch, afterSeconds: 10)
-            if parent.validationInFlight {
-                abortPlanning(parent.id, reason: NSLocalizedString(
-                    "The planning session ended before filing phases — click Plan to retry.",
-                    comment: "plan watchdog"))
-            } else {
-                planWatchdogs[parent.id]?.cancel()
-                planWatchdogs[parent.id] = nil
+            guard !settling.contains(parent.id) else { return }
+            settling.insert(parent.id)
+            Task { [weak self] in
+                // Subagents the planner spawned may still be exploring — or
+                // about to file phases through the MCP. Settle first, judge
+                // "ended before filing" after.
+                await self?.delegate?.waitForSessionQuiet(profileID: profileID,
+                                                          branch: branch)
+                guard let self else { return }
+                self.settling.remove(parent.id)
+                BACDebug.log("tasks", "planning session done for “\(parent.title)”")
+                self.closeSessionTab(profileID: profileID, branch: branch,
+                                     afterSeconds: 10)
+                guard let p = self.store.task(parent.id) else { return }
+                if p.validationInFlight {
+                    self.abortPlanning(parent.id, reason: NSLocalizedString(
+                        "The planning session ended before filing phases — click Plan to retry.",
+                        comment: "plan watchdog"))
+                } else {
+                    self.planWatchdogs[parent.id]?.cancel()
+                    self.planWatchdogs[parent.id] = nil
+                }
             }
         }
+    }
+
+    /// The actual done transition: worktree metadata off the tab, stage →
+    /// Testing, session tab closed. Idempotent via the stage guard.
+    private func finalizeTaskDone(_ taskID: UUID, profileID: UUID, branch: String) {
+        guard let task = store.task(taskID),
+              task.stage == .inProgress || task.stage == .planning else { return }
+        let tab = delegate?.pane(for: profileID)?.model.tabs
+            .first { $0.worktreeBranch == branch }
+        BACDebug.log("tasks", "“\(task.title)” agent done → testing (\(branch))")
+        store.mutate(taskID) {
+            $0.stage = .testing
+            $0.testingAt = Date()
+            $0.branch = branch
+            if let tab {
+                $0.worktreeDir = tab.repoRoot?.isEmpty == false ? tab.repoRoot : tab.cwd
+                $0.parentBranch = tab.parentBranch
+                $0.rootRepo = tab.rootRepo
+            }
+        }
+        // The agent is done; a finished session left open is just an idle
+        // claude eating a tab. Review send-back reopens the worktree via
+        // task-resume when needed.
+        closeSessionTab(profileID: profileID, branch: branch)
+    }
+
+    /// Immediate hand-to-review for the board_ready_for_review MCP tool: a
+    /// DELIBERATE call from the agent is not the premature Stop-hook case,
+    /// so it skips the quiescence settle and transitions synchronously.
+    @discardableResult
+    func handToReview(profileID: UUID, worktreeBranch: String?) -> Bool {
+        guard let branch = worktreeBranch, branch.hasPrefix("wt/") else { return false }
+        let slugPart = String(branch.dropFirst(3))
+        guard let task = store.tasks.first(where: { t in
+            guard t.stage == .inProgress || t.stage == .planning,
+                  t.profileID == profileID,
+                  let slug = t.branchSlug else { return false }
+            return slugPart == slug || (slugPart.hasPrefix(slug + "-")
+                && Int(slugPart.dropFirst(slug.count + 1)) != nil)
+        }) else { return false }
+        finalizeTaskDone(task.id, profileID: profileID, branch: branch)
+        return store.task(task.id)?.stage == .testing
     }
 
     // MARK: Review round (Testing → In Progress)
@@ -884,6 +933,27 @@ final class CodingTaskEngine {
             + "if [ -n \"$f\" ]; then tail -c 300000 \"$f\"; fi; "
             + "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
             + "then echo; tr -d '\\n' < \(pq); echo; fi"
+    }
+
+    /// The guest command that prints the age (seconds) of the newest write
+    /// to a session's transcript — the "are background subagents still
+    /// working?" probe. Project dir by worktree-slug glob, with the
+    /// plain-tab fallback through the wt/ marker's cwd. Prints nothing
+    /// when no transcript exists.
+    nonisolated static func transcriptAgeCommand(slug: String) -> String? {
+        guard !slug.isEmpty,
+              slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" })
+        else { return nil }
+        return "d=$(ls -td ~/.claude/projects/*-\(slug) 2>/dev/null | head -1); "
+            + "if [ -z \"$d\" ]; then "
+            + "cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
+            + "2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); "
+            + "if [ -n \"$cwd\" ]; then "
+            + "e1=$(printf %s \"$cwd\" | tr / -); e2=$(printf %s \"$cwd\" | tr ./ --); "
+            + "d=$(ls -td \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
+            + "2>/dev/null | head -1); fi; fi; "
+            + "f=$(ls -t \"$d\"/*.jsonl 2>/dev/null | head -1); "
+            + "if [ -n \"$f\" ]; then echo $(( $(date +%s) - $(stat -c %Y \"$f\") )); fi"
     }
 
     /// The guest command that makes a task's directory usable: mkdir -p,
@@ -1004,6 +1074,9 @@ final class CodingTaskEngine {
     // MARK: Planning watchdog
 
     private var planWatchdogs: [UUID: Task<Void, Never>] = [:]
+    /// Tasks whose done signal arrived and is settling (see
+    /// waitForSessionQuiet) — later Stop signals are ignored meanwhile.
+    private var settling: Set<UUID> = []
 
     /// End a planning session's in-flight state with a reason — the card
     /// stops spinning and says what to do, instead of waiting forever.

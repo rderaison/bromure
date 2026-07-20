@@ -210,7 +210,7 @@ final class TaskBoardMCPServer {
             guard task.stage == .inProgress || task.stage == .planning else {
                 return textResult("Already in \(task.stage.rawValue).")
             }
-            engine()?.agentFinished(profileID: profileID, worktreeBranch: branch)
+            engine()?.handToReview(profileID: profileID, worktreeBranch: branch)
             let now = store.task(task.id)?.stage
             guard now == .testing else {
                 return errorResult("could not move the task to review — is the branch still checked out?")

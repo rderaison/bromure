@@ -7406,6 +7406,45 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             command: "echo \(b64) | base64 -d | python3 -", timeout: 10)
     }
 
+    /// A Stop-hook "done" can be premature: the hook fires when the MAIN
+    /// thread ends its turn, but background subagents it spawned are still
+    /// working — their sidechain writes keep the session transcript hot,
+    /// and each completion re-wakes the main thread for another turn (and
+    /// another Stop). Tearing the session down on the first done kills
+    /// them mid-flight. This holds completion until the transcript has
+    /// been quiet for `quiet` seconds; an unreadable probe (no transcript,
+    /// VM gone) counts as quiet, and `cap` bounds the total wait.
+    func waitForSessionQuiet(profileID: Profile.ID, branch: String,
+                             quiet: Int = 20, cap: TimeInterval = 1800) async {
+        guard branch.hasPrefix("wt/"),
+              let cmd = CodingTaskEngine.transcriptAgeCommand(
+                  slug: String(branch.dropFirst(3))) else { return }
+        let deadline = Date().addingTimeInterval(cap)
+        var held = false
+        while Date() < deadline {
+            guard let out = try? await guestExec(profileID: profileID,
+                                                 command: cmd, timeout: 10),
+                  let age = Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
+            else { return }
+            if age >= quiet {
+                if held {
+                    BACDebug.log("session",
+                                 "\(branch): transcript quiet — completing")
+                }
+                return
+            }
+            if !held {
+                held = true
+                BACDebug.log("session", "\(branch): done signaled but the "
+                    + "transcript is still active (\(age)s ago) — background "
+                    + "agents? holding completion")
+            }
+            try? await Task.sleep(nanoseconds:
+                UInt64(max(quiet - age, 5)) * 1_000_000_000)
+        }
+        BACDebug.log("session", "\(branch): settle cap reached — completing anyway")
+    }
+
     /// Copy a finished automation run's Claude transcript out of the guest
     /// into the host-side per-run archive (runs/<runID>/transcript.jsonl).
     /// Called by the engine BEFORE automation-finish: an empty run's worktree
