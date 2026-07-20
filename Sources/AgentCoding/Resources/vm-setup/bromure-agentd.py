@@ -2076,10 +2076,15 @@ def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
     _set_window_option(win, "@display", display)
 
 
-def _automation_tab(cwd, display, tool, prompt_b64):
+def _automation_tab(cwd, display, tool, prompt_b64, slug=""):
     """Plain agent tab for an automation whose path isn't a git repo: same
     launch env as a worktree tab, no git anything. Always yolo — an
-    automation is unattended."""
+    automation is unattended.
+
+    The synthetic wt/<slug> marker matters: the ENTIRE completion pipeline
+    (done-signal matching, transcript pull, automation-finish's close) keys
+    off @worktree. Without it a non-repo run's tab never closes — the agent
+    finishes and the session just sits there."""
     _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""
@@ -2096,6 +2101,8 @@ def _automation_tab(cwd, display, tool, prompt_b64):
         return
     _set_window_option(win, "@label", tool)
     _set_window_option(win, "@display", display)
+    if slug:
+        _set_window_option(win, "@worktree", "wt/" + slug)
 
 
 def _seed_question_hooks():
@@ -2210,7 +2217,7 @@ def _automation_run(cwd, slug, display, tool, prompt_b64, mode=""):
         # Progress — refuse instead of degrading silently.
         worktree_err("task: %s is not a git repo" % cwd)
     else:
-        _automation_tab(cwd, display, tool, prompt_b64)
+        _automation_tab(cwd, display, tool, prompt_b64, slug=slug)
 
 
 def _save_claude_transcript(wt_dir):

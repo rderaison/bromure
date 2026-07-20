@@ -7424,8 +7424,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // guest's -N suffix) — safe to splice into the shell line.
         guard slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" }),
               !slug.isEmpty else { return }
+        // First try the worktree layout (project dir ends in the slug).
+        // A NON-REPO run lives in a plain tab at the automation's own path,
+        // so its project dir is the Claude-encoded cwd — resolve the cwd
+        // through the tab's synthetic wt/ marker while the tab still exists
+        // (this pull runs before automation-finish closes it).
         let cmd = """
         d=$(ls -td ~/.claude/projects/*-\(slug) 2>/dev/null | head -1); \
+        if [ -z "$d" ]; then \
+        cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' \
+        2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); \
+        if [ -n "$cwd" ]; then \
+        e1=$(printf %s "$cwd" | tr / -); e2=$(printf %s "$cwd" | tr ./ --); \
+        d=$(ls -td "$HOME/.claude/projects/$e1" "$HOME/.claude/projects/$e2" \
+        2>/dev/null | head -1); fi; fi; \
         if [ -n "$d" ]; then ls -t "$d"/*.jsonl 2>/dev/null | head -1 \
         | xargs -r cat | head -c 25000000; fi
         """
