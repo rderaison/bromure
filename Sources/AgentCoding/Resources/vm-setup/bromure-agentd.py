@@ -2283,28 +2283,73 @@ _MERGE_PROMPT = ("A git merge in this directory hit conflicts. Run 'git status'"
                  " first. Only run 'git commit --no-edit' to finish the merge"
                  " after I confirm.")
 
+# The merge FAILED TO START — it exited with an error before creating a
+# merge (no MERGE_HEAD): classically untracked files in the destination
+# checkout that the branch also ships ("would be overwritten by merge").
+# The window used to fall through to the success message ("no MERGE_HEAD
+# = no conflicts") and close 2s later — a refused merge misreported as
+# merged, with the host's verification then stuck on a merge that never
+# happened. Hand the agent the saved error instead.
+_MERGE_FAIL_PROMPT = (
+    "A git merge the user requested in this directory FAILED TO START."
+    " The exact command and its error output were saved to the file named"
+    " in the WT_MERGE_FAIL_FILE environment variable — run"
+    " `cat \"$WT_MERGE_FAIL_FILE\"` first.\n"
+    "Typical cause: untracked files in THIS checkout that the incoming"
+    " branch also contains ('would be overwritten by merge'). Compare each"
+    " colliding file with the branch's version (`git show <branch>:<path>`);"
+    " remove untracked duplicates the branch ships, and move aside or"
+    " commit anything that genuinely only exists here. Never delete"
+    " committed work.\n"
+    "Then run the saved merge command to completion. If it conflicts,"
+    " resolve every conflicted file keeping both sides' intent, stage the"
+    " resolutions with 'git add', then summarize and ask me to confirm"
+    " before finishing with 'git commit --no-edit'.\n"
+    "Reply with a one-line summary of what blocked the merge and what"
+    " landed.")
+
 # The merge window command (behaviour-equal to the shell heredoc): run the merge
-# unless one is already in progress, then either hand the checkout to the coding
-# agent (conflicts → exec bash -l → .bashrc worktree-launch branch) or report a
-# clean merge and wait. Branch names arrive via -e (env VALUES, never re-parsed).
-# A clean merge closes its own tab after a beat (the tmux window dies with
-# the command); only a conflict keeps it open, handing off to the resolver.
+# unless one is already in progress, then hand the checkout to the coding agent
+# on conflicts (exec bash -l → .bashrc worktree-launch) — or on a merge that
+# couldn't START (saved error + the fail prompt swapped in) — or report a
+# clean merge and wait. Branch names arrive via -e (env VALUES, never
+# re-parsed). A clean merge closes its own tab after a beat (the tmux window
+# dies with the command); the agent paths keep it open.
 _MERGE_WINDOW_CMD = (
-    'if ! git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then '
-    'git merge --no-edit "$WT_SRC"; fi; echo; '
+    'rc=0; if ! git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then '
+    'out=$(git merge --no-edit "$WT_SRC" 2>&1); rc=$?; printf "%s\\n" "$out"; fi; echo; '
     'if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then '
     'echo "bromure: merge conflicts — starting $BROMURE_AC_WT_TOOL to resolve…";'
-    ' echo; exec bash -l; else '
+    ' echo; exec bash -l; '
+    'elif [ "$rc" -ne 0 ]; then '
+    'mkdir -p "$HOME/.bromure/merge-fails"; '
+    'export WT_MERGE_FAIL_FILE="$HOME/.bromure/merge-fails/'
+    '$(printf %s "$WT_SRC-into-$WT_DST" | tr / -).txt"; '
+    '{ echo "command: git merge --no-edit $WT_SRC   (in the $WT_DST checkout)"; '
+    'printf "%s\\n" "$out"; } > "$WT_MERGE_FAIL_FILE"; '
+    'echo "bromure: merge could not start — starting $BROMURE_AC_WT_TOOL to sort it out…";'
+    ' echo; export BROMURE_AC_WT_PROMPT="$WT_FAIL_PROMPT"; exec bash -l; '
+    'else '
     'echo "bromure: merged $WT_SRC into $WT_DST."; sleep 2; fi')
 
 # Squash flavor: one commit on the target from the branch's whole diff.
 # `merge --squash` sets no MERGE_HEAD — conflicts show as unmerged index
-# entries instead, so that's the resolver trigger here.
+# entries instead, so that's the resolver trigger here. Same failed-to-start
+# handling as the merge flavor.
 _SQUASH_WINDOW_CMD = (
-    'git merge --squash "$WT_SRC"; echo; '
+    'out=$(git merge --squash "$WT_SRC" 2>&1); rc=$?; printf "%s\\n" "$out"; echo; '
     'if [ -n "$(git ls-files -u)" ]; then '
     'echo "bromure: squash-merge conflicts — starting $BROMURE_AC_WT_TOOL to resolve…";'
-    ' echo; exec bash -l; else '
+    ' echo; exec bash -l; '
+    'elif [ "$rc" -ne 0 ]; then '
+    'mkdir -p "$HOME/.bromure/merge-fails"; '
+    'export WT_MERGE_FAIL_FILE="$HOME/.bromure/merge-fails/'
+    '$(printf %s "$WT_SRC-into-$WT_DST" | tr / -).txt"; '
+    '{ echo "command: git merge --squash $WT_SRC && git commit   (in the $WT_DST checkout)"; '
+    'printf "%s\\n" "$out"; } > "$WT_MERGE_FAIL_FILE"; '
+    'echo "bromure: squash-merge could not start — starting $BROMURE_AC_WT_TOOL to sort it out…";'
+    ' echo; export BROMURE_AC_WT_PROMPT="$WT_FAIL_PROMPT"; exec bash -l; '
+    'else '
     'git commit -m "$WT_MSG" >/dev/null 2>&1; '
     'echo "bromure: squash-merged $WT_SRC into $WT_DST."; sleep 2; fi')
 
@@ -2371,7 +2416,10 @@ def _worktree_merge(branch, target, root, display, tool, mode="merge"):
                       env={"WT_SRC": branch, "WT_DST": target,
                            "WT_MSG": "Squash-merge %s" % branch,
                            "BROMURE_AC_WT_TOOL": tool,
-                           "BROMURE_AC_WT_PROMPT": rp64})
+                           "BROMURE_AC_WT_PROMPT": rp64,
+                           # Swapped into BROMURE_AC_WT_PROMPT by the window
+                           # command when the merge fails to start.
+                           "WT_FAIL_PROMPT": _b64e(_MERGE_FAIL_PROMPT)})
     # @display "Merge → …" is the host's marker for a merge tab.
     if win:
         _set_window_option(win, "@display", "Merge → " + target)
