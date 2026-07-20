@@ -66,7 +66,9 @@ final class TaskBoardMCPServer {
     Tools for the Bromure coding board. This session IS a board task: \
     board_get_task returns your card (brief, review comments, plan); \
     board_set_plan records the agreed plan on the card; \
-    board_create_subtasks files follow-up work as new backlog cards; \
+    board_create_subtasks files follow-up work as new backlog cards \
+    (declare inter-phase ordering in dependsOn — prose is not enforced); \
+    board_set_dependencies corrects a filed phase's dependency list; \
     board_ready_for_review hands this task to the Testing/Review column — \
     call it as your last action once everything is committed.
     """
@@ -88,7 +90,7 @@ final class TaskBoardMCPServer {
         ],
         [
             "name": "board_create_subtasks",
-            "description": "File follow-up work as ordered cards in the board's Plan column, linked to this task (same workspace and repository). Use for work that is out of scope for this session. Each may declare dependsOn: 1-based phase numbers (counting ALL phases filed for this task so far, across calls, in filing order) that must be DONE before it can start.",
+            "description": "File follow-up work as ordered cards in the board's Plan column, linked to this task (same workspace and repository). Use for work that is out of scope for this session. Each may declare dependsOn: 1-based phase numbers (counting ALL phases filed for this task so far, across calls, in filing order) that must be DONE before it can start. dependsOn metadata is the ONLY sequencing the board enforces — dependencies described in a phase's text are ignored, and a phase without dependsOn can start in parallel with everything else.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -110,6 +112,27 @@ final class TaskBoardMCPServer {
             ],
         ],
         [
+            "name": "board_set_dependencies",
+            "description": "Declare or correct phase dependencies after filing. Each entry names a phase (1-based number in filing order across all of this task's phases) and the phase numbers it must wait for; the entry REPLACES that phase's dependency list. Use this when the graph echoed by board_create_subtasks doesn't match your plan.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "dependencies": [
+                        "type": "array",
+                        "items": [
+                            "type": "object",
+                            "properties": [
+                                "phase": ["type": "integer"],
+                                "dependsOn": ["type": "array", "items": ["type": "integer"]],
+                            ],
+                            "required": ["phase", "dependsOn"],
+                        ],
+                    ],
+                ],
+                "required": ["dependencies"],
+            ],
+        ],
+        [
             "name": "board_ready_for_review",
             "description": "Hand this task to the Testing/Review column. Call ONLY after all work is committed to the branch.",
             "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
@@ -118,6 +141,23 @@ final class TaskBoardMCPServer {
 
     /// The task this connection is working on: the branch's live task in
     /// this workspace (in progress or already in review for late calls).
+    /// One line per phase of `parentID`, in filing order, with its recorded
+    /// dependencies as plan-wide phase numbers — what create/set echo back.
+    private func dependencyGraphSummary(parentID: UUID, store: CodingTaskStore) -> String {
+        let phases = store.tasks
+            .filter { $0.parentTaskID == parentID }
+            .sorted { $0.createdAt < $1.createdAt }
+        let numByID = Dictionary(uniqueKeysWithValues:
+            phases.enumerated().map { ($1.id, $0 + 1) })
+        return phases.map { p in
+            let deps = (p.dependsOn ?? []).compactMap { numByID[$0] }.sorted()
+            let suffix = deps.isEmpty
+                ? "no dependencies — can start immediately"
+                : "waits for \(deps.map(String.init).joined(separator: ", "))"
+            return "\(numByID[p.id]!). \(p.title) (\(suffix))"
+        }.joined(separator: "\n")
+    }
+
     private func resolveTask(branch: String?) -> CodingTask? {
         guard let branch, branch.hasPrefix("wt/"), let store = store() else { return nil }
         let slugPart = String(branch.dropFirst(3))
@@ -225,8 +265,42 @@ final class TaskBoardMCPServer {
                 if $0.stage == .backlog { $0.validatedAt = Date() }
             }
             BACDebug.log("tasks", "“\(task.title)”: \(titles.count) subtask(s) filed via MCP")
-            return textResult("Filed \(titles.count) card(s) in the Plan column: "
-                + titles.joined(separator: " · "))
+            // Echo the RECORDED graph so the planner can catch a phase it
+            // forgot to sequence (prose dependencies are not enforced).
+            return textResult("Filed \(titles.count) card(s). Recorded phase list:\n"
+                + dependencyGraphSummary(parentID: task.id, store: store)
+                + "\nOnly dependsOn metadata sequences phases — anything only "
+                + "stated in a brief is NOT enforced. Fix omissions with "
+                + "board_set_dependencies.")
+        case "board_set_dependencies":
+            guard let raw = args["dependencies"] as? [[String: Any]], !raw.isEmpty else {
+                return errorResult("dependencies (non-empty array) is required")
+            }
+            let phases = store.tasks
+                .filter { $0.parentTaskID == task.id }
+                .sorted { $0.createdAt < $1.createdAt }
+            guard !phases.isEmpty else {
+                return errorResult("no phases filed for this task yet")
+            }
+            var updated = 0
+            for item in raw {
+                guard let n = item["phase"] as? Int, n >= 1, n <= phases.count else { continue }
+                let selfID = phases[n - 1].id
+                let deps = ((item["dependsOn"] as? [Int]) ?? []).compactMap { idx -> UUID? in
+                    guard idx >= 1, idx <= phases.count, phases[idx - 1].id != selfID
+                    else { return nil }
+                    return phases[idx - 1].id
+                }
+                store.mutate(selfID) { $0.dependsOn = deps.isEmpty ? nil : deps }
+                updated += 1
+            }
+            guard updated > 0 else { return errorResult("no valid phase numbers") }
+            // A queued phase whose corrected deps are all Done starts now;
+            // running/finished phases just carry the updated metadata.
+            engine()?.pumpQueue()
+            BACDebug.log("tasks", "“\(task.title)”: dependencies set on \(updated) phase(s) via MCP")
+            return textResult("Recorded. Phase list is now:\n"
+                + dependencyGraphSummary(parentID: task.id, store: store))
         case "board_ready_for_review":
             guard task.stage == .inProgress || task.stage == .planning else {
                 return textResult("Already in \(task.stage.rawValue).")

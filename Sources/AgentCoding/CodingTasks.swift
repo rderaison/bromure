@@ -75,6 +75,10 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// Set when the user started this phase while its dependencies were
     /// unmet — it auto-starts the moment they all reach Done.
     var queuedAt: Date?
+    /// Set while a merge is running in the guest. The card stays in Testing
+    /// ("Merging…") until the engine VERIFIES the branch landed in the
+    /// target — only then does it go Done and unblock dependent phases.
+    var mergingAt: Date?
     /// Create `repoPath` (mkdir -p + git init + empty root commit) before
     /// launching, when it isn't already its own repository. Off by default:
     /// a monorepo subdirectory must NOT get a nested repo by surprise.
@@ -340,7 +344,13 @@ final class CodingTaskEngine {
         tool: ordered, each roughly one reviewable pull request of work, \
         with dependsOn set (1-based phase numbers, counting every phase \
         you've filed for this task so far) for phases that need earlier \
-        ones DONE first. The phases appear on the user's board as cards.
+        ones DONE first. dependsOn metadata is the ONLY thing that \
+        sequences phases — a dependency mentioned in a phase's brief text \
+        is NOT enforced, and a phase without dependsOn starts in parallel \
+        with everything else. The tool result echoes the recorded \
+        dependency graph: check it, and fix any omission with \
+        board_set_dependencies. The phases appear on the user's board as \
+        cards.
         2. Record a short overview of the plan with board_set_plan.
         Do NOT write any code, do NOT modify or commit anything. Explore in \
         THIS session directly — do NOT spawn subagents or background tasks \
@@ -975,6 +985,7 @@ final class CodingTaskEngine {
         store.mutate(taskID) {
             $0.stage = .inProgress
             $0.lastError = nil
+            $0.mergingAt = nil   // cancels a pending merge verification
             for i in $0.comments.indices where $0.comments[i].sentAt == nil {
                 $0.comments[i].sentAt = now
             }
@@ -1447,6 +1458,7 @@ final class CodingTaskEngine {
             }
             return
         }
+        guard task.mergingAt == nil else { return }   // one merge in flight
         let ok = delegate.automationWorktreeCommand(
             profileNameOrID: task.profileID.uuidString, action: "merge",
             args: [branch, target, root,
@@ -1460,13 +1472,69 @@ final class CodingTaskEngine {
         }
         BACDebug.log("tasks",
                      "“\(task.title)”: \(squash ? "squash-" : "")merging \(branch) → \(target)")
-        store.mutate(taskID) {
-            $0.stage = .done
-            $0.completedAt = Date()
-            $0.merged = true
-            $0.lastError = nil
+        // NOT Done yet: the guest merge can take a while (agent committing
+        // outstanding work, conflict resolution awaiting the user) — and
+        // dependent phases queued on this card must not start until the
+        // changes actually exist on the target. Verify, then finish.
+        store.mutate(taskID) { $0.mergingAt = Date(); $0.lastError = nil }
+        Task { [weak self] in
+            await self?.verifyMergeLanded(taskID, branch: branch, target: target,
+                                          root: root, squash: squash)
         }
-        pumpQueue()
+    }
+
+    private static let mergeVerifyTimeout: TimeInterval = 1800   // 30 min
+    private static let mergeVerifyInterval: UInt64 = 5_000_000_000  // 5s
+
+    /// Poll the guest's git state until the branch's changes are contained
+    /// in the target, then flip the card Done and pump the queue. Merge
+    /// flavor decides the check: a normal merge makes the branch an ancestor
+    /// of the target; a squash merge doesn't, but leaves the two trees
+    /// identical. The task's worktree must also be clean — the agent-driven
+    /// dirty-merge path commits there first, and until it has, an
+    /// "already-an-ancestor" branch (uncommitted-only work) must not count.
+    private func verifyMergeLanded(_ taskID: UUID, branch: String,
+                                   target: String, root: String,
+                                   squash: Bool) async {
+        func q(_ s: String) -> String {
+            "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        var check = squash
+            ? "git -C \(q(root)) diff --quiet \(q(target)) \(q(branch)) -- 2>/dev/null"
+            : "git -C \(q(root)) merge-base --is-ancestor \(q(branch)) \(q(target)) 2>/dev/null"
+        if let wt = store.task(taskID)?.worktreeDir, !wt.isEmpty {
+            check = "[ -z \"$(git -C \(q(wt)) status --porcelain 2>/dev/null)\" ] && " + check
+        }
+        let cmd = check + " && echo MERGED"
+        let deadline = Date().addingTimeInterval(Self.mergeVerifyTimeout)
+        while Date() < deadline {
+            // Merge cancelled or superseded (sent back to In Progress,
+            // closed without merge, card deleted) → stop quietly.
+            guard let task = store.task(taskID), task.stage == .testing,
+                  task.mergingAt != nil, let delegate else { return }
+            let out = try? await delegate.guestExec(
+                profileID: task.profileID, command: cmd, timeout: 10)
+            if out?.contains("MERGED") == true {
+                BACDebug.log("tasks", "“\(task.title)”: merge verified on \(target)")
+                store.mutate(taskID) {
+                    $0.stage = .done
+                    $0.completedAt = Date()
+                    $0.merged = true
+                    $0.mergingAt = nil
+                    $0.lastError = nil
+                }
+                pumpQueue()
+                return
+            }
+            try? await Task.sleep(nanoseconds: Self.mergeVerifyInterval)
+        }
+        store.mutate(taskID) {
+            guard $0.mergingAt != nil else { return }
+            $0.mergingAt = nil
+            $0.lastError = NSLocalizedString(
+                "The merge hasn't completed — check the merge tab in the workspace (conflicts wait for your confirmation), then click Merge again, or use Close (no merge).",
+                comment: "task merge")
+        }
     }
 
     /// "Create Pull Request": the existing worktree-pr flow — an agent tab
@@ -1504,6 +1572,7 @@ final class CodingTaskEngine {
             $0.stage = .done
             $0.completedAt = Date()
             $0.merged = false
+            $0.mergingAt = nil
         }
         pumpQueue()
     }
@@ -1513,7 +1582,10 @@ final class CodingTaskEngine {
     /// non-Claude agents that never signal done.
     func moveToInProgress(_ taskID: UUID) {
         store.mutate(taskID) {
-            if $0.stage == .testing || $0.stage == .planning { $0.stage = .inProgress }
+            if $0.stage == .testing || $0.stage == .planning {
+                $0.stage = .inProgress
+                $0.mergingAt = nil   // cancels a pending merge verification
+            }
         }
     }
 

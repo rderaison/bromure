@@ -951,10 +951,25 @@ private struct TestingTaskCard: View {
                             .help(NSLocalizedString("Draft review comments", comment: ""))
                     }
                 }
-                Text(NSLocalizedString("Ready for review — click to see the diff",
-                                       comment: "task card"))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                if task.mergingAt != nil {
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.mini)
+                        Text(NSLocalizedString("Merging… goes Done once the changes land",
+                                               comment: "task card"))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let err = task.lastError {
+                    Text(err)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.orange)
+                        .lineLimit(3)
+                } else {
+                    Text(NSLocalizedString("Ready for review — click to see the diff",
+                                           comment: "task card"))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
             }
             .contentShape(Rectangle())
         }

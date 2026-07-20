@@ -268,6 +268,46 @@ struct CodingTasksTests {
         #expect(!phases[2].unmetDependencies(in: store.tasks).isEmpty)
     }
 
+    @Test("board_set_dependencies corrects an under-declared graph")
+    @MainActor
+    func setDependenciesAfterFiling() async throws {
+        let store = CodingTaskStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("kb-\(UUID().uuidString).json"))
+        let pid = UUID()
+        var parent = CodingTask(title: "Plan", profileID: pid)
+        parent.branchSlug = "plan"
+        parent.stage = .inProgress
+        store.upsert(parent)
+        let server = TaskBoardMCPServer(profileID: pid,
+                                        store: { store }, engine: { nil })
+        func call(_ name: String, _ arguments: [String: Any]) async -> String {
+            let req: [String: Any] = [
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": ["name": name, "arguments": arguments],
+            ]
+            let line = String(data: try! JSONSerialization.data(withJSONObject: req),
+                              encoding: .utf8)!
+            return await server.handle(line: line, branch: "wt/plan") ?? ""
+        }
+        // The planner's real-world failure: dependencies in prose only.
+        let filed = await call("board_create_subtasks", ["subtasks": [
+            ["title": "Phase 1"], ["title": "Phase 2"], ["title": "Phase 3"],
+        ]])
+        // The response must expose the (missing) graph so the model notices.
+        #expect(filed.contains("can start immediately"))
+        #expect(filed.contains("board_set_dependencies"))
+        _ = await call("board_set_dependencies", ["dependencies": [
+            ["phase": 2, "dependsOn": [1]],
+            ["phase": 3, "dependsOn": [2]],
+        ]])
+        let phases = store.tasks.filter { $0.parentTaskID == parent.id }
+            .sorted { $0.createdAt < $1.createdAt }
+        try #require(phases.count == 3)
+        #expect(phases[0].dependsOn == nil)
+        #expect(phases[1].dependsOn == [phases[0].id])
+        #expect(phases[2].dependsOn == [phases[1].id])
+    }
+
     @Test("planBrief extracts the user's brief from the planner meta-prompt")
     func planBriefExtraction() {
         let task = CodingTask(title: "VM scanner",
