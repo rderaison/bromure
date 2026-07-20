@@ -3599,7 +3599,11 @@ public final class ProfileStore {
             # the filename so each tab's dot is independent.
             d=/mnt/bromure-outbox
             [ -d "$d" ] || exit 0
-            idx=$(tmux display-message -p -t "${TMUX_PANE:-}" '#{window_index}' 2>/dev/null)
+            # No TMUX_PANE → bail. An empty -t target resolves to the ACTIVE
+            # window, which stamps this signal onto whatever tab the user is
+            # looking at (a task's "done" once killed the plan interview).
+            [ -n "${TMUX_PANE:-}" ] || exit 0
+            idx=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
             [ -n "$idx" ] || exit 0
             printf '%s' "${1:-}" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
               && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true

@@ -807,9 +807,13 @@ final class CodingTaskEngine {
             }
             return
         }
-        // A planning session signaling done: the parent card sits in
-        // Backlog. Close the interview tab; if the agent quit WITHOUT
-        // filing phases, say so on the card.
+        // A planning session signaling done. Claude's Stop hook fires at the
+        // end of EVERY turn — for an interactive interview that includes the
+        // agent merely pausing for the user's reply, so "done" alone must
+        // NEVER kill the session. Only once the phases have actually landed
+        // is the signal the session's real completion; an unfiled "done" is
+        // ignored (the watchdog owns true deaths: claude exiting to a bare
+        // shell, the tab disappearing, the 1-hour cap).
         if let parent = store.tasks.first(where: {
             $0.stage == .backlog && $0.validationRequestedAt != nil && matches($0)
         }) {
@@ -817,24 +821,21 @@ final class CodingTaskEngine {
             settling.insert(parent.id)
             Task { [weak self] in
                 // Subagents the planner spawned may still be exploring — or
-                // about to file phases through the MCP. Settle first, judge
-                // "ended before filing" after.
+                // about to file phases through the MCP. Settle before judging.
                 await self?.delegate?.waitForSessionQuiet(profileID: profileID,
                                                           branch: branch)
                 guard let self else { return }
                 self.settling.remove(parent.id)
+                guard let p = self.store.task(parent.id) else { return }
+                guard !p.validationInFlight else {
+                    BACDebug.log("tasks", "“\(p.title)”: turn-end Stop before filing — interview continues")
+                    return
+                }
                 BACDebug.log("tasks", "planning session done for “\(parent.title)”")
                 self.closeSessionTab(profileID: profileID, branch: branch,
                                      afterSeconds: 10)
-                guard let p = self.store.task(parent.id) else { return }
-                if p.validationInFlight {
-                    self.abortPlanning(parent.id, reason: NSLocalizedString(
-                        "The planning session ended before filing phases — click Plan to retry.",
-                        comment: "plan watchdog"))
-                } else {
-                    self.planWatchdogs[parent.id]?.cancel()
-                    self.planWatchdogs[parent.id] = nil
-                }
+                self.planWatchdogs[parent.id]?.cancel()
+                self.planWatchdogs[parent.id] = nil
             }
         }
     }
@@ -1215,14 +1216,23 @@ final class CodingTaskEngine {
     /// The guest command for a sequence of TUI keystrokes into a session's
     /// tab (answering an AskUserQuestion picker). Digits are sent literally,
     /// named keys (Enter, Right) as tmux key names, with a beat between
-    /// keystrokes — the picker debounces and swallows bursts.
+    /// keystrokes — the picker debounces and swallows bursts. Every DIGIT
+    /// is gated on the picker still being on screen: the picker
+    /// instant-commits (a digit can answer AND submit), so a scripted
+    /// sequence can outlive it by a key — an ungated late digit lands as
+    /// stray text in the chat input. Named keys stay ungated (a stray
+    /// Enter on an empty input is invisible; refusing the final Enter on a
+    /// submit stop whose footer reads differently would break submission).
     nonisolated static func answerKeysCommand(tabIndex: Int, keys: [String]) -> String {
-        keys.compactMap { k -> String? in
+        let probe = "tmux capture-pane -p -t bromure:\(tabIndex) 2>/dev/null "
+            + "| grep -q 'Enter to select'"
+        return keys.compactMap { k -> String? in
             let named = ["Enter", "Right", "Left", "Down", "Up", "Tab", "Space"]
             let isDigit = k.count == 1 && k.first!.isNumber
             guard isDigit || named.contains(k) else { return nil }
-            return "tmux send-keys -t bromure:\(tabIndex) \(isDigit ? "-l " : "")\(k)"
-        }.joined(separator: " && sleep 1 && ")
+            let send = "tmux send-keys -t bromure:\(tabIndex) \(isDigit ? "-l " : "")\(k)"
+            return isDigit ? "{ \(probe) && \(send); true; }" : send
+        }.joined(separator: "; sleep 1; ")
     }
 
     /// Send picker keystrokes into a live session (see answerKeysCommand).
