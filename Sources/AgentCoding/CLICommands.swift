@@ -441,6 +441,18 @@ struct VMAttachWindow: ParsableCommand {
             help: "Fat-client remote host id: attach to a workspace on a remote bromure-ac over SSH.")
     var remote: String?
 
+    // Peer (P2P) hosts exist only in the spawning app's memory — never in
+    // hosts.json — and their loopback endpoint belongs to that app's broker.
+    // The app passes everything this subprocess needs on the command line.
+    @Option(name: .long,
+            help: "Peer attach: peer device id (derives the HostKeyAlias the host key is pinned under).")
+    var remotePeer: String?
+    @Option(name: .long,
+            help: "Peer attach: 127.0.0.1:<port> of the P2P loopback shim owned by the app process.")
+    var remoteEndpoint: String?
+    @Option(name: .long, help: "Peer attach: remote login user.")
+    var remoteUser: String?
+
     func run() throws {
         // Wipe the host login banner ("Last login: … on ttysNNN") that ghostty's
         // login shell prints before it execs us. While the VM is still booting
@@ -459,7 +471,7 @@ struct VMAttachWindow: ParsableCommand {
             // Interactive stream → dedicated direct SSH connection (no
             // ControlMaster; it buffers a multiplexed channel's server→client
             // output). The GET /vms resolution below reuses the same client.
-            guard let client = RemoteTransport.client(hostID: hostID, interactive: true) else {
+            guard let client = remoteClient(hostID: hostID) else {
                 throw ValidationError("Unknown remote host: \(remoteID)")
             }
             try attachLoop(client: client)
@@ -469,6 +481,21 @@ struct VMAttachWindow: ParsableCommand {
         let client = ControlClient()
         try client.ensureAgentRunning()
         try attachLoop(client: client)
+    }
+
+    /// A tunnel client for the remote host. A peer host is rebuilt from the
+    /// command-line plumbing (identity → HostKeyAlias pin, endpoint → the
+    /// app-owned loopback shim); a by-address host loads from hosts.json.
+    private func remoteClient(hostID: UUID) -> ControlClient? {
+        if let peer = remotePeer, let ep = remoteEndpoint,
+           let colon = ep.lastIndex(of: ":"), let port = Int(ep[ep.index(after: colon)...]) {
+            var host = RemoteHost(name: String(ep[..<colon]), address: String(ep[..<colon]),
+                                  port: port, user: remoteUser ?? NSUserName())
+            host.id = hostID
+            host.peerDeviceID = peer
+            return RemoteTransport.client(for: host, interactive: true)
+        }
+        return RemoteTransport.client(hostID: hostID, interactive: true)
     }
 
     private func attachLoop(client: ControlClient) throws {

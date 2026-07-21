@@ -3,6 +3,59 @@ import Foundation
 import Darwin
 #endif
 
+// MARK: - STUN over UDP (Binding only)
+
+/// One-shot STUN Binding over UDP — the classic, cheapest way to learn our
+/// public address (no TCP handshake, one round trip). UDP is ONLY viable for
+/// this discovery step: RFC 6062 TCP allocations and their control/data legs
+/// must run over TCP, and the relayed payload is SSH — a byte stream.
+enum STUNUDP {
+    /// Send a Binding request with RFC 5389-style retransmits (500 ms initial
+    /// RTO, doubling) until `deadline`. A connected UDP socket surfaces ICMP
+    /// port-unreachable as a recv error, so a dead server fails fast instead
+    /// of eating the whole budget.
+    static func binding(host: String, port: Int, deadline: Date) -> (ip: String, port: Int)? {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_DGRAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &res) == 0, let info = res else { return nil }
+        defer { freeaddrinfo(res) }
+        let fd = socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+        guard fd >= 0 else { return nil }
+        defer { Darwin.close(fd) }
+        let rc = info.pointee.ai_addr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.connect(fd, $0, info.pointee.ai_addrlen)   // connected: errors surface
+        }
+        guard rc == 0 else { return nil }
+
+        let req = STUNMessage(type: STUNMessage.bindingRequest)
+        let bytes = req.encoded()
+        var rto: TimeInterval = 0.5
+        while Date() < deadline {
+            guard bytes.withUnsafeBytes({ Darwin.send(fd, $0.baseAddress, bytes.count, 0) }) == bytes.count else {
+                return nil
+            }
+            let wait = min(rto, deadline.timeIntervalSinceNow)
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let pr = poll(&pfd, 1, Int32(max(1, wait * 1000)))
+            if pr < 0 { if errno == EINTR { continue }; return nil }
+            if pr > 0 {
+                var buf = [UInt8](repeating: 0, count: 1500)
+                let n = Darwin.recv(fd, &buf, buf.count, 0)
+                guard n > 0 else { return nil }   // ICMP unreachable → fall back to TCP
+                if let resp = STUNMessage.decode(Array(buf[0..<n])),
+                   resp.txid == req.txid, resp.isSuccess {
+                    return resp.xorAddress(STUNMessage.attrXorMappedAddress)
+                }
+                continue   // garbage / stray datagram: keep waiting, resend on timeout
+            }
+            rto *= 2   // timed out this round → retransmit
+        }
+        return nil
+    }
+}
+
 // MARK: - Blocking STUN-over-TCP plumbing
 
 /// Framed STUN send/recv over blocking TCP fds (RFC 5389 §7.2.2 framing: the
@@ -210,14 +263,26 @@ final class TurnTCPClient: @unchecked Sendable {
         return nil
     }
 
-    /// STUN Binding over a fresh TCP connection — our public address as the
-    /// relay host sees it (the NAT mapping the peer's permission must cover).
+    /// STUN Binding — our public address as the relay host sees it (the NAT
+    /// mapping the peer's permission must cover; only the IP is used there).
+    /// TCP first — it exercises the same protocol (and NAT mapping family) the
+    /// relay's TCP legs will use — then UDP with the remaining budget as the
+    /// fallback for TCP-hostile paths.
     static func publicAddress(host: String, port: Int, timeout: TimeInterval) -> (ip: String, port: Int)? {
-        guard let fd = STUNTCP.connect(host: host, port: port, timeout: timeout) else { return nil }
+        let deadline = Date().addingTimeInterval(timeout)
+        let tcpDeadline = min(deadline, Date().addingTimeInterval(timeout / 2))
+        if let viaTCP = bindingTCP(host: host, port: port, deadline: tcpDeadline) {
+            return viaTCP
+        }
+        return STUNUDP.binding(host: host, port: port, deadline: deadline)
+    }
+
+    private static func bindingTCP(host: String, port: Int, deadline: Date) -> (ip: String, port: Int)? {
+        guard let fd = STUNTCP.connect(host: host, port: port,
+                                       timeout: deadline.timeIntervalSinceNow) else { return nil }
         defer { Darwin.close(fd) }
         let req = STUNMessage(type: STUNMessage.bindingRequest)
         guard STUNTCP.send(fd, req) else { return nil }
-        let deadline = Date().addingTimeInterval(timeout)
         while let resp = STUNTCP.read(fd, deadline: deadline) {
             guard resp.txid == req.txid, resp.isSuccess else { continue }
             return resp.xorAddress(STUNMessage.attrXorMappedAddress)

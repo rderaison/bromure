@@ -156,11 +156,26 @@ final class TerminalSessionController {
 
     /// The surface child command. Quoted for ghostty's shell-words parsing —
     /// the app path contains spaces ("Bromure Agentic Coding.app").
+    ///
+    /// A PEER (P2P) host needs extra plumbing: it is never persisted to
+    /// hosts.json, and its loopback endpoint (the P2P shim) is owned by THIS
+    /// process's broker — a subprocess can resolve neither. So the peer
+    /// identity, live endpoint and login user ride the command line. Queried
+    /// per spawn: a reattach after the path self-heals picks up the fresh
+    /// shim port.
     static func attachCommand(vmID: String, window: Int, remoteHost: UUID? = nil) -> String {
         let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
-        if let remoteHost {
-            return "'\(exe)' __attach-window --remote '\(remoteHost.uuidString)' '\(vmID)' \(window)"
+        guard let remoteHost else {
+            return "'\(exe)' __attach-window '\(vmID)' \(window)"
         }
-        return "'\(exe)' __attach-window '\(vmID)' \(window)"
+        var cmd = "'\(exe)' __attach-window --remote '\(remoteHost.uuidString)'"
+        if let host = RemoteHostController.liveHosts[remoteHost],
+           let pid = host.peerDeviceID,
+           let ep = P2PBroker.shared.cachedEndpoint(forPeer: pid) {
+            cmd += " --remote-peer '\(pid)' --remote-endpoint '\(ep.host):\(ep.port)'"
+                + " --remote-user '\(host.user)'"
+        }
+        cmd += " '\(vmID)' \(window)"
+        return cmd
     }
 }

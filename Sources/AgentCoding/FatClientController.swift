@@ -107,8 +107,14 @@ final class RemoteHostController {
             || ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_UTUN"] != nil
     }
 
+    /// Live mirrors' hosts by id. PEER hosts exist only in this process (never
+    /// hosts.json), so the terminal-attach command builder needs this to hand
+    /// the `__attach-window` subprocess the peer identity + live endpoint.
+    static private(set) var liveHosts: [UUID: RemoteHost] = [:]
+
     init(host: RemoteHost) {
         self.host = host
+        Self.liveHosts[host.id] = host
         let base = RemoteTransport.dir
             .appendingPathComponent("hosts", isDirectory: true)
             .appendingPathComponent(host.id.uuidString, isDirectory: true)
@@ -146,6 +152,7 @@ final class RemoteHostController {
     }
 
     func stop() {
+        Self.liveHosts[host.id] = nil
         pollTimer?.invalidate()
         pollTimer = nil
         approvalPollTimer?.invalidate()

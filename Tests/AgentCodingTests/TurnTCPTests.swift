@@ -159,6 +159,62 @@ struct TurnTCPTests {
         }
     }
 
+    /// A loopback UDP STUN responder — answers Binding requests with a fixed
+    /// XOR-MAPPED-ADDRESS. Can bind a SPECIFIC port so it can share a port
+    /// number with the TCP fake (separate protocol namespaces), which is how
+    /// the UDP-preference test tells the two paths apart.
+    final class FakeStunUDP: @unchecked Sendable {
+        let port: Int
+        private let fd: Int32
+        init?(port requested: Int = 0, mappedIP: String, mappedPort: Int) {
+            let s = socket(AF_INET, SOCK_DGRAM, 0)
+            guard s >= 0 else { return nil }
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = in_port_t(UInt16(requested).bigEndian)
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+            let rc = withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.bind(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            guard rc == 0 else { Darwin.close(s); return nil }
+            var bound = sockaddr_in()
+            var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+            _ = withUnsafeMutablePointer(to: &bound) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(s, $0, &len) }
+            }
+            fd = s
+            port = Int(UInt16(bigEndian: bound.sin_port))
+            Thread.detachNewThread { [fd = s] in
+                var buf = [UInt8](repeating: 0, count: 1500)
+                while true {
+                    var peer = sockaddr_storage()
+                    var plen = socklen_t(MemoryLayout<sockaddr_storage>.size)
+                    let n = withUnsafeMutablePointer(to: &peer) {
+                        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                            Darwin.recvfrom(fd, &buf, buf.count, 0, $0, &plen)
+                        }
+                    }
+                    guard n > 0 else { break }
+                    guard let req = STUNMessage.decode(Array(buf[0..<n])),
+                          req.type == STUNMessage.bindingRequest else { continue }
+                    var resp = STUNMessage(type: STUNMessage.bindingSuccess, txid: req.txid)
+                    resp.addXorAddress(STUNMessage.attrXorMappedAddress, ip: mappedIP, port: mappedPort)
+                    let out = resp.encoded()
+                    _ = withUnsafePointer(to: &peer) { peerPtr in
+                        peerPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                            out.withUnsafeBytes { raw in
+                                Darwin.sendto(fd, raw.baseAddress, out.count, 0, sa, plen)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        func stop() { Darwin.close(fd) }
+    }
+
     /// A loopback echo server standing in for the listener's sshd.
     final class EchoServer: @unchecked Sendable {
         let port: Int
@@ -203,13 +259,29 @@ struct TurnTCPTests {
         """.utf8))
     }
 
-    @Test("publicAddress: STUN Binding over TCP returns the mapped address")
-    func stunBinding() throws {
+    @Test("publicAddress prefers TCP when the relay answers it")
+    func stunBindingPrefersTCP() throws {
+        // TCP and UDP fakes share one port number (separate protocol
+        // namespaces) and return DIFFERENT mapped addresses — whichever comes
+        // back is the path that won.
         let turn = try #require(FakeCoturn(username: "1893456000:conn-under-test", password: "s3cr3t"))
         defer { turn.stop() }
+        let udp = try #require(FakeStunUDP(port: turn.port, mappedIP: "198.51.100.5", mappedPort: 5555))
+        defer { udp.stop() }
         let pub = TurnTCPClient.publicAddress(host: "127.0.0.1", port: turn.port, timeout: 5)
         #expect(pub?.ip == "203.0.113.7")
         #expect(pub?.port == 42424)
+    }
+
+    @Test("publicAddress falls back to UDP when TCP is dead")
+    func stunBindingUDPFallback() throws {
+        // Only a UDP responder: the TCP connect refuses instantly on loopback
+        // and the UDP leg answers with the remaining budget.
+        let udp = try #require(FakeStunUDP(mappedIP: "198.51.100.5", mappedPort: 5555))
+        defer { udp.stop() }
+        let pub = TurnTCPClient.publicAddress(host: "127.0.0.1", port: udp.port, timeout: 5)
+        #expect(pub?.ip == "198.51.100.5")
+        #expect(pub?.port == 5555)
     }
 
     @Test("allocate runs the 401 dance and yields the relayed + mapped addresses")
