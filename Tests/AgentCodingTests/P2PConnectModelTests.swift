@@ -15,17 +15,36 @@ struct P2PConnectModelTests {
                    revoked: false, online: online, lastSeenAt: nil, isSelf: false)
     }
 
-    @Test("connecting to a peer builds a .peer RemoteHost carrying the device id")
+    @Test("a directory server maps to a .peer RemoteHost carrying the device id")
     func peerHost() {
+        let host = RemoteConnectModel.peerHost(for: device(id: "server-device-123"))
+        #expect(host.peerDeviceID == "server-device-123")
+        #expect(host.isPeer == true)
+        if case .peer(let id) = host.kind { #expect(id == "server-device-123") }
+        else { Issue.record("expected .peer kind") }
+    }
+
+    @Test("a peer that can't be resolved fails in the connect window, bounded")
+    func peerResolveFailure() async throws {
         var captured: RemoteHost?
         let model = RemoteConnectModel { captured = $0 }
-        model.connect(toPeer: device(id: "server-device-123"))
-        let host = try? #require(captured)
-        #expect(host?.peerDeviceID == "server-device-123")
-        #expect(host?.isPeer == true)
-        if case .peer(let id)? = host?.kind { #expect(id == "server-device-123") }
-        else { Issue.record("expected .peer kind") }
-        // Peer hosts don't leak into the by-address recents list.
+        model.peerResolver = { _ in nil }   // broker says: no path
+        model.connect(toPeer: device(id: "unreachable-peer"))
+        // The pipeline hops work-queue → main; suspending lets both drain.
+        var polls = 0
+        while polls < 100 {
+            if case .unreachable = model.phase { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            polls += 1
+        }
+        guard case .unreachable(let msg) = model.phase else {
+            Issue.record("expected .unreachable, got \(model.phase)")
+            return
+        }
+        #expect(msg.contains("Studio Mac"))
+        // The mirror window never opened, and no peer host leaked into the
+        // by-address recents list.
+        #expect(captured == nil)
         #expect(RemoteHostStore.shared.hosts.allSatisfy { $0.peerDeviceID == nil })
     }
 

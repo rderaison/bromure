@@ -75,6 +75,12 @@ final class RemoteHostController {
     private var pollTimer: Timer?
     private let pollQueue = DispatchQueue(label: "io.bromure.fatclient.poll")
     private var polling = false
+    /// Consecutive failed polls on a PEER host. The broker caches the winning
+    /// path and re-dials it per connection, so once that path dies (relay
+    /// expired, listener restarted, network change) it never heals on its own —
+    /// after a few straight failures we tear it down so the next poll
+    /// re-establishes end to end (fresh grant, fresh relay if needed).
+    private var peerFailStreak = 0
     /// Bumped every apply; the window observes it to refresh the stage.
     private(set) var revision = 0
 
@@ -169,6 +175,7 @@ final class RemoteHostController {
                     if !self.connected { FatClientLog.log("poll: connected, status 200") }
                     self.connected = true
                     self.lastError = nil
+                    self.peerFailStreak = 0
                     self.apply(resp.json)
                 } else {
                     if self.connected || self.revision == 0 {
@@ -176,6 +183,14 @@ final class RemoteHostController {
                     }
                     self.connected = false
                     self.lastError = "not reachable"
+                    if let pid = host.peerDeviceID {
+                        self.peerFailStreak += 1
+                        if self.peerFailStreak >= 3 {
+                            self.peerFailStreak = 0
+                            FatClientLog.log("p2p: mirror unreachable — tearing down the peer path to re-establish")
+                            P2PBroker.shared.closePeer(pid)
+                        }
+                    }
                 }
             }
         }
@@ -940,43 +955,62 @@ final class RemoteHostController {
 struct RemoteConnectionStatusView: View {
     @Bindable var controller: RemoteHostController
 
+    /// Peer hosts get their directory name, not the cryptic "user@peer:<hex>".
+    private var hostLabel: String {
+        controller.host.isPeer ? controller.host.name : controller.host.connectLabel
+    }
+
     var body: some View {
         VStack(spacing: 16) {
             if !controller.connected {
                 ProgressView().controlSize(.large)
                 Text(controller.hasSnapshot || controller.lastError == nil
-                     ? "Connecting to \(controller.host.connectLabel)…"
-                     : "Can't reach \(controller.host.connectLabel)")
+                     ? "Connecting to \(hostLabel)…"
+                     : "Can't reach \(hostLabel)")
                     .font(.headline)
                 if controller.lastError != nil {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("This Mac authenticates to the remote Bromure by SSH key. If the remote has remote access enabled, authorize this Mac's key on it:")
+                    if controller.host.isPeer {
+                        // A peer's key was authorized at connect time; a drop
+                        // here is transport. The controller is already tearing
+                        // the dead path down and re-establishing it.
+                        Text("The peer-to-peer path dropped. Reconnecting through bromure.io…")
                             .foregroundStyle(.secondary)
+                            .frame(maxWidth: 460)
                             .fixedSize(horizontal: false, vertical: true)
-                        HStack(spacing: 8) {
-                            Text(authorizeCommand)
-                                .font(.system(.callout, design: .monospaced))
-                                .textSelection(.enabled)
-                                .lineLimit(3)
-                                .truncationMode(.middle)
-                                .padding(8)
-                                .background(Color(nsColor: .textBackgroundColor))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                            Button("Copy") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(authorizeCommand, forType: .string)
-                            }
-                        }
-                        Text("Enable remote access on the remote with: bromure-ac remote enable")
-                            .font(.caption).foregroundStyle(.tertiary)
+                    } else {
+                        keyAuthorizationHint
                     }
-                    .frame(maxWidth: 460)
-                    .padding(.top, 4)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var keyAuthorizationHint: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("This Mac authenticates to the remote Bromure by SSH key. If the remote has remote access enabled, authorize this Mac's key on it:")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Text(authorizeCommand)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(3)
+                    .truncationMode(.middle)
+                    .padding(8)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                Button("Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(authorizeCommand, forType: .string)
+                }
+            }
+            Text("Enable remote access on the remote with: bromure-ac remote enable")
+                .font(.caption).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: 460)
+        .padding(.top, 4)
     }
 
     private var authorizeCommand: String {
@@ -1443,6 +1477,10 @@ final class RemoteHostWindow: NSWindow {
         // Connection-status overlay covers the stage until we're connected.
         statusHost = NSHostingView(rootView: RemoteConnectionStatusView(controller: controller))
         statusHost.translatesAutoresizingMaskIntoConstraints = false
+        // The overlay is fully pinned to the stage — its SwiftUI content must
+        // never impose intrinsic/min-size constraints, or a long status message
+        // (the authorize-key panel) inflates the whole window.
+        statusHost.sizingOptions = []
         content.addSubview(statusHost)
         // Keep the drag strips topmost so an open pane host never intercepts the
         // half of a handle that overlaps it (re-adding moves them to the front).

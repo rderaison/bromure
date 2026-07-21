@@ -110,8 +110,19 @@ final class P2PBroker: @unchecked Sendable {
     private var channelToken: String?
     private var sessions: [String: P2PSession] = [:]
     private var liveShims: [String: (shim: P2PLoopbackShim, path: P2PPath)] = [:]
+    /// Listener-side TURN relay sessions, one per grant, oldest first. Bounded
+    /// — a reconnecting dialer mints a fresh grant (and relay) each time.
+    private var relaySessions: [(grantID: String, listener: TurnRelayListener)] = []
     private var serving = false
     private var serveSSHPort = 2222
+
+    /// Run blocking transport work (socket dials, TURN transactions) on a real
+    /// thread so it never parks the cooperative pool.
+    private static func blocking<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { cont in
+            Thread.detachNewThread { cont.resume(returning: work()) }
+        }
+    }
 
     // MARK: Identity
 
@@ -230,8 +241,9 @@ final class P2PBroker: @unchecked Sendable {
         }
     }
 
-    /// Stop being a server: clear `p2p_server` and drop the channel. Outbound
-    /// dials still work (they re-open the channel on demand).
+    /// Stop being a server: clear `p2p_server`, drop the channel, and tear down
+    /// any TURN relay sessions. Outbound dials still work (they re-open the
+    /// channel on demand).
     func stopServing() {
         lock.lock()
         let wasServing = serving
@@ -240,8 +252,11 @@ final class P2PBroker: @unchecked Sendable {
         channel = nil
         channelToken = nil
         sessions.removeAll()
+        let relays = relaySessions
+        relaySessions.removeAll()
         lock.unlock()
         ch?.close()
+        for r in relays { r.listener.stop() }
         if wasServing, let id = currentIdentity(), let client = makeClient(id) {
             Task.detached { _ = try? await client.setServerMode(bearer: id.bearer, enabled: false) }
         }
@@ -250,7 +265,9 @@ final class P2PBroker: @unchecked Sendable {
     /// A client was granted a connection to us. Answer with our reachable
     /// candidates; for a same-LAN / globally-reachable path the dialer then
     /// connects straight to our embedded sshd (0.0.0.0:2222) — no splice needed
-    /// on this side.
+    /// on this side. Then stand up the relay rung (TURN credentials → RFC 6062
+    /// TCP allocation → permission for the dialer) and trickle those
+    /// candidates, so a dialer that can't reach us directly still connects.
     private func handleOffered(_ grant: ConnectionGrant) {
         guard let id = currentIdentity(), let client = makeClient(id) else { return }
         let session = P2PSession(grant: grant, role: .listener)
@@ -259,17 +276,73 @@ final class P2PBroker: @unchecked Sendable {
 
         let candidates = P2PCandidateGatherer.hostCandidates(sshPort: port)
         Task { [weak self] in
+            // 1. Host candidates immediately — the LAN fast path must not wait
+            //    on TURN round-trips.
             let payload = P2PSignalPayload(candidates: Array(candidates.prefix(8)))
             try? await session.send(.answer, payload: payload, via: ch)
-            // A completed grant closes signaling; the listener reports success
-            // best-effort (first report wins — the dialer usually reports first).
-            // Suppressed entirely for personal accounts.
+            // 2. Relay rung.
+            await self?.standUpRelay(session: session, client: client, id: id,
+                                     sshPort: port, via: ch)
+            // 3. Telemetry only after ALL signaling: a `connected` report
+            //    closes the grant, which would reject the relay trickle
+            //    (`connection_closed`). Suppressed for personal accounts.
             await self?.reportComplete(client, id, connectionId: grant.id,
                                        report: .connected(pathKind: .direct, timeToConnectedMs: 0))
-            // Signaling is done; drop the session after a grace window for any
-            // late dialer trickle.
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            // 4. Grace for late dialer frames, then drop the session.
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
             self?.lock.lock(); self?.sessions[grant.id] = nil; self?.lock.unlock()
+        }
+    }
+
+    /// Mint TURN credentials for this grant, learn the dialer's public IP from
+    /// its srflx trickle, allocate a TCP relay with a permission for that IP,
+    /// and trickle two more candidates: a srflx "guess" (our public IP + the
+    /// sshd port — free win if the router port-forwards it) and the relayed
+    /// transport address of last resort.
+    private func standUpRelay(session: P2PSession, client: ControlPlaneClient,
+                              id: P2PIdentity, sshPort: Int, via ch: DeviceChannel) async {
+        let grant = session.grant
+        guard let creds = await TurnRelayTransport.credentials(
+            client: client, bearer: id.bearer, connectionId: grant.id) else {
+            FatClientLog.log("p2p: turn-credentials unavailable — direct candidates only")
+            return
+        }
+        // The relay permission needs the dialer's public IP; it arrives as a
+        // srflx trickle right after the offer (bounded wait).
+        var permitIP: String?
+        let deadline = Date().addingTimeInterval(6)
+        while permitIP == nil && Date() < deadline {
+            permitIP = session.candidates.first(where: { $0.kind == .srflx })?.ip
+            if permitIP == nil { try? await Task.sleep(nanoseconds: 150_000_000) }
+        }
+        guard let permitIP else {
+            FatClientLog.log("p2p: dialer sent no srflx — relay rung skipped")
+            return
+        }
+        let started = await Self.blocking {
+            TurnRelayListener.start(creds: creds, permitIP: permitIP, sshPort: sshPort)
+        }
+        guard let (listener, info) = started else { return }
+        register(listener: listener, for: grant.id)
+        let guess = P2PCandidate(kind: .srflx, proto: .tcp, ip: info.mappedIP, port: sshPort)
+        try? await session.send(.candidate, payload: P2PSignalPayload(candidate: guess), via: ch)
+        try? await session.send(.candidate, payload: P2PSignalPayload(candidate: info.relay), via: ch)
+    }
+
+    private func register(listener: TurnRelayListener, for grantID: String) {
+        listener.onStopped = { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            self.relaySessions.removeAll { $0.grantID == grantID }
+            self.lock.unlock()
+        }
+        lock.lock()
+        relaySessions.append((grantID, listener))
+        let evicted = relaySessions.count > 4 ? [relaySessions.removeFirst()] : []
+        lock.unlock()
+        for e in evicted {
+            FatClientLog.log("p2p: relay session cap — dropping oldest (grant \(e.grantID.prefix(8)))")
+            e.listener.stop()
         }
     }
 
@@ -341,8 +414,8 @@ final class P2PBroker: @unchecked Sendable {
         lock.lock(); sessions[grant.id] = session; lock.unlock()
         defer { lock.lock(); sessions[grant.id] = nil; lock.unlock() }
 
-        // 2. Offer (seq 1). The dialer carries no candidates in V1 (it connects;
-        // its srflx becomes relevant only for the later hole-punch/relay rung).
+        // 2. Offer (seq 1), immediately — the LAN fast path must not wait on
+        // TURN round-trips.
         do {
             try await session.send(.offer, payload: P2PSignalPayload(note: "connect"), via: ch)
         } catch {
@@ -351,27 +424,57 @@ final class P2PBroker: @unchecked Sendable {
             return nil
         }
 
-        // 3. Collect the listener's answer + trickle candidates.
-        let deadline = Date().addingTimeInterval(min(timeout, 8))
-        while session.candidates.isEmpty && Date() < deadline {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        if !session.candidates.isEmpty {
-            try? await Task.sleep(nanoseconds: 400_000_000)   // grace for trickle
-        }
-        let candidates = session.candidates
-        guard !candidates.isEmpty else {
-            FatClientLog.log("p2p: no candidates from peer \(peerDeviceID.prefix(8))")
-            await reportComplete(client, id, connectionId: grant.id, report: .failed(stage: .signaling))
-            return nil
+        // 3. Concurrently: mint this grant's TURN credentials and learn our
+        // public address (STUN Binding over the relay's TCP port), then trickle
+        // it as a srflx candidate. That IP is what the listener's relay
+        // permission must cover — without it, no relay candidate comes back.
+        Task.detached {
+            guard let creds = await TurnRelayTransport.credentials(
+                client: client, bearer: id.bearer, connectionId: grant.id) else {
+                FatClientLog.log("p2p: turn-credentials unavailable — dialing direct only")
+                return
+            }
+            guard let stun = TurnRelayTransport.stunEndpoint(creds.urls) else { return }
+            let pub = await Self.blocking {
+                TurnTCPClient.publicAddress(host: stun.host, port: stun.port, timeout: 4)
+            }
+            guard let pub else {
+                FatClientLog.log("p2p: STUN binding to \(stun.host):\(stun.port) failed")
+                return
+            }
+            FatClientLog.log("p2p: our public address is \(pub.ip):\(pub.port)")
+            let srflx = P2PCandidate(kind: .srflx, proto: .tcp, ip: pub.ip, port: pub.port)
+            try? await session.send(.candidate, payload: P2PSignalPayload(candidate: srflx), via: ch)
         }
 
-        // 4. Dial best-first. (Relay is a later rung; direct only for now.)
+        // 4. Dial candidates as they arrive — the answer's host bundle first,
+        // then the trickled srflx-guess and relay (ranked last by prio, so a
+        // direct path always wins when reachable). Re-consulting the session
+        // until the deadline is what makes the late relay candidate usable.
         let t0 = Date()
-        guard let win = P2PDirectDialer.dial(candidates: candidates,
-                                             overallDeadline: Date().addingTimeInterval(8)) else {
-            FatClientLog.log("p2p: all \(candidates.count) candidates unreachable")
-            await reportComplete(client, id, connectionId: grant.id, report: .failed(stage: .ice))
+        let deadline = Date().addingTimeInterval(timeout)
+        var tried = Set<P2PCandidate>()
+        var win: P2PDirectDialer.Win?
+        while win == nil && Date() < deadline {
+            let fresh = session.candidates.filter { !tried.contains($0) }
+            guard !fresh.isEmpty else {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                continue
+            }
+            tried.formUnion(fresh)
+            // Bound each batch: a wall of silently-dropped host candidates
+            // (3s connect timeout apiece) must not starve the trickled
+            // srflx/relay rungs of their turn before the overall deadline.
+            let batchDeadline = min(deadline, Date().addingTimeInterval(6))
+            win = await Self.blocking {
+                P2PDirectDialer.dial(candidates: fresh, overallDeadline: batchDeadline)
+            }
+        }
+        guard let win else {
+            let stage: ConnectionReport.FailureStage = session.gotPeerFrame ? .ice : .signaling
+            FatClientLog.log("p2p: no viable path to \(peerDeviceID.prefix(8)) "
+                + "(\(tried.count) candidates tried)")
+            await reportComplete(client, id, connectionId: grant.id, report: .failed(stage: stage))
             return nil
         }
         Darwin.close(win.fd)   // the shim re-dials per SSH connection

@@ -480,6 +480,34 @@ enum RemoteTransport {
         try? body.write(to: knownHostsPath, atomically: true, encoding: .utf8)
     }
 
+    /// Trust a host key under a HostKeyAlias (peer hosts — their loopback
+    /// endpoint is ephemeral, so the pin keys on the stable device identity):
+    /// replace any prior alias entry, then write the scanned line with its host
+    /// token swapped for the alias. ssh consults the alias for both store and
+    /// verify, so `StrictHostKeyChecking=yes` matches this entry.
+    static func pinHostKey(alias: String, info: HostKeyInfo) {
+        ensureDirs()
+        let rm = Process(); rm.executableURL = URL(fileURLWithPath: sshKeygen)
+        rm.arguments = ["-R", alias, "-f", knownHostsPath.path]
+        rm.standardOutput = FileHandle.nullDevice; rm.standardError = FileHandle.nullDevice
+        try? rm.run(); rm.waitUntilExit()
+        let parts = info.line.split(separator: " ", maxSplits: 1)
+        guard parts.count == 2 else { return }
+        var body = (try? String(contentsOf: knownHostsPath, encoding: .utf8)) ?? ""
+        if !body.isEmpty && !body.hasSuffix("\n") { body += "\n" }
+        body += "\(alias) \(parts[1])\n"
+        try? body.write(to: knownHostsPath, atomically: true, encoding: .utf8)
+    }
+
+    /// Whether `alias` already has a pinned key in our known_hosts — i.e. this
+    /// peer completed fingerprint TOFU on an earlier connect.
+    static func hasAliasPin(_ alias: String) -> Bool {
+        guard let body = try? String(contentsOf: knownHostsPath, encoding: .utf8) else { return false }
+        return body.split(whereSeparator: \.isNewline).contains {
+            $0.split(separator: " ").first.map(String.init) == alias
+        }
+    }
+
     // MARK: Probe (classified connection attempt)
 
     /// Probe a remote with the client key, by running one `GET /health` over the

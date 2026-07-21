@@ -5,19 +5,16 @@ import Foundation
 /// The relay leg of the candidate ladder. When neither peer can offer a
 /// reachable direct candidate (symmetric×symmetric NAT, UDP-blocked corporate
 /// networks), the session relays through coturn (REMOTE_P2P_PLAN.md §"Rung 4 —
-/// TURN relay (fallback)"). This holds the credential-minting half — which is
-/// real and exercised — and a documented seam for the RFC 6062 TCP-allocation
-/// data path, which the plan says to ADOPT (libjuice / pion) rather than
-/// hand-roll (§"Build vs. adopt": "This is the Tailscale disco+DERP /
-/// WebRTC-data-channel problem; don't re-derive it").
+/// TURN relay (fallback)"): the LISTENER allocates a TCP relay (RFC 6062, see
+/// `TurnRelayListener`) and advertises the relayed transport address as a
+/// `relay` candidate; the dialer then makes an ordinary TCP connection to it
+/// (§"dialer's ssh connects to the public endpoint with zero new transport
+/// code"), coturn splices the two legs, and the listener binds its half into
+/// the local sshd. SSH stays end-to-end — the relay moves opaque bytes.
 ///
-/// Status: credential fetch works against the infra
-/// `POST /v1/connections/:id/turn-credentials`; the data path is intentionally
-/// not hand-implemented here. Until the adopted ICE/TURN helper lands,
-/// `allocateRelayCandidate` returns nil, so `P2PDirectDialer` is the whole
-/// working transport and dual-NAT sessions fail honestly rather than via a
-/// half-correct STUN/TURN stack that can't be verified without a live two-NAT
-/// rig + coturn.
+/// This enum holds the small pure pieces: credential fetch
+/// (`POST /v1/connections/:id/turn-credentials`) and URL parsing/selection,
+/// unit-testable without a relay.
 enum TurnRelayTransport {
     /// Fetch short-lived REST credentials for this grant. These outlive the 45 s
     /// grant (they bound the relayed session, not the rendez-vous); the username
@@ -27,23 +24,26 @@ enum TurnRelayTransport {
         try? await client.turnCredentials(bearer: bearer, connectionId: connectionId)
     }
 
-    /// The LISTENER allocates a TURN TCP relay (RFC 6062) and advertises the
-    /// relayed transport address as a `relay` candidate; the dialer then makes an
-    /// ordinary TCP connection to it (§"dialer's ssh connects to the public
-    /// endpoint with zero new transport code"), coturn splices the two legs, and
-    /// the listener binds its half into `127.0.0.1:2222`.
-    ///
-    /// Not implemented in this build — see the type doc. Returns nil ⇒ no relay
-    /// candidate is advertised, so a session that can't go direct fails cleanly.
-    static func allocateRelayCandidate(creds: TurnCredentials,
-                                       permitPeerIP: String?) -> P2PCandidate? {
-        // TODO(p2p-relay): Allocate(requested-transport=TCP) → CreatePermission
-        // for `permitPeerIP` → on ConnectionAttempt, ConnectionBind on a second
-        // TCP leg, then splice that leg into 127.0.0.1:2222. Deferred to the
-        // adopted ICE/TURN helper (libjuice/pion) per the plan's Phase 2.
-        _ = creds
-        _ = permitPeerIP
+    /// Pick the endpoint for the TURN-TCP client leg: the first
+    /// `turn:…?transport=tcp` URL (RFC 6062 requires a TCP client leg). `turns:`
+    /// (TLS, 5349) is not spoken yet — plain 3478 carries only the TURN
+    /// envelope; the payload is SSH, encrypted end-to-end regardless.
+    static func preferredTCPEndpoint(_ urls: [String]) -> (host: String, port: Int, transport: String?)? {
+        for url in urls where url.hasPrefix("turn:") {
+            if let parsed = parseHostPort(fromURL: url), parsed.transport == "tcp" {
+                return parsed
+            }
+        }
         return nil
+    }
+
+    /// The STUN endpoint (Binding needs no credentials): the `stun:` URL if
+    /// present, else any TURN host — coturn answers Binding on the same port.
+    static func stunEndpoint(_ urls: [String]) -> (host: String, port: Int, transport: String?)? {
+        for url in urls where url.hasPrefix("stun:") {
+            if let parsed = parseHostPort(fromURL: url) { return parsed }
+        }
+        return preferredTCPEndpoint(urls)
     }
 
     /// Parse the STUN/TURN host:port out of a coturn `urls` entry

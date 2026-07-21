@@ -80,9 +80,11 @@ enum P2PPath: String, Equatable {
 
 /// Tries a candidate list best-first and returns the winning candidate + a live
 /// connected fd, classifying the path. LAN vs global is inferred from the
-/// candidate's address (RFC1918 / same-subnet → LAN). Relay candidates are left
-/// to `TurnRelayTransport` (a later rung); this dialer only handles reachable
-/// TCP endpoints (host / srflx / port-mapped).
+/// candidate's address (RFC1918 / same-subnet → LAN). A `relay` candidate is a
+/// TURN relayed transport address the LISTENER allocated (`TurnRelayListener`)
+/// — to this dialer it's just another TCP endpoint (the plan's "ordinary TCP
+/// connection, zero new transport code"), ranked last by prio so direct paths
+/// always win when reachable.
 enum P2PDirectDialer {
     struct Win {
         let candidate: P2PCandidate
@@ -96,7 +98,7 @@ enum P2PDirectDialer {
                      perCandidateTimeout: TimeInterval = 3,
                      overallDeadline: Date) -> Win? {
         let ordered = candidates
-            .filter { $0.proto == .tcp && ($0.kind == .host || $0.kind == .srflx || $0.kind == .portMapped) }
+            .filter { $0.proto == .tcp }
             .sorted { $0.prio > $1.prio }
         for c in ordered {
             if Date() >= overallDeadline { break }

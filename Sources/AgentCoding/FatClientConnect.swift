@@ -69,6 +69,11 @@ final class RemoteConnectModel {
 
     var clientPublicKey: String { RemoteTransport.ensureClientKey() ?? "" }
 
+    /// Human label for the endpoint being connected — the directory name for a
+    /// peer (its address is an ephemeral loopback port), the typed address
+    /// otherwise.
+    var connectDisplayName: String { host.isPeer ? host.name : address }
+
     private func syncHostFromFields() {
         host.name = name.trimmingCharacters(in: .whitespaces).isEmpty
             ? address.trimmingCharacters(in: .whitespaces)
@@ -139,12 +144,18 @@ final class RemoteConnectModel {
     private var scannedHostKeyLine: String?
 
     /// User accepted the shown fingerprint (new host or an expected change).
+    /// A peer host pins under its stable HostKeyAlias (the loopback endpoint
+    /// is ephemeral); a direct host pins under address:port as before.
     func trustHostKey(_ info: HostKeyInfo) {
         host.pinnedHostKey = info.fingerprint
         let host = self.host
         phase = .working("Connecting…")
         work.async {
-            RemoteTransport.pinHostKey(address: host.address, port: host.port, info: info)
+            if let alias = host.hostKeyAlias {
+                RemoteTransport.pinHostKey(alias: alias, info: info)
+            } else {
+                RemoteTransport.pinHostKey(address: host.address, port: host.port, info: info)
+            }
             DispatchQueue.main.async { [weak self] in self?.tryKey() }
         }
     }
@@ -202,7 +213,11 @@ final class RemoteConnectModel {
 
     private func succeed() {
         host.lastConnected = Date()
-        RemoteHostStore.shared.upsert(host)
+        // Peer hosts live in the control-plane directory, not the by-address
+        // recents list — their identity is the device id + known_hosts alias.
+        if !host.isPeer {
+            RemoteHostStore.shared.upsert(host)
+        }
         onConnected(host)
     }
 
@@ -284,13 +299,75 @@ final class RemoteConnectModel {
     /// Open the browser to sign in and enroll this Mac as a client device.
     func signIn() { account.signIn() }
 
-    /// Mirror a server reached over the control plane (peer-to-peer). Not saved
-    /// to the by-address list — it lives in the live directory.
-    func connect(toPeer server: DeviceInfo) {
+    /// Test hook: replaces the broker resolution (which needs a live control
+    /// plane and a real peer). Returns the resolved loopback endpoint, or nil.
+    var peerResolver: (String) -> (host: String, port: Int)? = { id in
+        P2PBroker.shared.endpoint(forPeer: id, timeout: 20).map { ($0.host, $0.port) }
+    }
+
+    /// The RemoteHost a directory server dial produces. Not saved to the
+    /// by-address list — it lives in the live directory.
+    static func peerHost(for server: DeviceInfo) -> RemoteHost {
         var host = RemoteHost(name: server.displayName, address: "", user: NSUserName())
         host.peerDeviceID = server.id
         host.lastConnected = Date()
-        onConnected(host)
+        return host
+    }
+
+    /// Mirror a server reached over the control plane (peer-to-peer). The P2P
+    /// path is established HERE, bounded, with an honest failure state — then
+    /// the same host-key / key-auth / password pipeline as a direct host runs
+    /// against the resolved loopback endpoint, so a first connect can enroll
+    /// this Mac's key. The mirror window only opens once the tunnel works —
+    /// never as an empty stage with an error overlay.
+    func connect(toPeer server: DeviceInfo) {
+        host = Self.peerHost(for: server)
+        pinnedEndpoint = nil
+        phase = .working("Connecting to \(server.displayName) via bromure.io…")
+        let name = server.displayName
+        let resolve = peerResolver
+        let peerID = server.id
+        work.async { [weak self] in
+            let ep = resolve(peerID)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let ep else {
+                    self.phase = .unreachable("Couldn't establish a connection to \(name).\n\nIt may have just gone offline, or no network path (direct or relayed) could be set up between the two Macs. Check that both can reach bromure.io, then try again.")
+                    return
+                }
+                self.host.address = ep.host
+                self.host.port = ep.port
+                self.beginPeerAuth()
+            }
+        }
+    }
+
+    /// Host-key + auth against the freshly resolved loopback endpoint. The
+    /// fingerprint sheet only shows on the FIRST connect to this peer — later
+    /// connects find the pin under the peer's stable HostKeyAlias.
+    private func beginPeerAuth() {
+        let host = self.host
+        phase = .working("Verifying \(host.name)…")
+        work.async { [weak self] in
+            let info = RemoteTransport.scanHostKey(address: host.address, port: host.port)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let info else {
+                    self.phase = .unreachable("Reached \(host.name) over bromure.io, but its SSH front door didn't answer. Make sure Remote Access is still enabled on it.")
+                    return
+                }
+                self.scannedHostKeyLine = info.line
+                guard let alias = host.hostKeyAlias else { return }   // peers always have one
+                if RemoteTransport.hasAliasPin(alias) {
+                    self.tryKey()
+                } else if self.autoTrust {
+                    RemoteTransport.pinHostKey(alias: alias, info: info)
+                    self.tryKey()
+                } else {
+                    self.phase = .confirmHostKey(info, changed: false, previous: nil)
+                }
+            }
+        }
     }
 
     func signOutAccount() {
@@ -621,9 +698,15 @@ struct RemoteConnectView: View {
     }
 
     private func working(_ msg: String) -> some View {
-        HStack(spacing: 12) { ProgressView().controlSize(.small); Text(msg) }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 20)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) { ProgressView().controlSize(.small); Text(msg) }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack {
+                Spacer()
+                Button("Cancel", action: onClose).keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(.vertical, 12)
     }
 
     // Host-key TOFU / change warning
@@ -638,7 +721,7 @@ struct RemoteConnectView: View {
                     Text("Previously: \(previous)").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
                 }
             } else {
-                Text("First time connecting to \(model.address). Verify this fingerprint matches the remote (Preferences → Remote Access shows it):")
+                Text("First time connecting to \(model.connectDisplayName). Verify this fingerprint matches the remote (Preferences → Remote Access shows it):")
                     .foregroundStyle(.secondary).font(.callout).fixedSize(horizontal: false, vertical: true)
             }
             Text(info.fingerprint)
@@ -658,7 +741,7 @@ struct RemoteConnectView: View {
     // Password fallback with inline retry + shake
     private func passwordStep(_ error: String?) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("This Mac isn't authorized on \(model.address) yet. Enter the remote Mac's login password for “\(model.user)” to pair — Bromure will remember this Mac so you won't be asked again.")
+            Text("This Mac isn't authorized on \(model.connectDisplayName) yet. Enter the remote Mac's login password for “\(model.user)” to pair — Bromure will remember this Mac so you won't be asked again.")
                 .foregroundStyle(.secondary).font(.callout).fixedSize(horizontal: false, vertical: true)
             SecureField("Password", text: $model.password)
                 .textFieldStyle(.roundedBorder)
