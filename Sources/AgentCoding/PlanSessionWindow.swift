@@ -27,6 +27,17 @@ final class PlanSessionWindowManager {
         /// The live wt/ branch for a task's slug (nil = session gone).
         /// Async: a detached session is resolved by asking the guest.
         var liveBranch: (CodingTask) async -> String?
+        /// Streamed (plan-stream) session: the hub-rendered items. nil =
+        /// not streaming — the window falls back to the transcript mirror.
+        var liveItems: (_ task: CodingTask) async -> [TranscriptItem]? = { _ in nil }
+        /// Streamed session: structured answers for the pending question
+        /// round. false = no live stream (the card retries with keystrokes).
+        var sendAnswers: (_ task: CodingTask,
+                          _ answers: [(question: String, labels: [String], other: String?)])
+            async -> Bool = { _, _ in false }
+        /// Streamed session: a typed user turn. nil = not streaming — the
+        /// composer falls back to `send` (tmux typing).
+        var sendUser: (_ task: CodingTask, _ text: String) async -> Bool? = { _, _ in nil }
     }
 
     private let context: Context
@@ -56,14 +67,22 @@ final class PlanSessionWindowManager {
             model: model,
             store: store,
             onSend: { [weak self] text in
-                guard let self, let t = self.context.store()?.task(taskID),
-                      let branch = await self.context.liveBranch(t) else { return false }
+                guard let self, let t = self.context.store()?.task(taskID)
+                else { return false }
+                // Streamed session first; nil = not streaming → tmux typing.
+                if let sent = await self.context.sendUser(t, text) { return sent }
+                guard let branch = await self.context.liveBranch(t) else { return false }
                 return await self.context.send(t.profileID, branch, text)
             },
             onSendKeys: { [weak self] keys in
                 guard let self, let t = self.context.store()?.task(taskID),
                       let branch = await self.context.liveBranch(t) else { return false }
                 return await self.context.sendKeys(t.profileID, branch, keys)
+            },
+            onSendAnswers: { [weak self] answers in
+                guard let self, let t = self.context.store()?.task(taskID)
+                else { return false }
+                return await self.context.sendAnswers(t, answers)
             },
             onOpenTerminal: { [weak self] in
                 guard let t = self?.context.store()?.task(taskID) else { return }
@@ -112,9 +131,21 @@ final class PlanSessionWindowManager {
         windows[taskID] = nil
     }
 
+    /// Immediate refresh — the plan-stream hub calls this on every event so
+    /// a live window updates the instant something happens instead of on
+    /// the next 2s tick.
+    func refresh(_ taskID: UUID) {
+        guard windows[taskID] != nil else { return }
+        Task { [weak self] in await self?.poll(taskID) }
+    }
+
     private func poll(_ taskID: UUID) async {
         guard let model = models[taskID], let store = context.store(),
               let task = store.task(taskID) else { return }
+        // Streamed (driver-mode) session? Its items come from the hub, and
+        // its liveness doesn't involve a tmux tab.
+        let live = await context.liveItems(task)
+        if live != nil { model.streamed = true }
         // Session phase for the header: planning / phases landed / ended.
         let previous = model.phase
         if let done = task.validatedAt, let req = task.validationRequestedAt,
@@ -122,6 +153,8 @@ final class PlanSessionWindowManager {
             model.phase = .phasesFiled
         } else if !task.validationInFlight {
             model.phase = .ended(task.lastError)
+        } else if live != nil {
+            model.phase = .live
         } else {
             model.phase = await context.liveBranch(task) != nil ? .live : .starting
         }
@@ -133,6 +166,10 @@ final class PlanSessionWindowManager {
         }
         model.phaseCount = store.tasks.filter { $0.parentTaskID == taskID }.count
         guard task.validationRequestedAt != nil else { return }
+        if let live {
+            if model.items != live { model.items = live }
+            return
+        }
         if let raw = await context.fetchTranscript(task) {
             let parsed = await Task.detached(priority: .userInitiated) {
                 ClaudeTranscriptParser.parse(Data(raw.utf8))
@@ -245,6 +282,10 @@ final class PlanSessionModel {
     var phase: Phase = .starting
     /// Phases filed under this task — the completion bar's count.
     var phaseCount = 0
+    /// True once the session was seen streaming (driver mode, no tmux tab)
+    /// — latched, and used to hide the "Open Terminal" escape hatch, which
+    /// has nothing to open for a streamed session.
+    var streamed = false
 
     init(taskID: UUID, title: String, workspaceName: String, accentHex: String) {
         self.taskID = taskID
@@ -259,6 +300,9 @@ private struct PlanSessionView: View {
     var store: CodingTaskStore
     let onSend: (String) async -> Bool
     let onSendKeys: ([String]) async -> Bool
+    /// Structured answers for a streamed session; false falls the question
+    /// card back to the keystroke path.
+    let onSendAnswers: ([(question: String, labels: [String], other: String?)]) async -> Bool
     let onOpenTerminal: () -> Void
     let onClose: () -> Void
 
@@ -356,10 +400,13 @@ private struct PlanSessionView: View {
                     }
                 }
                 Spacer(minLength: 8)
-                Button(NSLocalizedString("Open Terminal", comment: "plan window"),
-                       action: onOpenTerminal)
-                    .help(NSLocalizedString(
-                        "The raw session, if you prefer the terminal.", comment: ""))
+                if !model.streamed {
+                    // Streamed sessions have no tmux tab — nothing to open.
+                    Button(NSLocalizedString("Open Terminal", comment: "plan window"),
+                           action: onOpenTerminal)
+                        .help(NSLocalizedString(
+                            "The raw session, if you prefer the terminal.", comment: ""))
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
@@ -402,7 +449,8 @@ private struct PlanSessionView: View {
                             }
                             TranscriptQuestionBatchCard(
                                 questions: questions,
-                                onSubmit: onSendKeys)
+                                onSubmit: onSendKeys,
+                                onSubmitAnswers: onSendAnswers)
                                 // A new batch = fresh local answers. Keyed by
                                 // the question TEXTS: consecutive rounds can
                                 // land at the same item indices (both live

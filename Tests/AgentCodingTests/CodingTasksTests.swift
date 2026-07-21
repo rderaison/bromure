@@ -124,7 +124,16 @@ struct CodingTasksTests {
             guestCwd: "/home/ubuntu/edr/", since: 1_752_800_000)
         #expect(cmd?.contains("projects/-home-ubuntu-edr\"") == true)  // no trailing slash
         #expect(cmd?.contains("-newermt @1752800000") == true)
-        // A dotted path is searched under BOTH encodings Claude has used.
+        // Guest-side candidates: Claude's REAL rule (flatten every
+        // non-alphanumeric, keyed off the PHYSICAL path — folder shares are
+        // symlinks) derived in-shell from both the logical and resolved cwd.
+        #expect(cmd?.contains("d='/home/ubuntu/edr'") == true)
+        #expect(cmd?.contains("readlink -f \"$d\"") == true)
+        #expect(cmd?.contains("tr -c 'a-zA-Z0-9' '-'") == true)
+        // A byte-cap cut can split a UTF-8 sequence; orphans are dropped
+        // instead of collapsing the guest exec's strict decode.
+        #expect(cmd?.contains("iconv -f UTF-8 -t UTF-8 -c") == true)
+        // A dotted path is still searched under BOTH legacy encodings.
         let dotted = CodingTaskEngine.planTranscriptCommand(
             guestCwd: "/home/u/my.app", since: 5)
         #expect(dotted?.contains("-home-u-my.app") == true)
@@ -132,7 +141,8 @@ struct CodingTasksTests {
         // Quotes and other unquotable characters refuse rather than escape.
         #expect(CodingTaskEngine.planTranscriptCommand(guestCwd: "/e'vil", since: 0) == nil)
         #expect(CodingTaskEngine.planTranscriptCommand(guestCwd: "", since: 0) == nil)
-        // The pending-question dump rides along, gated by the same since.
+        // The pending-question dump rides along, gated by the same since —
+        // and stays LOGICAL-path-keyed (the hook writes it from $(pwd)).
         #expect(cmd?.contains("pq--home-ubuntu-edr.json") == true)
         #expect(cmd?.contains("tr -d '\\n'") == true)
     }

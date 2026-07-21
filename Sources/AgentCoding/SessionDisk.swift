@@ -783,6 +783,28 @@ public final class SessionDisk {
             to: tmp.appendingPathComponent("bromure-task-mcp.py"),
             atomically: true, encoding: .utf8)
 
+        // Plan-stream driver assets — staged unconditionally, like the task
+        // MCP shim. bromure-plan-driver.py adapts codex/grok (and bridges
+        // the node claude driver) to the plan-stream v1 NDJSON protocol on
+        // vsock 5832; plan-driver-package.json pins the claude-agent-sdk
+        // agentd npm-installs into ~/.bromure/plan-driver on first use.
+        for name in ["bromure-plan-driver.py", "claude-plan-driver.mjs",
+                     "plan-driver-package.json"] {
+            let base = (name as NSString).deletingPathExtension
+            let ext = (name as NSString).pathExtension
+            if let src = acResourceBundle.url(forResource: "vm-setup/\(base)",
+                                              withExtension: ext) {
+                let dest = tmp.appendingPathComponent(name)
+                try? fm.removeItem(at: dest)
+                try fm.copyItem(at: src, to: dest)
+            }
+        }
+        // Feature marker: agentd routes plan runs through the stream driver
+        // only when this file exists (the tmux transcript path stays the
+        // fallback for old guests/tools). Ships on unconditionally.
+        try "".write(to: tmp.appendingPathComponent("plan-stream-enabled"),
+                     atomically: true, encoding: .utf8)
+
         // Codex local inference: Codex uses the Responses API via a config-file
         // provider, so env vars don't redirect it. Write a model_provider with
         // wire_api="responses" targeting the endpoint vllm-mlx serves on the
@@ -916,6 +938,11 @@ public final class SessionDisk {
     /// review). Sibling of the browser MCP, one port over.
     public static let taskBoardMCPVsockPort: UInt32 = 5831
     static let taskMCPShimGuestPath = "/mnt/bromure-meta/bromure-task-mcp.py"
+    /// Host vsock port for the plan-stream channel (plan-stream protocol
+    /// v1): guest plan drivers connect here and exchange NDJSON events/
+    /// commands with the host's planning UI. One port over from the board
+    /// MCP.
+    public static let planStreamVsockPort: UInt32 = 5832
 
     /// The built-in `browser` MCP server entry (Claude JSON shape): a stdio
     /// shim the agent launches, which pipes JSON-RPC over vsock to the host.

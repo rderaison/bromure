@@ -743,6 +743,10 @@ final class CodingTaskEngine {
     func destroy(_ taskID: UUID) {
         guard let task = store.task(taskID) else { return }
         let profileID = task.profileID
+        // A streamed planning session has no tab — end its driver directly.
+        if let slug = task.branchSlug {
+            delegate?.endPlanStream(profileID: profileID, branch: "wt/" + slug)
+        }
         let branch = task.branch ?? liveBranch(of: task)
         if let branch {
             let root = task.rootRepo
@@ -1108,7 +1112,7 @@ final class CodingTaskEngine {
         let enc1 = path.replacingOccurrences(of: "/", with: "-")
         let enc2 = path.replacingOccurrences(of: ".", with: "-")
             .replacingOccurrences(of: "/", with: "-")
-        let dirs = (enc1 == enc2 ? [enc1] : [enc1, enc2])
+        let legacy = (enc1 == enc2 ? [enc1] : [enc1, enc2])
             .map { "\"$HOME/.claude/projects/\($0)\"" }.joined(separator: " ")
         // The pq file is a PreToolUse hook's dump of a PENDING
         // AskUserQuestion (see the guest agent's _seed_question_hooks):
@@ -1116,11 +1120,24 @@ final class CodingTaskEngine {
         // until the question is answered, so this is the only way the
         // window can show the question while it's actually being asked.
         // tr strips newlines so a pretty-printed dump still parses as one
-        // transcript line.
+        // transcript line. The pq name stays LOGICAL-path-encoded — the
+        // hook derives it from $(pwd), which keeps the symlink.
         let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
-        return "f=$(find \(dirs) -maxdepth 1 -name '*.jsonl' -newermt @\(since) "
-            + "2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); "
-            + "if [ -n \"$f\" ]; then tail -c 300000 \"$f\"; fi; "
+        // Claude keys the project dir off the PHYSICAL cwd (node resolves
+        // symlinks — a folder share is a symlink into /mnt/bromure-share-N)
+        // and flattens EVERY non-alphanumeric to '-', not just '/' and '.'.
+        // Derive candidates guest-side from both the logical and resolved
+        // paths with the real rule; keep the old host-side encodings so
+        // transcripts of older sessions stay findable. iconv -c drops the
+        // orphan bytes a byte-cap cut can leave mid UTF-8 sequence — a
+        // strict decode downstream used to collapse the whole response.
+        return "d='\(path)'; r=$(readlink -f \"$d\" 2>/dev/null || printf %s \"$d\"); "
+            + "e1=$(printf %s \"$d\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "e2=$(printf %s \"$r\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "f=$(find \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
+            + "\(legacy) -maxdepth 1 -name '*.jsonl' -newermt @\(since) "
+            + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
+            + "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
             + "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
             + "then echo; tr -d '\\n' < \(pq); echo; fi"
     }
@@ -1142,11 +1159,18 @@ final class CodingTaskEngine {
             + "cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
             + "2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); "
             + "if [ -n \"$cwd\" ]; then "
-            + "e1=$(printf %s \"$cwd\" | tr / -); e2=$(printf %s \"$cwd\" | tr ./ --); "
+            // Claude's real project-dir rule (flatten every non-alnum, keyed
+            // off the PHYSICAL path) first; the old two encodings after, for
+            // transcripts of older sessions.
+            + "rc=$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\"); "
+            + "e1=$(printf %s \"$cwd\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "e2=$(printf %s \"$rc\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "e3=$(printf %s \"$cwd\" | tr / -); e4=$(printf %s \"$cwd\" | tr ./ --); "
             + "d=$(ls -td \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
+            + "\"$HOME/.claude/projects/$e3\" \"$HOME/.claude/projects/$e4\" "
             + "2>/dev/null | head -1); fi; fi; "
             + "f=$(ls -t \"$d\"/*.jsonl 2>/dev/null | head -1); "
-            + "if [ -n \"$f\" ]; then head -c 25000000 \"$f\"; fi"
+            + "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi"
     }
 
     /// The guest command that prints the age (seconds) of the newest write
@@ -1163,8 +1187,12 @@ final class CodingTaskEngine {
             + "cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
             + "2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); "
             + "if [ -n \"$cwd\" ]; then "
-            + "e1=$(printf %s \"$cwd\" | tr / -); e2=$(printf %s \"$cwd\" | tr ./ --); "
+            + "rc=$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\"); "
+            + "e1=$(printf %s \"$cwd\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "e2=$(printf %s \"$rc\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "e3=$(printf %s \"$cwd\" | tr / -); e4=$(printf %s \"$cwd\" | tr ./ --); "
             + "d=$(ls -td \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
+            + "\"$HOME/.claude/projects/$e3\" \"$HOME/.claude/projects/$e4\" "
             + "2>/dev/null | head -1); fi; fi; "
             // The WHOLE tree, recursively: subagent transcripts land as
             // separate files (agent-*.jsonl, possibly nested), and a probe
@@ -1353,6 +1381,11 @@ final class CodingTaskEngine {
         // Phases already landed? Then the session ending is just... done.
         if let done = t.validatedAt, let req = t.validationRequestedAt,
            done >= req { return }
+        // A streamed driver may still be running (timeout abort) — tear it
+        // down; safe no-op when the stream is already gone.
+        if let slug = t.branchSlug {
+            delegate?.endPlanStream(profileID: t.profileID, branch: "wt/" + slug)
+        }
         BACDebug.log("tasks", "“\(t.title)”: planning aborted — \(reason)")
         store.mutate(taskID) {
             $0.validationRequestedAt = nil
@@ -1381,10 +1414,18 @@ final class CodingTaskEngine {
                       let req = t.validationRequestedAt else { return }
                 if let done = t.validatedAt, done >= req {
                     // Phases landed — the interview is over. Give the agent
-                    // a beat to print its summary, then close its tab.
+                    // a beat to print its summary, then close its tab. A
+                    // streamed session has no tab (liveBranch is nil for it)
+                    // — send the driver its end command instead, or the
+                    // whole agent stack leaks in the guest until VM shutdown.
                     if let branch = self.liveBranch(of: t) {
                         self.closeSessionTab(profileID: profileID,
                                              branch: branch, afterSeconds: 20)
+                    }
+                    Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: 20_000_000_000)
+                        self?.delegate?.endPlanStream(profileID: profileID,
+                                                      branch: "wt/" + slug)
                     }
                     return
                 }
@@ -1393,6 +1434,18 @@ final class CodingTaskEngine {
                         "The planning session timed out without filing phases — click Plan to retry.",
                         comment: "plan watchdog"))
                     return
+                }
+                // A streamed (driver-mode) planning session has no tmux tab
+                // at all — its liveness is the vsock event stream, and its
+                // death arrives as a result/fatal event through
+                // planStreamEnded. Treat "streaming" as "tab present, agent
+                // running" so the tab checks below can't abort it.
+                if delegate.planStreamLive(profileID: profileID,
+                                           branch: "wt/" + slug) {
+                    seenTab = true
+                    sawAgent = true
+                    bareShellPolls = 0
+                    continue
                 }
                 // Pane roster when attached; guest tmux when the session
                 // runs detached (planning boots the VM headless).
@@ -1436,6 +1489,32 @@ final class CodingTaskEngine {
         }
     }
 
+    /// Streamed (driver-mode) planning ended — the terminal plan-stream
+    /// event, the counterpart of the tab path's Stop signal. Judge
+    /// filed-vs-not the same way; there is no tab to close.
+    func planStreamEnded(profileID: UUID, branch: String, ok: Bool,
+                         error: String?) {
+        guard branch.hasPrefix("wt/") else { return }
+        let slugPart = String(branch.dropFirst(3))
+        guard let parent = store.tasks.first(where: { t in
+            guard t.stage == .backlog, t.validationRequestedAt != nil,
+                  t.profileID == profileID, let slug = t.branchSlug
+            else { return false }
+            return slugPart == slug || (slugPart.hasPrefix(slug + "-")
+                && Int(slugPart.dropFirst(slug.count + 1)) != nil)
+        }) else { return }
+        if store.task(parent.id)?.validationInFlight == true {
+            abortPlanning(parent.id, reason: (error?.isEmpty == false ? error! : nil)
+                ?? NSLocalizedString(
+                    "The planning session ended before filing phases — click Plan to retry.",
+                    comment: "plan watchdog"))
+        } else {
+            BACDebug.log("tasks", "“\(parent.title)”: streamed planning complete")
+            planWatchdogs[parent.id]?.cancel()
+            planWatchdogs[parent.id] = nil
+        }
+    }
+
     /// App-launch sweep: re-arm watchdogs for planning sessions that were
     /// in flight when the app quit, so a stale spinner can't survive a
     /// restart unnoticed.
@@ -1459,7 +1538,7 @@ final class CodingTaskEngine {
     /// opens the usual merge tab (squash flavor on request); conflicts
     /// spawn the resolver flow.
     func merge(_ taskID: UUID, into targetOverride: String? = nil,
-               squash: Bool = false) {
+               squash: Bool = false, cleanup: Bool = true) {
         guard let task = store.task(taskID), task.stage == .testing,
               let branch = task.branch, let delegate else { return }
         guard let target = targetOverride ?? task.parentBranch,
@@ -1479,7 +1558,7 @@ final class CodingTaskEngine {
                 }
                 if let t = self.store.task(taskID),
                    (targetOverride ?? t.parentBranch) != nil, t.rootRepo != nil {
-                    self.merge(taskID, into: targetOverride, squash: squash)
+                    self.merge(taskID, into: targetOverride, squash: squash, cleanup: cleanup)
                 } else {
                     self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
                         "Couldn't determine the branch's parent or repo root — is the workspace running?",
@@ -1494,7 +1573,7 @@ final class CodingTaskEngine {
             args: [branch, target, root,
                    String(format: NSLocalizedString("Merge → %@", comment: "merge tab"),
                           target),
-                   task.tool.rawValue, squash ? "squash" : "merge"])
+                   task.tool.rawValue, squash ? "squash" : "merge", "auto"])
         guard ok else {
             store.mutate(taskID) { $0.lastError = NSLocalizedString(
                 "Couldn't reach the workspace — is it running?", comment: "task merge") }
@@ -1509,7 +1588,8 @@ final class CodingTaskEngine {
         store.mutate(taskID) { $0.mergingAt = Date(); $0.lastError = nil }
         Task { [weak self] in
             await self?.verifyMergeLanded(taskID, branch: branch, target: target,
-                                          root: root, squash: squash)
+                                          root: root, squash: squash,
+                                          cleanup: cleanup)
         }
     }
 
@@ -1525,7 +1605,7 @@ final class CodingTaskEngine {
     /// "already-an-ancestor" branch (uncommitted-only work) must not count.
     private func verifyMergeLanded(_ taskID: UUID, branch: String,
                                    target: String, root: String,
-                                   squash: Bool) async {
+                                   squash: Bool, cleanup: Bool) async {
         func q(_ s: String) -> String {
             "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
         }
@@ -1554,6 +1634,14 @@ final class CodingTaskEngine {
                     $0.lastError = nil
                 }
                 pumpQueue()
+                // The merge landed — the worktree's job is done. Remove it
+                // (checkout + branch) unless the user kept the option off;
+                // failures surface via worktree-error like any remove.
+                if cleanup {
+                    _ = delegate.automationWorktreeCommand(
+                        profileNameOrID: task.profileID.uuidString,
+                        action: "remove", args: [root, branch])
+                }
                 return
             }
             try? await Task.sleep(nanoseconds: Self.mergeVerifyInterval)

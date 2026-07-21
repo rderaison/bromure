@@ -571,9 +571,13 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         )
 
         try:
+            # errors="replace": byte-capped output (tail -c / head -c of a
+            # transcript) can cut mid UTF-8 sequence; a strict decode threw
+            # here and collapsed the WHOLE exec to exit -1, freezing every
+            # host feature riding this channel for that poll.
             result = subprocess.run(
                 wrapped, shell=True, capture_output=True, text=True,
-                timeout=timeout, cwd=workdir
+                errors="replace", timeout=timeout, cwd=workdir
             )
             response = {
                 "stdout": result.stdout,
@@ -2191,6 +2195,124 @@ def _plan_tab(cwd, slug, display, tool, prompt_b64):
     _set_window_option(win, "@worktree", branch)
 
 
+# ── plan-stream driver (headless planning, no tmux) ─────────────────────────
+_PLAN_DRIVER = "/mnt/bromure-meta/bromure-plan-driver.py"
+_PLAN_STREAM_FLAG = "/mnt/bromure-meta/plan-stream-enabled"
+_PLAN_SDK_PKG = "/mnt/bromure-meta/plan-driver-package.json"
+# Serializes claude-SDK installs: two plans racing before the SDK exists
+# must not run npm install concurrently in the same directory.
+_PLAN_SDK_LOCK = threading.Lock()
+
+
+def _plan_claude_sdk_ready():
+    """Ensure ~/.bromure/plan-driver holds the pinned claude-agent-sdk the
+    node plan driver imports. The home persists across sessions, so the
+    npm install runs once per guest; the proxy env comes from proxy.env
+    (sourced by the driver launch below, and here for npm). Readiness is
+    gated on a .sdk-ok sentinel written only after a SUCCESSFUL install —
+    a torn install (kill/timeout mid-extract) leaves the package dir on
+    disk and must not pass an isdir check forever."""
+    ddir = os.path.join(HOME, ".bromure", "plan-driver")
+    sdk = os.path.join(ddir, "node_modules", "@anthropic-ai",
+                       "claude-agent-sdk")
+    sentinel = os.path.join(ddir, ".sdk-ok")
+    with _PLAN_SDK_LOCK:
+        # Re-check under the lock: the loser of a race arrives here after
+        # the winner already installed.
+        if os.path.isdir(sdk) and os.path.exists(sentinel):
+            return True
+        if not os.path.exists(_PLAN_SDK_PKG):
+            log("plan", "plan-driver-package.json missing from meta share")
+            return False
+        try:
+            os.makedirs(ddir, exist_ok=True)
+            try:
+                os.remove(sentinel)
+            except OSError:
+                pass
+            shutil.copy(_PLAN_SDK_PKG, os.path.join(ddir, "package.json"))
+            p = subprocess.run(
+                ["bash", "-c",
+                 "if [ -r /mnt/bromure-meta/proxy.env ]; then "
+                 "set -a; . /mnt/bromure-meta/proxy.env; set +a; fi; "
+                 "exec npm install --no-audit --no-fund"],
+                cwd=ddir, capture_output=True, text=True, timeout=180)
+            if p.returncode != 0:
+                log("plan", "npm install failed:",
+                    (p.stderr or p.stdout or "")[-500:])
+                return False
+            if not os.path.isdir(sdk):
+                log("plan", "npm install succeeded but SDK dir is missing")
+                return False
+            open(sentinel, "w").close()
+            return True
+        except Exception as e:
+            log("plan", "claude sdk install failed:", e)
+            return False
+
+
+def _plan_stream(cwd, slug, display, tool, prompt_b64):
+    """Planning interview over the plan-stream driver: a headless process
+    that runs the agent's machine protocol and emits normalized NDJSON to
+    the host on vsock 5832 — no tmux window, no transcript scraping. Any
+    missing prerequisite (driver script, tool binary, node/SDK for claude)
+    falls back to the tmux path so planning never silently breaks."""
+    if prompt_b64 == "-":
+        prompt_b64 = ""
+    if not os.path.isdir(cwd):
+        worktree_err("plan: no such directory: " + cwd)
+        return
+    branch = "wt/" + slug
+    if not os.path.exists(_PLAN_DRIVER) or not shutil.which(tool):
+        log("plan", "driver or %s binary missing — tmux fallback" % tool)
+        _plan_tab(cwd, slug, display, tool, prompt_b64)
+        return
+    if tool == "claude":
+        if not shutil.which("node") or not _plan_claude_sdk_ready():
+            log("plan", "claude driver deps missing — tmux fallback")
+            _plan_tab(cwd, slug, display, tool, prompt_b64)
+            return
+        # Board MCP config the node driver loads (claude branch of
+        # _task_mcp_setup; the returned CLI flag is irrelevant here).
+        _task_mcp_setup(branch, "claude", cwd)
+    # codex/grok wire the board MCP themselves inside the driver.
+    logf = None
+    try:
+        logf = open(os.path.join(OUTBOX, "plan-driver.log"), "a")
+    except OSError:
+        pass
+    try:
+        # bash -c sources proxy.env AND api_key.env (agentd's own env has
+        # neither): the agent authenticates with the host-injected key —
+        # a bogus per-profile value the MITM proxy swaps on the wire, same
+        # as the tmux launcher's env. Without it the SDK's claude sits at
+        # "Not logged in". Then exec the driver; argv passes via "$@".
+        proc = subprocess.Popen(
+            ["bash", "-c",
+             "for f in /mnt/bromure-meta/proxy.env /mnt/bromure-meta/api_key.env; do "
+             'if [ -r "$f" ]; then set -a; . "$f"; set +a; fi; done; '
+             'exec python3 "$@"', "plan-driver",
+             _PLAN_DRIVER, tool, branch, cwd, prompt_b64],
+            cwd=cwd, stdin=_DEVNULL,
+            stdout=(logf or _DEVNULL), stderr=(logf or _DEVNULL))
+    except OSError as e:
+        if logf:
+            logf.close()
+        log("plan", "driver spawn failed (%s) — tmux fallback" % e)
+        _plan_tab(cwd, slug, display, tool, prompt_b64)
+        return
+    if logf:
+        logf.close()   # the child holds its own copy of the fd
+    log("plan", "plan driver started for %s (%s, pid %d)"
+        % (branch, tool, proc.pid))
+
+    def _wait():
+        rc = proc.wait()
+        log("plan", "plan driver for %s exited rc=%s" % (branch, rc))
+
+    _bg(_wait)
+
+
 def _automation_run(cwd, slug, display, tool, prompt_b64, mode=""):
     """Automation fire: a worktree when cwd is inside a git repo, a plain
     agent tab otherwise (the host can't tell — the guest decides here).
@@ -2199,7 +2321,13 @@ def _automation_run(cwd, slug, display, tool, prompt_b64, mode=""):
     board MCP tools wired in. mode "plan" = planning interview, run in cwd
     itself (no worktree)."""
     if mode == "plan":
-        _plan_tab(cwd, slug, display, tool, prompt_b64)
+        # The host stages the plan-stream-enabled marker when it can serve
+        # the vsock 5832 listener; without it (old host) plans keep the
+        # tmux transcript path.
+        if os.path.exists(_PLAN_STREAM_FLAG):
+            _plan_stream(cwd, slug, display, tool, prompt_b64)
+        else:
+            _plan_tab(cwd, slug, display, tool, prompt_b64)
         return
     root = _worktree_main_root(cwd) if os.path.isdir(cwd) else None
     if mode == "task" and root == os.path.expanduser("~"):
@@ -2274,14 +2402,29 @@ def _automation_finish(branch):
         log("automation", "finished %s — transcript saved, tab closed" % branch)
 
 
-# Prompt the coding agent gets when a merge conflicts (verbatim from source).
+# Prompt the coding agent gets when a merge conflicts. %(finish)s is the
+# autonomy-dependent ending: tab-menu merges ask the user before committing;
+# BOARD merges finish on their own (the user already reviewed the diff and
+# clicked Merge — a trailing "want to review?" just stalls the pipeline).
 _MERGE_PROMPT = ("A git merge in this directory hit conflicts. Run 'git status'"
                  " to see them, then resolve every conflicted file, keeping both"
-                 " sides' intent, and stage the resolutions with 'git add'. Do"
-                 " NOT commit yet: give me a short summary of how you resolved"
-                 " each conflict and ask whether I'd like to review the changes"
-                 " first. Only run 'git commit --no-edit' to finish the merge"
-                 " after I confirm.")
+                 " sides' intent, and stage the resolutions with 'git add'."
+                 " %(finish)s")
+_FINISH_ASK = ("Do NOT commit yet: give me a short summary of how you resolved"
+               " each conflict and ask whether I'd like to review the changes"
+               " first. Only run 'git commit --no-edit' to finish the merge"
+               " after I confirm.")
+_FINISH_AUTO = ("Then finish the merge with 'git commit --no-edit' on your own"
+                " — do NOT ask for confirmation — and reply with a one-line"
+                " summary of how you resolved each conflict.")
+# The same pair for the dirty-worktree and failed-to-start prompts' conflict
+# steps (shorter sentence shape, embedded mid-list).
+_CONFLICT_ASK = ("summarize how you resolved each conflict and ask me to"
+                 " confirm before finishing the merge with 'git commit"
+                 " --no-edit'")
+_CONFLICT_AUTO = ("then finish the merge with 'git commit --no-edit' without"
+                  " asking, and include a one-line summary of how you resolved"
+                  " each conflict in your reply")
 
 # The merge FAILED TO START — it exited with an error before creating a
 # merge (no MERGE_HEAD): classically untracked files in the destination
@@ -2303,8 +2446,7 @@ _MERGE_FAIL_PROMPT = (
     " committed work.\n"
     "Then run the saved merge command to completion. If it conflicts,"
     " resolve every conflicted file keeping both sides' intent, stage the"
-    " resolutions with 'git add', then summarize and ask me to confirm"
-    " before finishing with 'git commit --no-edit'.\n"
+    " resolutions with 'git add'; %(conflict_finish)s.\n"
     "Reply with a one-line summary of what blocked the merge and what"
     " landed.")
 
@@ -2370,8 +2512,7 @@ _DIRTY_MERGE_PROMPT = (
     "3. Then merge into the destination's checkout: %(merge_step)s\n"
     "4. If the merge conflicts, resolve every conflicted file keeping both"
     " sides' intent and stage the resolutions with `git add` in that"
-    " checkout; summarize how you resolved each conflict and ask me to"
-    " confirm before finishing the merge with `git commit --no-edit`.\n"
+    " checkout; %(conflict_finish)s.\n"
     "5. Reply with a one-line summary of what landed in '%(dst)s'.")
 
 _DIRTY_MERGE_STEP = "run `git -C '%(tdir)s' merge --no-edit '%(src)s'`."
@@ -2380,7 +2521,8 @@ _DIRTY_SQUASH_STEP = (
     " `git -C '%(tdir)s' commit -m 'Squash-merge %(src)s'`.")
 
 
-def _worktree_merge(branch, target, root, display, tool, mode="merge"):
+def _worktree_merge(branch, target, root, display, tool, mode="merge",
+                    autonomy="ask"):
     _ensure_seed_current()
     tdir = _worktree_dir_for_branch(root, target)
     if not tdir:
@@ -2389,6 +2531,11 @@ def _worktree_merge(branch, target, root, display, tool, mode="merge"):
         worktree_err("merge: no checkout for '%s'" % target)
         return
     squash = (mode == "squash")
+    # Board merges run to completion without asking (the user already
+    # reviewed and clicked Merge); the tab-menu flow keeps the confirm.
+    auto = (autonomy == "auto")
+    finish = _FINISH_AUTO if auto else _FINISH_ASK
+    conflict_finish = _CONFLICT_AUTO if auto else _CONFLICT_ASK
     # Uncommitted work on the source branch → agent-driven merge (see
     # _DIRTY_MERGE_PROMPT). The clean/committed case keeps the fast path.
     sdir = _worktree_dir_for_branch(root, branch)
@@ -2397,7 +2544,8 @@ def _worktree_merge(branch, target, root, display, tool, mode="merge"):
         step = (_DIRTY_SQUASH_STEP if squash else _DIRTY_MERGE_STEP) \
             % {"tdir": tdir, "src": branch}
         p64 = _b64e(_DIRTY_MERGE_PROMPT
-                    % {"src": branch, "dst": target, "merge_step": step})
+                    % {"src": branch, "dst": target, "merge_step": step,
+                       "conflict_finish": conflict_finish})
         win = _new_window(command="bash -l", cwd=sdir,
                           env={"BROMURE_AC_WT_TOOL": tool,
                                "BROMURE_AC_WT_PROMPT": p64})
@@ -2410,7 +2558,7 @@ def _worktree_merge(branch, target, root, display, tool, mode="merge"):
         _set_window_option(win, "@root_repo", root)
         _set_window_option(win, "@label", tool)
         return
-    rp64 = _b64e(_MERGE_PROMPT)
+    rp64 = _b64e(_MERGE_PROMPT % {"finish": finish})
     win = _new_window(command=_SQUASH_WINDOW_CMD if squash else _MERGE_WINDOW_CMD,
                       cwd=tdir,
                       env={"WT_SRC": branch, "WT_DST": target,
@@ -2419,7 +2567,8 @@ def _worktree_merge(branch, target, root, display, tool, mode="merge"):
                            "BROMURE_AC_WT_PROMPT": rp64,
                            # Swapped into BROMURE_AC_WT_PROMPT by the window
                            # command when the merge fails to start.
-                           "WT_FAIL_PROMPT": _b64e(_MERGE_FAIL_PROMPT)})
+                           "WT_FAIL_PROMPT": _b64e(_MERGE_FAIL_PROMPT
+                               % {"conflict_finish": conflict_finish})})
     # @display "Merge → …" is the host's marker for a merge tab.
     if win:
         _set_window_option(win, "@display", "Merge → " + target)
@@ -3162,10 +3311,13 @@ def _dispatch_command(action, arg):
         _bg(_task_resume, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
             _b64d(f[3]), _b64d(f[4]), f[5])
     elif action == "worktree-merge":
-        # Optional 6th field: merge mode ("merge" default, "squash").
-        f = _fields(arg, 6)
+        # Optional 6th field: merge mode ("merge" default, "squash");
+        # optional 7th: autonomy ("ask" default, "auto" = board merges,
+        # which commit without asking).
+        f = _fields(arg, 7)
         _bg(_worktree_merge, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), _b64d(f[4]), _b64d(f[5]) if f[5] else "merge")
+            _b64d(f[3]), _b64d(f[4]), _b64d(f[5]) if f[5] else "merge",
+            _b64d(f[6]) if f[6] else "ask")
     elif action == "worktree-pr":
         f = _fields(arg, 5)
         _bg(_worktree_pr, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),

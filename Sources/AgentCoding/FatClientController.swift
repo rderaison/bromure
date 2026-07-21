@@ -886,6 +886,18 @@ final class RemoteHostController {
     func taskCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
         send("POST", "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
     }
+    /// A coding-board verb that needs the HOST'S reply (the plan-stream
+    /// relay: event pages, structured answers). nil = transport failure.
+    func taskCommandReply(_ id: UUID, _ action: String,
+                          body: [String: Any]) async -> [String: Any]? {
+        let host = self.host
+        let path = "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", path, body: body)
+        }.value
+        guard let resp, resp.status == 200 else { return nil }
+        return resp.json
+    }
     func deleteTask(_ id: UUID) {
         send("DELETE", "/tasks/\(ControlClient.encodeSegment(id.uuidString))")
     }
@@ -1977,8 +1989,8 @@ final class RemoteHostWindow: NSWindow {
                 self?.controller.profile(for: id)?.name ?? ""
             },
             sendBack: { [weak self] id in self?.controller.taskCommand(id, "send-back") },
-            merge: { [weak self] id, target, squash in
-                var body: [String: Any] = ["squash": squash]
+            merge: { [weak self] id, target, squash, cleanup in
+                var body: [String: Any] = ["squash": squash, "cleanup": cleanup]
                 if let target { body["target"] = target }
                 self?.controller.taskCommand(id, "merge", body: body)
             },
@@ -2072,7 +2084,69 @@ final class RemoteHostWindow: NSWindow {
                     task.profileID, command: cmd, timeout: 8) else { return nil }
                 return out.split(whereSeparator: \.isNewline).map(String.init)
                     .first { AutomationBoard.branchMatches($0, slug: slug) }
+            },
+            liveItems: { [weak self] task in
+                // Streamed sessions relay through the host: page new items
+                // by cursor each poll tick; an empty non-live reply means no
+                // stream — fall back to the transcript mirror.
+                guard let self else { return nil }
+                var cache = self.planStreamItems[task.id] ?? (session: "", items: [])
+                guard let resp = await self.controller.taskCommandReply(
+                    task.id, "plan-events", body: ["since": cache.items.count])
+                else { return cache.items.isEmpty ? nil : cache.items }
+                let live = resp["live"] as? Bool ?? false
+                let token = resp["session"] as? String ?? ""
+                var new = ((resp["items"] as? [[String: Any]]) ?? [])
+                    .compactMap(TranscriptItemWire.decode)
+                let base = resp["since"] as? Int ?? cache.items.count
+                if (!token.isEmpty && token != cache.session && !cache.session.isEmpty)
+                    || base < cache.items.count {
+                    // Different session (Plan retry reused the branch) — the
+                    // cache belongs to the dead one. Never splice: drop it
+                    // and refetch this session from the top.
+                    cache = (session: token, items: [])
+                    if let full = await self.controller.taskCommandReply(
+                        task.id, "plan-events", body: ["since": 0]) {
+                        new = ((full["items"] as? [[String: Any]]) ?? [])
+                            .compactMap(TranscriptItemWire.decode)
+                    } else {
+                        new = []
+                    }
+                    cache.items = new
+                } else if !new.isEmpty {
+                    cache.items += new
+                }
+                cache.session = token
+                self.planStreamItems[task.id] = cache
+                return (cache.items.isEmpty && !live) ? nil : cache.items
+            },
+            sendAnswers: { [weak self] task, answers in
+                guard let self else { return false }
+                let payload = answers.map { a -> [String: Any] in
+                    var d: [String: Any] = ["question": a.question,
+                                            "labels": a.labels]
+                    if let o = a.other { d["other"] = o }
+                    return d
+                }
+                let resp = await self.controller.taskCommandReply(
+                    task.id, "plan-cmd",
+                    body: ["type": "answer", "answers": payload])
+                return resp?["ok"] as? Bool ?? false
+            },
+            sendUser: { [weak self] task, text in
+                guard let self else { return nil }
+                let resp = await self.controller.taskCommandReply(
+                    task.id, "plan-cmd", body: ["type": "user", "text": text])
+                // ok:false / error / old host → nil → the tmux typing path.
+                guard resp?["ok"] as? Bool == true else { return nil }
+                return true
             }))
+
+    /// Fat-client cache of streamed plan items, per task — grown by the
+    /// `plan-events` cursor pages the context's liveItems closure fetches.
+    /// The session token detects a Plan retry that reused the branch, so
+    /// the cache resets instead of splicing two sessions' transcripts.
+    private var planStreamItems: [UUID: (session: String, items: [TranscriptItem])] = [:]
 
     /// tmux window index for a branch: mirrored roster first, remote
     /// guest tmux when the session runs detached on the server.

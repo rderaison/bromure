@@ -75,7 +75,8 @@ final class TaskReviewWindowManager {
         var sendBack: (UUID) -> Void
         /// Merge the branch — into its parent by default, `target` when the
         /// picker chose another branch, squashed on request.
-        var merge: (_ taskID: UUID, _ target: String?, _ squash: Bool) -> Void
+        var merge: (_ taskID: UUID, _ target: String?, _ squash: Bool,
+                    _ cleanup: Bool) -> Void
         /// "Create Pull Request…" — the worktree-pr agent flow.
         var openPR: (UUID) -> Void
         /// Branches of the task's repo, for the "Merge into…" picker.
@@ -129,8 +130,8 @@ final class TaskReviewWindowManager {
                 self?.close(taskID)
             },
             fetchBranches: context.fetchBranches,
-            onMerge: { [weak self] target, squash in
-                self?.context.merge(taskID, target, squash)
+            onMerge: { [weak self] target, squash, cleanup in
+                self?.context.merge(taskID, target, squash, cleanup)
                 self?.close(taskID)
             },
             onOpenPR: { [weak self] in
@@ -167,11 +168,12 @@ private struct TaskReviewView: View {
     let onAddComment: (_ text: String, _ file: String?, _ line: Int?) -> Void
     let onSendBack: () -> Void
     let fetchBranches: (CodingTask) async -> [String]
-    let onMerge: (_ target: String?, _ squash: Bool) -> Void
+    let onMerge: (_ target: String?, _ squash: Bool, _ cleanup: Bool) -> Void
     let onOpenPR: () -> Void
 
     @State private var data: TaskReviewData?
     @State private var loadFailed = false
+    @State private var cleanupAfterMerge = true
     @State private var draftComment = ""
     /// File path the draft comment is scoped to (via a file header's
     /// comment button); nil = about the whole change.
@@ -265,19 +267,25 @@ private struct TaskReviewView: View {
         let parent = task?.parentBranch ?? "parent"
         return Menu {
             Button {
-                onMerge(nil, false)
+                onMerge(nil, false, cleanupAfterMerge)
             } label: {
                 Label(String(format: NSLocalizedString("Merge into %@", comment: "review"),
                              parent),
                       systemImage: "arrow.triangle.merge")
             }
             Button {
-                onMerge(nil, true)
+                onMerge(nil, true, cleanupAfterMerge)
             } label: {
                 Label(String(format: NSLocalizedString("Squash & Merge into %@",
                                                        comment: "review"), parent),
                       systemImage: "arrow.triangle.merge")
             }
+            Divider()
+            // Default ON: a merged task's worktree has done its job; the
+            // engine removes checkout + branch once the merge is VERIFIED
+            // on the target (never before).
+            Toggle(NSLocalizedString("Remove worktree after merge", comment: "review"),
+                   isOn: $cleanupAfterMerge)
             Divider()
             Button {
                 onOpenPR()
@@ -290,7 +298,7 @@ private struct TaskReviewView: View {
                 Divider()
                 Menu(NSLocalizedString("Merge into…", comment: "review")) {
                     ForEach(others.prefix(30), id: \.self) { branch in
-                        Button(branch) { onMerge(branch, false) }
+                        Button(branch) { onMerge(branch, false, cleanupAfterMerge) }
                     }
                 }
             }
@@ -299,7 +307,7 @@ private struct TaskReviewView: View {
                          parent),
                   systemImage: "arrow.triangle.merge")
         } primaryAction: {
-            onMerge(nil, false)
+            onMerge(nil, false, cleanupAfterMerge)
         }
         .fixedSize()
         .help(NSLocalizedString(

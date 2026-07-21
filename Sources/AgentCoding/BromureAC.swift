@@ -1236,17 +1236,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// hook reported). Authoritative for that tab — no timer, since the Stop
     /// hook delivers the terminal state explicitly.
     func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus) {
-        guard let tab = pane(for: id)?.model.tabs.first(where: { $0.index == index }) else { return }
-        tab.agentStatus = status
-        // A finished Claude tab may be an automation run — the engine saves
-        // its transcript and closes the tab if so — or a coding task, which
-        // moves to Testing.
-        if status == .done {
-            scheduledAutomationEngine.agentFinished(
-                profileID: id, worktreeBranch: tab.worktreeBranch)
-            codingTaskEngine.agentFinished(
-                profileID: id, worktreeBranch: tab.worktreeBranch)
+        if let tab = pane(for: id)?.model.tabs.first(where: { $0.index == index }) {
+            tab.agentStatus = status
+            // A finished Claude tab may be an automation run — the engine saves
+            // its transcript and closes the tab if so — or a coding task, which
+            // moves to Testing.
+            if status == .done {
+                scheduledAutomationEngine.agentFinished(
+                    profileID: id, worktreeBranch: tab.worktreeBranch)
+                codingTaskEngine.agentFinished(
+                    profileID: id, worktreeBranch: tab.worktreeBranch)
+            }
+            return
         }
+        // No local pane — a detached (fat-client-driven) session. The board
+        // lifecycle must not depend on a window: resolve the tab from the
+        // session's mirrored roster and route the done signal to the engines
+        // anyway. Without this, a remote-driven plan/task session finished
+        // invisibly — the tab never closed and the card never moved.
+        guard status == .done,
+              let tab = runningSessions[id]?.tabs.first(where: { $0.index == index })
+        else { return }
+        scheduledAutomationEngine.agentFinished(
+            profileID: id, worktreeBranch: tab.worktreeBranch)
+        codingTaskEngine.agentFinished(
+            profileID: id, worktreeBranch: tab.worktreeBranch)
     }
 
     /// Pop a VM out of the unified window into its own standalone window. The
@@ -1636,6 +1650,74 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var browserMCPBridges: [Profile.ID: BrowserMCPVsockBridge] = [:]
     /// Coding-board MCP listeners (vsock 5831), one per running workspace.
     var taskMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
+    /// Plan-stream listeners (vsock 5832), one per running workspace — the
+    /// streamed planning drivers connect here (see PlanEventBridge).
+    var planEventBridges: [Profile.ID: PlanEventBridge] = [:]
+    /// Streamed planning session state, shared by the plan windows, the
+    /// engine's lifecycle hooks, and the fat-client relay.
+    private(set) lazy var planStreamHub: PlanStreamHub = {
+        let hub = PlanStreamHub()
+        hub.onStarted = { pid, branch in
+            BACDebug.log("plan-stream", "\(branch) started (\(pid))")
+        }
+        hub.onEnded = { [weak self] pid, branch, ok, error in
+            self?.codingTaskEngine.planStreamEnded(
+                profileID: pid, branch: branch, ok: ok, error: error)
+        }
+        hub.onChanged = { [weak self] pid, branch in
+            guard let self else { return }
+            // Push the event straight into an open plan window (local; the
+            // fat client polls the relay instead).
+            guard branch.hasPrefix("wt/") else { return }
+            let slug = String(branch.dropFirst(3))
+            if let task = self.codingTaskStore.tasks.first(where: {
+                $0.profileID == pid && $0.branchSlug == slug
+            }) {
+                self.planSessionWindows.refresh(task.id)
+            }
+        }
+        return hub
+    }()
+
+    /// True while a streamed planning session for this branch is running —
+    /// the plan watchdog's "the session exists" signal in driver mode.
+    func planStreamLive(profileID: Profile.ID, branch: String) -> Bool {
+        planStreamHub.isLive(profileID: profileID, branch: branch)
+    }
+
+    /// Tear a streamed planning session down: the driver replies with its
+    /// terminal result and exits, releasing the guest agent processes. Safe
+    /// no-op when no live stream claims the branch — callers fire it on
+    /// every session-over path without checking first.
+    func endPlanStream(profileID: Profile.ID, branch: String) {
+        guard planStreamHub.isLive(profileID: profileID, branch: branch) else { return }
+        _ = planEventBridges[profileID]?.send(branch: branch, .end)
+    }
+
+    /// Wire a workspace's plan-stream bridge into the hub, including the
+    /// died-without-a-terminal-event detection: a bound connection closing
+    /// starts a grace period (the driver's reconnect backoff caps at 5s);
+    /// if nothing rebinds the branch, the session is declared dead so the
+    /// card doesn't spin until the 1-hour watchdog cap.
+    private func wirePlanBridge(_ bridge: PlanEventBridge, pid: Profile.ID) {
+        bridge.onEvent = { [weak self] branch, event in
+            self?.planStreamHub.handle(profileID: pid, branch: branch, event: event)
+        }
+        bridge.onConnectionLost = { [weak self, weak bridge] branch in
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 90_000_000_000)
+                guard let self, let bridge,
+                      !bridge.isBound(branch: branch),
+                      self.planStreamHub.isLive(profileID: pid, branch: branch)
+                else { return }
+                self.planStreamHub.handle(
+                    profileID: pid, branch: branch,
+                    event: .fatal(NSLocalizedString(
+                        "The planning driver disconnected and did not reconnect.",
+                        comment: "plan stream")))
+            }
+        }
+    }
 
     /// Errors from `guestExec`.
     enum GuestExecError: LocalizedError {
@@ -2724,7 +2806,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "merge":
                     self.codingTaskEngine.merge(
                         id, into: body["target"] as? String,
-                        squash: body["squash"] as? Bool ?? false)
+                        squash: body["squash"] as? Bool ?? false,
+                        cleanup: body["cleanup"] as? Bool ?? true)
                 case "open-pr":
                     self.codingTaskEngine.openPR(id)
                 case "validate":
@@ -2751,6 +2834,62 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.destroy(id)
                 case "resume":
                     self.codingTaskEngine.resumeSession(id)
+                case "plan-events":
+                    // Fat-client relay: the streamed plan session's rendered
+                    // items from `since` on (a growing-log cursor).
+                    guard let task = self.codingTaskStore.task(id),
+                          let slug = task.branchSlug,
+                          let s = self.planStreamHub.session(
+                              profileID: task.profileID, branch: "wt/" + slug)
+                    else { return ["live": false, "items": [], "since": 0] }
+                    let since = max(0, min(body["since"] as? Int ?? 0, s.items.count))
+                    var out: [String: Any] = [
+                        "live": s.ended == nil,
+                        "since": since,
+                        // Session identity: a Plan retry can reuse the branch,
+                        // and the client must drop its cache instead of
+                        // splicing two sessions' transcripts together.
+                        "session": s.token,
+                        "items": s.items[since...].map(TranscriptItemWire.encode),
+                    ]
+                    if let end = s.ended {
+                        out["ended"] = ["ok": end.ok, "error": end.error ?? ""]
+                    }
+                    return out
+                case "plan-cmd":
+                    // Fat-client relay: user turn / structured answers into
+                    // the streamed session.
+                    guard let task = self.codingTaskStore.task(id),
+                          let slug = task.branchSlug,
+                          let bridge = self.planEventBridges[task.profileID],
+                          self.planStreamHub.isLive(profileID: task.profileID,
+                                                    branch: "wt/" + slug)
+                    else { return ["ok": false, "error": "no live plan stream"] }
+                    let branch = "wt/" + slug
+                    let sent: Bool
+                    switch body["type"] as? String ?? "" {
+                    case "user":
+                        sent = bridge.send(branch: branch,
+                                           .user(body["text"] as? String ?? ""))
+                    case "answer":
+                        guard let session = self.planStreamHub.session(
+                            profileID: task.profileID, branch: branch),
+                              let qid = session.pendingQID
+                        else { return ["ok": false, "error": "no pending question"] }
+                        let answers = ((body["answers"] as? [[String: Any]]) ?? []).map {
+                            (question: $0["question"] as? String ?? "",
+                             labels: $0["labels"] as? [String] ?? [],
+                             other: $0["other"] as? String)
+                        }
+                        sent = bridge.send(branch: branch,
+                                           .answer(qid: qid, answers: answers))
+                        if sent { session.markAnswered(qid: qid) }
+                    case "interrupt":
+                        sent = bridge.send(branch: branch, .interrupt)
+                    default:
+                        return ["ok": false, "error": "unknown plan-cmd type"]
+                    }
+                    return ["ok": sent]
                 default:
                     return ["error": "unknown action", "action": action]
                 }
@@ -6669,6 +6808,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         profileID: pid,
                         store: { [weak self] in self?.codingTaskStore },
                         engine: { [weak self] in self?.codingTaskEngine }))
+                // Plan-stream listener (vsock 5832): streamed planning
+                // drivers (claude SDK / codex app-server / grok ACP).
+                let planBridge = PlanEventBridge(socketDevice: dev)
+                self.wirePlanBridge(planBridge, pid: pid)
+                self.planEventBridges[pid] = planBridge
             }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
                 var p = profile
@@ -6988,9 +7132,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let prompt = args[5].isEmpty ? "-" : b64(args[5])
             encoded = args.prefix(5).map(b64) + [prompt]
         case "merge":
-            // src, target, mainRoot, display, tool[, mode ("merge"/"squash")]
+            // src, target, mainRoot, display, tool[, mode ("merge"/"squash")
+            // [, autonomy ("ask"/"auto" — board merges commit without asking)]]
             guard args.count >= 5 else { return false }
-            name = "worktree-merge"; encoded = args.prefix(6).map(b64)
+            name = "worktree-merge"; encoded = args.prefix(7).map(b64)
         case "pr":
             guard args.count >= 5 else { return false }   // src, target, mainRoot, display, tool
             name = "worktree-pr"; encoded = args.prefix(5).map(b64)
@@ -7333,6 +7478,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             },
             liveBranch: { [weak self] task in
                 await self?.codingTaskEngine.liveBranchResolved(of: task)
+            },
+            liveItems: { [weak self] task in
+                guard let self, let slug = task.branchSlug,
+                      let s = self.planStreamHub.session(
+                          profileID: task.profileID, branch: "wt/" + slug)
+                else { return nil }
+                return s.items
+            },
+            sendAnswers: { [weak self] task, answers in
+                guard let self, let slug = task.branchSlug,
+                      let s = self.planStreamHub.session(
+                          profileID: task.profileID, branch: "wt/" + slug),
+                      s.ended == nil, let qid = s.pendingQID,
+                      let bridge = self.planEventBridges[task.profileID]
+                else { return false }
+                let sent = bridge.send(branch: "wt/" + slug,
+                                       .answer(qid: qid, answers: answers))
+                if sent { s.markAnswered(qid: qid) }
+                return sent
+            },
+            sendUser: { [weak self] task, text in
+                guard let self, let slug = task.branchSlug,
+                      self.planStreamHub.isLive(profileID: task.profileID,
+                                                branch: "wt/" + slug),
+                      let bridge = self.planEventBridges[task.profileID]
+                else { return nil }   // not streaming → tmux typing path
+                return bridge.send(branch: "wt/" + slug, .user(text))
             }))
 
     /// Finished-task transcript windows (Done cards) — the transcript is
@@ -7452,8 +7624,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return }
                 Task { @MainActor in await self.codingTaskEngine.sendBack(taskID) }
             },
-            merge: { [weak self] taskID, target, squash in
-                self?.codingTaskEngine.merge(taskID, into: target, squash: squash)
+            merge: { [weak self] taskID, target, squash, cleanup in
+                self?.codingTaskEngine.merge(taskID, into: target, squash: squash,
+                                             cleanup: cleanup)
             },
             openPR: { [weak self] taskID in
                 self?.codingTaskEngine.openPR(taskID)
@@ -8717,6 +8890,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         browserMCPBridges.removeValue(forKey: profile.id)
         taskMCPBridges[profile.id]?.stop()
         taskMCPBridges.removeValue(forKey: profile.id)
+        planEventBridges[profile.id]?.stop()
+        planEventBridges.removeValue(forKey: profile.id)
+        planStreamHub.removeSessions(profileID: profile.id)
         unifiedWindow?.teardownBrowser(for: profile.id)
         // Drop this workspace's local models from the engine's union, unloading
         // any no longer wanted by an open workspace (stops the engine if none
@@ -9088,6 +9264,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // deallocates (its deinit detaches the vmnet switch port). The fresh
         // sandbox is registered below once it's built.
         unregisterSession(profile.id)
+        // The reboot killed any streamed planning driver with the guest;
+        // without this the hub session stays un-ended forever (no terminal
+        // event, the dead driver never reconnects), pinning the plan
+        // watchdog "live" until its 1-hour cap and blocking a Plan retry.
+        planEventBridges[profile.id]?.stop()
+        planEventBridges.removeValue(forKey: profile.id)
+        planStreamHub.removeSessions(profileID: profile.id)
         win.sandbox = nil
         win.model.activeIndex = 0
         win.model.ipAddress = nil
@@ -9208,6 +9391,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         profileID: pid,
                         store: { [weak self] in self?.codingTaskStore },
                         engine: { [weak self] in self?.codingTaskEngine }))
+                // Plan-stream listener (vsock 5832) — see the matching block
+                // on the warm-boot path.
+                let planBridge = PlanEventBridge(socketDevice: dev)
+                self.wirePlanBridge(planBridge, pid: pid)
+                self.planEventBridges[pid] = planBridge
             }
             self.wireSandboxCallbacks(sandbox)
             self.registerSession(sandbox, profile: profile)

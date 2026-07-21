@@ -407,6 +407,20 @@ struct TranscriptQuestionBatchCard: View {
     let questions: [TranscriptQuestion]
     /// Sends the picker keystrokes; awaited so the card can show progress.
     let onSubmit: ([String]) async -> Bool
+    /// Streamed (plan-stream) sessions answer with STRUCTURED payloads
+    /// instead of TUI keystrokes. When set, it's tried first; a false
+    /// return falls back to the keystroke path (session not live).
+    var onSubmitAnswers: (([(question: String, labels: [String], other: String?)]) async -> Bool)? = nil
+
+    /// The structured form of the current picks, question order preserved.
+    private func structuredAnswers() -> [(question: String, labels: [String], other: String?)] {
+        questions.enumerated().map { i, q in
+            let labels = (picks[i] ?? []).sorted().compactMap {
+                q.options.indices.contains($0) ? q.options[$0].label : nil
+            }
+            return (question: q.question, labels: labels, other: nil)
+        }
+    }
 
     @State private var tab = 0
     @State private var picks: [Int: Set<Int>] = [:]
@@ -540,8 +554,13 @@ struct TranscriptQuestionBatchCard: View {
                     sending = true
                     failed = false
                     let keys = submitKeys()
+                    let answers = structuredAnswers()
                     Task {
-                        let ok = await onSubmit(keys)
+                        var ok = false
+                        if let onSubmitAnswers {
+                            ok = await onSubmitAnswers(answers)
+                        }
+                        if !ok { ok = await onSubmit(keys) }
                         sending = false
                         if ok { sent = true } else { failed = true }
                     }
