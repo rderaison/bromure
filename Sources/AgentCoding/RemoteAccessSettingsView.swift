@@ -21,10 +21,14 @@ struct RemoteAccessSettingsView: View {
     @State private var newKey = ""
     @State private var errorText: String?
 
+    @State private var account = P2PEnrollmentCoordinator.shared
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+                Divider()
+                bromureIOSection
                 Divider()
                 authSection
                 Divider()
@@ -38,8 +42,38 @@ struct RemoteAccessSettingsView: View {
             }
             .padding(20)
         }
-        .frame(minWidth: 480, minHeight: 520)
-        .onAppear(perform: refresh)
+        .frame(minWidth: 480, minHeight: 560)
+        .onAppear { refresh(); account.refresh() }
+    }
+
+    /// One-click registration of this Mac as a reachable server on bromure.io —
+    /// so clients can mirror it from anywhere without port forwarding. Signing
+    /// in opens the browser; the device is registered on return.
+    private var bromureIOSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Reachable from anywhere (bromure.io)").font(.headline)
+            if account.signedIn {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                    Text("Registered as a \(account.capability ?? "device") on \(account.accountLabel ?? "bromure.io").")
+                        .font(.callout)
+                    Spacer()
+                    Button("Sign Out") { account.signOut() }.buttonStyle(.link)
+                }
+                Text("Clients signed into the same workspace can mirror this Mac peer-to-peer, even when it's behind NAT.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Sign in to register this Mac so you can reach it from your other devices without exposing a port. Requires remote access (above) to be enabled.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Register this Mac on bromure.io") { account.signIn(asServer: true) }
+                    if account.busy { ProgressView().controlSize(.small) }
+                }
+            }
+            if let e = account.error {
+                Text(e).font(.caption).foregroundStyle(.red)
+            }
+        }
     }
 
     // MARK: Sections

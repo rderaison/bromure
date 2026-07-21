@@ -1835,6 +1835,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Lifecycle
 
+    /// Handle `bromure://enroll?…&state=…` deep links from the bromure.io
+    /// sign-in handoff: open (or focus) the Connect window and complete the
+    /// enrollment, but only if the `state` matches a sign-in the app started.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme == "bromure" {
+            guard let link = EnrollLink(parsing: url.absoluteString) else { continue }
+            let state = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "state" })?.value
+            P2PEnrollmentCoordinator.shared.complete(link, state: state)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         profiles = store.loadAll()
         // Menu-bar item: the persistent surface for reattaching / stopping VMs
@@ -2141,8 +2155,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         do {
-            try RemoteAccessServer.shared.start(remoteAccessConfig())
+            let cfg = remoteAccessConfig()
+            try RemoteAccessServer.shared.start(cfg)
             SupplyChainLog.shared.record("[remote] SSH front door started.")
+            // If this Mac is enrolled as a P2P server device, also serve inbound
+            // peer connection offers (no-op otherwise). Reachable clients splice
+            // into the same sshd; NAT'd clients reach it via the broker.
+            P2PBroker.shared.startServing(sshPort: cfg.port)
             updateStatusMenu()   // robot menu: reflect the now-running sshd
         } catch {
             SupplyChainLog.shared.record("[remote] start failed: \(error.localizedDescription)")
@@ -2163,6 +2182,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @MainActor func stopRemoteAccess() {
         RemoteAccessServer.shared.stop()
+        P2PBroker.shared.stopServing()
         updateStatusMenu()   // robot menu: reflect the stopped sshd
     }
 
@@ -7324,7 +7344,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// (inline retry + shake) → mirror window. Editing an existing host carries
     /// its pinned key so a changed key is flagged.
     @MainActor func promptConnectRemoteHost(existing: RemoteHost? = nil) {
-        if let w = remoteConnectWindow { w.makeKeyAndOrderFront(nil); return }
+        if let w = remoteConnectWindow {
+            w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return
+        }
         let model = RemoteConnectModel(existing: existing) { [weak self] host in
             self?.remoteConnectWindow?.close()
             self?.remoteConnectWindow = nil

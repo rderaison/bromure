@@ -205,6 +205,97 @@ final class RemoteConnectModel {
         RemoteHostStore.shared.upsert(host)
         onConnected(host)
     }
+
+    // MARK: - bromure.io account (P2P directory)
+
+    /// Identity + sign-in live in the shared coordinator; the connect window
+    /// owns only the server directory it renders.
+    private var account: P2PEnrollmentCoordinator { .shared }
+    /// Server devices in the workspace this Mac can mirror peer-to-peer.
+    var p2pServers: [DeviceInfo] = []
+    var directoryError: String?
+    private var identityObserver: NSObjectProtocol?
+    /// Polls the directory while the window is open so a server that stops
+    /// heartbeating bromure.io greys out within a refresh cycle.
+    private var directoryTimer: Timer?
+
+    var signedIn: Bool { account.signedIn }
+    var accountLabel: String? { account.accountLabel }
+    var p2pBusy: Bool { account.busy }
+    var p2pError: String? { account.error ?? directoryError }
+
+    /// Load the identity and, if present, refresh the server directory. Also
+    /// starts observing identity changes so a sign-in completed while the window
+    /// is open refreshes the list.
+    func refreshAccount() {
+        account.refresh()
+        if identityObserver == nil {
+            identityObserver = NotificationCenter.default.addObserver(
+                forName: .p2pIdentityChanged, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.p2pServers = []
+                    if self.account.signedIn { Task { await self.loadDirectory() } }
+                }
+            }
+        }
+        if account.signedIn {
+            Task { await loadDirectory() }
+            startDirectoryRefresh()
+        }
+    }
+
+    /// `silent` background refreshes keep the last-known list on a transient
+    /// failure instead of flashing an error (the reachability poll shouldn't
+    /// flap the UI on one dropped request).
+    func loadDirectory(silent: Bool = false) async {
+        guard let rec = account.record, let ep = try? ControlPlaneEndpoint(base: rec.apiBase) else { return }
+        if !silent { directoryError = nil }
+        let client = ControlPlaneClient(endpoint: ep)
+        do {
+            let devices = try await client.listDevices(bearer: rec.deviceToken)
+            p2pServers = devices.filter { $0.isServer && !$0.isSelf && !$0.revoked }
+        } catch ControlPlaneError.http(401, _) {
+            stopDirectoryRefresh()
+            account.signOut()
+            p2pServers = []
+            directoryError = "This Mac's bromure.io device was revoked. Sign in again."
+        } catch {
+            if !silent { directoryError = "Couldn't load your servers." }
+        }
+    }
+
+    private func startDirectoryRefresh() {
+        guard directoryTimer == nil else { return }
+        let t = Timer(timeInterval: 12, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.loadDirectory(silent: true) }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        directoryTimer = t
+    }
+
+    func stopDirectoryRefresh() {
+        directoryTimer?.invalidate()
+        directoryTimer = nil
+    }
+
+    /// Open the browser to sign in and enroll this Mac as a client device.
+    func signIn() { account.signIn(asServer: false) }
+
+    /// Mirror a server reached over the control plane (peer-to-peer). Not saved
+    /// to the by-address list — it lives in the live directory.
+    func connect(toPeer server: DeviceInfo) {
+        var host = RemoteHost(name: server.displayName, address: "", user: NSUserName())
+        host.peerDeviceID = server.id
+        host.lastConnected = Date()
+        onConnected(host)
+    }
+
+    func signOutAccount() {
+        stopDirectoryRefresh()
+        account.signOut()
+        p2pServers = []
+    }
 }
 
 // MARK: - Shake effect
@@ -228,8 +319,9 @@ struct RemoteConnectView: View {
     /// of the server picker.
     var startInForm = false
 
-    /// Server picker selection (the Screen Sharing-style list).
-    @State private var selectedID: UUID?
+    /// Unified picker selection — `"peer:<deviceID>"` for a control-plane server
+    /// or `"host:<uuid>"` for a saved by-address host.
+    @State private var selection: String?
     /// True while the add/edit details form is showing instead of the picker.
     @State private var showingForm: Bool
 
@@ -261,13 +353,15 @@ struct RemoteConnectView: View {
             }
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: 480)
+        .onAppear { model.refreshAccount() }
+        .onDisappear { model.stopDirectoryRefresh() }
     }
 
-    /// Picker first (like Screen Sharing) when there are saved servers; the
-    /// details form only for adding or editing one.
+    /// Picker (like Screen Sharing) unless the add/edit form is up. The picker
+    /// handles the empty case itself (it offers sign-in + add).
     @ViewBuilder private var editing: some View {
-        if showingForm || savedHosts.isEmpty {
+        if showingForm {
             form
         } else {
             picker
@@ -276,53 +370,189 @@ struct RemoteConnectView: View {
 
     // MARK: Server picker
 
+    private var hasAnyServer: Bool { !model.p2pServers.isEmpty || !savedHosts.isEmpty }
+
     private var picker: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Mirror another Mac running Bromure — its grid, workspaces, tabs and automations — over SSH.")
+            Text("Mirror another Mac running Bromure — its grid, workspaces, tabs and automations. Sign in to reach your servers from anywhere, or add one directly by address on your LAN.")
                 .foregroundStyle(.secondary).font(.callout)
-            List(selection: $selectedID) {
-                ForEach(savedHosts) { h in
-                    serverRow(h).tag(h.id)
-                }
+                .fixedSize(horizontal: false, vertical: true)
+
+            if hasAnyServer {
+                serverList
+            } else {
+                emptyState
             }
-            .listStyle(.inset(alternatesRowBackgrounds: true))
-            .frame(height: 190)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(Color.primary.opacity(0.12)))
-            .onAppear { if selectedID == nil { selectedID = savedHosts.first?.id } }
+
+            accountBar
+
             HStack(spacing: 10) {
                 ControlGroup {
                     Button {
                         model.prefill(RemoteHost(name: "", address: "", user: NSUserName()))
                         showingForm = true
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .help("Add a server")
+                    } label: { Image(systemName: "plus") }
+                    .help("Add a server by address")
                     Button {
-                        if let id = selectedID {
+                        if let sel = selection, sel.hasPrefix("host:"),
+                           let id = UUID(uuidString: String(sel.dropFirst(5))) {
                             RemoteHostStore.shared.remove(id)
-                            selectedID = savedHosts.first?.id
+                            selection = nil
                         }
-                    } label: {
-                        Image(systemName: "minus")
-                    }
-                    .disabled(selectedID == nil)
-                    .help("Remove the selected server")
+                    } label: { Image(systemName: "minus") }
+                    .disabled(!(selection?.hasPrefix("host:") ?? false))
+                    .help("Remove the selected saved server")
                 }
                 .frame(width: 70)
                 Button("Show this Mac's key") { showClientKey() }
                 Spacer()
                 Button("Cancel", action: onClose).keyboardShortcut(.cancelAction)
-                Button("Connect") {
-                    if let h = savedHosts.first(where: { $0.id == selectedID }) {
-                        model.connect(to: h)
+                Button("Connect") { connectSelected() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canConnectSelection)
+            }
+        }
+    }
+
+    /// Connect is enabled for a saved host, or a server that's currently
+    /// reachable — not one that just greyed out under the selection.
+    private var canConnectSelection: Bool {
+        guard let sel = selection else { return false }
+        if sel.hasPrefix("peer:") {
+            let id = String(sel.dropFirst(5))
+            return model.p2pServers.first(where: { $0.id == id })?.online ?? false
+        }
+        return sel.hasPrefix("host:")
+    }
+
+    private var serverList: some View {
+        List(selection: $selection) {
+            if model.signedIn && !model.p2pServers.isEmpty {
+                Section("My servers · bromure.io") {
+                    ForEach(model.p2pServers) { s in
+                        peerRow(s).tag("peer:\(s.id)")
                     }
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(selectedID == nil)
             }
+            if !savedHosts.isEmpty {
+                Section(model.signedIn ? "On this network" : "Saved servers") {
+                    ForEach(savedHosts) { h in
+                        serverRow(h).tag("host:\(h.id.uuidString)")
+                    }
+                }
+            }
+        }
+        .listStyle(.inset(alternatesRowBackgrounds: true))
+        .frame(height: 190)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.12)))
+        .onAppear {
+            if selection == nil {
+                if let s = model.p2pServers.first(where: { $0.online }) ?? model.p2pServers.first {
+                    selection = "peer:\(s.id)"
+                } else if let h = savedHosts.first {
+                    selection = "host:\(h.id.uuidString)"
+                }
+            }
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "macmini").font(.system(size: 30)).foregroundStyle(.tertiary)
+            Text(model.signedIn
+                 ? "No servers in your workspace yet.\nEnable Remote Access on the Mac you want to reach, or add one by address."
+                 : "Sign in with bromure.io to see your servers, or add one by address.")
+                .multilineTextAlignment(.center)
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 190)
+        .background(Color.primary.opacity(0.03))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.12)))
+    }
+
+    /// bromure.io account row: sign-in button, or the signed-in workspace with
+    /// refresh / sign-out.
+    private var accountBar: some View {
+        HStack(spacing: 8) {
+            if model.p2pBusy {
+                ProgressView().controlSize(.small)
+            }
+            if model.signedIn {
+                Image(systemName: "person.crop.circle.badge.checkmark").foregroundStyle(.secondary)
+                Text(model.accountLabel ?? "bromure.io").font(.callout)
+                Button { Task { await model.loadDirectory() } } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("Refresh servers")
+                Spacer()
+                Button("Sign Out") { model.signOutAccount(); selection = nil }
+                    .buttonStyle(.link)
+            } else {
+                Image(systemName: "person.crop.circle.badge.plus").foregroundStyle(.secondary)
+                Button("Sign in with bromure.io") { model.signIn() }
+                Spacer()
+            }
+        }
+        .font(.callout)
+    }
+
+    private func connectSelected() {
+        guard let sel = selection else { return }
+        if sel.hasPrefix("peer:") {
+            let id = String(sel.dropFirst(5))
+            // Only a reachable server — an offline one's grant is refused.
+            if let s = model.p2pServers.first(where: { $0.id == id }), s.online {
+                model.connect(toPeer: s)
+            }
+        } else if sel.hasPrefix("host:"), let id = UUID(uuidString: String(sel.dropFirst(5))),
+                  let h = savedHosts.first(where: { $0.id == id }) {
+            model.connect(to: h)
+        }
+    }
+
+    private func peerRow(_ s: DeviceInfo) -> some View {
+        // "Reachable" = the server pinged bromure.io within the presence window
+        // (a live control connection). Otherwise it's greyed out and can't be
+        // dialed — a connection grant to an offline server is refused anyway.
+        let reachable = s.online
+        return HStack(spacing: 10) {
+            Image(systemName: "macmini.fill")
+                .foregroundStyle(reachable ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                .font(.system(size: 16))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(s.displayName).font(.callout)
+                lastSeenLabel(s, reachable: reachable)
+            }
+            Spacer()
+            Circle().fill(reachable ? Color.green : Color.secondary.opacity(0.4)).frame(width: 8, height: 8)
+            Text(reachable ? "reachable" : "offline")
+                .font(.caption)
+                .foregroundStyle(reachable ? AnyShapeStyle(Color.green) : AnyShapeStyle(.tertiary))
+        }
+        .padding(.vertical, 3)
+        .opacity(reachable ? 1 : 0.45)
+        .contentShape(Rectangle())
+        // Offline servers aren't selectable or connectable — nothing to do but
+        // wait for them to come back.
+        .simultaneousGesture(TapGesture(count: 2).onEnded { if reachable { model.connect(toPeer: s) } })
+        .simultaneousGesture(TapGesture().onEnded { if reachable { selection = "peer:\(s.id)" } })
+        .help(reachable
+              ? "Connect to \(s.displayName)"
+              : "\(s.displayName) hasn't connected to bromure.io recently")
+    }
+
+    /// "Active now" for a reachable server, otherwise how long ago it last
+    /// reached bromure.io (a live relative timestamp), or "offline" if unknown.
+    @ViewBuilder private func lastSeenLabel(_ s: DeviceInfo, reachable: Bool) -> some View {
+        if reachable {
+            Text("Active now").font(.caption).foregroundStyle(.green)
+        } else if let seen = ISO8601.date(from: s.lastSeenAt) {
+            Text("Last seen \(seen, format: .relative(presentation: .named))")
+                .font(.caption).foregroundStyle(.tertiary)
+        } else {
+            Text("Offline").font(.caption).foregroundStyle(.tertiary)
         }
     }
 
@@ -347,7 +577,7 @@ struct RemoteConnectView: View {
             model.connect(to: h)
         })
         .simultaneousGesture(TapGesture().onEnded {
-            selectedID = h.id
+            selection = "host:\(h.id.uuidString)"
         })
         .contextMenu {
             Button("Connect") { model.connect(to: h) }
@@ -358,7 +588,7 @@ struct RemoteConnectView: View {
             Divider()
             Button("Remove", role: .destructive) {
                 RemoteHostStore.shared.remove(h.id)
-                if selectedID == h.id { selectedID = nil }
+                if selection == "host:\(h.id.uuidString)" { selection = nil }
             }
         }
         .help("Connect to \(h.connectLabel)")
@@ -377,9 +607,7 @@ struct RemoteConnectView: View {
                 field("Remote user", text: $model.user, placeholder: NSUserName())
             }
             HStack {
-                if !savedHosts.isEmpty {
-                    Button("Back") { showingForm = false }
-                }
+                Button("Back") { showingForm = false }
                 Button("Show this Mac's key") { showClientKey() }
                 Spacer()
                 Button("Cancel", action: onClose).keyboardShortcut(.cancelAction)

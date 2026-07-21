@@ -43,5 +43,20 @@
     <integer>86400</integer>
     <key>SUEnableInstallerLauncherService</key>
     <true/>
+    <!-- Deep link for P2P device enrollment: bromure://enroll?v=1&code=…&api=…
+         (REMOTE_P2P_PLAN.md). Opens the "Connect to Peer" window and redeems
+         the one-time code. A pasted code is the fallback when the scheme isn't
+         registered (e.g. running from the build dir). -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>io.bromure.agentic-coding.enroll</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>bromure</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>

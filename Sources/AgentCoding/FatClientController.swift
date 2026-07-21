@@ -148,6 +148,11 @@ final class RemoteHostController {
         socks = nil
         tunnel?.stop()
         tunnel = nil
+        // Tear down the P2P path (loopback shim, any port map) if this host is
+        // reached peer-to-peer. A no-op for a direct host.
+        if let pid = host.peerDeviceID {
+            P2PBroker.shared.closePeer(pid)
+        }
     }
 
     private func pollOnce() {

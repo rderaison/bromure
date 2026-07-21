@@ -41,8 +41,28 @@ struct RemoteHost: Codable, Identifiable, Equatable {
     var pinnedHostKey: String? = nil
     /// Last successful connect — orders the "Recent Servers" list.
     var lastConnected: Date? = nil
+    /// When set, this host is reached peer-to-peer through the P2P broker
+    /// (REMOTE_P2P_PLAN.md) rather than by dialing `address:port` directly. The
+    /// broker resolves it to a live loopback endpoint; `address`/`port` then
+    /// carry that `127.0.0.1:N` for the session. Absent ⇒ the classic direct
+    /// dial, unchanged. Optional so existing hosts.json decodes untouched.
+    var peerDeviceID: String? = nil
 
-    var connectLabel: String { "\(user)@\(address):\(port)" }
+    var connectLabel: String {
+        peerDeviceID.map { "\(user)@peer:\(String($0.prefix(8)))" } ?? "\(user)@\(address):\(port)"
+    }
+
+    /// How the dialer reaches this host.
+    enum Kind: Equatable { case direct, peer(String) }
+    var kind: Kind { peerDeviceID.map { .peer($0) } ?? .direct }
+    var isPeer: Bool { peerDeviceID != nil }
+
+    /// A stable known_hosts alias for a peer connection. The loopback endpoint's
+    /// port changes per session, so the SSH host-key pin must key on the peer's
+    /// device identity, not on `127.0.0.1:<ephemeral>` (`-o HostKeyAlias=`).
+    var hostKeyAlias: String? {
+        peerDeviceID.map { "bromure-peer-\($0)" }
+    }
 }
 
 /// Result of probing a remote with a given credential, classified from ssh's
@@ -344,7 +364,7 @@ enum RemoteTransport {
         } else {
             identity = ["-i", privateKeyPath.path]
         }
-        return identity + [
+        var args = identity + [
             "-p", String(host.port),
             "-o", "IdentitiesOnly=yes",
             "-o", "UserKnownHostsFile=\"\(knownHostsPath.path)\"",
@@ -353,6 +373,35 @@ enum RemoteTransport {
             "-o", "ConnectTimeout=10",
             "-o", "LogLevel=ERROR",
         ]
+        // For a peer (P2P) connection the address is an ephemeral loopback port
+        // that changes per session, so the host-key pin must key on the peer's
+        // stable device identity instead. HostKeyAlias makes ssh store/verify
+        // the known_hosts entry under that alias regardless of the loopback port.
+        if let alias = host.hostKeyAlias {
+            args += ["-o", "HostKeyAlias=\(alias)"]
+        }
+        return args
+    }
+
+    /// Swap a peer host for a live loopback endpoint resolved through the P2P
+    /// broker; direct hosts pass through unchanged. Off the main thread this
+    /// establishes the path if needed (blocking); on the main thread it only
+    /// consults the cache (establishment uses main-queue signaling callbacks, so
+    /// blocking main would deadlock). A peer that can't be resolved is returned
+    /// as-is, so the dial fails and is classified `unreachable` like any other.
+    static func resolved(_ host: RemoteHost) -> RemoteHost {
+        guard let pid = host.peerDeviceID else { return host }
+        let ep: P2PBroker.ResolvedEndpoint?
+        if Thread.isMainThread {
+            ep = P2PBroker.shared.cachedEndpoint(forPeer: pid)
+        } else {
+            ep = P2PBroker.shared.endpoint(forPeer: pid)
+        }
+        guard let ep else { return host }
+        var h = host
+        h.address = ep.host
+        h.port = ep.port
+        return h
     }
 
     static func sshArgs(for host: RemoteHost, interactive: Bool = false) -> [String] {
@@ -437,8 +486,9 @@ enum RemoteTransport {
     /// tunnel and classifying ssh's result. `strictHostKey` = enforce the pinned
     /// key (detects MITM). Password auth lives in `FatClientNIOSSH` — the system
     /// `ssh` binary is only ever used here with public-key auth (no askpass).
-    static func probe(host: RemoteHost, strictHostKey: Bool) -> RemoteProbe {
+    static func probe(host rawHost: RemoteHost, strictHostKey: Bool) -> RemoteProbe {
         ensureClientKey()
+        let host = resolved(rawHost)
         var args = commonArgs(for: host)
         args += ["-o", "StrictHostKeyChecking=\(strictHostKey ? "yes" : "accept-new")",
                  "-o", "BatchMode=yes",
@@ -489,8 +539,9 @@ enum RemoteTransport {
     /// HTTP API + `InteractiveExec` run over SSH unchanged. Pass
     /// `interactive: true` for the terminal-attach stream (direct connection,
     /// no ControlMaster buffering).
-    static func client(for host: RemoteHost, interactive: Bool = false) -> ControlClient {
+    static func client(for rawHost: RemoteHost, interactive: Bool = false) -> ControlClient {
         ensureClientKey()
+        let host = resolved(rawHost)
         let args = sshArgs(for: host, interactive: interactive)
         return ControlClient(socketPath: "ssh://\(host.connectLabel)") {
             SSHTunnel.shared.dial(args)
@@ -509,8 +560,9 @@ enum RemoteTransport {
     /// fd (the ssh channel bridged to the remote guest). No ControlMaster —
     /// it's a long-lived raw stream, same as the terminal attach. The caller
     /// owns/closes the fd.
-    static func forwardDial(host: RemoteHost, ip: String, port: Int) -> Int32? {
+    static func forwardDial(host rawHost: RemoteHost, ip: String, port: Int) -> Int32? {
         ensureClientKey()
+        let host = resolved(rawHost)
         var args = commonArgs(for: host)
         args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
                  "\(host.user)@\(host.address)", "\(FatClient.forwardVerbPrefix)\(ip) \(port)"]
@@ -520,8 +572,9 @@ enum RemoteTransport {
     /// Open a `forward-udp <ip>` channel: a multiplexed byte stream carrying
     /// length-prefixed UDP datagrams to a remote guest. Fresh ssh process, like
     /// `forwardDial`.
-    static func forwardDialUDP(host: RemoteHost, ip: String) -> Int32? {
+    static func forwardDialUDP(host rawHost: RemoteHost, ip: String) -> Int32? {
         ensureClientKey()
+        let host = resolved(rawHost)
         var args = commonArgs(for: host)
         args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
                  "\(host.user)@\(host.address)", "\(FatClient.forwardUDPVerbPrefix)\(ip)"]
@@ -532,8 +585,9 @@ enum RemoteTransport {
     /// workspace agent's line-delimited JSON-RPC, which the fat client answers
     /// with its own `BrowserMCPServer`. Fresh ssh process per relay (long-lived
     /// stream, no ControlMaster), like `forwardDial`.
-    static func browserMCPDial(host: RemoteHost, vm: String) -> Int32? {
+    static func browserMCPDial(host rawHost: RemoteHost, vm: String) -> Int32? {
         ensureClientKey()
+        let host = resolved(rawHost)
         var args = commonArgs(for: host)
         args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
                  "\(host.user)@\(host.address)", "\(FatClient.browserMCPVerbPrefix)\(vm)"]
