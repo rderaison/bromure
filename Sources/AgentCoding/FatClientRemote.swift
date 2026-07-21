@@ -73,19 +73,53 @@ enum FatClientKeyStore {
     private static let service = "io.bromure.agentic-coding.fatclient"
     private static let account = "client-key-ed25519"
 
-    static func load() -> String? {
+    /// The three states a keychain read can honestly be in. Collapsing
+    /// "the keychain won't serve it RIGHT NOW" into "it doesn't exist"
+    /// was how a long screen lock ended in the enrolled identity being
+    /// regenerated over — and a password re-pair on the next connect.
+    enum LoadResult {
+        case found(String)
+        case notFound
+        /// The item exists but is unreadable at this moment (device
+        /// locked before first unlock, post-wake window, other transient
+        /// Security errors). Callers must fail the attempt — NEVER mint a
+        /// replacement identity.
+        case unavailable(OSStatus)
+    }
+
+    static func load() -> LoadResult {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
             kSecAttrAccount: account,
             kSecReturnData: true,
+            kSecReturnAttributes: true,
             kSecMatchLimit: kSecMatchLimitOne,
             kSecUseDataProtectionKeychain: true,
         ]
         var out: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
-              let data = out as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        switch status {
+        case errSecSuccess:
+            guard let dict = out as? [CFString: Any],
+                  let data = dict[kSecValueData] as? Data,
+                  let pem = String(data: data, encoding: .utf8) else {
+                return .unavailable(status)
+            }
+            // Migrate items stored with the original WhenUnlocked class:
+            // the fat client opens SSH channels while the screen is locked
+            // (background mirroring), so the key must be readable after
+            // first unlock. Re-store is safe — we hold the pem.
+            if let acc = dict[kSecAttrAccessible] as? String,
+               acc == (kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String) {
+                store(pem)
+            }
+            return .found(pem)
+        case errSecItemNotFound:
+            return .notFound
+        default:
+            return .unavailable(status)
+        }
     }
 
     @discardableResult
@@ -101,7 +135,11 @@ enum FatClientKeyStore {
             kSecAttrService: service,
             kSecAttrAccount: account,
             kSecValueData: Data(pem.utf8),
-            kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            // After-first-unlock, not when-unlocked: still device-bound and
+            // encrypted at rest until the first unlock after boot, but
+            // readable while the screen is locked — new terminals must be
+            // able to open SSH channels on a locked Mac.
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecUseDataProtectionKeychain: true,
         ]
         return SecItemAdd(attrs as CFDictionary, nil) == errSecSuccess
@@ -163,8 +201,19 @@ enum RemoteTransport {
                 try? fm.removeItem(at: privateKeyPath)
             }
         }
-        if FatClientKeyStore.load() != nil {
+        switch FatClientKeyStore.load() {
+        case .found:
             return clientPublicKey()
+        case .unavailable(let status):
+            // The identity EXISTS — the keychain just won't serve it right
+            // now. Regenerating here would delete the enrolled key and
+            // force a password re-pair (the long-screen-lock incident).
+            // Fail this attempt; the next connect retries.
+            FatClientLog.log("client key unavailable (OSStatus \(status)) — "
+                + "not regenerating; retry after unlocking this Mac")
+            return nil
+        case .notFound:
+            break
         }
         // Fresh identity: generate to a temp path, move the private half
         // into the keychain, keep only the .pub on disk.
@@ -263,7 +312,7 @@ enum RemoteTransport {
             }
         }
         if !agentReady {
-            guard let pem = FatClientKeyStore.load() else { return nil }
+            guard case .found(let pem) = FatClientKeyStore.load() else { return nil }
             let add = Process()
             add.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
             add.arguments = ["-"]

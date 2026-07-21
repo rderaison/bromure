@@ -37,7 +37,7 @@ enum FatClientNIOSSH {
             return .unreachable("host key not pinned — restart the connection")
         }
         guard let pub = RemoteTransport.ensureClientKey() else {
-            return .unreachable("no client key")
+            return .unreachable("client key unavailable — if this Mac was locked, unlock it and retry")
         }
         let body = "{\"key\":\(jsonString(pub))}"
         let request = "POST /remote/keys HTTP/1.1\r\nHost: localhost\r\n"
