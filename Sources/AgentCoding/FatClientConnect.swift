@@ -249,12 +249,14 @@ final class RemoteConnectModel {
     /// failure instead of flashing an error (the reachability poll shouldn't
     /// flap the UI on one dropped request).
     func loadDirectory(silent: Bool = false) async {
-        guard let rec = account.record, let ep = try? ControlPlaneEndpoint(base: rec.apiBase) else { return }
+        guard let id = account.identity, let ep = try? ControlPlaneEndpoint(base: id.apiBase) else { return }
         if !silent { directoryError = nil }
         let client = ControlPlaneClient(endpoint: ep)
         do {
-            let devices = try await client.listDevices(bearer: rec.deviceToken)
-            p2pServers = devices.filter { $0.isServer && !$0.isSelf && !$0.revoked }
+            let devices = try await client.listDevices(bearer: id.bearer)
+            // The directory is already scoped to this user's own servers; just
+            // drop our own row (you don't mirror yourself).
+            p2pServers = devices.filter { !$0.isSelf && !$0.revoked }
         } catch ControlPlaneError.http(401, _) {
             stopDirectoryRefresh()
             account.signOut()
@@ -280,7 +282,7 @@ final class RemoteConnectModel {
     }
 
     /// Open the browser to sign in and enroll this Mac as a client device.
-    func signIn() { account.signIn(asServer: false) }
+    func signIn() { account.signIn() }
 
     /// Mirror a server reached over the control plane (peer-to-peer). Not saved
     /// to the by-address list — it lives in the live directory.

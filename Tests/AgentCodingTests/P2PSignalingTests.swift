@@ -160,6 +160,16 @@ struct P2PDeviceIdentityTests {
         #expect(rec(nil).recordsSessionTelemetry == false)   // unknown → privacy-safe default
     }
 
+    @Test("enterprise identity records telemetry; a personal one does not")
+    func identityTelemetry() {
+        let ent = P2PIdentity(apiBase: "https://bromure.io/api", bearer: "b", installId: "i",
+                              userId: "u", orgSlug: "acme", orgKind: "organization", source: .enterprise)
+        #expect(ent.recordsSessionTelemetry == true)
+        let indiv = P2PIdentity(apiBase: "https://bromure.io/api", bearer: "b", installId: "i",
+                                userId: nil, orgSlug: "me", orgKind: "individual", source: .device)
+        #expect(indiv.recordsSessionTelemetry == false)
+    }
+
     @Test("a device record persisted before orgKind existed still decodes")
     func backwardCompatDecode() throws {
         // An older keychain record has no orgKind key — it must decode to nil,

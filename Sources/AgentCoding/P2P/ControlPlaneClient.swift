@@ -220,6 +220,16 @@ struct ControlPlaneClient {
         return w.connection
     }
 
+    /// Turn this install's server role on/off (advertised in the directory +
+    /// connectable while on). Driven by the app's Remote Access switch. Returns
+    /// the resulting server state.
+    @discardableResult
+    func setServerMode(bearer: String, enabled: Bool) async throws -> Bool {
+        struct Wrap: Decodable { let ok: Bool; let server: Bool }
+        let w: Wrap = try await post("/v1/devices/server-mode", body: ["enabled": enabled], bearer: bearer)
+        return w.server
+    }
+
     func turnCredentials(bearer: String, connectionId: String) async throws -> TurnCredentials {
         do {
             return try await post("/v1/connections/\(connectionId)/turn-credentials",

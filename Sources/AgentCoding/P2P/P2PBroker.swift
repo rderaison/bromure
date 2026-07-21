@@ -115,14 +115,13 @@ final class P2PBroker: @unchecked Sendable {
 
     // MARK: Identity
 
-    var isEnrolled: Bool { currentRecord() != nil }
-    var currentRecord: () -> DeviceRecord? = {
-        if case .found(let r) = DeviceIdentityStore.load() { return r }
-        return nil
-    }
+    /// Enrolled = has a usable control-plane identity from EITHER a browser P2P
+    /// enrollment or the existing enterprise/managed enrollment.
+    var isEnrolled: Bool { P2PIdentity.current() != nil }
+    func currentIdentity() -> P2PIdentity? { P2PIdentity.current() }
 
-    private func makeClient(_ rec: DeviceRecord) -> ControlPlaneClient? {
-        guard let ep = try? ControlPlaneEndpoint(base: rec.apiBase) else { return nil }
+    private func makeClient(_ id: P2PIdentity) -> ControlPlaneClient? {
+        guard let ep = try? ControlPlaneEndpoint(base: id.apiBase) else { return nil }
         return ControlPlaneClient(endpoint: ep)
     }
 
@@ -131,13 +130,13 @@ final class P2PBroker: @unchecked Sendable {
     /// the `POST /v1/connections/:id/complete` telemetry is simply not sent, so
     /// no outcome/path/timing ever reaches the cloud. The grant then closes on
     /// its own 45 s TTL instead of being closed early by the report.
-    private func reportComplete(_ client: ControlPlaneClient, _ rec: DeviceRecord,
+    private func reportComplete(_ client: ControlPlaneClient, _ id: P2PIdentity,
                                 connectionId: String, report: ConnectionReport) async {
-        guard rec.recordsSessionTelemetry else {
+        guard id.recordsSessionTelemetry else {
             FatClientLog.log("p2p: personal account — session telemetry suppressed for \(connectionId)")
             return
         }
-        _ = try? await client.complete(bearer: rec.deviceToken, connectionId: connectionId, report: report)
+        _ = try? await client.complete(bearer: id.bearer, connectionId: connectionId, report: report)
     }
 
     /// The sshd port to advertise, from the same UserDefaults key the remote-
@@ -159,18 +158,18 @@ final class P2PBroker: @unchecked Sendable {
     /// Return a connected device channel for the current identity, creating it
     /// on first use and wiring the routing callbacks. Blocks up to ~5s for the
     /// WebSocket to open. Returns nil if not enrolled or the channel won't open.
-    private func ensureChannel(_ rec: DeviceRecord) -> DeviceChannel? {
+    private func ensureChannel(_ id: P2PIdentity) -> DeviceChannel? {
         lock.lock()
-        if let ch = channel, channelToken == rec.deviceToken {
+        if let ch = channel, channelToken == id.bearer {
             lock.unlock()
             return waitConnected(ch) ? ch : nil
         }
-        // Token changed (re-enroll) or first use — rebuild.
+        // Bearer changed (re-enroll / different identity) or first use — rebuild.
         channel?.close()
-        guard let ep = try? ControlPlaneEndpoint(base: rec.apiBase) else { lock.unlock(); return nil }
-        let ch = DeviceChannel(endpoint: ep, token: rec.deviceToken)
+        guard let ep = try? ControlPlaneEndpoint(base: id.apiBase) else { lock.unlock(); return nil }
+        let ch = DeviceChannel(endpoint: ep, token: id.bearer)
         channel = ch
-        channelToken = rec.deviceToken
+        channelToken = id.bearer
         lock.unlock()
 
         ch.onSignal = { [weak self] connId, _, kind, _, payload in
@@ -183,8 +182,10 @@ final class P2PBroker: @unchecked Sendable {
             FatClientLog.log("p2p: signaling error \(code) conn=\(connId ?? "-")")
         }
         ch.onRevoked = { [weak self] in
-            FatClientLog.log("p2p: device revoked — clearing identity")
-            DeviceIdentityStore.erase()
+            // Only a browser-enrolled device record is ours to erase; the
+            // enterprise identity is managed by BACEnrollment's own lifecycle.
+            FatClientLog.log("p2p: device channel reported revoked")
+            if case .found = DeviceIdentityStore.load() { DeviceIdentityStore.erase() }
             self?.stopServing()
         }
         ch.connect()
@@ -204,23 +205,36 @@ final class P2PBroker: @unchecked Sendable {
 
     // MARK: Listener role
 
-    /// Begin serving inbound connection offers (call when enrolled as a server
-    /// device and remote access is enabled). Idempotent.
+    /// Become a reachable server: flip the control plane's `p2p_server` flag on
+    /// and hold the device channel open so clients see us online. Call when
+    /// Remote Access is enabled. No-op without a control-plane identity (a Mac
+    /// with no bromure.io enrollment can still serve plain SSH, just not P2P).
+    ///
+    /// Independent of the client role — the same shared channel also carries
+    /// this Mac's outbound dials, so one install is a server AND a client at
+    /// once. Idempotent.
     func startServing(sshPort: Int) {
-        guard let rec = currentRecord(), rec.isServer else { return }
+        guard let id = currentIdentity() else { return }
         lock.lock()
         serveSSHPort = sshPort
         if serving { lock.unlock(); return }
         serving = true
         lock.unlock()
-        // Opening the channel registers presence so clients can reach us.
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            _ = self?.ensureChannel(rec)
+        Task.detached { [weak self] in
+            guard let self else { return }
+            if let client = self.makeClient(id) {
+                do { _ = try await client.setServerMode(bearer: id.bearer, enabled: true) }
+                catch { FatClientLog.log("p2p: server-mode on failed: \(error)") }
+            }
+            _ = self.ensureChannel(id)   // registers presence
         }
     }
 
+    /// Stop being a server: clear `p2p_server` and drop the channel. Outbound
+    /// dials still work (they re-open the channel on demand).
     func stopServing() {
         lock.lock()
+        let wasServing = serving
         serving = false
         let ch = channel
         channel = nil
@@ -228,6 +242,9 @@ final class P2PBroker: @unchecked Sendable {
         sessions.removeAll()
         lock.unlock()
         ch?.close()
+        if wasServing, let id = currentIdentity(), let client = makeClient(id) {
+            Task.detached { _ = try? await client.setServerMode(bearer: id.bearer, enabled: false) }
+        }
     }
 
     /// A client was granted a connection to us. Answer with our reachable
@@ -235,7 +252,7 @@ final class P2PBroker: @unchecked Sendable {
     /// connects straight to our embedded sshd (0.0.0.0:2222) — no splice needed
     /// on this side.
     private func handleOffered(_ grant: ConnectionGrant) {
-        guard let rec = currentRecord(), let client = makeClient(rec) else { return }
+        guard let id = currentIdentity(), let client = makeClient(id) else { return }
         let session = P2PSession(grant: grant, role: .listener)
         lock.lock(); sessions[grant.id] = session; let port = serveSSHPort; lock.unlock()
         guard let ch = channel else { return }
@@ -247,7 +264,7 @@ final class P2PBroker: @unchecked Sendable {
             // A completed grant closes signaling; the listener reports success
             // best-effort (first report wins — the dialer usually reports first).
             // Suppressed entirely for personal accounts.
-            await self?.reportComplete(client, rec, connectionId: grant.id,
+            await self?.reportComplete(client, id, connectionId: grant.id,
                                        report: .connected(pathKind: .direct, timeToConnectedMs: 0))
             // Signaling is done; drop the session after a grace window for any
             // late dialer trickle.
@@ -308,13 +325,13 @@ final class P2PBroker: @unchecked Sendable {
     }
 
     private func establish(peerDeviceID: String, timeout: TimeInterval) async -> ResolvedEndpoint? {
-        guard let rec = currentRecord(), let client = makeClient(rec) else { return nil }
-        guard let ch = ensureChannel(rec) else { return nil }
+        guard let id = currentIdentity(), let client = makeClient(id) else { return nil }
+        guard let ch = ensureChannel(id) else { return nil }
 
         // 1. Authorize the connection (45s grant, both peers now parties).
         let grant: ConnectionGrant
         do {
-            grant = try await client.requestConnection(bearer: rec.deviceToken, targetDeviceId: peerDeviceID)
+            grant = try await client.requestConnection(bearer: id.bearer, targetDeviceId: peerDeviceID)
         } catch {
             FatClientLog.log("p2p: connection request failed: \(error)")
             return nil
@@ -330,7 +347,7 @@ final class P2PBroker: @unchecked Sendable {
             try await session.send(.offer, payload: P2PSignalPayload(note: "connect"), via: ch)
         } catch {
             FatClientLog.log("p2p: offer send failed: \(error)")
-            await reportComplete(client, rec, connectionId: grant.id, report: .failed(stage: .signaling))
+            await reportComplete(client, id, connectionId: grant.id, report: .failed(stage: .signaling))
             return nil
         }
 
@@ -345,7 +362,7 @@ final class P2PBroker: @unchecked Sendable {
         let candidates = session.candidates
         guard !candidates.isEmpty else {
             FatClientLog.log("p2p: no candidates from peer \(peerDeviceID.prefix(8))")
-            await reportComplete(client, rec, connectionId: grant.id, report: .failed(stage: .signaling))
+            await reportComplete(client, id, connectionId: grant.id, report: .failed(stage: .signaling))
             return nil
         }
 
@@ -354,14 +371,14 @@ final class P2PBroker: @unchecked Sendable {
         guard let win = P2PDirectDialer.dial(candidates: candidates,
                                              overallDeadline: Date().addingTimeInterval(8)) else {
             FatClientLog.log("p2p: all \(candidates.count) candidates unreachable")
-            await reportComplete(client, rec, connectionId: grant.id, report: .failed(stage: .ice))
+            await reportComplete(client, id, connectionId: grant.id, report: .failed(stage: .ice))
             return nil
         }
         Darwin.close(win.fd)   // the shim re-dials per SSH connection
 
         // 5. Stand up the loopback shim.
         guard let shim = P2PLoopbackShim(winner: win.candidate) else {
-            await reportComplete(client, rec, connectionId: grant.id, report: .failed(stage: .transport))
+            await reportComplete(client, id, connectionId: grant.id, report: .failed(stage: .transport))
             return nil
         }
         lock.lock(); liveShims[peerDeviceID] = (shim, win.path); lock.unlock()
@@ -369,7 +386,7 @@ final class P2PBroker: @unchecked Sendable {
         // 6. Report the path/quality summary (first report wins, closes the
         // grant) — organizations only; a personal account records nothing.
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
-        await reportComplete(client, rec, connectionId: grant.id,
+        await reportComplete(client, id, connectionId: grant.id,
                              report: .connected(pathKind: win.path.reportKind, timeToConnectedMs: ms))
 
         FatClientLog.log("p2p: peer \(peerDeviceID.prefix(8)) path=\(win.path.uiLabel) via \(win.candidate.ip):\(win.candidate.port) → 127.0.0.1:\(shim.port)")

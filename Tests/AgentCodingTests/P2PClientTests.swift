@@ -170,6 +170,18 @@ struct P2PClientTests {
         #expect(cap.body["outcome"] as? String == "connected")
     }
 
+    @Test("server-mode: POST /v1/devices/server-mode {enabled} with bearer")
+    func serverMode() async throws {
+        StubURLProtocol.install { _ in .init(status: 200, json: ["ok": true, "server": true]) }
+        let c = try client()
+        let on = try await c.setServerMode(bearer: "tok-1", enabled: true)
+        #expect(on == true)
+        let cap = try #require(StubURLProtocol.recorded().first)
+        #expect(cap.path == "/api/v1/devices/server-mode")
+        #expect(cap.authorization == "Bearer tok-1")
+        #expect(cap.body["enabled"] as? Bool == true)
+    }
+
     @Test("a 404 surfaces as ControlPlaneError.http(404, code)")
     func notFound() async throws {
         StubURLProtocol.install { _ in .init(status: 404, json: ["error": "unknown-device"]) }

@@ -2218,8 +2218,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if enabled {
                 do { try RemoteAccessServer.shared.start(cfg) }
                 catch { return ["error": error.localizedDescription] }
+                // Advertise this Mac as a P2P server too (if enrolled). Server
+                // reachability follows the Remote Access switch.
+                P2PBroker.shared.startServing(sshPort: cfg.port)
             } else {
                 RemoteAccessServer.shared.stop()
+                P2PBroker.shared.stopServing()
             }
         } else if d.bool(forKey: "remoteAccess.enabled") {
             // No enable/disable in this call but we're on → apply live.

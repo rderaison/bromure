@@ -7,18 +7,21 @@ extension Notification.Name {
     static let p2pIdentityChanged = Notification.Name("io.bromure.p2pIdentityChanged")
 }
 
-/// The single owner of this Mac's bromure.io sign-in. Both the merged connect
-/// window (enrolling as a *client* to browse servers) and Remote Access
-/// settings (registering this Mac as a *server*) drive it, and the one
-/// `bromure://enroll` deep-link callback completes whichever sign-in is
-/// pending — so there's exactly one place that holds the enroll nonce and one
-/// place that writes the device identity.
+/// The single owner of this Mac's bromure.io identity. Enterprise installs
+/// already have one (the managed enrollment) and reuse it — no sign-in. Only a
+/// personal account with no enrollment at all needs the browser sign-in, which
+/// this coordinates: it holds the enroll nonce and the one `bromure://enroll`
+/// deep-link callback completes it.
+///
+/// Roles are independent: any identity can dial (client); Remote Access makes
+/// this Mac a server. So there is no "sign in as a server/client" — you sign in
+/// once, then the Remote Access switch decides reachability.
 @MainActor
 @Observable
 final class P2PEnrollmentCoordinator {
     static let shared = P2PEnrollmentCoordinator()
 
-    private(set) var record: DeviceRecord?
+    private(set) var identity: P2PIdentity?
     private(set) var busy = false
     var error: String?
 
@@ -27,25 +30,27 @@ final class P2PEnrollmentCoordinator {
     /// link can't enroll this Mac into an attacker's workspace.
     private var pendingState: String?
 
-    init() { record = P2PBroker.shared.currentRecord() }
+    init() { identity = P2PIdentity.current() }
 
-    var signedIn: Bool { record != nil }
-    var accountLabel: String? { record.map { $0.orgSlug ?? "bromure.io" } }
-    var capability: String? { record?.capability }
+    var signedIn: Bool { identity != nil }
+    var accountLabel: String? { identity?.orgSlug ?? (signedIn ? "bromure.io" : nil) }
+    /// True when the identity is the managed enterprise enrollment (reused) —
+    /// which the user can't "sign out" of from here.
+    var isEnterprise: Bool { identity?.source == .enterprise }
 
-    /// Re-read the identity from the keychain (e.g. when a window appears).
-    func refresh() { record = P2PBroker.shared.currentRecord() }
+    /// Re-read the identity (e.g. when a window appears).
+    func refresh() { identity = P2PIdentity.current() }
 
-    /// Open the browser to the bromure.io enrollment handoff. `asServer` picks
-    /// the device capability: a server is reachable by the workspace's clients;
-    /// a client browses and mirrors servers.
-    func signIn(asServer: Bool) {
+    /// Open the browser to the bromure.io enrollment handoff. Only used when
+    /// there's no existing identity (a personal account). Enrollment just
+    /// registers the device; server reachability is the Remote Access switch.
+    func signIn() {
         let state = UUID().uuidString
         pendingState = state
         error = nil
         var comps = URLComponents(string: "https://bromure.io/app/enroll")!
         comps.queryItems = [
-            URLQueryItem(name: "capability", value: asServer ? "server" : "client"),
+            URLQueryItem(name: "capability", value: "client"),
             URLQueryItem(name: "state", value: state),
         ]
         if let url = comps.url { NSWorkspace.shared.open(url) }
@@ -61,9 +66,10 @@ final class P2PEnrollmentCoordinator {
             let result = await P2PEnroll.enroll(link: link, deviceName: Host.current().localizedName)
             busy = false
             switch result {
-            case .success(let r):
-                record = r.record
-                if r.record.isServer, P2PBroker.remoteAccessEnabled {
+            case .success:
+                identity = P2PIdentity.current()
+                // If Remote Access is already on, advertise as a server now.
+                if P2PBroker.remoteAccessEnabled {
                     P2PBroker.shared.startServing(sshPort: P2PBroker.configuredSSHPort())
                 }
                 NotificationCenter.default.post(name: .p2pIdentityChanged, object: nil)
@@ -73,11 +79,14 @@ final class P2PEnrollmentCoordinator {
         }
     }
 
-    /// Forget this Mac's identity locally (server-side revoke is an admin action).
+    /// Forget a browser-enrolled identity locally (server-side revoke is an
+    /// admin action). No-op for the enterprise enrollment — that's owned by the
+    /// managed-enrollment lifecycle, not this window.
     func signOut() {
+        guard !isEnterprise else { return }
         DeviceIdentityStore.erase()
         P2PBroker.shared.stopServing()
-        record = nil
+        identity = P2PIdentity.current()   // may fall back to enterprise if present
         NotificationCenter.default.post(name: .p2pIdentityChanged, object: nil)
     }
 

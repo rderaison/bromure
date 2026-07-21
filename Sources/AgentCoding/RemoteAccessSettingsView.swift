@@ -46,27 +46,32 @@ struct RemoteAccessSettingsView: View {
         .onAppear { refresh(); account.refresh() }
     }
 
-    /// One-click registration of this Mac as a reachable server on bromure.io —
-    /// so clients can mirror it from anywhere without port forwarding. Signing
-    /// in opens the browser; the device is registered on return.
+    /// Reach this Mac from anywhere over bromure.io — peer-to-peer, no port
+    /// forwarding. Reachability follows the "Enable remote access" switch above:
+    /// while it's on, this Mac advertises as a server to your other devices.
     private var bromureIOSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Reachable from anywhere (bromure.io)").font(.headline)
             if account.signedIn {
                 HStack(spacing: 8) {
-                    Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
-                    Text("Registered as a \(account.capability ?? "device") on \(account.accountLabel ?? "bromure.io").")
-                        .font(.callout)
+                    Image(systemName: enabled ? "checkmark.seal.fill" : "seal")
+                        .foregroundStyle(enabled ? .green : .secondary)
+                    Text(enabled
+                         ? "Reachable to your \(account.accountLabel ?? "bromure.io") devices while remote access is on."
+                         : "Signed in to \(account.accountLabel ?? "bromure.io"). Turn on remote access above to make this Mac reachable.")
+                        .font(.callout).fixedSize(horizontal: false, vertical: true)
                     Spacer()
-                    Button("Sign Out") { account.signOut() }.buttonStyle(.link)
+                    if !account.isEnterprise {
+                        Button("Sign Out") { account.signOut() }.buttonStyle(.link)
+                    }
                 }
-                Text("Clients signed into the same workspace can mirror this Mac peer-to-peer, even when it's behind NAT.")
+                Text("Your other devices — signed into the same account — can mirror this Mac peer-to-peer, even when it's behind NAT.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("Sign in to register this Mac so you can reach it from your other devices without exposing a port. Requires remote access (above) to be enabled.")
+                Text("Sign in so you can reach this Mac from your other devices without exposing a port. Turn on remote access above to make it a server.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
-                    Button("Register this Mac on bromure.io") { account.signIn(asServer: true) }
+                    Button("Sign in with bromure.io") { account.signIn() }
                     if account.busy { ProgressView().controlSize(.small) }
                 }
             }
