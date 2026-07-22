@@ -289,7 +289,7 @@ struct CodingKanbanView: View {
             }
             .padding(14)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
         .sheet(item: $editing) { task in
             TaskEditorSheet(
                 task: task,
@@ -1135,26 +1135,7 @@ private struct TaskEditorSheet: View {
             ScrollView {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(siblings) { sib in
-                    HStack(spacing: 6) {
-                        Toggle(isOn: dependencyBinding(sib)) {
-                            Text(sib.title)
-                                .font(.system(size: 12))
-                                .lineLimit(1)
-                        }
-                        .toggleStyle(.checkbox)
-                        Spacer(minLength: 4)
-                        if sib.stage == .done {
-                            Label(NSLocalizedString("done", comment: "task editor dep"),
-                                  systemImage: "checkmark.circle.fill")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.green)
-                                .labelStyle(.titleAndIcon)
-                        } else if dependencyBinding(sib).wrappedValue {
-                            Text(NSLocalizedString("waiting", comment: "task editor dep"))
-                                .font(.system(size: 10))
-                                .foregroundStyle(.orange)
-                        }
-                    }
+                    dependencyRow(sib)
                 }
             }
             .padding(8)
@@ -1170,6 +1151,33 @@ private struct TaskEditorSheet: View {
                 .fill(Color.primary.opacity(0.03)))
             .overlay(RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(Color.primary.opacity(0.12)))
+        }
+    }
+
+    /// One phase-dependency row. Extracted from the `captioned {…}` builder so
+    /// the whole editor expression stays inside the type-checker's budget (the
+    /// nested Toggle + conditional status was the tipping point on iOS).
+    @ViewBuilder
+    private func dependencyRow(_ sib: CodingTask) -> some View {
+        HStack(spacing: 6) {
+            Toggle(isOn: dependencyBinding(sib)) {
+                Text(sib.title)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+            }
+            .platformCheckboxToggle()
+            Spacer(minLength: 4)
+            if sib.stage == .done {
+                Label(NSLocalizedString("done", comment: "task editor dep"),
+                      systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.green)
+                    .labelStyle(.titleAndIcon)
+            } else if dependencyBinding(sib).wrappedValue {
+                Text(NSLocalizedString("waiting", comment: "task editor dep"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+            }
         }
     }
 
@@ -1220,7 +1228,7 @@ private struct TaskEditorSheet: View {
                            isOn: Binding(
                                get: { task.initRepo ?? false },
                                set: { task.initRepo = $0 ? true : nil }))
-                        .toggleStyle(.checkbox)
+                        .platformCheckboxToggle()
                         .font(.system(size: 11))
                         .help(NSLocalizedString(
                             "Starting or planning first runs mkdir + git init (with an empty root commit) when the folder isn't already a git repository of its own. Leave off for a folder inside an existing repo.",

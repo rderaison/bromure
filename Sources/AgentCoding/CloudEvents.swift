@@ -1,5 +1,7 @@
 import Foundation
+#if os(macOS)
 import SandboxEngine
+#endif
 
 // Cloud event client → /v1/installs/:installId/ac-events.
 //

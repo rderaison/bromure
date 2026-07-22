@@ -1,4 +1,8 @@
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 import Foundation
 
 extension Notification.Name {
@@ -53,7 +57,13 @@ final class P2PEnrollmentCoordinator {
             URLQueryItem(name: "capability", value: "client"),
             URLQueryItem(name: "state", value: state),
         ]
-        if let url = comps.url { NSWorkspace.shared.open(url) }
+        if let url = comps.url {
+#if os(macOS)
+            NSWorkspace.shared.open(url)
+#else
+            UIApplication.shared.open(url)
+#endif
+        }
     }
 
     /// Complete a browser sign-in from the deep-link callback. No-op unless
@@ -63,7 +73,7 @@ final class P2PEnrollmentCoordinator {
         pendingState = nil
         busy = true; error = nil
         Task {
-            let result = await P2PEnroll.enroll(link: link, deviceName: Host.current().localizedName)
+            let result = await P2PEnroll.enroll(link: link, deviceName: platformDeviceName())
             busy = false
             switch result {
             case .success:

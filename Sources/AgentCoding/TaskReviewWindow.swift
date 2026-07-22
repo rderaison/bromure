@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import SwiftUI
 
 // MARK: - Review data
@@ -53,6 +55,7 @@ struct TaskReviewData: Equatable, Sendable {
     }
 }
 
+#if os(macOS)
 // MARK: - Window manager
 
 /// Standalone review windows for Testing cards: the branch's diff against
@@ -155,10 +158,11 @@ final class TaskReviewWindowManager {
         windows[taskID] = nil
     }
 }
+#endif
 
 // MARK: - Review view
 
-private struct TaskReviewView: View {
+struct TaskReviewView: View {
     var store: CodingTaskStore
     let taskID: UUID
     let accentHex: String
@@ -195,7 +199,7 @@ private struct TaskReviewView: View {
             Divider()
             commentsBar
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
         .task { await load() }
     }
 

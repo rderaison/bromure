@@ -242,7 +242,7 @@ struct ClaudeTranscriptPane: View {
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
     }
 }
 
@@ -308,7 +308,7 @@ struct ChatComposer: View {
         .padding(.top, 12)
         .padding(.bottom, 10)
         .background(RoundedRectangle(cornerRadius: 14)
-            .fill(Color(nsColor: .textBackgroundColor))
+            .fill(Color.platformTextBackground)
             .shadow(color: .black.opacity(0.10), radius: 6, y: 2))
         .overlay(RoundedRectangle(cornerRadius: 14)
             .strokeBorder(focused ? accent.opacity(0.55)

@@ -282,6 +282,7 @@ final class CodingTaskStore {
 /// (→ Testing), sending review feedback back (→ In Progress), and merging
 /// (→ Done). UI-only moves (backlog edits, dismiss) go straight through
 /// the store.
+#if os(macOS)
 @MainActor
 final class CodingTaskEngine {
     private weak var delegate: ACAppDelegate?
@@ -1764,6 +1765,21 @@ final class CodingTaskEngine {
         }?.worktreeBranch
     }
 }
+
+#else
+/// iOS shim: the coding-board engine runs on the HOST, never the fat client.
+/// Only its pure guest-command builders are needed here (the file explorer
+/// types a message into a session's tmux tab), so expose those and nothing
+/// else. Kept byte-identical to the macOS engine's statics.
+enum CodingTaskEngine {
+    nonisolated static func typeCommand(tabIndex: Int, text: String) -> String {
+        let b64 = Data(text.utf8).base64EncodedString()
+        return "echo \(b64) | base64 -d | xargs -0 tmux send-keys "
+            + "-t bromure:\(tabIndex) -l && sleep 1 && "
+            + "tmux send-keys -t bromure:\(tabIndex) Enter"
+    }
+}
+#endif
 
 // MARK: - Diff parsing (review window)
 

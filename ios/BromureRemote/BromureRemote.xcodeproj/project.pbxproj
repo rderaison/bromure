@@ -1,0 +1,572 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		8C4A68614FFC6ECE6DA80F54 /* ACAppDelegateShim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 505735CF5C8E91FEB4DA4DE2 /* ACAppDelegateShim.swift */; };
+		DF5906B4200E5514B147E469 /* AttachSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D64C491A1C90E3CD807747F /* AttachSession.swift */; };
+		C568C6135B3C91ED6EE4F4C3 /* BromureRemoteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */; };
+		028E121AD6D6119EC7D9FEE0 /* ConnectFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */; };
+		A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */; };
+		C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */; };
+		DD53AF72902E4568BC03B607 /* PlatformStubs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */; };
+		4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */; };
+		D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */; };
+		A605D8611294971B8BA65260 /* AutomationKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */; };
+		78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */; };
+		B58C6697BB7653D0D9519480 /* AutomationRunWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */; };
+		C1A736E1727425CB30914E1E /* BACDebug.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */; };
+		B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */; };
+		31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */; };
+		269D8003F7F7851DBCFBBF57 /* CodingTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */; };
+		F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */; };
+		B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDCC7578E83999395F752CAF /* ConversationView.swift */; };
+		483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */; };
+		B4E5CE6E341AFA91837DF064 /* FatClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEF3A13DDA52AA749EE9D2B9 /* FatClient.swift */; };
+		A9CDFDBA328F79D5F6468FDC /* FatClientConnect.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB94A3FA9300ABDA1A82DADB /* FatClientConnect.swift */; };
+		EEAA27D4E60DFC8DCAC1A5BF /* FatClientController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E8564A44A7DB91577E30D50 /* FatClientController.swift */; };
+		6A7BE186F5BEF684978A6B07 /* FatClientFleet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51C47CFD37DE977E9E308817 /* FatClientFleet.swift */; };
+		554B47572CC91835BBF33E3F /* FatClientNIOSSH.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97F06AB1B5913FEB5EBC6ECA /* FatClientNIOSSH.swift */; };
+		6C82036785EDA57A2F5A6E72 /* FatClientPAC.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5505E6BD4C82EA9CE0645F6 /* FatClientPAC.swift */; };
+		FBE3201FC08C6D5C1C4ACBF9 /* FatClientSSHDial.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABE5CAB976DE6C9935CAF22D /* FatClientSSHDial.swift */; };
+		8C4CC9D03A1E2C57D87BF88E /* FatClientTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EBA74ECEBD0D6CDAA9CBFBE /* FatClientTypes.swift */; };
+		9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A054E65FF7AFB16A80708D8 /* FatForward.swift */; };
+		68BD7714F7DA70C829916D36 /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6B76893030184C6F587C237 /* FileBrowserView.swift */; };
+		CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 057EC22F78972A50849C0EEF /* FileExplorer.swift */; };
+		7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */; };
+		A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */; };
+		B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */; };
+		61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */; };
+		FED3004C83536B84CF8C0C61 /* Mitm__PromptInjectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */; };
+		5C0722E5CF0BF28BADBEA327 /* Mitm__SecretsVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */; };
+		B854291378C379CF05ECFEE3 /* Mitm__SessionTokenPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */; };
+		AD266798BBB080664E84AD70 /* Mitm__SupplyChainPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BE2FBEDD33B118F9C4238D7 /* Mitm__SupplyChainPolicy.swift */; };
+		C46EAD94103A7DFA39B00F4A /* Mitm__TraceRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01E67908022893BC04C5048F /* Mitm__TraceRecord.swift */; };
+		9830CFB853F2FA4D5CE61573 /* P2P__ControlPlaneClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D779938B58750E7E3F93AB6 /* P2P__ControlPlaneClient.swift */; };
+		E19D161E660D842460884A1D /* P2P__DeviceChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD28A0CCEEF284164E0CB6C4 /* P2P__DeviceChannel.swift */; };
+		0E24C6E6070AC85F09B19E77 /* P2P__DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90679C57063443419D23E8D1 /* P2P__DeviceIdentity.swift */; };
+		F1464E00C6573863B23E4D8D /* P2P__P2PBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D4A4A75FFAA6D8CFA4915C1 /* P2P__P2PBroker.swift */; };
+		8AA4840DDF58D8CD9F52F413 /* P2P__P2PCandidate.swift in Sources */ = {isa = PBXBuildFile; fileRef = D35618325993E5F70C99F93F /* P2P__P2PCandidate.swift */; };
+		CC1E919809F09EEA591C85D9 /* P2P__P2PEnroll.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D89AEA7073FFBA82737D7F2 /* P2P__P2PEnroll.swift */; };
+		E1352ED2F9D7B75C0CECEDF1 /* P2P__P2PEnrollmentCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F0CE35E4BDA80192D272CEE /* P2P__P2PEnrollmentCoordinator.swift */; };
+		B8673C4CA3146F45629487C5 /* P2P__P2PIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A71CE90D060539BF28588D88 /* P2P__P2PIdentity.swift */; };
+		4B58D3C7D8DD9BDCF2828464 /* P2P__P2PSignaling.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AFB97CD93F45D49A865F2C1 /* P2P__P2PSignaling.swift */; };
+		23208E3C2B74A375A34B8E27 /* P2P__P2PTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0724142F1DD4BEE35B932B9 /* P2P__P2PTransport.swift */; };
+		F3EF497C1A2C232CB51B9D21 /* P2P__STUN.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79B578BC927582930ED5585C /* P2P__STUN.swift */; };
+		FC1C41B9A3FDBCDA909D6231 /* P2P__TurnRelayTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10644B01DC7B818F1EB193F /* P2P__TurnRelayTransport.swift */; };
+		7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */; };
+		E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */; };
+		3B15992E5BD329D249A9D27D /* Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2368064077094F44DF16B8E /* Profile.swift */; };
+		B47EFB48B64411BF181D2140 /* ScheduledAutomationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */; };
+		332BE05FECAFCE5409388316 /* ScheduledAutomations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */; };
+		B8BCF82DBF631DEFA8A1849A /* SessionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C45F1F9D11A980D236BD970D /* SessionModels.swift */; };
+		435FC51F11B11F312B92DAC5 /* SharedStatusViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */; };
+		A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */; };
+		4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */; };
+		87E7E20668933BD88F05A9F7 /* TaskTranscriptArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */; };
+		273ACE71B4D5E451211255EF /* TaskTranscriptWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 397F71D65F9055561BA4C3D0 /* TaskTranscriptWindow.swift */; };
+		B57BFBAA9AF42AE0A6EE14FA /* TerminalAppDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB8D84F5B227BEB930AD0A35 /* TerminalAppDefaults.swift */; };
+		D5FB8187D6511F113AD88886 /* Terminal__GridLayoutStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EAFF96DF3D1FA2755C2EECF /* Terminal__GridLayoutStore.swift */; };
+		6552B0D662751610674CFBF1 /* VMDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B2E7296B414B300A8BD7D8 /* VMDashboard.swift */; };
+		06A0A4CD90FBF9FC054FB0D3 /* Crypto */ = {isa = PBXBuildFile; productRef = 8ABC8E0C7D2DBE6AA0A1B70D /* Crypto */; };
+		5DC33D49C50A56509B91FD8B /* NIOCore */ = {isa = PBXBuildFile; productRef = AE2F455E8323D50164A75332 /* NIOCore */; };
+		928678D3A79D08846C487A50 /* NIOPosix */ = {isa = PBXBuildFile; productRef = 1EB7681EA7B981649D9DDEA0 /* NIOPosix */; };
+		AC386C9A81CC3D06F152CD16 /* NIOSSH */ = {isa = PBXBuildFile; productRef = 02B62CE274D8DA992C69E200 /* NIOSSH */; };
+		AF607A37C981D7AA9913AB84 /* MarkdownUI */ = {isa = PBXBuildFile; productRef = 464A3CFC0A0DE53330C36437 /* MarkdownUI */; };
+		7688993F4FA1D4E10B2F61E8 /* SwiftTerm */ = {isa = PBXBuildFile; productRef = C1052FCFAD51F05999DD0C4D /* SwiftTerm */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		505735CF5C8E91FEB4DA4DE2 /* ACAppDelegateShim.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ACAppDelegateShim.swift"; path = "Sources/BromureRemote/ACAppDelegateShim.swift"; sourceTree = "<group>"; };
+		5D64C491A1C90E3CD807747F /* AttachSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AttachSession.swift"; path = "Sources/BromureRemote/AttachSession.swift"; sourceTree = "<group>"; };
+		EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BromureRemoteApp.swift"; path = "Sources/BromureRemote/BromureRemoteApp.swift"; sourceTree = "<group>"; };
+		B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectFlow.swift"; path = "Sources/BromureRemote/ConnectFlow.swift"; sourceTree = "<group>"; };
+		DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectScreen.swift"; path = "Sources/BromureRemote/ConnectScreen.swift"; sourceTree = "<group>"; };
+		CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "HostMirrorScreen.swift"; path = "Sources/BromureRemote/HostMirrorScreen.swift"; sourceTree = "<group>"; };
+		7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformStubs.swift"; path = "Sources/BromureRemote/PlatformStubs.swift"; sourceTree = "<group>"; };
+		0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RemoteTransportMobile.swift"; path = "Sources/BromureRemote/RemoteTransportMobile.swift"; sourceTree = "<group>"; };
+		0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceScreen.swift"; path = "Sources/BromureRemote/WorkspaceScreen.swift"; sourceTree = "<group>"; };
+		F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationKanbanView.swift"; path = "Sources/BromureRemote/_shared/AutomationKanbanView.swift"; sourceTree = "<group>"; };
+		C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunArchive.swift"; path = "Sources/BromureRemote/_shared/AutomationRunArchive.swift"; sourceTree = "<group>"; };
+		0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunWindow.swift"; path = "Sources/BromureRemote/_shared/AutomationRunWindow.swift"; sourceTree = "<group>"; };
+		5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BACDebug.swift"; path = "Sources/BromureRemote/_shared/BACDebug.swift"; sourceTree = "<group>"; };
+		A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeTranscriptView.swift"; path = "Sources/BromureRemote/_shared/ClaudeTranscriptView.swift"; sourceTree = "<group>"; };
+		543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingKanbanView.swift"; path = "Sources/BromureRemote/_shared/CodingKanbanView.swift"; sourceTree = "<group>"; };
+		395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingTasks.swift"; path = "Sources/BromureRemote/_shared/CodingTasks.swift"; sourceTree = "<group>"; };
+		A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ControlClient.swift"; path = "Sources/BromureRemote/_shared/ControlClient.swift"; sourceTree = "<group>"; };
+		EDCC7578E83999395F752CAF /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConversationView.swift"; path = "Sources/BromureRemote/_shared/ConversationView.swift"; sourceTree = "<group>"; };
+		7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DockerDashboard.swift"; path = "Sources/BromureRemote/_shared/DockerDashboard.swift"; sourceTree = "<group>"; };
+		DEF3A13DDA52AA749EE9D2B9 /* FatClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClient.swift"; path = "Sources/BromureRemote/_shared/FatClient.swift"; sourceTree = "<group>"; };
+		FB94A3FA9300ABDA1A82DADB /* FatClientConnect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientConnect.swift"; path = "Sources/BromureRemote/_shared/FatClientConnect.swift"; sourceTree = "<group>"; };
+		1E8564A44A7DB91577E30D50 /* FatClientController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientController.swift"; path = "Sources/BromureRemote/_shared/FatClientController.swift"; sourceTree = "<group>"; };
+		51C47CFD37DE977E9E308817 /* FatClientFleet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientFleet.swift"; path = "Sources/BromureRemote/_shared/FatClientFleet.swift"; sourceTree = "<group>"; };
+		97F06AB1B5913FEB5EBC6ECA /* FatClientNIOSSH.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientNIOSSH.swift"; path = "Sources/BromureRemote/_shared/FatClientNIOSSH.swift"; sourceTree = "<group>"; };
+		F5505E6BD4C82EA9CE0645F6 /* FatClientPAC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientPAC.swift"; path = "Sources/BromureRemote/_shared/FatClientPAC.swift"; sourceTree = "<group>"; };
+		ABE5CAB976DE6C9935CAF22D /* FatClientSSHDial.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientSSHDial.swift"; path = "Sources/BromureRemote/_shared/FatClientSSHDial.swift"; sourceTree = "<group>"; };
+		5EBA74ECEBD0D6CDAA9CBFBE /* FatClientTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientTypes.swift"; path = "Sources/BromureRemote/_shared/FatClientTypes.swift"; sourceTree = "<group>"; };
+		1A054E65FF7AFB16A80708D8 /* FatForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatForward.swift"; path = "Sources/BromureRemote/_shared/FatForward.swift"; sourceTree = "<group>"; };
+		C6B76893030184C6F587C237 /* FileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileBrowserView.swift"; path = "Sources/BromureRemote/_shared/FileBrowserView.swift"; sourceTree = "<group>"; };
+		057EC22F78972A50849C0EEF /* FileExplorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorer.swift"; path = "Sources/BromureRemote/_shared/FileExplorer.swift"; sourceTree = "<group>"; };
+		C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorerViews.swift"; path = "Sources/BromureRemote/_shared/FileExplorerViews.swift"; sourceTree = "<group>"; };
+		D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Icons.swift"; path = "Sources/BromureRemote/_shared/Icons.swift"; sourceTree = "<group>"; };
+		D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__ConsentCredentialID.swift"; path = "Sources/BromureRemote/_shared/Mitm__ConsentCredentialID.swift"; sourceTree = "<group>"; };
+		6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__GuardrailsPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__GuardrailsPolicy.swift"; sourceTree = "<group>"; };
+		973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__PromptInjectionPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__PromptInjectionPolicy.swift"; sourceTree = "<group>"; };
+		0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SecretsVault.swift"; path = "Sources/BromureRemote/_shared/Mitm__SecretsVault.swift"; sourceTree = "<group>"; };
+		7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SessionTokenPlan.swift"; path = "Sources/BromureRemote/_shared/Mitm__SessionTokenPlan.swift"; sourceTree = "<group>"; };
+		9BE2FBEDD33B118F9C4238D7 /* Mitm__SupplyChainPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SupplyChainPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__SupplyChainPolicy.swift"; sourceTree = "<group>"; };
+		01E67908022893BC04C5048F /* Mitm__TraceRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__TraceRecord.swift"; path = "Sources/BromureRemote/_shared/Mitm__TraceRecord.swift"; sourceTree = "<group>"; };
+		4D779938B58750E7E3F93AB6 /* P2P__ControlPlaneClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__ControlPlaneClient.swift"; path = "Sources/BromureRemote/_shared/P2P__ControlPlaneClient.swift"; sourceTree = "<group>"; };
+		FD28A0CCEEF284164E0CB6C4 /* P2P__DeviceChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__DeviceChannel.swift"; path = "Sources/BromureRemote/_shared/P2P__DeviceChannel.swift"; sourceTree = "<group>"; };
+		90679C57063443419D23E8D1 /* P2P__DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__DeviceIdentity.swift"; path = "Sources/BromureRemote/_shared/P2P__DeviceIdentity.swift"; sourceTree = "<group>"; };
+		8D4A4A75FFAA6D8CFA4915C1 /* P2P__P2PBroker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__P2PBroker.swift"; path = "Sources/BromureRemote/_shared/P2P__P2PBroker.swift"; sourceTree = "<group>"; };
+		D35618325993E5F70C99F93F /* P2P__P2PCandidate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__P2PCandidate.swift"; path = "Sources/BromureRemote/_shared/P2P__P2PCandidate.swift"; sourceTree = "<group>"; };
+		3D89AEA7073FFBA82737D7F2 /* P2P__P2PEnroll.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__P2PEnroll.swift"; path = "Sources/BromureRemote/_shared/P2P__P2PEnroll.swift"; sourceTree = "<group>"; };
+		0F0CE35E4BDA80192D272CEE /* P2P__P2PEnrollmentCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__P2PEnrollmentCoordinator.swift"; path = "Sources/BromureRemote/_shared/P2P__P2PEnrollmentCoordinator.swift"; sourceTree = "<group>"; };
+		A71CE90D060539BF28588D88 /* P2P__P2PIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__P2PIdentity.swift"; path = "Sources/BromureRemote/_shared/P2P__P2PIdentity.swift"; sourceTree = "<group>"; };
+		0AFB97CD93F45D49A865F2C1 /* P2P__P2PSignaling.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__P2PSignaling.swift"; path = "Sources/BromureRemote/_shared/P2P__P2PSignaling.swift"; sourceTree = "<group>"; };
+		F0724142F1DD4BEE35B932B9 /* P2P__P2PTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__P2PTransport.swift"; path = "Sources/BromureRemote/_shared/P2P__P2PTransport.swift"; sourceTree = "<group>"; };
+		79B578BC927582930ED5585C /* P2P__STUN.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__STUN.swift"; path = "Sources/BromureRemote/_shared/P2P__STUN.swift"; sourceTree = "<group>"; };
+		C10644B01DC7B818F1EB193F /* P2P__TurnRelayTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnRelayTransport.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnRelayTransport.swift"; sourceTree = "<group>"; };
+		1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnTCP.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnTCP.swift"; sourceTree = "<group>"; };
+		1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformShims.swift"; path = "Sources/BromureRemote/_shared/PlatformShims.swift"; sourceTree = "<group>"; };
+		C2368064077094F44DF16B8E /* Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Profile.swift"; path = "Sources/BromureRemote/_shared/Profile.swift"; sourceTree = "<group>"; };
+		9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ScheduledAutomationViews.swift"; path = "Sources/BromureRemote/_shared/ScheduledAutomationViews.swift"; sourceTree = "<group>"; };
+		6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ScheduledAutomations.swift"; path = "Sources/BromureRemote/_shared/ScheduledAutomations.swift"; sourceTree = "<group>"; };
+		C45F1F9D11A980D236BD970D /* SessionModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SessionModels.swift"; path = "Sources/BromureRemote/_shared/SessionModels.swift"; sourceTree = "<group>"; };
+		17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SharedStatusViews.swift"; path = "Sources/BromureRemote/_shared/SharedStatusViews.swift"; sourceTree = "<group>"; };
+		39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SubscriptionTokenSwapState.swift"; path = "Sources/BromureRemote/_shared/SubscriptionTokenSwapState.swift"; sourceTree = "<group>"; };
+		11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskReviewWindow.swift"; path = "Sources/BromureRemote/_shared/TaskReviewWindow.swift"; sourceTree = "<group>"; };
+		A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskTranscriptArchive.swift"; path = "Sources/BromureRemote/_shared/TaskTranscriptArchive.swift"; sourceTree = "<group>"; };
+		397F71D65F9055561BA4C3D0 /* TaskTranscriptWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskTranscriptWindow.swift"; path = "Sources/BromureRemote/_shared/TaskTranscriptWindow.swift"; sourceTree = "<group>"; };
+		CB8D84F5B227BEB930AD0A35 /* TerminalAppDefaults.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TerminalAppDefaults.swift"; path = "Sources/BromureRemote/_shared/TerminalAppDefaults.swift"; sourceTree = "<group>"; };
+		1EAFF96DF3D1FA2755C2EECF /* Terminal__GridLayoutStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Terminal__GridLayoutStore.swift"; path = "Sources/BromureRemote/_shared/Terminal__GridLayoutStore.swift"; sourceTree = "<group>"; };
+		98B2E7296B414B300A8BD7D8 /* VMDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "VMDashboard.swift"; path = "Sources/BromureRemote/_shared/VMDashboard.swift"; sourceTree = "<group>"; };
+		F53560B8D470A293B70C0526 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "App/Info.plist"; sourceTree = "<group>"; };
+		85673086EF6CFD3A1F8591AF /* BromureRemote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BromureRemote.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		69BE8A4D8E4D9DA4E7DB3928 = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				06A0A4CD90FBF9FC054FB0D3 /* Crypto */,
+				5DC33D49C50A56509B91FD8B /* NIOCore */,
+				928678D3A79D08846C487A50 /* NIOPosix */,
+				AC386C9A81CC3D06F152CD16 /* NIOSSH */,
+				AF607A37C981D7AA9913AB84 /* MarkdownUI */,
+				7688993F4FA1D4E10B2F61E8 /* SwiftTerm */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		E50290A24C49A459B43487C5 = {
+			isa = PBXGroup;
+			children = (
+				DB89E782D488330EABE72BF7 /* Sources */,
+				69F8D45498D7E20DA99BB780 /* App */,
+				328EC33DF3954DC9B83FA285 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		328EC33DF3954DC9B83FA285 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				85673086EF6CFD3A1F8591AF /* BromureRemote.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		DB89E782D488330EABE72BF7 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				505735CF5C8E91FEB4DA4DE2 /* ACAppDelegateShim.swift */,
+				5D64C491A1C90E3CD807747F /* AttachSession.swift */,
+				EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */,
+				B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */,
+				DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */,
+				CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */,
+				7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */,
+				0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */,
+				0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */,
+				F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */,
+				C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */,
+				0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */,
+				5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */,
+				A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */,
+				543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */,
+				395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */,
+				A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */,
+				EDCC7578E83999395F752CAF /* ConversationView.swift */,
+				7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */,
+				DEF3A13DDA52AA749EE9D2B9 /* FatClient.swift */,
+				FB94A3FA9300ABDA1A82DADB /* FatClientConnect.swift */,
+				1E8564A44A7DB91577E30D50 /* FatClientController.swift */,
+				51C47CFD37DE977E9E308817 /* FatClientFleet.swift */,
+				97F06AB1B5913FEB5EBC6ECA /* FatClientNIOSSH.swift */,
+				F5505E6BD4C82EA9CE0645F6 /* FatClientPAC.swift */,
+				ABE5CAB976DE6C9935CAF22D /* FatClientSSHDial.swift */,
+				5EBA74ECEBD0D6CDAA9CBFBE /* FatClientTypes.swift */,
+				1A054E65FF7AFB16A80708D8 /* FatForward.swift */,
+				C6B76893030184C6F587C237 /* FileBrowserView.swift */,
+				057EC22F78972A50849C0EEF /* FileExplorer.swift */,
+				C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */,
+				D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */,
+				D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */,
+				6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */,
+				973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */,
+				0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */,
+				7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */,
+				9BE2FBEDD33B118F9C4238D7 /* Mitm__SupplyChainPolicy.swift */,
+				01E67908022893BC04C5048F /* Mitm__TraceRecord.swift */,
+				4D779938B58750E7E3F93AB6 /* P2P__ControlPlaneClient.swift */,
+				FD28A0CCEEF284164E0CB6C4 /* P2P__DeviceChannel.swift */,
+				90679C57063443419D23E8D1 /* P2P__DeviceIdentity.swift */,
+				8D4A4A75FFAA6D8CFA4915C1 /* P2P__P2PBroker.swift */,
+				D35618325993E5F70C99F93F /* P2P__P2PCandidate.swift */,
+				3D89AEA7073FFBA82737D7F2 /* P2P__P2PEnroll.swift */,
+				0F0CE35E4BDA80192D272CEE /* P2P__P2PEnrollmentCoordinator.swift */,
+				A71CE90D060539BF28588D88 /* P2P__P2PIdentity.swift */,
+				0AFB97CD93F45D49A865F2C1 /* P2P__P2PSignaling.swift */,
+				F0724142F1DD4BEE35B932B9 /* P2P__P2PTransport.swift */,
+				79B578BC927582930ED5585C /* P2P__STUN.swift */,
+				C10644B01DC7B818F1EB193F /* P2P__TurnRelayTransport.swift */,
+				1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */,
+				1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */,
+				C2368064077094F44DF16B8E /* Profile.swift */,
+				9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */,
+				6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */,
+				C45F1F9D11A980D236BD970D /* SessionModels.swift */,
+				17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */,
+				39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */,
+				11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */,
+				A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */,
+				397F71D65F9055561BA4C3D0 /* TaskTranscriptWindow.swift */,
+				CB8D84F5B227BEB930AD0A35 /* TerminalAppDefaults.swift */,
+				1EAFF96DF3D1FA2755C2EECF /* Terminal__GridLayoutStore.swift */,
+				98B2E7296B414B300A8BD7D8 /* VMDashboard.swift */,
+			);
+			name = Sources;
+			sourceTree = "<group>";
+		};
+		69F8D45498D7E20DA99BB780 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				F53560B8D470A293B70C0526 /* Info.plist */,
+			);
+			name = App;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0E8A3AD980EC179856012B7E /* BromureRemote */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5BFB0997A64A6CC735B2732E /* Build configuration list for PBXNativeTarget */;
+			buildPhases = (
+				4E57AE888889001C06A4F7E8 /* Sources */,
+				69BE8A4D8E4D9DA4E7DB3928 /* Frameworks */,
+				D6C9E8A172005E68A1DD674F /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = BromureRemote;
+			packageProductDependencies = (
+				8ABC8E0C7D2DBE6AA0A1B70D /* Crypto */,
+				AE2F455E8323D50164A75332 /* NIOCore */,
+				1EB7681EA7B981649D9DDEA0 /* NIOPosix */,
+				02B62CE274D8DA992C69E200 /* NIOSSH */,
+				464A3CFC0A0DE53330C36437 /* MarkdownUI */,
+				C1052FCFAD51F05999DD0C4D /* SwiftTerm */,
+			);
+			productName = BromureRemote;
+			productReference = 85673086EF6CFD3A1F8591AF /* BromureRemote.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		98F54143AB4E86B28C3AFEE0 /* Project object */ = {
+			isa = PBXProject;
+			attributes = { LastSwiftUpdateCheck = 1600; LastUpgradeCheck = 1600; };
+			buildConfigurationList = B93EB399AA6C0DCE49D9021C /* Build configuration list for PBXProject */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = ( en, Base );
+			mainGroup = E50290A24C49A459B43487C5;
+			packageReferences = (
+				6A50A05EE8982B43C00AC425 /* swift-crypto */,
+				658E91F0BDA2820D6E02937D /* swift-nio */,
+				D1D30ACA30B84E1B3EC955A7 /* swift-nio-ssh */,
+				3E367FF56E793BB302E0ADED /* swift-markdown-ui */,
+				C3E2C81CBCC031CA0286100E /* SwiftTerm */,
+			);
+			productRefGroup = 328EC33DF3954DC9B83FA285 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = ( 0E8A3AD980EC179856012B7E /* BromureRemote */ );
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		D6C9E8A172005E68A1DD674F = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		4E57AE888889001C06A4F7E8 = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8C4A68614FFC6ECE6DA80F54 /* ACAppDelegateShim.swift in Sources */,
+				DF5906B4200E5514B147E469 /* AttachSession.swift in Sources */,
+				C568C6135B3C91ED6EE4F4C3 /* BromureRemoteApp.swift in Sources */,
+				028E121AD6D6119EC7D9FEE0 /* ConnectFlow.swift in Sources */,
+				A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */,
+				C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */,
+				DD53AF72902E4568BC03B607 /* PlatformStubs.swift in Sources */,
+				4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */,
+				D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */,
+				A605D8611294971B8BA65260 /* AutomationKanbanView.swift in Sources */,
+				78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */,
+				B58C6697BB7653D0D9519480 /* AutomationRunWindow.swift in Sources */,
+				C1A736E1727425CB30914E1E /* BACDebug.swift in Sources */,
+				B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */,
+				31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */,
+				269D8003F7F7851DBCFBBF57 /* CodingTasks.swift in Sources */,
+				F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */,
+				B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */,
+				483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */,
+				B4E5CE6E341AFA91837DF064 /* FatClient.swift in Sources */,
+				A9CDFDBA328F79D5F6468FDC /* FatClientConnect.swift in Sources */,
+				EEAA27D4E60DFC8DCAC1A5BF /* FatClientController.swift in Sources */,
+				6A7BE186F5BEF684978A6B07 /* FatClientFleet.swift in Sources */,
+				554B47572CC91835BBF33E3F /* FatClientNIOSSH.swift in Sources */,
+				6C82036785EDA57A2F5A6E72 /* FatClientPAC.swift in Sources */,
+				FBE3201FC08C6D5C1C4ACBF9 /* FatClientSSHDial.swift in Sources */,
+				8C4CC9D03A1E2C57D87BF88E /* FatClientTypes.swift in Sources */,
+				9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */,
+				68BD7714F7DA70C829916D36 /* FileBrowserView.swift in Sources */,
+				CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */,
+				7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */,
+				A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */,
+				B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */,
+				61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */,
+				FED3004C83536B84CF8C0C61 /* Mitm__PromptInjectionPolicy.swift in Sources */,
+				5C0722E5CF0BF28BADBEA327 /* Mitm__SecretsVault.swift in Sources */,
+				B854291378C379CF05ECFEE3 /* Mitm__SessionTokenPlan.swift in Sources */,
+				AD266798BBB080664E84AD70 /* Mitm__SupplyChainPolicy.swift in Sources */,
+				C46EAD94103A7DFA39B00F4A /* Mitm__TraceRecord.swift in Sources */,
+				9830CFB853F2FA4D5CE61573 /* P2P__ControlPlaneClient.swift in Sources */,
+				E19D161E660D842460884A1D /* P2P__DeviceChannel.swift in Sources */,
+				0E24C6E6070AC85F09B19E77 /* P2P__DeviceIdentity.swift in Sources */,
+				F1464E00C6573863B23E4D8D /* P2P__P2PBroker.swift in Sources */,
+				8AA4840DDF58D8CD9F52F413 /* P2P__P2PCandidate.swift in Sources */,
+				CC1E919809F09EEA591C85D9 /* P2P__P2PEnroll.swift in Sources */,
+				E1352ED2F9D7B75C0CECEDF1 /* P2P__P2PEnrollmentCoordinator.swift in Sources */,
+				B8673C4CA3146F45629487C5 /* P2P__P2PIdentity.swift in Sources */,
+				4B58D3C7D8DD9BDCF2828464 /* P2P__P2PSignaling.swift in Sources */,
+				23208E3C2B74A375A34B8E27 /* P2P__P2PTransport.swift in Sources */,
+				F3EF497C1A2C232CB51B9D21 /* P2P__STUN.swift in Sources */,
+				FC1C41B9A3FDBCDA909D6231 /* P2P__TurnRelayTransport.swift in Sources */,
+				7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */,
+				E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */,
+				3B15992E5BD329D249A9D27D /* Profile.swift in Sources */,
+				B47EFB48B64411BF181D2140 /* ScheduledAutomationViews.swift in Sources */,
+				332BE05FECAFCE5409388316 /* ScheduledAutomations.swift in Sources */,
+				B8BCF82DBF631DEFA8A1849A /* SessionModels.swift in Sources */,
+				435FC51F11B11F312B92DAC5 /* SharedStatusViews.swift in Sources */,
+				A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */,
+				4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */,
+				87E7E20668933BD88F05A9F7 /* TaskTranscriptArchive.swift in Sources */,
+				273ACE71B4D5E451211255EF /* TaskTranscriptWindow.swift in Sources */,
+				B57BFBAA9AF42AE0A6EE14FA /* TerminalAppDefaults.swift in Sources */,
+				D5FB8187D6511F113AD88886 /* Terminal__GridLayoutStore.swift in Sources */,
+				6552B0D662751610674CFBF1 /* VMDashboard.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		920C57D0DA386BF254949DF9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				SWIFT_VERSION = 5.9;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				ENABLE_PREVIEWS = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				GCC_OPTIMIZATION_LEVEL = 0;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG BROMURE_APP";
+			};
+			name = Debug;
+		};
+		DB9D43B9A41A7AF4CFA1BF4A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				SWIFT_VERSION = 5.9;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				ENABLE_PREVIEWS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = BROMURE_APP;
+			};
+			name = Release;
+		};
+		B52D0FFB021E8F69445DE3D1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = io.bromure.remote;
+				INFOPLIST_FILE = App/Info.plist;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = W3RD8G85BC;
+				GENERATE_INFOPLIST_FILE = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				MARKETING_VERSION = 1.0;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				CODE_SIGN_ENTITLEMENTS = App/BromureRemote.entitlements;
+				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
+			};
+			name = Debug;
+		};
+		777513FA364619292C6CE7C0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = io.bromure.remote;
+				INFOPLIST_FILE = App/Info.plist;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = W3RD8G85BC;
+				GENERATE_INFOPLIST_FILE = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				MARKETING_VERSION = 1.0;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				CODE_SIGN_ENTITLEMENTS = App/BromureRemote.entitlements;
+				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		B93EB399AA6C0DCE49D9021C /* Build configuration list for PBXProject */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				920C57D0DA386BF254949DF9 /* Debug */,
+				DB9D43B9A41A7AF4CFA1BF4A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5BFB0997A64A6CC735B2732E /* Build configuration list for PBXNativeTarget */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B52D0FFB021E8F69445DE3D1 /* Debug */,
+				777513FA364619292C6CE7C0 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		6A50A05EE8982B43C00AC425 /* swift-crypto */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-crypto.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.7.0;
+			};
+		};
+		658E91F0BDA2820D6E02937D /* swift-nio */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-nio.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.65.0;
+			};
+		};
+		D1D30ACA30B84E1B3EC955A7 /* swift-nio-ssh */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-nio-ssh.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.9.0;
+			};
+		};
+		3E367FF56E793BB302E0ADED /* swift-markdown-ui */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/gonzalezreal/swift-markdown-ui.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.4.0;
+			};
+		};
+		C3E2C81CBCC031CA0286100E /* SwiftTerm */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.2.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		8ABC8E0C7D2DBE6AA0A1B70D /* Crypto */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6A50A05EE8982B43C00AC425 /* swift-crypto */;
+			productName = Crypto;
+		};
+		AE2F455E8323D50164A75332 /* NIOCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 658E91F0BDA2820D6E02937D /* swift-nio */;
+			productName = NIOCore;
+		};
+		1EB7681EA7B981649D9DDEA0 /* NIOPosix */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 658E91F0BDA2820D6E02937D /* swift-nio */;
+			productName = NIOPosix;
+		};
+		02B62CE274D8DA992C69E200 /* NIOSSH */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D1D30ACA30B84E1B3EC955A7 /* swift-nio-ssh */;
+			productName = NIOSSH;
+		};
+		464A3CFC0A0DE53330C36437 /* MarkdownUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3E367FF56E793BB302E0ADED /* swift-markdown-ui */;
+			productName = MarkdownUI;
+		};
+		C1052FCFAD51F05999DD0C4D /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C3E2C81CBCC031CA0286100E /* SwiftTerm */;
+			productName = SwiftTerm;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 98F54143AB4E86B28C3AFEE0 /* Project object */;
+}

@@ -1,5 +1,7 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#endif
 
 /// Window contents for "Window → Credential Approvals…". Lists every
 /// live consent decision the user has made in this app run — both

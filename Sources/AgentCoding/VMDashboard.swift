@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import SwiftUI
 import Charts
 
@@ -26,6 +28,10 @@ struct VMDashboardView: View {
 
     @State private var cpuHistory: [Double] = []
     @State private var now = Date()
+    /// Compact = iPhone portrait; drives the phone-friendly stacked layout.
+    /// Always `.regular` on macOS, so the desktop layout is unchanged.
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
 
     private var accent: Color { Color(hex: accentHex) }
     private var isRunning: Bool { state == .running || state == .booting }
@@ -51,27 +57,42 @@ struct VMDashboardView: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(spacing: 14) {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(LinearGradient(colors: [accent, accent.opacity(0.6)],
-                                     startPoint: .topLeading, endPoint: .bottomTrailing))
-                .frame(width: 48, height: 48)
-                .overlay(Image(systemName: "server.rack")
-                    .font(.system(size: 19, weight: .medium)).foregroundStyle(.white))
-                .shadow(color: accent.opacity(0.35), radius: 5, y: 2)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(profile.name).font(.system(size: 20, weight: .semibold))
-                HStack(spacing: 8) {
-                    statePill
-                    if let ip = model?.ipAddress, !ip.isEmpty {
-                        Label(ip, systemImage: "network")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary).labelStyle(.titleAndIcon)
-                    }
+        // On a phone the identity row and the action buttons each need the full
+        // width, so they stack; on macOS/iPad they sit side by side.
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                identityBadge
+                identityText
+                Spacer()
+                if !compact { actionBar }
+            }
+            if compact { actionBar }
+        }
+    }
+
+    private var identityBadge: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(LinearGradient(colors: [accent, accent.opacity(0.6)],
+                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+            .frame(width: 48, height: 48)
+            .overlay(Image(systemName: "server.rack")
+                .font(.system(size: 19, weight: .medium)).foregroundStyle(.white))
+            .shadow(color: accent.opacity(0.35), radius: 5, y: 2)
+    }
+
+    private var identityText: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(profile.name).font(.system(size: 20, weight: .semibold))
+                .lineLimit(1).minimumScaleFactor(0.7)
+            HStack(spacing: 8) {
+                statePill
+                if let ip = model?.ipAddress, !ip.isEmpty {
+                    Label(ip, systemImage: "network")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary).labelStyle(.titleAndIcon)
+                        .lineLimit(1)
                 }
             }
-            Spacer()
-            actionBar
         }
     }
 
@@ -85,64 +106,91 @@ struct VMDashboardView: View {
         .foregroundStyle(stateColor)
     }
 
-    private var actionBar: some View {
-        HStack(spacing: 8) {
-            if isRunning {
-                Button { onNewTerminal() } label: { Label("New Terminal", systemImage: "plus") }
-                    .buttonStyle(.borderedProminent)
-                Button { onSuspend() } label: { Label("Suspend", systemImage: "pause.fill") }
-                    .buttonStyle(.bordered).help("Save the VM's state to disk")
-                Button { onReboot() } label: { Label("Reboot", systemImage: "arrow.clockwise") }
-                    .buttonStyle(.bordered)
-                Button(role: .destructive) { onShutdown() } label: { Label("Shut Down", systemImage: "power") }
-                    .buttonStyle(.bordered)
-            } else {
-                Button { onResume() } label: {
-                    Label(state == .suspended ? "Resume" : "Start", systemImage: "play.fill")
+    @ViewBuilder private var actionBar: some View {
+        if isRunning {
+            let newTerminal = Button { onNewTerminal() } label: {
+                Label("New Terminal", systemImage: "plus").fillWidth(compact)
+            }.buttonStyle(.borderedProminent)
+            let suspend = Button { onSuspend() } label: {
+                Label("Suspend", systemImage: "pause.fill").fillWidth(compact)
+            }.buttonStyle(.bordered).help("Save the VM's state to disk")
+            let reboot = Button { onReboot() } label: {
+                Label("Reboot", systemImage: "arrow.clockwise").fillWidth(compact)
+            }.buttonStyle(.bordered)
+            let shutdown = Button(role: .destructive) { onShutdown() } label: {
+                Label("Shut Down", systemImage: "power").fillWidth(compact)
+            }.buttonStyle(.bordered)
+
+            Group {
+                if compact {
+                    // Two full-width rows so the labels stay legible on a phone.
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) { newTerminal; suspend }
+                        HStack(spacing: 8) { reboot; shutdown }
+                    }
+                } else {
+                    HStack(spacing: 8) { newTerminal; suspend; reboot; shutdown }
                 }
-                .buttonStyle(.borderedProminent)
             }
+            .controlSize(compact ? .large : .regular)
+            .labelStyle(.titleAndIcon)
+        } else {
+            Button { onResume() } label: {
+                Label(state == .suspended ? "Resume" : "Start", systemImage: "play.fill").fillWidth(compact)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(compact ? .large : .regular)
+            .labelStyle(.titleAndIcon)
         }
-        .controlSize(.regular)
-        .labelStyle(.titleAndIcon)
     }
 
     // MARK: Vitals
 
-    private var statStrip: some View {
-        HStack(spacing: 12) {
-            if isRunning {
-                CPUStatCard(value: model?.vmCPU ?? 0, history: cpuHistory, tint: accent)
-                StatCard(title: "Memory", value: gb(model?.vmMemUsedKB ?? 0),
-                         caption: "of \(profile.memoryGB) GB",
-                         systemImage: "memorychip.fill", tint: .purple)
-            } else {
-                StatCard(title: "CPU", value: "—", caption: stateCaption,
-                         systemImage: "cpu.fill", tint: accent)
-                StatCard(title: "Memory", value: "\(profile.memoryGB) GB", caption: "allocated",
-                         systemImage: "memorychip.fill", tint: .purple)
+    @ViewBuilder private var statStrip: some View {
+        // A phone can't fit five cards across, so they wrap into a 2-column grid;
+        // macOS/iPad keep the single row.
+        if compact {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12),
+                                GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                statCards
             }
-            StatCard(title: "vCPUs", value: "\(vCPUs)",
-                     caption: isRunning ? "load \(String(format: "%.2f", model?.vmLoad ?? 0))" : "cores",
-                     systemImage: "cpu.fill", tint: .blue)
-            // Prefer the GUEST's df numbers (the filesystem's own truth) over
-            // the host-side CoW clone allocation, which overstates real usage
-            // — blocks the guest FS freed stay materialized in the clone.
-            // Fall back to allocation while off / before the first report.
-            if isRunning, let m = model, m.vmDiskTotalKB > 0 {
-                StatCard(title: "Disk", value: gb(m.vmDiskUsedKB),
-                         caption: "of \(gb(m.vmDiskTotalKB))",
-                         systemImage: "internaldrive.fill", tint: .teal)
-            } else {
-                StatCard(title: "Disk", value: gbBytes(diskAllocatedBytes),
-                         caption: "of \(gbBytes(diskCapacityBytes)) (host)",
-                         systemImage: "internaldrive.fill", tint: .teal)
-            }
-            StatCard(title: "Uptime", value: isRunning ? uptimeText : "—",
-                     caption: isRunning ? "since boot" : stateCaption,
-                     systemImage: "clock.fill", tint: .orange)
+        } else {
+            HStack(spacing: 12) { statCards }
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var statCards: some View {
+        if isRunning {
+            CPUStatCard(value: model?.vmCPU ?? 0, history: cpuHistory, tint: accent)
+            StatCard(title: "Memory", value: gb(model?.vmMemUsedKB ?? 0),
+                     caption: "of \(profile.memoryGB) GB",
+                     systemImage: "memorychip.fill", tint: .purple)
+        } else {
+            StatCard(title: "CPU", value: "—", caption: stateCaption,
+                     systemImage: "cpu.fill", tint: accent)
+            StatCard(title: "Memory", value: "\(profile.memoryGB) GB", caption: "allocated",
+                     systemImage: "memorychip.fill", tint: .purple)
+        }
+        StatCard(title: "vCPUs", value: "\(vCPUs)",
+                 caption: isRunning ? "load \(String(format: "%.2f", model?.vmLoad ?? 0))" : "cores",
+                 systemImage: "cpu.fill", tint: .blue)
+        // Prefer the GUEST's df numbers (the filesystem's own truth) over
+        // the host-side CoW clone allocation, which overstates real usage
+        // — blocks the guest FS freed stay materialized in the clone.
+        // Fall back to allocation while off / before the first report.
+        if isRunning, let m = model, m.vmDiskTotalKB > 0 {
+            StatCard(title: "Disk", value: gb(m.vmDiskUsedKB),
+                     caption: "of \(gb(m.vmDiskTotalKB))",
+                     systemImage: "internaldrive.fill", tint: .teal)
+        } else {
+            StatCard(title: "Disk", value: gbBytes(diskAllocatedBytes),
+                     caption: "of \(gbBytes(diskCapacityBytes)) (host)",
+                     systemImage: "internaldrive.fill", tint: .teal)
+        }
+        StatCard(title: "Uptime", value: isRunning ? uptimeText : "—",
+                 caption: isRunning ? "since boot" : stateCaption,
+                 systemImage: "clock.fill", tint: .orange)
     }
 
     // MARK: Listening ports
@@ -171,8 +219,7 @@ struct VMDashboardView: View {
     }
 
     private func copyEndpoint(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        platformCopyToPasteboard(text)
         copiedEndpoint = text
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             if copiedEndpoint == text { copiedEndpoint = nil }
@@ -214,12 +261,17 @@ struct VMDashboardView: View {
                         // HTTP services only: a quick tunnel is browsable for
                         // web origins; raw TCP (ssh, databases, udp) would
                         // need cloudflared on every connecting client.
+                        // (cloudflared runs as a local subprocess — macOS only.)
+#if os(macOS)
                         if isExposable(p) { exposeButton(p) }
+#endif
                     }
+#if os(macOS)
                     if isExposable(p),
                        let info = CloudflareTunnelSupervisor.shared.tunnels[exposeID(p)] {
                         tunnelStatusLine(info)
                     }
+#endif
                 }
                 .padding(.horizontal, 14).padding(.vertical, 8)
             }
@@ -230,6 +282,7 @@ struct VMDashboardView: View {
             .strokeBorder(Color.primary.opacity(0.06)))
     }
 
+#if os(macOS)
     // MARK: Internet exposure (Cloudflare quick tunnels)
 
     private func exposeID(_ p: ListeningPort) -> String {
@@ -338,6 +391,7 @@ struct VMDashboardView: View {
         d.set(true, forKey: "cloudflareTunnel.consented")
         return true
     }
+#endif
 
     // MARK: Configuration
 
@@ -415,14 +469,20 @@ struct VMDashboardView: View {
         case .running:   return .green
         case .booting:   return .orange
         case .suspended: return .blue
-        case .off:       return Color(nsColor: .tertiaryLabelColor)
+        case .off:       return Color.platformTertiaryLabel
         }
     }
 
     /// Where a tool runs + how it authenticates / which local model it serves.
     private func toolModeText(_ spec: Profile.ToolSpec) -> String {
         if spec.authMode == .local {
+            // On macOS resolve the catalog's friendly name; the iOS fat client
+            // has no local-model catalog, so it shows the raw model id.
+#if os(macOS)
             let model = spec.localModelID.flatMap { CatalogStore.shared.resolve($0)?.name ?? $0 }
+#else
+            let model = spec.localModelID
+#endif
             return String(format: NSLocalizedString("On-device · %@", comment: "Config value: tool runs locally; %@ = model name"),
                           model ?? NSLocalizedString("local model", comment: "Fallback when the local model name is unknown"))
         }

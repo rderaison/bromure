@@ -586,7 +586,7 @@ struct AutomationEditorView: View {
             .frame(maxWidth: 660, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
         // Pinned action bar so Save/Run are always reachable without scrolling.
         .safeAreaInset(edge: .bottom, spacing: 0) { footerBar }
         // Reload the repo/team dropdowns whenever the workspace (and so the
@@ -780,7 +780,7 @@ struct AutomationEditorView: View {
                     Button(NSLocalizedString("Add one…", comment: "")) {
                         onEditWorkspace(draft.profileID)
                     }
-                    .buttonStyle(.link)
+                    .platformLinkButtonStyle()
                     .font(.system(size: 11))
                 }
             }

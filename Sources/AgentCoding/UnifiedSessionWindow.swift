@@ -30,103 +30,9 @@ final class SidebarResizeHandle: NSView {
     }
 }
 
-// MARK: - Sidebar list model
-
-/// Drives the unpeel-style source-list. One `VMEntry` per running VM hosted in
-/// the unified window; each entry carries the pane's live `TabsModel` so the
-/// nested tab rows update in place.
-@MainActor
-@Observable
-final class SessionListModel {
-    @MainActor
-    @Observable
-    final class VMEntry: Identifiable {
-        let id: Profile.ID
-        var name: String
-        var accentHex: String
-        /// The pane's tab model — shared by reference, so tab labels / active
-        /// index / thinking state refresh the sidebar rows live.
-        let model: TabsModel
-        init(id: Profile.ID, name: String, accentHex: String, model: TabsModel) {
-            self.id = id
-            self.name = name
-            self.accentHex = accentHex
-            self.model = model
-        }
-    }
-
-    /// Per-profile run state shown in the source list.
-    enum RunState { case off, booting, running, suspended }
-
-    /// One row per profile — running or not. Rebuilt wholesale by the
-    /// delegate's `refreshSidebar()`; a running row pairs (by id) with a
-    /// `VMEntry` that carries the live tab model for its nested tab rows.
-    struct ProfileRow: Identifiable, Equatable {
-        let id: Profile.ID
-        var name: String
-        var accentHex: String
-        var state: RunState
-        var compromised: Bool
-    }
-
-    /// Running, attached panes — carry live tab models.
-    var entries: [VMEntry] = []
-    /// Every profile, in display order — the source list's top level.
-    var profileRows: [ProfileRow] = []
-    var selectedID: Profile.ID?
-    /// Set when a VM's Docker dashboard is the active stage surface — highlights
-    /// that VM's Docker node in the source list.
-    var dockerSelectedID: Profile.ID?
-    /// True when the Grid is the active stage surface.
-    var gridSelected = false
-    /// Set when an automation's editor is the active stage surface —
-    /// highlights its row in the Automations section.
-    var automationSelectedID: UUID?
-    /// True when the automation kanban board is the active stage surface.
-    var automationBoardSelected = false
-    /// True when the coding-task kanban board is the active stage surface.
-    var taskBoardSelected = false
-    /// True when the sidebar is collapsed to the icon rail.
-    var sidebarCollapsed = false
-    /// True when the right-hand file-explorer pane is open. Drives the
-    /// toolbar button tint and the pane's own context/polling.
-    var filePaneOpen = false
-    /// True when the agentic browser pane is open. Drives the toolbar tint.
-    var browserPaneOpen = false
-}
-
-/// Right-click actions on a tab row. Handled by the window, which reads the
-/// tab's worktree metadata and dispatches to the delegate (dialogs + guest
-/// commands).
-enum TabAction {
-    case newWorktree        // any tab whose cwd is a git repo
-    case merge              // a worktree tab → merge into an ancestor
-    case attachTerminal     // a worktree tab → open a plain terminal in its checkout
-    case removeWorktree     // a worktree tab → discard (remove + delete branch)
-    case resolveConflicts   // a "Merge → …" tab → spawn the agent to resolve
-    case createAutomation   // any tab → automation editor seeded with its cwd
-}
-
-/// Nesting depth of a tab in the worktree tree: 0 for ordinary tabs, N for a
-/// worktree whose parent chain (by `parentBranch` → an ancestor's
-/// `worktreeBranch`) is N deep. An attached terminal — a plain tab tagged with
-/// `parentBranch` but no `worktreeBranch` — nests one step under its worktree
-/// the same way. Drives the source-list indentation so worktrees-off-worktrees
-/// read as nested. Capped so a deep tree can't march off the sidebar.
-@MainActor
-func worktreeDepth(of tab: TabsModel.Tab, in tabs: [TabsModel.Tab]) -> Int {
-    guard tab.isWorktree || !(tab.parentBranch?.isEmpty ?? true) else { return 0 }
-    var depth = 1
-    var parentBranch = tab.parentBranch
-    var guardCount = 0
-    while let pb = parentBranch, !pb.isEmpty, guardCount < 8 {
-        guard let parent = tabs.first(where: { $0.worktreeBranch == pb }) else { break }
-        depth += 1
-        parentBranch = parent.parentBranch
-        guardCount += 1
-    }
-    return min(depth, 6)
-}
+// SessionListModel, TabAction and worktreeDepth moved to SessionModels.swift
+// (platform-independent) so the iOS fat client can compile them without this
+// AppKit window file.
 
 /// A tab paired with its position in `model.tabs` (the select/close APIs
 /// speak model positions). `id` delegates to the tab so SwiftUI rows keep
@@ -2677,62 +2583,6 @@ private struct DockerTabRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }
-    }
-}
-
-/// unpeel-style staggered "typing" dots shown while the agent is working.
-/// Small status dot overlaid on an agent's icon. Orange gently pulses while the
-/// agent is working; green means it finished its turn; red means it's waiting
-/// on the user. A thin ring keeps it legible over any icon/background.
-struct AgentStatusDot: View {
-    let status: AgentStatus
-    @State private var pulse = false
-
-    private var color: Color {
-        switch status {
-        case .working:   return .orange
-        case .done:      return .green
-        case .needsInput: return .red
-        }
-    }
-    private var help: String {
-        switch status {
-        case .working:   return NSLocalizedString("Working…", comment: "agent status dot")
-        case .done:      return NSLocalizedString("Done", comment: "agent status dot")
-        case .needsInput: return NSLocalizedString("Needs your input", comment: "agent status dot")
-        }
-    }
-    /// The bare dot — a filled circle with a thin background-colored ring so it
-    /// stays legible over any icon.
-    private var dot: some View {
-        Circle()
-            .fill(color)
-            .frame(width: 6, height: 6)
-            .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.2))
-    }
-
-    var body: some View {
-        // Only the working dot animates. Done/needs-input render as a plain,
-        // STEADY dot in a separate branch, so switching out of .working
-        // destroys the animated view entirely — no lingering repeatForever
-        // pulse on the green/red dot.
-        Group {
-            if status == .working {
-                dot
-                    .scaleEffect(pulse ? 1.12 : 0.82)
-                    .opacity(pulse ? 1.0 : 0.5)
-                    .onAppear {
-                        pulse = false
-                        // ~30% slower than the original 0.75s for a gentler pulse.
-                        withAnimation(.easeInOut(duration: 0.98).repeatForever(autoreverses: true)) {
-                            pulse = true
-                        }
-                    }
-            } else {
-                dot
-            }
-        }
-        .help(help)
     }
 }
 

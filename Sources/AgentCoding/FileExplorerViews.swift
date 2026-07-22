@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import MarkdownUI
 import SwiftUI
 
@@ -63,10 +65,10 @@ struct FileExplorerPane: View {
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
         // Seam against the terminal — the pane owns its own divider line.
         .overlay(alignment: .leading) {
-            Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1)
+            Rectangle().fill(Color.platformSeparator).frame(width: 1)
         }
         .onAppear {
             applyContext()
@@ -259,11 +261,20 @@ struct FileExplorerPane: View {
         } else if model.selectedPath == nil {
             tree
         } else {
+#if os(macOS)
             VSplitView {
                 tree.frame(minHeight: 110, maxHeight: .infinity)
                 FileDetailSection(model: model)
                     .frame(minHeight: 140, maxHeight: .infinity)
             }
+#else
+            VStack(spacing: 0) {
+                tree.frame(minHeight: 110, maxHeight: .infinity)
+                Divider()
+                FileDetailSection(model: model)
+                    .frame(minHeight: 140, maxHeight: .infinity)
+            }
+#endif
         }
     }
 
@@ -436,7 +447,7 @@ private struct FileDetailSection: View {
             Divider().opacity(0.5)
             detailBody
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
     }
 
     private var header: some View {
@@ -465,6 +476,7 @@ private struct FileDetailSection: View {
                 .frame(width: 110)
             }
             if !windowed {
+#if os(macOS)
                 Button { FileViewerWindowController.shared.show(model: model) } label: {
                     Image(systemName: "macwindow.badge.plus")
                         .font(.system(size: 10))
@@ -472,6 +484,7 @@ private struct FileDetailSection: View {
                 }
                 .buttonStyle(.plain)
                 .help("Open in a separate window (full-screen capable)")
+#endif
                 Button { model.select(nil) } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .semibold))
@@ -512,7 +525,7 @@ private struct FileDetailSection: View {
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(Color.platformTextBackground)
         case .code(let text, let language):
             CodePreview(text: text, language: language)
         case .binary:
@@ -544,6 +557,7 @@ private struct FileDetailSection: View {
 /// its git polling running even while the pane itself is collapsed. The
 /// green traffic light (or double-tap on the title bar) takes it full
 /// screen — the point of popping out.
+#if os(macOS)
 @MainActor
 final class FileViewerWindowController: NSObject, NSWindowDelegate {
     static let shared = FileViewerWindowController()
@@ -605,6 +619,8 @@ private struct FileViewerWindowContent: View {
 }
 
 // MARK: - Colored diff
+
+#endif
 
 private struct DiffView: View {
     let document: DiffDocument
@@ -668,7 +684,7 @@ private struct DiffView: View {
             }
             .padding(.vertical, 4)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Color.platformTextBackground)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if canComment && !model.reviewDrafts.isEmpty {
                 HStack(spacing: 8) {
@@ -811,30 +827,38 @@ private struct DiffLineRow: View {
 /// created once and reused off the main actor.
 private actor CodeHighlighter {
     static let shared = CodeHighlighter()
+#if os(macOS)
+    // Highlightr (JavaScriptCore + highlight.js) ships in the macOS app's
+    // resource bundle. The iOS client skips it — the preview falls back to
+    // the plain monospaced path — to keep the port free of that bundle.
     private var highlightr: Highlightr?
     private var themeName: String?
 
     func highlight(_ text: String, language: String, dark: Bool)
-        -> (text: NSAttributedString, background: NSColor)? {
+        -> (text: NSAttributedString, background: PlatformColor)? {
         guard let h = highlightr ?? Highlightr() else { return nil }
         highlightr = h
         let theme = dark ? "atom-one-dark" : "xcode"
         if themeName != theme {
             h.setTheme(to: theme)
-            h.theme.setCodeFont(NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular))
+            h.theme.setCodeFont(PlatformFont.monospacedSystemFont(ofSize: 11.5, weight: .regular))
             themeName = theme
         }
         guard let attributed = h.highlight(text, as: language, fastRender: true)
         else { return nil }
-        return (attributed, h.theme.themeBackgroundColor ?? .textBackgroundColor)
+        return (attributed, h.theme.themeBackgroundColor ?? .platformTextBackgroundColor)
     }
+#else
+    func highlight(_ text: String, language: String, dark: Bool)
+        -> (text: NSAttributedString, background: PlatformColor)? { nil }
+#endif
 }
 
 private struct CodePreview: View {
     let text: String
     let language: String?
     @Environment(\.colorScheme) private var colorScheme
-    @State private var rendered: (text: NSAttributedString, background: NSColor)?
+    @State private var rendered: (text: NSAttributedString, background: PlatformColor)?
 
     var body: some View {
         Group {
@@ -857,14 +881,15 @@ private struct CodePreview: View {
 
     static func plain(_ text: String) -> NSAttributedString {
         NSAttributedString(string: text, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
-            .foregroundColor: NSColor.labelColor,
+            .font: PlatformFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
+            .foregroundColor: PlatformColor.platformLabel,
         ])
     }
 }
 
-/// Selectable, read-only NSTextView — SwiftUI Text chokes on multi-hundred-KB
+/// Selectable, read-only text view — SwiftUI Text chokes on multi-hundred-KB
 /// attributed strings; TextKit doesn't.
+#if os(macOS)
 private struct AttributedTextView: NSViewRepresentable {
     let text: NSAttributedString
     let background: NSColor?
@@ -899,3 +924,28 @@ private struct AttributedTextView: NSViewRepresentable {
         scroll.backgroundColor = bg
     }
 }
+#else
+/// UITextView twin of the macOS wrapper — same contract: selectable,
+/// read-only, scrollable, tinted background.
+private struct AttributedTextView: UIViewRepresentable {
+    let text: NSAttributedString
+    let background: PlatformColor?
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isScrollEnabled = true
+        textView.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        textView.adjustsFontForContentSizeCategory = false
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        if textView.attributedText?.isEqual(to: text) != true {
+            textView.attributedText = text
+        }
+        textView.backgroundColor = background ?? .systemBackground
+    }
+}
+#endif

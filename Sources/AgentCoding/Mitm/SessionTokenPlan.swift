@@ -100,6 +100,7 @@ public struct SessionTokenPlan: Sendable {
     /// replacement, scoped to the host the real token belongs to (so a
     /// stray fake leaking to a third-party host is left alone, not
     /// quietly rewritten with the wrong value).
+#if os(macOS)
     public func tokenMap() -> TokenMap {
         let mapped = entries.map { e in
             TokenMap.Entry(
@@ -116,6 +117,7 @@ public struct SessionTokenPlan: Sendable {
         }
         return TokenMap(entries: mapped)
     }
+#endif
 
     private func bodyScan(for purpose: Purpose) -> Bool {
         if case .httpDatabase = purpose { return true }

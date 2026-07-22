@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import Foundation
 import SwiftUI
 
@@ -54,6 +56,7 @@ final class RemoteHostController {
     /// Boot time of each running VM, derived from the mirrored uptime (kept
     /// stable across polls so the dashboard's uptime doesn't jitter).
     private(set) var bootTimes: [Profile.ID: Date] = [:]
+#if os(macOS)
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
     /// Decision prompts we're currently showing, in the order shown, so a later
@@ -62,6 +65,18 @@ final class RemoteHostController {
     /// topmost alert is app-modal and directly dismissable; lower ones clear as
     /// the modal stack unwinds.
     private var openPromptStack: [(id: String, alert: NSAlert)] = []
+#else
+    /// The remote's pending decision prompts, published for SwiftUI (.alert on
+    /// iOS) — same /state + `/prompts/{id}/answer` wire contract as the macOS
+    /// NSAlert stack.
+    struct DecisionPrompt: Identifiable, Equatable {
+        let id: String
+        let title: String
+        let message: String
+        let buttons: [String]
+    }
+    private(set) var decisionPrompts: [DecisionPrompt] = []
+#endif
     /// Shared-folder paths per running VM (feeds the remote file browser's
     /// location list — browsed via the guest, since the host dirs live on A).
     private(set) var mounts: [Profile.ID: [String]] = [:]
@@ -88,6 +103,7 @@ final class RemoteHostController {
     /// `/state`. Needed by the browser pane's PAC and the fleet router to decide
     /// which destinations to tunnel.
     private(set) var vmnetSubnet: String?
+#if os(macOS)
     /// Auto-started SOCKS5 forwarder into the remote subnet; its port feeds the
     /// browser pane's PAC and `curl --socks5`. Nil until `start()`.
     private(set) var socks: RemoteSocksForwarder?
@@ -106,6 +122,7 @@ final class RemoteHostController {
         UserDefaults.standard.bool(forKey: tunnelDefaultsKey)
             || ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_UTUN"] != nil
     }
+#endif
 
     /// Live mirrors' hosts by id. PEER hosts exist only in this process (never
     /// hosts.json), so the terminal-attach command builder needs this to hand
@@ -141,6 +158,7 @@ final class RemoteHostController {
         }
         RunLoop.main.add(t, forMode: .common)
         pollTimer = t
+#if os(macOS)
         // Stand up the subnet tunnel entry point (SOCKS) so the browser pane and
         // `curl --socks5` can reach the remote guests as soon as the host is up.
         if socks == nil {
@@ -149,18 +167,21 @@ final class RemoteHostController {
                 FatClientLog.log("socks: 127.0.0.1:\(p) → \(host.connectLabel) (remote subnet)")
             }
         }
+#endif
     }
 
     func stop() {
         Self.liveHosts[host.id] = nil
         pollTimer?.invalidate()
         pollTimer = nil
+#if os(macOS)
         approvalPollTimer?.invalidate()
         approvalPollTimer = nil
         socks?.stop()
         socks = nil
         tunnel?.stop()
         tunnel = nil
+#endif
         // Tear down the P2P path (loopback shim, any port map) if this host is
         // reached peer-to-peer. A no-op for a direct host.
         if let pid = host.peerDeviceID {
@@ -227,9 +248,11 @@ final class RemoteHostController {
         if let cidr = snapshot["vmnetSubnet"] as? String, cidr != vmnetSubnet {
             vmnetSubnet = cidr
             FatClientLog.log("apply: remote vmnet subnet = \(cidr)")
+#if os(macOS)
             // Optional system-wide tunnel: route the remote subnet literally to a
             // utun (needs the privileged helper; degrades to SOCKS if unavailable).
             startTunnelIfNeeded()
+#endif
         }
 
         applyWorkspaces(workspaces, vms: vms)
@@ -446,6 +469,27 @@ final class RemoteHostController {
     /// reset, compromise wipe, …) as LOCAL alerts — the whole point of the
     /// prompt broker: the interface that initiated the action answers. The
     /// chosen button index rides back over the tunnel.
+#if !os(macOS)
+    private func applyPendingPrompts(_ prompts: [[String: Any]]) {
+        let parsed = prompts.compactMap { p -> DecisionPrompt? in
+            guard let id = p["id"] as? String else { return nil }
+            return DecisionPrompt(
+                id: id,
+                title: p["title"] as? String ?? "Bromure — \(host.name)",
+                message: p["message"] as? String ?? "",
+                buttons: (p["buttons"] as? [String]) ?? ["OK"])
+        }
+        if decisionPrompts != parsed { decisionPrompts = parsed }
+    }
+
+    /// Send the chosen button index back over the tunnel and drop the prompt
+    /// locally (the next poll confirms it's gone host-side).
+    func answerPrompt(_ id: String, choice: Int) {
+        decisionPrompts.removeAll { $0.id == id }
+        send("POST", "/prompts/\(ControlClient.encodeSegment(id))/answer",
+             body: ["choice": choice])
+    }
+#else
     private func applyPendingPrompts(_ prompts: [[String: Any]]) {
         // Prune answered/expired ids so the set can't grow unbounded.
         let current = Set(prompts.compactMap { $0["id"] as? String })
@@ -494,6 +538,7 @@ final class RemoteHostController {
                  body: ["choice": max(0, min(choice, buttons.count - 1))])
         }
     }
+#endif
 
     private func applyGrid(_ grid: [String: Any]) {
         // Skip briefly after a local grid edit so an in-flight (stale) poll
@@ -613,6 +658,7 @@ final class RemoteHostController {
         send("POST", "/grid-layout", body: body, then: false)
     }
 
+#if os(macOS)
     // MARK: System-wide tunnel (one-click, no sudo)
 
     /// Toggle the per-host tunnel opt-in. Enabling runs the whole guided flow
@@ -757,6 +803,8 @@ final class RemoteHostController {
         alert.runModal()
     }
 
+#endif
+
     /// Fusion toggle for the toolbar's ⚡ — rides the same control verb the
     /// CLI's `vm fusion` uses. The mirrored `fusionEngaged` confirms on poll.
     func setFusion(_ id: Profile.ID, engaged: Bool) {
@@ -767,6 +815,7 @@ final class RemoteHostController {
     /// Full profile document for the settings editor (secrets blanked
     /// server-side; blank fields keep their stored value on save).
     // MARK: Trace inspection (fat-client Trace Inspector, over the tunnel)
+#if os(macOS)
 
     /// Pull the remote's full MITM trace records, optionally scoped to one
     /// workspace. Decoded from `/trace/records`'s JSON straight into the same
@@ -802,6 +851,7 @@ final class RemoteHostController {
               let b64 = resp.json["body"] as? String, !b64.isEmpty else { return nil }
         return Data(base64Encoded: b64)
     }
+#endif
 
     func fetchProfileDoc(_ id: Profile.ID) async throws -> [String: Any] {
         let host = self.host
@@ -952,6 +1002,7 @@ final class RemoteHostController {
     }
 }
 
+#if os(macOS)
 // MARK: - Connection status overlay
 
 /// Shown over the stage while the mirror isn't connected, so an empty sidebar
@@ -3171,4 +3222,4 @@ final class RemoteHostWindow: NSWindow {
         try? data.write(to: URL(fileURLWithPath: path))
     }
 }
-
+#endif

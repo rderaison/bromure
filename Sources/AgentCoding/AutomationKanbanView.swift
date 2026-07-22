@@ -153,7 +153,7 @@ struct AutomationKanbanView: View {
             .animation(.easeInOut(duration: 0.2), value: cols.needsAttention.isEmpty)
             .padding(14)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
     }
 
     private var header: some View {
@@ -244,7 +244,7 @@ struct AutomationKanbanView: View {
                               done.count - doneLimit)) {
                     doneLimit += 50
                 }
-                .buttonStyle(.link)
+                .platformLinkButtonStyle()
                 .font(.system(size: 11))
                 .padding(.top, 2)
             }
@@ -252,7 +252,7 @@ struct AutomationKanbanView: View {
                 Button(NSLocalizedString("Load older runs…", comment: "kanban")) {
                     archived = AutomationRunArchive.loadArchivedRuns()
                 }
-                .buttonStyle(.link)
+                .platformLinkButtonStyle()
                 .font(.system(size: 11))
                 .help(NSLocalizedString(
                     "Runs beyond the recent window are archived on disk — nothing is ever deleted.",
@@ -329,7 +329,7 @@ struct CardChrome: ViewModifier {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .controlBackgroundColor)
+                .fill(Color.platformControlBackground
                     .opacity(hovering ? 1.0 : 0.7)))
             .overlay(RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(borderTint == .clear

@@ -1,10 +1,13 @@
+#if os(macOS)
 import AppKit
+#endif
 import Charts
 import SwiftUI
 
 /// Owns an arrow cursor rect over its bounds — used as a background so the
 /// dashboard never inherits a stray I-beam from neighbouring text/framebuffer
 /// views. Real text fields layered above keep their own I-beam.
+#if os(macOS)
 private struct ArrowCursor: NSViewRepresentable {
     final class View: NSView {
         override func resetCursorRects() { addCursorRect(bounds, cursor: .arrow) }
@@ -14,6 +17,9 @@ private struct ArrowCursor: NSViewRepresentable {
         nsView.window?.invalidateCursorRects(for: nsView)
     }
 }
+#else
+private struct ArrowCursor: View { var body: some View { Color.clear } }
+#endif
 
 // MARK: - Docker dashboard
 
@@ -43,6 +49,10 @@ struct DockerDashboardView: View {
 
     private enum Pane: Hashable { case containers, images, volumes }
     @State private var pane: Pane = .containers
+    /// Compact = iPhone portrait → stacked header + card rows. `.regular` on
+    /// macOS, so the desktop table layout is unchanged.
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
     @State private var query = ""
     @State private var showNew = false
     @State private var showNewVolume = false
@@ -83,7 +93,7 @@ struct DockerDashboardView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
         // Force the arrow cursor over the whole dashboard. Plain SwiftUI Text
         // doesn't claim a cursor, but the framebuffer/text views around it can
         // leave a stale I-beam; this background owns an arrow cursor rect, while
@@ -126,46 +136,72 @@ struct DockerDashboardView: View {
 
     // MARK: Header
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Self.dockerBlue.opacity(0.15))
-                .frame(width: 38, height: 38)
-                .overlay(Image(systemName: "shippingbox.fill")
-                    .font(.system(size: 18)).foregroundStyle(Self.dockerBlue))
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Docker").font(.system(size: 18, weight: .semibold))
-                Text("\(running) running · \(model.dockerContainers.count) total")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            Spacer()
-            EmulationControl(probed: model.binfmtProbed, arches: model.binfmtArches,
-                             onInstall: onInstallBinfmt, onUninstall: onUninstallBinfmt)
-            SearchField(text: $query, prompt: searchPrompt)
-                .frame(width: 200)
-            Picker("", selection: $pane) {
-                Text("Containers").tag(Pane.containers)
-                Text("Images").tag(Pane.images)
-                Text("Volumes").tag(Pane.volumes)
-            }
-            .pickerStyle(.segmented)
-            .fixedSize()
-            if pane == .volumes {
-                Button { showNewVolume = true } label: {
-                    Label("New Volume", systemImage: "plus")
+    @ViewBuilder private var header: some View {
+        if compact {
+            // Phone: identity + primary action on one row, the pane picker and
+            // search on their own full-width rows. (Emulation install is an
+            // advanced binfmt control — reachable from the desktop app.)
+            VStack(spacing: 10) {
+                HStack(spacing: 12) {
+                    headerBadge
+                    headerTitle
+                    Spacer()
+                    primaryButton
                 }
-                .buttonStyle(.borderedProminent)
-                .help("Create a named volume")
-            } else {
-                Button { prefillImage = ""; showNew = true } label: {
-                    Label("Run", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-                .help("Run a new container")
+                panemPicker.pickerStyle(.segmented).frame(maxWidth: .infinity)
+                SearchField(text: $query, prompt: searchPrompt).frame(maxWidth: .infinity)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        } else {
+            HStack(spacing: 12) {
+                headerBadge
+                headerTitle
+                Spacer()
+                EmulationControl(probed: model.binfmtProbed, arches: model.binfmtArches,
+                                 onInstall: onInstallBinfmt, onUninstall: onUninstallBinfmt)
+                SearchField(text: $query, prompt: searchPrompt)
+                    .frame(width: 200)
+                panemPicker.pickerStyle(.segmented).fixedSize()
+                primaryButton
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
+    }
+
+    private var headerBadge: some View {
+        RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .fill(Self.dockerBlue.opacity(0.15))
+            .frame(width: 38, height: 38)
+            .overlay(Image(systemName: "shippingbox.fill")
+                .font(.system(size: 18)).foregroundStyle(Self.dockerBlue))
+    }
+
+    private var headerTitle: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("Docker").font(.system(size: 18, weight: .semibold))
+            Text("\(running) running · \(model.dockerContainers.count) total")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+
+    private var panemPicker: some View {
+        Picker("", selection: $pane) {
+            Text("Containers").tag(Pane.containers)
+            Text("Images").tag(Pane.images)
+            Text("Volumes").tag(Pane.volumes)
+        }
+    }
+
+    @ViewBuilder private var primaryButton: some View {
+        if pane == .volumes {
+            Button { showNewVolume = true } label: { Label("New Volume", systemImage: "plus") }
+                .buttonStyle(.borderedProminent).help("Create a named volume")
+        } else {
+            Button { prefillImage = ""; showNew = true } label: { Label("Run", systemImage: "plus") }
+                .buttonStyle(.borderedProminent).help("Run a new container")
+        }
     }
 
     private var searchPrompt: LocalizedStringKey {
@@ -208,17 +244,26 @@ struct DockerDashboardView: View {
         }
     }
 
-    private var statStrip: some View {
-        HStack(spacing: 12) {
-            StatCard(title: "Running", value: "\(running)", caption: "of \(model.dockerContainers.count)",
-                     systemImage: "play.circle.fill", tint: .green)
-            CPUStatCard(value: cpuTotal, history: cpuHistory, tint: Self.dockerBlue)
-            StatCard(title: "Memory", value: formatBytes(memTotal), caption: "in use",
-                     systemImage: "memorychip.fill", tint: .purple)
-            StatCard(title: "Images", value: "\(model.dockerImages.count)", caption: "local",
-                     systemImage: "square.stack.3d.up.fill", tint: .orange)
+    @ViewBuilder private var statStrip: some View {
+        if compact {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12),
+                                GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                statCards
+            }
+        } else {
+            HStack(spacing: 12) { statCards }
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var statCards: some View {
+        StatCard(title: "Running", value: "\(running)", caption: "of \(model.dockerContainers.count)",
+                 systemImage: "play.circle.fill", tint: .green)
+        CPUStatCard(value: cpuTotal, history: cpuHistory, tint: Self.dockerBlue)
+        StatCard(title: "Memory", value: formatBytes(memTotal), caption: "in use",
+                 systemImage: "memorychip.fill", tint: .purple)
+        StatCard(title: "Images", value: "\(model.dockerImages.count)", caption: "local",
+                 systemImage: "square.stack.3d.up.fill", tint: .orange)
     }
 
     private var filteredContainers: [DockerContainer] {
@@ -232,7 +277,7 @@ struct DockerDashboardView: View {
 
     private var containerList: some View {
         VStack(spacing: 0) {
-            ContainerHeaderRow()
+            if !compact { ContainerHeaderRow() }   // no columns in card mode
             ForEach(filteredContainers) { c in
                 ContainerRow(
                     container: c,
@@ -287,6 +332,7 @@ struct DockerDashboardView: View {
                         .fill(Color.primary.opacity(0.035)))
                     .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.06)))
+                    .horizontalScrollIfCompact(compact)
                     .padding(18)
                 }
             }
@@ -339,6 +385,7 @@ struct DockerDashboardView: View {
                         .fill(Color.primary.opacity(0.035)))
                     .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.06)))
+                    .horizontalScrollIfCompact(compact)
                     .padding(18)
                 }
             }
@@ -408,8 +455,34 @@ private struct ContainerRow: View {
     let onDelete: () -> Void
     let onLogs: () -> Void
     @State private var hovering = false
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
 
     var body: some View {
+        if compact { compactRow } else { wideRow }
+    }
+
+    /// Phone card: name + image + status, tap to open the detail (which holds
+    /// the start/stop/logs/delete actions), so the row stays legible.
+    private var compactRow: some View {
+        HStack(spacing: 10) {
+            StatusDot(running: container.isRunning)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayName(container)).font(.system(size: 14, weight: .medium))
+                    .lineLimit(1).truncationMode(.middle)
+                Text(container.image).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            StatusPill(container: container)
+            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 11)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
+    }
+
+    private var wideRow: some View {
         HStack(spacing: 10) {
             StatusDot(running: container.isRunning).frame(width: Col.dot)
             VStack(alignment: .leading, spacing: 1) {
@@ -663,7 +736,7 @@ private struct StatusDot: View {
     let running: Bool
     var body: some View {
         Circle()
-            .fill(running ? Color.green : Color(nsColor: .tertiaryLabelColor))
+            .fill(running ? Color.green : Color.platformTertiaryLabel)
             .frame(width: 8, height: 8)
     }
 }
@@ -675,7 +748,7 @@ private struct StatusPill: View {
         case "running": return .green
         case "paused":  return .orange
         case "created": return .blue
-        default:        return Color(nsColor: .tertiaryLabelColor)
+        default:        return Color.platformTertiaryLabel
         }
     }
     private var label: String {
@@ -995,7 +1068,7 @@ private struct ContainerDetailView: View {
         case "running": return .green
         case "paused":  return .orange
         case "created": return .blue
-        default:        return Color(nsColor: .tertiaryLabelColor)
+        default:        return Color.platformTertiaryLabel
         }
     }
 
@@ -1224,7 +1297,7 @@ private struct NewContainerSheet: View {
                             }
                         }
                     }
-                    .toggleStyle(.checkbox)
+                    .platformCheckboxToggle()
 
                     DisclosureGroup(isExpanded: $showAdvanced) {
                         VStack(alignment: .leading, spacing: 16) {

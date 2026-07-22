@@ -1,6 +1,8 @@
+#if os(macOS)
 import AppKit
-import Foundation
 import SandboxEngine
+#endif
+import Foundation
 
 /// Snapshot of the user's Terminal.app default-profile settings —
 /// background/foreground colors, font family, font size. Used to seed
@@ -21,6 +23,7 @@ public struct TerminalAppDefaults: Sendable {
         foregroundHex: "#c9d1d9"
     )
 
+#if os(macOS)
     /// Read ~/Library/Preferences/com.apple.Terminal.plist via UserDefaults.
     /// Falls back silently if anything's missing — never throws.
     public static func load() -> TerminalAppDefaults {
@@ -66,6 +69,11 @@ public struct TerminalAppDefaults: Sendable {
         let b = Int((rgb.blueComponent * 255).rounded())
         return String(format: "#%02X%02X%02X", r, g, b)
     }
+#else
+    /// iOS: no Terminal.app to mirror — the shipped fallback IS the default
+    /// appearance (profiles still override via resolveStyle).
+    public static func load() -> TerminalAppDefaults { .fallback }
+#endif
 }
 
 import SwiftUI
@@ -86,14 +94,22 @@ extension Color {
 
     /// Encode this Color as "#RRGGBB" via sRGB.
     var hexString: String {
+#if os(macOS)
         let ns = NSColor(self).usingColorSpace(.sRGB) ?? NSColor.black
         let r = Int((ns.redComponent   * 255).rounded())
         let g = Int((ns.greenComponent * 255).rounded())
         let b = Int((ns.blueComponent  * 255).rounded())
         return String(format: "#%02X%02X%02X", r, g, b)
+#else
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
+        return String(format: "#%02X%02X%02X", Int((r * 255).rounded()),
+                      Int((g * 255).rounded()), Int((b * 255).rounded()))
+#endif
     }
 }
 
+#if os(macOS)
 extension TerminalAppDefaults {
 
     /// Render a ghostty config for a native terminal surface from the same
@@ -161,6 +177,7 @@ extension TerminalAppDefaults {
     }
 
 }
+#endif
 
 extension Profile {
     /// Source the Terminal.app defaults into a brand-new profile's custom

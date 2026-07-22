@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -67,6 +69,10 @@ final class FileBrowserModel {
     private(set) var entries: [FileEntry] = []
     /// Non-nil when the guest listing failed (VM off, agent updating…).
     private(set) var errorText: String?
+    /// Most recent locally-materialized file (a download target, or a host
+    /// file the user opened). macOS opens it outright; the iOS screen observes
+    /// this to present QuickLook / share / save-to-Files.
+    var lastDownloaded: URL?
     /// True while a download/upload is in flight — drives the progress pill.
     private(set) var transferText: String?
 
@@ -134,14 +140,22 @@ final class FileBrowserModel {
             generation += 1
             Task { await reload() }
         } else if let url = entry.hostURL {
-            // Real file on disk — open it on the Mac with its default app.
+            // Real file on disk — open with its default app (macOS); on iOS
+            // the hosting screen surfaces it via QuickLook / share.
+#if os(macOS)
             NSWorkspace.shared.open(url)
+#else
+            lastDownloaded = url
+#endif
         } else {
             // Guest file: pull it down, then open the local copy.
             Task { @MainActor in
                 do {
                     let local = try await download(entry)
+                    lastDownloaded = local
+#if os(macOS)
                     NSWorkspace.shared.open(local)
+#endif
                 } catch {
                     errorText = error.localizedDescription
                 }
@@ -157,6 +171,7 @@ final class FileBrowserModel {
     }
 
     func reveal(_ entry: FileEntry?) {
+#if os(macOS)
         // Host-only affordance. nil = the current directory.
         if let entry {
             guard let url = entry.hostURL else { return }
@@ -165,6 +180,7 @@ final class FileBrowserModel {
             NSWorkspace.shared.activateFileViewerSelecting(
                 [URL(fileURLWithPath: currentPath)])
         }
+#endif
     }
 
     /// Host rows: Move to Trash. Guest rows: delete inside the VM.
@@ -469,23 +485,16 @@ struct FileBrowserView: View {
     @State var model: FileBrowserModel
     @State private var selection: String?
     @State private var dropTargeted = false
+    /// Compact = iPhone portrait → the locations sidebar becomes a chip row and
+    /// the fixed min-width is dropped. `.regular` on macOS (layout unchanged).
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
 
     private let reloadTimer = Timer.publish(every: 1.5, on: .main, in: .common)
         .autoconnect()
 
     var body: some View {
-        HStack(spacing: 0) {
-            if model.locations.count > 1 {
-                sidebar
-                Divider()
-            }
-            VStack(spacing: 0) {
-                pathBar
-                Divider()
-                listing
-            }
-        }
-        .frame(minWidth: 560, minHeight: 360)
+        content
         // Drop target covers the whole panel so the user can drop a file
         // anywhere — it lands in whatever directory is on screen.
         .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted) { providers in
@@ -501,6 +510,63 @@ struct FileBrowserView: View {
             }
         }
         .onReceive(reloadTimer) { _ in Task { await model.reload() } }
+    }
+
+    @ViewBuilder private var content: some View {
+        if compact {
+            // Phone: locations as a horizontal chip row above the listing, no
+            // fixed min-width (which would push the content off-screen).
+            VStack(spacing: 0) {
+                if model.locations.count > 1 {
+                    compactLocations
+                    Divider()
+                }
+                pathBar
+                Divider()
+                listing
+            }
+        } else {
+            HStack(spacing: 0) {
+                if model.locations.count > 1 {
+                    sidebar
+                    Divider()
+                }
+                VStack(spacing: 0) {
+                    pathBar
+                    Divider()
+                    listing
+                }
+            }
+            .frame(minWidth: 560, minHeight: 360)
+        }
+    }
+
+    // MARK: Locations (phone: horizontal chips)
+
+    private var compactLocations: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(model.locations) { loc in
+                    let selected = loc.id == model.location.id
+                    Button {
+                        selection = nil
+                        model.switchTo(loc)
+                    } label: {
+                        Label(loc.name, systemImage: loc.symbol)
+                            .font(.callout)
+                            .lineLimit(1)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(selected
+                                ? Color.accentColor.opacity(0.2)
+                                : Color.secondary.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
     }
 
     // MARK: Sidebar
@@ -539,7 +605,7 @@ struct FileBrowserView: View {
             Spacer()
         }
         .frame(width: 180)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.5))
+        .background(Color.platformWindowBackground.opacity(0.5))
     }
 
     // MARK: Path / toolbar row
@@ -688,9 +754,16 @@ private struct FileRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
+#if os(macOS)
             Image(nsImage: icon)
                 .resizable()
                 .frame(width: 24, height: 24)
+#else
+            Image(systemName: iosSymbolName)
+                .font(.system(size: 15))
+                .foregroundStyle(entry.isDirectory ? Color.accentColor : Color.secondary)
+                .frame(width: 24, height: 24)
+#endif
             Text(entry.name)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -712,6 +785,7 @@ private struct FileRow: View {
         .background(selected ? Color.accentColor.opacity(0.18) : .clear)
     }
 
+#if os(macOS)
     private var icon: NSImage {
         let img: NSImage
         if let url = entry.hostURL {
@@ -726,6 +800,23 @@ private struct FileRow: View {
         img.size = NSSize(width: 24, height: 24)
         return img
     }
+#else
+    private var iosSymbolName: String {
+        if entry.isDirectory { return "folder.fill" }
+        let ext = (entry.name as NSString).pathExtension.lowercased()
+        switch ext {
+        case "png", "jpg", "jpeg", "gif", "heic", "webp", "svg": return "photo"
+        case "pdf": return "doc.richtext"
+        case "zip", "tar", "gz", "xz", "bz2", "7z": return "doc.zipper"
+        case "mp4", "mov", "mkv", "webm": return "film"
+        case "mp3", "wav", "flac", "m4a": return "waveform"
+        case "swift", "py", "js", "ts", "c", "h", "cpp", "rs", "go", "rb", "sh",
+             "json", "yaml", "yml", "toml", "html", "css", "md":
+            return "doc.plaintext"
+        default: return "doc"
+        }
+    }
+#endif
 
     private var sizeText: String {
         ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file)

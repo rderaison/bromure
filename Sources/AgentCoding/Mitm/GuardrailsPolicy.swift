@@ -601,6 +601,7 @@ public struct GuardrailsConfig: Sendable {
     /// We can't reconstruct the operation description here from
     /// (host, method, path) alone for ClickHouse — the SQL has
     /// already been extracted by the caller for `dbQuery`.
+#if os(macOS)
     public func denyAsync(host: String, method: String, path: String,
                           amzTarget: String?, formAction: String?,
                           dbQuery: String? = nil,
@@ -635,6 +636,7 @@ public struct GuardrailsConfig: Sendable {
                                             operation: operation)
         return allowed ? nil : denial
     }
+#endif
 
     /// Single host-side decision for every guardrailed protocol. Returns a
     /// `Denial` (the caller sends a 403) or nil to forward. `amzTarget` /

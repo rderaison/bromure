@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import SwiftUI
 
 // A finished task's full session transcript, rendered natively long after
@@ -7,6 +9,7 @@ import SwiftUI
 // archived host-side — the window fetches it from the guest on demand,
 // which just requires the workspace to be running.
 
+#if os(macOS)
 @MainActor
 final class TaskTranscriptWindowManager {
     struct Context {
@@ -66,8 +69,9 @@ final class TaskTranscriptWindowManager {
         NSApp.activate(ignoringOtherApps: true)
     }
 }
+#endif
 
-private struct TaskTranscriptView: View {
+struct TaskTranscriptView: View {
     let title: String
     let workspaceName: String
     let accentHex: String
@@ -127,7 +131,7 @@ private struct TaskTranscriptView: View {
                     .frame(maxWidth: 720, alignment: .leading)
                     .frame(maxWidth: .infinity)
                 }
-                .background(Color(nsColor: .windowBackgroundColor))
+                .background(Color.platformWindowBackground)
             }
         }
         .task {

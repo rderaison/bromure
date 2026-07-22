@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import SwiftUI
 
 // MARK: - Connect to a remote Bromure (auth flow)
@@ -187,7 +189,14 @@ final class RemoteConnectModel {
     /// control bridge so the next connect is passwordless.
     func submitPassword() {
         let pw = password
-        guard !pw.isEmpty else { return }
+        let u = user.trimmingCharacters(in: .whitespaces)
+        guard !pw.isEmpty, !u.isEmpty else { return }
+        // Apply the (possibly just-entered) remote username — for a peer host it
+        // defaulted to the LOCAL device's user, which is meaningless on the
+        // remote Mac; the login step lets the user correct it. Remember it so
+        // the next connect keys/auths as the right account without re-asking.
+        host.user = u
+        Self.rememberPeerUser(host)
         phase = .working("Signing in…")
         let host = self.host
         let keyLine = scannedHostKeyLine
@@ -215,8 +224,12 @@ final class RemoteConnectModel {
         host.lastConnected = Date()
         // Peer hosts live in the control-plane directory, not the by-address
         // recents list — their identity is the device id + known_hosts alias.
+        // Remember the account username so the next (passwordless) connect
+        // key-auths as the right user without prompting.
         if !host.isPeer {
             RemoteHostStore.shared.upsert(host)
+        } else {
+            Self.rememberPeerUser(host)
         }
         onConnected(host)
     }
@@ -325,12 +338,31 @@ final class RemoteConnectModel {
     }
 
     /// The RemoteHost a directory server dial produces. Not saved to the
-    /// by-address list — it lives in the live directory.
+    /// by-address list — it lives in the live directory. The remote account
+    /// username is NOT in `DeviceInfo` (that's the local Mac's login on the
+    /// remote), so we reuse the one entered on a prior connect; absent that,
+    /// the local user name is a best-effort default the login step can fix.
     static func peerHost(for server: DeviceInfo) -> RemoteHost {
-        var host = RemoteHost(name: server.displayName, address: "", user: NSUserName())
+        var host = RemoteHost(name: server.displayName, address: "",
+                              user: rememberedPeerUser(server.id) ?? NSUserName())
         host.peerDeviceID = server.id
         host.lastConnected = Date()
         return host
+    }
+
+    /// Per-peer remote-username memory (peer hosts aren't saved to hosts.json,
+    /// so the username would otherwise be re-asked on every connect and
+    /// key-auth would keep failing under the wrong account).
+    private static func peerUserKey(_ deviceID: String) -> String {
+        "fatclient.peer.user.\(deviceID)"
+    }
+    static func rememberedPeerUser(_ deviceID: String) -> String? {
+        let v = UserDefaults.standard.string(forKey: peerUserKey(deviceID))
+        return (v?.isEmpty == false) ? v : nil
+    }
+    static func rememberPeerUser(_ host: RemoteHost) {
+        guard let pid = host.peerDeviceID, !host.user.isEmpty else { return }
+        UserDefaults.standard.set(host.user, forKey: peerUserKey(pid))
     }
 
     /// Mirror a server reached over the control plane (peer-to-peer). The P2P
@@ -341,6 +373,9 @@ final class RemoteConnectModel {
     /// never as an empty stage with an error overlay.
     func connect(toPeer server: DeviceInfo) {
         host = Self.peerHost(for: server)
+        // Surface the peer's remembered/best-effort username in the login
+        // field so the user sees (and can correct) which account will be used.
+        user = host.user
         pinnedEndpoint = nil
         phase = .working("Connecting to \(server.displayName) via bromure.io…")
         let name = server.displayName
@@ -398,6 +433,7 @@ final class RemoteConnectModel {
 
 // MARK: - Shake effect
 
+#if os(macOS)
 private struct Shake: GeometryEffect {
     var travel: CGFloat = 8
     var shakes: CGFloat = 3
@@ -758,7 +794,7 @@ struct RemoteConnectView: View {
             Text(info.fingerprint)
                 .font(.system(.callout, design: .monospaced)).textSelection(.enabled)
                 .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(nsColor: .textBackgroundColor)).clipShape(RoundedRectangle(cornerRadius: 6))
+                .background(Color.platformTextBackground).clipShape(RoundedRectangle(cornerRadius: 6))
             HStack {
                 Spacer()
                 Button("Cancel", action: onClose).keyboardShortcut(.cancelAction)
@@ -814,10 +850,13 @@ struct RemoteConnectView: View {
 
     private func showClientKey() {
         let key = model.clientPublicKey
-        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(key, forType: .string)
+        platformCopyToPasteboard(key)
+#if os(macOS)
         let a = NSAlert()
         a.messageText = "This Mac's public key (copied)"
         a.informativeText = "To authorize this Mac without a password, run on the remote:\n\n  bromure-ac remote key add '\(key)'"
         a.runModal()
+#endif
     }
 }
+#endif

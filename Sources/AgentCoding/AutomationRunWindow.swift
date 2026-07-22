@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import SwiftUI
 
 // MARK: - Run detail windows
@@ -17,6 +19,7 @@ import SwiftUI
 /// The header brands the window as a run — automation name, workspace,
 /// trigger detail, live status — so it never reads as "yet another
 /// terminal".
+#if os(macOS)
 @MainActor
 final class AutomationRunWindowManager {
     /// Everything the manager needs from its owner, as closures so this file
@@ -221,6 +224,8 @@ final class AutomationRunWindowManager {
     }
 }
 
+#endif
+
 // MARK: - Window model + header
 
 /// Shared state between the manager's poll loop and the SwiftUI header.
@@ -245,7 +250,7 @@ final class RunWindowModel {
 
 /// The strip that makes this window read as "an automation run", not a
 /// terminal: accent-colored identity, run detail, live status.
-private struct RunWindowHeader: View {
+struct RunWindowHeader: View {
     @Bindable var model: RunWindowModel
 
     private var statusText: String {
