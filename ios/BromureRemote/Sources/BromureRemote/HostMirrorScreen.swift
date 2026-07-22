@@ -8,13 +8,36 @@ import SwiftUI
 // detail (terminals, dashboard, docker, files). Every list here is driven by
 // the reused mirror stores, refreshed by the 0.75 s /state poll.
 
+/// A workspace window to open straight away — set when a tapped notification
+/// deep-links to the exact agent that's waiting.
+struct WorkspaceDeepLink: Hashable {
+    let profileID: UUID
+    let window: Int?
+}
+
 struct HostMirrorScreen: View {
     let host: RemoteHost
+    /// When set (a notification tap), push straight to this workspace window
+    /// once the mirror has connected and knows about it.
+    let openWorkspace: WorkspaceDeepLink?
     @State private var controller: RemoteHostController
+    @State private var deepWorkspace: WorkspaceDeepLink?
+    @State private var didDeepLink = false
 
-    init(host: RemoteHost) {
+    init(host: RemoteHost, openWorkspace: WorkspaceDeepLink? = nil) {
         self.host = host
+        self.openWorkspace = openWorkspace
         _controller = State(initialValue: RemoteHostController(host: host))
+    }
+
+    /// Push the deep-linked workspace the moment the mirror knows it exists
+    /// (the profile-id guard means a stale link for another server no-ops).
+    private func tryDeepLink() {
+        guard !didDeepLink, let target = openWorkspace,
+              controller.listModel.profileRows.contains(where: { $0.id == target.profileID })
+        else { return }
+        didDeepLink = true
+        deepWorkspace = target
     }
 
     var body: some View {
@@ -101,9 +124,17 @@ struct HostMirrorScreen: View {
             // when the mirror is finally popped.
             controller.start()
             AppBadge.set(waitingAgents.count)
+            tryDeepLink()
         }
         // Mirror the "agents waiting for input" count onto the app-icon badge.
         .onChange(of: waitingAgents.count) { AppBadge.set($0) }
+        // Once the mirror connects and the workspaces load, a tapped
+        // notification pushes straight to the waiting agent's window.
+        .onChange(of: controller.revision) { tryDeepLink() }
+        .navigationDestination(item: $deepWorkspace) { link in
+            WorkspaceScreen(controller: controller, profileID: link.profileID,
+                            initialWindow: link.window)
+        }
         // Snap the mirror back to life when the app returns to the foreground.
         .onReceive(NotificationCenter.default.publisher(for: .bromureDidForeground)) { _ in
             controller.foregroundKick()

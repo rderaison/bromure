@@ -31,6 +31,8 @@ struct RootView: View {
     @State private var activeHost: RemoteHost?
     @State private var showAddServer = false
     @State private var pendingPeer: DeviceInfo?
+    /// A notification tap's target window, opened once its server connects.
+    @State private var pendingWorkspace: WorkspaceDeepLink?
     /// Drives the "−" affordance: toggling it reveals delete controls on the
     /// by-address servers (bromure.io servers aren't removable from here).
     @State private var editMode: EditMode = .inactive
@@ -57,7 +59,7 @@ struct RootView: View {
                 NavigationStack {
                     bootList
                         .navigationDestination(item: $activeHost) { host in
-                            HostMirrorScreen(host: host).id(host.id)
+                            HostMirrorScreen(host: host, openWorkspace: pendingWorkspace).id(host.id)
                         }
                 }
             } else {
@@ -65,7 +67,7 @@ struct RootView: View {
                     bootList
                 } detail: {
                     if let host = activeHost {
-                        HostMirrorScreen(host: host).id(host.id)
+                        HostMirrorScreen(host: host, openWorkspace: pendingWorkspace).id(host.id)
                     } else {
                         ContentUnavailableView("Select a server",
                             systemImage: "server.rack",
@@ -137,6 +139,10 @@ struct RootView: View {
             directory.refreshAccount() // not loaded yet — retried when servers arrive
             return
         }
+        // Carry the exact waiting window so the mirror opens straight into it.
+        pendingWorkspace = target.profileId
+            .flatMap { UUID(uuidString: $0) }
+            .map { WorkspaceDeepLink(profileID: $0, window: target.windowIndex) }
         if server.online { pendingPeer = server }
         push.tapTarget = nil
     }
@@ -194,13 +200,13 @@ struct RootView: View {
         Section {
             if directory.signedIn {
                 ForEach(directory.p2pServers) { server in
-                    Button { pendingPeer = server } label: { peerRow(server) }
+                    Button { pendingWorkspace = nil; pendingPeer = server } label: { peerRow(server) }
                         .buttonStyle(.plain)
                         .disabled(!server.online || editMode == .active)
                 }
             }
             ForEach(savedHosts) { host in
-                Button { activeHost = host } label: { savedRow(host) }
+                Button { pendingWorkspace = nil; activeHost = host } label: { savedRow(host) }
                     .buttonStyle(.plain)
             }
             .onDelete { idx in for i in idx { store.remove(savedHosts[i].id) } }
