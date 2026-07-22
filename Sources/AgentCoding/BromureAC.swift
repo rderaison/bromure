@@ -7550,11 +7550,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.profile(for: id)?.color.hexInUI ?? "#888888"
             }))
 
-    /// A finished task's full session transcript: guest first (live vsock
-    /// read), ext4 home-image second (workspace off). The home is a
-    /// persistent ext4 image, so a Done card's transcript stays readable
-    /// forever without booting anything.
+    /// A finished task's full session transcript: the host archive first
+    /// (written when the card reached Done — survives even workspace
+    /// deletion), then the guest (live vsock read), then the ext4 home
+    /// image (workspace off).
     func fetchTaskTranscriptRaw(_ task: CodingTask) async -> String? {
+        if let archived = TaskTranscriptArchive.load(task.id) { return archived }
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 })
         else { return nil }
         if let cmd = CodingTaskEngine.taskTranscriptCommand(branch: branch),

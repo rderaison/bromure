@@ -224,6 +224,9 @@ final class CodingTaskStore {
     func remove(_ id: UUID) {
         tasks.removeAll { $0.id == id }
         save()
+        // The card is gone; its archived transcript goes with it. (The
+        // fat-client mirror never calls remove — deletes ride the tunnel.)
+        TaskTranscriptArchive.remove(id)
     }
 
     /// In-place update + save; no-op when the task is gone.
@@ -1531,6 +1534,37 @@ final class CodingTaskEngine {
         }
     }
 
+    // MARK: Completion housekeeping (transcript archive + worktree cleanup)
+
+    /// A card reached Done: pull the session transcript into the host
+    /// archive — durable across branch deletion, workspace deletion, even
+    /// the VM — then optionally drop the worktree + branch in the guest.
+    /// Strictly in that order; cleanup must never outrun the archive.
+    private func archiveTranscriptThenCleanup(_ taskID: UUID, removeWorktree: Bool) {
+        guard let task = store.task(taskID) else { return }
+        let branch = task.branch
+        let root = task.rootRepo
+        let profileID = task.profileID
+        Task { [weak self] in
+            guard let self, let delegate = self.delegate else { return }
+            // A beat for the Stop hook's final transcript lines to land
+            // (same courtesy as the automation pull).
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if !TaskTranscriptArchive.has(taskID),
+               let text = await delegate.fetchTaskTranscriptRaw(task), !text.isEmpty {
+                TaskTranscriptArchive.save(text, taskID: taskID)
+                BACDebug.log("tasks", "“\(task.title)”: transcript archived "
+                    + "(\(text.utf8.count) bytes)")
+            }
+            if removeWorktree, let branch, let root, !root.isEmpty {
+                _ = delegate.automationWorktreeCommand(
+                    profileNameOrID: profileID.uuidString,
+                    action: "remove", args: [root, branch])
+                BACDebug.log("tasks", "“\(task.title)”: worktree removed (\(branch))")
+            }
+        }
+    }
+
     // MARK: Merge (Testing → Done)
 
     /// Merge the task's branch into its parent — or `target`, when the
@@ -1634,14 +1668,10 @@ final class CodingTaskEngine {
                     $0.lastError = nil
                 }
                 pumpQueue()
-                // The merge landed — the worktree's job is done. Remove it
-                // (checkout + branch) unless the user kept the option off;
-                // failures surface via worktree-error like any remove.
-                if cleanup {
-                    _ = delegate.automationWorktreeCommand(
-                        profileNameOrID: task.profileID.uuidString,
-                        action: "remove", args: [root, branch])
-                }
+                // The merge landed — archive the transcript, then remove the
+                // worktree (checkout + branch) unless the user kept the
+                // option off; failures surface via worktree-error as usual.
+                archiveTranscriptThenCleanup(taskID, removeWorktree: cleanup)
                 return
             }
             try? await Task.sleep(nanoseconds: Self.mergeVerifyInterval)
@@ -1682,9 +1712,16 @@ final class CodingTaskEngine {
             $0.lastError = nil
         }
         pumpQueue()
+        // Transcript only — the PR agent tab is pushing FROM this worktree
+        // right now, so the checkout must survive (the branch then lives on
+        // the forge; local cleanup for the PR flow stays manual).
+        archiveTranscriptThenCleanup(taskID, removeWorktree: false)
     }
 
-    /// Close a task without merging (abandoned, or merged by hand).
+    /// Close a task without merging (abandoned, or merged by hand). The
+    /// worktree + branch go away like a merged task's would — "abandoned"
+    /// means exactly that, and the archived transcript keeps the durable
+    /// record of what the agent did.
     func closeWithoutMerge(_ taskID: UUID) {
         store.mutate(taskID) {
             $0.stage = .done
@@ -1693,6 +1730,7 @@ final class CodingTaskEngine {
             $0.mergingAt = nil
         }
         pumpQueue()
+        archiveTranscriptThenCleanup(taskID, removeWorktree: true)
     }
 
     /// Manual Testing → In Progress with no feedback (the user just wants
