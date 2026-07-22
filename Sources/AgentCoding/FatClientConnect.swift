@@ -114,6 +114,12 @@ final class RemoteConnectModel {
         syncHostFromFields()
         guard !host.address.isEmpty else { return }
         adoptSavedIdentity()
+        // Already trusted this host's key? Skip the up-front scan and go
+        // straight to auth (same reasoning as the peer path).
+        if host.pinnedHostKey != nil {
+            tryKey()
+            return
+        }
         phase = .working("Contacting \(host.connectLabel)…")
         let host = self.host
         work.async { [weak self] in
@@ -172,13 +178,36 @@ final class RemoteConnectModel {
                 guard let self else { return }
                 switch r {
                 case .ok: self.succeed()
-                case .authFailed: self.phase = .needPassword(error: nil)   // key not authorized yet
+                case .authFailed:
+                    // Key not authorized yet → password enrollment, which must
+                    // pin the handshake to the host key. If the fast path
+                    // skipped the up-front scan, fetch the key line first.
+                    if self.scannedHostKeyLine == nil {
+                        self.scanThenNeedPassword(host: host)
+                    } else {
+                        self.phase = .needPassword(error: nil)
+                    }
                 case .hostKeyChanged:
                     if let info = RemoteTransport.scanHostKey(address: host.address, port: host.port) {
                         self.phase = .confirmHostKey(info, changed: true, previous: self.host.pinnedHostKey)
                     } else { self.phase = .unreachable("Host key verification failed.") }
                 case .unreachable(let m): self.phase = .unreachable(m)
                 }
+            }
+        }
+    }
+
+    /// Populate `scannedHostKeyLine` (needed to pin the password-enrollment
+    /// handshake) when the fast path skipped the up-front scan and auth then
+    /// fell through to a password.
+    private func scanThenNeedPassword(host: RemoteHost) {
+        phase = .working("Verifying \(host.name)…")
+        work.async { [weak self] in
+            let line = RemoteTransport.scanHostKey(address: host.address, port: host.port)?.line
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.scannedHostKeyLine = line
+                self.phase = .needPassword(error: nil)
             }
         }
     }
@@ -401,6 +430,15 @@ final class RemoteConnectModel {
     /// connects find the pin under the peer's stable HostKeyAlias.
     private func beginPeerAuth() {
         let host = self.host
+        // Already trusted this peer's key? Skip the extra "Verifying" host-key
+        // scan and go straight to auth — the real connection verifies the pin
+        // during its own handshake, and a changed key comes back as
+        // .hostKeyChanged in tryKey. This is the common case (a reconnect to a
+        // known server) and cuts a whole SSH handshake off it.
+        if let alias = host.hostKeyAlias, RemoteTransport.hasAliasPin(alias) {
+            tryKey()
+            return
+        }
         phase = .working("Verifying \(host.name)…")
         work.async { [weak self] in
             let info = RemoteTransport.scanHostKey(address: host.address, port: host.port)
