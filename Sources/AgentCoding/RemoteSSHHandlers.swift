@@ -70,9 +70,12 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
 
     func requestReceived(request: NIOSSHUserAuthenticationRequest,
                          responsePromise: EventLoopPromise<NIOSSHUserAuthenticationOutcome>) {
-        guard request.username == username else {
-            responsePromise.succeed(.failure); return
-        }
+        // The client-supplied username is deliberately NOT checked. This is a
+        // single-user server: pubkey identity is the enrolled key itself,
+        // password auth verifies the OWNER's macOS password (below), and every
+        // session runs as the owner regardless. Requiring the exact short name
+        // added no security and broke P2P connects, where the dialer has no
+        // way to know the remote Mac's user name.
         switch request.request {
         case .publicKey(let pk):
             // NIO-SSH has already verified the signature; we only decide if the

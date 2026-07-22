@@ -188,6 +188,11 @@ final class RemoteConnectModel {
     func submitPassword() {
         let pw = password
         guard !pw.isEmpty else { return }
+        // The password step's user field is live — apply an edit ("renaud" →
+        // "admin") to the host before authenticating. Only the user: a peer
+        // host's address is the resolved loopback endpoint, never the form's.
+        let editedUser = user.trimmingCharacters(in: .whitespaces)
+        if !editedUser.isEmpty { host.user = editedUser }
         phase = .working("Signing in…")
         let host = self.host
         let keyLine = scannedHostKeyLine
@@ -215,7 +220,11 @@ final class RemoteConnectModel {
         host.lastConnected = Date()
         // Peer hosts live in the control-plane directory, not the by-address
         // recents list — their identity is the device id + known_hosts alias.
-        if !host.isPeer {
+        // Remember the login user that worked so the next connect doesn't
+        // re-guess it from the LOCAL account name.
+        if let pid = host.peerDeviceID {
+            Self.rememberUser(host.user, forPeer: pid)
+        } else {
             RemoteHostStore.shared.upsert(host)
         }
         onConnected(host)
@@ -328,10 +337,22 @@ final class RemoteConnectModel {
         P2PBroker.shared.endpoint(forPeer: id, timeout: 20).map { ($0.host, $0.port) }
     }
 
+    /// Last successful login user per peer device. Peer hosts aren't in the
+    /// by-address store, so this is where "log in as admin next time too"
+    /// lives. The local NSUserName() default is only a first guess — the two
+    /// Macs' short names routinely differ.
+    private static func rememberedUser(forPeer id: String) -> String? {
+        UserDefaults.standard.string(forKey: "p2p.remoteUser.\(id)")
+    }
+    static func rememberUser(_ user: String, forPeer id: String) {
+        UserDefaults.standard.set(user, forKey: "p2p.remoteUser.\(id)")
+    }
+
     /// The RemoteHost a directory server dial produces. Not saved to the
     /// by-address list — it lives in the live directory.
     static func peerHost(for server: DeviceInfo) -> RemoteHost {
-        var host = RemoteHost(name: server.displayName, address: "", user: NSUserName())
+        var host = RemoteHost(name: server.displayName, address: "",
+                              user: rememberedUser(forPeer: server.id) ?? NSUserName())
         host.peerDeviceID = server.id
         host.lastConnected = Date()
         return host
@@ -345,6 +366,7 @@ final class RemoteConnectModel {
     /// never as an empty stage with an error overlay.
     func connect(toPeer server: DeviceInfo) {
         host = Self.peerHost(for: server)
+        user = host.user   // the password step's user field edits this
         pinnedEndpoint = nil
         phase = .working("Connecting to \(server.displayName) via bromure.io…")
         let name = server.displayName
@@ -784,8 +806,12 @@ struct RemoteConnectView: View {
     // Password fallback with inline retry + shake
     private func passwordStep(_ error: String?) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("This Mac isn't authorized on \(model.connectDisplayName) yet. Enter the remote Mac's login password for “\(model.user)” to pair — Bromure will remember this Mac so you won't be asked again.")
+            Text("This Mac isn't authorized on \(model.connectDisplayName) yet. Enter the remote Mac's login user and password to pair — Bromure will remember this Mac so you won't be asked again.")
                 .foregroundStyle(.secondary).font(.callout).fixedSize(horizontal: false, vertical: true)
+            // Editable here, not just in the add form: the guessed default is
+            // THIS Mac's user name, and the remote's ("admin", say) routinely
+            // differs — with no field, a peer connect had no way to fix it.
+            field("Remote user", text: $model.user, placeholder: NSUserName())
             SecureField("Password", text: $model.password)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit { model.submitPassword() }
