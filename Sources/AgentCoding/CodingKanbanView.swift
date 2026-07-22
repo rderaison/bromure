@@ -1294,9 +1294,8 @@ private struct TaskEditorSheet: View {
             .frame(maxWidth: compact ? .infinity : 160, alignment: .leading)
             captioned(NSLocalizedString("Start the agent in — a folder inside the workspace",
                                         comment: "task editor")) {
-                TextField("", text: $task.repoPath, prompt: Text(verbatim: "~/my-repo"))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                repoPathField
+                    .font(.system(size: 13, design: .monospaced))
                     .help(NSLocalizedString(
                         "A path inside the workspace VM. \"~\" is the home folder (/home/ubuntu). When it's a git repository, the task runs in its own worktree and branch there.",
                         comment: "task editor"))
@@ -1312,6 +1311,26 @@ private struct TaskEditorSheet: View {
                         comment: "task editor"))
             }
             .frame(maxWidth: compact ? .infinity : nil, alignment: .leading)
+        }
+    }
+
+    /// The path field. On a phone the default `.roundedBorder` fill is a faint
+    /// grey that blends into the sheet (grey-on-grey); use an explicit
+    /// control-background box with a visible border and primary text instead.
+    @ViewBuilder private var repoPathField: some View {
+        let field = TextField("", text: $task.repoPath, prompt: Text(verbatim: "~/my-repo"))
+            .foregroundStyle(.primary)
+        if compact {
+            field
+                .textFieldStyle(.plain)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+                .background(RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.platformControlBackground))
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.primary.opacity(0.18)))
+        } else {
+            field.textFieldStyle(.roundedBorder)
         }
     }
 

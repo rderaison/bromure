@@ -872,11 +872,15 @@ struct AutomationEditorView: View {
                     .frame(width: 110)
             }
         }
-        Picker(NSLocalizedString("If the Mac is asleep at fire time", comment: ""),
-               selection: $draft.missedRunPolicy) {
-            ForEach(ScheduledAutomation.MissedRunPolicy.allCases, id: \.self) {
-                Text($0.displayName).tag($0)
+        // An explicit caption so the question shows on iOS too (a bare Picker
+        // there renders only the selected value, dropping its title label).
+        captioned(NSLocalizedString("If the Mac is asleep at fire time", comment: "")) {
+            Picker("", selection: $draft.missedRunPolicy) {
+                ForEach(ScheduledAutomation.MissedRunPolicy.allCases, id: \.self) {
+                    Text($0.displayName).tag($0)
+                }
             }
+            .labelsHidden()
         }
         if let next = nextFirePreview {
             Label(String(format: NSLocalizedString("Next run: %@", comment: ""),
@@ -1145,6 +1149,7 @@ struct AutomationEditorView: View {
                     comment: ""))
                 Toggle(NSLocalizedString("Start the workspace if needed", comment: ""),
                        isOn: $draft.startWorkspaceIfNeeded)
+                    .font(.system(size: 13))
                 hint(draft.startWorkspaceIfNeeded
                      ? NSLocalizedString(
                         "A fire while the workspace is off or suspended boots it first.",
@@ -1155,6 +1160,7 @@ struct AutomationEditorView: View {
                 Toggle(NSLocalizedString("Run in a disposable clone of the workspace",
                                          comment: ""),
                        isOn: $draft.cloneWorkspaceFirst)
+                    .font(.system(size: 13))
                     .disabled(draft.tool != .claude)
                 hint(draft.tool != .claude
                      ? NSLocalizedString(
