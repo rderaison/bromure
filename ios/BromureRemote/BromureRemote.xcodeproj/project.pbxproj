@@ -7,6 +7,7 @@
 
 /* Begin PBXBuildFile section */
 		8C4A68614FFC6ECE6DA80F54 /* ACAppDelegateShim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 505735CF5C8E91FEB4DA4DE2 /* ACAppDelegateShim.swift */; };
+		D98C47F5140432458E7AA4A2 /* AppBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7306D54CC8F32528924409A6 /* AppBadge.swift */; };
 		DF5906B4200E5514B147E469 /* AttachSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D64C491A1C90E3CD807747F /* AttachSession.swift */; };
 		C568C6135B3C91ED6EE4F4C3 /* BromureRemoteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */; };
 		028E121AD6D6119EC7D9FEE0 /* ConnectFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */; };
@@ -81,6 +82,7 @@
 
 /* Begin PBXFileReference section */
 		505735CF5C8E91FEB4DA4DE2 /* ACAppDelegateShim.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ACAppDelegateShim.swift"; path = "Sources/BromureRemote/ACAppDelegateShim.swift"; sourceTree = "<group>"; };
+		7306D54CC8F32528924409A6 /* AppBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AppBadge.swift"; path = "Sources/BromureRemote/AppBadge.swift"; sourceTree = "<group>"; };
 		5D64C491A1C90E3CD807747F /* AttachSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AttachSession.swift"; path = "Sources/BromureRemote/AttachSession.swift"; sourceTree = "<group>"; };
 		EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BromureRemoteApp.swift"; path = "Sources/BromureRemote/BromureRemoteApp.swift"; sourceTree = "<group>"; };
 		B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectFlow.swift"; path = "Sources/BromureRemote/ConnectFlow.swift"; sourceTree = "<group>"; };
@@ -187,6 +189,7 @@
 			isa = PBXGroup;
 			children = (
 				505735CF5C8E91FEB4DA4DE2 /* ACAppDelegateShim.swift */,
+				7306D54CC8F32528924409A6 /* AppBadge.swift */,
 				5D64C491A1C90E3CD807747F /* AttachSession.swift */,
 				EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */,
 				B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */,
@@ -330,6 +333,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				8C4A68614FFC6ECE6DA80F54 /* ACAppDelegateShim.swift in Sources */,
+				D98C47F5140432458E7AA4A2 /* AppBadge.swift in Sources */,
 				DF5906B4200E5514B147E469 /* AttachSession.swift in Sources */,
 				C568C6135B3C91ED6EE4F4C3 /* BromureRemoteApp.swift in Sources */,
 				028E121AD6D6119EC7D9FEE0 /* ConnectFlow.swift in Sources */,

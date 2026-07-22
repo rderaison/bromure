@@ -45,6 +45,36 @@ struct HostMirrorScreen: View {
                 }
             }
 
+            Section {
+                NavigationLink {
+                    GridScreen(controller: controller)
+                } label: {
+                    Label("Grid", systemImage: "square.grid.2x2")
+                        .badge(controller.gridStore.cells.count)
+                }
+                if waitingAgents.isEmpty {
+                    Label("No agents need input", systemImage: "checkmark.circle")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                } else {
+                    ForEach(waitingAgents) { agent in
+                        NavigationLink {
+                            WorkspaceScreen(controller: controller,
+                                            profileID: agent.profileID,
+                                            initialWindow: agent.windowIndex)
+                        } label: {
+                            waitingAgentRow(agent)
+                        }
+                    }
+                }
+            } header: {
+                Text("At a Glance")
+            } footer: {
+                if !waitingAgents.isEmpty {
+                    Text("These coding agents are paused waiting for your answer — tap to reply.")
+                }
+            }
+
             Section("Workspaces") {
                 if controller.listModel.profileRows.isEmpty && controller.hasSnapshot {
                     Text("No workspaces on this server.")
@@ -61,10 +91,57 @@ struct HostMirrorScreen: View {
         }
         .navigationTitle(host.name.isEmpty ? host.address : host.name)
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { controller.start() }
+        .onAppear {
+            controller.start()
+            AppBadge.set(waitingAgents.count)
+        }
         .onDisappear { controller.stop() }
+        // Mirror the "agents waiting for input" count onto the app-icon badge.
+        .onChange(of: waitingAgents.count) { AppBadge.set($0) }
         .alert(item: topPrompt) { prompt in
             promptAlert(prompt)
+        }
+    }
+
+    // MARK: At a Glance — agents waiting for input
+
+    /// One coding agent paused on a question (its tab is in the red
+    /// `needsInput` state), across every running workspace.
+    struct WaitingAgent: Identifiable {
+        let profileID: Profile.ID
+        let windowIndex: Int
+        let workspaceName: String
+        let tabLabel: String
+        let accentHex: String
+        var id: String { "\(profileID.uuidString):\(windowIndex)" }
+    }
+
+    private var waitingAgents: [WaitingAgent] {
+        controller.listModel.entries.flatMap { entry in
+            entry.model.tabs
+                .filter { $0.agentStatus == .needsInput }
+                .map { tab in
+                    WaitingAgent(
+                        profileID: entry.id,
+                        windowIndex: tab.index,
+                        workspaceName: entry.name,
+                        tabLabel: tab.shownLabel.isEmpty ? "shell" : tab.shownLabel,
+                        accentHex: entry.accentHex)
+                }
+        }
+    }
+
+    private func waitingAgentRow(_ agent: WaitingAgent) -> some View {
+        HStack(spacing: 10) {
+            AgentStatusDot(status: .needsInput)
+                .frame(width: 12)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(agent.tabLabel).font(.body)
+                Text(agent.workspaceName).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "exclamationmark.bubble.fill")
+                .foregroundStyle(.red)
         }
     }
 
@@ -253,5 +330,114 @@ private struct AutomationEditorSheet: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Grid (at a glance)
+
+/// The mirrored terminal grid: each arranged cell shows its live terminal (for
+/// running workspaces), so several agents are visible at once; tap a cell's
+/// header to open it full-screen. Grid membership is edited on the desktop app
+/// and mirrors here read-only.
+struct GridScreen: View {
+    let controller: RemoteHostController
+    /// One live attach per cell, keyed by cell id; reconciled against the
+    /// mirrored grid + run states so removed/stopped cells tear down.
+    @State private var sessions: [String: AttachSession] = [:]
+
+    private var cells: [GridCell] { controller.gridStore.cells }
+
+    var body: some View {
+        Group {
+            if cells.isEmpty {
+                ContentUnavailableView("No grid",
+                    systemImage: "square.grid.2x2",
+                    description: Text("Arrange a grid in the desktop app — it mirrors here."))
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 320, maximum: 700), spacing: 12)],
+                              spacing: 12) {
+                        ForEach(cells) { cell in cellView(cell) }
+                    }
+                    .padding(12)
+                }
+            }
+        }
+        .navigationTitle("Grid")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { reconcile() }
+        .onChange(of: cells.map(\.id)) { reconcile() }
+        .onChange(of: controller.revision) { reconcile() }
+        .onDisappear {
+            sessions.values.forEach { $0.stop() }
+            sessions = [:]
+        }
+    }
+
+    @ViewBuilder private func cellView(_ cell: GridCell) -> some View {
+        let name = controller.profile(for: cell.profileID)?.name ?? "?"
+        let accent = controller.profile(for: cell.profileID)?.color.hexInUI ?? "#888888"
+        let state = controller.runState(for: cell.profileID)
+        let running = state == .running || state == .booting
+        let status = controller.tabsModel(for: cell.profileID)?.tabs
+            .first { $0.index == cell.windowIndex }?.agentStatus
+        VStack(spacing: 0) {
+            NavigationLink {
+                WorkspaceScreen(controller: controller, profileID: cell.profileID,
+                                initialWindow: cell.windowIndex)
+            } label: {
+                HStack(spacing: 6) {
+                    Circle().fill(Color(hex: accent)).frame(width: 8, height: 8)
+                    Text(cell.label.isEmpty ? name : cell.label)
+                        .font(.callout.weight(.medium)).lineLimit(1)
+                    if let status { AgentStatusDot(status: status) }
+                    Spacer()
+                    Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                .padding(8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            Divider()
+            if running, let session = sessions[cell.id] {
+                RemoteTerminalView(session: session)
+                    .frame(height: 220)
+                    .background(Color.black)
+            } else {
+                ZStack {
+                    Color.platformControlBackground
+                    VStack(spacing: 4) {
+                        Image(systemName: running ? "hourglass" : "moon.zzz")
+                            .foregroundStyle(.secondary)
+                        Text(running ? "Attaching…" : "Workspace off")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(height: 220)
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .strokeBorder(status == .needsInput ? Color.red : Color.primary.opacity(0.12),
+                          lineWidth: status == .needsInput ? 2 : 1))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Attach running cells, stop + drop cells that are gone or stopped.
+    private func reconcile() {
+        var next: [String: AttachSession] = [:]
+        for cell in cells {
+            let state = controller.runState(for: cell.profileID)
+            guard state == .running || state == .booting else { continue }
+            next[cell.id] = sessions[cell.id]
+                ?? AttachSession(host: controller.host,
+                                 vmID: cell.profileID.uuidString,
+                                 windowIndex: cell.windowIndex)
+        }
+        for (id, s) in sessions where next[id] == nil { s.stop() }
+        // Only reassign when the cell set actually changed, so a routine poll
+        // doesn't churn @State (and re-mount the live terminals).
+        if Set(next.keys) != Set(sessions.keys) { sessions = next }
     }
 }

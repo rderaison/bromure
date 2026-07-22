@@ -10,6 +10,9 @@ import SwiftUI
 struct WorkspaceScreen: View {
     let controller: RemoteHostController
     let profileID: Profile.ID
+    /// When set, open straight to this tmux window's terminal (used by the
+    /// "At a Glance" agents-waiting list and the grid).
+    var initialWindow: Int? = nil
 
     enum Pane: String, CaseIterable, Identifiable {
         case terminals = "Terminals"
@@ -63,7 +66,8 @@ struct WorkspaceScreen: View {
 
     @ViewBuilder private var content: some View {
         switch pane {
-        case .terminals: TerminalsPane(controller: controller, profileID: profileID)
+        case .terminals: TerminalsPane(controller: controller, profileID: profileID,
+                                       initialWindow: initialWindow)
         case .dashboard: dashboard
         case .docker:    docker
         case .files:     files
@@ -143,8 +147,10 @@ struct WorkspaceScreen: View {
 private struct TerminalsPane: View {
     let controller: RemoteHostController
     let profileID: Profile.ID
+    var initialWindow: Int? = nil
     @State private var sessions: [Int: AttachSession] = [:]
     @State private var selectedWindow: Int?
+    @State private var didSeedInitial = false
 
     private var model: TabsModel? { controller.tabsModel(for: profileID) }
     private var tabs: [TabsModel.Tab] { model?.tabs ?? [] }
@@ -179,6 +185,13 @@ private struct TerminalsPane: View {
                 }
                 .accessibilityLabel("New terminal")
             }
+        }
+        .onAppear {
+            // Land on the requested window (a waiting agent / grid cell) once.
+            guard !didSeedInitial, let initialWindow else { return }
+            didSeedInitial = true
+            selectedWindow = initialWindow
+            controller.selectTab(profileID, index: initialWindow)
         }
     }
 

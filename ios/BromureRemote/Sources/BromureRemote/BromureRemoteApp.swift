@@ -68,6 +68,7 @@ struct RootView: View {
         .onAppear {
             directory.refreshAccount()
             hostBox.onChange = { activeHost = $0; pendingPeer = nil }
+            AppBadge.requestAuthorization()
         }
         .onOpenURL { url in
             // bromure://enroll?…&state=… — complete the account sign-in.
