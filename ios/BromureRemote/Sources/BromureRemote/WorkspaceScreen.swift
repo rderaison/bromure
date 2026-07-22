@@ -1,4 +1,7 @@
 import SwiftUI
+import UIKit
+import PhotosUI
+import UniformTypeIdentifiers
 
 // MARK: - Workspace detail (iOS)
 //
@@ -151,9 +154,42 @@ private struct TerminalsPane: View {
     @State private var sessions: [Int: AttachSession] = [:]
     @State private var selectedWindow: Int?
     @State private var didSeedInitial = false
+    /// Persisted terminal font size (points), driven by pinch-to-zoom and
+    /// shared across every window and relaunch.
+    @AppStorage("bromure.terminal.fontSizePt") private var fontSizePt: Double = 13
+    /// The user's explicit terminal/reader choice for the current window, or
+    /// nil to follow the window's agentic state (an agent window defaults to
+    /// the rich reader). Cleared on a window switch so each tab re-evaluates.
+    @State private var readerOverride: Bool?
 
     private var model: TabsModel? { controller.tabsModel(for: profileID) }
     private var tabs: [TabsModel.Tab] { model?.tabs ?? [] }
+
+    private var fontBinding: Binding<CGFloat> {
+        Binding(get: { CGFloat(fontSizePt) }, set: { fontSizePt = Double($0) })
+    }
+
+    /// The guest working directory backing a window's Claude transcript.
+    private func guestCwd(for window: Int) -> String? {
+        let tab = tabs.first { $0.index == window }
+        let cwd = tab?.cwd ?? tab?.repoRoot
+        return (cwd?.isEmpty ?? true) ? nil : cwd
+    }
+
+    private var currentTab: TabsModel.Tab? {
+        guard let win = effectiveWindow else { return nil }
+        return tabs.first { $0.index == win }
+    }
+
+    /// "Agentic mode": a coding agent is live in this window (actively working,
+    /// waiting on the user, or it's a task worktree). Those default to the rich
+    /// reader instead of raw ANSI.
+    private func isAgentic(_ tab: TabsModel.Tab?) -> Bool {
+        guard let tab else { return false }
+        return tab.agentStatus == .working || tab.agentStatus == .needsInput || tab.isWorktree
+    }
+
+    private var readerMode: Bool { readerOverride ?? isAgentic(currentTab) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -170,15 +206,27 @@ private struct TerminalsPane: View {
                 Divider()
             }
             if let win = effectiveWindow {
-                RemoteTerminalView(session: session(for: win))
-                    .id("\(profileID)-\(win)")
-                    .background(Color.black)
+                if readerMode {
+                    TranscriptReaderView(controller: controller, profileID: profileID,
+                                         window: win, guestCwd: guestCwd(for: win))
+                        .id("reader-\(profileID)-\(win)")
+                } else {
+                    RemoteTerminalView(session: session(for: win), fontSize: fontBinding)
+                        .id("\(profileID)-\(win)")
+                        .background(Color.black)
+                }
             } else {
                 ContentUnavailableView("No terminal", systemImage: "terminal",
                     description: Text("This workspace has no open windows yet."))
             }
         }
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { readerOverride = !readerMode } label: {
+                    Image(systemName: readerMode ? "terminal" : "doc.richtext")
+                }
+                .accessibilityLabel(readerMode ? "Show raw terminal" : "Show reader")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button { controller.newTab(profileID) } label: {
                     Image(systemName: "plus.rectangle.on.rectangle")
@@ -193,6 +241,9 @@ private struct TerminalsPane: View {
             selectedWindow = initialWindow
             controller.selectTab(profileID, index: initialWindow)
         }
+        // Switching windows drops any manual terminal/reader override, so each
+        // window re-evaluates the agentic default.
+        .onChange(of: effectiveWindow) { _, _ in readerOverride = nil }
     }
 
     private var effectiveWindow: Int? {
@@ -228,11 +279,237 @@ private struct TerminalsPane: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            Button {
+                _ = controller.gridStore.add(profileID: profileID, windowIndex: tab.index,
+                                             label: tab.shownLabel)
+                controller.pushGridLayout()
+            } label: { Label("Send to Grid", systemImage: "square.grid.2x2") }
             Button(role: .destructive) {
                 controller.closeTab(profileID, index: tab.index)
                 sessions[tab.index]?.stop()
                 sessions[tab.index] = nil
             } label: { Label("Close", systemImage: "xmark") }
+        }
+    }
+}
+
+// MARK: - Transcript reader
+
+/// A read-only, Claude-Code-Desktop-style rendering of the active terminal's
+/// live Claude transcript — prose, markdown, thinking, and tool traffic laid
+/// out as a conversation instead of raw ANSI. Tails the guest `.jsonl` over the
+/// tunnel every couple of seconds (the same command the desktop plan windows
+/// use) and reuses the shared `TranscriptItemView`.
+private struct TranscriptReaderView: View {
+    let controller: RemoteHostController
+    let profileID: Profile.ID
+    /// The tmux window index this reader mirrors — where a typed message is
+    /// sent, so the conversation lands in the right agent tab.
+    let window: Int
+    let guestCwd: String?
+    @State private var items: [TranscriptItem] = []
+    @State private var loaded = false
+    @State private var draft = ""
+    @State private var sending = false
+    // Image attach → upload → path, mirroring desktop copy-paste.
+    @State private var showPhotoPicker = false
+    @State private var photoItem: PhotosPickerItem?
+    @State private var showFileImporter = false
+    @State private var uploading = false
+    @State private var uploadError: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            transcript
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Divider()
+            composerBar
+        }
+        .task(id: guestCwd) { await poll() }
+    }
+
+    // MARK: Composer + image attach
+
+    private var composerBar: some View {
+        VStack(spacing: 4) {
+            if let uploadError {
+                Text(uploadError).font(.caption).foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // Type into the agent's session — the message (and any uploaded
+            // image path) shows up in the transcript on the next poll, and the
+            // agent responds inline.
+            HStack(alignment: .bottom, spacing: 8) {
+                attachButton
+                ChatComposer(placeholder: "Message the agent…", text: $draft,
+                             busy: sending, onSend: send)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.platformControlBackground)
+        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            Task { await loadPhoto(item) }
+        }
+        .fileImporter(isPresented: $showFileImporter,
+                      allowedContentTypes: [.image], allowsMultipleSelection: false,
+                      onCompletion: handleFileImport)
+    }
+
+    /// An image an agent can read: pick from the photo library, from Files, or
+    /// paste from the clipboard. Each uploads into the guest's pastes dir and
+    /// drops the resulting guest path into the message — exactly what a
+    /// desktop copy-paste of an image does.
+    private var attachButton: some View {
+        Menu {
+            Button { showPhotoPicker = true } label: {
+                Label("Photo Library", systemImage: "photo")
+            }
+            Button { showFileImporter = true } label: {
+                Label("Choose File", systemImage: "folder")
+            }
+            if UIPasteboard.general.hasImages {
+                Button { pasteImage() } label: {
+                    Label("Paste Image", systemImage: "doc.on.clipboard")
+                }
+            }
+        } label: {
+            Group {
+                if uploading {
+                    ProgressView()
+                } else {
+                    Image(systemName: "paperclip.circle.fill")
+                        .font(.system(size: 26))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .frame(width: 34, height: 34)
+        }
+        .disabled(uploading)
+        .accessibilityLabel("Attach image")
+    }
+
+    @ViewBuilder private var transcript: some View {
+        if guestCwd?.isEmpty ?? true {
+            unavailable("Not a project folder",
+                        "This terminal isn't running in a folder with a Claude session.")
+        } else if !loaded {
+            ProgressView("Loading transcript…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if items.isEmpty {
+            unavailable("No transcript",
+                        "No Claude session was found for this terminal yet — send a message to get started.")
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(items) { TranscriptItemView(item: $0) }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                // Jump to the newest turn when the reader opens…
+                .onAppear { scrollToBottom(proxy, animated: false) }
+                // …and follow the live tail as new turns arrive.
+                .onChange(of: items.count) { _, _ in scrollToBottom(proxy, animated: true) }
+            }
+            .background(Color.platformWindowBackground)
+        }
+    }
+
+    @ViewBuilder private func unavailable(_ title: String, _ detail: String) -> some View {
+        ContentUnavailableView(title, systemImage: "doc.richtext", description: Text(detail))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Scroll to the last item. The short defer lets the lazy stack realize
+    /// freshly-appended rows first, so the target actually exists.
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        guard let last = items.last?.id else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            if animated { withAnimation { proxy.scrollTo(last, anchor: .bottom) } }
+            else { proxy.scrollTo(last, anchor: .bottom) }
+        }
+    }
+
+    private func send() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !sending else { return }
+        sending = true
+        Task {
+            _ = try? await controller.guestExec(
+                profileID,
+                command: CodingTaskEngine.typeCommand(tabIndex: window, text: text),
+                timeout: 20)
+            await MainActor.run { draft = ""; sending = false }
+        }
+    }
+
+    private func loadPhoto(_ item: PhotosPickerItem) async {
+        defer { Task { @MainActor in photoItem = nil } }
+        guard let raw = try? await item.loadTransferable(type: Data.self), !raw.isEmpty else {
+            await MainActor.run { uploadError = "Couldn't read the selected photo." }
+            return
+        }
+        // Normalize to PNG so the guest gets a predictable format.
+        let png = UIImage(data: raw).flatMap { $0.pngData() }
+        await upload([.bitmap(png ?? raw, ext: png != nil ? "png" : "img")])
+    }
+
+    private func handleFileImport(_ result: Result<[URL], Error>) {
+        guard case let .success(urls) = result, let url = urls.first else { return }
+        // Read the bytes while the security scope is open — the upload runs
+        // later, off this callback.
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+            uploadError = "Couldn't read the selected file."
+            return
+        }
+        let ext = url.pathExtension.isEmpty ? "img" : url.pathExtension.lowercased()
+        Task { await upload([.bitmap(data, ext: ext)]) }
+    }
+
+    private func pasteImage() {
+        guard let img = UIPasteboard.general.image, let png = img.pngData() else {
+            uploadError = "No image on the clipboard."
+            return
+        }
+        Task { await upload([.bitmap(png, ext: "png")]) }
+    }
+
+    /// Chunk the image into the guest's pastes dir (shared with the desktop's
+    /// terminal image paste) and append the returned guest path to the draft.
+    private func upload(_ sources: [TerminalImagePaste.Source]) async {
+        guard !sources.isEmpty, !uploading else { return }
+        await MainActor.run { uploading = true; uploadError = nil }
+        do {
+            let op: TerminalImagePaste.GuestFileOp = {
+                try await controller.guestFileOp(profileID, op: $0)
+            }
+            let paths = try await TerminalImagePaste.upload(sources, via: op)
+            await MainActor.run {
+                let joined = paths.joined(separator: " ")
+                draft += (draft.isEmpty ? "" : " ") + joined + " "
+                uploading = false
+            }
+        } catch {
+            await MainActor.run { uploadError = "Upload failed."; uploading = false }
+        }
+    }
+
+    private func poll() async {
+        guard let cwd = guestCwd, !cwd.isEmpty,
+              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: 0)
+        else { loaded = true; return }
+        while !Task.isCancelled {
+            if let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15) {
+                items = ClaudeTranscriptParser.parse(Data(raw.utf8))
+            }
+            loaded = true
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
     }
 }

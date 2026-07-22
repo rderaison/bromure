@@ -92,10 +92,16 @@ struct HostMirrorScreen: View {
         .navigationTitle(host.name.isEmpty ? host.address : host.name)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
+            // `start()` is idempotent, so re-appearing (popping back from a
+            // pushed workspace/grid) is a no-op. Crucially we do NOT stop on
+            // disappear: a NavigationStack push fires the parent's onDisappear,
+            // and stopping there froze the mirror (stale tabs, dead grid cells)
+            // for as long as a child was open. The poll runs for the whole time
+            // the host is open; the controller invalidates its timer on dealloc
+            // when the mirror is finally popped.
             controller.start()
             AppBadge.set(waitingAgents.count)
         }
-        .onDisappear { controller.stop() }
         // Mirror the "agents waiting for input" count onto the app-icon badge.
         .onChange(of: waitingAgents.count) { AppBadge.set($0) }
         .alert(item: topPrompt) { prompt in
@@ -344,23 +350,38 @@ struct GridScreen: View {
     /// One live attach per cell, keyed by cell id; reconciled against the
     /// mirrored grid + run states so removed/stopped cells tear down.
     @State private var sessions: [String: AttachSession] = [:]
+    /// Pinch-to-zoom magnification of the whole grid: bigger tiles / fewer
+    /// columns as you pinch in, an overview of smaller tiles as you pinch out.
+    /// `zoom` tracks the live gesture; `zoomBase` is the committed value.
+    @State private var zoom: CGFloat = 1
+    @State private var zoomBase: CGFloat = 1
 
     private var cells: [GridCell] { controller.gridStore.cells }
+
+    private let baseCellHeight: CGFloat = 200
+    private let baseMinWidth: CGFloat = 300
+    private var cellHeight: CGFloat { baseCellHeight * zoom }
 
     var body: some View {
         Group {
             if cells.isEmpty {
                 ContentUnavailableView("No grid",
                     systemImage: "square.grid.2x2",
-                    description: Text("Arrange a grid in the desktop app — it mirrors here."))
+                    description: Text("Arrange a grid in the desktop app, or long-press a terminal tab and “Send to Grid.”"))
             } else {
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 320, maximum: 700), spacing: 12)],
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: baseMinWidth * zoom,
+                                                           maximum: 700), spacing: 12)],
                               spacing: 12) {
                         ForEach(cells) { cell in cellView(cell) }
                     }
                     .padding(12)
                 }
+                .simultaneousGesture(
+                    MagnificationGesture()
+                        .onChanged { v in zoom = min(2.2, max(0.55, zoomBase * v)) }
+                        .onEnded { _ in zoomBase = zoom }
+                )
             }
         }
         .navigationTitle("Grid")
@@ -381,11 +402,14 @@ struct GridScreen: View {
         let running = state == .running || state == .booting
         let status = controller.tabsModel(for: cell.profileID)?.tabs
             .first { $0.index == cell.windowIndex }?.agentStatus
-        VStack(spacing: 0) {
-            NavigationLink {
-                WorkspaceScreen(controller: controller, profileID: cell.profileID,
-                                initialWindow: cell.windowIndex)
-            } label: {
+        // The whole tile is one tap target: the preview terminal is display
+        // only (touches pass through), so tapping anywhere "focuses" it —
+        // pushes the full workspace terminal for that window.
+        NavigationLink {
+            WorkspaceScreen(controller: controller, profileID: cell.profileID,
+                            initialWindow: cell.windowIndex)
+        } label: {
+            VStack(spacing: 0) {
                 HStack(spacing: 6) {
                     Circle().fill(Color(hex: accent)).frame(width: 8, height: 8)
                     Text(cell.label.isEmpty ? name : cell.label)
@@ -397,26 +421,34 @@ struct GridScreen: View {
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
                 .padding(8)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            Divider()
-            if running, let session = sessions[cell.id] {
-                RemoteTerminalView(session: session)
-                    .frame(height: 220)
-                    .background(Color.black)
-            } else {
-                ZStack {
-                    Color.platformControlBackground
-                    VStack(spacing: 4) {
-                        Image(systemName: running ? "hourglass" : "moon.zzz")
-                            .foregroundStyle(.secondary)
-                        Text(running ? "Attaching…" : "Workspace off")
-                            .font(.caption).foregroundStyle(.secondary)
+                Divider()
+                Group {
+                    if running, let session = sessions[cell.id] {
+                        RemoteTerminalView(session: session, interactive: false,
+                                           fixedFontSize: 10)
+                            .background(Color.black)
+                    } else {
+                        ZStack {
+                            Color.platformControlBackground
+                            VStack(spacing: 4) {
+                                Image(systemName: running ? "hourglass" : "moon.zzz")
+                                    .foregroundStyle(.secondary)
+                                Text(running ? "Attaching…" : "Workspace off")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
-                .frame(height: 220)
+                .frame(height: cellHeight)
             }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive) {
+                controller.gridStore.remove(id: cell.id)
+                controller.pushGridLayout()
+            } label: { Label("Remove from Grid", systemImage: "xmark") }
         }
         .overlay(RoundedRectangle(cornerRadius: 10)
             .strokeBorder(status == .needsInput ? Color.red : Color.primary.opacity(0.12),

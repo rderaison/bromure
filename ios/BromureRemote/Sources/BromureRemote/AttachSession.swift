@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 import SwiftTerm
 #if canImport(Darwin)
 import Darwin
@@ -202,32 +203,96 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
 /// A SwiftTerm `TerminalView` bridged into SwiftUI, wired to an `AttachSession`.
 /// The view owns rendering, scrollback, selection, and IME; the session owns
 /// the byte transport. This is the iOS analog of the macOS `TerminalSurfaceView`.
+///
+/// `interactive` distinguishes the two ways a terminal appears on the phone: a
+/// full workspace terminal (keyboard, selection, pinch-to-zoom font) versus a
+/// live-but-untouchable grid preview (display only, so a tap falls through to
+/// the cell's "focus" navigation instead of moving the cursor).
 struct RemoteTerminalView: UIViewRepresentable {
     @ObservedObject var session: AttachSession
+    /// When false the surface is a passive preview: no keyboard, no pinch, and
+    /// touches pass through so an enclosing button can take the tap.
+    var interactive: Bool = true
+    /// Live, persisted font size for interactive surfaces; pinch writes here.
+    /// Nil for previews, which use `fixedFontSize`.
+    var fontSize: Binding<CGFloat>? = nil
+    /// The (non-zoomable) point size used when `fontSize` is nil.
+    var fixedFontSize: CGFloat = 13
 
-    func makeCoordinator() -> Coordinator { Coordinator(session: session) }
+    static let minFont: CGFloat = 8
+    static let maxFont: CGFloat = 28
+    static func monoFont(_ size: CGFloat) -> UIFont {
+        UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    private var currentSize: CGFloat { fontSize?.wrappedValue ?? fixedFontSize }
+
+    func makeCoordinator() -> Coordinator { Coordinator(view: self) }
 
     func makeUIView(context: Context) -> TerminalView {
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 300))
         tv.terminalDelegate = context.coordinator
         tv.backgroundColor = .black
+        tv.font = Self.monoFont(currentSize)
         context.coordinator.bind(tv)
         session.attach(to: tv)
+        if interactive {
+            let pinch = UIPinchGestureRecognizer(
+                target: context.coordinator,
+                action: #selector(Coordinator.handlePinch(_:)))
+            tv.addGestureRecognizer(pinch)
+        } else {
+            // A preview: let taps reach the SwiftUI navigation behind it.
+            tv.isUserInteractionEnabled = false
+        }
         return tv
     }
 
-    func updateUIView(_ uiView: TerminalView, context: Context) {}
+    func updateUIView(_ uiView: TerminalView, context: Context) {
+        context.coordinator.parent = self
+        let target = Self.monoFont(currentSize)
+        if uiView.font.pointSize != target.pointSize { uiView.font = target }
+        // Pop the keyboard once the surface is on screen, so an interactive
+        // terminal is ready to type into without a tap. (In the Simulator the
+        // software keyboard only shows when the hardware keyboard is
+        // disconnected — I/O ▸ Keyboard ▸ Connect Hardware Keyboard, ⌘K.)
+        if interactive, !context.coordinator.didFocus, uiView.window != nil {
+            context.coordinator.didFocus = true
+            uiView.becomeFirstResponder()
+        }
+    }
 
     static func dismantleUIView(_ uiView: TerminalView, coordinator: Coordinator) {
         coordinator.session.stop()
     }
 
     final class Coordinator: NSObject, TerminalViewDelegate {
-        let session: AttachSession
+        var parent: RemoteTerminalView
+        var session: AttachSession { parent.session }
         private weak var view: TerminalView?
+        private var pinchBaseSize: CGFloat = 13
+        var didFocus = false
 
-        init(session: AttachSession) { self.session = session }
+        init(view: RemoteTerminalView) { self.parent = view }
         func bind(_ v: TerminalView) { view = v }
+
+        /// Pinch scales the font live and persists it through the binding, so
+        /// the size sticks across tab switches and relaunches.
+        @objc func handlePinch(_ g: UIPinchGestureRecognizer) {
+            guard let binding = parent.fontSize else { return }
+            switch g.state {
+            case .began:
+                pinchBaseSize = binding.wrappedValue
+            case .changed, .ended:
+                let scaled = (pinchBaseSize * g.scale).rounded()
+                let clamped = min(RemoteTerminalView.maxFont,
+                                  max(RemoteTerminalView.minFont, scaled))
+                view?.font = RemoteTerminalView.monoFont(clamped)
+                if clamped != binding.wrappedValue { binding.wrappedValue = clamped }
+            default:
+                break
+            }
+        }
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             session.send(data)

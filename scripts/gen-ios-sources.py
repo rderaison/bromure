@@ -46,6 +46,7 @@ SHARED = [
     "Mitm/ConsentCredentialID.swift",
     "FatForward.swift",
     "Terminal/GridLayoutStore.swift",
+    "Terminal/TerminalImagePaste.swift",  # pure upload core (AppKit parts #if'd out)
     # Controller + connect flow (models; iOS provides the views)
     "FatClientController.swift",
     "FatClientConnect.swift",

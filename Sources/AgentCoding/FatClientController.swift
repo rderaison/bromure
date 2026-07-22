@@ -15,6 +15,15 @@ import SwiftUI
 /// automation edits, layout changes) are sent back over the tunnel; the remote
 /// executes them and the next poll reflects the result — so every client
 /// converges on the host's authoritative state.
+/// A non-isolated home for the poll timer. Because it isn't actor-isolated,
+/// its `deinit` can invalidate the timer — which a `@MainActor` controller's
+/// own `deinit` cannot do for an isolated stored property. The timer is only
+/// ever assigned on the main thread (start/stop), so there's no real races.
+private final class PollTimerBox {
+    var timer: Timer?
+    deinit { timer?.invalidate() }
+}
+
 @MainActor
 @Observable
 final class RemoteHostController {
@@ -87,7 +96,12 @@ final class RemoteHostController {
     /// in-flight poll can't revert the edit before its POST lands.
     private var gridTouched = Date.distantPast
 
-    private var pollTimer: Timer?
+    /// The 0.75 s poll timer, held in a non-isolated box so it can be
+    /// invalidated when the controller deallocates — a `@MainActor` class can't
+    /// touch its own isolated stored properties from `deinit`, but the box's
+    /// own `deinit` can. iOS no longer calls `stop()` on child navigation (that
+    /// froze the mirror), so dealloc is where a popped mirror reclaims its timer.
+    private let pollTimerBox = PollTimerBox()
     private let pollQueue = DispatchQueue(label: "io.bromure.fatclient.poll")
     private var polling = false
     /// Consecutive failed polls on a PEER host. The broker caches the winning
@@ -152,12 +166,16 @@ final class RemoteHostController {
     // MARK: Polling
 
     func start() {
+        // Idempotent: a re-`start()` (e.g. iOS re-appear when popping back from
+        // a pushed child) must not stack a second timer. The poll now runs for
+        // the whole time a host is open, straight through child navigation.
+        guard pollTimerBox.timer == nil else { return }
         pollOnce()
         let t = Timer(timeInterval: 0.75, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pollOnce() }
         }
         RunLoop.main.add(t, forMode: .common)
-        pollTimer = t
+        pollTimerBox.timer = t
 #if os(macOS)
         // Stand up the subnet tunnel entry point (SOCKS) so the browser pane and
         // `curl --socks5` can reach the remote guests as soon as the host is up.
@@ -172,8 +190,8 @@ final class RemoteHostController {
 
     func stop() {
         Self.liveHosts[host.id] = nil
-        pollTimer?.invalidate()
-        pollTimer = nil
+        pollTimerBox.timer?.invalidate()
+        pollTimerBox.timer = nil
 #if os(macOS)
         approvalPollTimer?.invalidate()
         approvalPollTimer = nil

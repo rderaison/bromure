@@ -1778,6 +1778,37 @@ enum CodingTaskEngine {
             + "-t bromure:\(tabIndex) -l && sleep 1 && "
             + "tmux send-keys -t bromure:\(tabIndex) Enter"
     }
+
+    /// The guest command that tails a plan session's live Claude transcript.
+    /// The planner runs IN the task's configured directory, so the project
+    /// dir is derived from that path the way Claude encodes it ("/" and "."
+    /// become "-"); `since` (epoch seconds) skips transcripts of earlier
+    /// sessions in the same directory. Output is capped so a long session
+    /// stays cheap to poll. Nil when the path has characters we won't quote.
+    /// (Byte-identical to the macOS engine's copy — the iOS "reader" view
+    /// tails the remote transcript over the tunnel the same way.)
+    nonisolated static func planTranscriptCommand(guestCwd: String, since: Int) -> String? {
+        var path = guestCwd
+        while path.count > 1 && path.hasSuffix("/") { path = String(path.dropLast()) }
+        let allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            + "0123456789-_./+ "
+        guard !path.isEmpty, path.allSatisfy({ allowed.contains($0) }) else { return nil }
+        let enc1 = path.replacingOccurrences(of: "/", with: "-")
+        let enc2 = path.replacingOccurrences(of: ".", with: "-")
+            .replacingOccurrences(of: "/", with: "-")
+        let legacy = (enc1 == enc2 ? [enc1] : [enc1, enc2])
+            .map { "\"$HOME/.claude/projects/\($0)\"" }.joined(separator: " ")
+        let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
+        return "d='\(path)'; r=$(readlink -f \"$d\" 2>/dev/null || printf %s \"$d\"); "
+            + "e1=$(printf %s \"$d\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "e2=$(printf %s \"$r\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "f=$(find \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
+            + "\(legacy) -maxdepth 1 -name '*.jsonl' -newermt @\(since) "
+            + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
+            + "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
+            + "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
+            + "then echo; tr -d '\\n' < \(pq); echo; fi"
+    }
 }
 #endif
 

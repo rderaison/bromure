@@ -2,6 +2,7 @@
 import AppKit
 #else
 import UIKit
+import AuthenticationServices
 #endif
 import Foundation
 
@@ -10,6 +11,19 @@ extension Notification.Name {
     /// signed out) so open windows refresh.
     static let p2pIdentityChanged = Notification.Name("io.bromure.p2pIdentityChanged")
 }
+
+#if os(iOS)
+/// Anchors the in-app sign-in web sheet to the app's foreground window.
+private final class WebAuthPresenter: NSObject, ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow }
+        return window ?? ASPresentationAnchor()
+    }
+}
+#endif
 
 /// The single owner of this Mac's bromure.io identity. Enterprise installs
 /// already have one (the managed enrollment) and reuse it — no sign-in. Only a
@@ -33,6 +47,13 @@ final class P2PEnrollmentCoordinator {
     /// when it echoes this exact value, so an unsolicited `bromure://enroll`
     /// link can't enroll this Mac into an attacker's workspace.
     private var pendingState: String?
+
+#if os(iOS)
+    /// Retained while the in-app sign-in web sheet is on screen; the callback
+    /// (a `bromure://enroll` redirect) is captured by the session itself.
+    private var webAuthSession: ASWebAuthenticationSession?
+    private let webAuthPresenter = WebAuthPresenter()
+#endif
 
     init() { identity = P2PIdentity.current() }
 
@@ -61,10 +82,43 @@ final class P2PEnrollmentCoordinator {
 #if os(macOS)
             NSWorkspace.shared.open(url)
 #else
-            UIApplication.shared.open(url)
+            startWebAuth(url: url)
 #endif
         }
     }
+
+#if os(iOS)
+    /// iOS sign-in in an in-app web sheet (ASWebAuthenticationSession) rather
+    /// than kicking out to Safari. It shares Safari's cookies (so an existing
+    /// bromure.io login carries over) and intercepts the `bromure://enroll`
+    /// redirect itself — feeding the same `complete(_:state:)` path the deep
+    /// link used, no app round-trip.
+    private func startWebAuth(url: URL) {
+        let session = ASWebAuthenticationSession(
+            url: url, callbackURLScheme: "bromure") { [weak self] callbackURL, err in
+            guard let self else { return }
+            self.webAuthSession = nil
+            if let callbackURL, let link = EnrollLink(parsing: callbackURL.absoluteString) {
+                let state = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
+                    .queryItems?.first { $0.name == "state" }?.value
+                self.complete(link, state: state)
+            } else if let authErr = err as? ASWebAuthenticationSessionError,
+                      authErr.code == .canceledLogin {
+                // Dismissed by the user — leave the sheet closed, no error.
+            } else if err != nil {
+                self.error = "Sign-in didn’t complete. Please try again."
+            }
+        }
+        session.presentationContextProvider = webAuthPresenter
+        // Reuse the system Safari cookie jar so an existing bromure.io session
+        // signs in without re-entering credentials.
+        session.prefersEphemeralWebBrowserSession = false
+        webAuthSession = session
+        if !session.start() {
+            error = "Couldn’t open the sign-in page."
+        }
+    }
+#endif
 
     /// Complete a browser sign-in from the deep-link callback. No-op unless
     /// `state` matches the in-flight sign-in.

@@ -1,6 +1,11 @@
+import Foundation
+import UniformTypeIdentifiers
+#if os(macOS)
 import AppKit
 import GhosttyKit
-import UniformTypeIdentifiers
+#else
+import UIKit
+#endif
 
 /// Image paste for native terminal surfaces.
 ///
@@ -42,6 +47,7 @@ enum TerminalImagePaste {
     static let maxTotalBytes = 96 * 1024 * 1024
 
     // MARK: Detection
+#if os(macOS)
 
     /// The images `pasteboard` should paste as guest files, or nil when
     /// this is not an image paste (text pastes return nil, always).
@@ -92,6 +98,7 @@ enum TerminalImagePaste {
         guard let type, type.conforms(to: .image) else { return nil }
         return type
     }
+#endif
 
     // MARK: Naming
 
@@ -167,6 +174,7 @@ enum TerminalImagePaste {
     }
 
     // MARK: Paste orchestration
+#if os(macOS)
 
     /// Called from the runtime's read-clipboard callback (main thread).
     /// Returns false when this isn't an image paste — the caller then
@@ -236,4 +244,5 @@ enum TerminalImagePaste {
         }
         return true
     }
+#endif
 }
