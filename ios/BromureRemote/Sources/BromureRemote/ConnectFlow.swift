@@ -67,9 +67,11 @@ struct ConnectPhaseView: View {
             TextField("Remote account username", text: $model.user)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .textContentType(.username)
+            // No .textContentType(.username/.password): this is a one-time
+            // enrollment password — we register this device's SSH key and never
+            // need it again — so iOS should NOT offer to save it to Keychain.
             SecureField("Remote account password", text: $model.password)
-                .textContentType(.password)
+                .textContentType(.oneTimeCode)
             Button("Sign In") { model.submitPassword() }
                 .disabled(model.password.isEmpty
                           || model.user.trimmingCharacters(in: .whitespaces).isEmpty)
