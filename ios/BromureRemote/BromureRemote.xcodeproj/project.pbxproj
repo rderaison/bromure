@@ -83,7 +83,36 @@
 		AC386C9A81CC3D06F152CD16 /* NIOSSH */ = {isa = PBXBuildFile; productRef = 02B62CE274D8DA992C69E200 /* NIOSSH */; };
 		AF607A37C981D7AA9913AB84 /* MarkdownUI */ = {isa = PBXBuildFile; productRef = 464A3CFC0A0DE53330C36437 /* MarkdownUI */; };
 		7688993F4FA1D4E10B2F61E8 /* SwiftTerm */ = {isa = PBXBuildFile; productRef = C1052FCFAD51F05999DD0C4D /* SwiftTerm */; };
+		68F425854E1E6E47C5736FFB /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BCBB5252D718C8B1EC18C63 /* NotificationService.swift */; };
+		71F7F9BC1CB1DB51D11B523E /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2652DA1029D0752C313AC9D0 /* PushCrypto.swift */; };
+		7DA2C4B1F9D466DA828F0B77 /* PushKeypair.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CD0F2B2F2F6347A584824B /* PushKeypair.swift */; };
+		B337DE32116B6375092DFF73 /* Crypto */ = {isa = PBXBuildFile; productRef = 3A2026F496EEC7351E995CC9 /* Crypto */; };
+		22FE77B0395ED580F0DD7F07 /* BromureNotify.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = C00C590CFD58DA5C4267F177 /* BromureNotify.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		D8CCFB5AE40BE2795D9F15CA = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 98F54143AB4E86B28C3AFEE0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 604F74F091BAD3D7C6E7D5EF;
+			remoteInfo = BromureNotify;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		CC531F55156D1B4CD472E876 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				22FE77B0395ED580F0DD7F07 /* BromureNotify.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		505735CF5C8E91FEB4DA4DE2 /* ACAppDelegateShim.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ACAppDelegateShim.swift"; path = "Sources/BromureRemote/ACAppDelegateShim.swift"; sourceTree = "<group>"; };
@@ -159,6 +188,10 @@
 		F53560B8D470A293B70C0526 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "App/Info.plist"; sourceTree = "<group>"; };
 		2C9329E02D38A226363A4698 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "App/Assets.xcassets"; sourceTree = "<group>"; };
 		85673086EF6CFD3A1F8591AF /* BromureRemote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BromureRemote.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2BCBB5252D718C8B1EC18C63 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "NotificationService.swift"; path = "../BromureNotify/NotificationService.swift"; sourceTree = "<group>"; };
+		A6217BCA986E7367ABF8208B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = "Info.plist"; path = "../BromureNotify/Info.plist"; sourceTree = "<group>"; };
+		B209A153792134CD85EE252A /* BromureNotify.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; name = "BromureNotify.entitlements"; path = "../BromureNotify/BromureNotify.entitlements"; sourceTree = "<group>"; };
+		C00C590CFD58DA5C4267F177 /* BromureNotify.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BromureNotify.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -175,6 +208,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		7877D50E3BFAF5DCF7FED2BF = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B337DE32116B6375092DFF73 /* Crypto */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -183,6 +224,7 @@
 			children = (
 				DB89E782D488330EABE72BF7 /* Sources */,
 				69F8D45498D7E20DA99BB780 /* App */,
+				568B7CE0BF623BF9E77C235B /* BromureNotify */,
 				328EC33DF3954DC9B83FA285 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -191,6 +233,7 @@
 			isa = PBXGroup;
 			children = (
 				85673086EF6CFD3A1F8591AF /* BromureRemote.app */,
+				C00C590CFD58DA5C4267F177 /* BromureNotify.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -281,6 +324,16 @@
 			name = App;
 			sourceTree = "<group>";
 		};
+		568B7CE0BF623BF9E77C235B /* BromureNotify */ = {
+			isa = PBXGroup;
+			children = (
+				2BCBB5252D718C8B1EC18C63 /* NotificationService.swift */,
+				A6217BCA986E7367ABF8208B /* Info.plist */,
+				B209A153792134CD85EE252A /* BromureNotify.entitlements */,
+			);
+			name = BromureNotify;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -291,9 +344,12 @@
 				4E57AE888889001C06A4F7E8 /* Sources */,
 				69BE8A4D8E4D9DA4E7DB3928 /* Frameworks */,
 				D6C9E8A172005E68A1DD674F /* Resources */,
+				CC531F55156D1B4CD472E876 /* Embed App Extensions */,
 			);
 			buildRules = ();
-			dependencies = ();
+			dependencies = (
+				CC576A5113FED775756707C1 /* PBXTargetDependency */,
+			);
 			name = BromureRemote;
 			packageProductDependencies = (
 				8ABC8E0C7D2DBE6AA0A1B70D /* Crypto */,
@@ -306,6 +362,23 @@
 			productName = BromureRemote;
 			productReference = 85673086EF6CFD3A1F8591AF /* BromureRemote.app */;
 			productType = "com.apple.product-type.application";
+		};
+		604F74F091BAD3D7C6E7D5EF /* BromureNotify */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8074348469ECA333301B095A /* Build configuration list for BromureNotify */;
+			buildPhases = (
+				6B4FB6461A708A910287E090 /* Sources */,
+				7877D50E3BFAF5DCF7FED2BF /* Frameworks */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = BromureNotify;
+			packageProductDependencies = (
+				3A2026F496EEC7351E995CC9 /* Crypto */,
+			);
+			productName = BromureNotify;
+			productReference = C00C590CFD58DA5C4267F177 /* BromureNotify.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -329,7 +402,10 @@
 			productRefGroup = 328EC33DF3954DC9B83FA285 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = ( 0E8A3AD980EC179856012B7E /* BromureRemote */ );
+			targets = (
+				0E8A3AD980EC179856012B7E /* BromureRemote */,
+				604F74F091BAD3D7C6E7D5EF /* BromureNotify */,
+			);
 		};
 /* End PBXProject section */
 
@@ -422,7 +498,25 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		6B4FB6461A708A910287E090 = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				68F425854E1E6E47C5736FFB /* NotificationService.swift in Sources */,
+				71F7F9BC1CB1DB51D11B523E /* PushCrypto.swift in Sources */,
+				7DA2C4B1F9D466DA828F0B77 /* PushKeypair.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		CC576A5113FED775756707C1 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 604F74F091BAD3D7C6E7D5EF /* BromureNotify */;
+			targetProxy = D8CCFB5AE40BE2795D9F15CA /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		920C57D0DA386BF254949DF9 /* Debug */ = {
@@ -496,6 +590,42 @@
 			};
 			name = Release;
 		};
+		3D1FDBFCD045DD93FA57F196 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = io.bromure.remote.BromureNotify;
+				INFOPLIST_FILE = "../BromureNotify/Info.plist";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = W3RD8G85BC;
+				GENERATE_INFOPLIST_FILE = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				MARKETING_VERSION = 1.0;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				CODE_SIGN_ENTITLEMENTS = "../BromureNotify/BromureNotify.entitlements";
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		405E8FDA3BFF7DA8C4A4925C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = io.bromure.remote.BromureNotify;
+				INFOPLIST_FILE = "../BromureNotify/Info.plist";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = W3RD8G85BC;
+				GENERATE_INFOPLIST_FILE = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				MARKETING_VERSION = 1.0;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				CODE_SIGN_ENTITLEMENTS = "../BromureNotify/BromureNotify.entitlements";
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -513,6 +643,15 @@
 			buildConfigurations = (
 				B52D0FFB021E8F69445DE3D1 /* Debug */,
 				777513FA364619292C6CE7C0 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8074348469ECA333301B095A /* Build configuration list for BromureNotify */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3D1FDBFCD045DD93FA57F196 /* Debug */,
+				405E8FDA3BFF7DA8C4A4925C /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -592,6 +731,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = C3E2C81CBCC031CA0286100E /* SwiftTerm */;
 			productName = SwiftTerm;
+		};
+		3A2026F496EEC7351E995CC9 /* Crypto */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6A50A05EE8982B43C00AC425 /* swift-crypto */;
+			productName = Crypto;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
