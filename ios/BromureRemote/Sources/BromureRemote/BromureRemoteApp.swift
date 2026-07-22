@@ -30,6 +30,9 @@ struct RootView: View {
     @State private var activeHost: RemoteHost?
     @State private var showAddServer = false
     @State private var pendingPeer: DeviceInfo?
+    /// Drives the "−" affordance: toggling it reveals delete controls on the
+    /// by-address servers (bromure.io servers aren't removable from here).
+    @State private var editMode: EditMode = .inactive
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.scenePhase) private var scenePhase
     /// When the app went to the background — used to reconnect on return only
@@ -119,18 +122,10 @@ struct RootView: View {
     private var bootList: some View {
         List {
             accountSection
-            if directory.signedIn {
-                bromureServersSection
-            }
-            savedServersSection
+            myServersSection
         }
-        .navigationTitle("Bromure Remote")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button { showAddServer = true } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("Add server by address")
-            }
-        }
+        .environment(\.editMode, $editMode)
+        .navigationTitle("Bromure Client")
     }
 
     @ViewBuilder private var accountSection: some View {
@@ -164,29 +159,59 @@ struct RootView: View {
         }
     }
 
-    @ViewBuilder private var bromureServersSection: some View {
+    private var savedHosts: [RemoteHost] {
+        store.hosts.sorted { ($0.lastConnected ?? .distantPast) > ($1.lastConnected ?? .distantPast) }
+    }
+
+    /// One list of everything this account can reach — the bromure.io directory
+    /// servers plus any added-by-address (direct) ones — with a +/− in the
+    /// header to add and remove direct connections, matching the desktop.
+    @ViewBuilder private var myServersSection: some View {
         Section {
-            if directory.p2pServers.isEmpty {
+            if directory.signedIn {
+                ForEach(directory.p2pServers) { server in
+                    Button { pendingPeer = server } label: { peerRow(server) }
+                        .buttonStyle(.plain)
+                        .disabled(!server.online || editMode == .active)
+                }
+            }
+            ForEach(savedHosts) { host in
+                Button { activeHost = host } label: { savedRow(host) }
+                    .buttonStyle(.plain)
+            }
+            .onDelete { idx in for i in idx { store.remove(savedHosts[i].id) } }
+
+            if directory.signedIn && directory.p2pServers.isEmpty && savedHosts.isEmpty {
                 if directory.directoryLoading {
                     HStack { ProgressView(); Text("Loading your servers…").foregroundStyle(.secondary) }
                 } else {
-                    Text("No servers in your bromure.io account yet. Enable Remote Access on a Bromure Mac to see it here.")
+                    Text("No servers yet. Turn on Remote Access on a Bromure Mac, or add one by address with +.")
                         .foregroundStyle(.secondary)
                 }
-            }
-            ForEach(directory.p2pServers) { server in
-                Button { pendingPeer = server } label: { peerRow(server) }
-                    .buttonStyle(.plain)
-                    .disabled(!server.online)
+            } else if !directory.signedIn && savedHosts.isEmpty {
+                Text("Add a server by address with +, or sign in above to reach your bromure.io servers.")
+                    .foregroundStyle(.secondary)
             }
         } header: {
-            HStack {
-                Text("bromure.io Servers")
+            HStack(spacing: 16) {
+                Text("My Servers")
                 Spacer()
-                if directory.directoryLoading && !directory.p2pServers.isEmpty {
+                if directory.signedIn && directory.directoryLoading && !directory.p2pServers.isEmpty {
                     ProgressView().controlSize(.mini)
                 }
+                Button { showAddServer = true } label: {
+                    Image(systemName: "plus").font(.body)
+                }
+                .accessibilityLabel("Add a server by address")
+                Button {
+                    withAnimation { editMode = editMode == .active ? .inactive : .active }
+                } label: {
+                    Image(systemName: editMode == .active ? "checkmark" : "minus").font(.body)
+                }
+                .disabled(savedHosts.isEmpty)
+                .accessibilityLabel(editMode == .active ? "Done editing" : "Remove a saved server")
             }
+            .textCase(nil)
         }
     }
 
@@ -208,29 +233,14 @@ struct RootView: View {
         .contentShape(Rectangle())
     }
 
-    @ViewBuilder private var savedServersSection: some View {
-        Section("By Address") {
-            let saved = store.hosts.sorted { ($0.lastConnected ?? .distantPast) > ($1.lastConnected ?? .distantPast) }
-            if saved.isEmpty {
-                Text("Add a server by its address with the + button.")
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(saved) { host in
-                Button { activeHost = host } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(host.name.isEmpty ? host.address : host.name)
-                            .font(.body.weight(.medium))
-                        Text(host.connectLabel).font(.caption).foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .onDelete { idx in
-                for i in idx { store.remove(saved[i].id) }
-            }
+    private func savedRow(_ host: RemoteHost) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(host.name.isEmpty ? host.address : host.name)
+                .font(.body.weight(.medium))
+            Text(host.connectLabel).font(.caption).foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 

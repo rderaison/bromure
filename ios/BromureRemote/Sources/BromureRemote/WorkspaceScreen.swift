@@ -189,7 +189,12 @@ private struct TerminalsPane: View {
         return tab.agentStatus == .working || tab.agentStatus == .needsInput || tab.isWorktree
     }
 
-    private var readerMode: Bool { readerOverride ?? isAgentic(currentTab) }
+    /// Non-agent tabs are always the raw terminal (and get no toggle); an agent
+    /// tab defaults to the reader, with the toggle as an override.
+    private var readerMode: Bool {
+        guard isAgentic(currentTab) else { return false }
+        return readerOverride ?? true
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -211,8 +216,9 @@ private struct TerminalsPane: View {
                                          window: win, guestCwd: guestCwd(for: win))
                         .id("reader-\(profileID)-\(win)")
                 } else {
-                    TerminalSurface(session: session(for: win), fontSize: fontBinding)
+                    RemoteTerminalView(session: session(for: win), fontSize: fontBinding)
                         .id("\(profileID)-\(win)")
+                        .background(Color.black)
                 }
             } else {
                 ContentUnavailableView("No terminal", systemImage: "terminal",
@@ -220,11 +226,14 @@ private struct TerminalsPane: View {
             }
         }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button { readerOverride = !readerMode } label: {
-                    Image(systemName: readerMode ? "terminal" : "doc.richtext")
+            // The terminal/reader toggle only makes sense on a coding-agent tab.
+            if isAgentic(currentTab) {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { readerOverride = !readerMode } label: {
+                        Image(systemName: readerMode ? "terminal" : "doc.richtext")
+                    }
+                    .accessibilityLabel(readerMode ? "Show raw terminal" : "Show reader")
                 }
-                .accessibilityLabel(readerMode ? "Show raw terminal" : "Show reader")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { controller.newTab(profileID) } label: {
@@ -292,34 +301,6 @@ private struct TerminalsPane: View {
     }
 }
 
-// MARK: - Terminal surface
-
-/// The live terminal plus a connection veil — so a workspace that hasn't
-/// attached yet (or has dropped) reads as "Connecting…" rather than a dead
-/// black box you can't type into. Observes the session so the veil clears the
-/// moment the pump connects.
-private struct TerminalSurface: View {
-    @ObservedObject var session: AttachSession
-    let fontSize: Binding<CGFloat>
-
-    var body: some View {
-        ZStack {
-            Color.black
-            RemoteTerminalView(session: session, fontSize: fontSize)
-            if !session.connected {
-                VStack(spacing: 10) {
-                    ProgressView()
-                    Text(session.lastError ?? "Connecting…")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                .padding(16)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                .allowsHitTesting(false)
-            }
-        }
-    }
-}
-
 // MARK: - Transcript reader
 
 /// A read-only, Claude-Code-Desktop-style rendering of the active terminal's
@@ -365,12 +346,32 @@ private struct TranscriptReaderView: View {
             }
             // Type into the agent's session — the message (and any uploaded
             // image path) shows up in the transcript on the next poll, and the
-            // agent responds inline.
-            HStack(alignment: .bottom, spacing: 8) {
-                attachButton
-                ChatComposer(placeholder: "Message the agent…", text: $draft,
-                             busy: sending, onSend: send)
+            // agent responds inline. Full-width field; attach + send ride a
+            // slim bar beneath it so the text area is as large as possible.
+            VStack(alignment: .leading, spacing: 8) {
+                TextField("Message the agent…", text: $draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 15))
+                    .lineLimit(1...8)
+                    .frame(minHeight: 24)
+                HStack(spacing: 18) {
+                    Spacer()
+                    attachButton
+                    Button(action: send) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(sendable ? Color.accentColor
+                                                       : Color.secondary.opacity(0.4))
+                    }
+                    .disabled(!sendable)
+                    .accessibilityLabel("Send")
+                }
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 16).fill(Color.platformTextBackground))
+            .overlay(RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(Color.primary.opacity(0.12)))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -407,12 +408,12 @@ private struct TranscriptReaderView: View {
                 if uploading {
                     ProgressView()
                 } else {
-                    Image(systemName: "paperclip.circle.fill")
-                        .font(.system(size: 26))
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 22, weight: .medium))
                         .foregroundStyle(Color.accentColor)
                 }
             }
-            .frame(width: 34, height: 34)
+            .frame(width: 30, height: 30)
         }
         .disabled(uploading)
         .accessibilityLabel("Attach image")
@@ -459,6 +460,10 @@ private struct TranscriptReaderView: View {
             if animated { withAnimation { proxy.scrollTo(last, anchor: .bottom) } }
             else { proxy.scrollTo(last, anchor: .bottom) }
         }
+    }
+
+    private var sendable: Bool {
+        !sending && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func send() {
