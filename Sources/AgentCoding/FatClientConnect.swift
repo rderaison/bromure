@@ -239,6 +239,10 @@ final class RemoteConnectModel {
     var p2pBusy: Bool { account.busy }
     var p2pError: String? { account.error ?? directoryError }
 
+    /// True while a directory fetch is in flight with nothing to show yet —
+    /// the empty state renders a spinner instead of a premature "No servers".
+    private(set) var directoryLoading = false
+
     /// Load the identity and, if present, refresh the server directory. Also
     /// starts observing identity changes so a sign-in completed while the window
     /// is open refreshes the list.
@@ -251,13 +255,17 @@ final class RemoteConnectModel {
                     guard let self else { return }
                     self.p2pServers = []
                     if self.account.signedIn { Task { await self.loadDirectory() } }
+                    self.startDirectoryRefresh()
                 }
             }
         }
         if account.signedIn {
             Task { await loadDirectory() }
-            startDirectoryRefresh()
         }
+        // Unconditional: the tick no-ops while signed out (loadDirectory
+        // guards on the identity), and arming it here closes every path
+        // where a later sign-in would otherwise poll nothing.
+        startDirectoryRefresh()
     }
 
     /// `silent` background refreshes keep the last-known list on a transient
@@ -266,6 +274,8 @@ final class RemoteConnectModel {
     func loadDirectory(silent: Bool = false) async {
         guard let id = account.identity, let ep = try? ControlPlaneEndpoint(base: id.apiBase) else { return }
         if !silent { directoryError = nil }
+        if p2pServers.isEmpty { directoryLoading = true }
+        defer { directoryLoading = false }
         let client = ControlPlaneClient(endpoint: ep)
         do {
             let devices = try await client.listDevices(bearer: id.bearer)
@@ -278,13 +288,22 @@ final class RemoteConnectModel {
             p2pServers = []
             directoryError = "This Mac's bromure.io device was revoked. Sign in again."
         } catch {
-            if !silent { directoryError = "Couldn't load your servers." }
+            if !silent {
+                directoryError = "Couldn't load your servers."
+                // One fast retry: the first fetch after launch/wake can lose
+                // to a cold network — don't make the user find the ⟳ button
+                // or wait out the poll interval.
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    await self?.loadDirectory(silent: true)
+                }
+            }
         }
     }
 
     private func startDirectoryRefresh() {
         guard directoryTimer == nil else { return }
-        let t = Timer(timeInterval: 12, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.loadDirectory(silent: true) }
         }
         RunLoop.main.add(t, forMode: .common)
@@ -462,6 +481,10 @@ struct RemoteConnectView: View {
             } else {
                 emptyState
             }
+            if let err = model.p2pError {
+                Text(err).font(.caption).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             accountBar
 
@@ -538,13 +561,21 @@ struct RemoteConnectView: View {
 
     private var emptyState: some View {
         VStack(spacing: 10) {
-            Image(systemName: "macmini").font(.system(size: 30)).foregroundStyle(.tertiary)
-            Text(model.signedIn
-                 ? "No servers in your workspace yet.\nEnable Remote Access on the Mac you want to reach, or add one by address."
-                 : "Sign in with bromure.io to see your servers, or add one by address.")
-                .multilineTextAlignment(.center)
-                .font(.callout).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if model.signedIn && model.directoryLoading {
+                // First fetch in flight — an empty list here isn't "no
+                // servers", it's "not answered yet".
+                ProgressView().controlSize(.small)
+                Text("Looking for your servers…")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "macmini").font(.system(size: 30)).foregroundStyle(.tertiary)
+                Text(model.signedIn
+                     ? "No servers in your workspace yet.\nEnable Remote Access on the Mac you want to reach, or add one by address."
+                     : "Sign in with bromure.io to see your servers, or add one by address.")
+                    .multilineTextAlignment(.center)
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity)
         .frame(height: 190)
