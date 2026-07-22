@@ -87,36 +87,46 @@ pipeline {
         stage('Archive') {
             steps {
                 withCredentials([
-                    file(credentialsId:   'ASC_API_KEY',   variable: 'ASC_KEY'),
-                    string(credentialsId: 'ASC_KEY_ID',    variable: 'ASC_KEY_ID'),
-                    string(credentialsId: 'ASC_ISSUER_ID', variable: 'ASC_ISSUER_ID')
+                    file(credentialsId:   'PROVISION_PROFILE_IOS_APP', variable: 'PP_APP'),
+                    file(credentialsId:   'PROVISION_PROFILE_IOS_NSE', variable: 'PP_NSE'),
+                    string(credentialsId: 'IOS_SIGN_IDENTITY',         variable: 'IOS_SIGN_IDENTITY')
                 ]) {
                     sh '''
                         set -euo pipefail
                         rm -rf "$ARCHIVE"
 
-                        # -configuration Release selects the production
-                        # aps-environment entitlement.
-                        #
-                        # Note on signing: under AUTOMATIC signing the archive
-                        # itself is signed with a *development* profile — the
-                        # distribution re-sign happens in -exportArchive below.
-                        # A development profile can only be minted for a team
-                        # with at least one registered device, so the team needs
-                        # one device registered (Certificates, Identifiers &
-                        # Profiles → Devices). Switch both targets to manual
-                        # signing with pinned App Store profiles if you'd rather
-                        # not depend on that.
+                        # Install both App Store profiles where Xcode looks for
+                        # them, and read each one's Name back out of the file —
+                        # that Name is what the target pins via
+                        # PROVISIONING_PROFILE_SPECIFIER, so deriving it here
+                        # keeps portal-specific names out of the repo entirely.
+                        PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+                        mkdir -p "$PROFILE_DIR"
+                        install_profile() {
+                            uuid=$(security cms -D -i "$1" | plutil -extract UUID raw -)
+                            cp "$1" "$PROFILE_DIR/$uuid.mobileprovision"
+                            security cms -D -i "$1" | plutil -extract Name raw -
+                        }
+                        PROFILE_APP="$(install_profile "$PP_APP")"
+                        PROFILE_NSE="$(install_profile "$PP_NSE")"
+                        echo "app profile: $PROFILE_APP"
+                        echo "extension profile: $PROFILE_NSE"
+
+                        # Release carries the production aps-environment AND the
+                        # manual-signing settings. Deliberately NO
+                        # -allowProvisioningUpdates: signing is fully pinned, so
+                        # the archive never asks Apple to mint a development
+                        # profile (which a team with no registered devices can't
+                        # do). Each target reads its own PROFILE_* variable.
                         xcodebuild archive \
                             -project "$PROJECT" \
                             -scheme "$SCHEME" \
                             -configuration Release \
                             -destination 'generic/platform=iOS' \
                             -archivePath "$ARCHIVE" \
-                            -allowProvisioningUpdates \
-                            -authenticationKeyPath "$ASC_KEY" \
-                            -authenticationKeyID "$ASC_KEY_ID" \
-                            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+                            IOS_SIGN_IDENTITY="$IOS_SIGN_IDENTITY" \
+                            PROFILE_APP="$PROFILE_APP" \
+                            PROFILE_NSE="$PROFILE_NSE" \
                             MARKETING_VERSION="$MARKETING_VERSION" \
                             CURRENT_PROJECT_VERSION="$BUILD_VERSION"
                     '''
@@ -130,11 +140,18 @@ pipeline {
                     file(credentialsId:   'ASC_API_KEY',   variable: 'ASC_KEY'),
                     string(credentialsId: 'ASC_KEY_ID',    variable: 'ASC_KEY_ID'),
                     string(credentialsId: 'ASC_ISSUER_ID', variable: 'ASC_ISSUER_ID'),
-                    string(credentialsId: 'TEAM_ID',       variable: 'TEAM_ID')
+                    string(credentialsId: 'TEAM_ID',       variable: 'TEAM_ID'),
+                    file(credentialsId:   'PROVISION_PROFILE_IOS_APP', variable: 'PP_APP'),
+                    file(credentialsId:   'PROVISION_PROFILE_IOS_NSE', variable: 'PP_NSE')
                 ]) {
                     sh '''
                         set -euo pipefail
                         rm -rf "$EXPORT"; mkdir -p "$EXPORT"
+
+                        # Manual signing needs an explicit bundle-id -> profile
+                        # map, one entry per target (the app and its extension).
+                        PROFILE_APP=$(security cms -D -i "$PP_APP" | plutil -extract Name raw -)
+                        PROFILE_NSE=$(security cms -D -i "$PP_NSE" | plutil -extract Name raw -)
 
                         # destination=upload hands the build straight to App
                         # Store Connect; export leaves a local .ipa instead.
@@ -152,7 +169,16 @@ pipeline {
 	<key>teamID</key>
 	<string>$TEAM_ID</string>
 	<key>signingStyle</key>
-	<string>automatic</string>
+	<string>manual</string>
+	<key>signingCertificate</key>
+	<string>Apple Distribution</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>io.bromure.remote</key>
+		<string>$PROFILE_APP</string>
+		<key>io.bromure.remote.BromureNotify</key>
+		<string>$PROFILE_NSE</string>
+	</dict>
 	<key>uploadSymbols</key>
 	<true/>
 	<key>manageAppVersionAndBuildNumber</key>
@@ -161,11 +187,12 @@ pipeline {
 </plist>
 PLIST
 
+                        # The API key is still needed here — not for signing
+                        # (that's pinned) but to authenticate the upload.
                         xcodebuild -exportArchive \
                             -archivePath "$ARCHIVE" \
                             -exportPath "$EXPORT" \
                             -exportOptionsPlist "$EXPORT/ExportOptions.plist" \
-                            -allowProvisioningUpdates \
                             -authenticationKeyPath "$ASC_KEY" \
                             -authenticationKeyID "$ASC_KEY_ID" \
                             -authenticationKeyIssuerID "$ASC_ISSUER_ID"
@@ -190,14 +217,26 @@ PLIST
 // ---------------------------------------------------------------------------
 // Jenkins credentials this pipeline expects
 //
-//   ASC_API_KEY    Secret file   The App Store Connect API key (AuthKey_*.p8).
-//                                Never committed — upload the .p8 to Jenkins.
+//   ASC_API_KEY    Secret file   App Store Connect API key (AuthKey_*.p8), used
+//                                to authenticate the UPLOAD. Never committed.
 //   ASC_KEY_ID     Secret text   The key's 10-char Key ID.
 //   ASC_ISSUER_ID  Secret text   The API key's Issuer ID (a UUID).
+//   PROVISION_PROFILE_IOS_APP  Secret file  App Store .mobileprovision for
+//                                io.bromure.remote
+//   PROVISION_PROFILE_IOS_NSE  Secret file  App Store .mobileprovision for
+//                                io.bromure.remote.BromureNotify
+//   IOS_SIGN_IDENTITY  Secret text  Signing identity as it appears in the
+//                                agent keychain, e.g.
+//                                "Apple Distribution: NAME (TEAMID)"
 //   TEAM_ID        Secret text   Apple Developer team id  (already exists —
 //                                shared with Jenkinsfile.ac).
 //   KEYCHAIN_PASSWORD  Secret text  Unlocks the agent's build keychain
 //                                (already exists — shared with Jenkinsfile.ac).
+//
+// Signing is fully MANUAL and pinned, so the pipeline needs no registered
+// devices. That means the agent's build keychain must hold the Apple
+// Distribution certificate + private key, and the two profiles above must be
+// kept current (App Store profiles expire yearly).
 //
 // The agent (label: macosx-builder) additionally needs Xcode with the iOS SDK
 // and python3. The app record must already exist in App Store Connect with

@@ -381,7 +381,6 @@ def main():
         "PRODUCT_NAME = \"$(TARGET_NAME)\";",
         f"PRODUCT_BUNDLE_IDENTIFIER = {BUNDLE_ID};",
         "INFOPLIST_FILE = App/Info.plist;",
-        "CODE_SIGN_STYLE = Automatic;",
         f"DEVELOPMENT_TEAM = {TEAM};",
         "GENERATE_INFOPLIST_FILE = NO;",
         "CURRENT_PROJECT_VERSION = 1;",
@@ -399,7 +398,6 @@ def main():
         "PRODUCT_NAME = \"$(TARGET_NAME)\";",
         f"PRODUCT_BUNDLE_IDENTIFIER = {BUNDLE_ID}.BromureNotify;",
         "INFOPLIST_FILE = \"../BromureNotify/Info.plist\";",
-        "CODE_SIGN_STYLE = Automatic;",
         f"DEVELOPMENT_TEAM = {TEAM};",
         "GENERATE_INFOPLIST_FILE = NO;",
         "CURRENT_PROJECT_VERSION = 1;",
@@ -424,13 +422,28 @@ def main():
     L.append("\n/* Begin XCBuildConfiguration section */")
     L += cfg(cfg_proj_debug, "Debug", proj_debug)
     L += cfg(cfg_proj_release, "Release", proj_release)
-    # APNs environment follows the build: sandbox for local/dev, production for
-    # a distribution (TestFlight/App Store) archive — the entitlements file reads
-    # $(APS_ENVIRONMENT).
-    L += cfg(cfg_tgt_debug, "Debug", tgt_common + ["APS_ENVIRONMENT = development;"])
-    L += cfg(cfg_tgt_release, "Release", tgt_common + ["APS_ENVIRONMENT = production;"])
-    L += cfg(nse_cfg_debug, "Debug", nse_tgt)
-    L += cfg(nse_cfg_release, "Release", nse_tgt)
+    # Signing differs by configuration:
+    #   Debug   — automatic, so local + simulator builds Just Work.
+    #   Release — MANUAL against pinned App Store profiles, so CI never needs a
+    #             registered device (automatic signing would insist on minting a
+    #             development profile for the archive, which requires one).
+    # The identity and the two profile names come from the build environment so
+    # nothing portal-specific is baked into the project; each target references
+    # its OWN profile variable, which is how we get per-target profiles out of
+    # xcodebuild's otherwise-global command-line settings.
+    manual_common = [
+        "CODE_SIGN_STYLE = Manual;",
+        'CODE_SIGN_IDENTITY = "$(IOS_SIGN_IDENTITY)";',
+    ]
+    L += cfg(cfg_tgt_debug, "Debug",
+             tgt_common + ["APS_ENVIRONMENT = development;", "CODE_SIGN_STYLE = Automatic;"])
+    L += cfg(cfg_tgt_release, "Release",
+             tgt_common + ["APS_ENVIRONMENT = production;"] + manual_common
+             + ['PROVISIONING_PROFILE_SPECIFIER = "$(PROFILE_APP)";'])
+    L += cfg(nse_cfg_debug, "Debug", nse_tgt + ["CODE_SIGN_STYLE = Automatic;"])
+    L += cfg(nse_cfg_release, "Release",
+             nse_tgt + manual_common
+             + ['PROVISIONING_PROFILE_SPECIFIER = "$(PROFILE_NSE)";'])
     L.append("/* End XCBuildConfiguration section */")
 
     # XCConfigurationList
