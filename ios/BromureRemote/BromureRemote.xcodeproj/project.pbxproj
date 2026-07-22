@@ -14,6 +14,7 @@
 		A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */; };
 		C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */; };
 		DD53AF72902E4568BC03B607 /* PlatformStubs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */; };
+		53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */; };
 		4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */; };
 		D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */; };
 		A605D8611294971B8BA65260 /* AutomationKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */; };
@@ -91,6 +92,7 @@
 		DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectScreen.swift"; path = "Sources/BromureRemote/ConnectScreen.swift"; sourceTree = "<group>"; };
 		CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "HostMirrorScreen.swift"; path = "Sources/BromureRemote/HostMirrorScreen.swift"; sourceTree = "<group>"; };
 		7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformStubs.swift"; path = "Sources/BromureRemote/PlatformStubs.swift"; sourceTree = "<group>"; };
+		D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushNotifications.swift"; path = "Sources/BromureRemote/PushNotifications.swift"; sourceTree = "<group>"; };
 		0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RemoteTransportMobile.swift"; path = "Sources/BromureRemote/RemoteTransportMobile.swift"; sourceTree = "<group>"; };
 		0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceScreen.swift"; path = "Sources/BromureRemote/WorkspaceScreen.swift"; sourceTree = "<group>"; };
 		F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationKanbanView.swift"; path = "Sources/BromureRemote/_shared/AutomationKanbanView.swift"; sourceTree = "<group>"; };
@@ -200,6 +202,7 @@
 				DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */,
 				CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */,
 				7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */,
+				D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */,
 				0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */,
 				0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */,
 				F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */,
@@ -348,6 +351,7 @@
 				A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */,
 				C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */,
 				DD53AF72902E4568BC03B607 /* PlatformStubs.swift in Sources */,
+				53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */,
 				4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */,
 				D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */,
 				A605D8611294971B8BA65260 /* AutomationKanbanView.swift in Sources */,

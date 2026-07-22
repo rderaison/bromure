@@ -248,6 +248,67 @@ struct ControlPlaneClient {
         return w.recorded
     }
 
+    // MARK: iOS push notifications (bearer)
+
+    private struct Ack: Decodable { let ok: Bool? }
+
+    /// Register/refresh this device's APNs token so the account can push to it.
+    func registerPushToken(bearer: String, token: String,
+                           environment: String, bundleId: String) async throws {
+        let _: Ack = try await post("/v1/devices/push-token",
+            body: ["token": token, "environment": environment, "bundleId": bundleId],
+            bearer: bearer)
+    }
+
+    /// Register/refresh this device's X25519 push encryption key (hex).
+    func registerPushKey(bearer: String, pubkeyHex: String) async throws {
+        let _: Ack = try await post("/v1/devices/push-key",
+            body: ["pubkey": pubkeyHex], bearer: bearer)
+    }
+
+    /// Report that a coding agent on this server is waiting for input.
+    func notifyNeedsInput(bearer: String, eventKey: String, profileId: String?,
+                          windowIndex: Int?, fallbackTitle: String,
+                          macIdleSeconds: Double?, sealed: [String: String] = [:]) async throws {
+        var body: [String: Any] = ["eventKey": eventKey,
+                                    "fallbackTitle": fallbackTitle,
+                                    "sealed": sealed]
+        if let profileId { body["profileId"] = profileId }
+        if let windowIndex { body["windowIndex"] = windowIndex }
+        if let macIdleSeconds { body["macIdleSeconds"] = macIdleSeconds }
+        let _: Ack = try await post("/v1/notifications/needs-input",
+                                    body: body, bearer: bearer)
+    }
+
+    /// Report that a pending question was answered or otherwise went away.
+    func notifyResolved(bearer: String, eventKey: String) async throws {
+        let _: Ack = try await post("/v1/notifications/resolved",
+                                    body: ["eventKey": eventKey], bearer: bearer)
+    }
+
+    struct PendingNotification: Decodable {
+        let eventKey: String
+        let serverInstallId: String?
+        let profileId: String?
+        let windowIndex: Int?
+        let delivered: Bool?
+    }
+    /// The account's currently-unanswered questions — the phone removes any
+    /// delivered notification not in this set when it foregrounds.
+    func pendingNotifications(bearer: String) async throws -> [PendingNotification] {
+        struct Wrap: Decodable { let pending: [PendingNotification] }
+        let w: Wrap = try await get("/v1/notifications/pending", bearer: bearer)
+        return w.pending
+    }
+
+    /// A client + bearer bound to the current enrolled device, or nil if this
+    /// device has no bromure.io identity yet.
+    static func current() -> (client: ControlPlaneClient, bearer: String)? {
+        guard let id = P2PIdentity.current(),
+              let endpoint = try? ControlPlaneEndpoint(base: id.apiBase) else { return nil }
+        return (ControlPlaneClient(endpoint: endpoint), id.bearer)
+    }
+
     // MARK: Transport
 
     private func get<T: Decodable>(_ path: String, bearer: String?) async throws -> T {

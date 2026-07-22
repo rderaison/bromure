@@ -10,6 +10,7 @@ import SwiftUI
 @main
 #endif
 struct BromureRemoteApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -38,6 +39,7 @@ struct RootView: View {
     /// When the app went to the background — used to reconnect on return only
     /// after a real absence (a brief app-switch keeps its sockets).
     @State private var backgroundedAt: Date?
+    private let push = PushManager.shared
 
     init() {
         // The directory model navigates to the mirror on a successful connect.
@@ -76,6 +78,7 @@ struct RootView: View {
             directory.refreshAccount()
             hostBox.onChange = { activeHost = $0; pendingPeer = nil }
             AppBadge.requestAuthorization()
+            push.syncToken()
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -88,10 +91,19 @@ struct RootView: View {
                     NotificationCenter.default.post(name: .bromureDidForeground, object: nil)
                 }
                 backgroundedAt = nil
+                // Remove any delivered notification whose question is already
+                // answered — the guarantee behind the silent "clear" push.
+                push.reconcile()
             default:
                 break
             }
         }
+        // A tapped notification asks to open the server that's waiting; connect
+        // to it so the agent shows up in "At a Glance" ready to answer.
+        .onChange(of: push.tapTarget) { _, target in route(target) }
+        .onChange(of: directory.p2pServers.map(\.id)) { _, _ in route(push.tapTarget) }
+        // Register the APNs token with the account once we're signed in.
+        .onChange(of: directory.signedIn) { _, signedIn in if signedIn { push.syncToken() } }
         .onOpenURL { url in
             // bromure://enroll?…&state=… — complete the account sign-in.
             guard url.scheme == "bromure", let link = EnrollLink(parsing: url.absoluteString) else { return }
@@ -115,6 +127,18 @@ struct RootView: View {
                 pendingPeer = nil
             }
         }
+    }
+
+    /// Route a tapped-notification target: connect to the server it names once
+    /// the directory knows about it (a cold launch can tap before it loads).
+    private func route(_ target: PushTapTarget?) {
+        guard let target else { return }
+        guard let server = directory.p2pServers.first(where: { $0.id == target.serverInstallId }) else {
+            directory.refreshAccount() // not loaded yet — retried when servers arrive
+            return
+        }
+        if server.online { pendingPeer = server }
+        push.tapTarget = nil
     }
 
     // MARK: Boot list

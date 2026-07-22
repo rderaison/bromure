@@ -2,6 +2,7 @@ import ArgumentParser
 import Cocoa
 import Crypto
 import Foundation
+import IOKit
 import SandboxEngine
 import Sparkle
 import SwiftUI
@@ -1232,12 +1233,58 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    // MARK: Push notification events (needs-input → phone, via bromure.io/APNs)
+
+    /// Bridge a coding agent's needs-input / resolved transition to the phone
+    /// push pipeline. Only while Remote Access is on — a phone can't answer a
+    /// Mac it can't reach — and only for a Mac enrolled in bromure.io. The
+    /// cloud debounces, so a question answered here in a few seconds never
+    /// pushes at all.
+    private func reportPushTransition(_ id: Profile.ID, index: Int,
+                                      from old: AgentStatus, to new: AgentStatus) {
+        guard old != new, P2PBroker.remoteAccessEnabled,
+              let (client, bearer) = ControlPlaneClient.current() else { return }
+        let key = "ni-\(id.uuidString)-\(index)"
+        if new == .needsInput {
+            let title = profile(for: id)?.name ?? "Bromure"
+            let idle = hostIdleSeconds()
+            let pid = id.uuidString
+            Task {
+                try? await client.notifyNeedsInput(
+                    bearer: bearer, eventKey: key, profileId: pid, windowIndex: index,
+                    fallbackTitle: title, macIdleSeconds: idle)
+            }
+        } else if old == .needsInput {
+            Task { try? await client.notifyResolved(bearer: bearer, eventKey: key) }
+        }
+    }
+
+    /// Seconds since the last local keyboard/mouse input (IOKit HID idle),
+    /// feeding the cloud's idle-aware debounce: at the desk → hold the push
+    /// (they'll likely answer here); away → push almost immediately.
+    private func hostIdleSeconds() -> Double {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault,
+                IOServiceMatching("IOHIDSystem"), &iterator) == KERN_SUCCESS else { return 0 }
+        defer { IOObjectRelease(iterator) }
+        let entry = IOIteratorNext(iterator)
+        guard entry != 0 else { return 0 }
+        defer { IOObjectRelease(entry) }
+        var props: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+              let dict = props?.takeRetainedValue() as? [String: Any],
+              let idle = (dict["HIDIdleTime"] as? NSNumber)?.uint64Value else { return 0 }
+        return Double(idle) / 1_000_000_000.0
+    }
+
     /// Per-tab status from a Claude hook (keyed by the tmux window index the
     /// hook reported). Authoritative for that tab — no timer, since the Stop
     /// hook delivers the terminal state explicitly.
     func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus) {
         if let tab = pane(for: id)?.model.tabs.first(where: { $0.index == index }) {
+            let previousStatus = tab.agentStatus
             tab.agentStatus = status
+            reportPushTransition(id, index: index, from: previousStatus, to: status)
             // A finished Claude tab may be an automation run — the engine saves
             // its transcript and closes the tab if so — or a coding task, which
             // moves to Testing.
