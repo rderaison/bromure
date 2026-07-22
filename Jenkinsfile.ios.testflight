@@ -1,0 +1,198 @@
+// Bromure Client (iOS/iPadOS) → TestFlight.
+//
+// Archives the app + its BromureNotify notification-service extension and
+// uploads them to App Store Connect. Signing and upload both authenticate with
+// an App Store Connect API key (a .p8 held as a Jenkins *file* credential), so
+// the agent needs no interactive Xcode account login — automatic signing mints
+// the distribution certificate and both App Store provisioning profiles on
+// demand.
+//
+// Jenkins credentials required (see README block at the bottom of this file):
+//   ASC_API_KEY (file)   ASC_KEY_ID (string)   ASC_ISSUER_ID (string)
+//   TEAM_ID (string)     KEYCHAIN_PASSWORD (string)   — last two already exist
+
+pipeline {
+    agent { label 'macosx-builder' }
+
+    parameters {
+        booleanParam(
+            name: 'UPLOAD',
+            defaultValue: true,
+            description: 'Upload to App Store Connect (TestFlight). Uncheck to archive + export a local .ipa only.'
+        )
+        string(
+            name: 'MARKETING_VERSION',
+            defaultValue: '1.0',
+            description: 'User-visible version (CFBundleShortVersionString).'
+        )
+    }
+
+    environment {
+        KEYCHAIN_PASSWORD = credentials('KEYCHAIN_PASSWORD')
+        BUILD_KEYCHAIN    = "${HOME}/build.keychain"
+
+        PROJECT = 'ios/BromureRemote/BromureRemote.xcodeproj'
+        SCHEME  = 'BromureRemote'
+        ARCHIVE = "${WORKSPACE}/build/BromureRemote.xcarchive"
+        EXPORT  = "${WORKSPACE}/build/export"
+
+        // CFBundleVersion must be unique for every TestFlight upload; the
+        // Jenkins build number gives us a monotonic one for free. Both
+        // Info.plists read $(CURRENT_PROJECT_VERSION), and the extension's
+        // version has to match the app's — passing it once covers both targets.
+        BUILD_VERSION = "${env.BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Unlock Keychain') {
+            steps {
+                // Automatic signing writes the distribution certificate into
+                // the build keychain, so it has to be unlocked first.
+                sh '''
+                    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$BUILD_KEYCHAIN"
+                    security list-keychains -s "$BUILD_KEYCHAIN" login.keychain-db
+                    security default-keychain -s "$BUILD_KEYCHAIN"
+                '''
+            }
+        }
+
+        stage('Toolchain') {
+            steps {
+                // Fail here with a readable message rather than deep inside the
+                // archive if the agent is half-provisioned. Idempotent.
+                sh '''
+                    set -euo pipefail
+                    xcode-select -p
+                    xcodebuild -version
+                    python3 --version
+                    xcodebuild -showsdks | grep -q iphoneos
+                    echo "Building Bromure Client ${MARKETING_VERSION} (${BUILD_VERSION})"
+                '''
+            }
+        }
+
+        stage('Generate project') {
+            steps {
+                // The .xcodeproj is generated, not hand-maintained: refresh the
+                // shared symlink farm, then re-emit the project so the app and
+                // the extension pick up any added/removed sources.
+                sh '''
+                    set -euo pipefail
+                    python3 scripts/gen-ios-sources.py
+                    python3 scripts/gen-ios-project.py
+                '''
+            }
+        }
+
+        stage('Archive') {
+            steps {
+                withCredentials([
+                    file(credentialsId:   'ASC_API_KEY',   variable: 'ASC_KEY'),
+                    string(credentialsId: 'ASC_KEY_ID',    variable: 'ASC_KEY_ID'),
+                    string(credentialsId: 'ASC_ISSUER_ID', variable: 'ASC_ISSUER_ID')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        rm -rf "$ARCHIVE"
+
+                        # -configuration Release is load-bearing twice over: it
+                        # selects the production aps-environment entitlement, and
+                        # it makes automatic signing provision an App Store
+                        # (distribution) profile instead of a development one —
+                        # a development profile would demand a registered device.
+                        xcodebuild archive \
+                            -project "$PROJECT" \
+                            -scheme "$SCHEME" \
+                            -configuration Release \
+                            -destination 'generic/platform=iOS' \
+                            -archivePath "$ARCHIVE" \
+                            -allowProvisioningUpdates \
+                            -authenticationKeyPath "$ASC_KEY" \
+                            -authenticationKeyID "$ASC_KEY_ID" \
+                            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+                            MARKETING_VERSION="$MARKETING_VERSION" \
+                            CURRENT_PROJECT_VERSION="$BUILD_VERSION"
+                    '''
+                }
+            }
+        }
+
+        stage('Export & Upload') {
+            steps {
+                withCredentials([
+                    file(credentialsId:   'ASC_API_KEY',   variable: 'ASC_KEY'),
+                    string(credentialsId: 'ASC_KEY_ID',    variable: 'ASC_KEY_ID'),
+                    string(credentialsId: 'ASC_ISSUER_ID', variable: 'ASC_ISSUER_ID'),
+                    string(credentialsId: 'TEAM_ID',       variable: 'TEAM_ID')
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        rm -rf "$EXPORT"; mkdir -p "$EXPORT"
+
+                        # destination=upload hands the build straight to App
+                        # Store Connect; export leaves a local .ipa instead.
+                        if [ "$UPLOAD" = "true" ]; then DEST=upload; else DEST=export; fi
+
+                        cat > "$EXPORT/ExportOptions.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>app-store-connect</string>
+	<key>destination</key>
+	<string>$DEST</string>
+	<key>teamID</key>
+	<string>$TEAM_ID</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>uploadSymbols</key>
+	<true/>
+	<key>manageAppVersionAndBuildNumber</key>
+	<false/>
+</dict>
+</plist>
+PLIST
+
+                        xcodebuild -exportArchive \
+                            -archivePath "$ARCHIVE" \
+                            -exportPath "$EXPORT" \
+                            -exportOptionsPlist "$EXPORT/ExportOptions.plist" \
+                            -allowProvisioningUpdates \
+                            -authenticationKeyPath "$ASC_KEY" \
+                            -authenticationKeyID "$ASC_KEY_ID" \
+                            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Build ${env.BUILD_VERSION} done. If uploaded, it shows up in " +
+                 "App Store Connect → TestFlight once processing finishes (~5-15 min)."
+        }
+        always {
+            archiveArtifacts artifacts: 'build/export/**/*.ipa',
+                             allowEmptyArchive: true, fingerprint: true
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Jenkins credentials this pipeline expects
+//
+//   ASC_API_KEY    Secret file   The App Store Connect API key (AuthKey_*.p8).
+//                                Never committed — upload the .p8 to Jenkins.
+//   ASC_KEY_ID     Secret text   The key's 10-char Key ID.
+//   ASC_ISSUER_ID  Secret text   The API key's Issuer ID (a UUID).
+//   TEAM_ID        Secret text   Apple Developer team id  (already exists —
+//                                shared with Jenkinsfile.ac).
+//   KEYCHAIN_PASSWORD  Secret text  Unlocks the agent's build keychain
+//                                (already exists — shared with Jenkinsfile.ac).
+//
+// The agent (label: macosx-builder) additionally needs Xcode with the iOS SDK
+// and python3. The app record must already exist in App Store Connect with
+// bundle id io.bromure.remote, otherwise the upload step is rejected.
+// ---------------------------------------------------------------------------
