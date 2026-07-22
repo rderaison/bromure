@@ -236,6 +236,10 @@ final class RemoteConnectModel {
 
     var signedIn: Bool { account.signedIn }
     var accountLabel: String? { account.accountLabel }
+    /// Managed (enterprise) identity — owned by the managed-enrollment
+    /// lifecycle, so this window must not offer Sign Out for it (the
+    /// coordinator refuses it anyway).
+    var isEnterpriseAccount: Bool { account.isEnterprise }
     var p2pBusy: Bool { account.busy }
     var p2pError: String? { account.error ?? directoryError }
 
@@ -597,8 +601,16 @@ struct RemoteConnectView: View {
                 Button { Task { await model.loadDirectory() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.borderless).help("Refresh servers")
                 Spacer()
-                Button("Sign Out") { model.signOutAccount(); selection = nil }
-                    .buttonStyle(.link)
+                if model.isEnterpriseAccount {
+                    // A managed identity can't be signed out of from here —
+                    // a button that silently no-ops is worse than saying so.
+                    Text("Managed by your organization")
+                        .font(.caption).foregroundStyle(.tertiary)
+                        .help("This Mac is enrolled by your organization; its bromure.io identity is managed outside this window.")
+                } else {
+                    Button("Sign Out") { model.signOutAccount(); selection = nil }
+                        .buttonStyle(.link)
+                }
             } else {
                 Image(systemName: "person.crop.circle.badge.plus").foregroundStyle(.secondary)
                 Button("Sign in with bromure.io") { model.signIn() }

@@ -32,7 +32,12 @@ struct EnrollCompleteResponse: Decodable {
 struct DeviceInfo: Decodable, Identifiable, Equatable {
     let id: String
     let name: String?
-    let capability: String
+    /// Legacy browser-enroll capability. NULL for an enterprise install that
+    /// became a server via the server-mode toggle (it never browser-enrolled),
+    /// so this MUST stay optional — a non-optional field made one enterprise
+    /// row fail the whole directory decode ("Couldn't load your servers").
+    /// The directory only lists servers regardless.
+    let capability: String?
     let revoked: Bool
     let online: Bool
     let lastSeenAt: String?
