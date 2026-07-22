@@ -1246,13 +1246,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
               let (client, bearer) = ControlPlaneClient.current() else { return }
         let key = "ni-\(id.uuidString)-\(index)"
         if new == .needsInput {
-            let title = profile(for: id)?.name ?? "Bromure"
+            // The rich title (workspace · tab) is E2E-sealed to each phone's
+            // push key; the server-visible fallback stays generic so no names
+            // leak to bromure.io or Apple.
+            let profileName = profile(for: id)?.name ?? "Workspace"
+            let tabLabel = pane(for: id)?.model.tabs.first(where: { $0.index == index })?.shownLabel ?? ""
+            let richTitle = tabLabel.isEmpty ? profileName : "\(profileName) · \(tabLabel)"
+            let rich = try? JSONSerialization.data(
+                withJSONObject: ["title": richTitle, "body": "An agent needs your input"])
             let idle = hostIdleSeconds()
             let pid = id.uuidString
             Task {
+                var sealed: [String: String] = [:]
+                if let rich, let recipients = try? await client.pushRecipients(bearer: bearer) {
+                    for r in recipients {
+                        if let blob = PushCrypto.seal(rich, toPublicKeyHex: r.pubkey) {
+                            sealed[r.installId] = blob
+                        }
+                    }
+                }
                 try? await client.notifyNeedsInput(
                     bearer: bearer, eventKey: key, profileId: pid, windowIndex: index,
-                    fallbackTitle: title, macIdleSeconds: idle)
+                    fallbackTitle: "Bromure", macIdleSeconds: idle, sealed: sealed)
             }
         } else if old == .needsInput {
             Task { try? await client.notifyResolved(bearer: bearer, eventKey: key) }

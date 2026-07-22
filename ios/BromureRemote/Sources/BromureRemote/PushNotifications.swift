@@ -49,9 +49,14 @@ final class PushManager {
         guard let token = apnsTokenHex, let (client, bearer) = ControlPlaneClient.current() else { return }
         let env = environment
         let bundle = Bundle.main.bundleIdentifier ?? "io.bromure.remote"
+        let pushPubkey = PushKeypair.publicKeyHex
         Task {
             try? await client.registerPushToken(bearer: bearer, token: token,
                                                  environment: env, bundleId: bundle)
+            // Publish this device's X25519 key so the Mac can E2E-seal to it.
+            if let pushPubkey {
+                try? await client.registerPushKey(bearer: bearer, pubkeyHex: pushPubkey)
+            }
         }
     }
 

@@ -301,6 +301,15 @@ struct ControlPlaneClient {
         return w.pending
     }
 
+    struct PushRecipient: Decodable { let installId: String; let pubkey: String }
+    /// The account's other devices that can receive an E2E push (a registered
+    /// APNs token + X25519 push key). The Mac seals the payload to each.
+    func pushRecipients(bearer: String) async throws -> [PushRecipient] {
+        struct Wrap: Decodable { let recipients: [PushRecipient] }
+        let w: Wrap = try await get("/v1/notifications/recipients", bearer: bearer)
+        return w.recipients
+    }
+
     /// A client + bearer bound to the current enrolled device, or nil if this
     /// device has no bromure.io identity yet.
     static func current() -> (client: ControlPlaneClient, bearer: String)? {

@@ -14,6 +14,7 @@
 		A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */; };
 		C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */; };
 		DD53AF72902E4568BC03B607 /* PlatformStubs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */; };
+		817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CD0F2B2F2F6347A584824B /* PushKeypair.swift */; };
 		53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */; };
 		4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */; };
 		D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */; };
@@ -62,6 +63,7 @@
 		7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */; };
 		E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */; };
 		3B15992E5BD329D249A9D27D /* Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2368064077094F44DF16B8E /* Profile.swift */; };
+		F3011FF5C29C08F27538AE45 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2652DA1029D0752C313AC9D0 /* PushCrypto.swift */; };
 		B47EFB48B64411BF181D2140 /* ScheduledAutomationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */; };
 		332BE05FECAFCE5409388316 /* ScheduledAutomations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */; };
 		B8BCF82DBF631DEFA8A1849A /* SessionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C45F1F9D11A980D236BD970D /* SessionModels.swift */; };
@@ -92,6 +94,7 @@
 		DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectScreen.swift"; path = "Sources/BromureRemote/ConnectScreen.swift"; sourceTree = "<group>"; };
 		CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "HostMirrorScreen.swift"; path = "Sources/BromureRemote/HostMirrorScreen.swift"; sourceTree = "<group>"; };
 		7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformStubs.swift"; path = "Sources/BromureRemote/PlatformStubs.swift"; sourceTree = "<group>"; };
+		74CD0F2B2F2F6347A584824B /* PushKeypair.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushKeypair.swift"; path = "Sources/BromureRemote/PushKeypair.swift"; sourceTree = "<group>"; };
 		D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushNotifications.swift"; path = "Sources/BromureRemote/PushNotifications.swift"; sourceTree = "<group>"; };
 		0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RemoteTransportMobile.swift"; path = "Sources/BromureRemote/RemoteTransportMobile.swift"; sourceTree = "<group>"; };
 		0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceScreen.swift"; path = "Sources/BromureRemote/WorkspaceScreen.swift"; sourceTree = "<group>"; };
@@ -140,6 +143,7 @@
 		1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnTCP.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnTCP.swift"; sourceTree = "<group>"; };
 		1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformShims.swift"; path = "Sources/BromureRemote/_shared/PlatformShims.swift"; sourceTree = "<group>"; };
 		C2368064077094F44DF16B8E /* Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Profile.swift"; path = "Sources/BromureRemote/_shared/Profile.swift"; sourceTree = "<group>"; };
+		2652DA1029D0752C313AC9D0 /* PushCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushCrypto.swift"; path = "Sources/BromureRemote/_shared/PushCrypto.swift"; sourceTree = "<group>"; };
 		9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ScheduledAutomationViews.swift"; path = "Sources/BromureRemote/_shared/ScheduledAutomationViews.swift"; sourceTree = "<group>"; };
 		6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ScheduledAutomations.swift"; path = "Sources/BromureRemote/_shared/ScheduledAutomations.swift"; sourceTree = "<group>"; };
 		C45F1F9D11A980D236BD970D /* SessionModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SessionModels.swift"; path = "Sources/BromureRemote/_shared/SessionModels.swift"; sourceTree = "<group>"; };
@@ -202,6 +206,7 @@
 				DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */,
 				CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */,
 				7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */,
+				74CD0F2B2F2F6347A584824B /* PushKeypair.swift */,
 				D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */,
 				0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */,
 				0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */,
@@ -250,6 +255,7 @@
 				1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */,
 				1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */,
 				C2368064077094F44DF16B8E /* Profile.swift */,
+				2652DA1029D0752C313AC9D0 /* PushCrypto.swift */,
 				9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */,
 				6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */,
 				C45F1F9D11A980D236BD970D /* SessionModels.swift */,
@@ -351,6 +357,7 @@
 				A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */,
 				C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */,
 				DD53AF72902E4568BC03B607 /* PlatformStubs.swift in Sources */,
+				817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */,
 				53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */,
 				4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */,
 				D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */,
@@ -399,6 +406,7 @@
 				7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */,
 				E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */,
 				3B15992E5BD329D249A9D27D /* Profile.swift in Sources */,
+				F3011FF5C29C08F27538AE45 /* PushCrypto.swift in Sources */,
 				B47EFB48B64411BF181D2140 /* ScheduledAutomationViews.swift in Sources */,
 				332BE05FECAFCE5409388316 /* ScheduledAutomations.swift in Sources */,
 				B8BCF82DBF631DEFA8A1849A /* SessionModels.swift in Sources */,

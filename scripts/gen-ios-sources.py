@@ -65,6 +65,7 @@ SHARED = [
     "AutomationRunWindow.swift",
     "AutomationRunArchive.swift",
     "ClaudeTranscriptView.swift",
+    "PushCrypto.swift",  # HPKE seal/open — shared by the Mac sender + iOS NSE
     "ConversationView.swift",
     "VMDashboard.swift",
     "DockerDashboard.swift",
