@@ -95,11 +95,18 @@ pipeline {
                         set -euo pipefail
                         rm -rf "$ARCHIVE"
 
-                        # -configuration Release is load-bearing twice over: it
-                        # selects the production aps-environment entitlement, and
-                        # it makes automatic signing provision an App Store
-                        # (distribution) profile instead of a development one —
-                        # a development profile would demand a registered device.
+                        # -configuration Release selects the production
+                        # aps-environment entitlement.
+                        #
+                        # Note on signing: under AUTOMATIC signing the archive
+                        # itself is signed with a *development* profile — the
+                        # distribution re-sign happens in -exportArchive below.
+                        # A development profile can only be minted for a team
+                        # with at least one registered device, so the team needs
+                        # one device registered (Certificates, Identifiers &
+                        # Profiles → Devices). Switch both targets to manual
+                        # signing with pinned App Store profiles if you'd rather
+                        # not depend on that.
                         xcodebuild archive \
                             -project "$PROJECT" \
                             -scheme "$SCHEME" \
