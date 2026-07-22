@@ -424,8 +424,11 @@ def main():
     L.append("\n/* Begin XCBuildConfiguration section */")
     L += cfg(cfg_proj_debug, "Debug", proj_debug)
     L += cfg(cfg_proj_release, "Release", proj_release)
-    L += cfg(cfg_tgt_debug, "Debug", tgt_common)
-    L += cfg(cfg_tgt_release, "Release", tgt_common)
+    # APNs environment follows the build: sandbox for local/dev, production for
+    # a distribution (TestFlight/App Store) archive — the entitlements file reads
+    # $(APS_ENVIRONMENT).
+    L += cfg(cfg_tgt_debug, "Debug", tgt_common + ["APS_ENVIRONMENT = development;"])
+    L += cfg(cfg_tgt_release, "Release", tgt_common + ["APS_ENVIRONMENT = production;"])
     L += cfg(nse_cfg_debug, "Debug", nse_tgt)
     L += cfg(nse_cfg_release, "Release", nse_tgt)
     L.append("/* End XCBuildConfiguration section */")
