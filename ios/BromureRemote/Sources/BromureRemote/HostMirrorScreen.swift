@@ -167,15 +167,35 @@ struct CodingBoardScreen: View {
     }
 }
 
+/// Which automation the editor sheet is on: a fresh one or an existing id.
+enum AutomationEdit: Identifiable {
+    case new
+    case existing(UUID)
+    var id: String {
+        switch self {
+        case .new: return "new"
+        case .existing(let u): return u.uuidString
+        }
+    }
+    var editingID: UUID? {
+        switch self {
+        case .new: return nil
+        case .existing(let u): return u
+        }
+    }
+}
+
 struct AutomationsBoardScreen: View {
     let controller: RemoteHostController
+    @State private var editing: AutomationEdit?
+
     var body: some View {
         AutomationKanbanView(
             store: controller.automationStore,
             model: controller.listModel,
             actions: AutomationKanbanView.Actions(
-                selectAutomation: { _ in },
-                newAutomation: {},
+                selectAutomation: { editing = .existing($0) },
+                newAutomation: { editing = .new },
                 runNow: { controller.runAutomation($0) },
                 toggle: { controller.toggleAutomation($0) },
                 delete: { controller.deleteAutomation($0) },
@@ -183,5 +203,55 @@ struct AutomationsBoardScreen: View {
                 acknowledge: { controller.acknowledgeRun($0) }))
         .navigationTitle("Automations")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { editing = .new } label: { Image(systemName: "plus") }
+                    .accessibilityLabel("New automation")
+            }
+        }
+        .sheet(item: $editing) { edit in
+            AutomationEditorSheet(controller: controller, editing: edit.editingID) {
+                editing = nil
+            }
+        }
+    }
+}
+
+/// Wraps the shared `AutomationEditorView` in a sheet with a Cancel affordance;
+/// the editor's own footer holds Delete / Run Now / Save, which route over the
+/// tunnel and dismiss.
+private struct AutomationEditorSheet: View {
+    let controller: RemoteHostController
+    let editing: UUID?
+    let onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            AutomationEditorView(
+                store: controller.automationStore,
+                profiles: controller.profiles,
+                editing: editing,
+                onSave: { auto in
+                    controller.upsertAutomation(auto)
+                    onClose()
+                },
+                onRunNow: { auto in
+                    controller.upsertAutomation(auto)
+                    controller.runAutomation(auto.id)
+                    onClose()
+                },
+                onDelete: { id in
+                    controller.deleteAutomation(id)
+                    onClose()
+                },
+                onEditWorkspace: { _ in })
+            .navigationTitle(editing == nil ? "New Automation" : "Edit Automation")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onClose)
+                }
+            }
+        }
     }
 }

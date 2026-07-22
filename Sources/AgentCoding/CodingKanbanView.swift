@@ -275,19 +275,36 @@ struct CodingKanbanView: View {
     /// Plan-column multi-selection (batch start).
     @State private var selectedPhases: Set<UUID> = []
     @State private var confirmingBatchDelete = false
+    /// Compact = iPhone portrait → columns stack in one vertical scroll.
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            HStack(alignment: .top, spacing: 14) {
-                backlogColumn
-                planColumn
-                inProgressColumn
-                testingColumn
-                doneColumn
+            if compact {
+                // Phone: one vertical scroll with the columns stacked.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        backlogColumn
+                        planColumn
+                        inProgressColumn
+                        testingColumn
+                        doneColumn
+                    }
+                    .padding(14)
+                }
+            } else {
+                HStack(alignment: .top, spacing: 14) {
+                    backlogColumn
+                    planColumn
+                    inProgressColumn
+                    testingColumn
+                    doneColumn
+                }
+                .padding(14)
             }
-            .padding(14)
         }
         .background(Color.platformWindowBackground)
         .sheet(item: $editing) { task in
@@ -1181,7 +1198,25 @@ private struct TaskEditorSheet: View {
         }
     }
 
+    /// Compact = iPhone portrait → the sheet fills the screen, the field row
+    /// stacks, and the whole form scrolls. macOS/iPad keep the wide fixed sheet.
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
+
     var body: some View {
+        if compact {
+            ScrollView { formContent.padding(18) }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            formContent
+                .padding(18)
+                // Capped: content shares space inside this; the sheet itself must
+                // stay shorter than any reasonable window.
+                .frame(minWidth: 680, minHeight: 500, idealHeight: 620, maxHeight: 660)
+        }
+    }
+
+    private var formContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(isNew
                  ? NSLocalizedString("New Task", comment: "task editor")
@@ -1192,49 +1227,7 @@ private struct TaskEditorSheet: View {
                 .font(.system(size: 14, weight: .semibold))
                 .textFieldStyle(.roundedBorder)
 
-            HStack(alignment: .top, spacing: 12) {
-                captioned(NSLocalizedString("Workspace", comment: "")) {
-                    Picker("", selection: $task.profileID) {
-                        ForEach(profiles) { Text($0.name).tag($0.id) }
-                    }
-                    .labelsHidden()
-                    .onChange(of: task.profileID) {
-                        if !toolChoices.contains(where: { $0.tool == task.tool }),
-                           let primary = selectedProfile?.tool {
-                            task.tool = primary
-                        }
-                    }
-                }
-                .frame(maxWidth: 220)
-                captioned(NSLocalizedString("Agent", comment: "")) {
-                    Picker("", selection: $task.tool) {
-                        ForEach(toolChoices) { spec in
-                            Text(spec.tool.displayName).tag(spec.tool)
-                        }
-                    }
-                    .labelsHidden()
-                }
-                .frame(maxWidth: 160)
-                captioned(NSLocalizedString("Start the agent in — a folder inside the workspace",
-                                            comment: "task editor")) {
-                    TextField("", text: $task.repoPath, prompt: Text(verbatim: "~/my-repo"))
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                        .help(NSLocalizedString(
-                            "A path inside the workspace VM. \"~\" is the home folder (/home/ubuntu). When it's a git repository, the task runs in its own worktree and branch there.",
-                            comment: "task editor"))
-                    Toggle(NSLocalizedString("Create folder & git repo if needed",
-                                             comment: "task editor"),
-                           isOn: Binding(
-                               get: { task.initRepo ?? false },
-                               set: { task.initRepo = $0 ? true : nil }))
-                        .platformCheckboxToggle()
-                        .font(.system(size: 11))
-                        .help(NSLocalizedString(
-                            "Starting or planning first runs mkdir + git init (with an empty root commit) when the folder isn't already a git repository of its own. Leave off for a folder inside an existing repo.",
-                            comment: "task editor"))
-                }
-            }
+            fieldsRow
 
             HStack {
                 Text(NSLocalizedString("Description (markdown)", comment: ""))
@@ -1251,7 +1244,8 @@ private struct TaskEditorSheet: View {
             }
 
             editorArea
-                .frame(minHeight: 140, maxHeight: .infinity)
+                .frame(minHeight: compact ? 200 : 140,
+                       maxHeight: compact ? nil : .infinity)
                 .layoutPriority(1)
 
             if !siblings.isEmpty {
@@ -1265,37 +1259,89 @@ private struct TaskEditorSheet: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack {
-                if !isNew {
-                    Button(NSLocalizedString("Delete", comment: ""), role: .destructive) {
-                        onDelete(task.id)
-                    }
-                }
-                if task.stage == .backlog {
-                    Button {
-                        onPlan(task)
-                    } label: {
-                        Label(NSLocalizedString("Plan", comment: "task editor"),
-                              systemImage: "list.number")
-                    }
-                    .disabled(!canSave)
-                    .help(NSLocalizedString(
-                        "Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phase cards with dependencies into the Plan column.",
-                        comment: "task editor"))
-                }
-                Spacer()
-                Button(NSLocalizedString("Cancel", comment: ""), action: onCancel)
-                    .keyboardShortcut(.cancelAction)
-                Button(NSLocalizedString("Save", comment: "")) { onSave(task) }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canSave)
-            }
+            bottomButtons
         }
-        .padding(18)
-        // Capped: content shares space inside this; the sheet itself must
-        // stay shorter than any reasonable window.
-        .frame(minWidth: 680, minHeight: 500, idealHeight: 620, maxHeight: 660)
+    }
+
+    /// Workspace / Agent / start-folder — a row on the desktop, stacked on a
+    /// phone (three pickers/fields side by side overflow a narrow screen).
+    @ViewBuilder private var fieldsRow: some View {
+        let layout = compact
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
+        layout {
+            captioned(NSLocalizedString("Workspace", comment: "")) {
+                Picker("", selection: $task.profileID) {
+                    ForEach(profiles) { Text($0.name).tag($0.id) }
+                }
+                .labelsHidden()
+                .onChange(of: task.profileID) {
+                    if !toolChoices.contains(where: { $0.tool == task.tool }),
+                       let primary = selectedProfile?.tool {
+                        task.tool = primary
+                    }
+                }
+            }
+            .frame(maxWidth: compact ? .infinity : 220, alignment: .leading)
+            captioned(NSLocalizedString("Agent", comment: "")) {
+                Picker("", selection: $task.tool) {
+                    ForEach(toolChoices) { spec in
+                        Text(spec.tool.displayName).tag(spec.tool)
+                    }
+                }
+                .labelsHidden()
+            }
+            .frame(maxWidth: compact ? .infinity : 160, alignment: .leading)
+            captioned(NSLocalizedString("Start the agent in — a folder inside the workspace",
+                                        comment: "task editor")) {
+                TextField("", text: $task.repoPath, prompt: Text(verbatim: "~/my-repo"))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .help(NSLocalizedString(
+                        "A path inside the workspace VM. \"~\" is the home folder (/home/ubuntu). When it's a git repository, the task runs in its own worktree and branch there.",
+                        comment: "task editor"))
+                Toggle(NSLocalizedString("Create folder & git repo if needed",
+                                         comment: "task editor"),
+                       isOn: Binding(
+                           get: { task.initRepo ?? false },
+                           set: { task.initRepo = $0 ? true : nil }))
+                    .platformCheckboxToggle()
+                    .font(.system(size: 11))
+                    .help(NSLocalizedString(
+                        "Starting or planning first runs mkdir + git init (with an empty root commit) when the folder isn't already a git repository of its own. Leave off for a folder inside an existing repo.",
+                        comment: "task editor"))
+            }
+            .frame(maxWidth: compact ? .infinity : nil, alignment: .leading)
+        }
+    }
+
+    private var bottomButtons: some View {
+        HStack {
+            if !isNew {
+                Button(NSLocalizedString("Delete", comment: ""), role: .destructive) {
+                    onDelete(task.id)
+                }
+            }
+            if task.stage == .backlog {
+                Button {
+                    onPlan(task)
+                } label: {
+                    Label(NSLocalizedString("Plan", comment: "task editor"),
+                          systemImage: "list.number")
+                }
+                .disabled(!canSave)
+                .help(NSLocalizedString(
+                    "Saves, then opens a visible planning session: the agent explores the repo (ask it things — it can see you) and files ordered phase cards with dependencies into the Plan column.",
+                    comment: "task editor"))
+            }
+            Spacer()
+            Button(NSLocalizedString("Cancel", comment: ""), action: onCancel)
+                .keyboardShortcut(.cancelAction)
+            Button(NSLocalizedString("Save", comment: "")) { onSave(task) }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canSave)
+        }
     }
 
 }

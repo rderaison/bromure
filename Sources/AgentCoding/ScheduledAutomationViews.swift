@@ -244,6 +244,9 @@ struct AutomationEditorView: View {
     /// Fires whenever the draft starts/stops differing from what's stored,
     /// so the AppKit host can warn before tearing down an edited draft.
     let onDirtyChange: (Bool) -> Void
+    /// Compact = iPhone portrait → trigger pills scroll horizontally.
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
 
     @State private var draft: ScheduledAutomation
     /// The draft as presented — the baseline for the dirty check.
@@ -732,45 +735,17 @@ struct AutomationEditorView: View {
     /// path to fix — so the capability is discoverable.
     private var triggerKindControl: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 2) {
-                triggerButton(.schedule, label: NSLocalizedString("Schedule", comment: ""))
-                triggerButton(.githubPullRequest,
-                              label: NSLocalizedString("GitHub PR", comment: ""))
-                    .disabled(!hasGitHubToken)
-                    .help(hasGitHubToken
-                          ? NSLocalizedString("Fire when a pull request is opened", comment: "")
-                          : NSLocalizedString(
-                              "Add a GitHub token to this workspace to enable GitHub triggers",
-                              comment: ""))
-                triggerButton(.githubIssue,
-                              label: NSLocalizedString("GitHub Issue", comment: ""))
-                    .disabled(!hasGitHubToken)
-                    .help(hasGitHubToken
-                          ? NSLocalizedString("Fire when an issue is opened", comment: "")
-                          : NSLocalizedString(
-                              "Add a GitHub token to this workspace to enable GitHub triggers",
-                              comment: ""))
-                triggerButton(.githubCommit,
-                              label: NSLocalizedString("GitHub Commit", comment: ""))
-                    .disabled(!hasGitHubToken)
-                    .help(hasGitHubToken
-                          ? NSLocalizedString("Fire when a commit lands on a branch", comment: "")
-                          : NSLocalizedString(
-                              "Add a GitHub token to this workspace to enable GitHub triggers",
-                              comment: ""))
-                triggerButton(.linearIssue,
-                              label: NSLocalizedString("Linear", comment: ""))
-                    .disabled(!hasLinearToken)
-                    .help(hasLinearToken
-                          ? NSLocalizedString("Fire when a Linear issue appears", comment: "")
-                          : NSLocalizedString(
-                              "Add a Linear API key to this workspace to enable Linear triggers",
-                              comment: ""))
-                triggerButton(.afterAutomation,
-                              label: NSLocalizedString("After automation", comment: ""))
-                    .help(NSLocalizedString(
-                        "Fire when another automation's run finishes", comment: ""))
-                Spacer()
+            // Six trigger pills don't fit a phone row, so they scroll
+            // horizontally there; the desktop keeps the full inline row.
+            if compact {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) { triggerButtons }.padding(.vertical, 1)
+                }
+            } else {
+                HStack(spacing: 2) {
+                    triggerButtons
+                    Spacer()
+                }
             }
             if !hasGitHubToken || !hasLinearToken {
                 HStack(spacing: 6) {
@@ -800,6 +775,46 @@ struct AutomationEditorView: View {
             return NSLocalizedString(
                 "Linear triggers need a Linear API key in this workspace.", comment: "")
         }
+    }
+
+    @ViewBuilder private var triggerButtons: some View {
+        triggerButton(.schedule, label: NSLocalizedString("Schedule", comment: ""))
+        triggerButton(.githubPullRequest,
+                      label: NSLocalizedString("GitHub PR", comment: ""))
+            .disabled(!hasGitHubToken)
+            .help(hasGitHubToken
+                  ? NSLocalizedString("Fire when a pull request is opened", comment: "")
+                  : NSLocalizedString(
+                      "Add a GitHub token to this workspace to enable GitHub triggers",
+                      comment: ""))
+        triggerButton(.githubIssue,
+                      label: NSLocalizedString("GitHub Issue", comment: ""))
+            .disabled(!hasGitHubToken)
+            .help(hasGitHubToken
+                  ? NSLocalizedString("Fire when an issue is opened", comment: "")
+                  : NSLocalizedString(
+                      "Add a GitHub token to this workspace to enable GitHub triggers",
+                      comment: ""))
+        triggerButton(.githubCommit,
+                      label: NSLocalizedString("GitHub Commit", comment: ""))
+            .disabled(!hasGitHubToken)
+            .help(hasGitHubToken
+                  ? NSLocalizedString("Fire when a commit lands on a branch", comment: "")
+                  : NSLocalizedString(
+                      "Add a GitHub token to this workspace to enable GitHub triggers",
+                      comment: ""))
+        triggerButton(.linearIssue,
+                      label: NSLocalizedString("Linear", comment: ""))
+            .disabled(!hasLinearToken)
+            .help(hasLinearToken
+                  ? NSLocalizedString("Fire when a Linear issue appears", comment: "")
+                  : NSLocalizedString(
+                      "Add a Linear API key to this workspace to enable Linear triggers",
+                      comment: ""))
+        triggerButton(.afterAutomation,
+                      label: NSLocalizedString("After automation", comment: ""))
+            .help(NSLocalizedString(
+                "Fire when another automation's run finishes", comment: ""))
     }
 
     private func triggerButton(_ kind: ScheduledAutomation.TriggerKind,

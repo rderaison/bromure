@@ -78,6 +78,9 @@ struct AutomationKanbanView: View {
     /// from the on-disk archive on demand.
     @State private var doneLimit = 30
     @State private var archived: [AutomationRunRecord]?
+    /// Compact = iPhone portrait → columns stack in one vertical scroll.
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
 
     var body: some View {
         if store.automations.isEmpty {
@@ -141,17 +144,34 @@ struct AutomationKanbanView: View {
         return VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            HStack(alignment: .top, spacing: 14) {
-                scheduledColumn(cols)
-                inProgressColumn(cols)
-                if !cols.needsAttention.isEmpty {
-                    attentionColumn(cols)
-                        .transition(.move(edge: .top).combined(with: .opacity))
+            if compact {
+                // Phone: one vertical scroll with the columns stacked.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        scheduledColumn(cols)
+                        inProgressColumn(cols)
+                        if !cols.needsAttention.isEmpty {
+                            attentionColumn(cols)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                        doneColumn(done)
+                    }
+                    .animation(.easeInOut(duration: 0.2), value: cols.needsAttention.isEmpty)
+                    .padding(14)
                 }
-                doneColumn(done)
+            } else {
+                HStack(alignment: .top, spacing: 14) {
+                    scheduledColumn(cols)
+                    inProgressColumn(cols)
+                    if !cols.needsAttention.isEmpty {
+                        attentionColumn(cols)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                    doneColumn(done)
+                }
+                .animation(.easeInOut(duration: 0.2), value: cols.needsAttention.isEmpty)
+                .padding(14)
             }
-            .animation(.easeInOut(duration: 0.2), value: cols.needsAttention.isEmpty)
-            .padding(14)
         }
         .background(Color.platformWindowBackground)
     }
@@ -275,6 +295,11 @@ struct KanbanColumn<Content: View>: View {
     var tint: Color = .secondary
     var emptyText: String = ""
     @ViewBuilder let content: () -> Content
+    /// Compact = iPhone portrait: columns are stacked vertically in one board
+    /// scroll, so a column is full-width and lays its cards out inline (no inner
+    /// scroll / fixed height). macOS/iPad keep the side-by-side columns.
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -296,24 +321,31 @@ struct KanbanColumn<Content: View>: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 4)
-            ScrollView(showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    if count == 0 && !emptyText.isEmpty {
-                        Text(emptyText)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.vertical, 18)
-                    }
-                    content()
-                }
-                .padding(2)
+            if compact {
+                cards   // inline — the whole board scrolls
+            } else {
+                ScrollView(showsIndicators: false) { cards }
             }
         }
         .padding(8)
-        .frame(minWidth: 210, maxWidth: 400, maxHeight: .infinity, alignment: .top)
+        .frame(minWidth: compact ? nil : 210, maxWidth: compact ? .infinity : 400,
+               maxHeight: compact ? nil : .infinity, alignment: .top)
         .background(RoundedRectangle(cornerRadius: 10)
             .fill(Color.primary.opacity(0.035)))
+    }
+
+    private var cards: some View {
+        LazyVStack(alignment: .leading, spacing: 8) {
+            if count == 0 && !emptyText.isEmpty {
+                Text(emptyText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 18)
+            }
+            content()
+        }
+        .padding(2)
     }
 }
 
