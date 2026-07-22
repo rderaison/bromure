@@ -233,11 +233,20 @@ private struct FilesPane: View {
     let controller: RemoteHostController
     let profileID: Profile.ID
     let mounts: [String]
-    @State private var shareURL: URL?
+    /// Built once (not per-render) so the browser keeps its directory + doesn't
+    /// re-list on every update. The download share sheet and the upload importer
+    /// live inside FileBrowserView (iOS).
+    @State private var model: FileBrowserModel?
 
     var body: some View {
-        FileBrowserView(model: makeModel())
-            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in }
+        Group {
+            if let model {
+                FileBrowserView(model: model)
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .onAppear { if model == nil { model = makeModel() } }
     }
 
     private func makeModel() -> FileBrowserModel {

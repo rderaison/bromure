@@ -1216,6 +1216,8 @@ private struct NewContainerSheet: View {
     let prefillImage: String
     let onRun: (ACAppDelegate.DockerRunSpec) -> Void
     let onCancel: () -> Void
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
 
     @State private var image = ""
     @State private var name = ""
@@ -1324,7 +1326,10 @@ private struct NewContainerSheet: View {
             }
             .padding(.horizontal, 20).padding(.vertical, 14)
         }
-        .frame(width: 480, height: 460)
+        // A phone sheet fills the presentation; only the desktop needs a
+        // fixed size.
+        .frame(width: compact ? nil : 480, height: compact ? nil : 460)
+        .frame(maxWidth: compact ? .infinity : nil, maxHeight: compact ? .infinity : nil)
         .onAppear { if image.isEmpty { image = prefillImage } }
     }
 
@@ -1385,6 +1390,8 @@ private struct NewContainerSheet: View {
 private struct NewVolumeSheet: View {
     let onCreate: (String) -> Void
     let onCancel: () -> Void
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
 
     @State private var name = ""
 
@@ -1433,6 +1440,7 @@ private struct NewVolumeSheet: View {
             }
             .padding(.horizontal, 20).padding(.vertical, 14)
         }
-        .frame(width: 380)
+        .frame(width: compact ? nil : 380)
+        .frame(maxWidth: compact ? .infinity : nil)
     }
 }

@@ -489,6 +489,12 @@ struct FileBrowserView: View {
     /// the fixed min-width is dropped. `.regular` on macOS (layout unchanged).
     @Environment(\.horizontalSizeClass) private var hSize
     private var compact: Bool { hSize == .compact }
+#if os(iOS)
+    /// iOS: a downloaded file pending the share / Save-to-Files sheet.
+    @State private var shareItem: ShareItem?
+    /// iOS: the Files picker for uploading into the current directory.
+    @State private var showImporter = false
+#endif
 
     private let reloadTimer = Timer.publish(every: 1.5, on: .main, in: .common)
         .autoconnect()
@@ -501,6 +507,17 @@ struct FileBrowserView: View {
             loadDropped(providers)
             return true
         }
+#if os(iOS)
+        // Upload: pick from the Files app and copy into the current directory.
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item],
+                      allowsMultipleSelection: true) { handleImport($0) }
+        // Download: when opening a guest file materializes a local copy, offer
+        // the share sheet (Save to Files, AirDrop, …).
+        .sheet(item: $shareItem) { item in ActivityView(activityItems: [item.url]) }
+        .onChange(of: model.lastDownloaded) { _, url in
+            if let url { shareItem = ShareItem(url: url) }
+        }
+#endif
         .overlay {
             if dropTargeted {
                 RoundedRectangle(cornerRadius: 8)
@@ -642,6 +659,14 @@ struct FileBrowserView: View {
             .buttonStyle(.borderless)
             .help(NSLocalizedString("New folder", comment: ""))
 
+#if os(iOS)
+            Button { showImporter = true } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .buttonStyle(.borderless)
+            .help(NSLocalizedString("Upload a file into this folder", comment: ""))
+#endif
+
             if !model.isGuestLocation {
                 Button { model.reveal(nil) } label: {
                     Image(systemName: "arrow.up.forward.app")
@@ -697,41 +722,61 @@ struct FileBrowserView: View {
             } else {
                 LazyVStack(spacing: 0) {
                     ForEach(model.entries) { entry in
-                        FileRow(entry: entry, selected: selection == entry.id)
-                            .onTapGesture(count: 2) {
-                                selection = entry.id
-                                model.open(entry)
-                            }
-                            .onTapGesture { selection = entry.id }
-                            // Drag a file out → Finder/desktop copies it
-                            // (guest files download lazily on drop).
-                            .onDrag {
-                                FileBrowserModel.dragProvider(for: entry, model: model)
-                            }
-                            .contextMenu {
-                                Button(NSLocalizedString("Open", comment: "")) {
-                                    model.open(entry)
-                                }
-                                if entry.hostURL != nil {
-                                    Button(NSLocalizedString("Reveal in Finder",
-                                                              comment: "")) {
-                                        model.reveal(entry)
-                                    }
-                                }
-                                Divider()
-                                Button(entry.hostURL != nil
-                                       ? NSLocalizedString("Move to Trash", comment: "")
-                                       : NSLocalizedString("Delete", comment: ""),
-                                       role: .destructive) {
-                                    if selection == entry.id { selection = nil }
-                                    model.remove(entry)
-                                }
-                            }
+                        fileRow(entry)
                     }
                 }
             }
         }
     }
+
+    /// One file/folder row with platform-appropriate taps: single-tap opens on a
+    /// phone (a directory navigates; a file downloads → share sheet), while
+    /// macOS keeps double-tap-to-open + single-tap-to-select. Long-press gives
+    /// Open / Delete either way.
+    @ViewBuilder private func fileRow(_ entry: FileEntry) -> some View {
+        let base = FileRow(entry: entry, selected: selection == entry.id)
+            .contentShape(Rectangle())
+            .onDrag { FileBrowserModel.dragProvider(for: entry, model: model) }
+            .contextMenu {
+                Button(NSLocalizedString("Open", comment: "")) { model.open(entry) }
+                if entry.hostURL != nil {
+                    Button(NSLocalizedString("Reveal in Finder", comment: "")) { model.reveal(entry) }
+                }
+                Divider()
+                Button(entry.hostURL != nil
+                       ? NSLocalizedString("Move to Trash", comment: "")
+                       : NSLocalizedString("Delete", comment: ""),
+                       role: .destructive) {
+                    if selection == entry.id { selection = nil }
+                    model.remove(entry)
+                }
+            }
+        if compact {
+            base.onTapGesture { selection = entry.id; model.open(entry) }
+        } else {
+            base.onTapGesture(count: 2) { selection = entry.id; model.open(entry) }
+                .onTapGesture { selection = entry.id }
+        }
+    }
+
+#if os(iOS)
+    /// Copy the picked Files-app documents into a temp dir (holding their
+    /// security scope) and upload them into the current guest directory.
+    private func handleImport(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result else { return }
+        var temps: [URL] = []
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("bromure-upload-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let dst = dir.appendingPathComponent(url.lastPathComponent)
+            if (try? FileManager.default.copyItem(at: url, to: dst)) != nil { temps.append(dst) }
+        }
+        if !temps.isEmpty { model.receive(temps) }
+    }
+#endif
 
     // MARK: Drop handling
 
@@ -751,6 +796,8 @@ struct FileBrowserView: View {
 private struct FileRow: View {
     let entry: FileEntry
     let selected: Bool
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -760,29 +807,47 @@ private struct FileRow: View {
                 .frame(width: 24, height: 24)
 #else
             Image(systemName: iosSymbolName)
-                .font(.system(size: 15))
+                .font(.system(size: 17))
                 .foregroundStyle(entry.isDirectory ? Color.accentColor : Color.secondary)
-                .frame(width: 24, height: 24)
+                .frame(width: 26, height: 26)
 #endif
-            Text(entry.name)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 12)
-            if !entry.isDirectory {
-                Text(sizeText)
-                    .font(.system(.caption, design: .monospaced))
+            if compact {
+                // iOS Files convention: name over a size·date caption, so the
+                // full name has the row width instead of fighting fixed columns.
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.name).lineLimit(1).truncationMode(.middle)
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                if entry.isDirectory {
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                }
+            } else {
+                Text(entry.name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 12)
+                if !entry.isDirectory {
+                    Text(sizeText)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 72, alignment: .trailing)
+                }
+                Text(dateText)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .frame(width: 72, alignment: .trailing)
+                    .frame(width: 130, alignment: .trailing)
             }
-            Text(dateText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 130, alignment: .trailing)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 5)
+        .padding(.vertical, compact ? 9 : 5)
         .contentShape(Rectangle())
         .background(selected ? Color.accentColor.opacity(0.18) : .clear)
+    }
+
+    /// "128 bytes · 3:14 PM" for files, just the date for folders.
+    private var subtitle: String {
+        entry.isDirectory ? dateText : "\(sizeText) · \(dateText)"
     }
 
 #if os(macOS)

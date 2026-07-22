@@ -147,3 +147,24 @@ extension View {
         }
     }
 }
+
+
+#if os(iOS)
+import UniformTypeIdentifiers
+
+/// A downloaded file to hand to the iOS share sheet (Save to Files / share).
+struct ShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+/// UIActivityViewController bridged into SwiftUI — the iOS "share / Save to
+/// Files" sheet for a downloaded guest file.
+struct ActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+#endif
