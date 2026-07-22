@@ -1785,8 +1785,12 @@ enum CodingTaskEngine {
     /// become "-"); `since` (epoch seconds) skips transcripts of earlier
     /// sessions in the same directory. Output is capped so a long session
     /// stays cheap to poll. Nil when the path has characters we won't quote.
-    /// (Byte-identical to the macOS engine's copy — the iOS "reader" view
-    /// tails the remote transcript over the tunnel the same way.)
+    /// Mirrors the macOS engine's copy, with one fat-client-only twist: the
+    /// pending-question (pq) file is keyed by the guest's LOGICAL `$(pwd)`, but
+    /// the reader only knows tmux's PHYSICAL path, so for a symlinked workspace
+    /// the exact name misses. We fall back to the freshest pq written in the
+    /// last few minutes (one plan runs at a time per VM), so a live planning
+    /// question still surfaces.
     nonisolated static func planTranscriptCommand(guestCwd: String, since: Int) -> String? {
         var path = guestCwd
         while path.count > 1 && path.hasSuffix("/") { path = String(path.dropLast()) }
@@ -1806,8 +1810,12 @@ enum CodingTaskEngine {
             + "\(legacy) -maxdepth 1 -name '*.jsonl' -newermt @\(since) "
             + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
             + "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
-            + "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
-            + "then echo; tr -d '\\n' < \(pq); echo; fi"
+            + "q=\(pq); "
+            + "if [ ! -f \"$q\" ]; then n=$(date +%s); "
+            + "q=$(find \"$HOME/.bromure\" -maxdepth 1 -name 'pq-*.json' "
+            + "-newermt @$((n-300)) 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); fi; "
+            + "if [ -n \"$q\" ] && [ -n \"$(find \"$q\" -newermt @\(since) 2>/dev/null)\" ]; "
+            + "then echo; tr -d '\\n' < \"$q\"; echo; fi"
     }
 }
 #endif

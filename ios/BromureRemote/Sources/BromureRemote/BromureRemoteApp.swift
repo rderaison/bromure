@@ -31,6 +31,10 @@ struct RootView: View {
     @State private var showAddServer = false
     @State private var pendingPeer: DeviceInfo?
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.scenePhase) private var scenePhase
+    /// When the app went to the background — used to reconnect on return only
+    /// after a real absence (a brief app-switch keeps its sockets).
+    @State private var backgroundedAt: Date?
 
     init() {
         // The directory model navigates to the mirror on a successful connect.
@@ -69,6 +73,21 @@ struct RootView: View {
             directory.refreshAccount()
             hostBox.onChange = { activeHost = $0; pendingPeer = nil }
             AppBadge.requestAuthorization()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background:
+                backgroundedAt = Date()
+            case .active:
+                // Only force a reconnect after a real absence; a quick
+                // app-switch usually keeps the sockets alive.
+                if let b = backgroundedAt, Date().timeIntervalSince(b) > 2 {
+                    NotificationCenter.default.post(name: .bromureDidForeground, object: nil)
+                }
+                backgroundedAt = nil
+            default:
+                break
+            }
         }
         .onOpenURL { url in
             // bromure://enroll?…&state=… — complete the account sign-in.

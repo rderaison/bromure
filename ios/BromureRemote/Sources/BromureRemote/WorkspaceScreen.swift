@@ -211,9 +211,8 @@ private struct TerminalsPane: View {
                                          window: win, guestCwd: guestCwd(for: win))
                         .id("reader-\(profileID)-\(win)")
                 } else {
-                    RemoteTerminalView(session: session(for: win), fontSize: fontBinding)
+                    TerminalSurface(session: session(for: win), fontSize: fontBinding)
                         .id("\(profileID)-\(win)")
-                        .background(Color.black)
                 }
             } else {
                 ContentUnavailableView("No terminal", systemImage: "terminal",
@@ -289,6 +288,34 @@ private struct TerminalsPane: View {
                 sessions[tab.index]?.stop()
                 sessions[tab.index] = nil
             } label: { Label("Close", systemImage: "xmark") }
+        }
+    }
+}
+
+// MARK: - Terminal surface
+
+/// The live terminal plus a connection veil — so a workspace that hasn't
+/// attached yet (or has dropped) reads as "Connecting…" rather than a dead
+/// black box you can't type into. Observes the session so the veil clears the
+/// moment the pump connects.
+private struct TerminalSurface: View {
+    @ObservedObject var session: AttachSession
+    let fontSize: Binding<CGFloat>
+
+    var body: some View {
+        ZStack {
+            Color.black
+            RemoteTerminalView(session: session, fontSize: fontSize)
+            if !session.connected {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text(session.lastError ?? "Connecting…")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                .padding(16)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .allowsHitTesting(false)
+            }
         }
     }
 }

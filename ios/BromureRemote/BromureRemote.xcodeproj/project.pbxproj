@@ -73,6 +73,7 @@
 		D5FB8187D6511F113AD88886 /* Terminal__GridLayoutStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EAFF96DF3D1FA2755C2EECF /* Terminal__GridLayoutStore.swift */; };
 		EA931E8BE8378C062728723A /* Terminal__TerminalImagePaste.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C1D36B3B723E8B3AF298639 /* Terminal__TerminalImagePaste.swift */; };
 		6552B0D662751610674CFBF1 /* VMDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B2E7296B414B300A8BD7D8 /* VMDashboard.swift */; };
+		A96EA517F1904A78B727B1F7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2C9329E02D38A226363A4698 /* Assets.xcassets */; };
 		06A0A4CD90FBF9FC054FB0D3 /* Crypto */ = {isa = PBXBuildFile; productRef = 8ABC8E0C7D2DBE6AA0A1B70D /* Crypto */; };
 		5DC33D49C50A56509B91FD8B /* NIOCore */ = {isa = PBXBuildFile; productRef = AE2F455E8323D50164A75332 /* NIOCore */; };
 		928678D3A79D08846C487A50 /* NIOPosix */ = {isa = PBXBuildFile; productRef = 1EB7681EA7B981649D9DDEA0 /* NIOPosix */; };
@@ -150,6 +151,7 @@
 		4C1D36B3B723E8B3AF298639 /* Terminal__TerminalImagePaste.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Terminal__TerminalImagePaste.swift"; path = "Sources/BromureRemote/_shared/Terminal__TerminalImagePaste.swift"; sourceTree = "<group>"; };
 		98B2E7296B414B300A8BD7D8 /* VMDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "VMDashboard.swift"; path = "Sources/BromureRemote/_shared/VMDashboard.swift"; sourceTree = "<group>"; };
 		F53560B8D470A293B70C0526 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "App/Info.plist"; sourceTree = "<group>"; };
+		2C9329E02D38A226363A4698 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "App/Assets.xcassets"; sourceTree = "<group>"; };
 		85673086EF6CFD3A1F8591AF /* BromureRemote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BromureRemote.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -265,6 +267,7 @@
 			isa = PBXGroup;
 			children = (
 				F53560B8D470A293B70C0526 /* Info.plist */,
+				2C9329E02D38A226363A4698 /* Assets.xcassets */,
 			);
 			name = App;
 			sourceTree = "<group>";
@@ -325,7 +328,9 @@
 		D6C9E8A172005E68A1DD674F = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
-			files = ();
+			files = (
+				A96EA517F1904A78B727B1F7 /* Assets.xcassets in Resources */,
+			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
@@ -456,6 +461,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				CODE_SIGN_ENTITLEMENTS = App/BromureRemote.entitlements;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 			};
 			name = Debug;
 		};
@@ -474,6 +480,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				CODE_SIGN_ENTITLEMENTS = App/BromureRemote.entitlements;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 			};
 			name = Release;
 		};

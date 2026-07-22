@@ -104,6 +104,10 @@ struct HostMirrorScreen: View {
         }
         // Mirror the "agents waiting for input" count onto the app-icon badge.
         .onChange(of: waitingAgents.count) { AppBadge.set($0) }
+        // Snap the mirror back to life when the app returns to the foreground.
+        .onReceive(NotificationCenter.default.publisher(for: .bromureDidForeground)) { _ in
+            controller.foregroundKick()
+        }
         .alert(item: topPrompt) { prompt in
             promptAlert(prompt)
         }
@@ -224,6 +228,7 @@ struct HostMirrorScreen: View {
 
 struct CodingBoardScreen: View {
     let controller: RemoteHostController
+    @State private var openedTask: TranscriptTarget?
     var body: some View {
         CodingKanbanView(
             store: controller.taskStore,
@@ -244,9 +249,71 @@ struct CodingBoardScreen: View {
                 openPlanSession: { _ in },
                 destroy: { controller.taskCommand($0, "destroy") },
                 resume: { controller.taskCommand($0, "resume") },
-                openTranscript: { _ in }))
+                openTranscript: { openedTask = TranscriptTarget(id: $0) }))
         .navigationTitle("Coding Tasks")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $openedTask) { t in
+            TranscriptScreen(
+                title: controller.taskStore.task(t.id)?.title ?? "Task",
+                subtitle: nil,
+                fetch: { await controller.fetchTaskTranscript(t.id) })
+        }
+    }
+}
+
+/// A UUID made presentable via `.sheet(item:)`.
+struct TranscriptTarget: Identifiable { let id: UUID }
+
+/// A fetched-once transcript rendered natively — shared by a finished coding
+/// task and a completed automation run. Both pull the JSONL from the host over
+/// the tunnel and render it with the shared `TranscriptItemView`.
+struct TranscriptScreen: View {
+    let title: String
+    let subtitle: String?
+    let fetch: () async -> Data?
+    @Environment(\.dismiss) private var dismiss
+    @State private var items: [TranscriptItem]?
+    @State private var failed = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let items {
+                    if items.isEmpty {
+                        ContentUnavailableView("Empty transcript", systemImage: "doc.text",
+                            description: Text("This run captured no transcript."))
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 10) {
+                                ForEach(items) { TranscriptItemView(item: $0) }
+                            }
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .background(Color.platformWindowBackground)
+                    }
+                } else if failed {
+                    ContentUnavailableView("No transcript", systemImage: "doc.questionmark",
+                        description: Text(subtitle?.isEmpty == false
+                                          ? subtitle! : "This run's transcript couldn't be read."))
+                } else {
+                    ProgressView("Loading transcript…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
+        .task {
+            if let data = await fetch(), !data.isEmpty {
+                items = ClaudeTranscriptParser.parse(data)
+            } else {
+                failed = true
+            }
+        }
     }
 }
 
@@ -271,6 +338,7 @@ enum AutomationEdit: Identifiable {
 struct AutomationsBoardScreen: View {
     let controller: RemoteHostController
     @State private var editing: AutomationEdit?
+    @State private var openedRun: AutomationRunRecord?
 
     var body: some View {
         AutomationKanbanView(
@@ -282,10 +350,16 @@ struct AutomationsBoardScreen: View {
                 runNow: { controller.runAutomation($0) },
                 toggle: { controller.toggleAutomation($0) },
                 delete: { controller.deleteAutomation($0) },
-                openRun: { _ in },
+                openRun: { openedRun = $0 },
                 acknowledge: { controller.acknowledgeRun($0) }))
         .navigationTitle("Automations")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $openedRun) { run in
+            TranscriptScreen(
+                title: controller.automationStore.automation(run.automationID)?.name ?? "Automation Run",
+                subtitle: run.detail,
+                fetch: { await controller.fetchRunTranscript(run.id) })
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { editing = .new } label: { Image(systemName: "plus") }

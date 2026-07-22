@@ -207,6 +207,10 @@ final class RemoteHostController {
         }
     }
 
+    /// Refresh immediately instead of waiting up to a poll interval — used when
+    /// the app returns to the foreground so the mirror catches up at once.
+    func foregroundKick() { pollOnce() }
+
     private func pollOnce() {
         if polling { return }   // don't stack requests if the link is slow
         polling = true
@@ -1014,6 +1018,21 @@ final class RemoteHostController {
               let b64 = resp.json["transcript"] as? String, !b64.isEmpty else { return nil }
         return Data(base64Encoded: b64)
     }
+
+    /// Fetch a coding task's transcript from the host, over the tunnel. The
+    /// host resolves it (live vsock when the workspace runs, ext4 home-image
+    /// read when it's off); nil = none captured or a transport failure.
+    func fetchTaskTranscript(_ id: UUID) async -> Data? {
+        let host = self.host
+        let path = "/tasks/\(ControlClient.encodeSegment(id.uuidString))/transcript"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("GET", path)
+        }.value
+        guard let resp, resp.status == 200,
+              let b64 = resp.json["transcript"] as? String, !b64.isEmpty else { return nil }
+        return Data(base64Encoded: b64)
+    }
+
     func upsertAutomation(_ automation: ScheduledAutomation) {
         guard let doc = ACAppDelegate.codableToDict(automation) else { return }
         send("POST", "/automations", body: doc)

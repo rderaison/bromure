@@ -2,6 +2,14 @@ import Foundation
 import SwiftUI
 import UIKit
 import SwiftTerm
+
+extension Notification.Name {
+    /// Posted when the app returns to the foreground after being backgrounded
+    /// long enough that its sockets likely died — drives an immediate reconnect
+    /// of the terminals and the mirror poll instead of waiting for a TCP
+    /// timeout on a blocking read.
+    static let bromureDidForeground = Notification.Name("io.bromure.remote.didForeground")
+}
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -49,10 +57,30 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
     /// Serializes writes to the stream fd (keystrokes/resize vs. the pump's EOF).
     private let writeLock = NSLock()
 
+    private var fgObserver: NSObjectProtocol?
+
     init(host: RemoteHost, vmID: String, windowIndex: Int) {
         self.host = host
         self.vmID = vmID
         self.windowIndex = windowIndex
+        // Reconnect the moment the app comes back to the foreground.
+        fgObserver = NotificationCenter.default.addObserver(
+            forName: .bromureDidForeground, object: nil, queue: .main) { [weak self] _ in
+            self?.reconnectNow()
+        }
+    }
+
+    deinit {
+        if let fgObserver { NotificationCenter.default.removeObserver(fgObserver) }
+    }
+
+    /// Force the pump to reconnect now. After the app was suspended the socket
+    /// may be dead, but a blocking `read` won't notice until TCP times out —
+    /// closing the fd unblocks it, so `onStreamEnded` reattaches immediately.
+    func reconnectNow() {
+        stateLock.lock(); let done = stopped; stateLock.unlock()
+        guard !done else { return }
+        closeFD()
     }
 
     /// Bind the SwiftUI-hosted terminal and start pumping. Main actor.
@@ -240,7 +268,14 @@ struct RemoteTerminalView: UIViewRepresentable {
             let pinch = UIPinchGestureRecognizer(
                 target: context.coordinator,
                 action: #selector(Coordinator.handlePinch(_:)))
+            // Never let the pinch swallow a single-finger tap — SwiftTerm's own
+            // tap-to-focus (becomeFirstResponder) must keep working.
+            pinch.cancelsTouchesInView = false
+            pinch.delaysTouchesBegan = false
             tv.addGestureRecognizer(pinch)
+            // Pop the keyboard once the surface actually lands in a window, so
+            // an interactive terminal is ready to type into without a tap.
+            context.coordinator.scheduleFocus(tv)
         } else {
             // A preview: let taps reach the SwiftUI navigation behind it.
             tv.isUserInteractionEnabled = false
@@ -252,14 +287,6 @@ struct RemoteTerminalView: UIViewRepresentable {
         context.coordinator.parent = self
         let target = Self.monoFont(currentSize)
         if uiView.font.pointSize != target.pointSize { uiView.font = target }
-        // Pop the keyboard once the surface is on screen, so an interactive
-        // terminal is ready to type into without a tap. (In the Simulator the
-        // software keyboard only shows when the hardware keyboard is
-        // disconnected — I/O ▸ Keyboard ▸ Connect Hardware Keyboard, ⌘K.)
-        if interactive, !context.coordinator.didFocus, uiView.window != nil {
-            context.coordinator.didFocus = true
-            uiView.becomeFirstResponder()
-        }
     }
 
     static func dismantleUIView(_ uiView: TerminalView, coordinator: Coordinator) {
@@ -271,10 +298,23 @@ struct RemoteTerminalView: UIViewRepresentable {
         var session: AttachSession { parent.session }
         private weak var view: TerminalView?
         private var pinchBaseSize: CGFloat = 13
-        var didFocus = false
 
         init(view: RemoteTerminalView) { self.parent = view }
         func bind(_ v: TerminalView) { view = v }
+
+        /// Bring the terminal up as first responder once it's actually in a
+        /// window. `updateUIView` can run before the view is in the hierarchy
+        /// (window == nil) and isn't guaranteed to run again, so poll until
+        /// `becomeFirstResponder()` actually succeeds (it can briefly refuse
+        /// during a transition).
+        func scheduleFocus(_ v: TerminalView, attempts: Int = 20) {
+            guard attempts > 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak v, weak self] in
+                guard let self, let v else { return }
+                if v.window != nil, v.becomeFirstResponder() { return }
+                self.scheduleFocus(v, attempts: attempts - 1)
+            }
+        }
 
         /// Pinch scales the font live and persists it through the binding, so
         /// the size sticks across tab switches and relaunches.
