@@ -32,7 +32,18 @@ enum TurnTLSTunnel {
         let localFD = sp[0]      // handed to the caller (raw STUN/splice I/O)
         let pumpFD = sp[1]       // owned by the pump threads
 
-        let params = NWParameters(tls: NWProtocolTLS.Options(), tcp: NWProtocolTCP.Options())
+        // Bound a stalled connection so a wedged send/receive can't leak the
+        // pump threads + fds + TLS socket for the default multi-minute RTO: a
+        // stalled (unacked) send is dropped after connectionDropTime, and
+        // keepalive errors a silently-dead peer in ~30s. On a healthy relay the
+        // SSH tunnel's own traffic keeps it well short of these.
+        let tcp = NWProtocolTCP.Options()
+        tcp.connectionDropTime = 30
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 15
+        tcp.keepaliveInterval = 5
+        tcp.keepaliveCount = 3
+        let params = NWParameters(tls: NWProtocolTLS.Options(), tcp: tcp)
         let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
         let queue = DispatchQueue(label: "io.bromure.p2p.turns")
 
@@ -64,13 +75,31 @@ enum TurnTLSTunnel {
             return nil
         }
 
-        startUplink(conn, pumpFD)
-        startDownlink(conn, pumpFD)
+        // Each pump thread gets its OWN dup of the pump end, so neither ever
+        // closes a descriptor the other still reads/writes. Sharing one fd let
+        // the downlink close(pumpFD) while the uplink was parked in a send and
+        // about to loop back to read(pumpFD) — by then the fd number could be
+        // reused by an unrelated socket, and the uplink would read its bytes.
+        // With dups the kernel frees the socket only once BOTH dups close, and
+        // shutdown() on either dup still wakes a peer blocked on the socket.
+        let upFD = dup(pumpFD)
+        let downFD = dup(pumpFD)
+        Darwin.close(pumpFD)
+        guard upFD >= 0, downFD >= 0 else {
+            if upFD >= 0 { Darwin.close(upFD) }
+            if downFD >= 0 { Darwin.close(downFD) }
+            conn.cancel(); Darwin.close(localFD)
+            return nil
+        }
+        startUplink(conn, upFD)
+        startDownlink(conn, downFD)
         return localFD
     }
 
     /// Local fd → TLS. Blocking read on a dedicated thread; each chunk is sent
-    /// and awaited (natural backpressure). EOF/error tears the connection down.
+    /// and awaited (natural backpressure). On exit it cancels the connection and
+    /// shuts down its own dup — SHUT_RDWR on the shared socket wakes the downlink
+    /// whether it's blocked in a write or a receive — then closes only that dup.
     private static func startUplink(_ conn: NWConnection, _ fd: Int32) {
         Thread.detachNewThread {
             var buf = [UInt8](repeating: 0, count: 32768)
@@ -89,13 +118,16 @@ enum TurnTLSTunnel {
             }
             conn.send(content: nil, isComplete: true, completion: .idempotent)  // best-effort FIN
             conn.cancel()
+            Darwin.shutdown(fd, SHUT_RDWR)   // wake a downlink blocked writing/reading the socket
+            Darwin.close(fd)                 // only this thread's dup
         }
     }
 
     /// TLS → local fd. Receive on a dedicated thread (the callback only hands the
     /// chunk back via the semaphore, so the NWConnection queue never blocks), and
-    /// blocking-write it to the socketpair. Closes `fd` once — waking the uplink's
-    /// blocked read via shutdown — so teardown is single-owner.
+    /// blocking-write it to the socketpair. On exit it cancels the connection and
+    /// shuts down its own dup — waking a uplink blocked in read(upFD) on the same
+    /// socket — then closes only that dup.
     private static func startDownlink(_ conn: NWConnection, _ fd: Int32) {
         Thread.detachNewThread {
             while true {
@@ -112,9 +144,9 @@ enum TurnTLSTunnel {
                 if let chunk, !chunk.isEmpty, !writeAll(fd, chunk) { done = true }
                 if done { break }
             }
-            Darwin.shutdown(fd, SHUT_RDWR)   // unblock the uplink's read(fd)
-            Darwin.close(fd)
             conn.cancel()
+            Darwin.shutdown(fd, SHUT_RDWR)   // unblock the uplink's read on the shared socket
+            Darwin.close(fd)                 // only this thread's dup
         }
     }
 
