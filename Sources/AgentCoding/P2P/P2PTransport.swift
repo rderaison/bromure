@@ -92,23 +92,50 @@ enum P2PDirectDialer {
         let path: P2PPath
     }
 
-    /// Connect to the first viable candidate. `perCandidateTimeout` bounds each
-    /// attempt; `overallDeadline` bounds the whole ladder.
+    /// How many candidates race at once. A peer advertises one address per live
+    /// interface plus its srflx/relay rungs; the cap is a sanity bound, not a
+    /// throttle (each racer is one blocked connect, not real work).
+    private static let maxConcurrent = 24
+    /// After the first candidate connects, how long to keep listening for a
+    /// BETTER (higher-priority) one before committing. Direct beats relayed, and
+    /// a relay that answers 100 ms sooner shouldn't win the session for its
+    /// whole life — but nobody should wait longer than this for the upgrade.
+    private static let upgradeGrace: TimeInterval = 0.25
+
+    /// Race every candidate at once and take the best one that connects.
+    ///
+    /// This used to walk the ladder one candidate at a time, which made the
+    /// common case pathologically slow: a Mac advertises an address per live
+    /// interface (Wi-Fi, Ethernet, VPN tunnels, VM bridges), a phone off that
+    /// LAN can reach NONE of them, and each dead rung burned the full
+    /// `perCandidateTimeout` before the relay — always ranked last — got its
+    /// turn. Six unreachable host candidates meant ~18 s of nothing. Racing them
+    /// costs one blocked connect per candidate and finishes as soon as the first
+    /// one answers, so establishment is bounded by the fastest working path
+    /// (plus `upgradeGrace`) instead of the sum of every broken one.
+    ///
+    /// `perCandidateTimeout` bounds each attempt; `overallDeadline` the lot.
     static func dial(candidates: [P2PCandidate],
                      perCandidateTimeout: TimeInterval = 3,
                      overallDeadline: Date) -> Win? {
         let ordered = candidates
             .filter { $0.proto == .tcp }
             .sorted { $0.prio > $1.prio }
+            .prefix(maxConcurrent)
+        guard !ordered.isEmpty else { return nil }
+        let budget = min(perCandidateTimeout, overallDeadline.timeIntervalSinceNow)
+        guard budget > 0 else { return nil }
+
+        let race = DialRace(topPrio: ordered[ordered.startIndex].prio, total: ordered.count)
         for c in ordered {
-            if Date() >= overallDeadline { break }
-            let budget = min(perCandidateTimeout, overallDeadline.timeIntervalSinceNow)
-            guard budget > 0 else { break }
-            if let fd = P2PTCP.connect(ip: c.ip, port: c.port, timeout: budget) {
-                return Win(candidate: c, fd: fd, path: pathFor(c))
+            Thread.detachNewThread {
+                defer { race.finishOne() }
+                guard !race.settled else { return }
+                guard let fd = P2PTCP.connect(ip: c.ip, port: c.port, timeout: budget) else { return }
+                race.offer(Win(candidate: c, fd: fd, path: pathFor(c)))
             }
         }
-        return nil
+        return race.result(grace: upgradeGrace, deadline: overallDeadline)
     }
 
     /// Just probe whether a candidate is currently reachable (used to verify a
@@ -123,6 +150,67 @@ enum P2PDirectDialer {
         if c.kind == .relay { return .relay }
         if c.kind == .host && isPrivate(c.ip) { return .lan }
         return .direct
+    }
+
+    /// Collects the racers' results, keeps the best, and closes every loser's
+    /// socket so a race never leaks an fd (the winner's fd is the caller's).
+    private final class DialRace: @unchecked Sendable {
+        private let cond = NSCondition()
+        private let topPrio: Int
+        private let total: Int
+        private var best: Win?
+        private var firstWinAt: Date?
+        private var finished = 0
+        private var resolved = false
+
+        init(topPrio: Int, total: Int) {
+            self.topPrio = topPrio
+            self.total = total
+        }
+
+        /// True once `result` has committed — racers that finish afterwards drop
+        /// their connection instead of handing over an fd nobody will close.
+        var settled: Bool {
+            cond.lock(); defer { cond.unlock() }
+            return resolved
+        }
+
+        func offer(_ win: Win) {
+            cond.lock()
+            defer { cond.unlock() }
+            if resolved { Darwin.close(win.fd); return }
+            if let current = best {
+                if win.candidate.prio > current.candidate.prio {
+                    Darwin.close(current.fd)
+                    best = win
+                } else {
+                    Darwin.close(win.fd)
+                }
+            } else {
+                best = win
+                firstWinAt = Date()
+            }
+            cond.broadcast()
+        }
+
+        func finishOne() {
+            cond.lock(); finished += 1; cond.broadcast(); cond.unlock()
+        }
+
+        func result(grace: TimeInterval, deadline: Date) -> Win? {
+            cond.lock()
+            defer { resolved = true; cond.unlock() }
+            while true {
+                // Nothing better can arrive: everyone reported, or the winner is
+                // already the top-priority candidate.
+                if finished >= total { return best }
+                if let b = best, b.candidate.prio >= topPrio { return b }
+                if let first = firstWinAt, Date().timeIntervalSince(first) >= grace { return best }
+                if Date() >= deadline { return best }
+                let wake = min(deadline, firstWinAt?.addingTimeInterval(grace) ?? deadline)
+                _ = cond.wait(until: wake)
+            }
+        }
     }
 
     private static func isPrivate(_ ip: String) -> Bool {

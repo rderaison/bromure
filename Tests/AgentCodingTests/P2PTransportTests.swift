@@ -72,6 +72,60 @@ struct P2PTransportTests {
         Darwin.close(w.fd)
     }
 
+    @Test("the dialer races candidates instead of walking them one by one")
+    func dialerRacesInParallel() throws {
+        let echo = try #require(EchoServer())
+        defer { echo.stop() }
+        // TEST-NET-1 black-holes: each of these burns the whole per-candidate
+        // budget. Walked in sequence they'd cost 3 × 1.5 s before the reachable
+        // (lowest-priority) candidate got a turn; raced, they cost one budget.
+        let blackHoles = (1...3).map {
+            P2PCandidate(kind: .host, proto: .tcp, ip: "192.0.2.\($0)", port: 2222, prio: 1000)
+        }
+        let good = P2PCandidate(kind: .host, proto: .tcp, ip: "127.0.0.1",
+                                port: echo.port, prio: 10)
+        let t0 = Date()
+        let win = P2PDirectDialer.dial(candidates: blackHoles + [good],
+                                       perCandidateTimeout: 1.5,
+                                       overallDeadline: Date().addingTimeInterval(20))
+        let elapsed = Date().timeIntervalSince(t0)
+        let w = try #require(win)
+        #expect(w.candidate.port == echo.port)
+        #expect(elapsed < 3.0)   // sequential would need ≥ 4.5 s
+        Darwin.close(w.fd)
+    }
+
+    @Test("a higher-priority candidate still wins when both connect")
+    func dialerPrefersHigherPriority() throws {
+        let low = try #require(EchoServer())
+        let high = try #require(EchoServer())
+        defer { low.stop(); high.stop() }
+        let win = P2PDirectDialer.dial(
+            candidates: [P2PCandidate(kind: .host, proto: .tcp, ip: "127.0.0.1",
+                                      port: low.port, prio: 10),
+                         P2PCandidate(kind: .host, proto: .tcp, ip: "127.0.0.1",
+                                      port: high.port, prio: 900)],
+            perCandidateTimeout: 2,
+            overallDeadline: Date().addingTimeInterval(5))
+        let w = try #require(win)
+        #expect(w.candidate.port == high.port)
+        Darwin.close(w.fd)
+    }
+
+    @Test("a stopped shim reports itself dead so the broker can re-establish")
+    func shimLiveness() throws {
+        let echo = try #require(EchoServer())
+        defer { echo.stop() }
+        let winner = P2PCandidate(kind: .host, proto: .tcp, ip: "127.0.0.1", port: echo.port)
+        let shim = try #require(P2PLoopbackShim(winner: winner))
+        #expect(shim.isAlive)
+        shim.stop()
+        // Its port now refuses every dial — the cache entry must not be handed
+        // out again (that was the "Connection refused" reconnect on iOS).
+        #expect(!shim.isAlive)
+        #expect(P2PTCP.connect(ip: "127.0.0.1", port: shim.port, timeout: 1) == nil)
+    }
+
     @Test("loopback shim byte-pumps to the winning candidate")
     func shimSplice() throws {
         let echo = try #require(EchoServer())

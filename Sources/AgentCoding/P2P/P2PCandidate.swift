@@ -89,6 +89,15 @@ enum P2PCandidateGatherer {
             let flags = Int32(p.pointee.ifa_flags)
             guard (flags & IFF_UP) == IFF_UP, (flags & IFF_LOOPBACK) == 0,
                   let sa = p.pointee.ifa_addr else { continue }
+            // Interfaces no remote peer can ever dial: Apple's peer-to-peer
+            // radios (awdl/llw), the internal NIC-management links (anpi/ap),
+            // and this Mac's own VM/container bridge (bridge100 — Bromure's
+            // guests live there). Advertising them just hands the dialer
+            // addresses that can only time out.
+            if let name = p.pointee.ifa_name.map({ String(cString: $0) }),
+               ["awdl", "llw", "anpi", "ap", "bridge"].contains(where: { name.hasPrefix($0) }) {
+                continue
+            }
             let fam = sa.pointee.sa_family
             guard fam == sa_family_t(AF_INET) || fam == sa_family_t(AF_INET6) else { continue }
 

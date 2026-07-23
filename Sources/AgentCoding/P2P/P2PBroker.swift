@@ -58,6 +58,7 @@ final class P2PLoopbackShim: @unchecked Sendable {
     let winner: P2PCandidate
     private let lfd: Int32
     private var stopped = false
+    private var accepting = true
     private let lock = NSLock()
 
     init?(winner: P2PCandidate) {
@@ -67,6 +68,20 @@ final class P2PLoopbackShim: @unchecked Sendable {
         self.port = port
         self.winner = winner
         Thread.detachNewThread { [weak self] in self?.acceptLoop() }
+    }
+
+    /// Still able to serve a dial. A shim whose listener died takes its port
+    /// with it, and every later connect to that port is refused — so the broker
+    /// must be able to tell a live cache entry from a corpse rather than
+    /// handing out an endpoint that can only fail. Two ways it dies: `stop()`,
+    /// and the OS reclaiming the socket underneath us (iOS tears an app's
+    /// sockets down while it's suspended), which the accept loop notices when
+    /// its blocked `accept` returns. The descriptor check covers the window
+    /// between the socket dying and that thread being scheduled to see it.
+    var isAlive: Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !stopped, accepting else { return false }
+        return fcntl(lfd, F_GETFD) != -1        // EBADF → the listener is gone
     }
 
     private func acceptLoop() {
@@ -81,6 +96,7 @@ final class P2PLoopbackShim: @unchecked Sendable {
                 FatForward.splice(cfd, rfd)
             }
         }
+        lock.lock(); accepting = false; lock.unlock()
     }
 
     func stop() {
@@ -110,6 +126,10 @@ final class P2PBroker: @unchecked Sendable {
     private var channelToken: String?
     private var sessions: [String: P2PSession] = [:]
     private var liveShims: [String: (shim: P2PLoopbackShim, path: P2PPath)] = [:]
+    /// Peers with an `establish` in flight, so concurrent dials coalesce onto
+    /// one grant instead of racing (see `endpoint(forPeer:)`).
+    private let establishGate = NSCondition()
+    private var establishing: Set<String> = []
     /// Listener-side TURN relay sessions, one per grant, oldest first. Bounded
     /// — a reconnecting dialer mints a fresh grant (and relay) each time.
     private var relaySessions: [(grantID: String, listener: TurnRelayListener)] = []
@@ -360,14 +380,34 @@ final class P2PBroker: @unchecked Sendable {
     /// repeated dials of the same peer reuse one path. MUST NOT be called on the
     /// main thread — it blocks on network establishment.
     func endpoint(forPeer id: String, timeout: TimeInterval = 12) -> ResolvedEndpoint? {
-        lock.lock()
-        if let live = liveShims[id] {
-            let ep = ResolvedEndpoint(host: "127.0.0.1", port: live.shim.port,
-                                      path: live.path, peerDeviceID: id)
-            lock.unlock()
-            return ep
+        if let ep = liveEndpoint(forPeer: id) { return ep }
+
+        // Single-flight per peer. Several callers dial the same server at once
+        // (the 0.75 s mirror poll, every attached terminal, every grid cell) and
+        // each concurrent `establish` would mint its OWN connection grant. The
+        // last one to finish wins `liveShims`, and when an earlier grant then
+        // expires the listener tears down ITS relay — killing a path a live SSH
+        // connection was still using. So the losers wait for the winner and
+        // share its shim: one grant, one path, per peer.
+        let deadline = Date().addingTimeInterval(timeout + 3)
+        establishGate.lock()
+        while establishing.contains(id) {
+            guard establishGate.wait(until: deadline) else {
+                establishGate.unlock()
+                return nil
+            }
+            establishGate.unlock()
+            if let ep = liveEndpoint(forPeer: id) { return ep }
+            establishGate.lock()
         }
-        lock.unlock()
+        establishing.insert(id)
+        establishGate.unlock()
+        defer {
+            establishGate.lock()
+            establishing.remove(id)
+            establishGate.broadcast()
+            establishGate.unlock()
+        }
 
         let sem = DispatchSemaphore(value: 0)
         var result: ResolvedEndpoint?
@@ -382,10 +422,29 @@ final class P2PBroker: @unchecked Sendable {
     /// Non-blocking cache lookup — a live path for `id` if one exists, else nil.
     /// Safe to call on the main thread (never establishes).
     func cachedEndpoint(forPeer id: String) -> ResolvedEndpoint? {
-        lock.lock(); defer { lock.unlock() }
-        guard let live = liveShims[id] else { return nil }
-        return ResolvedEndpoint(host: "127.0.0.1", port: live.shim.port,
-                                path: live.path, peerDeviceID: id)
+        liveEndpoint(forPeer: id)
+    }
+
+    /// The cached path for `id`, but only while it can still carry a dial —
+    /// a shim whose loopback listener has died is dropped here instead of being
+    /// handed out. Without this, a path that died while the app was suspended
+    /// stayed cached forever and every reconnect resolved to the same dead port
+    /// ("Connection refused" on a server that is perfectly reachable).
+    private func liveEndpoint(forPeer id: String) -> ResolvedEndpoint? {
+        lock.lock()
+        guard let live = liveShims[id] else { lock.unlock(); return nil }
+        guard live.shim.isAlive else {
+            liveShims[id] = nil
+            lock.unlock()
+            live.shim.stop()
+            FatClientLog.log("p2p: peer \(id.prefix(8)) had a dead loopback shim "
+                + "(127.0.0.1:\(live.shim.port)) — dropped, will re-establish")
+            return nil
+        }
+        let ep = ResolvedEndpoint(host: "127.0.0.1", port: live.shim.port,
+                                  path: live.path, peerDeviceID: id)
+        lock.unlock()
+        return ep
     }
 
     /// Tear down a peer's path (call from the mirror controller's stop()).
@@ -458,14 +517,17 @@ final class P2PBroker: @unchecked Sendable {
         while win == nil && Date() < deadline {
             let fresh = session.candidates.filter { !tried.contains($0) }
             guard !fresh.isEmpty else {
-                try? await Task.sleep(nanoseconds: 200_000_000)
+                // Tight: the answer's host bundle usually lands within a few
+                // signalling round-trips, and every poll interval spent asleep
+                // is added latency on an otherwise instant LAN connect.
+                try? await Task.sleep(nanoseconds: 50_000_000)
                 continue
             }
             tried.formUnion(fresh)
-            // Bound each batch: a wall of silently-dropped host candidates
-            // (3s connect timeout apiece) must not starve the trickled
-            // srflx/relay rungs of their turn before the overall deadline.
-            let batchDeadline = min(deadline, Date().addingTimeInterval(6))
+            // Bound each batch. The dialer races the whole batch in parallel, so
+            // a batch costs one connect timeout — not one per candidate — and
+            // the trickled srflx/relay rungs get their turn promptly.
+            let batchDeadline = min(deadline, Date().addingTimeInterval(3.5))
             win = await Self.blocking {
                 P2PDirectDialer.dial(candidates: fresh, overallDeadline: batchDeadline)
             }
