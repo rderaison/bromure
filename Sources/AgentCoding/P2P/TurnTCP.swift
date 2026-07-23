@@ -65,8 +65,12 @@ enum STUNUDP {
 enum STUNTCP {
     /// Resolve (DNS ok) and connect with a bounded timeout. Unlike
     /// `P2PTCP.connect` this accepts hostnames — the relay is `turn.bromure.io`,
-    /// not a numeric candidate. Returns a connected blocking fd.
-    static func connect(host: String, port: Int, timeout: TimeInterval) -> Int32? {
+    /// not a numeric candidate. Returns a connected blocking fd. When `tls` is
+    /// set the fd is a `TurnTLSTunnel` loopback whose bytes are TLS'd to the
+    /// relay (turns:, 5349) — transparent to every STUN send/read and the data
+    /// leg's splice, which keep treating it as a plain TCP socket.
+    static func connect(host: String, port: Int, timeout: TimeInterval, tls: Bool = false) -> Int32? {
+        if tls { return TurnTLSTunnel.connect(host: host, port: port, timeout: timeout) }
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
         hints.ai_socktype = SOCK_STREAM
@@ -160,6 +164,8 @@ final class TurnTCPClient: @unchecked Sendable {
 
     let host: String
     let port: Int
+    /// Dial the control + data legs over TLS (turns:) rather than plain TCP.
+    private let tls: Bool
     private let username: String
     private let password: String
 
@@ -171,16 +177,17 @@ final class TurnTCPClient: @unchecked Sendable {
     private var pendingEvents: [STUNMessage] = []
     private(set) var fd: Int32 = -1
 
-    init(host: String, port: Int, username: String, password: String) {
+    init(host: String, port: Int, tls: Bool = false, username: String, password: String) {
         self.host = host
         self.port = port
+        self.tls = tls
         self.username = username
         self.password = password
     }
 
     func connect(timeout: TimeInterval) -> Bool {
         guard fd < 0 else { return true }
-        guard let s = STUNTCP.connect(host: host, port: port, timeout: timeout) else { return false }
+        guard let s = STUNTCP.connect(host: host, port: port, timeout: timeout, tls: tls) else { return false }
         fd = s
         return true
     }
@@ -234,7 +241,7 @@ final class TurnTCPClient: @unchecked Sendable {
     /// a ConnectionAttempt's id. On success the returned fd is a raw byte pipe
     /// to the peer (caller owns it — splice it into the local sshd).
     func bindDataConnection(id: UInt32, timeout: TimeInterval) -> Int32? {
-        guard let dataFD = STUNTCP.connect(host: host, port: port, timeout: timeout) else { return nil }
+        guard let dataFD = STUNTCP.connect(host: host, port: port, timeout: timeout, tls: tls) else { return nil }
         let resp = transact(on: dataFD, timeout: timeout) {
             var m = STUNMessage(type: STUNMessage.connectionBindRequest)
             m.add(STUNMessage.attrConnectionID, u32: id)
@@ -384,14 +391,14 @@ final class TurnRelayListener: @unchecked Sendable {
     /// racing the dialer's connect.
     static func start(creds: TurnCredentials, permitIP: String, sshPort: Int)
         -> (listener: TurnRelayListener, started: Started)? {
-        guard let (host, port, _) = TurnRelayTransport.preferredTCPEndpoint(creds.urls) else {
-            FatClientLog.log("p2p: no turn:…?transport=tcp URL in credentials")
+        guard let (host, port, tls) = TurnRelayTransport.preferredRelayEndpoint(creds.urls) else {
+            FatClientLog.log("p2p: no turn(s):…?transport=tcp URL in credentials")
             return nil
         }
-        let client = TurnTCPClient(host: host, port: port,
+        let client = TurnTCPClient(host: host, port: port, tls: tls,
                                    username: creds.username, password: creds.credential)
         guard client.connect(timeout: 5) else {
-            FatClientLog.log("p2p: relay \(host):\(port) unreachable")
+            FatClientLog.log("p2p: relay \(host):\(port) (\(tls ? "TLS" : "TCP")) unreachable")
             return nil
         }
         guard let alloc = client.allocateTCP(timeout: 6) else {
@@ -405,6 +412,7 @@ final class TurnRelayListener: @unchecked Sendable {
             return nil
         }
         FatClientLog.log("p2p: TURN relay allocated \(alloc.relayIP):\(alloc.relayPort) "
+            + "over \(tls ? "TLS" : "TCP") \(host):\(port) "
             + "(lifetime \(alloc.lifetime)s, permit \(permitIP))")
         let listener = TurnRelayListener(client: client, sshPort: sshPort,
                                          lifetime: alloc.lifetime, permitted: [permitIP])

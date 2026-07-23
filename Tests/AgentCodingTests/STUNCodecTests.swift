@@ -113,8 +113,37 @@ struct STUNCodecTests {
         let stun = TurnRelayTransport.stunEndpoint(urls)
         #expect(stun?.host == "turn.bromure.io")
         #expect(stun?.port == 3478)
-        // No tcp turn: URL → no relay endpoint (turns: is not spoken yet).
+        // preferredTCPEndpoint is the plain-TCP selector (STUN fallback / non-TLS
+        // relay): it never picks a turns: URL.
         #expect(TurnRelayTransport.preferredTCPEndpoint(
             ["stun:h:3478", "turn:h:3478?transport=udp", "turns:h:5349?transport=tcp"]) == nil)
+    }
+
+    @Test("relay endpoint prefers turns: (TLS) when offered, else falls back to plain turn: TCP")
+    func relayEndpointSelection() {
+        // Full set → TLS (turns:5349) wins.
+        let full = ["stun:turn.bromure.io:3478",
+                    "turn:turn.bromure.io:3478?transport=udp",
+                    "turn:turn.bromure.io:3478?transport=tcp",
+                    "turns:turn.bromure.io:5349?transport=tcp"]
+        let tls = TurnRelayTransport.preferredRelayEndpoint(full)
+        #expect(tls?.host == "turn.bromure.io")
+        #expect(tls?.port == 5349)
+        #expect(tls?.tls == true)
+
+        // No turns: URL → fall back to plain turn: TCP (3478), tls == false.
+        let plain = TurnRelayTransport.preferredRelayEndpoint(
+            ["stun:h:3478", "turn:h:3478?transport=udp", "turn:h:3478?transport=tcp"])
+        #expect(plain?.host == "h")
+        #expect(plain?.port == 3478)
+        #expect(plain?.tls == false)
+
+        // A turns: URL that isn't TCP is not usable (RFC 6062 needs a TCP leg);
+        // with no plain turn: TCP either, there's no relay endpoint.
+        #expect(TurnRelayTransport.preferredRelayEndpoint(
+            ["stun:h:3478", "turn:h:3478?transport=udp", "turns:h:5349?transport=udp"]) == nil)
+
+        // No TURN URLs at all → nil.
+        #expect(TurnRelayTransport.preferredRelayEndpoint(["stun:h:3478"]) == nil)
     }
 }

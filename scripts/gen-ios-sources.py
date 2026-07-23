@@ -87,6 +87,7 @@ SHARED = [
     "P2P/STUN.swift",
     "P2P/TurnRelayTransport.swift",
     "P2P/TurnTCP.swift",
+    "P2P/TurnTLS.swift",
 ]
 
 

@@ -24,10 +24,28 @@ enum TurnRelayTransport {
         try? await client.turnCredentials(bearer: bearer, connectionId: connectionId)
     }
 
-    /// Pick the endpoint for the TURN-TCP client leg: the first
-    /// `turn:…?transport=tcp` URL (RFC 6062 requires a TCP client leg). `turns:`
-    /// (TLS, 5349) is not spoken yet — plain 3478 carries only the TURN
-    /// envelope; the payload is SSH, encrypted end-to-end regardless.
+    /// Pick the endpoint for the TURN client legs (control + RFC 6062 data),
+    /// preferring `turns:…?transport=tcp` (TLS, 5349) so the TURN envelope — the
+    /// long-term-credential username, realm/nonce, and the XOR-obfuscated peer
+    /// addresses — is encrypted to the relay, and falling back to plain
+    /// `turn:…?transport=tcp` (3478) when no TLS URL is offered. The relayed
+    /// payload is SSH either way; TLS here protects the metadata, not the data.
+    /// `tls == true` means dial via `TurnTLSTunnel`.
+    static func preferredRelayEndpoint(_ urls: [String]) -> (host: String, port: Int, tls: Bool)? {
+        for url in urls where url.hasPrefix("turns:") {
+            if let p = parseHostPort(fromURL: url), p.transport == "tcp" {
+                return (p.host, p.port, true)
+            }
+        }
+        if let p = preferredTCPEndpoint(urls) {
+            return (p.host, p.port, false)
+        }
+        return nil
+    }
+
+    /// The plain `turn:…?transport=tcp` endpoint (RFC 6062 requires a TCP client
+    /// leg). Kept for the STUN-Binding fallback (`stunEndpoint`) and as the
+    /// non-TLS relay fallback; the relay path prefers `preferredRelayEndpoint`.
     static func preferredTCPEndpoint(_ urls: [String]) -> (host: String, port: Int, transport: String?)? {
         for url in urls where url.hasPrefix("turn:") {
             if let parsed = parseHostPort(fromURL: url), parsed.transport == "tcp" {

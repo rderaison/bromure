@@ -65,6 +65,7 @@
 		F3EF497C1A2C232CB51B9D21 /* P2P__STUN.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79B578BC927582930ED5585C /* P2P__STUN.swift */; };
 		FC1C41B9A3FDBCDA909D6231 /* P2P__TurnRelayTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10644B01DC7B818F1EB193F /* P2P__TurnRelayTransport.swift */; };
 		7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */; };
+		FF560ED82A0B2A56BA508F9E /* P2P__TurnTLS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DCA79012D28C87E7EE2E89B /* P2P__TurnTLS.swift */; };
 		E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */; };
 		3B15992E5BD329D249A9D27D /* Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2368064077094F44DF16B8E /* Profile.swift */; };
 		F3011FF5C29C08F27538AE45 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2652DA1029D0752C313AC9D0 /* PushCrypto.swift */; };
@@ -178,6 +179,7 @@
 		79B578BC927582930ED5585C /* P2P__STUN.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__STUN.swift"; path = "Sources/BromureRemote/_shared/P2P__STUN.swift"; sourceTree = "<group>"; };
 		C10644B01DC7B818F1EB193F /* P2P__TurnRelayTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnRelayTransport.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnRelayTransport.swift"; sourceTree = "<group>"; };
 		1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnTCP.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnTCP.swift"; sourceTree = "<group>"; };
+		7DCA79012D28C87E7EE2E89B /* P2P__TurnTLS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnTLS.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnTLS.swift"; sourceTree = "<group>"; };
 		1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformShims.swift"; path = "Sources/BromureRemote/_shared/PlatformShims.swift"; sourceTree = "<group>"; };
 		C2368064077094F44DF16B8E /* Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Profile.swift"; path = "Sources/BromureRemote/_shared/Profile.swift"; sourceTree = "<group>"; };
 		2652DA1029D0752C313AC9D0 /* PushCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushCrypto.swift"; path = "Sources/BromureRemote/_shared/PushCrypto.swift"; sourceTree = "<group>"; };
@@ -308,6 +310,7 @@
 				79B578BC927582930ED5585C /* P2P__STUN.swift */,
 				C10644B01DC7B818F1EB193F /* P2P__TurnRelayTransport.swift */,
 				1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */,
+				7DCA79012D28C87E7EE2E89B /* P2P__TurnTLS.swift */,
 				1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */,
 				C2368064077094F44DF16B8E /* Profile.swift */,
 				2652DA1029D0752C313AC9D0 /* PushCrypto.swift */,
@@ -496,6 +499,7 @@
 				F3EF497C1A2C232CB51B9D21 /* P2P__STUN.swift in Sources */,
 				FC1C41B9A3FDBCDA909D6231 /* P2P__TurnRelayTransport.swift in Sources */,
 				7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */,
+				FF560ED82A0B2A56BA508F9E /* P2P__TurnTLS.swift in Sources */,
 				E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */,
 				3B15992E5BD329D249A9D27D /* Profile.swift in Sources */,
 				F3011FF5C29C08F27538AE45 /* PushCrypto.swift in Sources */,
