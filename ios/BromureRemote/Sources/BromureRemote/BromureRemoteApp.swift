@@ -29,6 +29,14 @@ struct RootView: View {
     @State private var directory: RemoteConnectModel
     /// The host currently being mirrored (saved OR a resolved peer).
     @State private var activeHost: RemoteHost?
+    /// One RemoteHostController per host, reused while the host is open (across
+    /// pushes into its terminals/grid) and torn down the instant the host is
+    /// left. Held in a reference type so get-or-create can run during view body
+    /// without mutating @State (which SwiftUI wouldn't persist — the terminal
+    /// session-cache trap). Without deterministic teardown here, leaving a host
+    /// left its poll timer + P2P connection alive; reconnecting stacked a second
+    /// one on the stale cached path and stalled until the app was killed.
+    @State private var controllers = HostControllerStore()
     @State private var showAddServer = false
     @State private var pendingPeer: DeviceInfo?
     /// A notification tap's target window, opened once its server connects.
@@ -89,6 +97,14 @@ struct RootView: View {
                 break
             }
         }
+        // Left a host (popped to the list) or switched hosts: stop the one we're
+        // leaving NOW — invalidate its poll and close its P2P peer path — so a
+        // later reconnect establishes a FRESH connection instead of reusing a
+        // stale cached one (the "stalls until I kill the app" bug, plus the flaky
+        // tab commands that a degraded reused connection intermittently dropped).
+        .onChange(of: activeHost) { old, new in
+            if let old, old.id != new?.id { controllers.leave(old) }
+        }
         // A tapped notification asks to open the server that's waiting; connect
         // to it so the agent shows up in "At a Glance" ready to answer.
         .onChange(of: push.tapTarget) { _, target in route(target) }
@@ -125,7 +141,8 @@ struct RootView: View {
             NavigationStack {
                 bootList
                     .navigationDestination(item: $activeHost) { host in
-                        HostMirrorScreen(host: host, openWorkspace: pendingWorkspace).id(host.id)
+                        HostMirrorScreen(controller: controllers.controller(for: host),
+                                         host: host, openWorkspace: pendingWorkspace).id(host.id)
                     }
             }
         } else {
@@ -133,7 +150,8 @@ struct RootView: View {
                 bootList
             } detail: {
                 if let host = activeHost {
-                    HostMirrorScreen(host: host, openWorkspace: pendingWorkspace).id(host.id)
+                    HostMirrorScreen(controller: controllers.controller(for: host),
+                                     host: host, openWorkspace: pendingWorkspace).id(host.id)
                 } else {
                     ContentUnavailableView("Select a server",
                         systemImage: "server.rack",
@@ -477,5 +495,28 @@ final class HostBox {
     var onChange: ((RemoteHost) -> Void)?
     var host: RemoteHost? {
         didSet { if let host { onChange?(host) } }
+    }
+}
+
+/// One live `RemoteHostController` per host id. `controller(for:)` reuses the
+/// existing one (so pushing into a host's terminals/grid doesn't re-handshake)
+/// and mints a fresh one after a `leave`. `leave` stops the controller — poll
+/// timer invalidated, P2P peer path closed — the instant the host is left, so a
+/// later reconnect never reuses a stale cached connection. A reference type: the
+/// view body's get-or-create must not mutate @State (SwiftUI won't persist it),
+/// the same reason the terminal session cache is a class.
+@MainActor
+final class HostControllerStore {
+    private var map: [UUID: RemoteHostController] = [:]
+
+    func controller(for host: RemoteHost) -> RemoteHostController {
+        if let c = map[host.id] { return c }
+        let c = RemoteHostController(host: host)
+        map[host.id] = c
+        return c
+    }
+
+    func leave(_ host: RemoteHost) {
+        map.removeValue(forKey: host.id)?.stop()
     }
 }

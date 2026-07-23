@@ -16,18 +16,23 @@ struct WorkspaceDeepLink: Hashable {
 }
 
 struct HostMirrorScreen: View {
+    /// Owned by the app's per-host store, NOT created here — so leaving the host
+    /// can deterministically stop it (poll + P2P teardown) instead of relying on
+    /// @State dealloc, which never closed the peer path and left a stale
+    /// connection to be reused (and stall) on reconnect.
+    let controller: RemoteHostController
     let host: RemoteHost
     /// When set (a notification tap), push straight to this workspace window
     /// once the mirror has connected and knows about it.
     let openWorkspace: WorkspaceDeepLink?
-    @State private var controller: RemoteHostController
     @State private var deepWorkspace: WorkspaceDeepLink?
     @State private var didDeepLink = false
 
-    init(host: RemoteHost, openWorkspace: WorkspaceDeepLink? = nil) {
+    init(controller: RemoteHostController, host: RemoteHost,
+         openWorkspace: WorkspaceDeepLink? = nil) {
+        self.controller = controller
         self.host = host
         self.openWorkspace = openWorkspace
-        _controller = State(initialValue: RemoteHostController(host: host))
     }
 
     /// Push the deep-linked workspace the moment the mirror knows it exists
