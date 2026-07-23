@@ -55,26 +55,7 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if sizeClass == .compact {
-                NavigationStack {
-                    bootList
-                        .navigationDestination(item: $activeHost) { host in
-                            HostMirrorScreen(host: host, openWorkspace: pendingWorkspace).id(host.id)
-                        }
-                }
-            } else {
-                NavigationSplitView {
-                    bootList
-                } detail: {
-                    if let host = activeHost {
-                        HostMirrorScreen(host: host, openWorkspace: pendingWorkspace).id(host.id)
-                    } else {
-                        ContentUnavailableView("Select a server",
-                            systemImage: "server.rack",
-                            description: Text("Pick a bromure.io server or add one by address."))
-                    }
-                }
-            }
+            mainUI
         }
         .onAppear {
             directory.refreshAccount()
@@ -127,6 +108,29 @@ struct RootView: View {
             PeerConnectSheet(server: server) { host in
                 activeHost = host
                 pendingPeer = nil
+            }
+        }
+    }
+
+    @ViewBuilder private var mainUI: some View {
+        if sizeClass == .compact {
+            NavigationStack {
+                bootList
+                    .navigationDestination(item: $activeHost) { host in
+                        HostMirrorScreen(host: host, openWorkspace: pendingWorkspace).id(host.id)
+                    }
+            }
+        } else {
+            NavigationSplitView {
+                bootList
+            } detail: {
+                if let host = activeHost {
+                    HostMirrorScreen(host: host, openWorkspace: pendingWorkspace).id(host.id)
+                } else {
+                    ContentUnavailableView("Select a server",
+                        systemImage: "server.rack",
+                        description: Text("Pick a bromure.io server or add one by address."))
+                }
             }
         }
     }

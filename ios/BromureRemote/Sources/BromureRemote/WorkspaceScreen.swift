@@ -210,7 +210,14 @@ private struct TerminalsPane: View {
     /// stays mounted either way — see WorkspaceScreen.content — so this is what
     /// keeps a hidden surface from holding the keyboard.
     var isVisible = true
-    @State private var sessions: [Int: AttachSession] = [:]
+    /// Cache of one live AttachSession per window. Held in a REFERENCE type, not
+    /// a @State dictionary: `session(for:)` lazily creates entries during view
+    /// body evaluation, and mutating @State there is undefined behaviour —
+    /// SwiftUI didn't persist the writes, so every render minted fresh sessions
+    /// that never stayed connected (typing hit a dead socket, fd -1). Mutating a
+    /// class the @State merely *references* is safe and the entries persist.
+    @State private var store = SessionCache()
+    final class SessionCache { var map: [Int: AttachSession] = [:] }
     /// Every window shown in this pane so far. Their surfaces stay mounted (and
     /// their streams attached) so switching back is instant instead of a fresh
     /// exec + tmux attach + repaint. Pruned when a window closes remotely.
@@ -410,11 +417,16 @@ private struct TerminalsPane: View {
     /// will, now that the surfaces outlive a tab switch).
     private func syncMounted() {
         let live = Set(tabs.map(\.index))
-        for w in mounted where !live.contains(w) {
-            sessions[w]?.stop()
-            sessions[w] = nil
+        // Prune only against a POPULATED roster. A poll blip that momentarily
+        // reports zero/partial tabs must not stop a live session — that killed
+        // the active terminal's stream, and typing then dropped (fd -1).
+        if !live.isEmpty {
+            for w in mounted where !live.contains(w) {
+                store.map[w]?.stop()
+                store.map[w] = nil
+            }
+            mounted.removeAll { !live.contains($0) }
         }
-        mounted.removeAll { !live.contains($0) }
         if let win = effectiveWindow, !mounted.contains(win) { mounted.append(win) }
     }
 
@@ -427,9 +439,9 @@ private struct TerminalsPane: View {
     }
 
     private func session(for window: Int) -> AttachSession {
-        if let s = sessions[window] { return s }
+        if let s = store.map[window] { return s }
         let s = AttachSession(host: controller.host, vmID: profileID.uuidString, windowIndex: window)
-        sessions[window] = s
+        store.map[window] = s   // mutates the class, not @State — safe in body
         return s
     }
 
@@ -459,8 +471,8 @@ private struct TerminalsPane: View {
             } label: { Label("Send to Grid", systemImage: "square.grid.2x2") }
             Button(role: .destructive) {
                 controller.closeTab(profileID, index: tab.index)
-                sessions[tab.index]?.stop()
-                sessions[tab.index] = nil
+                store.map[tab.index]?.stop()
+                store.map[tab.index] = nil
             } label: { Label("Close", systemImage: "xmark") }
         }
     }

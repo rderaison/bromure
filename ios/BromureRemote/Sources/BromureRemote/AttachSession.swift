@@ -47,6 +47,9 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
 
     private let stateLock = NSLock()
     private var streamFD: Int32 = -1
+    /// A pump loop is live (running or between reconnect attempts). Guards
+    /// against `attach` starting a second one — see `attach`.
+    private var pumping = false
     private var stopped = false
     private var reattachDelay: TimeInterval = 1.0
     private var lastConnectAt = Date.distantPast
@@ -83,16 +86,38 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
         closeFD()
     }
 
-    /// Bind the SwiftUI-hosted terminal and start pumping. Main actor.
+    /// Bind the SwiftUI-hosted terminal. Idempotent: if a pump is already
+    /// running (the session is cached and reused across view recreations), just
+    /// re-point at the new view and force a repaint — do NOT start a second
+    /// pump. A second pump would open a second stream and, when either ends,
+    /// `closeFD` would clobber `streamFD` to -1, silently dropping every
+    /// keystroke (`writeFrame`'s `guard fd >= 0`). That was the "typing goes
+    /// nowhere / fd0" bug.
     @MainActor func attach(to view: TerminalView) {
         terminalView = view
         let term = view.getTerminal()
-        stateLock.lock(); cols = term.cols; rows = term.rows; stopped = false; stateLock.unlock()
-        startPump()
+        stateLock.lock()
+        cols = term.cols; rows = term.rows; stopped = false
+        let running = pumping
+        stateLock.unlock()
+        if running {
+            // Existing pump now feeds this (possibly fresh, blank) view — nudge
+            // a resize so tmux repaints the current screen into it.
+            resize(cols: term.cols, rows: term.rows)
+        } else {
+            startPump()
+        }
+    }
+
+    /// Drop the view binding without touching the stream — the session is cached
+    /// and a new view may re-attach. Only clears if `view` is still the bound
+    /// one, so a recreate that already re-attached isn't unbound.
+    @MainActor func detach(_ view: TerminalView) {
+        if terminalView === view { terminalView = nil }
     }
 
     func stop() {
-        stateLock.lock(); stopped = true; stateLock.unlock()
+        stateLock.lock(); stopped = true; pumping = false; stateLock.unlock()
         closeFD()
     }
 
@@ -118,6 +143,7 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
 
     private func startPump() {
         stateLock.lock()
+        pumping = true
         let sinceLast = Date().timeIntervalSince(lastConnectAt)
         let delay = reattachDelay
         lastConnectAt = Date()
@@ -221,7 +247,12 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
         if Date().timeIntervalSince(lastConnectAt) > 10 { reattachDelay = 1.0 }
         else { reattachDelay = min(reattachDelay * 2, 30) }
         stateLock.unlock()
-        guard !done, terminalView != nil else { return }
+        // No view bound (mid-recreate) or explicitly stopped → the pump is over.
+        // Mark it not-pumping so a later attach starts a fresh one.
+        guard !done, terminalView != nil else {
+            stateLock.lock(); pumping = false; stateLock.unlock()
+            return
+        }
         startPump()
     }
 }
@@ -273,6 +304,7 @@ struct RemoteTerminalView: UIViewRepresentable {
         tv.font = Self.monoFont(currentSize)
         context.coordinator.bind(tv)
         session.attach(to: tv)
+        tv.isHidden = interactive && !isActive   // inactive surfaces start ineligible
         if interactive {
             let pinch = UIPinchGestureRecognizer(
                 target: context.coordinator,
@@ -282,11 +314,10 @@ struct RemoteTerminalView: UIViewRepresentable {
             pinch.cancelsTouchesInView = false
             pinch.delaysTouchesBegan = false
             tv.addGestureRecognizer(pinch)
-            // Pop the keyboard once the surface actually lands in a window, so
-            // an interactive terminal is ready to type into without a tap. Only
-            // the surface on screen: a sibling mounted for another window must
-            // not steal it out from under the visible one.
-            if isActive { context.coordinator.keepFocused(tv) }
+            // Focus is driven by updateUIView (which always runs right after
+            // this, with justActivated == true), so it grabs the keyboard once
+            // the view is actually in the window — not here, where the view has
+            // no window yet and becomeFirstResponder would no-op.
         } else {
             // A preview: let taps reach the SwiftUI navigation behind it.
             tv.isUserInteractionEnabled = false
@@ -299,24 +330,38 @@ struct RemoteTerminalView: UIViewRepresentable {
         let target = Self.monoFont(currentSize)
         if uiView.font.pointSize != target.pointSize { uiView.font = target }
         guard interactive else { return }
+        // Hide the UIView itself when inactive — not just via SwiftUI .opacity,
+        // which leaves it fully first-responder-eligible. A truly hidden view
+        // can't hold or take the keyboard (UIKit refuses becomeFirstResponder),
+        // so only the ONE visible surface can ever own it. This is the
+        // structural half of the fix.
+        if uiView.isHidden == isActive { uiView.isHidden = !isActive }
         if isActive {
-            // The visible terminal owns the keyboard. Keep it — reclaim first
-            // responder if lost to a sibling teardown, the reader closing, or a
-            // rotation. A terminal has no "dismiss keyboard" affordance, so
-            // simply following visibility is right; going inactive (switching
-            // tab / pane / into the reader) is what releases it. This is
-            // self-healing: every render re-checks, so a transient active →
-            // inactive → active flip during a transition can't strand it
-            // keyboard-less, which the previous focusTick-only trigger did.
-            context.coordinator.keepFocused(uiView)
+            // Auto-focus on an explicit signal only: this surface just became
+            // active, or focusTick bumped (tab switch, rotation, reader closed,
+            // pane returned). NOT on every render — that would fight SwiftTerm's
+            // keyboard-dismiss button, snapping it back the instant it's hidden.
+            let c = context.coordinator
+            if c.justActivated || c.lastFocusTick != focusTick {
+                c.justActivated = false
+                c.lastFocusTick = focusTick
+                c.keepFocused(uiView)
+            }
         } else {
+            context.coordinator.justActivated = true   // arm for the next activation
             context.coordinator.stopKeepingFocus()
             if uiView.isFirstResponder { uiView.resignFirstResponder() }
         }
     }
 
     static func dismantleUIView(_ uiView: TerminalView, coordinator: Coordinator) {
-        coordinator.session.stop()
+        // Do NOT stop the session here. It's cached per window and reused across
+        // view recreations (the mounted-surface design), so stopping on view
+        // teardown killed the live stream — the next keystroke hit a closed
+        // socket and was dropped (the "typing does nothing / fd0" bug). Just
+        // unbind this view; the cache owns the session's lifecycle (syncMounted
+        // prunes and stops a window that actually closed; Close does it too).
+        coordinator.session.detach(uiView)
     }
 
     final class Coordinator: NSObject, TerminalViewDelegate {
@@ -330,29 +375,36 @@ struct RemoteTerminalView: UIViewRepresentable {
         /// `becomeFirstResponder()` on this now-hidden surface and steal the
         /// keyboard from the visible one (surfaces stay mounted).
         private var focusGen = 0
+        /// Last focusTick acted on — a change means an explicit "take focus now".
+        var lastFocusTick = 0
+        /// True until this surface's first focus attempt after becoming active,
+        /// so a fresh activation always (re)grabs the keyboard even if focusTick
+        /// didn't change. Reset to true whenever the surface goes inactive.
+        var justActivated = true
 
         init(view: RemoteTerminalView) { self.parent = view }
         func bind(_ v: TerminalView) { view = v }
 
-        /// Ensure this (active, visible) surface is first responder, retrying
-        /// until it lands in the window and takes it. A no-op once it already
-        /// holds focus, so calling it on every render is cheap.
+        /// Make this (active, visible) surface first responder so the terminal
+        /// is ready to type into without a tap. A no-op once it holds focus. The
+        /// view may not be in the window yet at call time (mid tab-switch), so
+        /// poll a few times until becomeFirstResponder lands.
         func keepFocused(_ v: TerminalView) {
             if v.isFirstResponder { return }
             focusGen &+= 1
-            retryFocus(v, gen: focusGen, attempts: 40)
+            retryFocus(v, gen: focusGen, attempts: 20)
         }
 
-        /// Stop any pending focus retry (this surface is no longer active).
+        /// Cancel any pending focus retry (this surface is no longer active).
         func stopKeepingFocus() { focusGen &+= 1 }
 
         private func retryFocus(_ v: TerminalView, gen: Int, attempts: Int) {
             guard attempts > 0 else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak v, weak self] in
-                guard let self, let v else { return }
-                // Superseded (this surface went inactive, or a newer attempt
-                // started) → stop, so a hidden terminal can't claim the keyboard.
-                guard gen == self.focusGen else { return }
+                guard let self, let v, gen == self.focusGen else { return }
+                // Superseded (went inactive) or hidden → stop; a hidden terminal
+                // must never claim the keyboard.
+                if v.isHidden { return }
                 if v.window != nil, v.becomeFirstResponder() { return }
                 self.retryFocus(v, gen: gen, attempts: attempts - 1)
             }
