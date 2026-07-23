@@ -1817,6 +1817,25 @@ enum CodingTaskEngine {
             + "if [ -n \"$q\" ] && [ -n \"$(find \"$q\" -newermt @\(since) 2>/dev/null)\" ]; "
             + "then echo; tr -d '\\n' < \"$q\"; echo; fi"
     }
+
+    /// The guest command that answers a live AskUserQuestion picker by typing
+    /// its key sequence. Byte-identical to the macOS engine's copy — the phone
+    /// renders the same interactive question card and answers the same way.
+    ///
+    /// Each digit re-checks that the picker is still on screen: a keystroke that
+    /// lands after it closed goes into the chat input and interrupts the pending
+    /// tool call, which Claude records as the user declining to answer.
+    nonisolated static func answerKeysCommand(tabIndex: Int, keys: [String]) -> String {
+        let probe = "tmux capture-pane -p -t bromure:\(tabIndex) 2>/dev/null "
+            + "| grep -q 'Enter to select'"
+        return keys.compactMap { k -> String? in
+            let named = ["Enter", "Right", "Left", "Down", "Up", "Tab", "Space"]
+            let isDigit = k.count == 1 && k.first!.isNumber
+            guard isDigit || named.contains(k) else { return nil }
+            let send = "tmux send-keys -t bromure:\(tabIndex) \(isDigit ? "-l " : "")\(k)"
+            return isDigit ? "{ \(probe) && \(send); true; }" : send
+        }.joined(separator: "; sleep 1; ")
+    }
 }
 #endif
 

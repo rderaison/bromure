@@ -246,6 +246,10 @@ struct RemoteTerminalView: UIViewRepresentable {
     var fontSize: Binding<CGFloat>? = nil
     /// The (non-zoomable) point size used when `fontSize` is nil.
     var fixedFontSize: CGFloat = 13
+    /// Any change asks the surface to take first responder again. A rotation
+    /// dismisses the keyboard and drops focus, and `makeUIView` (where focus is
+    /// first requested) does not run again for a view that merely re-laid out.
+    var focusTick: Int = 0
 
     static let minFont: CGFloat = 8
     static let maxFont: CGFloat = 28
@@ -287,6 +291,10 @@ struct RemoteTerminalView: UIViewRepresentable {
         context.coordinator.parent = self
         let target = Self.monoFont(currentSize)
         if uiView.font.pointSize != target.pointSize { uiView.font = target }
+        if interactive, context.coordinator.lastFocusTick != focusTick {
+            context.coordinator.lastFocusTick = focusTick
+            context.coordinator.scheduleFocus(uiView)
+        }
     }
 
     static func dismantleUIView(_ uiView: TerminalView, coordinator: Coordinator) {
@@ -298,6 +306,8 @@ struct RemoteTerminalView: UIViewRepresentable {
         var session: AttachSession { parent.session }
         private weak var view: TerminalView?
         private var pinchBaseSize: CGFloat = 13
+        /// Last `focusTick` acted on, so one bump means one focus attempt.
+        var lastFocusTick = 0
 
         init(view: RemoteTerminalView) { self.parent = view }
         func bind(_ v: TerminalView) { view = v }

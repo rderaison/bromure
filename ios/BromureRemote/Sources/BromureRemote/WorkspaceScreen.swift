@@ -62,6 +62,17 @@ struct WorkspaceScreen: View {
                 Divider()
             }
 
+            // Everything below is a mirror of the remote's last known state. If
+            // the poll has stopped answering, say so HERE: the tab strip, the
+            // dashboard and the docker list all keep rendering their last good
+            // values, which otherwise read as current. That is how a rebooted
+            // workspace ends up "having more tabs on the phone than on the
+            // desktop" — the phone is showing what was true before the link
+            // dropped, with nothing on screen to admit it.
+            if !controller.connected && controller.hasSnapshot {
+                staleBanner
+            }
+
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -74,6 +85,24 @@ struct WorkspaceScreen: View {
 
     private var availablePanes: [Pane] {
         isRunning ? Pane.allCases : [.dashboard]
+    }
+
+    /// "What you're looking at may be out of date" — deliberately a strip
+    /// rather than an overlay, so the stale content stays usable (a terminal
+    /// already attached keeps its own connection) while it's clearly labelled.
+    private var staleBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "wifi.exclamationmark")
+            Text("Reconnecting — this view may be out of date")
+                .font(.caption)
+            Spacer()
+            ProgressView().controlSize(.mini)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(Color.orange.opacity(0.15))
     }
 
     @ViewBuilder private var content: some View {
@@ -174,6 +203,14 @@ private struct TerminalsPane: View {
     /// nil to follow the window's agentic state (an agent window defaults to
     /// the rich reader). Cleared on a window switch so each tab re-evaluates.
     @State private var readerOverride: Bool?
+    /// Software-keyboard frame in screen coordinates, .zero when hidden. The
+    /// terminal opts out of SwiftUI's automatic keyboard avoidance and insets
+    /// itself by the measured overlap instead — see `keyboardOverlap`.
+    @State private var keyboardFrame: CGRect = .zero
+    /// Bumped whenever the layout flips (rotation), asking the live terminal to
+    /// take first responder again — the keyboard is dismissed across the
+    /// transition and nothing else asks for it back.
+    @State private var focusTick = 0
 
     private var model: TabsModel? { controller.tabsModel(for: profileID) }
     private var tabs: [TabsModel.Tab] { model?.tabs ?? [] }
@@ -220,7 +257,9 @@ private struct TerminalsPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if tabs.count > 1 && !hidesTabStrip {
+            // Shown for a single tab too: the strip is how you see what the
+            // workspace has open, and it's where "Send to Grid" / Close live.
+            if !tabs.isEmpty && !hidesTabStrip {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(tabs) { tab in
@@ -238,15 +277,40 @@ private struct TerminalsPane: View {
                                          window: win, guestCwd: guestCwd(for: win))
                         .id("reader-\(profileID)-\(win)")
                 } else {
-                    RemoteTerminalView(session: session(for: win), fontSize: fontBinding)
-                        .id("\(profileID)-\(win)")
-                        .background(Color.black)
+                    // The bottom of a terminal is the part that matters — it's
+                    // where the prompt and the newest output are — so the
+                    // surface is inset by however much of it the keyboard
+                    // actually covers, measured rather than assumed. SwiftUI's
+                    // own avoidance is off (.ignoresSafeArea below): in
+                    // landscape it left the last rows under the keyboard.
+                    GeometryReader { geo in
+                        RemoteTerminalView(session: session(for: win),
+                                           fontSize: fontBinding,
+                                           focusTick: focusTick)
+                            .padding(.bottom, keyboardOverlap(with: geo.frame(in: .global)))
+                    }
+                    .id("\(profileID)-\(win)")
+                    .background(Color.black)
                 }
             } else {
                 ContentUnavailableView("No terminal", systemImage: "terminal",
                     description: Text("This workspace has no open windows yet."))
             }
         }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+            keyboardFrame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                             as? NSValue)?.cgRectValue ?? .zero
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillHideNotification)) { _ in
+            keyboardFrame = .zero
+        }
+        // A rotation dismisses the keyboard and drops first responder; ask for
+        // it back so coming out of landscape lands you at a live prompt rather
+        // than needing a trip through another pane to wake the terminal up.
+        .onChange(of: hidesTabStrip) { _, _ in focusTick += 1 }
         .toolbar {
             // The terminal/reader toggle only makes sense on a coding-agent tab.
             if isAgentic(currentTab) {
@@ -258,7 +322,16 @@ private struct TerminalsPane: View {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
-                Button { controller.newTab(profileID) } label: {
+                Button {
+                    controller.newTab(profileID)
+                    // Drop the pinned window so the pane follows the roster's
+                    // active tab — which the guest has just made the new one.
+                    // Without this the new terminal is created but never shown
+                    // (the pin survives from the last chip tapped), which reads
+                    // as "the + button does nothing".
+                    selectedWindow = nil
+                    readerOverride = nil
+                } label: {
                     Image(systemName: "plus.rectangle.on.rectangle")
                 }
                 .accessibilityLabel("New terminal")
@@ -281,6 +354,14 @@ private struct TerminalsPane: View {
             return selectedWindow
         }
         return model?.activeTab?.index ?? tabs.first?.index
+    }
+
+    /// How much of `container` (screen coordinates) the keyboard covers. Zero
+    /// when it's hidden, off-screen, or below the surface entirely — an
+    /// undocked/floating iPad keyboard therefore costs the terminal nothing.
+    private func keyboardOverlap(with container: CGRect) -> CGFloat {
+        guard keyboardFrame.height > 0 else { return 0 }
+        return max(0, container.maxY - keyboardFrame.minY)
     }
 
     private func session(for window: Int) -> AttachSession {
@@ -455,7 +536,23 @@ private struct TranscriptReaderView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(items) { TranscriptItemView(item: $0) }
+                        ForEach(answeredItems) { TranscriptItemView(item: $0) }
+                        // The question the agent is asking RIGHT NOW gets the
+                        // interactive card — pick the options here and Submit
+                        // sends the picker's key sequence into the session, the
+                        // same path the desktop plan window uses. Without it the
+                        // phone could see a multiple-choice question but had no
+                        // way to answer one.
+                        if !openQuestions.isEmpty {
+                            TranscriptQuestionBatchCard(
+                                questions: openQuestions,
+                                onSubmit: submitAnswerKeys)
+                                // Keyed by the question TEXTS: consecutive
+                                // rounds land at the same item indices (both
+                                // live only in the pq dump), and an index-based
+                                // id would keep the previous round's picks.
+                                .id(openQuestions.map(\.question).joined(separator: "\u{1f}"))
+                        }
                     }
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -472,6 +569,57 @@ private struct TranscriptReaderView: View {
     @ViewBuilder private func unavailable(_ title: String, _ detail: String) -> some View {
         ContentUnavailableView(title, systemImage: "doc.richtext", description: Text(detail))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: Live question batch
+    //
+    // A pending AskUserQuestion only exists in the guest's `pq-<cwd>.json` dump
+    // (Claude Code writes the assistant turn to the transcript only once the
+    // turn completes), and the tail appends it LAST. So the trailing run of
+    // question items is the batch still being asked; anything before it was
+    // already answered and stays a static card. Same rule the desktop plan
+    // window uses.
+
+    private var openQuestionItems: [TranscriptItem] {
+        var batch: [TranscriptItem] = []
+        for item in items.reversed() {
+            if case .question = item.kind { batch.append(item) } else { break }
+        }
+        return batch.reversed()
+    }
+
+    private var openQuestions: [TranscriptQuestion] {
+        openQuestionItems.compactMap {
+            if case .question(let q) = $0.kind { q } else { nil }
+        }
+    }
+
+    /// Everything except the batch being asked right now.
+    private var answeredItems: [TranscriptItem] {
+        let openIDs = Set(openQuestionItems.map(\.id))
+        return items.filter { !openIDs.contains($0.id) }
+    }
+
+    /// Type the picker's key sequence into this window's agent. The picker must
+    /// be ON SCREEN first: keys sent early land in the chat input and cancel the
+    /// tool call ("user declined"), so wait for it exactly as the desktop does.
+    private func submitAnswerKeys(_ keys: [String]) async -> Bool {
+        guard !keys.isEmpty else { return false }
+        let probe = "tmux capture-pane -p -t bromure:\(window) 2>/dev/null "
+            + "| grep -q 'Enter to select'"
+        var visible = false
+        for _ in 0..<15 {
+            if (try? await controller.guestExec(profileID, command: probe, timeout: 8)) != nil {
+                visible = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        guard visible else { return false }
+        return (try? await controller.guestExec(
+            profileID,
+            command: CodingTaskEngine.answerKeysCommand(tabIndex: window, keys: keys),
+            timeout: 60)) != nil
     }
 
     /// Scroll to the last item. The short defer lets the lazy stack realize
