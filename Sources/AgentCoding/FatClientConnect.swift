@@ -218,14 +218,12 @@ final class RemoteConnectModel {
     /// control bridge so the next connect is passwordless.
     func submitPassword() {
         let pw = password
-        let u = user.trimmingCharacters(in: .whitespaces)
-        guard !pw.isEmpty, !u.isEmpty else { return }
-        // Apply the (possibly just-entered) remote username — for a peer host it
-        // defaulted to the LOCAL device's user, which is meaningless on the
-        // remote Mac; the login step lets the user correct it. Remember it so
-        // the next connect keys/auths as the right account without re-asking.
-        host.user = u
-        Self.rememberPeerUser(host)
+        guard !pw.isEmpty else { return }
+        // The password step's user field is live — apply an edit ("renaud" →
+        // "admin") to the host before authenticating. Only the user: a peer
+        // host's address is the resolved loopback endpoint, never the form's.
+        let editedUser = user.trimmingCharacters(in: .whitespaces)
+        if !editedUser.isEmpty { host.user = editedUser }
         phase = .working("Signing in…")
         let host = self.host
         let keyLine = scannedHostKeyLine
@@ -253,12 +251,12 @@ final class RemoteConnectModel {
         host.lastConnected = Date()
         // Peer hosts live in the control-plane directory, not the by-address
         // recents list — their identity is the device id + known_hosts alias.
-        // Remember the account username so the next (passwordless) connect
-        // key-auths as the right user without prompting.
-        if !host.isPeer {
-            RemoteHostStore.shared.upsert(host)
+        // Remember the login user that worked so the next connect doesn't
+        // re-guess it from the LOCAL account name.
+        if let pid = host.peerDeviceID {
+            Self.rememberUser(host.user, forPeer: pid)
         } else {
-            Self.rememberPeerUser(host)
+            RemoteHostStore.shared.upsert(host)
         }
         onConnected(host)
     }
@@ -278,6 +276,10 @@ final class RemoteConnectModel {
 
     var signedIn: Bool { account.signedIn }
     var accountLabel: String? { account.accountLabel }
+    /// Managed (enterprise) identity — owned by the managed-enrollment
+    /// lifecycle, so this window must not offer Sign Out for it (the
+    /// coordinator refuses it anyway).
+    var isEnterpriseAccount: Bool { account.isEnterprise }
     var p2pBusy: Bool { account.busy }
     var p2pError: String? { account.error ?? directoryError }
 
@@ -366,6 +368,23 @@ final class RemoteConnectModel {
         P2PBroker.shared.endpoint(forPeer: id, timeout: 20).map { ($0.host, $0.port) }
     }
 
+    /// Last successful login user per peer device. Peer hosts aren't in the
+    /// by-address store, so this is where "log in as admin next time too"
+    /// lives. The local NSUserName() default is only a first guess — the two
+    /// Macs' short names routinely differ.
+    private static func rememberedUser(forPeer id: String) -> String? {
+        if let v = UserDefaults.standard.string(forKey: "p2p.remoteUser.\(id)"),
+           !v.isEmpty { return v }
+        // Fall back to the key this branch used before it adopted the one
+        // above, so an upgrade doesn't re-prompt for a username the app has
+        // already been told once.
+        let legacy = UserDefaults.standard.string(forKey: "fatclient.peer.user.\(id)")
+        return (legacy?.isEmpty == false) ? legacy : nil
+    }
+    static func rememberUser(_ user: String, forPeer id: String) {
+        UserDefaults.standard.set(user, forKey: "p2p.remoteUser.\(id)")
+    }
+
     /// The RemoteHost a directory server dial produces. Not saved to the
     /// by-address list — it lives in the live directory. The remote account
     /// username is NOT in `DeviceInfo` (that's the local Mac's login on the
@@ -373,25 +392,10 @@ final class RemoteConnectModel {
     /// the local user name is a best-effort default the login step can fix.
     static func peerHost(for server: DeviceInfo) -> RemoteHost {
         var host = RemoteHost(name: server.displayName, address: "",
-                              user: rememberedPeerUser(server.id) ?? NSUserName())
+                              user: rememberedUser(forPeer: server.id) ?? NSUserName())
         host.peerDeviceID = server.id
         host.lastConnected = Date()
         return host
-    }
-
-    /// Per-peer remote-username memory (peer hosts aren't saved to hosts.json,
-    /// so the username would otherwise be re-asked on every connect and
-    /// key-auth would keep failing under the wrong account).
-    private static func peerUserKey(_ deviceID: String) -> String {
-        "fatclient.peer.user.\(deviceID)"
-    }
-    static func rememberedPeerUser(_ deviceID: String) -> String? {
-        let v = UserDefaults.standard.string(forKey: peerUserKey(deviceID))
-        return (v?.isEmpty == false) ? v : nil
-    }
-    static func rememberPeerUser(_ host: RemoteHost) {
-        guard let pid = host.peerDeviceID, !host.user.isEmpty else { return }
-        UserDefaults.standard.set(host.user, forKey: peerUserKey(pid))
     }
 
     /// Mirror a server reached over the control plane (peer-to-peer). The P2P
@@ -402,8 +406,8 @@ final class RemoteConnectModel {
     /// never as an empty stage with an error overlay.
     func connect(toPeer server: DeviceInfo) {
         host = Self.peerHost(for: server)
-        // Surface the peer's remembered/best-effort username in the login
-        // field so the user sees (and can correct) which account will be used.
+        // Surface the peer's remembered/best-effort username in the login field
+        // so the user sees (and can correct) which account will be used.
         user = host.user
         pinnedEndpoint = nil
         phase = .working("Connecting to \(server.displayName) via bromure.io…")
@@ -671,8 +675,16 @@ struct RemoteConnectView: View {
                 Button { Task { await model.loadDirectory() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.borderless).help("Refresh servers")
                 Spacer()
-                Button("Sign Out") { model.signOutAccount(); selection = nil }
-                    .buttonStyle(.link)
+                if model.isEnterpriseAccount {
+                    // A managed identity can't be signed out of from here —
+                    // a button that silently no-ops is worse than saying so.
+                    Text("Managed by your organization")
+                        .font(.caption).foregroundStyle(.tertiary)
+                        .help("This Mac is enrolled by your organization; its bromure.io identity is managed outside this window.")
+                } else {
+                    Button("Sign Out") { model.signOutAccount(); selection = nil }
+                        .buttonStyle(.link)
+                }
             } else {
                 Image(systemName: "person.crop.circle.badge.plus").foregroundStyle(.secondary)
                 Button("Sign in with bromure.io") { model.signIn() }
@@ -846,8 +858,12 @@ struct RemoteConnectView: View {
     // Password fallback with inline retry + shake
     private func passwordStep(_ error: String?) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("This Mac isn't authorized on \(model.connectDisplayName) yet. Enter the remote Mac's login password for “\(model.user)” to pair — Bromure will remember this Mac so you won't be asked again.")
+            Text("This Mac isn't authorized on \(model.connectDisplayName) yet. Enter the remote Mac's login user and password to pair — Bromure will remember this Mac so you won't be asked again.")
                 .foregroundStyle(.secondary).font(.callout).fixedSize(horizontal: false, vertical: true)
+            // Editable here, not just in the add form: the guessed default is
+            // THIS Mac's user name, and the remote's ("admin", say) routinely
+            // differs — with no field, a peer connect had no way to fix it.
+            field("Remote user", text: $model.user, placeholder: NSUserName())
             SecureField("Password", text: $model.password)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit { model.submitPassword() }

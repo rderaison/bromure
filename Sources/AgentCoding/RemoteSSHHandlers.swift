@@ -70,14 +70,20 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
 
     func requestReceived(request: NIOSSHUserAuthenticationRequest,
                          responsePromise: EventLoopPromise<NIOSSHUserAuthenticationOutcome>) {
-        guard request.username == username else {
-            responsePromise.succeed(.failure); return
-        }
+        // The username IS enforced (the owner's short name). On a single-user
+        // server it isn't a secrecy boundary — pubkey identity is the enrolled
+        // key, password auth verifies the OWNER's password, sessions run as
+        // the owner — but a server that greets any username reads as a
+        // misconfiguration in security reviews. The P2P dialer's can't-know-
+        // the-name problem is handled client-side (editable user field,
+        // remembered per peer device).
         switch request.request {
         case .publicKey(let pk):
-            // NIO-SSH has already verified the signature; we only decide if the
-            // key is enrolled.
-            if allowPubkey, authorizedKeys.contains(pk.publicKey) {
+            // NIO-SSH has already verified the signature; we only decide if
+            // the key is enrolled. Wrong-name and unenrolled-key failures are
+            // identical (both instant), so this path leaks nothing about
+            // which name is right.
+            if allowPubkey, request.username == username, authorizedKeys.contains(pk.publicKey) {
                 responsePromise.succeed(.success)
             } else {
                 responsePromise.succeed(.failure)
@@ -100,9 +106,17 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
                 return
             }
             let throttle = self.throttle
+            let requestedUser = request.username
             let work: @Sendable () -> Void = {
                 defer { throttle.endVerification() }
+                // The username check rides INSIDE the throttled verification,
+                // and the owner's password is verified regardless of the name,
+                // so a wrong username costs a rate-limit slot and fails with
+                // the same timing as a wrong password — no enumeration oracle
+                // revealing the owner's short name. (An up-front name check
+                // would fail instantly and give the valid name away.)
                 let ok = SystemPassword.verify(user: user, password: password)
+                    && requestedUser == user
                 responsePromise.succeed(ok ? .success : .failure)
             }
             let q = DispatchQueue.global(qos: .utility)

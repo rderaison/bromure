@@ -2828,7 +2828,13 @@ async function main() {
             assertEq(tt.stage, "testing", "manual to-testing failed");
             const m = await api("POST", `/tasks/${KTID}/merge`, {});
             assertEq(m._status, 200, `merge: ${JSON.stringify(m)}`);
-            assertEq(m.stage, "done", "merge did not close the task");
+            // Merge verification is asynchronous: the card holds in Testing
+            // (mergingAt set) until the engine confirms the branch actually
+            // landed on the target in the guest, THEN flips Done — so poll
+            // for Done instead of expecting it in the POST response.
+            const done = await waitForTask(KTID, (x) => x.stage === "done", 30, 1500);
+            assert(done && done.stage === "done",
+                   `merge never closed the task: ${JSON.stringify(done)}`);
             const log = await waitFor(id, `git -C ${REPO} log ${defBranch} --oneline 2>/dev/null`,
                                       (s) => s.includes("add KANBAN.txt"));
             assertIncludes(log, "add KANBAN.txt", "task commit never landed on the parent branch");
@@ -2978,7 +2984,9 @@ async function main() {
               ].join("\n");
               const b64 = Buffer.from(probe).toString("base64");
               const out = await sh(id, `echo ${b64} | base64 -d | python3 -`, { timeout: 30 });
-              assertIncludes(out, "Plan column", "board_create_subtasks did not ack");
+              // The ack echoes the recorded dependency graph ("Filed N
+              // card(s). Recorded phase list: …") so the agent can check it.
+              assertIncludes(out, "Recorded phase list", "board_create_subtasks did not ack");
 
               // Both phases sit in the Plan column, dependency wired.
               let phases = [];
