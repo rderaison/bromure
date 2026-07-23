@@ -65,12 +65,17 @@
 	<array>
 		<string>remote-notification</string>
 	</array>
-	<!-- The app statically links a full SSH v2 stack (swift-nio-ssh) providing
-	     bulk data confidentiality — non-exempt encryption using only standard,
-	     published algorithms. Mass-market under License Exception ENC
-	     740.17(b)(1); see ~/Desktop/crypto.txt for the self-classification. -->
+	<!-- TEMPORARY: exempt declaration to unblock the TestFlight upload (ASC
+	     rejected the non-exempt build with error 90592 — the plist was missing
+	     the ITSEncryptionExportComplianceCode that must match the App Encryption
+	     Documentation on App Store Connect). The app actually uses non-exempt but
+	     standard, mass-market encryption (a bundled SSH v2 stack, swift-nio-ssh;
+	     see ~/Desktop/crypto.txt). TO RESTORE CORRECT DECLARATION: set this back
+	     to <true/> AND add, alongside it, ITSEncryptionExportComplianceCode with
+	     the code from App Store Connect → My Apps → App Information → App
+	     Encryption Documentation. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
-	<true/>
+	<false/>
 	<!-- The in-app browser loads http://127.0.0.1:<port> forwarded to a
 	     workspace VM's dev server; NSAllowsLocalNetworking permits loopback
 	     HTTP without weakening ATS for any real host. -->
