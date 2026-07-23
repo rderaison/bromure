@@ -95,6 +95,43 @@ struct P2PTransportTests {
         Darwin.close(w.fd)
     }
 
+    @Test("a dead ladder gives up after the impatient budget, not the patient one")
+    func dialerFastPassBudget() throws {
+        // Nothing reachable: the caller gets its answer after the 1s pass plus
+        // the 3s patient retry — NOT 3s per candidate, and not sooner than the
+        // patient pass (a slow relay still gets its chance).
+        let blackHoles = (1...3).map {
+            P2PCandidate(kind: .host, proto: .tcp, ip: "192.0.2.\($0)", port: 2222)
+        }
+        let t0 = Date()
+        let win = P2PDirectDialer.dial(candidates: blackHoles,
+                                       overallDeadline: Date().addingTimeInterval(20))
+        let elapsed = Date().timeIntervalSince(t0)
+        #expect(win == nil)
+        #expect(elapsed >= 1.0)   // the impatient pass really was 1s, not 0
+        #expect(elapsed < 6.0)    // 1s + 3s patient, not 3s × 3 candidates
+    }
+
+    @Test("a reachable candidate returns well inside the impatient budget")
+    func dialerFastPassWins() throws {
+        let echo = try #require(EchoServer())
+        defer { echo.stop() }
+        let dead = P2PCandidate(kind: .host, proto: .tcp, ip: "192.0.2.9",
+                                port: 2222, prio: 1000)
+        let good = P2PCandidate(kind: .host, proto: .tcp, ip: "127.0.0.1",
+                                port: echo.port, prio: 10)
+        let t0 = Date()
+        let win = P2PDirectDialer.dial(candidates: [dead, good],
+                                       overallDeadline: Date().addingTimeInterval(20))
+        let elapsed = Date().timeIntervalSince(t0)
+        let w = try #require(win)
+        #expect(w.candidate.port == echo.port)
+        // Bounded by the impatient budget + the higher-priority upgrade grace,
+        // never by the patient retry.
+        #expect(elapsed < 1.5)
+        Darwin.close(w.fd)
+    }
+
     @Test("a higher-priority candidate still wins when both connect")
     func dialerPrefersHigherPriority() throws {
         let low = try #require(EchoServer())

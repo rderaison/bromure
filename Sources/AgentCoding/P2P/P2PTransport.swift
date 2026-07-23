@@ -114,19 +114,58 @@ enum P2PDirectDialer {
     /// one answers, so establishment is bounded by the fastest working path
     /// (plus `upgradeGrace`) instead of the sum of every broken one.
     ///
+    /// Patient second pass. A working path answers in milliseconds on a LAN and
+    /// well inside `perCandidateTimeout` over a relay, so the fast budget is
+    /// sized for the SUCCESS case; this is the allowance for a genuinely slow
+    /// one (a distant TURN relay reached over congested cellular) before the
+    /// peer is called unreachable.
+    private static let patientTimeout: TimeInterval = 3
+
+    /// Race every candidate at once and take the best one that connects.
+    ///
+    /// This used to walk the ladder one candidate at a time, which made the
+    /// common case pathologically slow: a Mac advertises an address per live
+    /// interface (Wi-Fi, Ethernet, VPN tunnels, VM bridges), a phone off that
+    /// LAN can reach NONE of them, and each dead rung burned the full
+    /// `perCandidateTimeout` before the relay — always ranked last — got its
+    /// turn. Six unreachable host candidates meant ~18 s of nothing. Racing them
+    /// costs one blocked connect per candidate and finishes as soon as the first
+    /// one answers, so establishment is bounded by the fastest working path
+    /// (plus `upgradeGrace`) instead of the sum of every broken one.
+    ///
+    /// Two passes, because the per-candidate budget is doing two different jobs.
+    /// A reachable candidate completes its TCP handshake fast; the budget only
+    /// ever bounds the DEAD ones, and every second of it is dead air before the
+    /// next rung is tried. So the first pass is deliberately impatient (1 s) and
+    /// only if nothing at all answers does a `patientTimeout` pass run, for the
+    /// slow-but-alive relay. The success case is unchanged and the failure case
+    /// reaches the next rung three times sooner.
+    ///
     /// `perCandidateTimeout` bounds each attempt; `overallDeadline` the lot.
     static func dial(candidates: [P2PCandidate],
-                     perCandidateTimeout: TimeInterval = 3,
+                     perCandidateTimeout: TimeInterval = 1,
                      overallDeadline: Date) -> Win? {
-        let ordered = candidates
+        let ordered = Array(candidates
             .filter { $0.proto == .tcp }
             .sorted { $0.prio > $1.prio }
-            .prefix(maxConcurrent)
+            .prefix(maxConcurrent))
         guard !ordered.isEmpty else { return nil }
-        let budget = min(perCandidateTimeout, overallDeadline.timeIntervalSinceNow)
-        guard budget > 0 else { return nil }
 
-        let race = DialRace(topPrio: ordered[ordered.startIndex].prio, total: ordered.count)
+        if let win = race(ordered, budget: perCandidateTimeout, deadline: overallDeadline) {
+            return win
+        }
+        guard perCandidateTimeout < patientTimeout else { return nil }
+        return race(ordered, budget: patientTimeout, deadline: overallDeadline)
+    }
+
+    /// One parallel pass: every candidate dialled at once, best connect wins.
+    private static func race(_ ordered: [P2PCandidate],
+                             budget: TimeInterval,
+                             deadline: Date) -> Win? {
+        let budget = min(budget, deadline.timeIntervalSinceNow)
+        guard budget > 0, let top = ordered.first?.prio else { return nil }
+
+        let race = DialRace(topPrio: top, total: ordered.count)
         for c in ordered {
             Thread.detachNewThread {
                 defer { race.finishOne() }
@@ -135,7 +174,7 @@ enum P2PDirectDialer {
                 race.offer(Win(candidate: c, fd: fd, path: pathFor(c)))
             }
         }
-        return race.result(grace: upgradeGrace, deadline: overallDeadline)
+        return race.result(grace: upgradeGrace, deadline: deadline)
     }
 
     /// Just probe whether a candidate is currently reachable (used to verify a

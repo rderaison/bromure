@@ -526,8 +526,10 @@ final class P2PBroker: @unchecked Sendable {
             tried.formUnion(fresh)
             // Bound each batch. The dialer races the whole batch in parallel, so
             // a batch costs one connect timeout — not one per candidate — and
-            // the trickled srflx/relay rungs get their turn promptly.
-            let batchDeadline = min(deadline, Date().addingTimeInterval(3.5))
+            // the trickled srflx/relay rungs get their turn promptly. The window
+            // covers the dialer's impatient pass plus its patient retry; a batch
+            // that connects returns as soon as it does, well inside this.
+            let batchDeadline = min(deadline, Date().addingTimeInterval(4.5))
             win = await Self.blocking {
                 P2PDirectDialer.dial(candidates: fresh, overallDeadline: batchDeadline)
             }
