@@ -1,14 +1,16 @@
 // Bromure Client (iOS/iPadOS) → TestFlight.
 //
 // Archives the app + its BromureNotify notification-service extension and
-// uploads them to App Store Connect. Signing and upload both authenticate with
-// an App Store Connect API key (a .p8 held as a Jenkins *file* credential), so
-// the agent needs no interactive Xcode account login — automatic signing mints
-// the distribution certificate and both App Store provisioning profiles on
-// demand.
+// uploads them to App Store Connect. Signing is fully MANUAL and pinned: the
+// agent's build keychain holds the Apple Distribution identity, and the two App
+// Store profiles arrive as Jenkins file credentials. Nothing is minted on
+// demand, which is what lets this run for a team with no registered devices.
+// The App Store Connect API key authenticates the upload only.
 //
 // Jenkins credentials required (see README block at the bottom of this file):
 //   ASC_API_KEY (file)   ASC_KEY_ID (string)   ASC_ISSUER_ID (string)
+//   PROVISION_PROFILE_IOS_APP (file)   PROVISION_PROFILE_IOS_NSE (file)
+//   IOS_SIGN_IDENTITY (string)
 //   TEAM_ID (string)     KEYCHAIN_PASSWORD (string)   — last two already exist
 
 pipeline {
@@ -46,8 +48,8 @@ pipeline {
     stages {
         stage('Unlock Keychain') {
             steps {
-                // Automatic signing writes the distribution certificate into
-                // the build keychain, so it has to be unlocked first.
+                // The Apple Distribution identity lives in the build keychain;
+                // codesign can't reach its private key until it's unlocked.
                 sh '''
                     security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$BUILD_KEYCHAIN"
                     security list-keychains -s "$BUILD_KEYCHAIN" login.keychain-db
