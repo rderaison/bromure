@@ -83,6 +83,22 @@ struct AutomationKanbanView: View {
     private var compact: Bool { hSize == .compact }
 
     var body: some View {
+        content
+        // iOS shows this board inside a NavigationStack — its bar carries the
+        // title, so the in-board header would repeat it. One title, with the
+        // icon, at the top (see CodingKanbanView for the same trade).
+        #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Label(NSLocalizedString("Automations", comment: "kanban title"),
+                          systemImage: "bolt.badge.clock.fill")
+                }
+            }
+        #endif
+    }
+
+    @ViewBuilder private var content: some View {
         if store.automations.isEmpty {
             ContentUnavailableView {
                 Label(NSLocalizedString("No automations yet", comment: ""),
@@ -142,8 +158,10 @@ struct AutomationKanbanView: View {
         let cols = columns
         let done = doneRuns(cols)
         return VStack(alignment: .leading, spacing: 0) {
+            #if !os(iOS)
             header
             Divider()
+            #endif
             if compact {
                 // Phone: one vertical scroll with the columns stacked.
                 ScrollView {

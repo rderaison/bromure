@@ -281,8 +281,10 @@ struct CodingKanbanView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            #if !os(iOS)
             header
             Divider()
+            #endif
             if compact {
                 // Phone: one vertical scroll with the columns stacked.
                 ScrollView {
@@ -307,6 +309,23 @@ struct CodingKanbanView: View {
             }
         }
         .background(Color.platformWindowBackground)
+        // iOS puts the board inside a NavigationStack, which already has a bar
+        // across the top — so the in-board header would be the SECOND title on
+        // screen. Hand the same icon + title + New action to that bar instead
+        // and give the columns the space back.
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Label(NSLocalizedString("Coding Tasks", comment: "coding kanban title"),
+                      systemImage: "checklist")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { editing = newDraft() } label: { Image(systemName: "plus") }
+                    .accessibilityLabel(NSLocalizedString("New Task", comment: ""))
+            }
+        }
+        #endif
         .sheet(item: $editing) { task in
             TaskEditorSheet(
                 task: task,
@@ -327,6 +346,13 @@ struct CodingKanbanView: View {
         }
     }
 
+    /// A blank task on the first workspace — the "New Task" subject.
+    private func newDraft() -> CodingTask {
+        let profiles = profilesProvider()
+        return CodingTask(profileID: profiles.first?.id ?? UUID(),
+                          tool: profiles.first?.tool ?? .claude)
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
             Image(systemName: "checklist")
@@ -335,11 +361,7 @@ struct CodingKanbanView: View {
             Text(NSLocalizedString("Coding Tasks", comment: "coding kanban title"))
                 .font(.system(size: 16, weight: .bold))
             Spacer()
-            Button {
-                let profiles = profilesProvider()
-                editing = CodingTask(profileID: profiles.first?.id ?? UUID(),
-                                     tool: profiles.first?.tool ?? .claude)
-            } label: {
+            Button { editing = newDraft() } label: {
                 Label(NSLocalizedString("New Task", comment: ""), systemImage: "plus")
             }
         }

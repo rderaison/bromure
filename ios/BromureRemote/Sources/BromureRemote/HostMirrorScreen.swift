@@ -281,8 +281,8 @@ struct CodingBoardScreen: View {
                 destroy: { controller.taskCommand($0, "destroy") },
                 resume: { controller.taskCommand($0, "resume") },
                 openTranscript: { openedTask = TranscriptTarget(id: $0) }))
-        .navigationTitle("Coding Tasks")
-        .navigationBarTitleDisplayMode(.inline)
+        // Title, icon and "New Task" come from the board itself, straight into
+        // this stack's navigation bar — one header, not two.
         .sheet(item: $openedTask) { t in
             TranscriptScreen(
                 title: controller.taskStore.task(t.id)?.title ?? "Task",
@@ -383,8 +383,8 @@ struct AutomationsBoardScreen: View {
                 delete: { controller.deleteAutomation($0) },
                 openRun: { openedRun = $0 },
                 acknowledge: { controller.acknowledgeRun($0) }))
-        .navigationTitle("Automations")
-        .navigationBarTitleDisplayMode(.inline)
+        // The board supplies the bar's title + icon (see CodingBoardScreen);
+        // "+" stays here because this screen owns the editor sheet.
         .sheet(item: $openedRun) { run in
             TranscriptScreen(
                 title: controller.automationStore.automation(run.automationID)?.name ?? "Automation Run",
