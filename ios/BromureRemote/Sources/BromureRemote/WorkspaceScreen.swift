@@ -298,26 +298,33 @@ private struct TerminalsPane: View {
                     // shown. Switching tabs is then a visibility change, not a
                     // teardown: the stream stays up and the scrollback is
                     // already painted when you come back.
-                    ForEach(mounted, id: \.self) { w in
-                        let active = w == win && !readerMode && isVisible
-                        // The bottom of a terminal is the part that matters —
-                        // the prompt and the newest output — so the surface is
-                        // inset by however much of it the keyboard actually
-                        // covers, measured rather than assumed. SwiftUI's own
-                        // avoidance is off (.ignoresSafeArea below): in
-                        // landscape it left the last rows under the keyboard.
-                        GeometryReader { geo in
-                            RemoteTerminalView(session: session(for: w),
-                                               fontSize: fontBinding,
-                                               focusTick: focusTick,
-                                               isActive: active)
-                                .padding(.bottom, keyboardOverlap(with: geo.frame(in: .global)))
+                    //
+                    // Keyboard handling is on THIS container only — the terminal
+                    // opts out of SwiftUI's automatic avoidance and insets by the
+                    // measured overlap instead (default avoidance left the last
+                    // rows under the keyboard in landscape). The reader is a
+                    // sibling below, deliberately OUTSIDE this, so it keeps the
+                    // normal avoidance its text field needs.
+                    ZStack {
+                        ForEach(mounted, id: \.self) { w in
+                            let active = w == win && !readerMode && isVisible
+                            GeometryReader { geo in
+                                RemoteTerminalView(session: session(for: w),
+                                                   fontSize: fontBinding,
+                                                   focusTick: focusTick,
+                                                   isActive: active)
+                                    .padding(.bottom, keyboardOverlap(with: geo.frame(in: .global)))
+                            }
+                            .background(Color.black)
+                            .opacity(active ? 1 : 0)
+                            .allowsHitTesting(active)
                         }
-                        .background(Color.black)
-                        .opacity(active ? 1 : 0)
-                        .allowsHitTesting(active)
                     }
+                    .ignoresSafeArea(.keyboard, edges: .bottom)
+
                     if readerMode {
+                        // Normal keyboard avoidance: the composer lifts above the
+                        // keyboard so you can see what you type.
                         TranscriptReaderView(controller: controller, profileID: profileID,
                                              window: win, guestCwd: guestCwd(for: win))
                             .id("reader-\(profileID)-\(win)")
@@ -328,7 +335,6 @@ private struct TerminalsPane: View {
                     description: Text("This workspace has no open windows yet."))
             }
         }
-        .ignoresSafeArea(.keyboard, edges: .bottom)
         .onReceive(NotificationCenter.default.publisher(
             for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             keyboardFrame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
@@ -348,6 +354,7 @@ private struct TerminalsPane: View {
         .onChange(of: isVisible) { _, visible in if visible { focusTick += 1 } }
         .onChange(of: effectiveWindow) { _, _ in
             syncMounted()
+            readerOverride = nil   // each window re-evaluates the reader default
             focusTick += 1
         }
         // Prune surfaces for windows that closed remotely.

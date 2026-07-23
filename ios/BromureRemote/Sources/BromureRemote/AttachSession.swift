@@ -300,8 +300,11 @@ struct RemoteTerminalView: UIViewRepresentable {
         if uiView.font.pointSize != target.pointSize { uiView.font = target }
         guard interactive else { return }
         if !isActive {
-            // Hand the keyboard back the moment this surface is covered, so the
-            // one taking its place can claim it.
+            // Covered by another surface (a sibling window, or the reader): hand
+            // the keyboard back so whatever replaces it can claim it, and cancel
+            // any focus retry still in flight — a mounted-but-hidden terminal
+            // must never grab first responder.
+            context.coordinator.cancelFocus()
             if uiView.isFirstResponder { uiView.resignFirstResponder() }
             context.coordinator.lastFocusTick = focusTick
             return
@@ -327,6 +330,13 @@ struct RemoteTerminalView: UIViewRepresentable {
         private var pinchBaseSize: CGFloat = 13
         /// Last `focusTick` acted on, so one bump means one focus attempt.
         var lastFocusTick = 0
+        /// Supersedes stale focus loops. Every `scheduleFocus`/`cancelFocus`
+        /// bumps it; an in-flight retry whose captured generation no longer
+        /// matches stops. Without this a retry loop from a PREVIOUS tab visit
+        /// (they run for up to a second) would fire `becomeFirstResponder()` on
+        /// this now-hidden surface and steal the keyboard from the visible one —
+        /// the "terminal rarely grabs focus" bug, now that surfaces stay mounted.
+        private var focusGen = 0
 
         init(view: RemoteTerminalView) { self.parent = view }
         func bind(_ v: TerminalView) { view = v }
@@ -334,14 +344,25 @@ struct RemoteTerminalView: UIViewRepresentable {
         /// Bring the terminal up as first responder once it's actually in a
         /// window. `updateUIView` can run before the view is in the hierarchy
         /// (window == nil) and isn't guaranteed to run again, so poll until
-        /// `becomeFirstResponder()` actually succeeds (it can briefly refuse
-        /// during a transition).
+        /// `becomeFirstResponder()` succeeds — but only while this is still the
+        /// active surface and this attempt hasn't been superseded.
         func scheduleFocus(_ v: TerminalView, attempts: Int = 20) {
+            focusGen &+= 1
+            retryFocus(v, gen: focusGen, attempts: attempts)
+        }
+
+        /// Cancel any pending focus retry (this surface is no longer active).
+        func cancelFocus() { focusGen &+= 1 }
+
+        private func retryFocus(_ v: TerminalView, gen: Int, attempts: Int) {
             guard attempts > 0 else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak v, weak self] in
                 guard let self, let v else { return }
+                // Superseded by a newer attempt, or this surface went inactive →
+                // stop, so a hidden terminal can't claim the keyboard.
+                guard gen == self.focusGen, self.parent.isActive else { return }
                 if v.window != nil, v.becomeFirstResponder() { return }
-                self.scheduleFocus(v, attempts: attempts - 1)
+                self.retryFocus(v, gen: gen, attempts: attempts - 1)
             }
         }
 
