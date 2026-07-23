@@ -105,30 +105,59 @@ pipeline {
                         # Xcode 16 moved the profile store out of
                         # ~/Library/MobileDevice/Provisioning Profiles and into
                         # ~/Library/Developer/Xcode/UserData/Provisioning
-                        # Profiles. Install into both, newest first, and fail
-                        # only if NEITHER took the file: the MobileDevice path
-                        # is TCC-protected on recent macOS, so a headless agent
-                        # gets "cp: Permission denied" there even though it can
-                        # sign perfectly well from the Xcode location.
+                        # Profiles. Install into both and fail only if NEITHER
+                        # took the file.
+                        #
+                        # When a copy fails, cp's OWN message is the whole
+                        # diagnosis and must not be swallowed: "Permission
+                        # denied" from a TCC/sandbox denial, from a directory
+                        # some other account owns, and from a deny ACL are three
+                        # different problems with three different fixes, and the
+                        # errno plus `ls -lde` is what tells them apart. The
+                        # agent runs headless with no TCC grants, so this is a
+                        # failure mode worth reporting properly rather than
+                        # guessing at from an empty PROFILE_APP three builds
+                        # running.
                         #
                         # install_profile's stdout is captured by the caller and
                         # must be the profile Name alone — every diagnostic here
                         # goes to stderr.
+                        PROFILE_DIR_NEW="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+                        PROFILE_DIR_OLD="$HOME/Library/MobileDevice/Provisioning Profiles"
                         install_profile() {
                             uuid=$(security cms -D -i "$1" | plutil -extract UUID raw -)
                             installed=""
-                            for dir in \
-                                "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" \
-                                "$HOME/Library/MobileDevice/Provisioning Profiles"; do
-                                mkdir -p "$dir" 2>/dev/null || continue
-                                if cp "$1" "$dir/$uuid.mobileprovision" 2>/dev/null; then
+                            failures=""
+                            for dir in "$PROFILE_DIR_NEW" "$PROFILE_DIR_OLD"; do
+                                if ! mkdirerr=$(mkdir -p "$dir" 2>&1); then
+                                    failures="$failures
+    mkdir: $mkdirerr"
+                                    continue
+                                fi
+                                # A leftover file owned by another account can't
+                                # be overwritten but CAN be replaced, so clear
+                                # the way before giving up on this directory.
+                                rm -f "$dir/$uuid.mobileprovision" 2>/dev/null || true
+                                if cperr=$(cp "$1" "$dir/$uuid.mobileprovision" 2>&1); then
                                     installed="$dir"
                                     echo "installed $uuid.mobileprovision in $dir" >&2
+                                else
+                                    failures="$failures
+    cp: $cperr"
                                 fi
                             done
                             if [ -z "$installed" ]; then
-                                echo "could not install $uuid.mobileprovision into any" \
-                                     "provisioning-profile directory under $HOME/Library" >&2
+                                {
+                                    echo "could not install $uuid.mobileprovision anywhere:$failures"
+                                    echo "running as: $(id)"
+                                    echo "candidate directories (note ACLs, '+' suffix):"
+                                    ls -lde "$PROFILE_DIR_NEW" "$PROFILE_DIR_OLD" 2>&1 || true
+                                    echo "parents:"
+                                    ls -lde "$HOME/Library" \
+                                            "$HOME/Library/Developer" \
+                                            "$HOME/Library/Developer/Xcode" \
+                                            "$HOME/Library/Developer/Xcode/UserData" 2>&1 || true
+                                } >&2
                                 return 1
                             fi
                             security cms -D -i "$1" | plutil -extract Name raw -
