@@ -250,6 +250,11 @@ struct RemoteTerminalView: UIViewRepresentable {
     /// dismisses the keyboard and drops focus, and `makeUIView` (where focus is
     /// first requested) does not run again for a view that merely re-laid out.
     var focusTick: Int = 0
+    /// The surface the user is actually looking at. Sibling surfaces for the
+    /// workspace's other windows stay mounted (so switching back is instant) but
+    /// must never hold the keyboard or answer a focus tick — otherwise typing
+    /// goes to a terminal that isn't on screen.
+    var isActive: Bool = true
 
     static let minFont: CGFloat = 8
     static let maxFont: CGFloat = 28
@@ -278,8 +283,10 @@ struct RemoteTerminalView: UIViewRepresentable {
             pinch.delaysTouchesBegan = false
             tv.addGestureRecognizer(pinch)
             // Pop the keyboard once the surface actually lands in a window, so
-            // an interactive terminal is ready to type into without a tap.
-            context.coordinator.scheduleFocus(tv)
+            // an interactive terminal is ready to type into without a tap. Only
+            // the surface on screen: a sibling mounted for another window must
+            // not steal it out from under the visible one.
+            if isActive { context.coordinator.scheduleFocus(tv) }
         } else {
             // A preview: let taps reach the SwiftUI navigation behind it.
             tv.isUserInteractionEnabled = false
@@ -291,7 +298,19 @@ struct RemoteTerminalView: UIViewRepresentable {
         context.coordinator.parent = self
         let target = Self.monoFont(currentSize)
         if uiView.font.pointSize != target.pointSize { uiView.font = target }
-        if interactive, context.coordinator.lastFocusTick != focusTick {
+        guard interactive else { return }
+        if !isActive {
+            // Hand the keyboard back the moment this surface is covered, so the
+            // one taking its place can claim it.
+            if uiView.isFirstResponder { uiView.resignFirstResponder() }
+            context.coordinator.lastFocusTick = focusTick
+            return
+        }
+        // Only an explicit tick takes the keyboard. Reacting to "isn't first
+        // responder" instead would re-summon it the moment the user swipes it
+        // away — updateUIView runs on the very state change that dismissal
+        // causes — and the keyboard would be unclosable.
+        if context.coordinator.lastFocusTick != focusTick {
             context.coordinator.lastFocusTick = focusTick
             context.coordinator.scheduleFocus(uiView)
         }

@@ -106,13 +106,26 @@ struct WorkspaceScreen: View {
     }
 
     @ViewBuilder private var content: some View {
-        switch pane {
-        case .terminals: TerminalsPane(controller: controller, profileID: profileID,
-                                       initialWindow: initialWindow,
-                                       hidesTabStrip: terminalFullBleed)
-        case .dashboard: dashboard
-        case .docker:    docker
-        case .files:     files
+        ZStack {
+            // The terminals pane stays mounted whichever tab is selected. Its
+            // surfaces hold live exec streams, so tearing them down to glance at
+            // the dashboard means paying a full re-attach on the way back — a
+            // blank terminal that repaints late and has lost the keyboard. That
+            // was the "switch to Info and back to grab the focus" workaround.
+            if isRunning {
+                TerminalsPane(controller: controller, profileID: profileID,
+                              initialWindow: initialWindow,
+                              hidesTabStrip: terminalFullBleed,
+                              isVisible: pane == .terminals)
+                    .opacity(pane == .terminals ? 1 : 0)
+                    .allowsHitTesting(pane == .terminals)
+            }
+            switch pane {
+            case .terminals: EmptyView()
+            case .dashboard: dashboard
+            case .docker:    docker
+            case .files:     files
+            }
         }
     }
 
@@ -193,7 +206,15 @@ private struct TerminalsPane: View {
     /// Landscape: the tab chips go away with the pane picker so the surface
     /// gets the full height (WorkspaceScreen.terminalFullBleed).
     var hidesTabStrip = false
+    /// False while another pane (Info / Docker / Files) is on top. The pane
+    /// stays mounted either way — see WorkspaceScreen.content — so this is what
+    /// keeps a hidden surface from holding the keyboard.
+    var isVisible = true
     @State private var sessions: [Int: AttachSession] = [:]
+    /// Every window shown in this pane so far. Their surfaces stay mounted (and
+    /// their streams attached) so switching back is instant instead of a fresh
+    /// exec + tmux attach + repaint. Pruned when a window closes remotely.
+    @State private var mounted: [Int] = []
     @State private var selectedWindow: Int?
     @State private var didSeedInitial = false
     /// Persisted terminal font size (points), driven by pinch-to-zoom and
@@ -272,25 +293,35 @@ private struct TerminalsPane: View {
                 Divider()
             }
             if let win = effectiveWindow {
-                if readerMode {
-                    TranscriptReaderView(controller: controller, profileID: profileID,
-                                         window: win, guestCwd: guestCwd(for: win))
-                        .id("reader-\(profileID)-\(win)")
-                } else {
-                    // The bottom of a terminal is the part that matters — it's
-                    // where the prompt and the newest output are — so the
-                    // surface is inset by however much of it the keyboard
-                    // actually covers, measured rather than assumed. SwiftUI's
-                    // own avoidance is off (.ignoresSafeArea below): in
-                    // landscape it left the last rows under the keyboard.
-                    GeometryReader { geo in
-                        RemoteTerminalView(session: session(for: win),
-                                           fontSize: fontBinding,
-                                           focusTick: focusTick)
-                            .padding(.bottom, keyboardOverlap(with: geo.frame(in: .global)))
+                ZStack {
+                    // One live surface per visited window, only the current one
+                    // shown. Switching tabs is then a visibility change, not a
+                    // teardown: the stream stays up and the scrollback is
+                    // already painted when you come back.
+                    ForEach(mounted, id: \.self) { w in
+                        let active = w == win && !readerMode && isVisible
+                        // The bottom of a terminal is the part that matters —
+                        // the prompt and the newest output — so the surface is
+                        // inset by however much of it the keyboard actually
+                        // covers, measured rather than assumed. SwiftUI's own
+                        // avoidance is off (.ignoresSafeArea below): in
+                        // landscape it left the last rows under the keyboard.
+                        GeometryReader { geo in
+                            RemoteTerminalView(session: session(for: w),
+                                               fontSize: fontBinding,
+                                               focusTick: focusTick,
+                                               isActive: active)
+                                .padding(.bottom, keyboardOverlap(with: geo.frame(in: .global)))
+                        }
+                        .background(Color.black)
+                        .opacity(active ? 1 : 0)
+                        .allowsHitTesting(active)
                     }
-                    .id("\(profileID)-\(win)")
-                    .background(Color.black)
+                    if readerMode {
+                        TranscriptReaderView(controller: controller, profileID: profileID,
+                                             window: win, guestCwd: guestCwd(for: win))
+                            .id("reader-\(profileID)-\(win)")
+                    }
                 }
             } else {
                 ContentUnavailableView("No terminal", systemImage: "terminal",
@@ -307,10 +338,21 @@ private struct TerminalsPane: View {
             for: UIResponder.keyboardWillHideNotification)) { _ in
             keyboardFrame = .zero
         }
-        // A rotation dismisses the keyboard and drops first responder; ask for
-        // it back so coming out of landscape lands you at a live prompt rather
-        // than needing a trip through another pane to wake the terminal up.
+        // Anything that changes WHICH surface should own the keyboard asks the
+        // newly-active one to take it: a rotation (which dismisses the keyboard
+        // and drops first responder), a tab switch, leaving the reader, and
+        // coming back from another pane. Without this the terminal is on screen
+        // but dead until tapped — the focus complaint.
         .onChange(of: hidesTabStrip) { _, _ in focusTick += 1 }
+        .onChange(of: readerMode) { _, _ in focusTick += 1 }
+        .onChange(of: isVisible) { _, visible in if visible { focusTick += 1 } }
+        .onChange(of: effectiveWindow) { _, _ in
+            syncMounted()
+            focusTick += 1
+        }
+        // Prune surfaces for windows that closed remotely.
+        .onChange(of: tabs.map(\.index)) { _, _ in syncMounted() }
+        .onAppear { syncMounted() }
         .toolbar {
             // The terminal/reader toggle only makes sense on a coding-agent tab.
             if isAgentic(currentTab) {
@@ -354,6 +396,19 @@ private struct TerminalsPane: View {
             return selectedWindow
         }
         return model?.activeTab?.index ?? tabs.first?.index
+    }
+
+    /// Keep `mounted` in step with the roster: add the window being shown, drop
+    /// any that closed remotely (and tear down their sessions — nothing else
+    /// will, now that the surfaces outlive a tab switch).
+    private func syncMounted() {
+        let live = Set(tabs.map(\.index))
+        for w in mounted where !live.contains(w) {
+            sessions[w]?.stop()
+            sessions[w] = nil
+        }
+        mounted.removeAll { !live.contains($0) }
+        if let win = effectiveWindow, !mounted.contains(win) { mounted.append(win) }
     }
 
     /// How much of `container` (screen coordinates) the keyboard covers. Zero
