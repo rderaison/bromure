@@ -48,16 +48,21 @@ struct P2PCandidate: Codable, Equatable, Hashable {
     }
 
     /// A stable, RFC-8445-flavoured preference so both peers rank a shared
-    /// candidate set identically. Type wins first (host > srflx > port-mapped >
+    /// candidate set identically. Type wins first (host > port-mapped > srflx >
     /// relay), then TCP over UDP (V1's reliable transport is TCP), then IPv6
     /// over IPv4 within a type. Not the RFC's exact formula — we don't run full
     /// ICE — just a total order good enough to try the best path first.
+    ///
+    /// port-mapped outranks srflx deliberately: a port map is a VERIFIED public
+    /// endpoint the router actually forwards to sshd, whereas the srflx "guess"
+    /// (public IP + sshd port) only connects if a port-forward happens to exist.
+    /// When both connect within the race's grace window, prefer the real one.
     static func defaultPriority(kind: Kind, proto: Proto, ip: String) -> Int {
         let typePref: Int
         switch kind {
         case .host:       typePref = 126
+        case .portMapped: typePref = 110
         case .srflx:      typePref = 100
-        case .portMapped: typePref = 96
         case .relay:      typePref = 0
         }
         let protoPref = proto == .tcp ? 2 : 1

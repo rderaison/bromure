@@ -135,6 +135,13 @@ final class P2PBroker: @unchecked Sendable {
     private var relaySessions: [(grantID: String, listener: TurnRelayListener)] = []
     private var serving = false
     private var serveSSHPort = 2222
+    /// Rung 2: a router port mapping (PCP/NAT-PMP) to our sshd, held for as long
+    /// as we serve and torn down with it. `handleOffered` advertises it as a
+    /// `.portMapped` candidate — a dialer connects straight there, no relay.
+    /// nil until the first successful map (or if the router speaks neither
+    /// protocol / sits behind CGNAT). Guarded by `lock`.
+    private var portMapping: PortMapping?
+    private var portMapTask: Task<Void, Never>?
 
     /// Run blocking transport work (socket dials, TURN transactions) on a real
     /// thread so it never parks the cooperative pool.
@@ -259,6 +266,44 @@ final class P2PBroker: @unchecked Sendable {
             }
             _ = self.ensureChannel(id)   // registers presence
         }
+        startPortMapKeepalive(sshPort: sshPort)
+    }
+
+    /// Establish the rung-2 router mapping and renew it at ~half its lease for
+    /// as long as we serve. Runs entirely off-main (blocking UDP). A router that
+    /// speaks neither PCP nor NAT-PMP, or one behind CGNAT, simply leaves
+    /// `portMapping` nil and we fall back to the relay — no error, no retry
+    /// storm (one attempt per serving session; a failed map isn't worth
+    /// hammering the gateway over).
+    private func startPortMapKeepalive(sshPort: Int) {
+        lock.lock()
+        portMapTask?.cancel()
+        let task = Task.detached { [weak self] in
+            guard let self else { return }
+            guard let mapping = await Self.blocking({ PortMapClient.mapTCP(internalPort: sshPort) })
+            else { return }
+            self.lock.lock(); self.portMapping = mapping; self.lock.unlock()
+            // Renew at half-life until cancelled. A renewal that fails (router
+            // rebooted, lease dropped) clears the candidate rather than
+            // advertising a hole that no longer exists.
+            var lease = mapping.lifetime
+            while !Task.isCancelled {
+                let half = Double(max(60, lease / 2))
+                try? await Task.sleep(nanoseconds: UInt64(half * 1_000_000_000))
+                if Task.isCancelled { break }
+                let renewed = await Self.blocking { PortMapClient.mapTCP(internalPort: sshPort) }
+                self.lock.lock()
+                self.portMapping = renewed
+                self.lock.unlock()
+                guard let renewed else {
+                    FatClientLog.log("p2p: port-map renewal failed — dropping the mapped candidate")
+                    break
+                }
+                lease = renewed.lifetime
+            }
+        }
+        portMapTask = task
+        lock.unlock()
     }
 
     /// Stop being a server: clear `p2p_server`, drop the channel, and tear down
@@ -274,9 +319,19 @@ final class P2PBroker: @unchecked Sendable {
         sessions.removeAll()
         let relays = relaySessions
         relaySessions.removeAll()
+        let mapTask = portMapTask
+        let mapping = portMapping
+        portMapTask = nil
+        portMapping = nil
         lock.unlock()
         ch?.close()
         for r in relays { r.listener.stop() }
+        // Close the router hole we opened — don't leave a public port forwarded
+        // to sshd after we've stopped accepting connections.
+        mapTask?.cancel()
+        if let mapping {
+            Thread.detachNewThread { PortMapClient.delete(mapping, internalPort: mapping.internalPort) }
+        }
         if wasServing, let id = currentIdentity(), let client = makeClient(id) {
             Task.detached { _ = try? await client.setServerMode(bearer: id.bearer, enabled: false) }
         }
@@ -294,10 +349,19 @@ final class P2PBroker: @unchecked Sendable {
         lock.lock(); sessions[grant.id] = session; let port = serveSSHPort; lock.unlock()
         guard let ch = channel else { return }
 
-        let candidates = P2PCandidateGatherer.hostCandidates(sshPort: port)
+        var candidates = P2PCandidateGatherer.hostCandidates(sshPort: port)
+        // Rung 2: if we hold a live router mapping, advertise it — a dialer that
+        // can't reach any host candidate connects straight to this public
+        // ip:port, no relay. Ranked above srflx/relay by its kind's priority.
+        lock.lock(); let mapping = portMapping; lock.unlock()
+        if let mapping {
+            candidates.append(P2PCandidate(kind: .portMapped, proto: .tcp,
+                                           ip: mapping.externalIP, port: mapping.externalPort,
+                                           ttl: Int(mapping.lifetime)))
+        }
         Task { [weak self] in
-            // 1. Host candidates immediately — the LAN fast path must not wait
-            //    on TURN round-trips.
+            // 1. Host + port-mapped candidates immediately — the direct fast
+            //    paths must not wait on TURN round-trips.
             let payload = P2PSignalPayload(candidates: Array(candidates.prefix(8)))
             try? await session.send(.answer, payload: payload, via: ch)
             // 2. Relay rung.

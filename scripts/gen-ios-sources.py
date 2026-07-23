@@ -83,6 +83,7 @@ SHARED = [
     "P2P/P2PIdentity.swift",
     "P2P/P2PSignaling.swift",
     "P2P/P2PTransport.swift",
+    "P2P/PortMap.swift",
     "P2P/STUN.swift",
     "P2P/TurnRelayTransport.swift",
     "P2P/TurnTCP.swift",

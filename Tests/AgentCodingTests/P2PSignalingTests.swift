@@ -12,15 +12,17 @@ struct P2PSignalingTests {
 
     // MARK: Candidate priority
 
-    @Test("candidate priority ranks host > srflx > port-mapped > relay")
+    @Test("candidate priority ranks host > port-mapped > srflx > relay")
     func candidatePriority() {
         let host = P2PCandidate(kind: .host, proto: .tcp, ip: "10.0.0.2", port: 2222)
-        let srflx = P2PCandidate(kind: .srflx, proto: .tcp, ip: "1.2.3.4", port: 40000)
         let mapped = P2PCandidate(kind: .portMapped, proto: .tcp, ip: "1.2.3.4", port: 41000)
+        let srflx = P2PCandidate(kind: .srflx, proto: .tcp, ip: "1.2.3.4", port: 40000)
         let relay = P2PCandidate(kind: .relay, proto: .tcp, ip: "5.6.7.8", port: 3478)
-        #expect(host.prio > srflx.prio)
-        #expect(srflx.prio > mapped.prio)
-        #expect(mapped.prio > relay.prio)
+        // port-mapped is a verified router forward; srflx is only a guess that
+        // a forward exists — so the real one outranks the guess.
+        #expect(host.prio > mapped.prio)
+        #expect(mapped.prio > srflx.prio)
+        #expect(srflx.prio > relay.prio)
     }
 
     @Test("TCP outranks UDP within a kind")

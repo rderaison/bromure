@@ -58,6 +58,7 @@
 		B8673C4CA3146F45629487C5 /* P2P__P2PIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A71CE90D060539BF28588D88 /* P2P__P2PIdentity.swift */; };
 		4B58D3C7D8DD9BDCF2828464 /* P2P__P2PSignaling.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AFB97CD93F45D49A865F2C1 /* P2P__P2PSignaling.swift */; };
 		23208E3C2B74A375A34B8E27 /* P2P__P2PTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0724142F1DD4BEE35B932B9 /* P2P__P2PTransport.swift */; };
+		34B118E4F85D8E7ADD57F8F2 /* P2P__PortMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBD334CF77BC7E5F89147F59 /* P2P__PortMap.swift */; };
 		F3EF497C1A2C232CB51B9D21 /* P2P__STUN.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79B578BC927582930ED5585C /* P2P__STUN.swift */; };
 		FC1C41B9A3FDBCDA909D6231 /* P2P__TurnRelayTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10644B01DC7B818F1EB193F /* P2P__TurnRelayTransport.swift */; };
 		7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */; };
@@ -167,6 +168,7 @@
 		A71CE90D060539BF28588D88 /* P2P__P2PIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__P2PIdentity.swift"; path = "Sources/BromureRemote/_shared/P2P__P2PIdentity.swift"; sourceTree = "<group>"; };
 		0AFB97CD93F45D49A865F2C1 /* P2P__P2PSignaling.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__P2PSignaling.swift"; path = "Sources/BromureRemote/_shared/P2P__P2PSignaling.swift"; sourceTree = "<group>"; };
 		F0724142F1DD4BEE35B932B9 /* P2P__P2PTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__P2PTransport.swift"; path = "Sources/BromureRemote/_shared/P2P__P2PTransport.swift"; sourceTree = "<group>"; };
+		FBD334CF77BC7E5F89147F59 /* P2P__PortMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__PortMap.swift"; path = "Sources/BromureRemote/_shared/P2P__PortMap.swift"; sourceTree = "<group>"; };
 		79B578BC927582930ED5585C /* P2P__STUN.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__STUN.swift"; path = "Sources/BromureRemote/_shared/P2P__STUN.swift"; sourceTree = "<group>"; };
 		C10644B01DC7B818F1EB193F /* P2P__TurnRelayTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnRelayTransport.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnRelayTransport.swift"; sourceTree = "<group>"; };
 		1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnTCP.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnTCP.swift"; sourceTree = "<group>"; };
@@ -293,6 +295,7 @@
 				A71CE90D060539BF28588D88 /* P2P__P2PIdentity.swift */,
 				0AFB97CD93F45D49A865F2C1 /* P2P__P2PSignaling.swift */,
 				F0724142F1DD4BEE35B932B9 /* P2P__P2PTransport.swift */,
+				FBD334CF77BC7E5F89147F59 /* P2P__PortMap.swift */,
 				79B578BC927582930ED5585C /* P2P__STUN.swift */,
 				C10644B01DC7B818F1EB193F /* P2P__TurnRelayTransport.swift */,
 				1DB0D013E884E5C42A66C8BC /* P2P__TurnTCP.swift */,
@@ -477,6 +480,7 @@
 				B8673C4CA3146F45629487C5 /* P2P__P2PIdentity.swift in Sources */,
 				4B58D3C7D8DD9BDCF2828464 /* P2P__P2PSignaling.swift in Sources */,
 				23208E3C2B74A375A34B8E27 /* P2P__P2PTransport.swift in Sources */,
+				34B118E4F85D8E7ADD57F8F2 /* P2P__PortMap.swift in Sources */,
 				F3EF497C1A2C232CB51B9D21 /* P2P__STUN.swift in Sources */,
 				FC1C41B9A3FDBCDA909D6231 /* P2P__TurnRelayTransport.swift in Sources */,
 				7CC69D04A322847424A97871 /* P2P__TurnTCP.swift in Sources */,

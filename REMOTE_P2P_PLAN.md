@@ -7,7 +7,15 @@ else can beat.
 
 This is a transport substrate underneath the existing fat client
 (`REMOTE_FAT_CLIENT_PLAN.md`): it changes *how a dialer reaches a listener*, and
-nothing above it. Status: **design only, not implemented.**
+nothing above it.
+
+**Status.** Shipped: rung 1 (LAN / host candidates), **rung 2 (explicit port
+mapping — PCP + NAT-PMP, `PortMap.swift`)**, srflx guess, and rung 4 (TURN-TCP
+relay, RFC 6062). The dialer races all advertised candidates in parallel and
+takes the first to connect (`P2PDirectDialer`). **Not** implemented: rung 3 (UDP
+hole punching — the whole transport is TCP, so it would be a new transport, not
+an added rung) and UPnP-IGD (the flakiest third mapping protocol; PCP/NAT-PMP
+cover the routers people actually run).
 
 ---
 
