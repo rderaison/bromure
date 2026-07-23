@@ -4194,18 +4194,12 @@ public final class ProfileStore {
             if [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
                 _wt_prompt=$(printf '%s' "$BROMURE_AC_WT_PROMPT" | base64 -d 2>/dev/null)
                 unset BROMURE_AC_WT_PROMPT
-                # A prompt whose first character is "-" is read as a flag by the
-                # agent's own argument parser, which then dies before it ever
-                # starts ("error: unknown option '- Generate a report…'"). An
-                # automation written as a bullet list hits this every time. End
-                # option parsing with "--" so the prompt is unambiguously the
-                # positional argument. Only when it's actually needed: agents
-                # differ in whether a stray "--" reaches the prompt text, and the
-                # ordinary case must keep the argv it has always had.
-                case "$_wt_prompt" in
-                    -*) "$_wt_tool" $_wt_flags -- "$_wt_prompt" ;;
-                    *)  "$_wt_tool" $_wt_flags "$_wt_prompt" ;;
-                esac
+                # "--" ends option parsing, so the prompt is unambiguously the
+                # positional argument. Without it a prompt whose first character
+                # is "-" — an automation written as a bullet list, say — is read
+                # as a flag by the agent's own parser, which dies before the run
+                # starts ("error: unknown option '- Generate a report…'").
+                "$_wt_tool" $_wt_flags -- "$_wt_prompt"
             else
                 "$_wt_tool" $_wt_flags
             fi
