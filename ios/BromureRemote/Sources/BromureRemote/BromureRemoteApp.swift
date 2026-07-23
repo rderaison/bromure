@@ -38,6 +38,7 @@ struct RootView: View {
     @State private var editMode: EditMode = .inactive
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
     /// When the app went to the background — used to reconnect on return only
     /// after a real absence (a brief app-switch keeps its sockets).
     @State private var backgroundedAt: Date?
@@ -69,9 +70,16 @@ struct RootView: View {
                 backgroundedAt = Date()
             case .active:
                 // Only force a reconnect after a real absence; a quick
-                // app-switch usually keeps the sockets alive.
-                if let b = backgroundedAt, Date().timeIntervalSince(b) > 2 {
-                    NotificationCenter.default.post(name: .bromureDidForeground, object: nil)
+                // app-switch usually keeps the sockets alive. The elapsed
+                // duration rides along so a LONG absence (the P2P path is surely
+                // dead) can tear it down and re-establish, not just re-poll.
+                if let b = backgroundedAt {
+                    let away = Date().timeIntervalSince(b)
+                    if away > 2 {
+                        NotificationCenter.default.post(
+                            name: .bromureDidForeground, object: nil,
+                            userInfo: ["awaySeconds": away])
+                    }
                 }
                 backgroundedAt = nil
                 // Remove any delivered notification whose question is already
@@ -151,26 +159,122 @@ struct RootView: View {
         push.tapTarget = nil
     }
 
-    // MARK: Boot list
+    // MARK: Boot screen
 
-    private var bootList: some View {
-        List {
-            accountSection
-            myServersSection
+    /// A fresh, signed-out install with no saved servers gets the branded hero;
+    /// once there's an account or a by-address server it's the working list.
+    private var showHero: Bool { !directory.signedIn && savedHosts.isEmpty }
+
+    @ViewBuilder private var bootList: some View {
+        if showHero {
+            heroLanding
+                .toolbar(.hidden, for: .navigationBar)   // the hero is its own title
+        } else {
+            List {
+                accountSection
+                myServersSection
+            }
+            .listSectionSpacing(.compact)
+            .environment(\.editMode, $editMode)
+            .navigationTitle("Bromure")
         }
-        .environment(\.editMode, $editMode)
-        .navigationTitle("Bromure Client")
+    }
+
+    // MARK: #0 — pre-login hero
+
+    private var heroLanding: some View {
+        ZStack {
+            Color(uiColor: .systemBackground).ignoresSafeArea()
+            RadialGradient(
+                colors: [Color.blue.opacity(colorScheme == .dark ? 0.30 : 0.15), .clear],
+                center: UnitPoint(x: 0.5, y: 0.30), startRadius: 6, endRadius: 340)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                Spacer(minLength: 40)
+                brandMark.padding(.bottom, 30)
+                Text("Bromure")
+                    .font(.system(size: 42, weight: .heavy, design: .rounded))
+                Text("Your coding agents and terminals —\nlive, from your phone.")
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 10)
+                    .padding(.horizontal, 32)
+                Spacer()
+
+                VStack(spacing: 14) {
+                    Button { directory.signIn() } label: {
+                        HStack(spacing: 8) {
+                            if directory.p2pBusy { ProgressView().tint(.white) }
+                            else { Image(systemName: "person.crop.circle.badge.plus") }
+                            Text(directory.p2pBusy ? "Finishing sign-in…" : "Sign in to bromure.io")
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 15)
+                        .background(
+                            LinearGradient(colors: [Color.blue, Color.indigo],
+                                           startPoint: .topLeading, endPoint: .bottomTrailing),
+                            in: RoundedRectangle(cornerRadius: 15))
+                        .foregroundStyle(.white)
+                        .shadow(color: .blue.opacity(0.35), radius: 12, y: 6)
+                    }
+                    .disabled(directory.p2pBusy)
+
+                    Button { showAddServer = true } label: {
+                        Text("Add a server by address")
+                            .font(.subheadline.weight(.medium))
+                    }
+
+                    if let err = directory.p2pError {
+                        Text(err).font(.caption).foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .padding(.horizontal, 28)
+                .padding(.bottom, 40)
+            }
+        }
+    }
+
+    /// The real app icon, over a matching blue glow — the exact mark people
+    /// tapped to open the app.
+    private var brandMark: some View {
+        ZStack {
+            Circle()
+                .fill(RadialGradient(colors: [Color.blue.opacity(0.5), .clear],
+                                     center: .center, startRadius: 4, endRadius: 100))
+                .frame(width: 210, height: 210)
+            Image("AppLogo")
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 132, height: 132)
+                .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+                .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+        }
     }
 
     @ViewBuilder private var accountSection: some View {
         Section {
             if directory.signedIn {
-                HStack {
-                    Label(directory.accountLabel ?? "bromure.io", systemImage: "person.crop.circle.fill")
+                HStack(spacing: 12) {
+                    Image(systemName: "person.crop.circle.fill")
+                        .font(.system(size: 30))
+                        .foregroundStyle(
+                            LinearGradient(colors: [Color.blue, Color.indigo],
+                                           startPoint: .top, endPoint: .bottom))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(directory.accountLabel ?? "bromure.io")
+                            .font(.body.weight(.semibold))
+                        Text("Signed in").font(.caption).foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Button("Sign Out") { directory.signOutAccount() }
                         .font(.callout)
                 }
+                .padding(.vertical, 4)
             } else {
                 Button {
                     directory.signIn()
@@ -207,11 +311,17 @@ struct RootView: View {
                     Button { pendingWorkspace = nil; pendingPeer = server } label: { peerRow(server) }
                         .buttonStyle(.plain)
                         .disabled(!server.online || editMode == .active)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                 }
             }
             ForEach(savedHosts) { host in
                 Button { pendingWorkspace = nil; activeHost = host } label: { savedRow(host) }
                     .buttonStyle(.plain)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
             }
             .onDelete { idx in for i in idx { store.remove(savedHosts[i].id) } }
 
@@ -250,32 +360,114 @@ struct RootView: View {
     }
 
     private func peerRow(_ server: DeviceInfo) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "server.rack")
-                .foregroundStyle(server.online ? Color.accentColor : Color.secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(server.displayName).font(.body)
-                Text(server.online ? "Online" : "Offline")
-                    .font(.caption)
-                    .foregroundStyle(server.online ? .green : .secondary)
-            }
-            Spacer()
-            if server.online {
-                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
-            }
-        }
-        .contentShape(Rectangle())
+        let status: String = {
+            if server.online { return "Online" }
+            if let seen = lastSeenText(server.lastSeenAt) { return "Last seen \(seen)" }
+            return "Offline"
+        }()
+        return ServerCard(icon: "server.rack", accent: serverAccent(server.id),
+                          name: server.displayName, status: status,
+                          online: server.online, showChevron: server.online)
     }
 
     private func savedRow(_ host: RemoteHost) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(host.name.isEmpty ? host.address : host.name)
-                .font(.body.weight(.medium))
-            Text(host.connectLabel).font(.caption).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
+        // A by-address host: reachability isn't known until you dial it, so no
+        // online dot — a neutral "Direct" card with its connect label.
+        ServerCard(icon: "network", accent: serverAccent(host.id.uuidString),
+                   name: host.name.isEmpty ? host.address : host.name,
+                   status: host.connectLabel, online: nil, showChevron: true)
     }
+}
+
+// MARK: - Boot-screen building blocks
+
+/// A server row rendered as a card: an accent-tinted icon tile, the name, and a
+/// status line with a pulsing dot when the server is online.
+private struct ServerCard: View {
+    let icon: String
+    let accent: Color
+    let name: String
+    let status: String
+    /// true = online (green pulse), false = offline (grey), nil = no dot.
+    let online: Bool?
+    let showChevron: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(accent.opacity(0.18))
+                    .frame(width: 42, height: 42)
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(accent)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(name).font(.body.weight(.semibold))
+                HStack(spacing: 5) {
+                    if let online { PulsingDot(color: online ? .green : .secondary, active: online) }
+                    Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 4)
+            if showChevron {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(online == true ? accent.opacity(0.4) : Color.clear, lineWidth: 1))
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+/// A small status dot that emits a slow expanding ring while `active`.
+struct PulsingDot: View {
+    let color: Color
+    let active: Bool
+    @State private var pulse = false
+    var body: some View {
+        ZStack {
+            if active {
+                Circle().fill(color.opacity(0.4))
+                    .frame(width: 16, height: 16)
+                    .scaleEffect(pulse ? 1.7 : 0.7)
+                    .opacity(pulse ? 0 : 0.9)
+            }
+            Circle().fill(color).frame(width: 8, height: 8)
+        }
+        .frame(width: 16, height: 16)
+        .onAppear {
+            guard active else { return }
+            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { pulse = true }
+        }
+    }
+}
+
+/// A stable, distinct accent colour per server, derived from its id (FNV-1a →
+/// hue), so each server reads as its own thing across launches.
+private func serverAccent(_ seed: String) -> Color {
+    var h: UInt64 = 1469598103934665603
+    for b in seed.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
+    return Color(hue: Double(h % 1000) / 1000, saturation: 0.55, brightness: 0.85)
+}
+
+/// "3h", "2d" … from an ISO-8601 timestamp, or nil if unparseable.
+private func lastSeenText(_ iso: String?) -> String? {
+    guard let iso else { return nil }
+    let withFrac = ISO8601DateFormatter()
+    withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let plain = ISO8601DateFormatter()
+    guard let date = withFrac.date(from: iso) ?? plain.date(from: iso) else { return nil }
+    let rel = RelativeDateTimeFormatter()
+    rel.unitsStyle = .abbreviated
+    return rel.localizedString(for: date, relativeTo: Date())
 }
 
 /// A tiny reference box so the model's `onConnected` (set at init, before

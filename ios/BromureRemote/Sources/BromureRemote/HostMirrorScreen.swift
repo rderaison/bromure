@@ -40,80 +40,26 @@ struct HostMirrorScreen: View {
         deepWorkspace = target
     }
 
+    private var runningCount: Int {
+        controller.listModel.profileRows.filter { $0.state == .running }.count
+    }
+
     var body: some View {
-        List {
-            if !controller.connected {
-                Section {
-                    Label(controller.hasSnapshot ? "Reconnecting…" : "Connecting…",
-                          systemImage: "wifi.exclamationmark")
-                        .foregroundStyle(.secondary)
-                    if let err = controller.lastError, !controller.connected, controller.hasSnapshot {
-                        Text(err).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                if !controller.connected { reconnectBanner }
 
-            Section("Boards") {
-                NavigationLink {
-                    CodingBoardScreen(controller: controller)
-                } label: {
-                    Label("Coding Tasks", systemImage: "checklist")
-                        .badge(controller.taskStore.tasks.count)
-                }
-                NavigationLink {
-                    AutomationsBoardScreen(controller: controller)
-                } label: {
-                    Label("Automations", systemImage: "bolt.badge.clock")
-                        .badge(controller.automationStore.automations.count)
-                }
-            }
+                boardsRow
 
-            Section {
-                NavigationLink {
-                    GridScreen(controller: controller)
-                } label: {
-                    Label("Grid", systemImage: "square.grid.2x2")
-                        .badge(controller.gridStore.cells.count)
-                }
-                if waitingAgents.isEmpty {
-                    Label("No agents need input", systemImage: "checkmark.circle")
-                        .foregroundStyle(.secondary)
-                        .font(.callout)
-                } else {
-                    ForEach(waitingAgents) { agent in
-                        NavigationLink {
-                            WorkspaceScreen(controller: controller,
-                                            profileID: agent.profileID,
-                                            initialWindow: agent.windowIndex)
-                        } label: {
-                            waitingAgentRow(agent)
-                        }
-                    }
-                }
-            } header: {
-                Text("At a Glance")
-            } footer: {
-                if !waitingAgents.isEmpty {
-                    Text("These coding agents are paused waiting for your answer — tap to reply.")
-                }
-            }
+                if !waitingAgents.isEmpty { waitingSection }
 
-            Section("Workspaces") {
-                if controller.listModel.profileRows.isEmpty && controller.hasSnapshot {
-                    Text("No workspaces on this server.")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(controller.listModel.profileRows) { row in
-                    NavigationLink {
-                        WorkspaceScreen(controller: controller, profileID: row.id)
-                    } label: {
-                        workspaceRow(row)
-                    }
-                }
+                workspacesSection
             }
+            .padding(16)
         }
+        .background(Color(uiColor: .systemGroupedBackground))
         .navigationTitle(host.name.isEmpty ? host.address : host.name)
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
         .onAppear {
             // `start()` is idempotent, so re-appearing (popping back from a
             // pushed workspace/grid) is a no-op. Crucially we do NOT stop on
@@ -136,7 +82,15 @@ struct HostMirrorScreen: View {
                             initialWindow: link.window)
         }
         // Snap the mirror back to life when the app returns to the foreground.
-        .onReceive(NotificationCenter.default.publisher(for: .bromureDidForeground)) { _ in
+        // After a long absence the P2P path is almost certainly dead — tear it
+        // down so the next dial re-establishes a fresh one, rather than looping
+        // on a locally-alive-but-remotely-dead shim (which just re-polls to no
+        // avail). The controller + attached terminals then reconnect on it.
+        .onReceive(NotificationCenter.default.publisher(for: .bromureDidForeground)) { note in
+            let away = (note.userInfo?["awaySeconds"] as? TimeInterval) ?? 0
+            if away > 20, let pid = host.peerDeviceID {
+                P2PBroker.shared.closePeer(pid)
+            }
             controller.foregroundKick()
         }
         .alert(item: topPrompt) { prompt in
@@ -172,43 +126,173 @@ struct HostMirrorScreen: View {
         }
     }
 
-    private func waitingAgentRow(_ agent: WaitingAgent) -> some View {
+    // MARK: Dashboard sections
+
+    private var reconnectBanner: some View {
         HStack(spacing: 10) {
-            AgentStatusDot(status: .needsInput)
-                .frame(width: 12)
+            ProgressView().controlSize(.small).tint(.orange)
             VStack(alignment: .leading, spacing: 1) {
-                Text(agent.tabLabel).font(.body)
-                Text(agent.workspaceName).font(.caption).foregroundStyle(.secondary)
+                Text(controller.hasSnapshot ? "Reconnecting…" : "Connecting…")
+                    .font(.subheadline.weight(.semibold))
+                if let err = controller.lastError, controller.hasSnapshot {
+                    Text(err).font(.caption)
+                }
             }
             Spacer()
-            Image(systemName: "exclamationmark.bubble.fill")
-                .foregroundStyle(.red)
+        }
+        .foregroundStyle(.orange)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color.orange.opacity(0.14)))
+    }
+
+    private var boardsRow: some View {
+        HStack(spacing: 12) {
+            NavigationLink { CodingBoardScreen(controller: controller) } label: {
+                boardCard("Coding Tasks", icon: "checklist",
+                          count: controller.taskStore.tasks.count, tint: .blue)
+            }.buttonStyle(.plain)
+            NavigationLink { AutomationsBoardScreen(controller: controller) } label: {
+                boardCard("Automations", icon: "bolt.badge.clock.fill",
+                          count: controller.automationStore.automations.count, tint: .orange)
+            }.buttonStyle(.plain)
+            NavigationLink { GridScreen(controller: controller) } label: {
+                boardCard("Grid", icon: "square.grid.2x2.fill",
+                          count: controller.gridStore.cells.count, tint: .purple)
+            }.buttonStyle(.plain)
         }
     }
 
-    private func workspaceRow(_ row: SessionListModel.ProfileRow) -> some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(Color(hex: row.accentHex))
-                .frame(width: 10, height: 10)
-                .overlay(stateRing(row.state))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(row.name).font(.body)
-                Text(stateLabel(row.state)).font(.caption).foregroundStyle(.secondary)
+    private func boardCard(_ title: String, icon: String, count: Int, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: icon).font(.system(size: 17, weight: .semibold)).foregroundStyle(tint)
+                Spacer()
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.footnote.weight(.bold)).monospacedDigit()
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Capsule().fill(tint.opacity(0.18)))
+                        .foregroundStyle(tint)
+                }
             }
-            Spacer()
+            Text(title).font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1).minimumScaleFactor(0.85)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color(uiColor: .secondarySystemGroupedBackground)))
+    }
+
+    private var waitingSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Needs your input", icon: "exclamationmark.bubble.fill", tint: .red)
+            ForEach(waitingAgents) { agent in
+                NavigationLink {
+                    WorkspaceScreen(controller: controller, profileID: agent.profileID,
+                                    initialWindow: agent.windowIndex)
+                } label: { waitingAgentCard(agent) }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func waitingAgentCard(_ agent: WaitingAgent) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.red.opacity(0.15)).frame(width: 42, height: 42)
+                PulsingDot(color: .red, active: true)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(agent.tabLabel).font(.body.weight(.semibold)).lineLimit(1)
+                Text(agent.workspaceName).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            Text("Reply").font(.caption.weight(.bold)).foregroundStyle(.red)
+            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                .foregroundStyle(.red.opacity(0.55))
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color.red.opacity(0.09)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(Color.red.opacity(0.3), lineWidth: 1))
+    }
+
+    @ViewBuilder private var workspacesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Workspaces",
+                          trailing: controller.listModel.profileRows.isEmpty ? nil
+                                    : "\(runningCount) running")
+            if controller.listModel.profileRows.isEmpty {
+                Text(controller.hasSnapshot ? "No workspaces on this server."
+                                            : "Loading workspaces…")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(controller.listModel.profileRows) { row in
+                    NavigationLink {
+                        WorkspaceScreen(controller: controller, profileID: row.id)
+                    } label: { workspaceCard(row) }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func workspaceCard(_ row: SessionListModel.ProfileRow) -> some View {
+        let accent = Color(hex: row.accentHex)
+        return HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(accent.opacity(0.18)).frame(width: 42, height: 42)
+                Image(systemName: "cpu")
+                    .font(.system(size: 18, weight: .medium)).foregroundStyle(accent)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.name).font(.body.weight(.semibold)).lineLimit(1)
+                HStack(spacing: 5) {
+                    stateDot(row.state)
+                    Text(stateLabel(row.state)).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 4)
             if row.compromised {
                 Image(systemName: "exclamationmark.shield.fill").foregroundStyle(.red)
             }
+            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(row.state == .running ? accent.opacity(0.4) : .clear, lineWidth: 1))
+    }
+
+    @ViewBuilder private func stateDot(_ s: SessionListModel.RunState) -> some View {
+        switch s {
+        case .running:   PulsingDot(color: .green, active: true)
+        case .booting:   PulsingDot(color: .orange, active: true)
+        case .suspended: PulsingDot(color: .yellow, active: false)
+        case .off:       PulsingDot(color: .secondary, active: false)
         }
     }
 
-    @ViewBuilder private func stateRing(_ s: SessionListModel.RunState) -> some View {
-        switch s {
-        case .running:   Circle().stroke(.green, lineWidth: 2).frame(width: 16, height: 16)
-        case .booting:   Circle().stroke(.orange, lineWidth: 2).frame(width: 16, height: 16)
-        case .suspended: Circle().stroke(.yellow, lineWidth: 2).frame(width: 16, height: 16)
-        case .off:       EmptyView()
+    private func sectionHeader(_ title: String, icon: String? = nil,
+                               tint: Color = .primary, trailing: String? = nil) -> some View {
+        HStack(spacing: 6) {
+            if let icon { Image(systemName: icon).font(.subheadline).foregroundStyle(tint) }
+            Text(title).font(.headline)
+            Spacer()
+            if let trailing {
+                Text(trailing).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            }
         }
     }
 

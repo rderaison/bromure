@@ -17,9 +17,23 @@ struct WorkspaceScreen: View {
     /// "At a Glance" agents-waiting list and the grid).
     var initialWindow: Int? = nil
 
+    /// Bridges the workspace's browser MCP (an agent's `browser_navigate`) and
+    /// the manual port browser to one shared WKWebView + loopback tunnel. Its
+    /// relay runs for the life of this screen (started in `.onAppear`).
+    @StateObject private var browserBridge: MobileBrowserBridge
+
+    init(controller: RemoteHostController, profileID: Profile.ID, initialWindow: Int? = nil) {
+        self.controller = controller
+        self.profileID = profileID
+        self.initialWindow = initialWindow
+        _browserBridge = StateObject(
+            wrappedValue: MobileBrowserBridge(controller: controller, profileID: profileID))
+    }
+
     enum Pane: String, CaseIterable, Identifiable {
         case terminals = "Terminals"
         case dashboard = "Info"
+        case web = "Web"
         case docker = "Docker"
         case files = "Files"
         var id: String { rawValue }
@@ -27,6 +41,7 @@ struct WorkspaceScreen: View {
             switch self {
             case .terminals: "terminal"
             case .dashboard: "gauge.with.dots.needle.67percent"
+            case .web: "globe"
             case .docker: "shippingbox"
             case .files: "folder"
             }
@@ -50,15 +65,7 @@ struct WorkspaceScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             if !terminalFullBleed {
-                Picker("View", selection: $pane) {
-                    ForEach(availablePanes) { p in
-                        Label(p.rawValue, systemImage: p.symbol).tag(p)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.vertical, 6)
-
+                panePicker
                 Divider()
             }
 
@@ -81,10 +88,48 @@ struct WorkspaceScreen: View {
         .onChange(of: isRunning) { _, running in
             if !running && pane != .dashboard { pane = .dashboard }
         }
+        // Serve the browser MCP for this workspace while its screen is open.
+        .onAppear { browserBridge.start() }
+        // An agent opened a page (browser_navigate) — bring the Web pane forward.
+        .onChange(of: browserBridge.showTick) { _, _ in
+            if isRunning { withAnimation(.snappy(duration: 0.28)) { pane = .web } }
+        }
     }
 
     private var availablePanes: [Pane] {
         isRunning ? Pane.allCases : [.dashboard]
+    }
+
+    /// Modern expandable-pill picker: every pane shows its icon; the selected
+    /// one expands to also show its label with an accent fill. Fits four panes
+    /// on a narrow phone without the flat stock segmented look.
+    private var panePicker: some View {
+        HStack(spacing: 8) {
+            ForEach(availablePanes) { p in
+                let selected = pane == p
+                Button {
+                    withAnimation(.snappy(duration: 0.28)) { pane = p }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: p.symbol).font(.system(size: 14, weight: .semibold))
+                        if selected {
+                            Text(p.rawValue).font(.subheadline.weight(.semibold))
+                                .fixedSize().lineLimit(1)
+                        }
+                    }
+                    .padding(.horizontal, selected ? 15 : 12)
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: selected ? .infinity : nil)
+                    .background(
+                        Capsule().fill(selected ? Color.accentColor
+                                                : Color.secondary.opacity(0.14)))
+                    .foregroundStyle(selected ? Color.white : Color.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     /// "What you're looking at may be out of date" — deliberately a strip
@@ -123,6 +168,8 @@ struct WorkspaceScreen: View {
             switch pane {
             case .terminals: EmptyView()
             case .dashboard: dashboard
+            case .web:       WebBrowserPane(controller: controller, profileID: profileID,
+                                            bridge: browserBridge)
             case .docker:    docker
             case .files:     files
             }
@@ -218,6 +265,14 @@ private struct TerminalsPane: View {
     /// class the @State merely *references* is safe and the entries persist.
     @State private var store = SessionCache()
     final class SessionCache { var map: [Int: AttachSession] = [:] }
+    /// Last-loaded Claude transcript per window, kept across reader ↔ terminal
+    /// toggles so re-opening the reader shows the conversation instantly instead
+    /// of the slow "Loading transcript…" while it re-tails the guest jsonl.
+    @State private var transcripts = TranscriptStore()
+    final class TranscriptStore {
+        var items: [Int: [TranscriptItem]] = [:]
+        var everLoaded: Set<Int> = []
+    }
     /// Every window shown in this pane so far. Their surfaces stay mounted (and
     /// their streams attached) so switching back is instant instead of a fresh
     /// exec + tmux attach + repaint. Pruned when a window closes remotely.
@@ -231,6 +286,9 @@ private struct TerminalsPane: View {
     /// nil to follow the window's agentic state (an agent window defaults to
     /// the rich reader). Cleared on a window switch so each tab re-evaluates.
     @State private var readerOverride: Bool?
+    /// Windows for which a Claude transcript has been detected — gates the
+    /// auto-reader default (see `readerMode`).
+    @State private var transcriptPresent: Set<Int> = []
     /// Software-keyboard frame in screen coordinates, .zero when hidden. The
     /// terminal opts out of SwiftUI's automatic keyboard avoidance and insets
     /// itself by the measured overlap instead — see `keyboardOverlap`.
@@ -242,6 +300,17 @@ private struct TerminalsPane: View {
 
     private var model: TabsModel? { controller.tabsModel(for: profileID) }
     private var tabs: [TabsModel.Tab] { model?.tabs ?? [] }
+
+    /// Epoch floor for transcript/pending-question reads: this workspace's boot
+    /// time. A guest reboot (`shutdown -r`) can leave a stale `pq-<cwd>.json`
+    /// pending-question dump on the persistent home — Claude was killed mid
+    /// question before its Stop hook swept it — and `planTranscriptCommand`
+    /// otherwise appends it as a live question (a phantom the TUI isn't asking).
+    /// Filtering by boot time drops anything written before this boot; 0 (no
+    /// filter) until the boot time is known.
+    private var transcriptSince: Int {
+        controller.bootTimes[profileID].map { max(0, Int($0.timeIntervalSince1970)) } ?? 0
+    }
 
     private var fontBinding: Binding<CGFloat> {
         Binding(get: { CGFloat(fontSizePt) }, set: { fontSizePt = Double($0) })
@@ -276,11 +345,16 @@ private struct TerminalsPane: View {
         return BromureIcons.agentKind(forLabel: tab.shownLabel) != nil
     }
 
-    /// Non-agent tabs are always the raw terminal (and get no toggle); an agent
-    /// tab defaults to the reader, with the toggle as an override.
+    /// Non-agent tabs are always the raw terminal (and get no toggle). An agent
+    /// tab defaults to the reader ONLY once a transcript actually exists — a
+    /// freshly-typed `claude` sitting on its "Claude can make mistakes…" splash
+    /// has no transcript yet, and auto-opening the reader there just showed "No
+    /// transcript". So detect the transcript first (a background presence poll),
+    /// then flip. The toggle still overrides either way.
     @MainActor private var readerMode: Bool {
         guard isAgentic(currentTab) else { return false }
-        return readerOverride ?? true
+        if let readerOverride { return readerOverride }
+        return effectiveWindow.map { transcriptPresent.contains($0) } ?? false
     }
 
     var body: some View {
@@ -316,11 +390,11 @@ private struct TerminalsPane: View {
                         ForEach(mounted, id: \.self) { w in
                             let active = w == win && !readerMode && isVisible
                             GeometryReader { geo in
-                                RemoteTerminalView(session: session(for: w),
-                                                   fontSize: fontBinding,
-                                                   focusTick: focusTick,
-                                                   isActive: active)
-                                    .padding(.bottom, keyboardOverlap(with: geo.frame(in: .global)))
+                                TerminalSurface(session: session(for: w),
+                                                fontSize: fontBinding,
+                                                focusTick: focusTick,
+                                                isActive: active,
+                                                bottomInset: keyboardOverlap(with: geo.frame(in: .global)))
                             }
                             .background(Color.black)
                             .opacity(active ? 1 : 0)
@@ -333,7 +407,8 @@ private struct TerminalsPane: View {
                         // Normal keyboard avoidance: the composer lifts above the
                         // keyboard so you can see what you type.
                         TranscriptReaderView(controller: controller, profileID: profileID,
-                                             window: win, guestCwd: guestCwd(for: win))
+                                             window: win, guestCwd: guestCwd(for: win),
+                                             since: transcriptSince, store: transcripts)
                             .id("reader-\(profileID)-\(win)")
                     }
                 }
@@ -350,6 +425,17 @@ private struct TerminalsPane: View {
         .onReceive(NotificationCenter.default.publisher(
             for: UIResponder.keyboardWillHideNotification)) { _ in
             keyboardFrame = .zero
+        }
+        // A terminal's link dropped or came back — almost always a guest reboot,
+        // which rebuilds tmux with a different window set. Force the mirror to
+        // re-poll NOW: the fresh roster drives syncMounted, which prunes surfaces
+        // for windows that no longer exist and re-homes the view onto a live one
+        // (a surface left attached to a dead window index just eats keystrokes).
+        // Then re-grab keyboard focus for whatever surface ends up active.
+        .onReceive(NotificationCenter.default.publisher(for: .bromureTerminalLinkChanged)) { note in
+            guard (note.userInfo?["host"] as? UUID) == controller.host.id else { return }
+            controller.foregroundKick()
+            focusTick += 1
         }
         // Anything that changes WHICH surface should own the keyboard asks the
         // newly-active one to take it: a rotation (which dismisses the keyboard
@@ -368,9 +454,13 @@ private struct TerminalsPane: View {
         .onChange(of: tabs.map(\.index)) { _, _ in syncMounted() }
         .onAppear { syncMounted() }
         .toolbar {
-            // The terminal/reader toggle only makes sense on a coding-agent tab.
-            if isAgentic(currentTab) {
-                ToolbarItem(placement: .primaryAction) {
+            // Keep the toolbar-item COUNT constant. Conditionally adding/removing
+            // a ToolbarItem (as this did for the reader toggle) leaves a ghost
+            // glass circle behind on iOS 26 — the stray button the user saw. So
+            // the toggle is always the same slot, rendering nothing on a
+            // non-agent tab where a reader makes no sense.
+            ToolbarItem(placement: .primaryAction) {
+                if isAgentic(currentTab) {
                     Button { readerOverride = !readerMode } label: {
                         Image(systemName: readerMode ? "terminal" : "doc.richtext")
                     }
@@ -403,6 +493,35 @@ private struct TerminalsPane: View {
         // Switching windows drops any manual terminal/reader override, so each
         // window re-evaluates the agentic default.
         .onChange(of: effectiveWindow) { _, _ in readerOverride = nil }
+        // Watch the current agent window for a transcript; once one exists, the
+        // reader default flips on (issue #8). Runs while the terminal is shown
+        // and stops the moment it finds one — the reader then polls itself.
+        .task(id: presencePollKey) { await pollTranscriptPresence() }
+    }
+
+    private var presencePollKey: String {
+        let win = effectiveWindow ?? -1
+        return "\(win)-\(isAgentic(currentTab))-\(effectiveWindow.flatMap { guestCwd(for: $0) } ?? "")"
+    }
+
+    private func pollTranscriptPresence() async {
+        guard let win = effectiveWindow, isAgentic(currentTab),
+              !transcriptPresent.contains(win),
+              let cwd = guestCwd(for: win), !cwd.isEmpty,
+              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: transcriptSince)
+        else { return }
+        while !Task.isCancelled {
+            if let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15) {
+                let parsed = ClaudeTranscriptParser.parse(Data(raw.utf8))
+                if !parsed.isEmpty {
+                    transcripts.items[win] = parsed          // seed the reader's cache
+                    transcripts.everLoaded.insert(win)
+                    transcriptPresent.insert(win)            // → reader default flips on
+                    return
+                }
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
     }
 
     private var effectiveWindow: Int? {
@@ -451,16 +570,21 @@ private struct TerminalsPane: View {
             selectedWindow = tab.index
             controller.selectTab(profileID, index: tab.index)
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 AgentStatusDot(status: tab.agentStatus)
                 Text(tab.shownLabel.isEmpty ? "shell" : tab.shownLabel)
-                    .font(.callout)
+                    .font(.callout.weight(selected ? .semibold : .regular))
                     .lineLimit(1)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
             .background(
-                Capsule().fill(selected ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.12)))
+                Capsule().fill(selected ? Color.accentColor.opacity(0.16)
+                                        : Color.secondary.opacity(0.10)))
+            .overlay(
+                Capsule().strokeBorder(selected ? Color.accentColor.opacity(0.5) : .clear,
+                                       lineWidth: 1))
+            .foregroundStyle(selected ? Color.accentColor : Color.primary)
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -492,6 +616,12 @@ private struct TranscriptReaderView: View {
     /// sent, so the conversation lands in the right agent tab.
     let window: Int
     let guestCwd: String?
+    /// Epoch floor (this workspace's boot time) so a pre-reboot pending-question
+    /// dump or an older session's transcript isn't tailed as if it were live —
+    /// see TerminalsPane.transcriptSince.
+    let since: Int
+    /// Shared across reader remounts so a toggle doesn't re-tail from scratch.
+    let store: TerminalsPane.TranscriptStore
     @State private var items: [TranscriptItem] = []
     @State private var loaded = false
     @State private var draft = ""
@@ -504,22 +634,32 @@ private struct TranscriptReaderView: View {
     @State private var uploadError: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            transcript
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
-            composerBar
-        }
-        .task(id: guestCwd) { await poll() }
+        transcript
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The composer as a bottom safe-area inset (the Messages pattern):
+            // this pins it correctly ABOVE the keyboard INCLUDING the QuickType
+            // suggestion bar, so what you type is never hidden behind it.
+            .safeAreaInset(edge: .bottom, spacing: 0) { composerBar }
+            .onAppear {
+                // Show the cached conversation instantly; the poll refreshes it.
+                if items.isEmpty { items = store.items[window] ?? [] }
+                if store.everLoaded.contains(window) { loaded = true }
+            }
+            // Re-key on `since` as well as the cwd: a reboot bumps the boot-time
+            // floor, and the poll must rebuild its command to stop tailing the
+            // pre-reboot pending-question dump (poll() captures `since` once).
+            .task(id: "\(guestCwd ?? "")\u{1f}\(since)") { await poll() }
     }
 
     // MARK: Composer + image attach
 
     private var composerBar: some View {
         VStack(spacing: 4) {
+            Divider()   // safeAreaInset composer — separate it from the transcript
             if let uploadError {
                 Text(uploadError).font(.caption).foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
             }
             // Type into the agent's session — the message (and any uploaded
             // image path) shows up in the transcript on the next poll, and the
@@ -620,7 +760,11 @@ private struct TranscriptReaderView: View {
                         if !openQuestions.isEmpty {
                             TranscriptQuestionBatchCard(
                                 questions: openQuestions,
-                                onSubmit: submitAnswerKeys)
+                                onSubmit: { keys in
+                                    let ok = await submitAnswerKeys(keys)
+                                    if ok { await refreshNow() }   // clear the card promptly
+                                    return ok
+                                })
                                 // Keyed by the question TEXTS: consecutive
                                 // rounds land at the same item indices (both
                                 // live only in the pq dump), and an index-based
@@ -719,6 +863,7 @@ private struct TranscriptReaderView: View {
                 command: CodingTaskEngine.typeCommand(tabIndex: window, text: text),
                 timeout: 20)
             await MainActor.run { draft = ""; sending = false }
+            await refreshNow()   // reflect the sent message immediately
         }
     }
 
@@ -777,15 +922,31 @@ private struct TranscriptReaderView: View {
 
     private func poll() async {
         guard let cwd = guestCwd, !cwd.isEmpty,
-              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: 0)
-        else { loaded = true; return }
+              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since)
+        else { loaded = true; store.everLoaded.insert(window); return }
         while !Task.isCancelled {
             if let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15) {
-                items = ClaudeTranscriptParser.parse(Data(raw.utf8))
+                let parsed = ClaudeTranscriptParser.parse(Data(raw.utf8))
+                items = parsed
+                store.items[window] = parsed          // survive a reader remount
             }
             loaded = true
+            store.everLoaded.insert(window)
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
+    }
+
+    /// One immediate transcript refresh — used right after sending a message or
+    /// answering a question so the reader reflects it without waiting out the
+    /// 2 s poll (the "nothing happens until I toggle" complaint: a toggle just
+    /// forced this same fresh read).
+    private func refreshNow() async {
+        guard let cwd = guestCwd, !cwd.isEmpty,
+              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since),
+              let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15)
+        else { return }
+        let parsed = ClaudeTranscriptParser.parse(Data(raw.utf8))
+        await MainActor.run { items = parsed; store.items[window] = parsed }
     }
 }
 

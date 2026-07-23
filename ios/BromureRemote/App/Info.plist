@@ -67,5 +67,13 @@
 	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!-- The in-app browser loads http://127.0.0.1:<port> forwarded to a
+	     workspace VM's dev server; NSAllowsLocalNetworking permits loopback
+	     HTTP without weakening ATS for any real host. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

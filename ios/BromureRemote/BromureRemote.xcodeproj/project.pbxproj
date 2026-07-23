@@ -13,10 +13,13 @@
 		028E121AD6D6119EC7D9FEE0 /* ConnectFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */; };
 		A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */; };
 		C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */; };
+		555114C355A323E29739E1E8 /* MobileBrowserMCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */; };
+		2ED4C4DCC04A62F04C1D3E62 /* MobileForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB7A8036C2F4D1B840537F79 /* MobileForward.swift */; };
 		DD53AF72902E4568BC03B607 /* PlatformStubs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */; };
 		817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CD0F2B2F2F6347A584824B /* PushKeypair.swift */; };
 		53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */; };
 		4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */; };
+		B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */; };
 		D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */; };
 		A605D8611294971B8BA65260 /* AutomationKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */; };
 		78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */; };
@@ -123,10 +126,13 @@
 		B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectFlow.swift"; path = "Sources/BromureRemote/ConnectFlow.swift"; sourceTree = "<group>"; };
 		DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectScreen.swift"; path = "Sources/BromureRemote/ConnectScreen.swift"; sourceTree = "<group>"; };
 		CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "HostMirrorScreen.swift"; path = "Sources/BromureRemote/HostMirrorScreen.swift"; sourceTree = "<group>"; };
+		DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MobileBrowserMCP.swift"; path = "Sources/BromureRemote/MobileBrowserMCP.swift"; sourceTree = "<group>"; };
+		EB7A8036C2F4D1B840537F79 /* MobileForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MobileForward.swift"; path = "Sources/BromureRemote/MobileForward.swift"; sourceTree = "<group>"; };
 		7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformStubs.swift"; path = "Sources/BromureRemote/PlatformStubs.swift"; sourceTree = "<group>"; };
 		74CD0F2B2F2F6347A584824B /* PushKeypair.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushKeypair.swift"; path = "Sources/BromureRemote/PushKeypair.swift"; sourceTree = "<group>"; };
 		D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushNotifications.swift"; path = "Sources/BromureRemote/PushNotifications.swift"; sourceTree = "<group>"; };
 		0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RemoteTransportMobile.swift"; path = "Sources/BromureRemote/RemoteTransportMobile.swift"; sourceTree = "<group>"; };
+		5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WebBrowserPane.swift"; path = "Sources/BromureRemote/WebBrowserPane.swift"; sourceTree = "<group>"; };
 		0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceScreen.swift"; path = "Sources/BromureRemote/WorkspaceScreen.swift"; sourceTree = "<group>"; };
 		F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationKanbanView.swift"; path = "Sources/BromureRemote/_shared/AutomationKanbanView.swift"; sourceTree = "<group>"; };
 		C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunArchive.swift"; path = "Sources/BromureRemote/_shared/AutomationRunArchive.swift"; sourceTree = "<group>"; };
@@ -250,10 +256,13 @@
 				B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */,
 				DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */,
 				CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */,
+				DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */,
+				EB7A8036C2F4D1B840537F79 /* MobileForward.swift */,
 				7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */,
 				74CD0F2B2F2F6347A584824B /* PushKeypair.swift */,
 				D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */,
 				0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */,
+				5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */,
 				0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */,
 				F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */,
 				C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */,
@@ -435,10 +444,13 @@
 				028E121AD6D6119EC7D9FEE0 /* ConnectFlow.swift in Sources */,
 				A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */,
 				C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */,
+				555114C355A323E29739E1E8 /* MobileBrowserMCP.swift in Sources */,
+				2ED4C4DCC04A62F04C1D3E62 /* MobileForward.swift in Sources */,
 				DD53AF72902E4568BC03B607 /* PlatformStubs.swift in Sources */,
 				817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */,
 				53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */,
 				4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */,
+				B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */,
 				D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */,
 				A605D8611294971B8BA65260 /* AutomationKanbanView.swift in Sources */,
 				78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */,

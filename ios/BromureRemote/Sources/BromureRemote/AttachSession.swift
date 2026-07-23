@@ -9,6 +9,16 @@ extension Notification.Name {
     /// of the terminals and the mirror poll instead of waiting for a TCP
     /// timeout on a blocking read.
     static let bromureDidForeground = Notification.Name("io.bromure.remote.didForeground")
+    /// Posted (userInfo `["host": UUID]`) when a workspace terminal's exec
+    /// stream drops or comes back — most often a guest `reboot`/`shutdown -r`,
+    /// which leaves the HOST reachable (so the mirror poll keeps succeeding and
+    /// never flags a reconnect) while the guest's tmux is torn down and rebuilt
+    /// with a fresh, usually smaller, window set. Drives an immediate roster
+    /// re-poll so the tab strip and the attached sessions reconcile against the
+    /// new window set instead of the pre-reboot one — otherwise the phone keeps
+    /// showing windows that no longer exist AND a surface stays attached to a
+    /// now-dead window index that silently swallows keystrokes.
+    static let bromureTerminalLinkChanged = Notification.Name("io.bromure.remote.terminalLinkChanged")
 }
 #if canImport(Darwin)
 import Darwin
@@ -40,6 +50,9 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
 
     /// Published so the SwiftUI veil can show "reconnecting…". Written on main.
     @Published private(set) var connected = false
+    /// True once the stream has connected at least once, so the veil can say
+    /// "Reconnecting…" on a drop vs "Connecting…" on first open.
+    @Published private(set) var everConnected = false
     @Published private(set) var lastError: String?
 
     /// Bound once from the SwiftUI representable; read on main to feed output.
@@ -80,10 +93,19 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
     /// Force the pump to reconnect now. After the app was suspended the socket
     /// may be dead, but a blocking `read` won't notice until TCP times out —
     /// closing the fd unblocks it, so `onStreamEnded` reattaches immediately.
+    /// Also resets the backoff and, if no pump is alive (it died or is asleep
+    /// mid-backoff after a long suspension), starts a fresh one — otherwise
+    /// coming back into a terminal after a long background just sat there dead.
     func reconnectNow() {
-        stateLock.lock(); let done = stopped; stateLock.unlock()
+        stateLock.lock()
+        let done = stopped
+        reattachDelay = 1.0          // don't wait out a grown backoff
+        let running = pumping
+        let haveView = terminalView != nil
+        stateLock.unlock()
         guard !done else { return }
-        closeFD()
+        closeFD()                    // wake a blocked read → reconnect
+        if !running && haveView { DispatchQueue.main.async { [weak self] in self?.startPump() } }
     }
 
     /// Bind the SwiftUI-hosted terminal. Idempotent: if a pump is already
@@ -228,7 +250,9 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor private func onConnected() {
+        let wasReconnect = everConnected   // a drop we just recovered from, not first open
         connected = true
+        everConnected = true
         lastError = nil
         stateLock.lock(); reattachDelay = 1.0; stateLock.unlock()
         // Push our current geometry so the guest tmux repaints at our size.
@@ -236,11 +260,25 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
             let term = tv.getTerminal()
             resize(cols: term.cols, rows: term.rows)
         }
+        // Came back after a drop (typically a guest reboot): the roster the
+        // phone holds is likely stale. Ask the workspace screen to re-poll and
+        // reconcile now (see .bromureTerminalLinkChanged).
+        if wasReconnect {
+            NotificationCenter.default.post(name: .bromureTerminalLinkChanged,
+                                            object: nil, userInfo: ["host": host.id])
+        }
     }
 
     @MainActor private func onStreamEnded(error: String?) {
         connected = false
         lastError = error
+        // The link just dropped — nudge a roster re-poll so a shrinking window
+        // set (a guest reboot closing windows) is noticed promptly rather than
+        // on the next lazy tick, and stale windows stop being shown/attached.
+        if everConnected {
+            NotificationCenter.default.post(name: .bromureTerminalLinkChanged,
+                                            object: nil, userInfo: ["host": host.id])
+        }
         stateLock.lock()
         let done = stopped
         // Reconnect with capped backoff; a run that lasted a while resets it.
@@ -254,6 +292,58 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
             return
         }
         startPump()
+    }
+}
+
+// MARK: - Terminal surface + reconnect veil
+
+/// The live terminal plus a "Connecting…/Reconnecting…" veil driven by the
+/// session's published `connected` state — so returning to a terminal after a
+/// dropped link shows an animated status instead of a frozen, dead screen.
+struct TerminalSurface: View {
+    @ObservedObject var session: AttachSession
+    let fontSize: Binding<CGFloat>
+    let focusTick: Int
+    let isActive: Bool
+    let bottomInset: CGFloat
+
+    var body: some View {
+        ZStack {
+            RemoteTerminalView(session: session, fontSize: fontSize,
+                               focusTick: focusTick, isActive: isActive)
+                .padding(.bottom, bottomInset)
+            if !session.connected {
+                ReconnectVeil(text: session.everConnected ? "Reconnecting…" : "Connecting…")
+            }
+        }
+    }
+}
+
+/// A translucent status overlay with an animated pulse — the reconnect
+/// affordance the terminal was missing.
+private struct ReconnectVeil: View {
+    let text: String
+    @State private var pulse = false
+    var body: some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 10) {
+                ProgressView().tint(.white)
+                Text(text).font(.callout.weight(.semibold)).foregroundStyle(.white)
+            }
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.15)))
+            .scaleEffect(pulse ? 1.0 : 0.97)
+            .opacity(pulse ? 1.0 : 0.75)
+            .padding(.bottom, 60)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.35))
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { pulse = true }
+        }
+        .allowsHitTesting(false)
     }
 }
 
