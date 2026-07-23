@@ -404,12 +404,16 @@ private struct TerminalsPane: View {
                     .ignoresSafeArea(.keyboard, edges: .bottom)
 
                     if readerMode {
-                        // Normal keyboard avoidance: the composer lifts above the
-                        // keyboard so you can see what you type.
-                        TranscriptReaderView(controller: controller, profileID: profileID,
-                                             window: win, guestCwd: guestCwd(for: win),
-                                             since: transcriptSince, store: transcripts)
-                            .id("reader-\(profileID)-\(win)")
+                        // The composer is inset by the MEASURED keyboard overlap
+                        // (incl. the QuickType predictive bar) — same as the
+                        // terminal — so its send/attach row never hides behind it.
+                        GeometryReader { geo in
+                            TranscriptReaderView(controller: controller, profileID: profileID,
+                                                 window: win, guestCwd: guestCwd(for: win),
+                                                 since: transcriptSince, store: transcripts,
+                                                 bottomInset: keyboardOverlap(with: geo.frame(in: .global)))
+                        }
+                        .id("reader-\(profileID)-\(win)")
                     }
                 }
             } else {
@@ -622,6 +626,12 @@ private struct TranscriptReaderView: View {
     let since: Int
     /// Shared across reader remounts so a toggle doesn't re-tail from scratch.
     let store: TerminalsPane.TranscriptStore
+    /// Measured keyboard overlap (TerminalsPane.keyboardOverlap) the composer is
+    /// inset by. SwiftUI's automatic avoidance lifts by the keyboard height MINUS
+    /// its QuickType predictive bar, which left the send/attach row tucked behind
+    /// the keyboard; the measured frame includes the predictive bar. Same
+    /// mechanism the terminal surface uses.
+    let bottomInset: CGFloat
     @State private var items: [TranscriptItem] = []
     @State private var loaded = false
     @State private var draft = ""
@@ -634,21 +644,27 @@ private struct TranscriptReaderView: View {
     @State private var uploadError: String?
 
     var body: some View {
-        transcript
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // The composer as a bottom safe-area inset (the Messages pattern):
-            // this pins it correctly ABOVE the keyboard INCLUDING the QuickType
-            // suggestion bar, so what you type is never hidden behind it.
-            .safeAreaInset(edge: .bottom, spacing: 0) { composerBar }
-            .onAppear {
-                // Show the cached conversation instantly; the poll refreshes it.
-                if items.isEmpty { items = store.items[window] ?? [] }
-                if store.everLoaded.contains(window) { loaded = true }
-            }
-            // Re-key on `since` as well as the cwd: a reboot bumps the boot-time
-            // floor, and the poll must rebuild its command to stop tailing the
-            // pre-reboot pending-question dump (poll() captures `since` once).
-            .task(id: "\(guestCwd ?? "")\u{1f}\(since)") { await poll() }
+        // Transcript fills; the composer is pinned beneath it and the WHOLE stack
+        // is inset up by the measured keyboard overlap. We opt out of SwiftUI's
+        // automatic keyboard avoidance (which omitted the QuickType predictive
+        // bar, leaving the send/attach row behind it) and inset explicitly —
+        // exactly how the terminal surface handles the keyboard.
+        VStack(spacing: 0) {
+            transcript
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            composerBar
+        }
+        .padding(.bottom, bottomInset)
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .onAppear {
+            // Show the cached conversation instantly; the poll refreshes it.
+            if items.isEmpty { items = store.items[window] ?? [] }
+            if store.everLoaded.contains(window) { loaded = true }
+        }
+        // Re-key on `since` as well as the cwd: a reboot bumps the boot-time
+        // floor, and the poll must rebuild its command to stop tailing the
+        // pre-reboot pending-question dump (poll() captures `since` once).
+        .task(id: "\(guestCwd ?? "")\u{1f}\(since)") { await poll() }
     }
 
     // MARK: Composer + image attach
