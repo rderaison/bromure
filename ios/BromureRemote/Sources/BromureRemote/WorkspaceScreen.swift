@@ -605,8 +605,7 @@ private struct TranscriptReaderView: View {
     /// tool call ("user declined"), so wait for it exactly as the desktop does.
     private func submitAnswerKeys(_ keys: [String]) async -> Bool {
         guard !keys.isEmpty else { return false }
-        let probe = "tmux capture-pane -p -t bromure:\(window) 2>/dev/null "
-            + "| grep -q 'Enter to select'"
+        let probe = CodingTaskEngine.pickerVisibleCommand(tabIndex: window)
         var visible = false
         for _ in 0..<15 {
             if (try? await controller.guestExec(profileID, command: probe, timeout: 8)) != nil {

@@ -2183,8 +2183,7 @@ final class RemoteHostWindow: NSWindow {
                 // Same guard as the host engine: keys sent before the
                 // picker is ON SCREEN land in the chat input and interrupt
                 // the tool call ("user declined"). Wait for it.
-                let probe = "tmux capture-pane -p -t bromure:\(index) 2>/dev/null "
-                    + "| grep -q 'Enter to select'"
+                let probe = CodingTaskEngine.pickerVisibleCommand(tabIndex: index)
                 var visible = false
                 for _ in 0..<15 {
                     if (try? await self.controller.guestExec(

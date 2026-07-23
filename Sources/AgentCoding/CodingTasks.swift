@@ -1255,9 +1255,20 @@ final class CodingTaskEngine {
     /// stray text in the chat input. Named keys stay ungated (a stray
     /// Enter on an empty input is invisible; refusing the final Enter on a
     /// submit stop whose footer reads differently would break submission).
+    /// True (exit 0) while an agent's option picker is ON SCREEN in `tabIndex`.
+    ///
+    /// Claude Code ships TWO footers and both have to match. Single-select ends
+    /// "Enter to select"; multi-select ends "Space to toggle, Enter to confirm,
+    /// a to select all, …" — which does NOT contain "Enter to select", so a
+    /// probe for that string alone silently refused to answer every
+    /// multiple-choice question, the exact shape a remote reader most needs.
+    nonisolated static func pickerVisibleCommand(tabIndex: Int) -> String {
+        "tmux capture-pane -p -t bromure:\(tabIndex) 2>/dev/null "
+            + "| grep -qE 'Enter to (select|confirm)'"
+    }
+
     nonisolated static func answerKeysCommand(tabIndex: Int, keys: [String]) -> String {
-        let probe = "tmux capture-pane -p -t bromure:\(tabIndex) 2>/dev/null "
-            + "| grep -q 'Enter to select'"
+        let probe = pickerVisibleCommand(tabIndex: tabIndex)
         return keys.compactMap { k -> String? in
             let named = ["Enter", "Right", "Left", "Down", "Up", "Tab", "Space"]
             let isDigit = k.count == 1 && k.first!.isNumber
@@ -1277,8 +1288,7 @@ final class CodingTaskEngine {
         guard let delegate, !keys.isEmpty,
               let index = await tabIndex(profileID: profileID, branch: branch)
         else { return false }
-        let probe = "tmux capture-pane -p -t bromure:\(index) 2>/dev/null "
-            + "| grep -q 'Enter to select'"
+        let probe = Self.pickerVisibleCommand(tabIndex: index)
         var visible = false
         for _ in 0..<15 {
             if (try? await delegate.guestExec(
@@ -1825,9 +1835,20 @@ enum CodingTaskEngine {
     /// Each digit re-checks that the picker is still on screen: a keystroke that
     /// lands after it closed goes into the chat input and interrupts the pending
     /// tool call, which Claude records as the user declining to answer.
+    /// True (exit 0) while an agent's option picker is ON SCREEN in `tabIndex`.
+    ///
+    /// Claude Code ships TWO footers and both have to match. Single-select ends
+    /// "Enter to select"; multi-select ends "Space to toggle, Enter to confirm,
+    /// a to select all, …" — which does NOT contain "Enter to select", so a
+    /// probe for that string alone silently refused to answer every
+    /// multiple-choice question, the exact shape a remote reader most needs.
+    nonisolated static func pickerVisibleCommand(tabIndex: Int) -> String {
+        "tmux capture-pane -p -t bromure:\(tabIndex) 2>/dev/null "
+            + "| grep -qE 'Enter to (select|confirm)'"
+    }
+
     nonisolated static func answerKeysCommand(tabIndex: Int, keys: [String]) -> String {
-        let probe = "tmux capture-pane -p -t bromure:\(tabIndex) 2>/dev/null "
-            + "| grep -q 'Enter to select'"
+        let probe = pickerVisibleCommand(tabIndex: tabIndex)
         return keys.compactMap { k -> String? in
             let named = ["Enter", "Right", "Left", "Down", "Up", "Tab", "Space"]
             let isDigit = k.count == 1 && k.first!.isNumber
