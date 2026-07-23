@@ -33,6 +33,13 @@ struct WorkspaceScreen: View {
         }
     }
     @State private var pane: Pane = .terminals
+    /// Compact height = the phone is on its side. A terminal is the one pane
+    /// that wants every one of those few hundred points, so landscape drops the
+    /// pane picker and the tab strip and hands the whole area to the surface.
+    /// Rotating back brings them straight back; the nav bar stays either way
+    /// (it carries Back and the reader / new-terminal actions).
+    @Environment(\.verticalSizeClass) private var vSize
+    private var terminalFullBleed: Bool { vSize == .compact && pane == .terminals }
 
     private var runState: SessionListModel.RunState { controller.runState(for: profileID) }
     private var isRunning: Bool { runState == .running || runState == .booting }
@@ -42,16 +49,18 @@ struct WorkspaceScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("View", selection: $pane) {
-                ForEach(availablePanes) { p in
-                    Label(p.rawValue, systemImage: p.symbol).tag(p)
+            if !terminalFullBleed {
+                Picker("View", selection: $pane) {
+                    ForEach(availablePanes) { p in
+                        Label(p.rawValue, systemImage: p.symbol).tag(p)
+                    }
                 }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.vertical, 6)
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 6)
 
-            Divider()
+                Divider()
+            }
 
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -70,7 +79,8 @@ struct WorkspaceScreen: View {
     @ViewBuilder private var content: some View {
         switch pane {
         case .terminals: TerminalsPane(controller: controller, profileID: profileID,
-                                       initialWindow: initialWindow)
+                                       initialWindow: initialWindow,
+                                       hidesTabStrip: terminalFullBleed)
         case .dashboard: dashboard
         case .docker:    docker
         case .files:     files
@@ -151,6 +161,9 @@ private struct TerminalsPane: View {
     let controller: RemoteHostController
     let profileID: Profile.ID
     var initialWindow: Int? = nil
+    /// Landscape: the tab chips go away with the pane picker so the surface
+    /// gets the full height (WorkspaceScreen.terminalFullBleed).
+    var hidesTabStrip = false
     @State private var sessions: [Int: AttachSession] = [:]
     @State private var selectedWindow: Int?
     @State private var didSeedInitial = false
@@ -181,24 +194,33 @@ private struct TerminalsPane: View {
         return tabs.first { $0.index == win }
     }
 
-    /// "Agentic mode": a coding agent is live in this window (actively working,
-    /// waiting on the user, or it's a task worktree). Those default to the rich
-    /// reader instead of raw ANSI.
-    private func isAgentic(_ tab: TabsModel.Tab?) -> Bool {
+    /// "Agentic mode": this window is a coding agent — live (working / waiting
+    /// on the user), a task worktree, or simply an agent tab sitting idle.
+    /// Those default to the rich reader instead of raw ANSI.
+    ///
+    /// The label check is what carries an IDLE agent: its status is `.done` and
+    /// it may not be a worktree, but the tab is named for the tool it runs —
+    /// bare (`claude`) before the agent sets a session title, and
+    /// `"Fix the branding (claude)"` after. The same resolution badges the
+    /// desktop sidebar, so both clients agree on what counts as an agent.
+    @MainActor private func isAgentic(_ tab: TabsModel.Tab?) -> Bool {
         guard let tab else { return false }
-        return tab.agentStatus == .working || tab.agentStatus == .needsInput || tab.isWorktree
+        if tab.agentStatus == .working || tab.agentStatus == .needsInput || tab.isWorktree {
+            return true
+        }
+        return BromureIcons.agentKind(forLabel: tab.shownLabel) != nil
     }
 
     /// Non-agent tabs are always the raw terminal (and get no toggle); an agent
     /// tab defaults to the reader, with the toggle as an override.
-    private var readerMode: Bool {
+    @MainActor private var readerMode: Bool {
         guard isAgentic(currentTab) else { return false }
         return readerOverride ?? true
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            if tabs.count > 1 {
+            if tabs.count > 1 && !hidesTabStrip {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(tabs) { tab in
