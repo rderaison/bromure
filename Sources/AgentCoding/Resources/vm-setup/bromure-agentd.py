@@ -3713,6 +3713,18 @@ def _apply_home_seed_locked():
         _seed_claude_settings()
     except Exception:
         log("home", "claude-settings merge failed:\n" + traceback.format_exc())
+    # Pending-question hooks belong to EVERY claude session in this VM, not
+    # only the ones a coding task launched. A `claude` the user starts by hand
+    # in a terminal asks multiple-choice questions too, and without these hooks
+    # nothing writes the pq dump — so a remote reader (the phone especially,
+    # where there is no raw terminal to fall back on at a glance) shows the run
+    # sitting silent with no question and nothing to answer. Seeded here, after
+    # the settings merge, so it survives whatever that rewrites; idempotent, so
+    # a VM that later launches a coding task just finds them already in place.
+    try:
+        _seed_question_hooks()
+    except Exception:
+        log("home", "question hook seeding failed:\n" + traceback.format_exc())
 
 
 def _approve_claude_api_key(suffix):
@@ -3826,10 +3838,25 @@ def _seed_claude_settings():
 
     hooks = settings.get("hooks")
     hooks = hooks if isinstance(hooks, dict) else {}
-    hooks["UserPromptSubmit"] = _hook_cmd("working")
-    hooks["PreToolUse"] = _hook_cmd("working")
-    hooks["Stop"] = _hook_cmd("done")
-    hooks["Notification"] = _hook_cmd("needsInput")
+
+    def _keep_others(key):
+        """Entries under `key` that are NOT the managed status hook.
+
+        These four keys used to be ASSIGNED outright. The pending-question
+        hooks (_seed_question_hooks) live under PreToolUse/Stop as well, so
+        every seed apply silently deleted them — seeded once by a coding task,
+        gone by the next boot — and a live AskUserQuestion stopped being
+        dumped, leaving the remote readers with a question they could neither
+        see nor answer. A user's own hooks were being dropped here too."""
+        existing = hooks.get(key)
+        if not isinstance(existing, list):
+            return []
+        return [e for e in existing if hook not in json.dumps(e)]
+
+    hooks["UserPromptSubmit"] = _hook_cmd("working") + _keep_others("UserPromptSubmit")
+    hooks["PreToolUse"] = _hook_cmd("working") + _keep_others("PreToolUse")
+    hooks["Stop"] = _hook_cmd("done") + _keep_others("Stop")
+    hooks["Notification"] = _hook_cmd("needsInput") + _keep_others("Notification")
     settings["hooks"] = hooks
     _write(settings)
 

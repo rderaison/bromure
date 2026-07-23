@@ -3537,17 +3537,45 @@ public final class ProfileStore {
             // back mid-session (/config) works but resets next session.
             settings["copyOnSelect"] = false
             // Managed status hooks — report working/done/needsInput to the host
-            // for the sidebar status dot. Overwrite just these four events
-            // (other user hooks + settings are preserved by the read above).
+            // for the sidebar status dot.
             let hookScript = "/home/ubuntu/.bromure/agent-status.sh"
             func hookCmd(_ arg: String) -> [[String: Any]] {
                 [["hooks": [["type": "command", "command": "\(hookScript) \(arg)"]]]]
             }
+            // Pending-question dump. Claude Code writes an assistant turn to the
+            // transcript only once the turn COMPLETES, so while an
+            // AskUserQuestion picker is up the question exists nowhere on disk —
+            // a remote reader shows the run sitting silent with nothing to
+            // answer. PreToolUse dumps the tool input, PostToolUse clears it,
+            // and Stop sweeps it (a DECLINED picker doesn't reliably fire
+            // PostToolUse, and a stale dump would stay clickable). Byte-identical
+            // to what bromure-agentd's `_seed_question_hooks` writes, so
+            // whichever runs second recognises these and leaves them alone.
+            let pq = "\"$HOME/.bromure/pq-$(pwd | tr './' '--').json\""
+            let pqPre: [String: Any] = ["matcher": "AskUserQuestion", "hooks":
+                [["type": "command", "command": "mkdir -p ~/.bromure && cat > " + pq]]]
+            let pqPost: [String: Any] = ["matcher": "AskUserQuestion", "hooks":
+                [["type": "command", "command": "rm -f " + pq]]]
+            let pqStop: [String: Any] = ["hooks":
+                [["type": "command", "command": "rm -f " + pq]]]
+
             var hooks = settings["hooks"] as? [String: Any] ?? [:]
-            hooks["UserPromptSubmit"] = hookCmd("working")
-            hooks["PreToolUse"] = hookCmd("working")
-            hooks["Stop"] = hookCmd("done")
-            hooks["Notification"] = hookCmd("needsInput")
+            // Entries under `key` that are NOT ours, so a user's own hooks
+            // survive. These four keys used to be ASSIGNED outright, which
+            // deleted the question hooks above at every single session start —
+            // seeded once by a coding task, gone by the next boot.
+            func othersUnder(_ key: String) -> [[String: Any]] {
+                (hooks[key] as? [[String: Any]] ?? []).filter { entry in
+                    guard let data = try? JSONSerialization.data(withJSONObject: entry),
+                          let text = String(data: data, encoding: .utf8) else { return true }
+                    return !text.contains(hookScript) && !text.contains("/.bromure/pq-")
+                }
+            }
+            hooks["UserPromptSubmit"] = hookCmd("working") + othersUnder("UserPromptSubmit")
+            hooks["PreToolUse"] = hookCmd("working") + [pqPre] + othersUnder("PreToolUse")
+            hooks["PostToolUse"] = [pqPost] + othersUnder("PostToolUse")
+            hooks["Stop"] = hookCmd("done") + [pqStop] + othersUnder("Stop")
+            hooks["Notification"] = hookCmd("needsInput") + othersUnder("Notification")
             settings["hooks"] = hooks
 
             let data = try JSONSerialization.data(withJSONObject: settings,
