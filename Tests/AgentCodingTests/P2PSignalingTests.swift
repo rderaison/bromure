@@ -48,6 +48,18 @@ struct P2PSignalingTests {
         }
     }
 
+    @Test("host candidates carry the configured sshd port, not a hardcoded 2222")
+    func hostGatherCustomPort() {
+        // The whole listener path (host candidates, srflx guess, relay leg,
+        // port map) is parameterised on the serving port, so a non-default
+        // Remote Access port must flow straight through to what's advertised.
+        for port in [22, 8022, 40404] {
+            for c in P2PCandidateGatherer.hostCandidates(sshPort: port) {
+                #expect(c.port == port)
+            }
+        }
+    }
+
     // MARK: Outgoing frame
 
     @Test("outgoing signal frame encodes the exact gateway shape")

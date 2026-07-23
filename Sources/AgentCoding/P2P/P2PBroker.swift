@@ -254,19 +254,31 @@ final class P2PBroker: @unchecked Sendable {
     func startServing(sshPort: Int) {
         guard let id = currentIdentity() else { return }
         lock.lock()
+        let portChanged = serving && serveSSHPort != sshPort
+        let wasServing = serving
         serveSSHPort = sshPort
-        if serving { lock.unlock(); return }
         serving = true
         lock.unlock()
-        Task.detached { [weak self] in
-            guard let self else { return }
-            if let client = self.makeClient(id) {
-                do { _ = try await client.setServerMode(bearer: id.bearer, enabled: true) }
-                catch { FatClientLog.log("p2p: server-mode on failed: \(error)") }
+        // Only announce presence on the FIRST start — an already-serving
+        // instance keeps its channel and server-mode flag.
+        if !wasServing {
+            Task.detached { [weak self] in
+                guard let self else { return }
+                if let client = self.makeClient(id) {
+                    do { _ = try await client.setServerMode(bearer: id.bearer, enabled: true) }
+                    catch { FatClientLog.log("p2p: server-mode on failed: \(error)") }
+                }
+                _ = self.ensureChannel(id)   // registers presence
             }
-            _ = self.ensureChannel(id)   // registers presence
         }
-        startPortMapKeepalive(sshPort: sshPort)
+        // (Re)map the sshd port. A live port change (Remote Access stays on, the
+        // user just moves the port) must re-map to the NEW port and release the
+        // hole for the old one — without this, host candidates followed the new
+        // port but the router mapping stayed on the old, and every advertised
+        // path pointed at a port sshd no longer listens on.
+        if !wasServing || portChanged {
+            startPortMapKeepalive(sshPort: sshPort)
+        }
     }
 
     /// Establish the rung-2 router mapping and renew it at ~half its lease for
@@ -278,6 +290,15 @@ final class P2PBroker: @unchecked Sendable {
     private func startPortMapKeepalive(sshPort: Int) {
         lock.lock()
         portMapTask?.cancel()
+        // A restart (live port change) supersedes any existing mapping — release
+        // it so we don't leave the old port forwarded to a now-dead sshd port.
+        let stale = portMapping
+        portMapping = nil
+        lock.unlock()
+        if let stale {
+            Thread.detachNewThread { PortMapClient.delete(stale, internalPort: stale.internalPort) }
+        }
+        lock.lock()
         let task = Task.detached { [weak self] in
             guard let self else { return }
             guard let mapping = await Self.blocking({ PortMapClient.mapTCP(internalPort: sshPort) })

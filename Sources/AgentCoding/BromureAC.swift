@@ -2292,8 +2292,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // (Skipped mid-install — the server is paused then; the
             // post-install resume picks the new config up.)
             if installTask == nil {
-                do { try RemoteAccessServer.shared.start(remoteAccessConfig()) }
+                let cfg = remoteAccessConfig()
+                do { try RemoteAccessServer.shared.start(cfg) }
                 catch { return ["error": error.localizedDescription] }
+                // A live port change moves sshd; P2P must advertise the new
+                // port too, or peers keep being handed the old one. startServing
+                // is idempotent and re-maps on a port change.
+                P2PBroker.shared.startServing(sshPort: cfg.port)
             }
         }
         return remoteAccessStatus()
