@@ -317,8 +317,12 @@ struct CodingKanbanView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
+                // .titleAndIcon is not the default in a navigation bar — a bare
+                // Label renders icon-only there.
                 Label(NSLocalizedString("Coding Tasks", comment: "coding kanban title"),
                       systemImage: "checklist")
+                    .labelStyle(.titleAndIcon)
+                    .font(.headline)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { editing = newDraft() } label: { Image(systemName: "plus") }

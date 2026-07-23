@@ -91,8 +91,12 @@ struct AutomationKanbanView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
+                    // .titleAndIcon is not the default in a navigation bar — a
+                    // bare Label renders icon-only there.
                     Label(NSLocalizedString("Automations", comment: "kanban title"),
                           systemImage: "bolt.badge.clock.fill")
+                        .labelStyle(.titleAndIcon)
+                        .font(.headline)
                 }
             }
         #endif
