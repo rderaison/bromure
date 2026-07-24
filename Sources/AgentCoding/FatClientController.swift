@@ -104,6 +104,8 @@ final class RemoteHostController {
     private let pollTimerBox = PollTimerBox()
     private let pollQueue = DispatchQueue(label: "io.bromure.fatclient.poll")
     private var polling = false
+    /// Observes .bromureP2PPathChanged (a network switch) to re-poll at once.
+    private var pathObserver: NSObjectProtocol?
     /// Consecutive failed polls on a PEER host. The broker caches the winning
     /// path and re-dials it per connection, so once that path dies (relay
     /// expired, listener restarted, network change) it never heals on its own —
@@ -176,6 +178,16 @@ final class RemoteHostController {
         }
         RunLoop.main.add(t, forMode: .common)
         pollTimerBox.timer = t
+        // A network change (WiFi switch, VPN up/down) kills the P2P/SSH path this
+        // poll rides. The broker already dropped the stale path — re-poll at once
+        // so the mirror re-establishes in seconds instead of after several failed
+        // polls. Harmless for a direct host (just an extra poll).
+        if pathObserver == nil {
+            pathObserver = NotificationCenter.default.addObserver(
+                forName: .bromureP2PPathChanged, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.pollOnce() }
+            }
+        }
 #if os(macOS)
         // Stand up the subnet tunnel entry point (SOCKS) so the browser pane and
         // `curl --socks5` can reach the remote guests as soon as the host is up.
@@ -200,6 +212,10 @@ final class RemoteHostController {
         tunnel?.stop()
         tunnel = nil
 #endif
+        if let o = pathObserver {
+            NotificationCenter.default.removeObserver(o)
+            pathObserver = nil
+        }
         // Tear down the P2P path (loopback shim, any port map) if this host is
         // reached peer-to-peer. A no-op for a direct host.
         if let pid = host.peerDeviceID {

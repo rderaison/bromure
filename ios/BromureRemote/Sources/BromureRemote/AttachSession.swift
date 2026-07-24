@@ -74,6 +74,7 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
     private let writeLock = NSLock()
 
     private var fgObserver: NSObjectProtocol?
+    private var pathObserver: NSObjectProtocol?
 
     init(host: RemoteHost, vmID: String, windowIndex: Int) {
         self.host = host
@@ -84,10 +85,17 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
             forName: .bromureDidForeground, object: nil, queue: .main) { [weak self] _ in
             self?.reconnectNow()
         }
+        // …and the moment the network path changes (WiFi switch, VPN drop): the
+        // stream's socket is bound to the vanished route, so reconnect at once.
+        pathObserver = NotificationCenter.default.addObserver(
+            forName: .bromureP2PPathChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.reconnectNow()
+        }
     }
 
     deinit {
         if let fgObserver { NotificationCenter.default.removeObserver(fgObserver) }
+        if let pathObserver { NotificationCenter.default.removeObserver(pathObserver) }
     }
 
     /// Force the pump to reconnect now. After the app was suspended the socket

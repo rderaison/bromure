@@ -1,4 +1,5 @@
 import Foundation
+import Network
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -8,6 +9,11 @@ extension Notification.Name {
     /// server re-pulls the owner's authorized keys immediately (no-op on a
     /// client with no SSH server).
     static let bromureAccountKeysChanged = Notification.Name("io.bromure.p2p.accountKeysChanged")
+    /// Posted when the network path meaningfully changed (WiFi switch, VPN up/
+    /// down, interface change). Cached peer paths are already torn down; the
+    /// mirror controllers re-poll and the terminals reconnect so a live session
+    /// re-establishes in seconds instead of waiting out socket timeouts.
+    static let bromureP2PPathChanged = Notification.Name("io.bromure.p2p.pathChanged")
 }
 
 // MARK: - Per-connection signaling session
@@ -149,6 +155,10 @@ final class P2PBroker: @unchecked Sendable {
     /// protocol / sits behind CGNAT). Guarded by `lock`.
     private var portMapping: PortMapping?
     private var portMapTask: Task<Void, Never>?
+    /// Network-path monitor (see startNetworkMonitor) + the last path signature,
+    /// so a re-fire during a transition isn't mistaken for a new change.
+    private var pathMonitor: NWPathMonitor?
+    private var lastPathSignature: String = ""
 
     /// Run blocking transport work (socket dials, TURN transactions) on a real
     /// thread so it never parks the cooperative pool.
@@ -479,6 +489,7 @@ final class P2PBroker: @unchecked Sendable {
     /// repeated dials of the same peer reuse one path. MUST NOT be called on the
     /// main thread — it blocks on network establishment.
     func endpoint(forPeer id: String, timeout: TimeInterval = 12) -> ResolvedEndpoint? {
+        startNetworkMonitor()   // watch for WiFi/VPN changes while a peer is in use
         if let ep = liveEndpoint(forPeer: id) { return ep }
 
         // Single-flight per peer. Several callers dial the same server at once
@@ -553,6 +564,55 @@ final class P2PBroker: @unchecked Sendable {
         liveShims[id] = nil
         lock.unlock()
         live?.shim.stop()
+    }
+
+    /// Drop EVERY cached peer path (loopback shim). The next dial to any peer
+    /// re-establishes from scratch — used on a network change, when the old
+    /// paths are bound to the vanished route and are dead.
+    func resetPeerPaths() {
+        lock.lock()
+        let shims = liveShims
+        liveShims.removeAll()
+        lock.unlock()
+        for (_, live) in shims { live.shim.stop() }
+        if !shims.isEmpty {
+            FatClientLog.log("p2p: network changed — dropped \(shims.count) peer path(s) to re-establish")
+        }
+    }
+
+    // MARK: Network-change detection
+
+    /// Watch for network path changes (WiFi switch, VPN up/down, a new
+    /// interface) and, on a meaningful one, drop stale peer paths and tell the
+    /// app to reconnect — so a live session re-establishes in seconds instead of
+    /// waiting out a dead socket's TCP timeout. Idempotent; started on the first
+    /// peer dial and runs for the process lifetime (cheap).
+    func startNetworkMonitor() {
+        lock.lock()
+        guard pathMonitor == nil else { lock.unlock(); return }
+        let m = NWPathMonitor()
+        pathMonitor = m
+        lock.unlock()
+        m.pathUpdateHandler = { [weak self] path in self?.handlePathUpdate(path) }
+        m.start(queue: DispatchQueue(label: "io.bromure.p2p.pathmonitor"))
+    }
+
+    private func handlePathUpdate(_ path: NWPath) {
+        // Signature = status + the usable interfaces. The handler fires
+        // repeatedly during a transition, so react only when the signature
+        // actually changes AND the path is usable again (reconnecting mid-outage
+        // is pointless). The very first update is the baseline, not a change.
+        let sig = "\(path.status)|"
+            + path.availableInterfaces.map(\.name).sorted().joined(separator: ",")
+        lock.lock()
+        let changed = sig != lastPathSignature
+        let hadBaseline = !lastPathSignature.isEmpty
+        lastPathSignature = sig
+        lock.unlock()
+        guard changed, hadBaseline, path.status == .satisfied else { return }
+        FatClientLog.log("p2p: network path changed (\(sig)) — re-establishing")
+        resetPeerPaths()
+        NotificationCenter.default.post(name: .bromureP2PPathChanged, object: nil)
     }
 
     private func establish(peerDeviceID: String, timeout: TimeInterval) async -> ResolvedEndpoint? {
