@@ -12,7 +12,8 @@ struct P2PConnectModelTests {
 
     private func device(id: String, online: Bool = true) -> DeviceInfo {
         DeviceInfo(id: id, name: "Studio Mac", capability: "server",
-                   revoked: false, online: online, lastSeenAt: nil, isSelf: false)
+                   revoked: false, online: online, lastSeenAt: nil, isSelf: false,
+                   sshUsername: nil)
     }
 
     @Test("a directory server maps to a .peer RemoteHost carrying the device id")

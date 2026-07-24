@@ -55,6 +55,20 @@ enum TurnRelayTransport {
         return nil
     }
 
+    /// The plain `turn:…?transport=udp` endpoint — the UDP relay leg (RFC 5766
+    /// Allocate/ChannelBind, `TurnUDPClient`). No TLS variant: coturn's `turns:`
+    /// listener is TLS-over-TCP, so the UDP relay stays on 3478; the metadata
+    /// (peer addresses, already exchanged as srflx candidates over signaling) is
+    /// the only thing in clear, and the payload is SSH, encrypted end to end.
+    static func preferredUDPEndpoint(_ urls: [String]) -> (host: String, port: Int)? {
+        for url in urls where url.hasPrefix("turn:") {
+            if let p = parseHostPort(fromURL: url), p.transport == "udp" {
+                return (p.host, p.port)
+            }
+        }
+        return nil
+    }
+
     /// The STUN endpoint (Binding needs no credentials): the `stun:` URL if
     /// present, else any TURN host — coturn answers Binding on the same port.
     static func stunEndpoint(_ urls: [String]) -> (host: String, port: Int, transport: String?)? {

@@ -88,6 +88,8 @@ SHARED = [
     "P2P/TurnRelayTransport.swift",
     "P2P/TurnTCP.swift",
     "P2P/TurnTLS.swift",
+    "P2P/RelayARQ.swift",   # reliable-stream ARQ over datagrams (UDP relay)
+    "P2P/TurnUDP.swift",    # UDP TURN client/listener/dialer + P2PDial + flag
 ]
 
 

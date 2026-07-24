@@ -49,9 +49,17 @@ struct P2PCandidate: Codable, Equatable, Hashable {
 
     /// A stable, RFC-8445-flavoured preference so both peers rank a shared
     /// candidate set identically. Type wins first (host > port-mapped > srflx >
-    /// relay), then TCP over UDP (V1's reliable transport is TCP), then IPv6
-    /// over IPv4 within a type. Not the RFC's exact formula — we don't run full
-    /// ICE — just a total order good enough to try the best path first.
+    /// relay), then the proto preference, then IPv6 over IPv4 within a type. Not
+    /// the RFC's exact formula — we don't run full ICE — just a total order good
+    /// enough to try the best path first.
+    ///
+    /// The proto preference is kind-aware. For a DIRECT path (host / srflx /
+    /// port-mapped) the transport is a raw socket to sshd, always TCP, so TCP
+    /// wins. For a RELAY it inverts: the UDP relay carries a `RelayARQ` reliable
+    /// stream that resists loss far better than TCP-over-TCP (RFC 6062), so when
+    /// both relay legs exist the UDP one is tried first, with the TCP relay as
+    /// the fallback for UDP-blocked networks. Relays still rank below every
+    /// direct path, so this only decides which relay wins, never relay-vs-direct.
     ///
     /// port-mapped outranks srflx deliberately: a port map is a VERIFIED public
     /// endpoint the router actually forwards to sshd, whereas the srflx "guess"
@@ -65,7 +73,9 @@ struct P2PCandidate: Codable, Equatable, Hashable {
         case .srflx:      typePref = 100
         case .relay:      typePref = 0
         }
-        let protoPref = proto == .tcp ? 2 : 1
+        let protoPref: Int
+        if kind == .relay { protoPref = proto == .udp ? 2 : 1 }   // UDP relay preferred
+        else { protoPref = proto == .tcp ? 2 : 1 }                 // direct paths are TCP
         let famPref = ip.contains(":") ? 1 : 0   // slight IPv6 nudge
         return (typePref << 16) | (protoPref << 8) | (famPref << 4)
     }

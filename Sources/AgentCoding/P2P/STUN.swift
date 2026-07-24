@@ -32,13 +32,22 @@ struct STUNMessage {
     /// RFC 6062 §4.4 — server → client indication that a peer TCP-connected to
     /// the relayed address; carries CONNECTION-ID + XOR-PEER-ADDRESS.
     static let connectionAttemptIndication: UInt16 = 0x001C
+    // RFC 5766 UDP relay verbs (the resilience path — see RelayARQ.swift).
+    static let channelBindRequest: UInt16    = 0x0009
+    static let channelBindSuccess: UInt16    = 0x0109
+    /// Client → server: relay `DATA` to `XOR-PEER-ADDRESS` (pre-channel).
+    static let sendIndication: UInt16        = 0x0016
+    /// Server → client: a peer sent us `DATA` from `XOR-PEER-ADDRESS`.
+    static let dataIndication: UInt16        = 0x0017
 
     // Attributes.
     static let attrUsername: UInt16          = 0x0006
     static let attrMessageIntegrity: UInt16  = 0x0008
     static let attrErrorCode: UInt16         = 0x0009
     static let attrLifetime: UInt16          = 0x000D
+    static let attrChannelNumber: UInt16     = 0x000C
     static let attrXorPeerAddress: UInt16    = 0x0012
+    static let attrData: UInt16              = 0x0013
     static let attrRealm: UInt16             = 0x0014
     static let attrNonce: UInt16             = 0x0015
     static let attrXorRelayedAddress: UInt16 = 0x0016
@@ -198,6 +207,12 @@ struct STUNMessage {
         return Int(v[2] & 0x07) * 100 + Int(v[3])
     }
 
+    /// Add a CHANNEL-NUMBER attribute (channel + 2 bytes RFFU).
+    mutating func add(channelNumber: UInt16) {
+        add(STUNMessage.attrChannelNumber,
+            [UInt8(truncatingIfNeeded: channelNumber >> 8), UInt8(truncatingIfNeeded: channelNumber), 0, 0])
+    }
+
     /// Un-XOR an XOR-*-ADDRESS attribute back to (ip, port).
     func xorAddress(_ type: UInt16) -> (ip: String, port: Int)? {
         guard let v = attr(type), v.count >= 8 else { return nil }
@@ -222,5 +237,46 @@ struct STUNMessage {
         default:
             return nil
         }
+    }
+}
+
+// MARK: - ChannelData (RFC 5766 §11.4) — the low-overhead UDP relay data framing
+
+/// Once a channel is bound (`ChannelBind`), the relay wraps peer↔client data in
+/// a 4-byte ChannelData header instead of a ~36-byte Send/Data STUN indication —
+/// the difference matters on a slow link carrying many small SSH segments:
+///
+///     0                   1                   2                   3
+///     +-------+-------+-------+-------+-------------------------------+
+///     |     channel (2)       |     length (2)        | data ...      |
+///     +-------+-------+-------+-------+-------------------------------+
+///
+/// Channel numbers live in 0x4000–0x7FFF, which is how a received datagram is
+/// told apart from a STUN message (whose first two bits are always 0) without
+/// ambiguity. On UDP the final message needs no 4-byte padding (RFC 5766
+/// §11.5), so we emit none and tolerate its absence on receive.
+enum ChannelData {
+    static let minChannel: UInt16 = 0x4000
+    static let maxChannel: UInt16 = 0x7FFE   // 0x7FFF is reserved
+
+    /// A datagram is ChannelData (not STUN) iff its first two bits are `01`.
+    static func isChannelData(_ firstByte: UInt8) -> Bool { (firstByte & 0xC0) == 0x40 }
+
+    static func encode(channel: UInt16, _ payload: [UInt8]) -> [UInt8] {
+        var out: [UInt8] = [UInt8(truncatingIfNeeded: channel >> 8), UInt8(truncatingIfNeeded: channel),
+                            UInt8(truncatingIfNeeded: payload.count >> 8), UInt8(truncatingIfNeeded: payload.count)]
+        out += payload
+        return out
+    }
+
+    /// Parse a received ChannelData frame → (channel, payload). Returns nil if it
+    /// isn't a channel frame, the channel is out of range, or it's truncated.
+    static func decode(_ bytes: [UInt8]) -> (channel: UInt16, payload: [UInt8])? {
+        guard bytes.count >= 4, isChannelData(bytes[0]) else { return nil }
+        let channel = UInt16(bytes[0]) << 8 | UInt16(bytes[1])
+        guard channel >= minChannel, channel <= maxChannel else { return nil }
+        let len = Int(bytes[2]) << 8 | Int(bytes[3])
+        guard bytes.count >= 4 + len else { return nil }
+        return (channel, Array(bytes[4 ..< 4 + len]))
     }
 }

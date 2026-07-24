@@ -103,7 +103,11 @@ final class P2PLoopbackShim: @unchecked Sendable {
             if cfd < 0 { if errno == EINTR { continue }; break }   // lfd closed → stop
             let w = winner
             Thread.detachNewThread {
-                guard let rfd = P2PTCP.connect(ip: w.ip, port: w.port, timeout: 5) else {
+                // Re-open the winning transport per SSH connection: a TCP
+                // candidate reconnects; a `.relay/.udp` winner opens a fresh
+                // ARQ session over the relay (its own peer 5-tuple → the
+                // listener spins up a matching splice to sshd).
+                guard let rfd = P2PDial.connect(w, timeout: 5) else {
                     Darwin.close(cfd); return
                 }
                 FatForward.splice(cfd, rfd)
@@ -143,9 +147,10 @@ final class P2PBroker: @unchecked Sendable {
     /// one grant instead of racing (see `endpoint(forPeer:)`).
     private let establishGate = NSCondition()
     private var establishing: Set<String> = []
-    /// Listener-side TURN relay sessions, one per grant, oldest first. Bounded
-    /// — a reconnecting dialer mints a fresh grant (and relay) each time.
-    private var relaySessions: [(grantID: String, listener: TurnRelayListener)] = []
+    /// Listener-side TURN relay sessions (TCP and/or UDP), oldest first. Bounded
+    /// — a reconnecting dialer mints a fresh grant (and relay) each time. When
+    /// the UDP relay flag is on a grant contributes two entries (both legs).
+    private var relaySessions: [(grantID: String, listener: P2PRelaySession)] = []
     private var serving = false
     private var serveSSHPort = 2222
     /// Rung 2: a router port mapping (PCP/NAT-PMP) to our sshd, held for as long
@@ -456,18 +461,35 @@ final class P2PBroker: @unchecked Sendable {
         let guess = P2PCandidate(kind: .srflx, proto: .tcp, ip: info.mappedIP, port: sshPort)
         try? await session.send(.candidate, payload: P2PSignalPayload(candidate: guess), via: ch)
         try? await session.send(.candidate, payload: P2PSignalPayload(candidate: info.relay), via: ch)
+
+        // Resilience rung: when enabled, also stand up a UDP relay whose
+        // `RelayARQ` transport survives loss far better than TCP-over-TCP. It's
+        // advertised alongside the TCP relay (kept as the fallback for
+        // UDP-blocked networks) and outranks it by candidate priority, so the
+        // dialer prefers it when both connect.
+        if P2PRelayConfig.udpRelayEnabled {
+            let udpStarted = await Self.blocking {
+                TurnUDPRelayListener.start(creds: creds, permitIP: permitIP, sshPort: sshPort)
+            }
+            if let (udpListener, udpInfo) = udpStarted {
+                register(listener: udpListener, for: grant.id)
+                try? await session.send(.candidate, payload: P2PSignalPayload(candidate: udpInfo.relay), via: ch)
+            }
+        }
     }
 
-    private func register(listener: TurnRelayListener, for grantID: String) {
-        listener.onStopped = { [weak self] in
+    private func register(listener: P2PRelaySession, for grantID: String) {
+        listener.onStopped = { [weak self, weak listener] in
             guard let self else { return }
             self.lock.lock()
-            self.relaySessions.removeAll { $0.grantID == grantID }
+            self.relaySessions.removeAll { $0.listener === listener }
             self.lock.unlock()
         }
         lock.lock()
         relaySessions.append((grantID, listener))
-        let evicted = relaySessions.count > 4 ? [relaySessions.removeFirst()] : []
+        // Up to 3 concurrent grants' relays (each grant may hold a TCP + a UDP
+        // leg when the resilience path is on).
+        let evicted = relaySessions.count > 6 ? [relaySessions.removeFirst()] : []
         lock.unlock()
         for e in evicted {
             FatClientLog.log("p2p: relay session cap — dropping oldest (grant \(e.grantID.prefix(8)))")
