@@ -2259,6 +2259,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     private var accountKeySyncTimer: Timer?
     private var accountKeysObserver: NSObjectProtocol?
+    /// The (key, login) last published to bromure.io. We re-upload ONLY when it
+    /// actually changes: an unconditional upload on every sync pokes the control
+    /// plane, which broadcasts a `keysChanged` back to us, which triggers the
+    /// next sync — a self-sustaining storm. Uploading once (then only on change)
+    /// breaks that loop at the source; the 180 s timer still re-publishes.
+    private var lastUploadedSSHKey: String?
+    private var lastUploadedSSHUser: String?
 
     /// The authorized_keys comment prefix that marks a key as account-managed
     /// (pulled from bromure.io) vs. a manual `remote key add`.
@@ -2274,8 +2281,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let ownKey = RemoteTransport.clientPublicKey()
         let ownUser = NSUserName()   // the login clients must dial this server as
         let marker = Self.accountKeyMarker
+        // Only publish when the key/login actually changed since we last did, so
+        // a re-sync (esp. one triggered by a keysChanged push) doesn't re-poke
+        // the control plane and echo back another keysChanged (see the storm note
+        // on lastUploadedSSHKey).
+        let shouldUpload = ownKey != nil && (ownKey != lastUploadedSSHKey || ownUser != lastUploadedSSHUser)
+        if shouldUpload { lastUploadedSSHKey = ownKey; lastUploadedSSHUser = ownUser }
         Task {
-            if let ownKey {
+            if shouldUpload, let ownKey {
                 try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: ownKey, sshUsername: ownUser)
             }
             guard let keys = try? await client.listSSHKeys(bearer: bearer) else { return }

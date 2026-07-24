@@ -126,9 +126,34 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
         case .error(let code, let connId):
             dispatch { self.onError?(code, connId) }
         case .keysChanged:
-            dispatch { self.onKeysChanged?() }
+            coalesceKeysChanged()
         case .unknown:
             break
+        }
+    }
+
+    /// Fold a burst of `keysChanged` frames into a single `onKeysChanged`
+    /// callback per window. The control plane can emit a flood of these (backlog
+    /// replay, or a fleet-wide re-sync loop); firing a full authorized-keys
+    /// re-sync per frame hops to the main queue and round-trips to bromure.io
+    /// thousands of times a second, starving real work (P2P establishment) —
+    /// observed as a ~100/s storm that blocked new connections entirely. One
+    /// fire conveys the same information as N: the listener re-pulls the WHOLE
+    /// key set anyway, and a 180 s timer already backstops propagation, so
+    /// collapsing the burst loses nothing. Runs on `queue`, so a storm never
+    /// touches the main queue more than once per window.
+    private var keysChangedCoalescing = false
+    private static let keysChangedCoalesceWindow: TimeInterval = 2.0
+
+    private func coalesceKeysChanged() {
+        lock.lock()
+        if keysChangedCoalescing { lock.unlock(); return }
+        keysChangedCoalescing = true
+        lock.unlock()
+        queue.asyncAfter(deadline: .now() + Self.keysChangedCoalesceWindow) { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); self.keysChangedCoalescing = false; self.lock.unlock()
+            self.dispatch { self.onKeysChanged?() }
         }
     }
 
