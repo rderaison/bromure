@@ -113,7 +113,19 @@ enum TurnTLSTunnel {
                               if err != nil { failed = true }
                               sem.signal()
                           })
-                sem.wait()
+                // Bound the wait. On the relay path this NWConnection IS the real
+                // coturn socket; when the far client dies coturn zero-windows us
+                // and this send wedges forever (nothing unacked, so keepalive and
+                // connectionDropTime never fire). Give up after a few windows and
+                // fall through to cancel(), so this thread + the NWConnection +
+                // its dup'd fds are reaped instead of leaking. A healthy send
+                // completes on the first wait; a merely-slow link makes progress
+                // and re-arms each send, so only a truly stuck peer trips this.
+                var stalls = 0
+                while sem.wait(timeout: .now() + 15) == .timedOut {
+                    stalls += 1
+                    if stalls >= 4 { failed = true; break }   // ~60s wedged → dead peer
+                }
                 if failed { break }
             }
             conn.send(content: nil, isComplete: true, completion: .idempotent)  // best-effort FIN

@@ -500,6 +500,10 @@ final class TurnRelayListener: @unchecked Sendable {
             Darwin.close(dataFD)
             return
         }
+        // The relay leg is the only socket that can observe the far client dying;
+        // a blocking write to a vanished client would otherwise hang this pump —
+        // and leak the session (fds, PTY, guest tmux view) — indefinitely.
+        SocketTuning.boundStalledPeer(dataFD)
         FatForward.splice(dataFD, sshFD)
     }
 }

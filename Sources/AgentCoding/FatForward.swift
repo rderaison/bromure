@@ -7,18 +7,45 @@ import Darwin
 #endif
 
 enum FatForward {
-    /// Read up to bufSize from `from` and write it all to `to`. Returns false on
-    /// EOF/error (time to stop reading `from`).
-    private static func copyOnce(_ from: Int32, _ to: Int32, _ buf: inout [UInt8]) -> Bool {
+    /// Why `copyOnce` stopped. `.more` copied a chunk (keep going); `.eof` hit
+    /// end-of-stream or a hard error on this direction (a graceful half-close —
+    /// keep draining the other way); `.stalled` gave up writing to a peer that
+    /// stopped draining for `maxWriteStalls` send-timeout windows — a DEAD peer,
+    /// which must tear the WHOLE pump down (both directions are futile), not
+    /// half-close and linger polling a leg that will never deliver EOF.
+    private enum CopyResult { case more, eof, stalled }
+
+    /// Max consecutive no-progress write stalls (each an SO_SNDTIMEO window)
+    /// before a pump declares the write peer dead. Only a socket given a send
+    /// timeout (`SocketTuning.boundStalledPeer` — the TURN relay leg, or the TLS
+    /// tunnel's loopback socketpair on the `turns:` path) ever reaches this: a
+    /// plain blocking socket blocks in `write()` and never returns EWOULDBLOCK,
+    /// so every other splice/proxy caller is unaffected.
+    private static let maxWriteStalls = 4
+
+    /// Read up to bufSize from `from` and write it all to `to`.
+    private static func copyOnce(_ from: Int32, _ to: Int32, _ buf: inout [UInt8]) -> CopyResult {
         let r = buf.withUnsafeMutableBytes { Darwin.read(from, $0.baseAddress, $0.count) }
-        if r <= 0 { return false }
+        if r <= 0 { return .eof }
         var off = 0
+        var stalls = 0
         while off < r {
             let w = buf.withUnsafeBytes { Darwin.write(to, $0.baseAddress!.advanced(by: off), r - off) }
-            if w <= 0 { if errno == EINTR || errno == EAGAIN { continue }; return false }
-            off += w
+            if w > 0 { off += w; stalls = 0; continue }
+            if w < 0 && errno == EINTR { continue }
+            if w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // `to` isn't draining — a send-timeout'd relay leg toward a peer
+                // that stopped reading (coturn's zero-window persist when the far
+                // client died; neither keepalive nor the retransmit timer breaks
+                // it). Tolerate a few windows for a merely-slow link — any
+                // progress resets the count — then declare the peer dead.
+                stalls += 1
+                if stalls >= maxWriteStalls { return .stalled }
+                continue
+            }
+            if w <= 0 { return .eof }   // hard error
         }
-        return true
+        return .more
     }
 
     /// Bidirectional byte pump between two full-duplex fds, half-close aware:
@@ -33,17 +60,28 @@ enum FatForward {
         var buf = [UInt8](repeating: 0, count: 1 << 16)
         let pollIn = Int16(POLLIN)
         var aOpen = true, bOpen = true   // "still readable"
-        while aOpen || bOpen {
+        pump: while aOpen || bOpen {
             var fds = [pollfd(fd: aOpen ? a : -1, events: pollIn, revents: 0),
                        pollfd(fd: bOpen ? b : -1, events: pollIn, revents: 0)]
             if poll(&fds, 2, -1) < 0 { if errno == EINTR { continue }; break }
             if aOpen, fds[0].revents & Int16(POLLIN | POLLHUP | POLLERR) != 0 {
-                if !copyOnce(a, b, &buf) { aOpen = false; Darwin.shutdown(b, SHUT_WR) }
+                switch copyOnce(a, b, &buf) {
+                case .more:    break
+                case .eof:     aOpen = false; Darwin.shutdown(b, SHUT_WR)
+                case .stalled: break pump   // `b` is a dead peer → close both now
+                }
             }
             if bOpen, fds[1].revents & Int16(POLLIN | POLLHUP | POLLERR) != 0 {
-                if !copyOnce(b, a, &buf) { bOpen = false; Darwin.shutdown(a, SHUT_WR) }
+                switch copyOnce(b, a, &buf) {
+                case .more:    break
+                case .eof:     bOpen = false; Darwin.shutdown(a, SHUT_WR)
+                case .stalled: break pump   // `a` is a dead peer → close both now
+                }
             }
         }
+        // A dead-peer stall (or both directions ended) closes BOTH fds: closing
+        // sshFD is what fires NIOSSH's channelInactive and reaps the session/PTY;
+        // half-closing and lingering would just move the hang into poll().
         Darwin.close(a); Darwin.close(b)
     }
 
@@ -58,10 +96,10 @@ enum FatForward {
                        pollfd(fd: sockOpen ? sock : -1, events: pollIn, revents: 0)]
             if poll(&fds, 2, -1) < 0 { if errno == EINTR { continue }; break }
             if inOpen, fds[0].revents & Int16(POLLIN | POLLHUP | POLLERR) != 0 {
-                if !copyOnce(inFD, sock, &buf) { inOpen = false; Darwin.shutdown(sock, SHUT_WR) }
+                if copyOnce(inFD, sock, &buf) != .more { inOpen = false; Darwin.shutdown(sock, SHUT_WR) }
             }
             if sockOpen, fds[1].revents & Int16(POLLIN | POLLHUP | POLLERR) != 0 {
-                if !copyOnce(sock, outFD, &buf) { sockOpen = false }
+                if copyOnce(sock, outFD, &buf) != .more { sockOpen = false }
             }
         }
         Darwin.close(sock)

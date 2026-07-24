@@ -27,6 +27,38 @@ enum SocketTuning {
         setsockopt(fd, Int32(IPPROTO_TCP), TCP_KEEPINTVL, &intvl, sz)
         setsockopt(fd, Int32(IPPROTO_TCP), TCP_KEEPCNT, &cnt, sz)
     }
+
+    /// Bound how long a write to this socket may stall on a peer that has stopped
+    /// draining — the failure mode of a TURN *relay leg* whose client has
+    /// silently died. coturn stays up and keeps acking at the TCP layer while its
+    /// buffer toward the dead client is full (zero-window persist), so neither
+    /// SO_KEEPALIVE (the connection isn't idle, and coturn answers probes) nor
+    /// the retransmit drop-timer (nothing is going unacked) ever fires — a
+    /// blocking `write()` hangs indefinitely, freezing that session's splice
+    /// thread and leaking its fds/PTY forever.
+    ///
+    /// SO_SNDTIMEO makes the blocked write return EWOULDBLOCK after `sndSecs`
+    /// (FatForward.copyOnce counts consecutive no-progress stalls and tears the
+    /// splice down); TCP_RXT_CONNDROPTIME covers the other case where the leg
+    /// itself dies, dropping it after `rxtSecs` of failed retransmits.
+    ///
+    /// The relay leg is EITHER the real coturn TCP socket (plain `turn:`) OR, on
+    /// the preferred `turns:` path, the TLS tunnel's loopback AF_UNIX socketpair
+    /// whose far end is drained by the TLS uplink pump — and that pump wedges when
+    /// coturn zero-windows a send, so a stalled socketpair write signals the same
+    /// (transitively) dead peer. So SO_SNDTIMEO is meaningful on both; on the
+    /// AF_UNIX socketpair TCP_RXT_CONNDROPTIME is simply a harmless ENOPROTOOPT
+    /// no-op (the TLS `NWConnection` is bounded separately in TurnTLSTunnel).
+    /// Never apply this to a purely-local loopback splice with no remote peer
+    /// behind it (the browser-MCP / forward vsock bridges), where a slow local
+    /// consumer is not a dead peer — those callers set no send timeout.
+    static func boundStalledPeer(_ fd: Int32, sndSecs: Int = 15, rxtSecs: Int32 = 60) {
+        guard fd >= 0 else { return }
+        var tv = timeval(tv_sec: sndSecs, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var rxt = rxtSecs
+        setsockopt(fd, Int32(IPPROTO_TCP), TCP_RXT_CONNDROPTIME, &rxt, socklen_t(MemoryLayout<Int32>.size))
+    }
 }
 
 // MARK: - Candidate TCP connection
