@@ -2626,6 +2626,8 @@ struct ProfileEditorView: View {
             if storageContext == nil {
                 Divider()
                 SubnetSettingsView()
+                Divider()
+                RelayTransportSettingsView()
             }
         }
     }
@@ -5121,6 +5123,28 @@ private struct SubnetSettingsView: View {
             Text("Each install normally uses 192.168.64.0/24, which collides when the rich client mirrors more than one remote. A private 172.16.x.x subnet keeps them distinct. Changes apply the next time your workspaces start.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// App-wide P2P transport preference: opt into the UDP relay (RelayARQ over
+/// TURN-UDP), off by default. Shown only in Preferences (the Resources pane);
+/// bound to the same `p2p.udpRelay.enabled` key `P2PRelayConfig` reads, so the
+/// dialer offers UDP relay candidates only while this is on.
+private struct RelayTransportSettingsView: View {
+    @AppStorage("p2p.udpRelay.enabled") private var udpRelayEnabled = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Remote transport")
+                .font(.headline)
+            Toggle(isOn: $udpRelayEnabled) {
+                Text("UDP relay transport (experimental)")
+            }
+            Text("When a remote connection falls back to the relay, prefer a UDP path (RelayARQ) that resists packet loss better than the TCP relay, dropping back to TCP when UDP is blocked. Applies to new connections; the relay server must also have UDP transport enabled.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
