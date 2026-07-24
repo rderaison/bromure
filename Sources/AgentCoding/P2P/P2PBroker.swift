@@ -3,6 +3,13 @@ import Foundation
 import Darwin
 #endif
 
+extension Notification.Name {
+    /// Posted when the device channel reports a peer's SSH key changed — the
+    /// server re-pulls the owner's authorized keys immediately (no-op on a
+    /// client with no SSH server).
+    static let bromureAccountKeysChanged = Notification.Name("io.bromure.p2p.accountKeysChanged")
+}
+
 // MARK: - Per-connection signaling session
 
 /// One in-flight connection attempt (one grant / connectionId). Owns the
@@ -218,6 +225,13 @@ final class P2PBroker: @unchecked Sendable {
         }
         ch.onError = { code, connId in
             FatClientLog.log("p2p: signaling error \(code) conn=\(connId ?? "-")")
+        }
+        ch.onKeysChanged = {
+            // A peer device logged in/out — re-pull authorized SSH keys now
+            // rather than waiting for the periodic poll. The server observes
+            // this and reconciles authorized_keys (iOS has no server → no-op).
+            FatClientLog.log("p2p: keys-changed — re-syncing authorized keys")
+            NotificationCenter.default.post(name: .bromureAccountKeysChanged, object: nil)
         }
         ch.onRevoked = { [weak self] in
             // Only a browser-enrolled device record is ours to erase; the

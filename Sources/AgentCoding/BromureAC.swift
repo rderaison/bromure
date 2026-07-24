@@ -2258,6 +2258,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: - Account SSH keys (passwordless fat-client authorization)
 
     private var accountKeySyncTimer: Timer?
+    private var accountKeysObserver: NSObjectProtocol?
 
     /// The authorized_keys comment prefix that marks a key as account-managed
     /// (pulled from bromure.io) vs. a manual `remote key add`.
@@ -2299,11 +2300,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         RunLoop.main.add(t, forMode: .common)
         accountKeySyncTimer = t
+        // Push path: re-sync the instant bromure.io says a peer logged in/out,
+        // so a new device is authorized (and a logged-out one dropped) in
+        // seconds rather than on the next 3-minute tick.
+        accountKeysObserver = NotificationCenter.default.addObserver(
+            forName: .bromureAccountKeysChanged, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.syncAccountSSHKeys() }
+        }
     }
 
     @MainActor func stopAccountKeySync() {
         accountKeySyncTimer?.invalidate()
         accountKeySyncTimer = nil
+        if let o = accountKeysObserver {
+            NotificationCenter.default.removeObserver(o)
+            accountKeysObserver = nil
+        }
     }
 
     /// Apply a config change coming from the CLI (`remote …`) or Preferences.

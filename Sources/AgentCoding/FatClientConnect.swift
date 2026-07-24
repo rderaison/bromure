@@ -468,6 +468,12 @@ final class RemoteConnectModel {
 
     func signOutAccount() {
         stopDirectoryRefresh()
+        // Withdraw this device's SSH key so the user's servers drop it — capture
+        // the bearer BEFORE signing out clears the identity (sign-out is local,
+        // so the token stays valid long enough for this DELETE to land).
+        if let (client, bearer) = ControlPlaneClient.current() {
+            Task { try? await client.removeSSHKey(bearer: bearer) }
+        }
         account.signOut()
         p2pServers = []
     }

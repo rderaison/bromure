@@ -278,6 +278,13 @@ struct ControlPlaneClient {
             body: ["sshPublicKey": sshPublicKey], bearer: bearer)
     }
 
+    /// Withdraw this device's SSH key (on logout) so the user's servers drop it
+    /// from authorized_keys and this device can no longer connect without a
+    /// fresh login.
+    func removeSSHKey(bearer: String) async throws {
+        let _: Ack = try await delete("/v1/devices/ssh-key", bearer: bearer)
+    }
+
     struct DeviceSSHKey: Decodable { let id: String; let name: String?; let sshPublicKey: String }
     /// The SSH public keys of the caller's OWN devices — a server installs these
     /// into its authorized_keys so every one of the user's clients connects
@@ -349,6 +356,10 @@ struct ControlPlaneClient {
     private func post<T: Decodable>(_ path: String, body: [String: Any], bearer: String?) async throws -> T {
         let data = try JSONSerialization.data(withJSONObject: body)
         return try await send(makeRequest(path, method: "POST", body: data, bearer: bearer))
+    }
+
+    private func delete<T: Decodable>(_ path: String, bearer: String?) async throws -> T {
+        try await send(makeRequest(path, method: "DELETE", body: nil, bearer: bearer))
     }
 
     private func makeRequest(_ path: String, method: String, body: Data?, bearer: String?) -> URLRequest {

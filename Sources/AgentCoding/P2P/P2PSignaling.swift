@@ -80,6 +80,9 @@ enum IncomingServerFrame {
     /// A protocol/policy rejection: bad_frame, rate_limited, unknown_connection,
     /// connection_closed, stale_seq, frame_cap, candidate_cap, peer_offline.
     case error(code: String, connectionId: String?)
+    /// A peer device's SSH key was published or withdrawn — re-pull authorized
+    /// keys now instead of waiting for the periodic poll.
+    case keysChanged
     /// A `type` we don't recognise — carried through for logging, never fatal.
     case unknown(type: String)
 
@@ -106,6 +109,8 @@ enum IncomingServerFrame {
         case "error":
             return .error(code: obj["error"] as? String ?? "unknown",
                           connectionId: obj["connectionId"] as? String)
+        case "keys-changed":
+            return .keysChanged
         default:
             return .unknown(type: type)
         }

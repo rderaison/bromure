@@ -22,6 +22,8 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
     var onStateChange: ((_ connected: Bool) -> Void)?
     /// The token is dead (revoked / invalid). Terminal — no reconnect.
     var onRevoked: (() -> Void)?
+    /// A peer's SSH key was published/withdrawn — re-pull authorized keys now.
+    var onKeysChanged: (() -> Void)?
 
     private let endpoint: ControlPlaneEndpoint
     private let token: String
@@ -123,6 +125,8 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
             dispatch { self.onConnectionOffered?(grant) }
         case .error(let code, let connId):
             dispatch { self.onError?(code, connId) }
+        case .keysChanged:
+            dispatch { self.onKeysChanged?() }
         case .unknown:
             break
         }
