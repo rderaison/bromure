@@ -81,8 +81,6 @@ final class RemoteAccessServer {
         @Sendable (_ vm: String, _ completion: @escaping @Sendable (Int32) -> Void) -> Void
     var browserMCPResolver: BrowserMCPResolver?
 
-    private static let sshKeygenBinary = "/usr/bin/ssh-keygen"
-
     init(paths: Paths = .default) { self.paths = paths }
 
     enum RemoteError: LocalizedError {
@@ -389,23 +387,20 @@ final class RemoteAccessServer {
         }
     }
 
+    /// The OpenSSH SHA256 fingerprint of an authorized_keys line: `SHA256:` +
+    /// base64(sha256(key-blob)) with padding stripped — exactly what
+    /// `ssh-keygen -l` prints, computed in-process.
+    ///
+    /// The previous version wrote a temp file and spawned `ssh-keygen -lf` PER
+    /// KEY. `listAuthorizedKeys` fingerprints every key and runs on the
+    /// @MainActor for every account sync (the 180 s timer AND every
+    /// `keys-changed` push), so once a handful of devices had registered each
+    /// sync froze the whole app for seconds spawning subprocesses + temp-file
+    /// I/O on the main thread. This is a base64 decode + one SHA256 instead.
     private static func fingerprint(ofPublicKeyLine line: String) -> String? {
-        let tmp = NSTemporaryDirectory() + "bromure-pk-\(abs(line.hashValue)).pub"
-        defer { try? FileManager.default.removeItem(atPath: tmp) }
-        guard (try? line.write(toFile: tmp, atomically: true, encoding: .utf8)) != nil else { return nil }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: sshKeygenBinary)
-        p.arguments = ["-lf", tmp]
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
-        guard (try? p.run()) != nil else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        let out = String(data: data, encoding: .utf8) ?? ""
-        return out.split(separator: " ").first(where: { $0.hasPrefix("SHA256:") }).map(String.init)
-            ?? out.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let fields = line.split(separator: " ")
+        guard fields.count >= 2, let blob = Data(base64Encoded: String(fields[1])) else { return nil }
+        let digest = Data(SHA256.hash(data: blob))
+        return "SHA256:" + digest.base64EncodedString().replacingOccurrences(of: "=", with: "")
     }
-}
-
-private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
