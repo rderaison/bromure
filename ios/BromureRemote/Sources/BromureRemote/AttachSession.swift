@@ -185,9 +185,11 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
         }
         t.stackSize = 1 << 20
         // A quick reconnect spins under backoff so a hard-failing VM doesn't
-        // hot-loop; the first attach starts immediately.
+        // hot-loop; the first attach starts immediately. ±25% jitter so every
+        // terminal knocked off by one network blip doesn't re-dial in lockstep.
         if sinceLast < 0.5 && delay > 1.0 {
-            DispatchQueue.global().asyncAfter(deadline: .now() + delay) { t.start() }
+            let jittered = delay * Double.random(in: 0.75...1.25)
+            DispatchQueue.global().asyncAfter(deadline: .now() + jittered) { t.start() }
         } else {
             t.start()
         }

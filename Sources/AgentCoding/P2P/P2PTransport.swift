@@ -3,6 +3,32 @@ import Foundation
 import Darwin
 #endif
 
+// MARK: - Socket tuning (interactive links)
+
+/// TCP options for the fat-client's latency-sensitive sockets. Disables Nagle
+/// (small frames — keystrokes, control-poll requests, PTY output — go on the
+/// wire immediately instead of waiting to coalesce, which was adding an RTT of
+/// lag on high-latency links) and, for real network sockets, enables keepalive
+/// so a silently-dead link (packet loss, not a clean FIN) is detected in ~30s
+/// instead of the multi-minute OS default. Safe on loopback and AF_UNIX fds:
+/// the TCP-level options simply no-op or return a harmless error there.
+enum SocketTuning {
+    static func tuneInteractive(_ fd: Int32, keepalive: Bool = true) {
+        guard fd >= 0 else { return }
+        var on: Int32 = 1
+        let sz = socklen_t(MemoryLayout<Int32>.size)
+        setsockopt(fd, Int32(IPPROTO_TCP), TCP_NODELAY, &on, sz)
+        guard keepalive else { return }
+        setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sz)
+        var idle: Int32 = 15   // Darwin TCP_KEEPALIVE: idle seconds before first probe
+        var intvl: Int32 = 5   // seconds between probes
+        var cnt: Int32 = 3     // drop after this many unanswered probes (~30s)
+        setsockopt(fd, Int32(IPPROTO_TCP), TCP_KEEPALIVE, &idle, sz)
+        setsockopt(fd, Int32(IPPROTO_TCP), TCP_KEEPINTVL, &intvl, sz)
+        setsockopt(fd, Int32(IPPROTO_TCP), TCP_KEEPCNT, &cnt, sz)
+    }
+}
+
 // MARK: - Candidate TCP connection
 
 /// Low-level TCP connect used to validate and use candidates. Handles IPv4 and
@@ -32,6 +58,7 @@ enum P2PTCP {
         }
         if rc == 0 {
             _ = fcntl(fd, F_SETFL, flags)
+            SocketTuning.tuneInteractive(fd)
             return fd
         }
         guard errno == EINPROGRESS else { Darwin.close(fd); return nil }
@@ -47,6 +74,7 @@ enum P2PTCP {
             Darwin.close(fd); return nil
         }
         _ = fcntl(fd, F_SETFL, flags)
+        SocketTuning.tuneInteractive(fd)
         return fd
     }
 }

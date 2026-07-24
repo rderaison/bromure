@@ -239,6 +239,7 @@ final class SSHDialer: @unchecked Sendable {
                             inboundChildChannelInitializer: nil))
                 }
             }
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
             .connectTimeout(.seconds(8))
         guard let channel = try? bootstrap.connect(host: address, port: port).wait() else { return nil }
         // The validation failure tears the connection down; wait for that —
@@ -305,6 +306,7 @@ final class SSHConnection: @unchecked Sendable {
                 }
             }
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_KEEPALIVE), value: 1)
+            .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
             .connectTimeout(.seconds(10))
 
         do {

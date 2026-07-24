@@ -24,6 +24,12 @@ enum FatForward {
     /// Bidirectional byte pump between two full-duplex fds, half-close aware:
     /// when one direction ends, keep draining the other until it also ends.
     static func splice(_ a: Int32, _ b: Int32) {
+        // Every forwarded byte stream (loopback shim, relay data leg, SSH channel
+        // splice) passes through here — the one place to kill Nagle on both ends
+        // so interactive traffic isn't buffered. No-ops harmlessly on the AF_UNIX
+        // / loopback ends.
+        SocketTuning.tuneInteractive(a, keepalive: false)
+        SocketTuning.tuneInteractive(b, keepalive: false)
         var buf = [UInt8](repeating: 0, count: 1 << 16)
         let pollIn = Int16(POLLIN)
         var aOpen = true, bOpen = true   // "still readable"

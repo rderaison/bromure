@@ -159,9 +159,11 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
         reconnectAttempt += 1
         let attempt = reconnectAttempt
         lock.unlock()
-        // 0.5s → cap 30s, capped exponential. (No jitter source available in
-        // this build — Math.random-equivalents are fine here, but keep it simple.)
-        let delay = min(30.0, 0.5 * pow(2.0, Double(min(attempt, 6))))
+        // 0.5s → cap 30s, capped exponential, with ±25% jitter so many devices
+        // (or many sessions) knocked off by the same outage don't retry in
+        // lockstep and hammer the link/relay the instant it returns.
+        let base = min(30.0, 0.5 * pow(2.0, Double(min(attempt, 6))))
+        let delay = base * Double.random(in: 0.75...1.25)
         queue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.lock.lock(); let want = self.desiredOpen; self.lock.unlock()

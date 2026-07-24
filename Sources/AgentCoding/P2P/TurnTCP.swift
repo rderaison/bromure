@@ -97,6 +97,7 @@ enum STUNTCP {
                 }
                 if ok {
                     _ = fcntl(fd, F_SETFL, flags)
+                    SocketTuning.tuneInteractive(fd)
                     return fd
                 }
                 Darwin.close(fd)
