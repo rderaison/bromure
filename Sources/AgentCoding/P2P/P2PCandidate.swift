@@ -84,14 +84,16 @@ struct P2PCandidate: Codable, Equatable, Hashable {
 // MARK: - Local interface candidate gathering
 
 enum P2PCandidateGatherer {
-    /// Every routable local interface address, as `host` TCP candidates pointing
-    /// at `sshPort` (the listener's embedded sshd, already bound 0.0.0.0:2222).
-    /// A dialer on the same LAN — or with a globally reachable IPv6 — connects
-    /// straight to one of these with no relay and no shim on the listener side.
+    /// Every routable local IPv4 interface address, as `host` TCP candidates
+    /// pointing at `sshPort` (the listener's embedded sshd, bound 0.0.0.0:2222).
+    /// A dialer on the same LAN connects straight to one of these with no relay
+    /// and no shim on the listener side.
     ///
-    /// Skips loopback, link-local (169.254 / fe80), and (for IPv6) unique-local
-    /// fc00::/7 and the temporary/deprecated flags. Both IPv4 and IPv6 are
-    /// gathered; IPv6 is often the winning direct path on modern home networks.
+    /// IPv4 only: the embedded sshd binds `0.0.0.0` (IPv4), so it never listens
+    /// on IPv6 — advertising a Mac's pile of SLAAC IPv6 privacy addresses only
+    /// handed the dialer dead candidates that time out (and, ranked above IPv4 by
+    /// the priority nudge, evicted the one reachable RFC1918 LAN address from the
+    /// 8-candidate answer budget). Skips loopback and link-local (169.254).
     static func hostCandidates(sshPort: Int) -> [P2PCandidate] {
         var out: [P2PCandidate] = []
         var addrs: UnsafeMutablePointer<ifaddrs>?
@@ -113,23 +115,15 @@ enum P2PCandidateGatherer {
                ["awdl", "llw", "anpi", "ap", "bridge"].contains(where: { name.hasPrefix($0) }) {
                 continue
             }
-            let fam = sa.pointee.sa_family
-            guard fam == sa_family_t(AF_INET) || fam == sa_family_t(AF_INET6) else { continue }
+            guard sa.pointee.sa_family == sa_family_t(AF_INET) else { continue }   // IPv4 only
 
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             guard getnameinfo(sa, socklen_t(sa.pointee.sa_len),
                               &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0
             else { continue }
-            var ip = String(cString: host)
-            // getnameinfo tags link-local IPv6 with a %zone suffix; drop it —
-            // both are excluded below anyway, but keep IPs clean if kept.
-            if let pct = ip.firstIndex(of: "%") { ip = String(ip[..<pct]) }
+            let ip = String(cString: host)
 
-            if ip.hasPrefix("127.") || ip.hasPrefix("169.254.") { continue }   // v4 loop/link-local
-            if ip == "::1" { continue }                                         // v6 loopback
-            let low = ip.lowercased()
-            if low.hasPrefix("fe80:") { continue }                              // v6 link-local
-            if low.hasPrefix("fc") || low.hasPrefix("fd") { continue }          // v6 unique-local
+            if ip.hasPrefix("127.") || ip.hasPrefix("169.254.") { continue }   // loopback / link-local
 
             out.append(P2PCandidate(kind: .host, proto: .tcp, ip: ip, port: sshPort))
         }
