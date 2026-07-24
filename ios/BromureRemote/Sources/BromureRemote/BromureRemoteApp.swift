@@ -71,6 +71,8 @@ struct RootView: View {
             hostBox.onChange = { activeHost = $0; pendingPeer = nil }
             AppBadge.requestAuthorization()
             push.syncToken()
+            // Publish our SSH key so the user's servers authorize us passwordless.
+            RemoteTransport.publishSSHKey()
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -110,7 +112,9 @@ struct RootView: View {
         .onChange(of: push.tapTarget) { _, target in route(target) }
         .onChange(of: directory.p2pServers.map(\.id)) { _, _ in route(push.tapTarget) }
         // Register the APNs token with the account once we're signed in.
-        .onChange(of: directory.signedIn) { _, signedIn in if signedIn { push.syncToken() } }
+        .onChange(of: directory.signedIn) { _, signedIn in
+            if signedIn { push.syncToken(); RemoteTransport.publishSSHKey() }
+        }
         .onOpenURL { url in
             // bromure://enroll?…&state=… — complete the account sign-in.
             guard url.scheme == "bromure", let link = EnrollLink(parsing: url.absoluteString) else { return }

@@ -129,6 +129,18 @@ enum RemoteTransport {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Publish this Mac's SSH public key to bromure.io so the user's servers
+    /// authorize it with no password (they pull it via /v1/devices/ssh-keys).
+    /// Safe to call repeatedly; a no-op until this Mac has a bromure.io device
+    /// identity and an SSH key. (A Mac that also serves re-publishes on the
+    /// account-key sync — this covers a client-only Mac.)
+    static func publishSSHKey() {
+        _ = ensureClientKey()
+        guard let line = clientPublicKey(),
+              let (client, bearer) = ControlPlaneClient.current() else { return }
+        Task { try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: line) }
+    }
+
     /// ssh argument vector: pubkey-only (BatchMode), TOFU host-key pinning to
     /// our dedicated known_hosts, and the fat-client control verb as the remote
     /// command.

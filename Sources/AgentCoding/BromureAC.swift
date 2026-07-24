@@ -2023,6 +2023,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // schedule keeps `last_seen_at` fresh on the admin UI. No-op
         // when not enrolled.
         BACHeartbeat.shared.start()
+        // Publish this Mac's SSH key so the owner's servers authorize it
+        // passwordless (no-op until it has a P2P device identity + SSH key).
+        RemoteTransport.publishSSHKey()
         // Per-install egress-IP heartbeat — mirrors the Bromure Web
         // Chromium extension, ticks every 60s against
         // analytics.bromure.io/register-ip so install_ips reflects
@@ -2224,6 +2227,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // peer connection offers (no-op otherwise). Reachable clients splice
             // into the same sshd; NAT'd clients reach it via the broker.
             P2PBroker.shared.startServing(sshPort: cfg.port)
+            // Pull the owner's other devices' SSH keys into authorized_keys so
+            // they connect with no password and no manual `remote key add`.
+            startAccountKeySync()
             updateStatusMenu()   // robot menu: reflect the now-running sshd
         } catch {
             SupplyChainLog.shared.record("[remote] start failed: \(error.localizedDescription)")
@@ -2245,7 +2251,59 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func stopRemoteAccess() {
         RemoteAccessServer.shared.stop()
         P2PBroker.shared.stopServing()
+        stopAccountKeySync()
         updateStatusMenu()   // robot menu: reflect the stopped sshd
+    }
+
+    // MARK: - Account SSH keys (passwordless fat-client authorization)
+
+    private var accountKeySyncTimer: Timer?
+
+    /// The authorized_keys comment prefix that marks a key as account-managed
+    /// (pulled from bromure.io) vs. a manual `remote key add`.
+    private static let accountKeyMarker = "bromure-account:"
+
+    /// Publish this Mac's SSH public key and pull the owner's OTHER devices' SSH
+    /// keys into authorized_keys, so any of the user's devices connects with no
+    /// password and no manual `remote key add`. Per-user scope (bromure.io only
+    /// returns the caller's own devices). No-op unless enrolled + Remote Access on.
+    @MainActor func syncAccountSSHKeys() {
+        guard P2PBroker.remoteAccessEnabled,
+              let (client, bearer) = ControlPlaneClient.current() else { return }
+        let ownKey = RemoteTransport.clientPublicKey()
+        let marker = Self.accountKeyMarker
+        Task {
+            if let ownKey { try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: ownKey) }
+            guard let keys = try? await client.listSSHKeys(bearer: bearer) else { return }
+            // Re-tag each key's comment with our marker + device id, so the
+            // reconcile prunes only account keys and never manual ones.
+            let lines: [String] = keys.compactMap { k in
+                let p = k.sshPublicKey.split(separator: " ").map(String.init)
+                guard p.count >= 2 else { return nil }
+                return "\(p[0]) \(p[1]) \(marker)\(k.id)"
+            }
+            await MainActor.run {
+                RemoteAccessServer.shared.setManagedKeys(marker: marker, lines: lines)
+            }
+        }
+    }
+
+    /// Sync now and every few minutes while Remote Access is on, so a device
+    /// enrolled later is authorized without a restart (the reconcile only
+    /// rewrites/reloads on an actual change, so this is cheap).
+    @MainActor func startAccountKeySync() {
+        syncAccountSSHKeys()
+        guard accountKeySyncTimer == nil else { return }
+        let t = Timer(timeInterval: 180, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.syncAccountSSHKeys() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        accountKeySyncTimer = t
+    }
+
+    @MainActor func stopAccountKeySync() {
+        accountKeySyncTimer?.invalidate()
+        accountKeySyncTimer = nil
     }
 
     /// Apply a config change coming from the CLI (`remote …`) or Preferences.

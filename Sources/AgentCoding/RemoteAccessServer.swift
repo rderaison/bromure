@@ -339,6 +339,38 @@ final class RemoteAccessServer {
         reloadIfRunning()
     }
 
+    /// Reconcile the ACCOUNT-managed authorized keys (those whose comment starts
+    /// with `marker`) to exactly `lines`, leaving every manually-added key
+    /// (`bromure-ac remote key add`) untouched. One write and at most one reload,
+    /// and ONLY when the managed set actually changed — so a periodic account
+    /// sync never needlessly restarts the sshd (which would drop live sessions).
+    func setManagedKeys(marker: String, lines: [String]) {
+        let current = listAuthorizedKeys()
+        let managedNow = Set(current.filter { $0.comment.hasPrefix(marker) }.map(\.line))
+        let manual = current.filter { !$0.comment.hasPrefix(marker) }
+        // A desired key that duplicates a manual key's blob is dropped, so a
+        // manual entry is never shadowed or duplicated.
+        var seen = Set(manual.map { Self.keyBlob($0.line) })
+        var desired: [String] = []
+        for line in lines {
+            guard (try? NIOSSHPublicKey(openSSHPublicKey: line)) != nil,
+                  seen.insert(Self.keyBlob(line)).inserted else { continue }
+            desired.append(line)
+        }
+        guard managedNow != Set(desired) else { return }   // unchanged → no restart
+        try? ensureLayout()
+        let out = manual.map(\.line) + desired
+        try? (out.joined(separator: "\n") + (out.isEmpty ? "" : "\n"))
+            .write(to: paths.authKeys, atomically: true, encoding: .utf8)
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.authKeys.path)
+        reloadIfRunning()
+    }
+
+    /// The "type blob" identity of an authorized_keys line (ignoring the comment).
+    private static func keyBlob(_ line: String) -> String {
+        line.split(separator: " ").prefix(2).joined(separator: " ")
+    }
+
     /// Authorized keys are read at start; restart to pick up edits while live.
     private func reloadIfRunning() {
         guard running, let cfg = current else { return }

@@ -101,6 +101,16 @@ enum RemoteTransport {
         return SSHKeyWire.opensshPublicLine(key.publicKey, comment: "bromure-remote-ios")
     }
 
+    /// Publish this device's SSH public key to bromure.io so the user's servers
+    /// authorize it with no password (they pull it in via /v1/devices/ssh-keys).
+    /// Safe to call repeatedly — on launch and after sign-in. No-op until this
+    /// device has a bromure.io identity and an SSH key.
+    static func publishSSHKey() {
+        guard let line = ensureClientKey(),
+              let (client, bearer) = ControlPlaneClient.current() else { return }
+        Task { try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: line) }
+    }
+
     static func clientKeyFingerprint() -> String? {
         guard let key = loadClientKeyCrypto() else { return nil }
         return SSHKeyWire.fingerprint(ofBlob: SSHKeyWire.ed25519Blob(key.publicKey))

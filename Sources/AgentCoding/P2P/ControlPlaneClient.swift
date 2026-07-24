@@ -271,6 +271,23 @@ struct ControlPlaneClient {
             body: ["pubkey": pubkeyHex], bearer: bearer)
     }
 
+    /// Publish this device's SSH public key (an OpenSSH ed25519 line) so the
+    /// user's own servers can authorize it without a password.
+    func uploadSSHKey(bearer: String, sshPublicKey: String) async throws {
+        let _: Ack = try await post("/v1/devices/ssh-key",
+            body: ["sshPublicKey": sshPublicKey], bearer: bearer)
+    }
+
+    struct DeviceSSHKey: Decodable { let id: String; let name: String?; let sshPublicKey: String }
+    /// The SSH public keys of the caller's OWN devices — a server installs these
+    /// into its authorized_keys so every one of the user's clients connects
+    /// passwordless. Per-user scope (never another user's keys).
+    func listSSHKeys(bearer: String) async throws -> [DeviceSSHKey] {
+        struct Wrap: Decodable { let keys: [DeviceSSHKey] }
+        let w: Wrap = try await get("/v1/devices/ssh-keys", bearer: bearer)
+        return w.keys
+    }
+
     /// Report that a coding agent on this server is waiting for input.
     func notifyNeedsInput(bearer: String, eventKey: String, profileId: String?,
                           windowIndex: Int?, fallbackTitle: String,
