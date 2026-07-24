@@ -1704,7 +1704,14 @@ struct SessionSidebar: View {
     private var fullSidebar: some View {
         VStack(spacing: 0) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 3) {
+                // Eager VStack, not LazyVStack: the sidebar has a bounded row
+                // count, and a lazy stack under-reports its content height when
+                // off-screen rows aren't realized. On any re-render (in client
+                // mode the shared TabsModels mutate ~every 0.75s poll) that
+                // transient shrink makes NSScrollView clamp the offset back to
+                // the top — the "rubber band to the top, can't scroll down" bug.
+                // Eager layout keeps the full height stable so the offset holds.
+                VStack(alignment: .leading, spacing: 3) {
                     // Boards first — the surfaces that summarize everything —
                     // then the Workspaces group (label, Grid, rows).
                     AutomationsSection(
