@@ -78,6 +78,57 @@ enum TurnRelayTransport {
         return preferredTCPEndpoint(urls)
     }
 
+    /// Distinct relay hosts in first-seen order (a coturn `urls` list repeats
+    /// each host across its stun/turn/turns entries).
+    static func distinctHosts(_ urls: [String]) -> [String] {
+        var hosts: [String] = []
+        for u in urls {
+            if let h = parseHostPort(fromURL: u)?.host, !hosts.contains(h) { hosts.append(h) }
+        }
+        return hosts
+    }
+
+    /// Reorder `urls` so the lowest-RTT relay's URLs come first — the "pick
+    /// first" selectors above then choose the nearest relay. Probes at most the
+    /// first `limit` distinct hosts in parallel (TCP connect to the port the data
+    /// leg would actually use — `turns:` and its `turn:`/`stun:` share a path).
+    /// Unreachable/unprobed hosts keep their original relative order, after the
+    /// reachable ones. Blocking — call off-main. Returns `urls` unchanged when
+    /// there's nothing to choose.
+    ///
+    /// TODO(scale): with a large relay fleet, have the control plane return only
+    /// the nearest-K in turn-credentials so the client never probes more than K.
+    static func orderURLsByRTT(_ urls: [String], limit: Int = 3,
+                               timeout: TimeInterval = 1.0) -> [String] {
+        let hosts = distinctHosts(urls)
+        let probed = Array(hosts.prefix(limit))
+        guard probed.count > 1 else { return urls }
+
+        let lock = NSLock()
+        var rtt: [String: TimeInterval] = [:]
+        let group = DispatchGroup()
+        for h in probed {
+            let hostURLs = urls.filter { parseHostPort(fromURL: $0)?.host == h }
+            let port = preferredRelayEndpoint(hostURLs)?.port
+                ?? parseHostPort(fromURL: hostURLs.first ?? "")?.port ?? 3478
+            group.enter()
+            Thread.detachNewThread {
+                let r = P2PTCP.probeRTT(host: h, port: port, timeout: timeout)
+                lock.lock(); if let r { rtt[h] = r }; lock.unlock()
+                group.leave()
+            }
+        }
+        _ = group.wait(timeout: .now() + timeout + 1)
+        lock.lock(); let measured = rtt; lock.unlock()   // snapshot; a late thread must not race the read
+
+        FatClientLog.log("p2p: relay probe: " + probed.map {
+            "\($0)=\(measured[$0].map { "\(Int($0 * 1000))ms" } ?? "unreachable")" }.joined(separator: " "))
+
+        let reachable = probed.filter { measured[$0] != nil }.sorted { measured[$0]! < measured[$1]! }
+        let order = reachable + hosts.filter { !reachable.contains($0) }
+        return order.flatMap { h in urls.filter { parseHostPort(fromURL: $0)?.host == h } }
+    }
+
     /// Parse the STUN/TURN host:port out of a coturn `urls` entry
     /// (`turn:host:3478?transport=tcp`) — small, pure, and unit-testable ahead
     /// of the data path so the credential wiring is verified end to end.

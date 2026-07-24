@@ -109,6 +109,46 @@ enum P2PTCP {
         SocketTuning.tuneInteractive(fd)
         return fd
     }
+
+    /// TCP-connect RTT to `host:port` (hostname OR numeric), or nil if none of
+    /// the host's addresses connect within `timeout` each. Resolves ALL addresses
+    /// and tries them in order, mirroring the data leg (`STUNTCP.connect` walks
+    /// `ai_next`) — so a dual-stack relay whose IPv6 is broken isn't scored
+    /// unreachable when its IPv4 works. Returns the connect RTT of the first
+    /// address that succeeds. Blocking.
+    static func probeRTT(host: String, port: Int, timeout: TimeInterval) -> TimeInterval? {
+        for ip in resolveAll(host) {
+            let t0 = Date()
+            if let fd = connect(ip: ip, port: port, timeout: timeout) {
+                Darwin.close(fd)
+                return Date().timeIntervalSince(t0)
+            }
+        }
+        return nil
+    }
+
+    /// Every resolved numeric address for `host`, in the resolver's order (so
+    /// `connect`'s AI_NUMERICHOST fast path can be reused per address). Empty on
+    /// resolution failure.
+    static func resolveAll(_ host: String) -> [String] {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &res) == 0 else { return [] }
+        defer { freeaddrinfo(res) }
+        var out: [String] = []
+        var p = res
+        while let info = p {
+            defer { p = info.pointee.ai_next }
+            var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(info.pointee.ai_addr, info.pointee.ai_addrlen,
+                           &buf, socklen_t(buf.count), nil, 0, NI_NUMERICHOST) == 0 {
+                out.append(String(cString: buf))
+            }
+        }
+        return out
+    }
 }
 
 // MARK: - Path types (surfaced to the UI as a connection-quality pill)

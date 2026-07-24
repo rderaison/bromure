@@ -85,7 +85,7 @@ struct ConnectionGrant: Decodable, Equatable {
 
 /// `POST /v1/connections/:id/turn-credentials` response (connections.js:271).
 struct TurnCredentials: Decodable, Equatable {
-    let urls: [String]
+    var urls: [String]
     let username: String
     let credential: String
     let ttlSeconds: Int

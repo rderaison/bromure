@@ -164,6 +164,14 @@ final class P2PBroker: @unchecked Sendable {
     /// so a re-fire during a transition isn't mistaken for a new change.
     private var pathMonitor: NWPathMonitor?
     private var lastPathSignature: String = ""
+    /// Fastest-first relay host ranking, cached per network path so the RTT probe
+    /// runs once per path rather than per connection. Cleared by `resetPeerPaths`
+    /// on a path change, like the peer shims. Guarded by `lock`.
+    private var relayHostRank: [String]?
+    /// Bumped on every network-path change (`resetPeerPaths`). A relay probe that
+    /// was in flight across a path change carries the old generation and must not
+    /// write its now-stale ranking back over the cleared cache. Guarded by `lock`.
+    private var pathGeneration: UInt64 = 0
 
     /// Run blocking transport work (socket dials, TURN transactions) on a real
     /// thread so it never parks the cooperative pool.
@@ -453,8 +461,11 @@ final class P2PBroker: @unchecked Sendable {
             FatClientLog.log("p2p: dialer sent no srflx — relay rung skipped")
             return
         }
+        // Allocate on the nearest relay (by measured RTT, cached per network path).
+        var relayCreds = creds
+        relayCreds.urls = await orderedRelayURLs(creds.urls)
         let started = await Self.blocking {
-            TurnRelayListener.start(creds: creds, permitIP: permitIP, sshPort: sshPort)
+            TurnRelayListener.start(creds: relayCreds, permitIP: permitIP, sshPort: sshPort)
         }
         guard let (listener, info) = started else { return }
         register(listener: listener, for: grant.id)
@@ -469,7 +480,7 @@ final class P2PBroker: @unchecked Sendable {
         // dialer prefers it when both connect.
         if P2PRelayConfig.udpRelayEnabled {
             let udpStarted = await Self.blocking {
-                TurnUDPRelayListener.start(creds: creds, permitIP: permitIP, sshPort: sshPort)
+                TurnUDPRelayListener.start(creds: relayCreds, permitIP: permitIP, sshPort: sshPort)
             }
             if let (udpListener, udpInfo) = udpStarted {
                 register(listener: udpListener, for: grant.id)
@@ -495,6 +506,29 @@ final class P2PBroker: @unchecked Sendable {
             FatClientLog.log("p2p: relay session cap — dropping oldest (grant \(e.grantID.prefix(8)))")
             e.listener.stop()
         }
+    }
+
+    /// Reorder a grant's TURN urls by measured RTT so the "pick first" relay and
+    /// STUN selectors choose the nearest relay. Probes once per network path and
+    /// caches the host ranking; the cache is dropped on a path change
+    /// (`resetPeerPaths`). Off-main (the probe blocks); safe to call from the
+    /// listener's relay setup and the dialer's STUN path — both share the cache.
+    private func orderedRelayURLs(_ urls: [String]) async -> [String] {
+        let hosts = TurnRelayTransport.distinctHosts(urls)
+        guard hosts.count > 1 else { return urls }
+        func regroup(by order: [String]) -> [String] {
+            order.flatMap { h in urls.filter { TurnRelayTransport.parseHostPort(fromURL: $0)?.host == h } }
+        }
+        lock.lock(); let gen = pathGeneration; let cached = relayHostRank; lock.unlock()
+        if let cached, Set(cached) == Set(hosts) { return regroup(by: cached) }
+        let ordered = await Self.blocking { TurnRelayTransport.orderURLsByRTT(urls) }
+        // Commit only if the network path hasn't changed under us — otherwise this
+        // ranking is for a path that no longer applies and must not resurrect the
+        // cache resetPeerPaths just cleared.
+        lock.lock()
+        if pathGeneration == gen { relayHostRank = TurnRelayTransport.distinctHosts(ordered) }
+        lock.unlock()
+        return ordered
     }
 
     // MARK: Dialer role
@@ -595,6 +629,8 @@ final class P2PBroker: @unchecked Sendable {
         lock.lock()
         let shims = liveShims
         liveShims.removeAll()
+        relayHostRank = nil          // re-probe relays on the new path
+        pathGeneration &+= 1         // invalidate any relay probe still in flight
         lock.unlock()
         for (_, live) in shims { live.shim.stop() }
         if !shims.isEmpty {
@@ -668,13 +704,15 @@ final class P2PBroker: @unchecked Sendable {
         // public address (STUN Binding over the relay's TCP port), then trickle
         // it as a srflx candidate. That IP is what the listener's relay
         // permission must cover — without it, no relay candidate comes back.
-        Task.detached {
+        Task.detached { [weak self] in
             guard let creds = await TurnRelayTransport.credentials(
                 client: client, bearer: id.bearer, connectionId: grant.id) else {
                 FatClientLog.log("p2p: turn-credentials unavailable — dialing direct only")
                 return
             }
-            guard let stun = TurnRelayTransport.stunEndpoint(creds.urls) else { return }
+            FatClientLog.log("p2p: turn relays advertised: \(creds.urls.joined(separator: ", "))")
+            let urls = await self?.orderedRelayURLs(creds.urls) ?? creds.urls
+            guard let stun = TurnRelayTransport.stunEndpoint(urls) else { return }
             let pub = await Self.blocking {
                 TurnTCPClient.publicAddress(host: stun.host, port: stun.port, timeout: 4)
             }
