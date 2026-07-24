@@ -705,6 +705,8 @@ final class P2PBroker: @unchecked Sendable {
                 continue
             }
             tried.formUnion(fresh)
+            FatClientLog.log("p2p: peer candidates: " + fresh.map {
+                "\($0.kind.rawValue) \($0.ip):\($0.port) prio=\($0.prio)" }.joined(separator: " | "))
             // Bound each batch. The dialer races the whole batch in parallel, so
             // a batch costs one connect timeout — not one per candidate — and
             // the trickled srflx/relay rungs get their turn promptly. The window

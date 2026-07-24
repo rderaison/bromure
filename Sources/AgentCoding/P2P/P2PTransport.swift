@@ -239,7 +239,14 @@ enum P2PDirectDialer {
                 // TCP candidates connect directly; a `.relay/.udp` winner stands
                 // up the UDP relay + ARQ behind a loopback fd. Both yield a plain
                 // fd, so the race treats them identically.
-                guard let fd = P2PDial.connect(c, timeout: budget) else { return }
+                let t0 = Date()
+                guard let fd = P2PDial.connect(c, timeout: budget) else {
+                    FatClientLog.log("p2p: dial \(c.kind.rawValue) \(c.ip):\(c.port) "
+                        + "FAILED (\(Int(Date().timeIntervalSince(t0) * 1000))ms budget \(Int(budget * 1000))ms)")
+                    return
+                }
+                FatClientLog.log("p2p: dial \(c.kind.rawValue) \(c.ip):\(c.port) "
+                    + "OK (\(Int(Date().timeIntervalSince(t0) * 1000))ms)")
                 race.offer(Win(candidate: c, fd: fd, path: pathFor(c)))
             }
         }
