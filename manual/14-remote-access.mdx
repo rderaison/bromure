@@ -1,14 +1,16 @@
 ---
 title: "Remote Access & the Rich Client"
-description: "Reach a running Bromure Agentic Coding over SSH — from a terminal menu, the CLI, or another Mac that mirrors it 1:1 — and expose VM services safely."
+description: "Reach a running Bromure Agentic Coding over SSH — from a terminal menu, the CLI, or a rich client that mirrors it 1:1, on your LAN by address or from anywhere through a bromure.io account — and expose VM services safely."
 order: 14
 ---
 
 # Remote Access & the Rich Client
 
-A workspace VM lives on one Mac, but the person who wants to drive it is not always sitting at that Mac. Bromure Agentic Coding can be reached remotely, and every remote path rides a single, optional, disabled-by-default SSH front door. Turn it on and you get three ways in: a person can `ssh` in from any terminal and land in a menu; you can manage the front door itself from the command line; and another Mac running the app can connect over the same server and mirror the whole instance — its grid, workspaces, terminals, and dashboards — in a live window.
+A workspace VM lives on one Mac, but the person who wants to drive it is not always sitting at that Mac. Bromure Agentic Coding can be reached remotely, and every remote path rides a single, optional, disabled-by-default SSH front door. Turn it on and you get three ways in: a person can `ssh` in from any terminal and land in a menu; you can manage the front door itself from the command line; and a **rich client** — another Mac running the app, or the **iOS / iPadOS app** — can connect and mirror the whole instance (its grid, workspaces, terminals, and dashboards) in a live window.
 
-This chapter covers enabling remote access on the host, each of the three entry points, how the rich client mirrors a remote 1:1, reaching services inside remote VMs, exposing a dev server to the internet, and the security model that keeps all of it safe. Fleet-scale enrollment and cloud telemetry are a different system entirely — see [Enterprise](15-enterprise.mdx). The complete command reference lives in [Automation & the CLI](16-automation-cli.mdx).
+The rich client reaches a server two ways. On the same network you add it **directly by address**. From anywhere else you **sign in to a bromure.io account** and pick the server from a directory: the two devices are introduced by bromure.io and then talk **peer-to-peer**, with no port-forwarding, no VPN, and no address to remember — and once you're signed in, your own devices authorize each other so the connection is **passwordless** with no manual key setup.
+
+This chapter covers enabling remote access on the host, each of the entry points, how the rich client mirrors a remote 1:1 (by address and via bromure.io), reaching services inside remote VMs, exposing a dev server to the internet, and the security model that keeps all of it safe. Fleet-scale enrollment and cloud telemetry are a different system entirely — see [Enterprise](15-enterprise.mdx). The complete command reference lives in [Automation & the CLI](16-automation-cli.mdx).
 
 ## The three ways in
 
@@ -18,7 +20,7 @@ Everything below depends on the SSH front door being enabled (it is off by defau
 |---|---|---|
 | **Plain SSH** | A person at any terminal (`ssh -p 2222 you@mac`) | The [remote menu](#signing-in-over-plain-ssh) — a curses-style TUI. A raw shell is never reachable. |
 | **The `bromure-cli remote` CLI** | You, on the host itself | Manage the front door: enable/disable, keys, status. See [Enabling remote access on the host](#enabling-remote-access-on-the-host). |
-| **The rich client** | Another Mac running the app | A live 1:1 [mirror window](#mirroring-a-remote-with-the-rich-client) of the remote instance, with bidirectional edits. |
+| **The rich client** | Another Mac running the app, or the iOS / iPadOS app | A live 1:1 [mirror window](#mirroring-a-remote-with-the-rich-client) of the remote instance, with bidirectional edits — reached [by address](#by-address-same-network) on a LAN or [through a bromure.io account](#through-a-bromureio-account-from-anywhere) from anywhere. |
 
 The server is *embedded* — it is Apple's swift-nio-ssh library built into the app, not macOS's own `sshd`. That distinction matters: because the app runs its own server, it can verify your macOS account password through OpenDirectory without you ever enabling **Remote Login** in System Settings and without administrator rights. It listens only for the exact macOS user who launched `bromure-cli`, and it forces every interactive login into the remote menu. The only machine-facing exceptions are four whitelisted commands the rich client uses (`bromure-fatclient/1 control`, `forward <ip> <port>`, `forward-udp <ip>`, and `browser-mcp <vm>`); anything else a human types behaves like a login and drops into the menu.
 
@@ -100,15 +102,39 @@ The rich client turns this Mac's copy of Bromure Agentic Coding into a live mirr
 
 ### Connecting
 
+Open **Workspaces → Connect to Remote Bromure…** (⇧⌘K). The window sums up the choice: *"Mirror another Mac running Bromure — its grid, workspaces, tabs and automations. Sign in to reach your servers from anywhere, or add one directly by address on your LAN."* Both paths land in the same [mirror window](#the-mirror-window); they differ only in how the two Macs find each other and authorize.
+
+#### By address (same network)
+
+Use this on a LAN where you know the Mac's address and don't need a bromure.io account.
+
 1. **On the remote Mac**, enable remote access (the **Remote Access** window or `bromure-cli remote enable`).
-2. **On this Mac**, choose **Workspaces** → **Connect to Remote Bromure…** (⇧⌘K). The **Connect to Remote Bromure** window opens: a saved-servers picker plus an add/edit form. Rows show a name, `user@address:port`, and the last-connected time.
-3. Click **+**, enter a **Name** (for example, `rack mini`), **Address**, **Port** (default `2222`), and **Remote user**, then click **Connect**.
-4. On **first contact**, a sheet shows the remote's SSH host-key fingerprint. Verify it against the remote's **Remote Access** window, then click **Trust & Continue**. The pin is remembered for this endpoint; later connections are silent unless the key changes, in which case the button turns red and reads **Trust New Key & Continue** — a possible man-in-the-middle.
-5. The client then tries public-key auth with this Mac's dedicated key. If this Mac is not authorized yet, it falls back to asking for the remote user's macOS **login password** (button: **Sign In**). A successful password login automatically enrolls this Mac's key on the remote over the tunnel, so every later connection is passwordless.
+2. **On this Mac**, click **+**, enter a **Name** (for example, `rack mini`), **Address**, **Port** (default `2222`), and **Remote user**, then click **Connect**. Saved rows show `user@address:port` and the last-connected time.
+3. On **first contact**, a sheet shows the remote's SSH host-key fingerprint. Verify it against the remote's **Remote Access** window, then click **Trust & Continue**. The pin is remembered for this endpoint; later connections are silent unless the key changes, in which case the button turns red and reads **Trust New Key & Continue** — a possible man-in-the-middle.
+4. The client tries public-key auth with this Mac's dedicated key. If this Mac isn't authorized yet, it falls back to the remote user's macOS **login password** (button: **Sign In**); a successful password login enrolls this Mac's key on the remote over the tunnel, so every later connection is passwordless. To pre-authorize without ever typing a password, click **Show this Mac's key** and run `bromure-cli remote key add '<this Mac's key>'` on the remote.
 
-To pre-authorize a Mac without ever typing a password, click **Show this Mac's key** in the connect window, then run `bromure-cli remote key add '<this Mac's key>'` on the remote. After the first successful connect, double-click a saved server for one-click reconnects; each row's context menu offers **Connect**, **Edit…**, and **Remove**.
+After the first connect, double-click a saved server for one-click reconnects; each row's context menu offers **Connect**, **Edit…**, and **Remove**.
 
-> **Note:** The rich client generates its own dedicated ed25519 keypair (comment `bromure-ac-fatclient`) the first time you use it, stored under the remote-client directory. The host-key pin belongs to the endpoint (`address:port`), not the user — editing a saved server's address or port drops the pin and re-triggers the first-contact fingerprint sheet. Because adding a key restarts the remote's SSH listener, the password-pairing step reports success as soon as the enrollment request is flushed, not after an HTTP response.
+#### Through a bromure.io account (from anywhere)
+
+Signing in to bromure.io lets a client reach your servers across networks — a coffee-shop Wi-Fi to a Mac at home — with **no port-forwarding, no VPN, and no address to remember**. bromure.io only introduces the two Macs and relays bytes when a direct path is impossible; the SSH session itself stays end-to-end encrypted between the two Macs.
+
+1. **Sign in.** Choose **Window → Enroll in bromure.io…** and enter the enrollment code your bromure.io account gives you (a six-word phrase minted by your administrator, or by the web console for a personal account) plus a **Device Name**. Every device you enroll shares the same account.
+2. **On the remote Mac**, enable **Remote Access**. A server appears in the directory only while its front door is on and it is heartbeating bromure.io.
+3. **On this Mac**, open **Connect to Remote Bromure…**. Your servers are listed under **My servers · bromure.io** with a live online dot and last-seen time. Double-click one (or select it and click **Connect**). The status reads *"Connecting to `<name>` via bromure.io…"* while a peer-to-peer path is established — direct, router-port-mapped, or relayed — then the mirror window opens.
+
+There is **no address to type, no host-key sheet, and no password** in this path: your own devices trust each other through your account (below), and the host key is pinned automatically.
+
+#### Passwordless across your own devices
+
+Once you are signed in, every device you enroll shares its SSH identity through your account, so any of your devices reaches any of your servers with **no password and no manual `bromure-cli remote key add`**:
+
+- Each device **publishes its SSH public key** to bromure.io on launch. Each of your servers (Remote Access on) **pulls your devices' keys** and installs them into its `authorized_keys` within seconds — over the same device channel, so a device you enrolled a moment ago is authorized almost immediately, no key copied by hand.
+- A server also publishes the **macOS login it runs as**, so the client dials it as the correct user automatically (the very field the by-address path asks you to fill in).
+- Keys are **scoped to your own devices** — never another user's, even inside the same organization.
+- **Signing out** on a device retires it: its key is dropped from your servers and it disappears from the directory, so signing back in never leaves a stale duplicate. A device **unused for 90 days** also stops being authorized until it next checks in. And from the bromure.io **web console** you can **log out** any of your devices on demand.
+
+> **Note:** The rich client generates its own dedicated ed25519 keypair (comment `bromure-ac-fatclient`) the first time you use it, stored under the remote-client directory — this is the key published to your account. For a **by-address** connect the host-key pin belongs to the endpoint (`address:port`), not the user, so editing a saved server's address or port drops the pin and re-triggers the fingerprint sheet; a **bromure.io** connect pins the peer's key through the account instead. The macOS app and the **iOS / iPadOS app ("Bromure Client")** both use this account model — the mobile app is a client-only mirror, reached exactly the same way (sign in, pick a server, connect). The by-address path is macOS-only.
 
 ### The mirror window
 
@@ -123,7 +149,7 @@ A few affordances behave specially over the mirror:
 - **Reboot the VM** asks **Soft** vs **Hard** locally, then sends the verb.
 - **Pop out** opens an extra live terminal window that auto-closes if the workspace stops.
 
-Under the hood, the mirror polls the remote's `/state` snapshot every 0.75 seconds over an SSH-tunnelled control-socket bridge, and renders it through the same views as a local window. Short control calls multiplex over one SSH ControlMaster connection per host; interactive terminal attaches deliberately use their own dedicated SSH connections, because a multiplexed channel buffers the spontaneous output (tmux repaints) that a terminal needs immediately.
+Under the hood, the mirror polls the remote's `/state` snapshot every 0.75 seconds over an SSH-tunnelled control-socket bridge, and renders it through the same views as a local window. Short control calls multiplex over one SSH ControlMaster connection per host; interactive terminal attaches deliberately use their own dedicated SSH connections, because a multiplexed channel buffers the spontaneous output (tmux repaints) that a terminal needs immediately. Over a **bromure.io** connection the same bridge and terminal streams ride the peer-to-peer SSH path (reached through a local loopback shim), and the mirror behaves identically.
 
 ### What mirrors, and what works remotely
 
@@ -213,6 +239,7 @@ Remote access is powerful, so it is worth being precise about its boundaries.
 
 - **Off by default, one door.** No remote path exists until you enable the SSH server. Every path — human menu, CLI, rich client, port forwards, browser MCP — rides that one server and no other.
 - **Encryption and transport.** All traffic is SSH. The rich client's control polling, terminal attaches, file transfers, port forwards, and browser-MCP relay all travel inside the SSH connection. Because swift-nio-ssh has no post-quantum key exchange, a modern OpenSSH client will print a "not using a post-quantum key exchange" warning; this is expected and does not indicate a downgrade attack.
+- **bromure.io is a broker, not a middleman.** In the account path, bromure.io only *introduces* your two devices and — when no direct peer-to-peer path can be built — relays opaque bytes through a TURN relay (over TLS). It never terminates the SSH session: the encrypted tunnel runs end-to-end between your two Macs. SSH keys are shared only among the devices of **your own account** (never another user's), each server pulls its owner's device keys itself, and enrolling / signing out is how a device's trust is granted and retired. A signed-out or 90-day-idle device stops being authorized.
 - **Who can log in.** Only the exact macOS user who launched the app. Password auth is verified against OpenDirectory (no Remote Login, no PAM changes, no admin rights), and public-key auth accepts only keys you have enrolled. Password attempts are rate-limited per source IP; keys are not.
 - **What a session can do.** A human login can only reach the remote menu — never a shell — so it can create, configure, and drive workspaces, but it cannot run arbitrary host commands. The rich client's four machine verbs are similarly narrow: a control-socket bridge, a forward to a guest on the vmnet subnet, and a browser-MCP relay. Forwards to the host itself, the gateway, or the internet are refused.
 - **Secrets never leave the host.** Remote profile reads are secrets-blanked and saves are secret-preserving; API keys, tokens, and MCP environment secrets stay on the remote Mac.
@@ -226,7 +253,12 @@ Remote access is powerful, so it is worth being precise about its boundaries.
 | Enabling returns an error | Base image is missing or still installing | The server cannot start until the base image is present. Finish the install, then enable again. |
 | `ssh` connects but says to reconnect with `ssh -t` | No TTY was requested | The remote menu needs a terminal; add `-t` (or use `ssh -t -p 2222 <user>@<mac>`). |
 | OpenSSH prints "not using a post-quantum key exchange" | swift-nio-ssh has no PQ key exchange | Expected and harmless — the connection is still encrypted. |
-| The rich client keeps asking for a password | This Mac's key is not enrolled on the remote | Let one password login enroll it automatically, or run `bromure-cli remote key add '<this Mac's key>'` on the remote (**Show this Mac's key** copies it). |
+| A **by-address** connect keeps asking for a password | This Mac's key isn't enrolled on the remote | Let one password login enroll it automatically, or run `bromure-cli remote key add '<this Mac's key>'` on the remote (**Show this Mac's key** copies it). |
+| A **bromure.io** connect still asks for a password | The key registry hasn't authorized this device on that server yet | Passwordless is automatic here — check you're signed in to bromure.io on both Macs, the server has **Remote Access** on, and both are running a current build (the server publishes its login and pulls your keys). Give it a few seconds after enabling Remote Access. |
+| **My servers · bromure.io** is empty | Not signed in, or the server isn't advertising | Sign in (**Window → Enroll in bromure.io…**); on the remote, enable **Remote Access** so it heartbeats and appears. A greyed row means it stopped heartbeating. |
+| "Couldn't establish a connection … via bromure.io" | No direct or relayed network path between the two Macs | Confirm both can reach bromure.io; the relay needs `turns:5349` reachable. Try again — a path is retried on the next attempt. |
+| "Reached … over bromure.io, but its SSH front door didn't answer" | Remote Access was turned off on the remote | Re-enable **Remote Access** on the remote Mac. |
+| "This Mac's bromure.io device was revoked. Sign in again." | This device was logged out / revoked (by you, the web console, or 90-day idle) | Re-enroll: **Window → Enroll in bromure.io…**. |
 | Red **Trust New Key & Continue** sheet | The remote's host key changed since it was pinned | Verify out of band; only continue if you know why the key changed (reinstall, new Mac) — otherwise it may be a man-in-the-middle. |
 | Live connections drop after editing keys | Adding or removing an authorized key restarts the listener | Expected; reconnect. |
 | Browser pane stays blank | The SOCKS forwarder or subnet is not ready yet | Wait for the first `/state` poll; ensure the workspace is running and this Mac has the browser image installed. |
@@ -241,6 +273,7 @@ Server-side state lives under `~/Library/Application Support/BromureAC/remote/`:
 | Port / interface | Role |
 |---|---|
 | TCP 2222 (configurable, `≥ 1024`) | The embedded SSH server, bind `0.0.0.0` by default. |
+| Outbound TCP 443 + `turns:5349` | **bromure.io account path only.** Reaching your account (device directory, rendezvous) and, when no direct peer-to-peer path can be built, the TURN relay over TLS. Both must be reachable from each device for the account path; unrelated to the by-address path. |
 | Guest vsock 5010 | Always-on loopback relay in every VM — the path for port forwards and OAuth callback delivery. |
 | Guest vsock 5830 | The workspace agent's browser-MCP stream, relayed to the rich client's browser pane. |
 | Ephemeral port, bound `0.0.0.0` | Per-host SOCKS5 forwarder (peer-filtered to loopback and the `192.168.127.x` browser subnet). |
