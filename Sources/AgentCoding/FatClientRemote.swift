@@ -138,7 +138,8 @@ enum RemoteTransport {
         _ = ensureClientKey()
         guard let line = clientPublicKey(),
               let (client, bearer) = ControlPlaneClient.current() else { return }
-        Task { try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: line) }
+        let user = NSUserName()   // the login a client must dial this Mac as
+        Task { try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: line, sshUsername: user) }
     }
 
     /// ssh argument vector: pubkey-only (BatchMode), TOFU host-key pinning to

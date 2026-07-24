@@ -386,13 +386,15 @@ final class RemoteConnectModel {
     }
 
     /// The RemoteHost a directory server dial produces. Not saved to the
-    /// by-address list — it lives in the live directory. The remote account
-    /// username is NOT in `DeviceInfo` (that's the local Mac's login on the
-    /// remote), so we reuse the one entered on a prior connect; absent that,
-    /// the local user name is a best-effort default the login step can fix.
+    /// by-address list — it lives in the live directory. Username precedence:
+    /// the server's PUBLISHED login (authoritative — its SSH pubkey-auth
+    /// username, so key auth matches without a manual first login), then a
+    /// username entered on a prior connect, then the local login as a
+    /// best-effort default the login step can fix (older servers publish none).
     static func peerHost(for server: DeviceInfo) -> RemoteHost {
-        var host = RemoteHost(name: server.displayName, address: "",
-                              user: rememberedUser(forPeer: server.id) ?? NSUserName())
+        let user = server.sshUsername?.isEmpty == false ? server.sshUsername!
+            : (rememberedUser(forPeer: server.id) ?? NSUserName())
+        var host = RemoteHost(name: server.displayName, address: "", user: user)
         host.peerDeviceID = server.id
         host.lastConnected = Date()
         return host
@@ -468,11 +470,14 @@ final class RemoteConnectModel {
 
     func signOutAccount() {
         stopDirectoryRefresh()
-        // Withdraw this device's SSH key so the user's servers drop it — capture
-        // the bearer BEFORE signing out clears the identity (sign-out is local,
-        // so the token stays valid long enough for this DELETE to land).
+        // Retire this device on bromure.io before sign-out erases its identity:
+        // the install is about to be dead (its keys are gone locally), so revoke
+        // it so it doesn't linger as a live duplicate when the user signs in
+        // again. Revoke also drops its SSH key from the user's servers. Capture
+        // the bearer first — sign-out is local, so the token stays valid long
+        // enough for this to land.
         if let (client, bearer) = ControlPlaneClient.current() {
-            Task { try? await client.removeSSHKey(bearer: bearer) }
+            Task { try? await client.selfRevoke(bearer: bearer) }
         }
         account.signOut()
         p2pServers = []

@@ -108,7 +108,10 @@ enum RemoteTransport {
     static func publishSSHKey() {
         guard let line = ensureClientKey(),
               let (client, bearer) = ControlPlaneClient.current() else { return }
-        Task { try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: line) }
+        // iOS is a client, never an SSH server, so its username is never dialed;
+        // publish it anyway for a uniform record.
+        let user = NSUserName()
+        Task { try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: line, sshUsername: user) }
     }
 
     static func clientKeyFingerprint() -> String? {

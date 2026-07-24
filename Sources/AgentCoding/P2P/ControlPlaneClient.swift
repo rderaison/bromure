@@ -42,9 +42,15 @@ struct DeviceInfo: Decodable, Identifiable, Equatable {
     let online: Bool
     let lastSeenAt: String?
     let isSelf: Bool
+    /// The macOS login the server runs bromure-ac as — its SSH pubkey-auth
+    /// username. Published by the server; the client dials the peer as this so
+    /// key auth matches (the server checks `request.username == NSUserName()`).
+    /// nil for an older server that hasn't published it → fall back to the
+    /// remembered / local login.
+    let sshUsername: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, capability, revoked, online, lastSeenAt
+        case id, name, capability, revoked, online, lastSeenAt, sshUsername
         case isSelf = "self"
     }
 
@@ -272,10 +278,12 @@ struct ControlPlaneClient {
     }
 
     /// Publish this device's SSH public key (an OpenSSH ed25519 line) so the
-    /// user's own servers can authorize it without a password.
-    func uploadSSHKey(bearer: String, sshPublicKey: String) async throws {
+    /// user's own servers can authorize it without a password. `sshUsername` is
+    /// the local login this device runs bromure-ac as — a client dialing this
+    /// device (as a server) must use it, so publish it alongside the key.
+    func uploadSSHKey(bearer: String, sshPublicKey: String, sshUsername: String) async throws {
         let _: Ack = try await post("/v1/devices/ssh-key",
-            body: ["sshPublicKey": sshPublicKey], bearer: bearer)
+            body: ["sshPublicKey": sshPublicKey, "sshUsername": sshUsername], bearer: bearer)
     }
 
     /// Withdraw this device's SSH key (on logout) so the user's servers drop it
@@ -283,6 +291,13 @@ struct ControlPlaneClient {
     /// fresh login.
     func removeSSHKey(bearer: String) async throws {
         let _: Ack = try await delete("/v1/devices/ssh-key", bearer: bearer)
+    }
+
+    /// Retire this device on sign-out: revoke the install (and its tokens) so it
+    /// doesn't linger as a live duplicate once the local identity is erased. Also
+    /// drops its SSH key from the user's servers.
+    func selfRevoke(bearer: String) async throws {
+        let _: Ack = try await post("/v1/devices/self-revoke", body: [:], bearer: bearer)
     }
 
     struct DeviceSSHKey: Decodable { let id: String; let name: String?; let sshPublicKey: String }

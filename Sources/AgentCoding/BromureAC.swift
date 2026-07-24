@@ -2272,9 +2272,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard P2PBroker.remoteAccessEnabled,
               let (client, bearer) = ControlPlaneClient.current() else { return }
         let ownKey = RemoteTransport.clientPublicKey()
+        let ownUser = NSUserName()   // the login clients must dial this server as
         let marker = Self.accountKeyMarker
         Task {
-            if let ownKey { try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: ownKey) }
+            if let ownKey {
+                try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: ownKey, sshUsername: ownUser)
+            }
             guard let keys = try? await client.listSSHKeys(bearer: bearer) else { return }
             // Re-tag each key's comment with our marker + device id, so the
             // reconcile prunes only account keys and never manual ones.
