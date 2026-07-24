@@ -1,3 +1,4 @@
+import MarkdownUI
 import SwiftUI
 
 // MARK: - Transcript model + parser
@@ -607,6 +608,12 @@ struct TranscriptQuestionBatchCard: View {
 struct TranscriptItemView: View {
     let item: TranscriptItem
 
+    #if os(iOS)
+    private static let userTextSize: CGFloat = 16
+    #else
+    private static let userTextSize: CGFloat = 12.5
+    #endif
+
     var body: some View {
         switch item.kind {
         case .userText(let text):
@@ -616,16 +623,14 @@ struct TranscriptItemView: View {
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Text(text)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Self.userTextSize))
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(10)
+            .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 8)
-                .fill(Color.accentColor.opacity(0.10)))
-            .overlay(RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color.accentColor.opacity(0.25)))
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.secondary.opacity(0.12)))
         case .assistantText(let text):
             assistantText(text)
         case .question(let q):
@@ -662,24 +667,23 @@ struct TranscriptItemView: View {
         }
     }
 
-    /// Assistant prose, with markdown when it parses (Claude's answers are
-    /// markdown-heavy — headings, lists, backticks).
+    /// Assistant prose, rendered as full markdown (Claude's answers are
+    /// markdown-heavy — headings, lists, fenced code) with the Claude reading
+    /// look. The old inline-only `AttributedString` couldn't render block
+    /// elements: lists showed their literal markers and code fences ran together.
     @ViewBuilder
     private func assistantText(_ text: String) -> some View {
-        if let attributed = try? AttributedString(
-            markdown: text,
-            options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-            Text(attributed)
-                .font(.system(size: 12.5))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            Text(text)
-                .font(.system(size: 12.5))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+        #if os(iOS)
+        let bodySize: CGFloat = 17     // a reading surface on the phone
+        let serif = true
+        #else
+        let bodySize: CGFloat = 13.5   // a dense dev tool on the Mac
+        let serif = false
+        #endif
+        Markdown(text)
+            .markdownTheme(.claudeReader(bodySize: bodySize, serif: serif))
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func codeBlock(_ text: String) -> some View {
@@ -741,5 +745,81 @@ private struct CollapsibleRow<Content: View>: View {
                     .padding(.leading, 18)
             }
         }
+    }
+}
+
+// MARK: - Claude reading theme
+
+private extension MarkdownUI.Theme {
+    /// Claude-style reading typography for assistant prose: a serif body with
+    /// generous line spacing, monospaced inline code and code fences, and proper
+    /// block rendering (headings, lists, blockquotes) — as close as MarkdownUI
+    /// gets to the look of the Claude app. `bodySize`/`serif` differ by platform:
+    /// the iPhone reader is a reading surface (serif, larger), the Mac transcript
+    /// window a dense dev tool (system font, compact).
+    ///
+    /// Built stepwise (not one long chain) so the type-checker stays fast, and
+    /// qualified as `MarkdownUI.Theme` because the vendored Highlightr also
+    /// declares a `Theme`.
+    static func claudeReader(bodySize: CGFloat, serif: Bool) -> MarkdownUI.Theme {
+        let family: FontProperties.Family = serif ? .system(.serif) : .system(.default)
+        var t = MarkdownUI.Theme()
+        t = t.text {
+            ForegroundColor(.primary)
+            FontFamily(family)
+            FontSize(bodySize)
+        }
+        t = t.code {
+            FontFamilyVariant(.monospaced)
+            FontSize(bodySize * 0.92)
+            BackgroundColor(Color.secondary.opacity(0.12))
+        }
+        t = t.strong { FontWeight(.semibold) }
+        t = t.link { ForegroundColor(.accentColor) }
+        t = t.paragraph { c in
+            c.label
+                .relativeLineSpacing(.em(0.24))
+                .markdownMargin(top: .em(0), bottom: .em(0.85))
+        }
+        t = t.listItem { c in
+            c.label.markdownMargin(top: .em(0.12), bottom: .em(0.12))
+        }
+        t = t.heading1 { c in
+            c.label
+                .markdownMargin(top: .em(0.9), bottom: .em(0.4))
+                .markdownTextStyle { FontFamily(family); FontWeight(.bold); FontSize(bodySize * 1.5) }
+        }
+        t = t.heading2 { c in
+            c.label
+                .markdownMargin(top: .em(0.8), bottom: .em(0.35))
+                .markdownTextStyle { FontFamily(family); FontWeight(.bold); FontSize(bodySize * 1.3) }
+        }
+        t = t.heading3 { c in
+            c.label
+                .markdownMargin(top: .em(0.7), bottom: .em(0.3))
+                .markdownTextStyle { FontFamily(family); FontWeight(.semibold); FontSize(bodySize * 1.12) }
+        }
+        t = t.blockquote { c in
+            c.label
+                .markdownTextStyle { FontStyle(.italic); ForegroundColor(.secondary) }
+                .padding(.leading, 12)
+                .overlay(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(Color.secondary.opacity(0.35))
+                        .frame(width: 3)
+                }
+                .markdownMargin(top: .em(0.3), bottom: .em(0.85))
+        }
+        t = t.codeBlock { c in
+            ScrollView(.horizontal, showsIndicators: false) {
+                c.label
+                    .markdownTextStyle { FontFamilyVariant(.monospaced); FontSize(bodySize * 0.86) }
+                    .padding(12)
+            }
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.secondary.opacity(0.10)))
+            .markdownMargin(top: .em(0.4), bottom: .em(0.85))
+        }
+        return t
     }
 }
