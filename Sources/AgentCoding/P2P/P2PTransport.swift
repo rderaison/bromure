@@ -205,8 +205,14 @@ enum P2PDirectDialer {
     static func dial(candidates: [P2PCandidate],
                      perCandidateTimeout: TimeInterval = 1,
                      overallDeadline: Date) -> Win? {
+        // TCP candidates (every direct path + the RFC 6062 TCP relay) always.
+        // The UDP relay (a RelayARQ byte stream behind a loopback fd) only when
+        // this device has opted into UDP transport — the `p2p.udpRelay.enabled`
+        // toggle, off by default. A bare UDP direct candidate is never produced,
+        // so only the relay can slip through here.
+        let allowUDP = P2PRelayConfig.udpRelayEnabled
         let ordered = Array(candidates
-            .filter { $0.proto == .tcp }
+            .filter { $0.proto == .tcp || (allowUDP && $0.kind == .relay && $0.proto == .udp) }
             .sorted { $0.prio > $1.prio }
             .prefix(maxConcurrent))
         guard !ordered.isEmpty else { return nil }
@@ -230,7 +236,10 @@ enum P2PDirectDialer {
             Thread.detachNewThread {
                 defer { race.finishOne() }
                 guard !race.settled else { return }
-                guard let fd = P2PTCP.connect(ip: c.ip, port: c.port, timeout: budget) else { return }
+                // TCP candidates connect directly; a `.relay/.udp` winner stands
+                // up the UDP relay + ARQ behind a loopback fd. Both yield a plain
+                // fd, so the race treats them identically.
+                guard let fd = P2PDial.connect(c, timeout: budget) else { return }
                 race.offer(Win(candidate: c, fd: fd, path: pathFor(c)))
             }
         }
