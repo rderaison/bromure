@@ -56,6 +56,18 @@ struct ControlClient {
         guard let fd = dial() else { throw ClientError.agentNotRunning }
         defer { Darwin.close(fd) }
 
+        // Bound the response read. A control call is small and answers in well
+        // under a second on a live link; a wedged/half-dead connection (notably
+        // the iOS multiplexed transport, where a backed-up terminal channel can
+        // stall the shared connection) would otherwise block this read FOREVER —
+        // and since polls/sends run on one serial queue, a single hung request
+        // freezes the whole mirror on "Connecting…" with no recovery. On timeout
+        // the read returns -1, the response is incomplete, and this throws — the
+        // poll then fails and the reconnect path takes over. Generous so a slow
+        // but alive response over a WAN relay is never truncated.
+        var rcvTimeout = timeval(tv_sec: 12, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
+
         let bodyData = try body.map { try JSONSerialization.data(withJSONObject: $0) } ?? Data()
         var head = "\(method) \(path) HTTP/1.1\r\n"
         head += "Host: localhost\r\n"
