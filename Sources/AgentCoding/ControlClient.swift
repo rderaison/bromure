@@ -132,6 +132,13 @@ struct ControlClient {
         var out = Data(head.utf8); out.append(bodyData)
         Self.writeAll(fd, out)
 
+        // Bound the HANDSHAKE (response-header read) so a wedged stream connection
+        // doesn't hang a terminal forever on connect ("some terminals don't
+        // connect"). Cleared once the header lands, so an idle terminal — no
+        // output for a while — is never dropped by a read timeout on the live fd.
+        var hsTimeout = timeval(tv_sec: 12, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &hsTimeout, socklen_t(MemoryLayout<timeval>.size))
+
         // Read exactly up to the end of the response header (\r\n\r\n) one byte
         // at a time, so we don't swallow any stream bytes that follow it.
         var header = [UInt8]()
@@ -155,6 +162,10 @@ struct ControlClient {
                 ?? "request failed (HTTP \(status))"
             throw ClientError.transport(msg)
         }
+        // Handshake done — clear the read timeout for the live bidirectional
+        // stream so an idle terminal is never disconnected by it.
+        var noTimeout = timeval(tv_sec: 0, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &noTimeout, socklen_t(MemoryLayout<timeval>.size))
         return fd
     }
 
