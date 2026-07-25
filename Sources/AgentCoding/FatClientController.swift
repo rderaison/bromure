@@ -102,6 +102,15 @@ final class RemoteHostController {
     /// stale poll can't flash the chip back. Cleared per-window once a snapshot
     /// no longer lists it (or a reboot legitimately rebuilds it).
     private var pendingTabDrops: [Profile.ID: Set<Int>] = [:]
+    /// Tabs added optimistically (a "+" tap). The guest appends new windows at
+    /// the highest index + 1 (see `_new_window`), so we can predict the index and
+    /// show the tab at once instead of after a poll. Held here (index → give-up
+    /// deadline) and INJECTED into incoming snapshots in `applyWorkspaces` until
+    /// the server confirms the window — so a stale in-flight poll can't drop the
+    /// placeholder. Cleared when the snapshot lists it, or after the deadline (an
+    /// older server that gap-fills to a different index, so the prediction was
+    /// wrong — drop the placeholder rather than leave a phantom).
+    private var pendingTabAdds: [Profile.ID: [Int: Date]] = [:]
 
     /// The 0.75 s poll timer, held in a non-isolated box so it can be
     /// invalidated when the controller deallocates — a `@MainActor` class can't
@@ -440,6 +449,23 @@ final class RemoteHostController {
                     tabDicts = tabDicts.filter { !stillPending.contains($0["index"] as? Int ?? -1) }
                 }
             }
+            // Honor optimistic tab adds (a "+" tap): keep the predicted window
+            // present until the server confirms it, so a stale in-flight poll
+            // (still N tabs) can't drop the placeholder via applyRemoteTabs' count
+            // reconcile. Clear an add once the snapshot lists it, or after its
+            // deadline (an older server gap-filled to a different index → the
+            // prediction was wrong, so stop injecting and let the placeholder go).
+            if var adds = pendingTabAdds[id], !adds.isEmpty {
+                let present = Set(tabDicts.compactMap { $0["index"] as? Int })
+                let now = Date()
+                for (idx, deadline) in adds where present.contains(idx) || now >= deadline {
+                    adds[idx] = nil
+                }
+                pendingTabAdds[id] = adds.isEmpty ? nil : adds
+                for idx in adds.keys where !present.contains(idx) {
+                    tabDicts.append(["index": idx, "title": "shell"])
+                }
+            }
             applyRemoteTabs(model, tabDicts)
             // An empty roster means tmux isn't up yet (boot), not "all windows
             // closed" — only reconcile surfaces against a populated list.
@@ -714,6 +740,16 @@ final class RemoteHostController {
         send("POST", "/sessions/\(seg(id))/tab", body: ["action": "select", "index": index])
     }
     func newTab(_ id: Profile.ID) {
+        // Optimistic echo: show the new tab (and switch to it) now, so "+" feels
+        // instant instead of waiting a poll + the guest's tmux window creation.
+        // The guest appends at the highest index + 1, so predict that index; the
+        // poll reconciles (applyWorkspaces holds/injects it via pendingTabAdds).
+        if let m = tabsModels[id] {
+            let nextIndex = (m.tabs.map(\.index).max() ?? -1) + 1
+            m.tabs.append(TabsModel.Tab(label: "shell", index: nextIndex))
+            m.activeIndex = m.tabs.count - 1
+            pendingTabAdds[id, default: [:]][nextIndex] = Date().addingTimeInterval(4)
+        }
         send("POST", "/sessions/\(seg(id))/tab", body: ["action": "new"])
     }
     func closeTab(_ id: Profile.ID, index: Int) {
