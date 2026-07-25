@@ -472,29 +472,17 @@ final class ACAutomationServer {
         // carry no secrets but they are the fat client's whole state feed.
         // One-shot combined snapshot (the poll workhorse): workspaces + running
         // VMs + grid layout + automations in a single round trip.
+        // Push channel: hold the connection open and stream framed, gzipped
+        // snapshots whenever the state changes (see handleStateSubscribe). A
+        // client that sees `supportsPush` in /state uses this and drops its poll
+        // to a slow heartbeat; older clients keep polling /state.
+        case ("GET", "/state/subscribe"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            handleStateSubscribe(fd: fd)
+
         case ("GET", "/state"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
-            var snapshot: [String: Any] = DispatchQueue.main.sync {
-                [
-                    "version": FatClient.protocolVersion,
-                    "workspaces": self.onListWorkspaces?() ?? [],
-                    "vms": self.onListVMs?() ?? [],
-                    "gridLayout": self.onGetGridLayout?() ?? ["cells": []],
-                    "automations": self.onListAutomations?() ?? ["automations": [], "runs": []],
-                    "tasks": self.onListTasks?() ?? ["tasks": []],
-                    // Decision prompts awaiting a remote answer (storage
-                    // upgrade, drift reset, …) — the fat client renders these
-                    // as local alerts and answers via POST /prompts/{id}/answer.
-                    "pendingPrompts": self.onListPendingPrompts?() ?? [],
-                ]
-            }
-            // The workspace VM subnet, so a fat client can route/tunnel to it
-            // (Phase 4). nil until the first VM boots the vmnet interface.
-            if let subnet = SandboxEngine.VMNetSwitch.shared.subnet {
-                snapshot["vmnetSubnet"] = subnet.cidrString
-                snapshot["vmnetGateway"] = subnet.startAddressString
-            }
-            sendResponse(fd: fd, status: 200, body: snapshot)
+            sendResponse(fd: fd, status: 200, body: buildStateSnapshot())
 
         case ("GET", "/workspaces"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
@@ -1632,6 +1620,89 @@ final class ACAutomationServer {
             return .protocolFailure
         }
         return .success(obj)
+    }
+
+    // MARK: - Fat-client state snapshot + push
+
+    /// The combined fat-client snapshot — workspaces + running VMs + grid +
+    /// automations + tasks + prompts. Shared by GET /state and the push loop.
+    /// `supportsPush` tells a new client it can subscribe (see /state/subscribe)
+    /// instead of polling; older clients ignore it and keep polling.
+    private func buildStateSnapshot() -> [String: Any] {
+        var snapshot: [String: Any] = DispatchQueue.main.sync {
+            [
+                "version": FatClient.protocolVersion,
+                "supportsPush": true,
+                "workspaces": self.onListWorkspaces?() ?? [],
+                "vms": self.onListVMs?() ?? [],
+                "gridLayout": self.onGetGridLayout?() ?? ["cells": []],
+                "automations": self.onListAutomations?() ?? ["automations": [], "runs": []],
+                "tasks": self.onListTasks?() ?? ["tasks": []],
+                "pendingPrompts": self.onListPendingPrompts?() ?? [],
+            ]
+        }
+        // The workspace VM subnet, so a fat client can route/tunnel to it. nil
+        // until the first VM boots the vmnet interface.
+        if let subnet = SandboxEngine.VMNetSwitch.shared.subnet {
+            snapshot["vmnetSubnet"] = subnet.cidrString
+            snapshot["vmnetGateway"] = subnet.startAddressString
+        }
+        return snapshot
+    }
+
+    /// Write a 200 header, then PUSH framed snapshots whenever the state changes.
+    /// Frame: [len:u32be][flag:u8][payload] where flag 1 = zlib-compressed and
+    /// len covers flag+payload. Wakes every 500ms (≈ the old poll cadence, so no
+    /// extra server load), builds the snapshot, and only writes when it changed —
+    /// so an idle workspace sends nothing — plus a ~15s keepalive re-push for
+    /// liveness/self-heal. Runs on the caller's global-queue worker until the
+    /// client disconnects. Idle clients that never subscribe still poll /state.
+    private func handleStateSubscribe(fd: Int32) {
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
+        guard Self.writeAllStreaming(fd, Data(header.utf8)) else { Darwin.close(fd); return }
+        var lastSent = Data()
+        var lastSentAt = Date.distantPast
+        while true {
+            let snapshot = buildStateSnapshot()
+            let json = (try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data()
+            let now = Date()
+            if json != lastSent || now.timeIntervalSince(lastSentAt) > 15 {
+                lastSent = json
+                lastSentAt = now
+                var payload = json
+                var flag: UInt8 = 0
+                if let z = try? (json as NSData).compressed(using: .zlib) as Data, z.count < json.count {
+                    payload = z; flag = 1
+                }
+                var lenBE = UInt32(payload.count + 1).bigEndian
+                var frame = Data(bytes: &lenBE, count: 4)
+                frame.append(flag)
+                frame.append(payload)
+                guard Self.writeAllStreaming(fd, frame) else { break }
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        Darwin.close(fd)
+    }
+
+    /// Write-all that reports success, so a streaming loop stops when the peer
+    /// goes away. Blocks (bounded) on EAGAIN rather than dropping bytes.
+    private static func writeAllStreaming(_ fd: Int32, _ data: Data) -> Bool {
+        var ok = true
+        data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+            guard var base = ptr.baseAddress else { return }
+            var remaining = ptr.count
+            while remaining > 0 {
+                let n = Darwin.write(fd, base, remaining)
+                if n > 0 { base += n; remaining -= n }
+                else if n < 0 && errno == EINTR { continue }
+                else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                    if poll(&pfd, 1, 5000) <= 0 { ok = false; return }   // 5s unwritable → peer gone
+                } else { ok = false; return }   // hard error / peer hung up
+            }
+        }
+        return ok
     }
 
     // MARK: - Response helpers

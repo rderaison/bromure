@@ -21,7 +21,10 @@ import SwiftUI
 /// ever assigned on the main thread (start/stop), so there's no real races.
 private final class PollTimerBox {
     var timer: Timer?
-    deinit { timer?.invalidate() }
+    // Held here too so a controller that deallocs WITHOUT stop() (the iOS
+    // "popped mirror reclaims its timer" path) also tears down the push stream.
+    var stateStream: StateStream?
+    deinit { timer?.invalidate(); stateStream?.stop() }
 }
 
 @MainActor
@@ -120,6 +123,13 @@ final class RemoteHostController {
     private let pollTimerBox = PollTimerBox()
     private let pollQueue = DispatchQueue(label: "io.bromure.fatclient.poll")
     private var polling = false
+    /// Push subscription (GET /state/subscribe), held in pollTimerBox so it's torn
+    /// down on dealloc. Started when a snapshot advertises `supportsPush`; while
+    /// it's live the poll drops to a slow heartbeat. nil on an older server.
+    private var stateStream: StateStream? {
+        get { pollTimerBox.stateStream }
+        set { pollTimerBox.stateStream = newValue }
+    }
     /// Observes .bromureP2PPathChanged (a network switch) to re-poll at once.
     private var pathObserver: NSObjectProtocol?
     /// Consecutive failed polls on a PEER host. The broker caches the winning
@@ -218,6 +228,8 @@ final class RemoteHostController {
 
     func stop() {
         Self.liveHosts[host.id] = nil
+        stateStream?.stop()
+        stateStream = nil
         pollTimerBox.timer?.invalidate()
         pollTimerBox.timer = nil
 #if os(macOS)
@@ -242,6 +254,49 @@ final class RemoteHostController {
     /// Refresh immediately instead of waiting up to a poll interval — used when
     /// the app returns to the foreground so the mirror catches up at once.
     func foregroundKick() { pollOnce() }
+
+    // MARK: - Push subscription
+
+    /// Rebuild the poll timer at a new interval (fast poll ↔ slow heartbeat).
+    private func setPollInterval(_ seconds: TimeInterval) {
+        pollTimerBox.timer?.invalidate()
+        let t = Timer(timeInterval: seconds, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pollOnce() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        pollTimerBox.timer = t
+    }
+
+    /// Called on main by StateStream when the push channel connects/drops. While
+    /// connected, the mirror updates on push, so the poll drops to a 5s heartbeat;
+    /// on a drop, resume fast polling and re-poll now until we re-subscribe.
+    func setPushActive(_ active: Bool) {
+        guard pollTimerBox.timer != nil else { return }   // only after start()
+        FatClientLog.log("push: \(active ? "connected — poll → 5s heartbeat" : "dropped — poll → 0.75s")")
+        setPollInterval(active ? 5.0 : 0.75)
+        if !active { pollOnce() }
+    }
+
+    /// Called on main by StateStream for each pushed snapshot — treated like a
+    /// successful poll (mark connected, then apply through the same path so the
+    /// degenerate guard etc. still apply).
+    func applyPushedSnapshot(_ snapshot: [String: Any]) {
+        if !connected { FatClientLog.log("push: first snapshot") }
+        connected = true
+        lastError = nil
+        peerFailStreak = 0
+        apply(snapshot)
+    }
+
+    /// Upgrade from polling to push once a snapshot advertises `supportsPush`.
+    private func startPushSubscription() {
+        guard stateStream == nil else { return }
+        let s = StateStream(host: host)
+        s.controller = self
+        stateStream = s
+        s.start()
+        FatClientLog.log("push: subscribing (server advertised supportsPush)")
+    }
 
     private func pollOnce() {
         if polling { return }   // don't stack requests if the link is slow
@@ -350,6 +405,8 @@ final class RemoteHostController {
             FatClientLog.log("apply: \(workspaces.count) workspaces, \(vms.count) running, "
                 + "\(gridStore.cells.count) grid cells, \(automationStore.automations.count) automations")
         }
+        // Upgrade to push once we learn the server supports it (idempotent).
+        if snapshot["supportsPush"] as? Bool == true { startPushSubscription() }
     }
 
     private func applyWorkspaces(_ workspaces: [[String: Any]], vms: [[String: Any]]) {
@@ -3379,3 +3436,107 @@ final class RemoteHostWindow: NSWindow {
     }
 }
 #endif
+
+// MARK: - Push subscription stream
+
+/// Subscribes to the server's push channel (GET /state/subscribe) and hands each
+/// framed snapshot to its controller, so the mirror updates on change instead of
+/// polling. Wire frame matches the server: [len:u32be][flag:u8][payload], flag
+/// 1 = zlib-compressed, len covers flag+payload. Runs a reconnect loop with
+/// backoff; if the server has no push endpoint (openStream fails / non-200) it
+/// just retries slowly while the controller keeps fast-polling as the fallback.
+final class StateStream: @unchecked Sendable {
+    private let host: RemoteHost
+    weak var controller: RemoteHostController?
+    private let lock = NSLock()
+    private var stopped = false
+    private var running = false
+    private var currentFD: Int32 = -1
+
+    init(host: RemoteHost) { self.host = host }
+
+    func start() {
+        lock.lock()
+        if running || stopped { lock.unlock(); return }
+        running = true
+        lock.unlock()
+        let host = self.host
+        let t = Thread { [weak self] in self?.loop(host: host) }
+        t.stackSize = 1 << 20
+        t.start()
+    }
+
+    func stop() {
+        lock.lock(); stopped = true; let fd = currentFD; currentFD = -1; lock.unlock()
+        if fd >= 0 { Darwin.shutdown(fd, SHUT_RDWR); Darwin.close(fd) }   // wake a blocked read
+    }
+
+    private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+
+    private func loop(host: RemoteHost) {
+        var backoff: TimeInterval = 1
+        while !isStopped {
+            let connected = runOnce(host: host)
+            if isStopped { break }
+            backoff = connected ? 1 : min(backoff * 2, 30)
+            Thread.sleep(forTimeInterval: backoff)
+        }
+        deliverActive(false)
+        lock.lock(); running = false; lock.unlock()
+    }
+
+    /// One subscribe session. Returns true once it connected (streamed the
+    /// header), false if the open failed (an older server with no push endpoint).
+    private func runOnce(host: RemoteHost) -> Bool {
+        // A long-lived read stream, like a terminal: interactive lane so it rides
+        // a stream-appropriate connection (dedicated on macOS; the term lane on
+        // iOS) instead of the short-request control path.
+        let client = RemoteTransport.client(for: host, interactive: true)
+        let fd: Int32
+        do { fd = try client.openStream("GET", "/state/subscribe", body: [:]) }
+        catch { return false }
+        lock.lock(); currentFD = fd; lock.unlock()
+        // Close via currentFD so stop() and this defer never double-close (stop()
+        // clears it after closing; then this defer sees -1 and skips).
+        defer {
+            lock.lock(); let f = currentFD; currentFD = -1; lock.unlock()
+            if f >= 0 { Darwin.shutdown(f, SHUT_RDWR); Darwin.close(f) }
+        }
+        deliverActive(true)
+
+        var buf = [UInt8](); buf.reserveCapacity(1 << 17)
+        var rbuf = [UInt8](repeating: 0, count: 1 << 16)
+        while !isStopped {
+            let n = rbuf.withUnsafeMutableBufferPointer { Darwin.read(fd, $0.baseAddress!, $0.count) }
+            if n <= 0 { break }
+            buf.append(contentsOf: rbuf[0..<n])
+            while buf.count >= 4 {
+                let len = (Int(buf[0]) << 24) | (Int(buf[1]) << 16) | (Int(buf[2]) << 8) | Int(buf[3])
+                if len < 1 || len > 32 * 1024 * 1024 { return true }   // bogus frame → drop + reconnect
+                if buf.count < 4 + len { break }
+                let flag = buf[4]
+                var data = Data(buf[5 ..< 4 + len])
+                buf.removeFirst(4 + len)
+                if flag == 1, let inflated = try? (data as NSData).decompressed(using: .zlib) {
+                    data = inflated as Data
+                }
+                if let snap = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                    deliverSnapshot(snap)
+                }
+            }
+        }
+        deliverActive(false)
+        return true
+    }
+
+    private func deliverSnapshot(_ snap: [String: Any]) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.controller?.applyPushedSnapshot(snap) }
+        }
+    }
+    private func deliverActive(_ active: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.controller?.setPushActive(active) }
+        }
+    }
+}
