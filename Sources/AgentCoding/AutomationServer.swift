@@ -298,7 +298,14 @@ final class ACAutomationServer {
         let clientFD = Darwin.accept(serverSocket, nil, nil)
         guard clientFD >= 0 else { return }
 
-        var linger = Darwin.linger(l_onoff: 1, l_linger: 2)
+        // Graceful close (SO_LINGER OFF). The previous SO_LINGER(on, 2s) RST the
+        // socket 2s after close(), discarding anything the peer hadn't read — so
+        // a large response (the fat-client /state is 100+ KB) that took >2s to
+        // drain over the phone's P2P/SSH path arrived TRUNCATED, which the client
+        // parsed as an empty snapshot (keys=[]) and skipped, making the mirror
+        // feel stuck on a timer. A graceful close lets the kernel deliver the
+        // whole body then FIN, no matter how slow the link.
+        var linger = Darwin.linger(l_onoff: 0, l_linger: 0)
         setsockopt(clientFD, SOL_SOCKET, SO_LINGER, &linger, socklen_t(MemoryLayout<Darwin.linger>.size))
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in

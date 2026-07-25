@@ -232,15 +232,15 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
         // the openStream handshake.
         FatClientLog.log("term win=\(window) pump start — resolving peer")
         let client = RemoteTransport.client(for: host, interactive: true)
-        // Resolve the VM by id like the macOS attachLoop: a booting workspace
-        // isn't in /vms yet, so best-effort match and fall back to the raw id.
-        FatClientLog.log("term win=\(window) peer resolved — GET /vms")
-        var resolvedVM = vmID
-        if let vms = (try? client.request("GET", "/vms"))?.json["vms"] as? [[String: Any]],
-           let match = vms.first(where: { ($0["id"] as? String) == vmID }) {
-            resolvedVM = (match["id"] as? String) ?? vmID
-        }
-        FatClientLog.log("term win=\(window) GET /vms done — opening stream")
+        // Open the stream to the VM id directly. The old best-effort GET /vms
+        // "resolve" always came back to this same id (the VM id IS the workspace
+        // id), but it fetched the entire (100+ KB) VM list — and on the shared
+        // term connection, already carrying another terminal's live stream, that
+        // request stalled the full 12s SO_RCVTIMEO, delaying the FIRST terminal's
+        // text by ~12s on-device. If the VM isn't booted yet the exec just fails
+        // and reattaches, exactly as the old fallback path did.
+        let resolvedVM = vmID
+        FatClientLog.log("term win=\(window) peer resolved — opening stream")
         let body: [String: Any] = ["command": "", "interactive": true,
                                    "cols": cols, "rows": rows,
                                    "view": UUID().uuidString, "window": window,
