@@ -136,7 +136,8 @@ final class RemoteAuthDelegateFactory: @unchecked Sendable {
     private let username: String
     private let allowPassword: Bool
     private let allowPubkey: Bool
-    private let authorizedKeys: Set<NIOSSHPublicKey>
+    private let lock = NSLock()
+    private var authorizedKeys: Set<NIOSSHPublicKey>
     private let throttle: RemoteAuthThrottle
 
     init(username: String, allowPassword: Bool, allowPubkey: Bool,
@@ -148,10 +149,20 @@ final class RemoteAuthDelegateFactory: @unchecked Sendable {
         self.throttle = throttle
     }
 
+    /// Hot-swap the enrolled key set on the LIVE listener — no restart, so a key
+    /// sync (e.g. a peer device publishing its key the moment it connects) never
+    /// drops live SSH sessions. New connections authenticate against the updated
+    /// set; connections already past auth are untouched. Called off the event
+    /// loop (the key-sync path); `make` reads it on the loop — hence the lock.
+    func updateAuthorizedKeys(_ keys: Set<NIOSSHPublicKey>) {
+        lock.lock(); authorizedKeys = keys; lock.unlock()
+    }
+
     func make(peerIP: String) -> RemoteAuthDelegate {
-        RemoteAuthDelegate(username: username, allowPassword: allowPassword,
-                           allowPubkey: allowPubkey, authorizedKeys: authorizedKeys,
-                           throttle: throttle, peerIP: peerIP)
+        lock.lock(); let keys = authorizedKeys; lock.unlock()
+        return RemoteAuthDelegate(username: username, allowPassword: allowPassword,
+                                  allowPubkey: allowPubkey, authorizedKeys: keys,
+                                  throttle: throttle, peerIP: peerIP)
     }
 }
 

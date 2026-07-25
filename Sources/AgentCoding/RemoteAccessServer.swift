@@ -58,6 +58,10 @@ final class RemoteAccessServer {
     private var channel: Channel?
     private var current: Config?
     private var running = false
+    /// The live auth delegate factory, kept so authorized-key changes can be
+    /// hot-swapped into the RUNNING listener (see `reloadAuthorizedKeys`) instead
+    /// of restarting it — a restart drops every live SSH session. nil when stopped.
+    private var authFactory: RemoteAuthDelegateFactory?
 
     /// Resolves a fat-client `forward <ip> <port>` to a connected fd bridged to
     /// the guest's loopback-relay (vsock 5010) over VZ — the reliable host→guest
@@ -129,6 +133,7 @@ final class RemoteAccessServer {
             allowPubkey: config.pubkeyAuth,
             authorizedKeys: authorized,
             throttle: throttle)
+        self.authFactory = authFactory   // for hot-reloading keys without a restart
 
         // NOTE: swift-nio-ssh (0.13.0, latest) offers no post-quantum key
         // exchange — only curve25519-sha256 and ecdh-sha2-nistp*, and the KEX
@@ -225,6 +230,7 @@ final class RemoteAccessServer {
         if let ch = channel { try? ch.close().wait(); channel = nil }
         if let g = group { try? g.syncShutdownGracefully(); group = nil }
         current = nil
+        authFactory = nil
     }
 
     // MARK: Host key
@@ -369,10 +375,19 @@ final class RemoteAccessServer {
         line.split(separator: " ").prefix(2).joined(separator: " ")
     }
 
-    /// Authorized keys are read at start; restart to pick up edits while live.
+    /// Apply an authorized_keys change to the RUNNING listener WITHOUT restarting
+    /// it. A restart (stop + re-bind) drops every live SSH session — and a key
+    /// sync fires exactly when a peer connects (the peer publishes its key, the
+    /// control plane broadcasts `keys-changed`, this server re-pulls the set), so
+    /// restarting on a key change tore the connecting client's own session down
+    /// mid-session ("stuck loading workspaces", broken-pipe writes, relay churn).
+    /// The auth delegate reads the key set per connection, so hot-swapping the set
+    /// is sufficient: new connections see the update; live ones (already past
+    /// auth) are undisturbed. Structural config changes (port, auth methods) still
+    /// go through `start()` from `remoteAccessApply`.
     private func reloadIfRunning() {
         guard running, let cfg = current else { return }
-        try? start(cfg)
+        authFactory?.updateAuthorizedKeys(cfg.pubkeyAuth ? loadAuthorizedNIOKeys() : [])
     }
 
     // MARK: Filesystem
