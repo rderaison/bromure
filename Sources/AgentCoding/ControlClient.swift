@@ -94,6 +94,13 @@ struct ControlClient {
         let status = firstLine.split(separator: " ").dropFirst().first.flatMap { Int($0) } ?? 0
         let json = (try? JSONSerialization.jsonObject(
             with: Data(str[sep.upperBound...].utf8)) as? [String: Any]) ?? [:]
+        // Diagnose a 200 with an empty/unparseable body (the `keys=[]` degenerate
+        // snapshot). total≈header-size ⇒ the body never arrived (RST right after
+        // the header); total>header ⇒ a partial/truncated body. Either way points
+        // at a transport truncation, not a server serialization failure.
+        if status == 200 && json.isEmpty {
+            FatClientLog.log("request \(method) \(path): 200 but empty JSON — total=\(resp.count)B")
+        }
         return Response(status: status, json: json)
     }
 

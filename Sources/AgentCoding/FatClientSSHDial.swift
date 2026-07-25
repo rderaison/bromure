@@ -191,9 +191,13 @@ final class SSHDialer: @unchecked Sendable {
         connections[key] = nil
         lock.unlock()
 
+        // Timing: a "building" with no matching "built" (or a 12s gap) pinpoints
+        // a slow first-terminal open to the SSH connection build.
+        FatClientLog.log("nio-dial: building \(host.connectLabel) lane=\(lane.isEmpty ? "ctrl" : lane)")
         let conn = try SSHConnection(host: host, group: group, strictHostKey: strict,
                                      knownHosts: knownHostsURL.map(KnownHostsStore.init),
                                      clientKey: loadClientKey?())
+        FatClientLog.log("nio-dial: built \(host.connectLabel) lane=\(lane.isEmpty ? "ctrl" : lane)")
         lock.lock()
         connections[key] = conn
         lock.unlock()
@@ -342,6 +346,7 @@ final class SSHConnection: @unchecked Sendable {
         } catch {
             throw SSHDialError.unreachable(Self.firstLine("\(error)"))
         }
+        FatClientLog.log("nio-conn: tcp up \(host.connectLabel) — handshaking")
 
         // The NIOSSH handshake+auth completes asynchronously after connect.
         // Prove the session end-to-end by opening (and immediately closing) a
@@ -371,6 +376,7 @@ final class SSHConnection: @unchecked Sendable {
             }
             let child = try probe.futureResult.wait()
             timeout.cancel()
+            FatClientLog.log("nio-conn: handshake+auth OK \(host.connectLabel)")
             child.close(promise: nil)
         } catch {
             let flagged = outcome.get()

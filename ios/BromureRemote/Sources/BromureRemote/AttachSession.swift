@@ -226,14 +226,21 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
 
     /// Runs off the main actor: open the stream, then read frames until EOF/exit.
     private func pumpLoop(host: RemoteHost, vmID: String, window: Int, cols: Int, rows: Int) {
+        // Timing brackets: the gaps between these lines in the on-device log show
+        // where a slow terminal open is spent — peer resolve (P2P endpoint), the
+        // GET /vms (which builds the term-lane SSH connection on first use), or
+        // the openStream handshake.
+        FatClientLog.log("term win=\(window) pump start — resolving peer")
         let client = RemoteTransport.client(for: host, interactive: true)
         // Resolve the VM by id like the macOS attachLoop: a booting workspace
         // isn't in /vms yet, so best-effort match and fall back to the raw id.
+        FatClientLog.log("term win=\(window) peer resolved — GET /vms")
         var resolvedVM = vmID
         if let vms = (try? client.request("GET", "/vms"))?.json["vms"] as? [[String: Any]],
            let match = vms.first(where: { ($0["id"] as? String) == vmID }) {
             resolvedVM = (match["id"] as? String) ?? vmID
         }
+        FatClientLog.log("term win=\(window) GET /vms done — opening stream")
         let body: [String: Any] = ["command": "", "interactive": true,
                                    "cols": cols, "rows": rows,
                                    "view": UUID().uuidString, "window": window,
