@@ -998,6 +998,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             gridView = v
         }
         gridSlot.isHidden = false
+        // The grid takes the whole stage. The right file pane is auto-shown from
+        // the SELECTED TERMINAL's directory (onAutoSetOpen) — in grid mode there's
+        // no such terminal, so it just lingers empty over the grid. Hide it while
+        // the grid is up; `filePaneOpen` (the logical/persisted state) is left
+        // untouched so hideGrid restores it.
+        filePaneHost.isHidden = true
+        filePaneResizeHandle?.isHidden = true
         gridView?.reconcile()
     }
 
@@ -1007,6 +1014,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         listModel.gridSelected = false
         gridSlot.isHidden = true
         gridView?.retireAll()
+        // Back to a terminal on the stage: restore the file pane to its logical
+        // open/closed state (grid hid it unconditionally above).
+        filePaneHost.isHidden = !filePaneOpen
+        filePaneResizeHandle?.isHidden = !filePaneOpen
     }
 
     /// Grid cell "open in workspace": leave the grid on that terminal's tab.
