@@ -1361,6 +1361,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                               pinnedCA: pinnedCA)
             try upstreamTLS.handshake()
         } catch {
+            FileHandle.standardError.write(Data(
+                "[mitm] WS \(host): upstream TLS handshake FAILED: \(error)\n".utf8))
             close(upstreamFD)
             throw error
         }
@@ -2262,26 +2264,55 @@ private func connectTCP(host: String, port: Int) throws -> Int32 {
     }
     defer { freeaddrinfo(res) }
 
-    var lastErrno: Int32 = 0
+    // Happy-Eyeballs-lite: start a NON-BLOCKING connect to every resolved
+    // address at once and take the first that completes. A sequential BLOCKING
+    // connect() with no timeout hung the WebSocket-upgrade path forever when a
+    // host (chatgpt.com/Cloudflare) returned an IPv6 (AAAA) address this machine
+    // can't route — connect() to the dead v6 never returns. URLSession's HTTP
+    // path never hit it because URLSession already races the address families.
+    var fds: [Int32] = []
+    var savedFlags: [Int32: Int32] = [:]
     var cursor = res
     while let info = cursor {
-        let fd = socket(info.pointee.ai_family,
-                        info.pointee.ai_socktype,
-                        info.pointee.ai_protocol)
-        if fd < 0 {
-            lastErrno = errno
-            cursor = info.pointee.ai_next
-            continue
-        }
+        cursor = info.pointee.ai_next
+        let fd = socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+        if fd < 0 { continue }
+        let flags = fcntl(fd, F_GETFL, 0)
+        savedFlags[fd] = flags
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
         if connect(fd, info.pointee.ai_addr, info.pointee.ai_addrlen) == 0 {
+            _ = fcntl(fd, F_SETFL, flags)   // restore blocking; the rest of the path expects it
+            fds.forEach { close($0) }
             return fd
         }
-        lastErrno = errno
-        close(fd)
-        cursor = info.pointee.ai_next
+        if errno == EINPROGRESS { fds.append(fd) } else { close(fd) }
     }
-    let msg = String(cString: strerror(lastErrno))
-    throw MitmError.upstreamFailed("connect(\(host):\(port)): \(msg)")
+    guard !fds.isEmpty else {
+        throw MitmError.upstreamFailed("connect(\(host):\(port)): no reachable address")
+    }
+
+    let start = Date()
+    while Date().timeIntervalSince(start) < 10 {
+        var pfds = fds.map { pollfd(fd: $0, events: Int16(POLLOUT), revents: 0) }
+        let pr = poll(&pfds, UInt32(pfds.count), 1000)
+        if pr < 0 { if errno == EINTR { continue }; break }
+        for p in pfds where (p.revents & Int16(POLLOUT | POLLERR | POLLHUP | POLLNVAL)) != 0 {
+            var soErr: Int32 = 0
+            var len = socklen_t(MemoryLayout<Int32>.size)
+            getsockopt(p.fd, SOL_SOCKET, SO_ERROR, &soErr, &len)
+            if soErr == 0 {
+                _ = fcntl(p.fd, F_SETFL, savedFlags[p.fd] ?? 0)   // restore blocking
+                fds.removeAll { $0 == p.fd }
+                fds.forEach { close($0) }   // drop the losers
+                return p.fd
+            }
+            close(p.fd)
+            fds.removeAll { $0 == p.fd }
+        }
+        if fds.isEmpty { break }
+    }
+    fds.forEach { close($0) }
+    throw MitmError.upstreamFailed("connect(\(host):\(port)): timed out / all addresses failed")
 }
 
 private func writeAll(fd: Int32, bytes: [UInt8]) throws {
