@@ -1485,8 +1485,18 @@ def _has_session():
 def _new_window(command=None, cwd=None, env=None, background=False):
     """tmux new-window -P -F '#{window_id}' … → window id ('' on failure).
     background=True adds -d so the new window doesn't become the active tab
-    (for windows the daemon opens on its own, not on a user action)."""
-    args = ["tmux", "new-window", "-P", "-F", "#{window_id}", "-t", TMUX_S]
+    (for windows the daemon opens on its own, not on a user action).
+
+    Always APPEND at the end (`-a -t {end}`): a plain `-t <session>` new-window
+    fills the lowest free index, so after a close it REUSES a freed low index and
+    lands in front. The mirror keys its per-window state (terminal surface, and
+    the reader's transcript cache) by the tmux window index, so a reused index
+    made the new window inherit the previous occupant's rich-mode content and
+    agent status. Appending past the highest index keeps every existing window's
+    index (identity) stable and hands the new window a fresh, never-cached index.
+    It also puts the new terminal at the back, which is where users expect it."""
+    args = ["tmux", "new-window", "-a", "-P", "-F", "#{window_id}",
+            "-t", "%s:{end}" % TMUX_S]
     if background:
         args.append("-d")
     if cwd:

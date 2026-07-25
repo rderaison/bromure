@@ -570,6 +570,14 @@ private struct TerminalsPane: View {
             for w in mounted where !live.contains(w) {
                 store.map[w]?.stop()
                 store.map[w] = nil
+                // Drop this index's reader/transcript caches too. tmux indices are
+                // reused (closing the last tab frees the highest index, which the
+                // next new-window takes), and these caches are index-keyed — a
+                // reused index must not inherit the previous occupant's rich-mode
+                // transcript or auto-reader state.
+                transcripts.items[w] = nil
+                transcripts.everLoaded.remove(w)
+                transcriptPresent.remove(w)
             }
             mounted.removeAll { !live.contains($0) }
             // Re-arm any surface that ended on a CLEAN exit but whose window is
