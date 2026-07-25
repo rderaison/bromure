@@ -403,12 +403,13 @@ private struct TerminalsPane: View {
                     // teardown: the stream stays up and the scrollback is
                     // already painted when you come back.
                     //
-                    // Keyboard handling is on THIS container only — the terminal
-                    // opts out of SwiftUI's automatic avoidance and insets by the
-                    // measured overlap instead (default avoidance left the last
-                    // rows under the keyboard in landscape). The reader is a
-                    // sibling below, deliberately OUTSIDE this, so it keeps the
-                    // normal avoidance its text field needs.
+                    // The terminal opts out of SwiftUI's automatic avoidance and
+                    // insets by the measured overlap instead (default avoidance
+                    // left the last rows under the keyboard in landscape). Note the
+                    // .ignoresSafeArea(.keyboard) is on the ZStack OUTSIDE the
+                    // GeometryReader, so geo.frame stays anchored to the screen
+                    // bottom. The reader (sibling below) uses the same pattern with
+                    // its own ignoresSafeArea wrapper.
                     ZStack {
                         ForEach(mounted, id: \.self) { w in
                             let active = w == win && !readerMode && isVisible
@@ -430,6 +431,12 @@ private struct TerminalsPane: View {
                         // The composer is inset by the MEASURED keyboard overlap
                         // (incl. the QuickType predictive bar) — same as the
                         // terminal — so its send/attach row never hides behind it.
+                        // .ignoresSafeArea(.keyboard) MUST wrap the GeometryReader
+                        // (not just the inner VStack): on iOS 26 a GeometryReader
+                        // outside it is itself avoided to the keyboard top, so
+                        // geo.frame.maxY collapses to the keyboard's minY and the
+                        // measured overlap goes to 0 (composer ends up behind the
+                        // keyboard). Wrapping here keeps geo at the screen bottom.
                         GeometryReader { geo in
                             TranscriptReaderView(controller: controller, profileID: profileID,
                                                  window: win, guestCwd: guestCwd(for: win),
@@ -437,6 +444,7 @@ private struct TerminalsPane: View {
                                                  bottomInset: keyboardOverlap(with: geo.frame(in: .global)))
                         }
                         .id("reader-\(profileID)-\(win)")
+                        .ignoresSafeArea(.keyboard, edges: .bottom)
                     }
                 }
             } else {
@@ -448,7 +456,6 @@ private struct TerminalsPane: View {
             for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             keyboardFrame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
                              as? NSValue)?.cgRectValue ?? .zero
-            FatClientLog.log("kbd willChangeFrame end=\(keyboardFrame)")
         }
         .onReceive(NotificationCenter.default.publisher(
             for: UIResponder.keyboardWillHideNotification)) { _ in
@@ -598,17 +605,14 @@ private struct TerminalsPane: View {
     /// undocked/floating iPad keyboard therefore costs the terminal nothing.
     private func keyboardOverlap(with container: CGRect) -> CGFloat {
         guard keyboardFrame.height > 0 else { return 0 }
-        // Measure against the real SCREEN bottom, not `container.maxY`. On iOS 26
-        // geo.frame(in:.global).maxY is reported at the keyboard-AVOIDED position
-        // (the device capture showed container.maxY == kbd.minY == 530), so
-        // `container.maxY - kbd.minY` collapsed to 0 and the keyboard covered the
-        // composer. The reader and terminal both extend to the screen bottom via
-        // .ignoresSafeArea(.keyboard), so the true overlap is screenBottom minus
-        // the keyboard top — and 0 when the keyboard is docked off-screen (its
-        // down frame's minY equals the screen height). `container` is no longer
-        // needed but kept so the GeometryReader call sites stay unchanged.
-        _ = container
-        return max(0, UIScreen.main.bounds.height - keyboardFrame.minY)
+        // How much the keyboard covers the container's bottom. This ONLY works if
+        // `container` (geo.frame(in:.global)) reaches the real screen bottom — i.e.
+        // the GeometryReader must sit INSIDE .ignoresSafeArea(.keyboard). On iOS 26,
+        // a GeometryReader that is NOT inside ignoresSafeArea is itself avoided up
+        // to the keyboard top, so container.maxY == kbd.minY and this collapses to
+        // 0. Both call sites wrap their GeometryReader in .ignoresSafeArea(.keyboard)
+        // so container.maxY is the screen bottom and this is the keyboard height.
+        return max(0, container.maxY - keyboardFrame.minY)
     }
 
     private func session(for window: Int) -> AttachSession {
@@ -715,14 +719,15 @@ private struct TranscriptReaderView: View {
         // is inset up by the measured keyboard overlap. We opt out of SwiftUI's
         // automatic keyboard avoidance (which omitted the QuickType predictive
         // bar, leaving the send/attach row behind it) and inset explicitly —
-        // exactly how the terminal surface handles the keyboard.
+        // exactly how the terminal surface handles the keyboard. The matching
+        // .ignoresSafeArea(.keyboard) lives on the GeometryReader at the call site
+        // (it must wrap the geo, or on iOS 26 the measured overlap collapses to 0).
         VStack(spacing: 0) {
             transcript
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             composerBar
         }
         .padding(.bottom, bottomInset)
-        .ignoresSafeArea(.keyboard, edges: .bottom)
         .onAppear {
             // Show the cached conversation instantly; the poll refreshes it.
             if items.isEmpty { items = store.items[window] ?? [] }
@@ -862,6 +867,10 @@ private struct TranscriptReaderView: View {
                 .onAppear { scrollToBottom(proxy, animated: false) }
                 // …and follow the live tail as new turns arrive.
                 .onChange(of: items.count) { _, _ in scrollToBottom(proxy, animated: true) }
+                // …and when the keyboard shows/hides: the transcript area shrinks
+                // by the keyboard height (bottomInset), which would otherwise clip
+                // the last line behind the composer — re-anchor to the tail.
+                .onChange(of: bottomInset) { _, _ in scrollToBottom(proxy, animated: true) }
             }
             .background(Color.platformWindowBackground)
         }
@@ -1004,17 +1013,28 @@ private struct TranscriptReaderView: View {
     }
 
     private func poll() async {
+        FatClientLog.log("reader win=\(window) poll start cwd=\(guestCwd ?? "nil")")
         guard let cwd = guestCwd, !cwd.isEmpty,
               let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since)
-        else { loaded = true; store.everLoaded.insert(window); return }
+        else {
+            FatClientLog.log("reader win=\(window) no cwd/cmd → loaded")
+            loaded = true; store.everLoaded.insert(window); return
+        }
+        var first = true
         while !Task.isCancelled {
-            if let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15) {
+            if first { FatClientLog.log("reader win=\(window) guestExec…") }
+            let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15)
+            if first {
+                FatClientLog.log("reader win=\(window) guestExec \(raw == nil ? "FAILED/timeout" : "OK \(raw!.count) chars")")
+            }
+            if let raw {
                 let parsed = ClaudeTranscriptParser.parse(Data(raw.utf8))
                 items = parsed
                 store.items[window] = parsed          // survive a reader remount
             }
             loaded = true
             store.everLoaded.insert(window)
+            first = false
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
     }
