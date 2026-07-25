@@ -375,6 +375,30 @@ final class SSHConnection: @unchecked Sendable {
 
         let promise = channel.eventLoop.makePromise(of: Channel.self)
         let ch = channel
+        // Close the pump side exactly once — from whichever fires first, the
+        // channel-open failure or the timeout below. Both run on `ch.eventLoop`,
+        // so a plain flag is race-free.
+        var pumpClosed = false
+        func closePump() {
+            guard !pumpClosed else { return }
+            pumpClosed = true
+            Darwin.shutdown(pumpFD, SHUT_RDWR)
+            Darwin.close(pumpFD)
+        }
+        // A pooled connection can go half-dead: `isAlive` (channel.isActive) still
+        // reports true while the SSH layer is unresponsive, so `createChannel`
+        // never resolves — and this transport returns the fd optimistically, so
+        // the caller's `request()` then BLOCKS forever reading a response that
+        // can't come. That stalled the whole SERIAL poll queue: one action wedged
+        // and everything after it showed "Connecting…" until the app restarted.
+        // Bound the channel open: on timeout, EOF the app side (the request fails
+        // like any dropped connection) and tear the connection down so the NEXT
+        // request re-establishes a fresh one instead of reusing the corpse.
+        let timeout = ch.eventLoop.scheduleTask(in: .seconds(6)) { [weak self] in
+            FatClientLog.log("nio-dial: channel open timed out — dropping wedged connection")
+            closePump()
+            self?.close()
+        }
         // `syncOperations` (handler lookup + child addHandler) MUST run on the
         // event loop, not this caller's background thread — off-loop it trips
         // NIO's preconditionInEventLoop and crashes.
@@ -391,10 +415,10 @@ final class SSHConnection: @unchecked Sendable {
                 promise.fail(error)
             }
         }
-        promise.futureResult.whenFailure { _ in
+        promise.futureResult.whenComplete { result in
+            timeout.cancel()
             // Channel never opened — close the pump side so the app side EOFs.
-            Darwin.shutdown(pumpFD, SHUT_RDWR)
-            Darwin.close(pumpFD)
+            if case .failure = result { closePump() }
         }
         return appFD
     }

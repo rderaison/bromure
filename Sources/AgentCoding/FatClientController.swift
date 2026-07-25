@@ -267,8 +267,10 @@ final class RemoteHostController {
                       then refresh: Bool = true) {
         let host = self.host
         pollQueue.async { [weak self] in
+            FatClientLog.log("send START \(method) \(path)")   // paired with DONE — a START with no DONE = a hung request blocking the serial pollQueue
             let client = RemoteTransport.client(for: host)
-            _ = try? client.request(method, path, body: body)
+            let resp = try? client.request(method, path, body: body)
+            FatClientLog.log("send DONE \(method) \(path) status=\(resp?.status ?? -1)")
             if refresh {
                 DispatchQueue.main.async { self?.pollOnce() }
             }
