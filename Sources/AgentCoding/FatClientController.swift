@@ -235,6 +235,12 @@ final class RemoteHostController {
             NotificationCenter.default.removeObserver(o)
             pathObserver = nil
         }
+        // Close the pooled SSH connections for this host FIRST, so the server
+        // sees a clean SSH close and reaps the forwarded control-socket fds now.
+        // Closing only the P2P shim (below) left them pooled+alive → a full
+        // ctrl+term pair leaked per connect→back cycle. No-op on macOS (system
+        // ssh, no NIOSSH pool).
+        SSHDialer.shared.closeHost(host.id)
         // Tear down the P2P path (loopback shim, any port map) if this host is
         // reached peer-to-peer. A no-op for a direct host.
         if let pid = host.peerDeviceID {

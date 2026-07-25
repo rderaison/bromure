@@ -347,6 +347,19 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler {
     func handlerAdded(context: ChannelHandlerContext) {
         context.channel.setOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .whenFailure { _ in }
+        // Drive teardown off the channel's closeFuture, NOT just channelInactive.
+        // A multiplexed SSH child channel does not reliably deliver channelInactive
+        // to this handler when the PARENT connection drops — which left the bridged
+        // control-socket fd (`master`) open, so the AutomationServer pump/subscribe
+        // on the far end blocked forever (seen as dozens of orphaned control.sock
+        // fds with ZERO live SSH connections → main-thread starvation, death
+        // spiral). closeFuture always fires on close; hold a strong ref so the
+        // handler can't dealloc before it runs (the callback releases once fired,
+        // so no cycle). teardown is idempotent via `terminated`.
+        context.channel.closeFuture.whenComplete { [self] _ in
+            let m = master
+            ioQueue.async { self.teardown(pid: self.childPID, master: m) }
+        }
     }
 
     func channelInactive(context: ChannelHandlerContext) {

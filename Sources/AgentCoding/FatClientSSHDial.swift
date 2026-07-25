@@ -159,6 +159,24 @@ final class SSHDialer: @unchecked Sendable {
         dead.values.forEach { $0.close() }
     }
 
+    /// Close every pooled connection to one host (all lanes, all endpoints).
+    /// Called when the user leaves a host (back to the server list): stop() alone
+    /// closed the P2P shim but LEFT these SSH connections pooled and alive, so the
+    /// server kept their forwarded control-socket fds → a full ctrl+term pair
+    /// leaked per connect→back cycle. Closing them here drops the SSH connections
+    /// so the server reaps promptly (its channel closeFuture fires).
+    func closeHost(_ hostID: UUID) {
+        let prefix = hostID.uuidString + "|"
+        lock.lock()
+        let dead = connections.filter { $0.key.hasPrefix(prefix) }
+        for k in dead.keys { connections[k] = nil }
+        lock.unlock()
+        if !dead.isEmpty {
+            FatClientLog.log("nio-dial: leaving host — closing \(dead.count) pooled connection(s)")
+        }
+        dead.values.forEach { $0.close() }
+    }
+
     /// Where host-key pins live. Configured once at startup by the platform
     /// transport layer (RemoteTransport on iOS; unused while macOS stays on
     /// system ssh, whose known_hosts the ssh binary manages itself).
