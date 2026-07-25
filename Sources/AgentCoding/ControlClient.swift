@@ -73,6 +73,7 @@ struct ControlClient {
         head += "Host: localhost\r\n"
         head += "Content-Type: application/json\r\n"
         head += "Content-Length: \(bodyData.count)\r\n"
+        head += "X-Bromure-Gzip: 1\r\n"   // we accept a zlib-compressed response body
         head += "Connection: close\r\n\r\n"
         var out = Data(head.utf8); out.append(bodyData)
         Self.writeAll(fd, out)
@@ -84,16 +85,21 @@ struct ControlClient {
             if n <= 0 { break }
             resp.append(contentsOf: buf[0..<n])
         }
-        guard let str = String(data: resp, encoding: .utf8),
-              let sep = str.range(of: "\r\n\r\n") else {
+        // Split header/body on the RAW bytes: the body may be BINARY (a
+        // zlib-compressed response, negotiated via X-Bromure-Gzip) and a
+        // whole-response UTF-8 decode would fail on it.
+        guard let sep = resp.range(of: Data([13, 10, 13, 10])) else {
             throw ClientError.transport("Invalid HTTP response from agent")
         }
-        // NB: "\r\n" is a single grapheme cluster in Swift, so
-        // `firstIndex(of: "\r")` finds nothing — split on the substring instead.
-        let firstLine = str.components(separatedBy: "\r\n").first ?? ""
+        let headerStr = String(decoding: resp[..<sep.lowerBound], as: UTF8.self)
+        var respBody = Data(resp[sep.upperBound...])
+        let firstLine = headerStr.components(separatedBy: "\r\n").first ?? ""
         let status = firstLine.split(separator: " ").dropFirst().first.flatMap { Int($0) } ?? 0
-        let json = (try? JSONSerialization.jsonObject(
-            with: Data(str[sep.upperBound...].utf8)) as? [String: Any]) ?? [:]
+        if headerStr.range(of: "x-bromure-gzip: 1", options: .caseInsensitive) != nil,
+           let inflated = try? (respBody as NSData).decompressed(using: .zlib) {
+            respBody = inflated as Data
+        }
+        let json = (try? JSONSerialization.jsonObject(with: respBody) as? [String: Any]) ?? [:]
         // Diagnose a 200 with an empty/unparseable body (the `keys=[]` degenerate
         // snapshot). total≈header-size ⇒ the body never arrived (RST right after
         // the header); total>header ⇒ a partial/truncated body. Either way points

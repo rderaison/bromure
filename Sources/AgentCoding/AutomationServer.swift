@@ -375,6 +375,9 @@ final class ACAutomationServer {
         }
         let method = String(parts[0])
         let path = String(parts[1])
+        // The client advertises zlib support via this request header; an older
+        // client omits it, so we only ever compress when it's present.
+        let acceptGzip = headerBlock.range(of: "x-bromure-gzip: 1", options: .caseInsensitive) != nil
 
         var bodyJSON: [String: Any] = [:]
         let bodyBytes = data.count > start ? Array(data[start...]) : []
@@ -395,12 +398,18 @@ final class ACAutomationServer {
             }
         }
 
-        route(fd: fd, method: method, path: path, bodyJSON: bodyJSON)
+        route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip)
     }
 
     // MARK: - Routing
 
-    private func route(fd: Int32, method: String, path: String, bodyJSON: [String: Any]) {
+    private func route(fd: Int32, method: String, path: String, bodyJSON: [String: Any], acceptGzip: Bool) {
+        // Local shadow so every `sendResponse` in this switch honors the client's
+        // gzip capability without threading a flag through ~50 call sites. The
+        // real 4-arg method is reached via `self.sendResponse`.
+        func sendResponse(fd: Int32, status: Int, body: [String: Any]) {
+            self.sendResponse(fd: fd, status: status, body: body, gzip: acceptGzip)
+        }
         switch (method, path) {
         case ("GET", "/health"):
             sendResponse(fd: fd, status: 200, body: [
@@ -1627,7 +1636,7 @@ final class ACAutomationServer {
 
     // MARK: - Response helpers
 
-    private func sendResponse(fd: Int32, status: Int, body: [String: Any]) {
+    private func sendResponse(fd: Int32, status: Int, body: [String: Any], gzip: Bool = false) {
         // Never ship a silent empty 200. A snapshot carrying a NaN/±Inf (VM
         // vitals during boot or a rapid mutation burst) or any non-JSON leaf made
         // `JSONSerialization.data` return nil, and `?? Data()` sent HTTP 200 with
@@ -1648,9 +1657,19 @@ final class ACAutomationServer {
             status = 500
             bodyData = Data(#"{"error":"response serialization failed"}"#.utf8)
         }
+        // Compress large bodies when the client advertised support (the
+        // fat-client /state is 100+ KB and dominates poll bandwidth/latency).
+        // Only worth it above ~1 KB; the client inflates on X-Bromure-Gzip.
+        var gzipHeader = ""
+        if gzip, bodyData.count > 1024,
+           let compressed = try? (bodyData as NSData).compressed(using: .zlib) {
+            bodyData = compressed as Data
+            gzipHeader = "X-Bromure-Gzip: 1\r\n"
+        }
         let statusText = httpStatusText(status)
         var response = "HTTP/1.1 \(status) \(statusText)\r\n"
         response += "Content-Type: application/json\r\n"
+        response += gzipHeader
         response += "Content-Length: \(bodyData.count)\r\n"
         response += "Connection: close\r\n"
         response += "\r\n"
