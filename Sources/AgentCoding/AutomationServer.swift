@@ -35,6 +35,15 @@ final class ACAutomationServer {
     /// backlog while main churned). A dedicated queue accepts promptly and each
     /// request still fans out to a global-queue worker.
     private let acceptQueue = DispatchQueue(label: "io.bromure.ac.accept")
+    // Push subscribers and /state share ONE snapshot build. Each build hops to
+    // the main thread (onListWorkspaces/VMs/… via main.sync); N subscribers each
+    // rebuilding every 0.5s saturates main — and leaked subscriptions (a client
+    // that reconnects without tearing down its old streams) pile up and starve
+    // poll/exec entirely. A sub-cadence TTL bounds the build rate no matter how
+    // many subscribers wake. Guarded by snapshotLock.
+    private let snapshotLock = NSLock()
+    private var snapshotCache: [String: Any]?
+    private var snapshotCacheAt = Date.distantPast
     let port: UInt16
     let bindAddress: String
     /// When non-nil, bind an AF_UNIX socket at this path instead of TCP — the
@@ -1629,6 +1638,17 @@ final class ACAutomationServer {
     /// `supportsPush` tells a new client it can subscribe (see /state/subscribe)
     /// instead of polling; older clients ignore it and keep polling.
     private func buildStateSnapshot() -> [String: Any] {
+        // Serve a recent cached build to any concurrent caller. Holding the lock
+        // across the main.sync serializes builds too: a burst of subscribers waits
+        // on the lock and then reuses the one fresh result instead of each firing
+        // its own main.sync. (No deadlock: buildStateSnapshot is only ever called
+        // from global-queue handlers, never from main.) TTL < the 0.5s push wake
+        // so a lone subscriber still refreshes every wake.
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        if let cache = snapshotCache, Date().timeIntervalSince(snapshotCacheAt) < 0.4 {
+            return cache
+        }
         var snapshot: [String: Any] = DispatchQueue.main.sync {
             [
                 "version": FatClient.protocolVersion,
@@ -1647,6 +1667,8 @@ final class ACAutomationServer {
             snapshot["vmnetSubnet"] = subnet.cidrString
             snapshot["vmnetGateway"] = subnet.startAddressString
         }
+        snapshotCache = snapshot
+        snapshotCacheAt = Date()
         return snapshot
     }
 
@@ -1663,6 +1685,14 @@ final class ACAutomationServer {
         var lastSent = Data()
         var lastSentAt = Date.distantPast
         while true {
+            // Exit as soon as the client hangs up, even while the snapshot is
+            // unchanged — otherwise a dead subscription is only noticed on the
+            // next write (up to 15s later, or never if the fd never becomes
+            // writable-failed), and orphans pile up. A subscribe stream is a GET
+            // the client never writes to, so any POLLIN is EOF/hangup.
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            if poll(&pfd, 1, 0) > 0,
+               (pfd.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0 { break }
             let snapshot = buildStateSnapshot()
             let json = (try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data()
             let now = Date()
