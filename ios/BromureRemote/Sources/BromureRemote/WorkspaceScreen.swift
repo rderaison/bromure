@@ -448,6 +448,7 @@ private struct TerminalsPane: View {
             for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             keyboardFrame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
                              as? NSValue)?.cgRectValue ?? .zero
+            FatClientLog.log("kbd willChangeFrame end=\(keyboardFrame)")
         }
         .onReceive(NotificationCenter.default.publisher(
             for: UIResponder.keyboardWillHideNotification)) { _ in
@@ -597,7 +598,14 @@ private struct TerminalsPane: View {
     /// undocked/floating iPad keyboard therefore costs the terminal nothing.
     private func keyboardOverlap(with container: CGRect) -> CGFloat {
         guard keyboardFrame.height > 0 else { return 0 }
-        return max(0, container.maxY - keyboardFrame.minY)
+        let overlap = max(0, container.maxY - keyboardFrame.minY)
+        if overlap == 0 {
+            // Keyboard is up but we computed no overlap — the composer/terminal
+            // won't be inset and the keyboard covers it. Log the geometry so a
+            // capture shows whether it's the keyboard frame or the container.
+            FatClientLog.log("kbd overlap=0 container.maxY=\(container.maxY) kbd.minY=\(keyboardFrame.minY)")
+        }
+        return overlap
     }
 
     private func session(for window: Int) -> AttachSession {
