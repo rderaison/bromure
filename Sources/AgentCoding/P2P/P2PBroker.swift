@@ -626,6 +626,15 @@ final class P2PBroker: @unchecked Sendable {
             live.shim.stop()
             FatClientLog.log("p2p: peer \(id.prefix(8)) had a dead loopback shim "
                 + "(127.0.0.1:\(live.shim.port)) — dropped, will re-establish")
+            // Kick the transport the SAME way a path change does. A dead shim
+            // (iOS reclaimed the loopback socket while suspended) leaves the
+            // terminals' live-stream reads blocked with no timeout, and the
+            // pooled SSH connection's isAlive (channel.isActive) still reads true
+            // on the resulting half-open socket — so without this they'd sit on
+            // the dead connection for the full 12s SO_RCVTIMEO before noticing
+            // (the "terminals take ~12s to reconnect after a re-establish" bug).
+            // Observers drop stale SSH connections and reconnect terminals now.
+            NotificationCenter.default.post(name: .bromureP2PPathChanged, object: nil)
             return nil
         }
         let ep = ResolvedEndpoint(host: "127.0.0.1", port: live.shim.port,

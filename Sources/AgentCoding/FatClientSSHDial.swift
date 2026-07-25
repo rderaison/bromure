@@ -133,6 +133,32 @@ enum SSHDialError: Error {
 final class SSHDialer: @unchecked Sendable {
     static let shared = SSHDialer()
 
+    private init() {
+        // A P2P path change or a dead loopback shim invalidates every pooled
+        // connection — they all ride the shim's loopback port, which is gone or
+        // renumbered. Drop them so the next dial builds fresh instead of blocking
+        // ~12s on a half-open socket whose channel.isActive still reads true.
+        // Closing a connection also EOFs any request wedged reading on it, so a
+        // stuck poll/attach fails fast and retries at once. The mirror poll and
+        // every terminal observe the same notification and rebuild immediately.
+        NotificationCenter.default.addObserver(
+            forName: .bromureP2PPathChanged, object: nil, queue: nil) { [weak self] _ in
+            self?.closeAll()
+        }
+    }
+
+    /// Close and drop every pooled connection (all hosts + lanes).
+    func closeAll() {
+        lock.lock()
+        let dead = connections
+        connections.removeAll()
+        lock.unlock()
+        if !dead.isEmpty {
+            FatClientLog.log("nio-dial: path changed — dropping \(dead.count) pooled connection(s)")
+        }
+        dead.values.forEach { $0.close() }
+    }
+
     /// Where host-key pins live. Configured once at startup by the platform
     /// transport layer (RemoteTransport on iOS; unused while macOS stays on
     /// system ssh, whose known_hosts the ssh binary manages itself).
