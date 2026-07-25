@@ -568,21 +568,42 @@ final class P2PBroker: @unchecked Sendable {
         }
         establishing.insert(id)
         establishGate.unlock()
-        defer {
-            establishGate.lock()
-            establishing.remove(id)
-            establishGate.broadcast()
-            establishGate.unlock()
-        }
 
+        // Release the single-flight ONLY when the real `establish` finishes —
+        // NOT when the `sem.wait` below times out. `establish` can outrun this
+        // 15s budget on a slow relay path: its requestConnection preamble
+        // (URLSession-bounded, ~20s) runs before the candidate-dial loop, which
+        // has its own separate `timeout` deadline. If we cleared `establishing`
+        // on endpoint's early return, the next 0.75s poll would spawn a SECOND
+        // establish with a fresh grant; when the first grant then expires (~45s)
+        // the listener tears down ITS relay — killing the path the winner is
+        // using — and the mirror thrashes on "Connecting…" forever. Holding
+        // `id` until the ONE establish completes makes every waiter share its
+        // shim (they fall through to `liveEndpoint` above).
         let sem = DispatchSemaphore(value: 0)
         var result: ResolvedEndpoint?
         Task.detached { [weak self] in
-            result = await self?.establish(peerDeviceID: id, timeout: timeout)
+            let ep = await self?.establish(peerDeviceID: id, timeout: timeout)
+            if let self {
+                self.establishGate.lock()
+                self.establishing.remove(id)
+                self.establishGate.broadcast()
+                self.establishGate.unlock()
+            }
+            result = ep
             sem.signal()
         }
         if sem.wait(timeout: .now() + timeout + 3) == .timedOut { return nil }
         return result
+    }
+
+    /// True while a single-flight `establish` is in flight for `id`. The mirror
+    /// controller consults this before reaping an "unreachable" peer, so a
+    /// slow-but-succeeding establish on a relay path isn't torn down mid-flight
+    /// (closePeer would drop the shim it is about to cache).
+    func isEstablishing(_ id: String) -> Bool {
+        establishGate.lock(); defer { establishGate.unlock() }
+        return establishing.contains(id)
     }
 
     /// Non-blocking cache lookup — a live path for `id` if one exists, else nil.

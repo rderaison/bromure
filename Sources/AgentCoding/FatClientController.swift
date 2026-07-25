@@ -252,9 +252,20 @@ final class RemoteHostController {
                     if let pid = host.peerDeviceID {
                         self.peerFailStreak += 1
                         if self.peerFailStreak >= 3 {
-                            self.peerFailStreak = 0
-                            FatClientLog.log("p2p: mirror unreachable — tearing down the peer path to re-establish")
-                            P2PBroker.shared.closePeer(pid)
+                            if P2PBroker.shared.isEstablishing(pid) {
+                                // A single-flight establish is still running
+                                // (slow relay path). Don't reap the peer now —
+                                // closePeer would drop the shim this establish
+                                // is about to cache, tearing the path down as
+                                // fast as it's built. Let it finish; a genuinely
+                                // dead path clears `establishing` and the next
+                                // streak reaps it.
+                                FatClientLog.log("p2p: mirror unreachable but establish in flight — deferring teardown")
+                            } else {
+                                self.peerFailStreak = 0
+                                FatClientLog.log("p2p: mirror unreachable — tearing down the peer path to re-establish")
+                                P2PBroker.shared.closePeer(pid)
+                            }
                         }
                     }
                 }
