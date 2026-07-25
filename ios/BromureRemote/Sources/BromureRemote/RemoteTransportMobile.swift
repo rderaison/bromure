@@ -142,8 +142,13 @@ enum RemoteTransport {
         _ = bootstrap
         ensureClientKey()
         let host = resolved(rawHost)
+        // Terminal streams get their own pooled connection ("term" lane) so a
+        // long-lived, possibly backed-up PTY channel can't stall the control
+        // connection the mirror poll rides — a shared connection let one wedge
+        // freeze everything on "Connecting…".
+        let lane = interactive ? "term" : ""
         return ControlClient(socketPath: "ssh://\(host.connectLabel)") {
-            SSHDialer.shared.dial(host: host, verb: FatClient.controlVerb)
+            SSHDialer.shared.dial(host: host, verb: FatClient.controlVerb, lane: lane)
         }
     }
 

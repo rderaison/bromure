@@ -148,15 +148,15 @@ final class SSHDialer: @unchecked Sendable {
     /// Key by endpoint, not host id: a peer host's resolved loopback endpoint
     /// changes per session, and a stale connection to a dead endpoint must not
     /// shadow a fresh one.
-    private func poolKey(_ host: RemoteHost) -> String {
-        "\(host.id.uuidString)|\(host.user)@\(host.address):\(host.port)"
+    private func poolKey(_ host: RemoteHost, lane: String) -> String {
+        "\(host.id.uuidString)|\(host.user)@\(host.address):\(host.port)|\(lane)"
     }
 
     /// A live (or newly established) connection to `host`. `strict` = the host
     /// key MUST match an existing pin (probe's MITM check); otherwise
     /// accept-new semantics: pin on first contact, refuse a changed key.
-    func ensureConnection(host: RemoteHost, strict: Bool = false) throws -> SSHConnection {
-        let key = poolKey(host)
+    func ensureConnection(host: RemoteHost, strict: Bool = false, lane: String = "") throws -> SSHConnection {
+        let key = poolKey(host, lane: lane)
         lock.lock()
         if let c = connections[key], c.isAlive {
             lock.unlock()
@@ -184,9 +184,9 @@ final class SSHDialer: @unchecked Sendable {
     /// exactly like `SSHTunnel.dial`. Retries once through a fresh connection
     /// if the pooled one turns out dead. Returns nil on failure (the caller's
     /// request/stream errors out the same way it does when ssh dies).
-    func dial(host: RemoteHost, verb: String) -> Int32? {
+    func dial(host: RemoteHost, verb: String, lane: String = "") -> Int32? {
         for attempt in 0..<2 {
-            guard let conn = try? ensureConnection(host: host) else { return nil }
+            guard let conn = try? ensureConnection(host: host, lane: lane) else { return nil }
             if let fd = conn.openVerbChannel(verb) { return fd }
             // Channel open failed on a connection that claimed to be alive —
             // drop it and retry once on a fresh one.
@@ -197,11 +197,13 @@ final class SSHDialer: @unchecked Sendable {
     }
 
     func closeConnection(host: RemoteHost) {
-        let key = poolKey(host)
+        // Close every lane for this host (control + terminal streams).
+        let base = "\(host.id.uuidString)|\(host.user)@\(host.address):\(host.port)|"
         lock.lock()
-        let c = connections.removeValue(forKey: key)
+        let dead = connections.filter { $0.key.hasPrefix(base) }
+        for k in dead.keys { connections[k] = nil }
         lock.unlock()
-        c?.close()
+        dead.values.forEach { $0.close() }
     }
 
     // MARK: Host-key scan (ssh-keyscan replacement)
