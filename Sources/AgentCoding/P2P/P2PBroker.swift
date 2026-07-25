@@ -677,12 +677,22 @@ final class P2PBroker: @unchecked Sendable {
     }
 
     private func handlePathUpdate(_ path: NWPath) {
-        // Signature = status + the usable interfaces. The handler fires
-        // repeatedly during a transition, so react only when the signature
-        // actually changes AND the path is usable again (reconnecting mid-outage
-        // is pointless). The very first update is the baseline, not a change.
-        let sig = "\(path.status)|"
-            + path.availableInterfaces.map(\.name).sorted().joined(separator: ",")
+        // Signature = status + the REAL transport interfaces (wifi/cellular/
+        // wired) only. VPN/tunnel interfaces (ipsec*, utun*, type .other) flap
+        // constantly on a phone — a VPN reconnect or cellular-coexistence toggle
+        // rewrote the raw interface list every few seconds (e.g.
+        // `en0,ipsec6,ipsec6,pdp_ip0`), and keying on ALL names made each wiggle
+        // drop EVERY live peer shim and force a full re-establish (grant + STUN +
+        // candidate race), so every terminal open redid the whole P2P dance. The
+        // peer paths don't ride the VPN (a direct-LAN shim uses wifi/wired; a
+        // relay rides the same underlying transport), so ignore .other interfaces
+        // and de-dupe. The handler fires repeatedly during a transition, so react
+        // only when THIS signature changes and the path is usable again; the very
+        // first update is the baseline, not a change.
+        let transports = path.availableInterfaces
+            .filter { $0.type == .wifi || $0.type == .cellular || $0.type == .wiredEthernet }
+            .map(\.name)
+        let sig = "\(path.status)|" + Set(transports).sorted().joined(separator: ",")
         lock.lock()
         let changed = sig != lastPathSignature
         let hadBaseline = !lastPathSignature.isEmpty
