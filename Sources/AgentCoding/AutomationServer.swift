@@ -29,6 +29,12 @@ import SandboxEngine
 final class ACAutomationServer {
     private var serverSocket: Int32 = -1
     private var acceptSource: DispatchSourceRead?
+    /// Accepts run here, NOT on `.main`: every stateful route body blocks on
+    /// `DispatchQueue.main.sync`, so keeping the accept loop on main let a burst
+    /// of in-flight requests starve new accepts (connections queued in the
+    /// backlog while main churned). A dedicated queue accepts promptly and each
+    /// request still fans out to a global-queue worker.
+    private let acceptQueue = DispatchQueue(label: "io.bromure.ac.accept")
     let port: UInt16
     let bindAddress: String
     /// When non-nil, bind an AF_UNIX socket at this path instead of TCP — the
@@ -264,7 +270,7 @@ final class ACAutomationServer {
     private func beginAccepting(on sock: Int32) {
         self.serverSocket = sock
         let unixPath = unixSocketPath
-        let source = DispatchSource.makeReadSource(fileDescriptor: sock, queue: .main)
+        let source = DispatchSource.makeReadSource(fileDescriptor: sock, queue: acceptQueue)
         source.setEventHandler { [weak self] in self?.acceptConnection() }
         source.setCancelHandler { [weak self] in
             if self?.serverSocket == sock { Darwin.close(sock) }
@@ -1615,7 +1621,26 @@ final class ACAutomationServer {
     // MARK: - Response helpers
 
     private func sendResponse(fd: Int32, status: Int, body: [String: Any]) {
-        let bodyData = (try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+        // Never ship a silent empty 200. A snapshot carrying a NaN/±Inf (VM
+        // vitals during boot or a rapid mutation burst) or any non-JSON leaf made
+        // `JSONSerialization.data` return nil, and `?? Data()` sent HTTP 200 with
+        // ZERO bytes — which the fat client parsed as an empty state and applied,
+        // wiping its whole mirror for that poll (the "content flashes to Info /
+        // new tab lags" bug). Sanitize first (non-finite numbers → 0), and if it
+        // STILL can't serialize, fail loudly with 500 so the client retries
+        // rather than wiping.
+        var payload: Any = body
+        if !JSONSerialization.isValidJSONObject(body) {
+            payload = Self.sanitizeJSON(body)
+            NSLog("[ac-http] sanitized non-JSON response body (status %d)", status)
+        }
+        var bodyData = (try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+        var status = status
+        if bodyData.isEmpty && !body.isEmpty {
+            NSLog("[ac-http] response serialization FAILED after sanitize (was status %d)", status)
+            status = 500
+            bodyData = Data(#"{"error":"response serialization failed"}"#.utf8)
+        }
         let statusText = httpStatusText(status)
         var response = "HTTP/1.1 \(status) \(statusText)\r\n"
         response += "Content-Type: application/json\r\n"
@@ -1654,6 +1679,29 @@ final class ACAutomationServer {
                     return   // peer hung up
                 }
             }
+        }
+    }
+
+    /// Coerce a value tree into something JSONSerialization accepts: non-finite
+    /// Doubles/Floats (NaN, ±Inf — which make `data(withJSONObject:)` fail, so
+    /// the response went out as a silent empty 200) become 0; dicts/arrays are
+    /// walked recursively. Only invoked when `isValidJSONObject` already said the
+    /// body is bad, so it's off the hot path.
+    private static func sanitizeJSON(_ value: Any) -> Any {
+        switch value {
+        case let d as [String: Any]:
+            return d.mapValues { sanitizeJSON($0) }
+        case let a as [Any]:
+            return a.map { sanitizeJSON($0) }
+        case let d as Double:
+            return d.isFinite ? d : 0
+        case let f as Float:
+            return f.isFinite ? f : 0
+        case let n as NSNumber:
+            // Bool/Int bridge here too; only non-finite floating values are bad.
+            return n.doubleValue.isFinite ? n : 0
+        default:
+            return value
         }
     }
 

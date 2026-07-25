@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 // MARK: - Fat-client shared types (platform-independent)
 //
@@ -20,8 +21,19 @@ enum FatClientLog {
         || ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"] != nil
     /// When set to a path, also append to that file (survives pty/stderr mixing).
     static let filePath = ProcessInfo.processInfo.environment["BROMURE_ATTACH_DEBUG"]
+    /// Unified-logging sink so the fat-client trace is visible on a PHYSICAL
+    /// device with NO env var — the stderr/file sinks above need an env var that
+    /// can't be set on a real phone. Read it over USB with:
+    ///   log stream --device --style compact \
+    ///     --predicate 'subsystem == "io.bromure.fatclient"'
+    /// (or the same predicate in Console.app). Emitted at `.notice` so it shows
+    /// without a `--level` flag and is persisted to the log store.
+    private static let logger = Logger(subsystem: "io.bromure.fatclient", category: "trace")
     static func log(_ msg: @autoclosure () -> String) {
-        let line = "[fatclient] \(msg())\n"
+        let text = msg()
+        logger.notice("\(text, privacy: .public)")
+        guard enabled || filePath != nil else { return }
+        let line = "[fatclient] \(text)\n"
         if enabled { FileHandle.standardError.write(Data(line.utf8)) }
         if let filePath {
             if !FileManager.default.fileExists(atPath: filePath) {

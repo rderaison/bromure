@@ -54,9 +54,25 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
     /// "Reconnecting…" on a drop vs "Connecting…" on first open.
     @Published private(set) var everConnected = false
     @Published private(set) var lastError: String?
+    /// The user hit "Close" on this tab: never show a reconnect veil for it and
+    /// never reconnect — it's being torn down, not recovered.
+    @Published private(set) var stoppedByUser = false
+    /// The guest shell exited cleanly (ctrl-D / `exit` → a PTYFrame.exit frame).
+    /// We do NOT auto-reconnect — re-dialing runs the guest's
+    /// `tmux has-session || tmux new-session`, which would RESURRECT the window
+    /// the user just closed and pin the roster so its chip lingers. The session
+    /// parks here; the roster then either drops the window (ctrl-D → chip goes)
+    /// or, if it reappears (a guest reboot rebuilt tmux), `reviveIfExited()`
+    /// restarts the pump.
+    @Published private(set) var cleanExited = false
 
     /// Bound once from the SwiftUI representable; read on main to feed output.
     private weak var terminalView: TerminalView?
+
+    /// Invoked on the main actor when the guest shell exits cleanly (ctrl-D /
+    /// `exit`), so the pane can drop this window's tab at once instead of waiting
+    /// for the roster poll. Set by TerminalsPane.session(for:).
+    var onCleanExit: (@MainActor () -> Void)?
 
     private let stateLock = NSLock()
     private var streamFD: Int32 = -1
@@ -148,7 +164,20 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
 
     func stop() {
         stateLock.lock(); stopped = true; pumping = false; stateLock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.stoppedByUser = true }
         closeFD()
+    }
+
+    /// Re-arm a parked (cleanly-exited) session whose window is back in the
+    /// roster — e.g. a guest reboot rebuilt tmux on the same index — so its
+    /// surface reconnects instead of sitting dead. No-op unless it actually
+    /// exited cleanly and is still wanted (a view is bound, not user-stopped).
+    /// Called on the main actor from the pane's syncMounted.
+    func reviveIfExited() {
+        guard cleanExited, !stoppedByUser, terminalView != nil else { return }
+        cleanExited = false
+        stateLock.lock(); let running = pumping; stateLock.unlock()
+        if !running { startPump() }
     }
 
     // MARK: Input from SwiftTerm (main actor → frames)
@@ -215,17 +244,20 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
                 "POST", "/vms/\(ControlClient.encodeSegment(resolvedVM))/exec", body: body)
         } catch {
             let msg = error.localizedDescription
+            FatClientLog.log("term win=\(window) vm=\(resolvedVM) openStream FAILED: \(msg)")
             DispatchQueue.main.async { [weak self] in self?.onStreamEnded(error: msg) }
             return
         }
+        FatClientLog.log("term win=\(window) vm=\(resolvedVM) openStream OK — streaming")
         stateLock.lock(); streamFD = fd; stateLock.unlock()
         DispatchQueue.main.async { [weak self] in self?.onConnected() }
 
         var inbuf = [UInt8](); inbuf.reserveCapacity(1 << 16)
         var rbuf = [UInt8](repeating: 0, count: 1 << 16)
+        var cleanExit = false
         while true {
             let n = rbuf.withUnsafeMutableBufferPointer { Darwin.read(fd, $0.baseAddress!, $0.count) }
-            if n <= 0 { break }
+            if n <= 0 { break }              // EOF: link/VM dropped — reconnectable
             inbuf.append(contentsOf: rbuf[0..<n])
             var out: [UInt8] = []
             var exited = false
@@ -233,16 +265,16 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
                 if type == PTYFrame.data, !payload.isEmpty {
                     out.append(contentsOf: payload)
                 } else if type == PTYFrame.exit {
-                    exited = true
+                    exited = true            // type-2: shell/tmux client exited cleanly
                 }
             }
             if !out.isEmpty {
                 DispatchQueue.main.async { [weak self] in self?.feed(out) }
             }
-            if exited { break }
+            if exited { cleanExit = true; break }
         }
         closeFD()
-        DispatchQueue.main.async { [weak self] in self?.onStreamEnded(error: nil) }
+        DispatchQueue.main.async { [weak self] in self?.onStreamEnded(error: nil, cleanExit: cleanExit) }
     }
 
     private func closeFD() {
@@ -263,6 +295,7 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
         let wasReconnect = everConnected   // a drop we just recovered from, not first open
         connected = true
         everConnected = true
+        cleanExited = false                // a revive that reconnected is live again
         lastError = nil
         stateLock.lock(); reattachDelay = 1.0; stateLock.unlock()
         // Push our current geometry so the guest tmux repaints at our size.
@@ -279,7 +312,7 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
         }
     }
 
-    @MainActor private func onStreamEnded(error: String?) {
+    @MainActor private func onStreamEnded(error: String?, cleanExit: Bool = false) {
         connected = false
         lastError = error
         // The link just dropped — nudge a roster re-poll so a shrinking window
@@ -295,6 +328,20 @@ final class AttachSession: ObservableObject, @unchecked Sendable {
         if Date().timeIntervalSince(lastConnectAt) > 10 { reattachDelay = 1.0 }
         else { reattachDelay = min(reattachDelay * 2, 30) }
         stateLock.unlock()
+        // A CLEAN exit (guest type-2 exit frame: shell ctrl-D / `exit`, tmux
+        // window gone) must NOT auto-reconnect — re-dialing runs the guest's
+        // `tmux has-session || tmux new-session`, which RESURRECTS the window the
+        // user just closed and pins the roster at N so the chip lingers. Park the
+        // session: the roster re-poll above prunes the chip if the window is gone
+        // (ctrl-D), or reviveIfExited() restarts the pump if it reappears (a guest
+        // reboot that rebuilt tmux). A bare EOF (cleanExit == false) is a
+        // transient drop / reboot mid-flight and still reconnects below.
+        if cleanExit {
+            cleanExited = true
+            stateLock.lock(); pumping = false; stateLock.unlock()
+            onCleanExit?()   // let the pane drop this tab now, not on the next poll
+            return
+        }
         // No view bound (mid-recreate) or explicitly stopped → the pump is over.
         // Mark it not-pumping so a later attach starts a fresh one.
         guard !done, terminalView != nil else {
@@ -322,7 +369,10 @@ struct TerminalSurface: View {
             RemoteTerminalView(session: session, fontSize: fontSize,
                                focusTick: focusTick, isActive: isActive)
                 .padding(.bottom, bottomInset)
-            if !session.connected {
+            // A deliberately-closed or cleanly-exited session is being torn down,
+            // not recovered — show no veil (the surface goes away as the roster
+            // settles) rather than a misleading "Reconnecting…".
+            if !session.connected && !session.stoppedByUser && !session.cleanExited {
                 ReconnectVeil(text: session.everConnected ? "Reconnecting…" : "Connecting…")
             }
         }

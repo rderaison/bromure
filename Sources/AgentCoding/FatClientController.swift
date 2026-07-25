@@ -95,6 +95,13 @@ final class RemoteHostController {
     /// Last local grid edit — `applyGrid` skips while recent, so a stale
     /// in-flight poll can't revert the edit before its POST lands.
     private var gridTouched = Date.distantPast
+    /// Tabs dropped optimistically (a Close tap, or a ctrl-D clean exit the
+    /// terminal pump reported) so their chip disappears at once instead of on the
+    /// next /state poll. Held here and filtered out of incoming snapshots in
+    /// `applyWorkspaces` until the server confirms them gone, so an in-flight
+    /// stale poll can't flash the chip back. Cleared per-window once a snapshot
+    /// no longer lists it (or a reboot legitimately rebuilds it).
+    private var pendingTabDrops: [Profile.ID: Set<Int>] = [:]
 
     /// The 0.75 s poll timer, held in a non-isolated box so it can be
     /// invalidated when the controller deallocates — a `@MainActor` class can't
@@ -292,6 +299,24 @@ final class RemoteHostController {
 
     private func apply(_ snapshot: [String: Any]) {
         let workspaces = (snapshot["workspaces"] as? [[String: Any]]) ?? []
+        // Guard against a degenerate /state. A 200 poll whose body was truncated
+        // or failed to parse arrives as an (almost) empty snapshot, and a partial
+        // server snapshot can momentarily carry no workspaces. Applying it wipes
+        // the ENTIRE mirror for one poll — every workspace row, tab and grid cell
+        // — and because the workspace screen unmounts its live terminals whenever
+        // `isRunning` goes false, the screen flashes to a blank "Info" view until
+        // the next good poll repaints it (and a just-created tab is wiped, so "+"
+        // looks slow to appear). Once we hold a populated mirror, an empty
+        // workspaces list is far likelier a bad read than a genuine "all
+        // workspaces removed", so keep the last good state instead of flashing.
+        // (keys= reveals the cause: empty ⇒ truncated/parse-fail whole body;
+        // vms/grid/… present but no workspaces ⇒ a partial server snapshot.)
+        if workspaces.isEmpty, revision > 0, !profilesByID.isEmpty {
+            FatClientLog.log("apply: skipped degenerate snapshot "
+                + "(keys=[\(snapshot.keys.sorted().joined(separator: ","))]) — "
+                + "kept \(profilesByID.count) workspaces")
+            return
+        }
         let vms = (snapshot["vms"] as? [[String: Any]]) ?? []
         let grid = (snapshot["gridLayout"] as? [String: Any]) ?? ["cells": []]
         let autos = (snapshot["automations"] as? [String: Any]) ?? [:]
@@ -399,7 +424,22 @@ final class RemoteHostController {
             }
             applyRemotePorts(model, vm)
             applyRemoteDocker(model, vm)
-            let tabDicts = (vm["tabs"] as? [[String: Any]]) ?? []
+            var tabDicts = (vm["tabs"] as? [[String: Any]]) ?? []
+            // Honor optimistic tab drops (a Close tap / ctrl-D): keep a dropped
+            // window hidden until the server confirms it gone — so an in-flight
+            // stale poll can't flash the chip back — and clear the pending mark
+            // once it's confirmed absent (or a reboot legitimately rebuilt it).
+            if let pending = pendingTabDrops[id], !pending.isEmpty {
+                let present = Set(tabDicts.compactMap { $0["index"] as? Int })
+                let confirmed = pending.subtracting(present)   // server no longer lists it
+                if !confirmed.isEmpty {
+                    let remaining = pending.subtracting(confirmed)
+                    pendingTabDrops[id] = remaining.isEmpty ? nil : remaining
+                }
+                if let stillPending = pendingTabDrops[id] {
+                    tabDicts = tabDicts.filter { !stillPending.contains($0["index"] as? Int ?? -1) }
+                }
+            }
             applyRemoteTabs(model, tabDicts)
             // An empty roster means tmux isn't up yet (boot), not "all windows
             // closed" — only reconcile surfaces against a populated list.
@@ -677,7 +717,22 @@ final class RemoteHostController {
         send("POST", "/sessions/\(seg(id))/tab", body: ["action": "new"])
     }
     func closeTab(_ id: Profile.ID, index: Int) {
+        dropTabLocally(id, index: index)   // optimistic: chip goes now, not next poll
         send("POST", "/sessions/\(seg(id))/tab", body: ["action": "close", "index": index])
+    }
+
+    /// Drop a tab from the mirror immediately — a Close tap, or a terminal whose
+    /// guest shell exited cleanly (ctrl-D). The window index is remembered in
+    /// `pendingTabDrops` and filtered from incoming snapshots (see
+    /// `applyWorkspaces`) until the server confirms it gone, so an in-flight
+    /// stale poll can't flash the chip back. Kicks an immediate poll to confirm.
+    func dropTabLocally(_ id: Profile.ID, index: Int) {
+        pendingTabDrops[id, default: []].insert(index)
+        if let m = tabsModels[id], let pos = m.tabs.firstIndex(where: { $0.index == index }) {
+            m.tabs.remove(at: pos)
+            if m.activeIndex >= m.tabs.count { m.activeIndex = max(0, m.tabs.count - 1) }
+        }
+        foregroundKick()
     }
     /// Worktree actions that are fully derivable from the mirrored tab
     /// (remove / attach-terminal). Prompt-driven ones (new worktree, merge,

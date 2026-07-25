@@ -48,6 +48,9 @@ struct WorkspaceScreen: View {
         }
     }
     @State private var pane: Pane = .terminals
+    /// Debounces the not-running → Info fallback (see the `isRunning` onChange):
+    /// a transient snapshot dip must not yank a live terminal to the dashboard.
+    @State private var stopFallback: Task<Void, Never>?
     /// Compact height = the phone is on its side. A terminal is the one pane
     /// that wants every one of those few hundred points, so landscape drops the
     /// pane picker and the tab strip and hands the whole area to the surface.
@@ -86,7 +89,27 @@ struct WorkspaceScreen: View {
         .navigationTitle(profileName)
         .navigationBarTitleDisplayMode(.inline)
         .onChange(of: isRunning) { _, running in
-            if !running && pane != .dashboard { pane = .dashboard }
+            FatClientLog.log("workspace \(profileID.uuidString.prefix(8)) isRunning=\(running) "
+                + "state=\(runState) connected=\(controller.connected) "
+                + "hasRow=\(controller.profile(for: profileID) != nil)")
+            if running {
+                stopFallback?.cancel(); stopFallback = nil
+                return
+            }
+            // Fall back to the dashboard only on a GENUINE, SUSTAINED stop. A
+            // transient/partial snapshot after a link blip can briefly report the
+            // workspace as not-running (or drop its row), which would otherwise
+            // yank the user off a live terminal to Info mid-session — the "it
+            // switched to Info by itself" bug. Debounce so a dip that recovers
+            // within a few polls never triggers the switch.
+            stopFallback?.cancel()
+            stopFallback = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard !Task.isCancelled, !isRunning, pane != .dashboard else { return }
+                FatClientLog.log("workspace \(profileID.uuidString.prefix(8)) "
+                    + "stayed not-running 3s — falling back to Info")
+                pane = .dashboard
+            }
         }
         // Serve the browser MCP for this workspace while its screen is open.
         .onAppear { browserBridge.start() }
@@ -549,6 +572,14 @@ private struct TerminalsPane: View {
                 store.map[w] = nil
             }
             mounted.removeAll { !live.contains($0) }
+            // Re-arm any surface that ended on a CLEAN exit but whose window is
+            // back in the roster — a guest reboot rebuilt tmux on the same index,
+            // so the parked session must reconnect instead of sitting dead. A
+            // ctrl-D that truly closed the window leaves it OUT of `live`, so it
+            // was pruned above and is never revived (no resurrection).
+            for w in mounted where live.contains(w) {
+                store.map[w]?.reviveIfExited()
+            }
         }
         if let win = effectiveWindow, !mounted.contains(win) { mounted.append(win) }
     }
@@ -564,6 +595,11 @@ private struct TerminalsPane: View {
     private func session(for window: Int) -> AttachSession {
         if let s = store.map[window] { return s }
         let s = AttachSession(host: controller.host, vmID: profileID.uuidString, windowIndex: window)
+        // ctrl-D / clean shell exit → drop this tab at once (the guest already
+        // closed the window), instead of waiting for the roster poll.
+        s.onCleanExit = { [weak controller, profileID] in
+            controller?.dropTabLocally(profileID, index: window)
+        }
         store.map[window] = s   // mutates the class, not @State — safe in body
         return s
     }
@@ -598,9 +634,21 @@ private struct TerminalsPane: View {
                 controller.pushGridLayout()
             } label: { Label("Send to Grid", systemImage: "square.grid.2x2") }
             Button(role: .destructive) {
-                controller.closeTab(profileID, index: tab.index)
-                store.map[tab.index]?.stop()
-                store.map[tab.index] = nil
+                let closing = tab.index
+                // Re-home to a live sibling BEFORE tearing the session down. If
+                // the closed tab is the one on screen, stopping its session flips
+                // connected=false while everConnected is still true, so its still-
+                // active surface would show the "Reconnecting…" veil until the next
+                // poll drops the tab (~1 poll). Re-homing now makes that surface
+                // inactive+unmounted, so a live sibling shows at once — no veil.
+                if effectiveWindow == closing,
+                   let pos = tabs.firstIndex(where: { $0.index == closing }) {
+                    selectedWindow = (tabs[(pos + 1)...].first ?? tabs[..<pos].last)?.index
+                }
+                mounted.removeAll { $0 == closing }
+                controller.closeTab(profileID, index: closing)
+                store.map[closing]?.stop()
+                store.map[closing] = nil
             } label: { Label("Close", systemImage: "xmark") }
         }
     }
