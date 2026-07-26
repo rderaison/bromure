@@ -12,7 +12,8 @@ public enum TraceLevel: String, Codable, CaseIterable, Sendable {
     case activity
     /// Same as `.activity` plus full request + response bodies for
     /// well-known LLM hosts (Anthropic, OpenAI, Google AI, Cohere,
-    /// Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace).
+    /// Mistral, Perplexity, x.ai, Groq, Moonshot/Kimi, Replicate,
+    /// HuggingFace).
     case aiDetails
     /// Same as `.aiDetails` plus bodies for every host. Eats space
     /// fastest — gated by per-session 100 MB / total 5 GB caps.
@@ -41,6 +42,8 @@ public enum TraceLevel: String, Codable, CaseIterable, Sendable {
         "x.ai",
         "grok.com",           // Grok subscription backend (cli-chat-proxy)
         "groq.com",
+        "moonshot.ai",        // Kimi open platform (api.moonshot.ai)
+        "kimi.com",           // Kimi Code subscription backend (api.kimi.com/coding)
         "replicate.com",
         "huggingface.co",
         InferenceService.localMitmHost,  // local-inference sentinel (routed via the MITM)

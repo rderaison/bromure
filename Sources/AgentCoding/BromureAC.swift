@@ -1028,6 +1028,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if let rec = engine.grokSubscriptionStore.record(for: baseID) {
                     try? engine.grokSubscriptionStore.setOverride(rec, for: clone.id)
                 }
+                if let rec = engine.kimiSubscriptionStore.record(for: baseID) {
+                    try? engine.kimiSubscriptionStore.setOverride(rec, for: clone.id)
+                }
             }
             profiles = store.loadAll()
             refreshSidebar()
@@ -1066,9 +1069,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     try? engine.claudeSubscriptionStore.forget(for: id)
                     try? engine.codexSubscriptionStore.forget(for: id)
                     try? engine.grokSubscriptionStore.forget(for: id)
+                    try? engine.kimiSubscriptionStore.forget(for: id)
                     engine.claudeSubscriptionStore.unregisterBogusKeys(for: id)
                     engine.codexSubscriptionStore.unregisterBogusKeys(for: id)
                     engine.grokSubscriptionStore.unregisterBogusKeys(for: id)
+                    engine.kimiSubscriptionStore.unregisterBogusKeys(for: id)
                 }
                 self.profiles = self.store.loadAll()
                 self.refreshSidebar()
@@ -1206,9 +1211,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// The MITM proxy saw a model *conversation* request for this VM. The proxy
     /// can't attribute traffic to a specific tab, so this is the per-VM fallback
     /// for the agents WITHOUT per-tab hooks (Codex/Grok): flip their tabs to
-    /// .working and re-arm a timer to drop them back to .done. Claude tabs are
-    /// left to their own per-window hooks (accurate per tab), so a Claude call
-    /// never flips a sibling Codex tab.
+    /// .working and re-arm a timer to drop them back to .done. Claude and Kimi
+    /// tabs are left to their own per-window hooks (accurate per tab), so a
+    /// Claude call never flips a sibling Codex tab — and the 4s timer can't
+    /// mark a hook-driven tab .done mid-run.
+    /// Agents that report status through their own per-tab hooks, so the
+    /// per-VM proxy fallback must leave their tabs alone.
+    static let hookDrivenAgents: Set<String> = ["claude", "kimi"]
+
     func noteAgentActivity(_ id: Profile.ID) {
         setNonClaudeAgentTabs(id, .working)
         thinkingClearTasks[id]?.cancel()
@@ -1220,14 +1230,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    /// Apply `status` to every NON-Claude agent tab of a VM (the proxy fallback).
-    /// A .done never stomps a tab that's mid-.working elsewhere would — but here
-    /// .done only lands on tabs still marked .working (idle transition).
+    /// Apply `status` to every hook-less agent tab of a VM (the proxy
+    /// fallback). A .done never stomps a tab that's mid-.working elsewhere
+    /// would — but here .done only lands on tabs still marked .working (idle
+    /// transition).
     private func setNonClaudeAgentTabs(_ id: Profile.ID, _ status: AgentStatus) {
         guard let pane = pane(for: id) else { return }
         for tab in pane.model.tabs {
             guard let kind = BromureIcons.agentKind(forLabel: tab.shownLabel),
-                  kind != "claude" else { continue }
+                  !Self.hookDrivenAgents.contains(kind) else { continue }
             if status == .done && tab.agentStatus != .working { continue }
             tab.agentStatus = status
         }
@@ -5248,6 +5259,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 try? self?.mitmEngine?.grokSubscriptionStore.forget(for: nil)
                 NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
             },
+            kimiAccountSavedAt: { [weak self] in self?.mitmEngine?.kimiSubscriptionStore.record(for: nil)?.savedAt },
+            onRegisterKimi: { [weak self] in
+                self?.beginSubscriptionRegistration(provider: .kimi, scope: .alwaysShared)
+            },
+            onForgetKimi: { [weak self] in
+                try? self?.mitmEngine?.kimiSubscriptionStore.forget(for: nil)
+                NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+            },
             onFetchFusionModels: { provider, authMode, apiKey, completion in
                 Task {
                     let m = await Fusion.listModels(provider: provider, authMode: authMode,
@@ -5481,6 +5500,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             onForgetGrok: (editing ?? initialDraft).map { p in
                 { [weak self] in
                     try? self?.mitmEngine?.grokSubscriptionStore.forget(for: p.id)
+                    NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+                }
+            },
+            kimiAccountSavedAt: (editing ?? initialDraft).map { p in
+                { [weak self] in
+                    self?.mitmEngine?.kimiSubscriptionStore.record(for: p.id)?.savedAt
+                        ?? self?.mitmEngine?.kimiSubscriptionStore.record(for: nil)?.savedAt
+                }
+            },
+            onRegisterKimi: (editing ?? initialDraft).map { p in
+                { [weak self] in self?.beginSubscriptionRegistration(provider: .kimi, scope: .askPerSession(p.id)) }
+            },
+            onForgetKimi: (editing ?? initialDraft).map { p in
+                { [weak self] in
+                    try? self?.mitmEngine?.kimiSubscriptionStore.forget(for: p.id)
                     NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
                 }
             },
@@ -6279,6 +6313,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let files = seedDir.appendingPathComponent("files", isDirectory: true)
                 seedCodexAuthFile(for: profile, homeRoot: files)
                 seedGrokAuthFile(for: profile, homeRoot: files)
+                seedKimiAuthFile(for: profile, homeRoot: files)
                 try store.finalizeHomeSeed(
                             for: profile, seedDir: seedDir,
                             anthropicEnvKey: plan.fakeForAnthropic()
@@ -6682,6 +6717,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // so the guest runs without logging in (host owns the real token).
             seedCodexAuthFile(for: profile)
             seedGrokAuthFile(for: profile)
+            seedKimiAuthFile(for: profile)
         }
         if let engine = mitmEngine {
             // Tell the trace store what level + session id to record
@@ -6875,6 +6911,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         let files = seedDir.appendingPathComponent("files", isDirectory: true)
                         seedCodexAuthFile(for: profile, homeRoot: files)
                         seedGrokAuthFile(for: profile, homeRoot: files)
+                        seedKimiAuthFile(for: profile, homeRoot: files)
                         try store.finalizeHomeSeed(
                             for: profile, seedDir: seedDir,
                             anthropicEnvKey: plan.fakeForAnthropic()
@@ -8044,7 +8081,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let nameField = NSTextField(frame: NSRect(x: 0, y: 68, width: 320, height: 24))
         nameField.placeholderString = NSLocalizedString("Task name (e.g. Website refactoring)", comment: "")
         let toolPopup = NSPopUpButton(frame: NSRect(x: 0, y: 36, width: 320, height: 24))
-        let tools = ["claude", "codex", "grok"]
+        let tools = ["claude", "codex", "grok", "kimi"]
         toolPopup.addItems(withTitles: tools)
         toolPopup.selectItem(withTitle: tools.contains(defaultTool) ? defaultTool : "claude")
         let promptField = NSTextField(frame: NSRect(x: 0, y: 4, width: 320, height: 24))
@@ -9064,6 +9101,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         mitmEngine?.claudeSubscriptionStore.unregisterBogusKeys(for: profile.id)
         mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: profile.id)
         mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: profile.id)
+        mitmEngine?.kimiSubscriptionStore.unregisterBogusKeys(for: profile.id)
         shellBridges[profile.id]?.stop()
         shellBridges.removeValue(forKey: profile.id)
         browserMCPBridges[profile.id]?.stop()
@@ -9489,6 +9527,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if profile.homeModel == .virtiofs {
                 self.seedCodexAuthFile(for: profile)
                 self.seedGrokAuthFile(for: profile)
+                self.seedKimiAuthFile(for: profile)
             }
             if let engine = self.mitmEngine, let scriptURL = self.bridgeScriptURL {
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
@@ -9518,6 +9557,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         let files = seedDir.appendingPathComponent("files", isDirectory: true)
                         self.seedCodexAuthFile(for: profile, homeRoot: files)
                         self.seedGrokAuthFile(for: profile, homeRoot: files)
+                        self.seedKimiAuthFile(for: profile, homeRoot: files)
                         try store.finalizeHomeSeed(
                             for: profile, seedDir: seedDir,
                             anthropicEnvKey: plan.fakeForAnthropic()
@@ -10100,6 +10140,67 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             try? data.write(to: url, options: .atomic)
             try? FileManager.default.setAttributes(
                 [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
+        }
+    }
+
+    /// Kimi subscription mode: write a bogus
+    /// `~/.kimi-code/credentials/<name>.json` (plus, if captured, the managed
+    /// `config.toml` the CLI's own `/login` writes) into the profile's
+    /// host-side home so the guest runs Kimi Code without logging in. The
+    /// bogus token carries a far-future `expires_at` so the guest never
+    /// refreshes; the host owns refresh and the proxy swaps the bogus Bearer
+    /// for the live one on api.kimi.com. `homeRoot`: see seedCodexAuthFile.
+    func seedKimiAuthFile(for profile: Profile, homeRoot: URL? = nil) {
+        guard let engine = mitmEngine,
+              profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription }),
+              let real = engine.kimiSubscriptionStore.record(for: profile.id) else { return }
+        let saltA = Data("kimi-bogus-access:\(profile.id)".utf8)
+        let saltR = Data("kimi-bogus-refresh:\(profile.id)".utf8)
+        // Kimi's access token is a JWT — mint a JWT-shaped bogus (real claims,
+        // far-future exp, fake signature) so the CLI can decode it locally;
+        // an opaque placeholder makes it treat the session as logged out.
+        let bogusAccess = SubscriptionFakeMint.mintNoRefreshJWTFake(
+                realJWT: real.accessToken, salt: saltA)
+            ?? SessionTokenPlan.deriveFake(
+                prefix: "kimi-brm-", real: real.accessToken, salt: saltA,
+                targetLength: max(40, real.accessToken.count))
+        let bogusRefresh = SessionTokenPlan.deriveFake(
+            prefix: "kimirt-brm-", real: real.refreshToken, salt: saltR,
+            targetLength: max(40, real.refreshToken.count))
+        engine.kimiSubscriptionStore.registerBogusKey(bogusAccess, for: profile.id)
+
+        // Rebuild the credentials entry from the captured template (scope /
+        // token_type / expires_in as the server issued them) and inject the
+        // bogus secrets. `expires_at` is unix SECONDS in kimi's wire format
+        // (see packages/oauth types.ts) — push it ~10y out.
+        let farFuture = Date().addingTimeInterval(10 * 365 * 24 * 3600).timeIntervalSince1970
+        var entry: [String: Any] = (real.templateJSON.flatMap {
+            (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+        }) ?? ["scope": "", "token_type": "Bearer", "expires_in": 3600]
+        entry["access_token"] = bogusAccess
+        entry["refresh_token"] = bogusRefresh
+        entry["expires_at"] = Int(farFuture)
+
+        let kimiHome = (homeRoot ?? store.homeDirectory(for: profile))
+            .appendingPathComponent(".kimi-code", isDirectory: true)
+        let credDir = kimiHome.appendingPathComponent("credentials", isDirectory: true)
+        try? FileManager.default.createDirectory(at: credDir, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: credDir.path)
+        let url = credDir.appendingPathComponent("\(real.credentialName).json")
+        if let data = try? JSONSerialization.data(withJSONObject: entry, options: [.prettyPrinted]) {
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
+        }
+        // The managed provider + model list `/login` wrote in the registration
+        // VM. Create-if-missing: the guest's own config.toml (and the marker
+        // block the .bashrc appends) owns the file from then on.
+        if let toml = real.configTOML, !toml.isEmpty {
+            let cfg = kimiHome.appendingPathComponent("config.toml")
+            if !FileManager.default.fileExists(atPath: cfg.path) {
+                try? toml.write(to: cfg, atomically: true, encoding: .utf8)
+            }
         }
     }
 

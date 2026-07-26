@@ -22,7 +22,7 @@ enum EnvFileImport {
 
     /// Where a recognized variable belongs.
     enum Slot: Equatable {
-        case toolKey(Profile.Tool)    // ANTHROPIC/OPENAI/XAI API keys
+        case toolKey(Profile.Tool)    // ANTHROPIC/OPENAI/XAI/MOONSHOT API keys
         case gitToken(host: String)   // GH_TOKEN → github.com, GITLAB_TOKEN → gitlab.com
         case digitalOcean
         case linear
@@ -39,6 +39,7 @@ enum EnvFileImport {
         case "ANTHROPIC_API_KEY":                          return .toolKey(.claude)
         case "OPENAI_API_KEY":                             return .toolKey(.codex)
         case "XAI_API_KEY":                                return .toolKey(.grok)
+        case "MOONSHOT_API_KEY", "KIMI_API_KEY":           return .toolKey(.kimi)
         case "GH_TOKEN", "GITHUB_TOKEN":                   return .gitToken(host: "github.com")
         case "GITLAB_TOKEN", "GLAB_TOKEN":                 return .gitToken(host: "gitlab.com")
         case "DIGITALOCEAN_ACCESS_TOKEN", "DIGITALOCEAN_TOKEN", "DO_TOKEN": return .digitalOcean
@@ -58,6 +59,7 @@ enum EnvFileImport {
         case .toolKey(.claude):  return ["anthropic.com"]
         case .toolKey(.codex):   return ["openai.com"]
         case .toolKey(.grok):    return ["x.ai"]
+        case .toolKey(.kimi):    return ["moonshot.ai"]
         case .gitToken(let host): return [host]
         case .digitalOcean:      return ["digitalocean.com"]
         case .linear:            return ["linear.app"]

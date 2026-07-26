@@ -29,6 +29,7 @@ extension Profile.Tool {
         case .claude: "sparkles"
         case .codex:  "terminal.fill"
         case .grok:   "bolt.fill"
+        case .kimi:   "moon.stars.fill"
         }
     }
 }
@@ -436,6 +437,10 @@ struct ProfileEditorView: View {
     let grokAccountSavedAt: (() -> Date?)?
     let onRegisterGrok: (() -> Void)?
     let onForgetGrok: (() -> Void)?
+    /// Kimi (Moonshot) counterparts.
+    let kimiAccountSavedAt: (() -> Date?)?
+    let onRegisterKimi: (() -> Void)?
+    let onForgetKimi: (() -> Void)?
 
     init(
         profile: Profile? = nil,
@@ -456,6 +461,9 @@ struct ProfileEditorView: View {
         grokAccountSavedAt: (() -> Date?)? = nil,
         onRegisterGrok: (() -> Void)? = nil,
         onForgetGrok: (() -> Void)? = nil,
+        kimiAccountSavedAt: (() -> Date?)? = nil,
+        onRegisterKimi: (() -> Void)? = nil,
+        onForgetKimi: (() -> Void)? = nil,
         onFetchFusionModels: ((Profile.Tool, Profile.AuthMode, String?, @escaping ([String]) -> Void) -> Void)? = nil
     ) {
         self.onImportSSHKey = onImportSSHKey
@@ -469,6 +477,9 @@ struct ProfileEditorView: View {
         self.grokAccountSavedAt = grokAccountSavedAt
         self.onRegisterGrok = onRegisterGrok
         self.onForgetGrok = onForgetGrok
+        self.kimiAccountSavedAt = kimiAccountSavedAt
+        self.onRegisterKimi = onRegisterKimi
+        self.onForgetKimi = onForgetKimi
         self.onFetchFusionModels = onFetchFusionModels
         var p = profile ?? Profile(name: "", tool: .claude, authMode: .token)
         // New profiles: pre-fill custom appearance fields with Terminal.app
@@ -862,6 +873,7 @@ struct ProfileEditorView: View {
         case .claude: return (claudeAccountSavedAt?(), onRegisterClaude, onForgetClaude)
         case .codex:  return (codexAccountSavedAt?(), onRegisterCodex, onForgetCodex)
         case .grok:   return (grokAccountSavedAt?(), onRegisterGrok, onForgetGrok)
+        case .kimi:   return (kimiAccountSavedAt?(), onRegisterKimi, onForgetKimi)
         }
     }
 
@@ -938,6 +950,7 @@ struct ProfileEditorView: View {
         case .claude: return NSLocalizedString("Claude Code (Anthropic) — your session", comment: "Fusion cloud leg label for the primary Claude session")
         case .codex:  return NSLocalizedString("Codex (OpenAI)", comment: "Fusion cloud leg label")
         case .grok:   return NSLocalizedString("Grok (xAI)", comment: "Fusion cloud leg label")
+        case .kimi:   return NSLocalizedString("Kimi Code (Moonshot AI)", comment: "Fusion cloud leg label")
         }
     }
 
@@ -4649,6 +4662,10 @@ private struct ToolConfigCard: View {
         case .claude: return "ANTHROPIC_BASE_URL"
         case .codex:  return "OPENAI_BASE_URL"
         case .grok:   return "XAI_BASE_URL"
+        // Kimi reads no base-URL env var — its provider (and the local
+        // override) is config-driven; KIMI_MODEL_BASE_URL is the closest
+        // equivalent and is what the local-mode exports set.
+        case .kimi:   return "KIMI_MODEL_BASE_URL"
         }
     }
 
@@ -4783,6 +4800,7 @@ private struct ToolConfigCard: View {
         case .claude: return "Anthropic API key"
         case .codex:  return "OpenAI API key"
         case .grok:   return "xAI API key"
+        case .kimi:   return "Moonshot API key"
         }
     }
 }

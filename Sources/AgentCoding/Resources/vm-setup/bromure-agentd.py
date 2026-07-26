@@ -1809,6 +1809,11 @@ def _restore_worktrees(repo_root, repo_name):
 # automation launches (never manual worktrees). Kept here — with the rest of
 # the launch logic — rather than in the profile's persisted .bashrc, so the
 # dangerous strings live in the fresh-staged daemon, not the user's home.
+#
+# Deliberately NO "kimi" entry: `kimi --prompt` (the form the launcher uses
+# for an unattended run) already runs in permission mode "auto" with an
+# auto-approving handler, and the CLI hard-ERRORS if --prompt is combined
+# with --yolo/--auto. An entry here would break every kimi automation.
 _YOLO_FLAGS = {
     "claude": "--dangerously-skip-permissions",
     "codex": "--dangerously-bypass-approvals-and-sandbox",
@@ -1932,10 +1937,13 @@ def _task_mcp_setup(branch, tool, workdir):
                 directory (grok-cli reads mcpServers from there); the
                 .grok/ dir is added to the checkout's local git exclude so
                 it can never dirty the task's diff or get committed.
+      - kimi:   the same idea against .kimi-code/mcp.json, kimi's
+                project-scope MCP declaration file (identical mcpServers
+                shape), likewise git-excluded.
 
     Returns the extra CLI flags for BROMURE_AC_WT_FLAGS (may be "" — grok
-    is wired purely through the settings file). Flag strings word-split in
-    the tab launcher, so every token must be space-free."""
+    and kimi are wired purely through their settings files). Flag strings
+    word-split in the tab launcher, so every token must be space-free."""
     if not os.path.exists(_TASK_MCP_SHIM):
         return ""
     if tool == "claude":
@@ -1959,11 +1967,13 @@ def _task_mcp_setup(branch, tool, workdir):
         args = json.dumps([_TASK_MCP_SHIM, branch], separators=(",", ":"))
         return (' -c mcp_servers.bromure_board.command="python3"'
                 ' -c mcp_servers.bromure_board.args=' + args)
-    if tool == "grok":
+    if tool in ("grok", "kimi"):
+        subdir, fname = ((".grok", "settings.json") if tool == "grok"
+                         else (".kimi-code", "mcp.json"))
         try:
-            d = os.path.join(workdir, ".grok")
+            d = os.path.join(workdir, subdir)
             os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, "settings.json"), "w") as f:
+            with open(os.path.join(d, fname), "w") as f:
                 json.dump({"mcpServers": {"bromure-board": {
                     "command": "python3",
                     "args": [_TASK_MCP_SHIM, branch]}}}, f, indent=2)
@@ -1976,11 +1986,11 @@ def _task_mcp_setup(branch, tool, workdir):
                 if os.path.exists(path):
                     with open(path) as f:
                         current = f.read()
-                if ".grok/" not in current:
+                if (subdir + "/") not in current:
                     with open(path, "a") as f:
-                        f.write("\n.grok/\n")
+                        f.write("\n" + subdir + "/\n")
         except OSError as e:
-            log("worktree", "grok task-mcp setup failed:", e)
+            log("worktree", "%s task-mcp setup failed: %s" % (tool, e))
         return ""
     return ""
 
@@ -2759,7 +2769,8 @@ def _agent_title(pane_title, agent):
 # Mirrors the shell case: node|node[0-9]*|deno|bun|python|python[0-9.]*|ruby|uv|tsx
 _INTERP_RE = re.compile(
     r"^(node|node[0-9].*|deno|bun|python|python[0-9.].*|ruby|uv|tsx)$")
-_AGENTS = ("claude", "codex", "grok", "aider", "goose", "amp", "opencode",
+_AGENTS = ("claude", "codex", "grok", "kimi", "kimi-code", "kimi-co",
+           "aider", "goose", "amp", "opencode",
            "gemini", "cursor")
 _AGENTS_SET = frozenset(_AGENTS)
 

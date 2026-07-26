@@ -116,7 +116,8 @@ struct FileExplorerPane: View {
     /// "claude" for a bare agent but "Refactor website (claude)" once the
     /// agent sets a session title — match both, for every agent the guest
     /// roster recognizes. Worktree tabs are agent-launched by construction.
-    private static let agentNames = ["claude", "codex", "grok", "aider",
+    private static let agentNames = ["claude", "codex", "grok", "kimi",
+                                     "kimi-code", "kimi-co", "aider",
                                      "goose", "amp", "opencode", "gemini",
                                      "cursor"]
     private func updateAgentTab() {

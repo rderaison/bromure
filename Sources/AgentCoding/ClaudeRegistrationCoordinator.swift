@@ -23,12 +23,31 @@ public enum SubscriptionProvider: Sendable {
     case claude
     case codex
     case grok
+    case kimi
 
     var displayName: String {
-        switch self { case .claude: return "Claude"; case .codex: return "ChatGPT"; case .grok: return "Grok" }
+        switch self {
+        case .claude: return "Claude"
+        case .codex:  return "ChatGPT"
+        case .grok:   return "Grok"
+        case .kimi:   return "Kimi"
+        }
     }
     var scratchTool: Profile.Tool {
-        switch self { case .claude: return .claude; case .codex: return .codex; case .grok: return .grok }
+        switch self {
+        case .claude: return .claude
+        case .codex:  return .codex
+        case .grok:   return .grok
+        case .kimi:   return .kimi
+        }
+    }
+    /// True for providers with no vsock token agent, whose credentials are
+    /// read straight out of the (host-mounted) home dir instead.
+    var capturesFromHomeDir: Bool {
+        switch self {
+        case .grok, .kimi: return true
+        case .claude, .codex: return false
+        }
     }
     var scratchName: String { "Register with \(displayName)" }
 }
@@ -105,8 +124,8 @@ extension ACAppDelegate {
         // Scratch profile: the right tool + subscription, no folders / SSH /
         // creds / MCP / env, fresh random id → unique throwaway dir we delete.
         // Deliberately on the legacy virtiofs home: the VM lives minutes, and
-        // the Grok flow harvests ~/.grok/auth.json by polling the host-side
-        // home dir — which only exists in the virtiofs model.
+        // the Grok / Kimi flows harvest their credentials file by polling the
+        // host-side home dir — which only exists in the virtiofs model.
         let scratch = Profile(name: provider.scratchName, tool: provider.scratchTool,
                               authMode: .subscription, homeModel: .virtiofs)
         let scratchDir = store.profileDirectory(for: scratch)
@@ -187,7 +206,7 @@ extension ACAppDelegate {
             switch provider {
             case .claude: state.claudeBridge = SubscriptionTokenBridge(socketDevice: dev)
             case .codex:  state.codexBridge = CodexTokenBridge(socketDevice: dev)
-            case .grok:   break  // no vsock agent — captured from the home-dir file
+            case .grok, .kimi: break  // no vsock agent — captured from the home-dir file
             }
 
             // Window 0 of the guest tmux session sources .bashrc, whose
@@ -248,7 +267,12 @@ extension ACAppDelegate {
         guard let state = claudeRegistration, !state.finished,
               !state.agentLaunchStarted else { return }
         state.agentLaunchStarted = true
-        let tool = state.provider.scratchTool.rawValue   // claude | codex | grok
+        // The command that starts the provider's login. Bare tool name for
+        // the agents whose first run performs OAuth itself; kimi's TUI would
+        // just sit at a prompt waiting for `/login`, so use its dedicated
+        // non-interactive device-code subcommand instead.
+        let rawTool = state.provider.scratchTool.rawValue  // claude|codex|grok|kimi
+        let tool = state.provider == .kimi ? "'kimi login'" : rawTool
         let pid = state.scratchProfile.id
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -278,11 +302,12 @@ extension ACAppDelegate {
     private func pollForSubscriptionRegistration(state: ClaudeRegistrationState) {
         // Grok has no vsock agent — its creds land in the (host-mounted) home
         // dir, which we poll directly.
-        let grokAuthURL = store.homeDirectory(for: state.scratchProfile)
-            .appendingPathComponent(".grok/auth.json")
+        let home = store.homeDirectory(for: state.scratchProfile)
+        let grokAuthURL = home.appendingPathComponent(".grok/auth.json")
+        let kimiHome = home.appendingPathComponent(".kimi-code", isDirectory: true)
         state.pollTask = Task { @MainActor in
-            // Bridge providers connect ~15–60s after boot; Grok has no bridge.
-            if state.provider != .grok {
+            // Bridge providers connect ~15–60s after boot; Grok/Kimi have none.
+            if !state.provider.capturesFromHomeDir {
                 for _ in 0..<240 {
                     if Task.isCancelled { return }
                     let isUp = state.claudeBridge?.isConnected ?? state.codexBridge?.isConnected ?? false
@@ -309,6 +334,12 @@ extension ACAppDelegate {
                                       scopeKey: g.scopeKey, template: g.template))
                     return
                 }
+                if state.provider == .kimi, let k = Self.readKimiCredentials(in: kimiHome) {
+                    self.finishClaudeRegistration(state: state,
+                        record: .kimi(access: k.access, refresh: k.refresh, name: k.name,
+                                      template: k.template, configTOML: k.configTOML))
+                    return
+                }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
             if Task.isCancelled { return }
@@ -326,6 +357,8 @@ extension ACAppDelegate {
         case claude(access: String, refresh: String)
         case codex(access: String, refresh: String, idToken: String)
         case grok(access: String, refresh: String, scopeKey: String, template: Data)
+        case kimi(access: String, refresh: String, name: String, template: Data,
+                  configTOML: String?)
     }
 
     /// Read real Grok tokens from a freshly-written `~/.grok/auth.json`, or nil
@@ -356,6 +389,45 @@ extension ACAppDelegate {
             entry.removeValue(forKey: "expires_at")
             let template = (try? JSONSerialization.data(withJSONObject: entry)) ?? Data()
             return (key, refresh, exp, scope, template)
+        }
+        return nil
+    }
+
+    /// Read real Kimi tokens from `~/.kimi-code/credentials/<name>.json`, or
+    /// nil until the user has signed in. Wire shape (packages/oauth types.ts):
+    /// `{ access_token, refresh_token, expires_at (unix s), scope, token_type,
+    /// expires_in }`. We prefer the managed `kimi-code` flow's file but accept
+    /// any credential in the dir, capture the FULL entry minus secrets as a
+    /// template, and pick up the `config.toml` `/login` wrote so a seeded guest
+    /// starts with the managed provider + model list already configured.
+    static func readKimiCredentials(in kimiHome: URL)
+        -> (access: String, refresh: String, name: String, template: Data,
+            configTOML: String?)? {
+        let credDir = kimiHome.appendingPathComponent("credentials", isDirectory: true)
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: credDir, includingPropertiesForKeys: nil) else { return nil }
+        // Managed flow first, then any other provider the user logged into.
+        let jsons = entries.filter { $0.pathExtension == "json" }
+        let ordered = jsons.sorted { a, _ in
+            a.deletingPathExtension().lastPathComponent == kimiManagedCredentialName
+        }
+        for url in ordered {
+            guard let data = try? Data(contentsOf: url),
+                  var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let access = obj["access_token"] as? String, !access.isEmpty,
+                  // Skip our own bogus seed (both the JWT-mint and the
+                  // deriveFake fallback shapes).
+                  !access.hasPrefix("kimi-brm-") else { continue }
+            let refresh = (obj["refresh_token"] as? String) ?? ""
+            obj.removeValue(forKey: "access_token")
+            obj.removeValue(forKey: "refresh_token")
+            obj.removeValue(forKey: "expires_at")
+            let template = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
+            let name = url.deletingPathExtension().lastPathComponent
+            let toml = try? String(
+                contentsOf: kimiHome.appendingPathComponent("config.toml"), encoding: .utf8)
+            return (access, refresh, name, template, toml)
         }
         return nil
     }
@@ -397,6 +469,15 @@ extension ACAppDelegate {
                     expiresAt: .distantPast, savedAt: Date())
                 if let pid = overrideProfile { try engine.codexSubscriptionStore.setOverride(rec, for: pid) }
                 else { try engine.codexSubscriptionStore.setShared(rec) }
+            case .kimi(let access, let refresh, let name, let template, let configTOML):
+                // Same forced-refresh-on-first-use rationale as Grok below.
+                let rec = KimiSubscriptionRecord(
+                    accessToken: access, refreshToken: refresh,
+                    expiresAt: .distantPast, savedAt: Date(),
+                    credentialName: name, templateJSON: template,
+                    configTOML: configTOML)
+                if let pid = overrideProfile { try engine.kimiSubscriptionStore.setOverride(rec, for: pid) }
+                else { try engine.kimiSubscriptionStore.setShared(rec) }
             case .grok(let access, let refresh, let scopeKey, let template):
                 // Force an immediate proactive refresh on first use to establish
                 // the real expiry + prove the refresh path.
@@ -457,6 +538,7 @@ extension ACAppDelegate {
         mitmEngine?.claudeSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
         mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
         mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
+        mitmEngine?.kimiSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
 
         // Retire the pane's native terminal surfaces up front, while the view
         // is still alive, so closing the window below can't leave libghostty

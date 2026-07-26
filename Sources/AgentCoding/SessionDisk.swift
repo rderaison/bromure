@@ -411,6 +411,8 @@ public final class SessionDisk {
                 value = tokenPlan?.fakeForOpenAI() ?? real
             case .grok:
                 value = tokenPlan?.fakeForXAI() ?? real
+            case .kimi:
+                value = tokenPlan?.fakeForKimi() ?? real
             }
             lines.append("export \(spec.tool.apiKeyEnvVar)=\(shellQuote(value))")
         }
@@ -836,6 +838,22 @@ public final class SessionDisk {
                 atomically: true, encoding: .utf8)
         }
 
+        // Kimi Code managed config block, merged marker-guarded into
+        // ~/.kimi-code/config.toml by the guest init. Always carries the
+        // status `[[hooks]]` (working/done/needsInput → sidebar dot, and the
+        // automation done signal); token mode adds the open-platform provider
+        // with the FAKE key, since kimi reads provider credentials only from
+        // config.toml — never from the shell environment.
+        if let kimiSpec = profile.allToolSpecs.first(where: { $0.tool == .kimi }) {
+            var toml = Self.kimiHooksTOML
+            if kimiSpec.authMode == .token,
+               let fake = tokenPlan?.fakeForKimi() {
+                toml += Self.kimiTokenProviderTOML(fakeKey: fake)
+            }
+            try toml.write(to: tmp.appendingPathComponent("kimi.toml"),
+                           atomically: true, encoding: .utf8)
+        }
+
         // home.mode — tells the guest agent how /home/ubuntu arrives this
         // boot: "virtiofs" (legacy, agent does nothing), "ext4" (format if
         // blank + mount + seed), or "migrate" (copy the virtiofs home into
@@ -1255,6 +1273,44 @@ public final class SessionDisk {
         [model.grok-build]
         model = \(tomlQuote(model))
         # <<< bromure-local
+        """
+    }
+
+    /// Status hooks for Kimi Code — its `[[hooks]]` events mirror Claude
+    /// Code's hook names, and the commands reuse the same reporter script
+    /// `prepareHomeDirectory` writes for Claude. Stop doubles as the
+    /// automation done signal.
+    static let kimiHooksTOML = """
+    [[hooks]]
+    event = "UserPromptSubmit"
+    command = "/home/ubuntu/.bromure/agent-status.sh working"
+
+    [[hooks]]
+    event = "PreToolUse"
+    command = "/home/ubuntu/.bromure/agent-status.sh working"
+
+    [[hooks]]
+    event = "Stop"
+    command = "/home/ubuntu/.bromure/agent-status.sh done"
+
+    [[hooks]]
+    event = "PermissionRequest"
+    command = "/home/ubuntu/.bromure/agent-status.sh needsInput"
+
+    """
+
+    /// Open-platform provider entry for token-mode Kimi: config.toml is the
+    /// ONLY place kimi reads provider credentials from (shell env vars are
+    /// deliberately ignored by the CLI), so the fake key lands here and the
+    /// proxy swaps it on requests to api.moonshot.ai.
+    static func kimiTokenProviderTOML(fakeKey: String) -> String {
+        """
+
+        [providers.kimi]
+        type = "kimi"
+        base_url = "https://api.moonshot.ai/v1"
+        api_key = \(tomlQuote(fakeKey))
+
         """
     }
 

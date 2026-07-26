@@ -922,9 +922,9 @@ struct AutomationEditorView: View {
                         comment: ""), systemImage: "exclamationmark.triangle")
                         .font(.system(size: 11))
                         .foregroundStyle(.orange)
-                } else if up.tool != .claude {
+                } else if !up.tool.hasReliableDoneSignal {
                     Label(String(format: NSLocalizedString(
-                        "“%@” runs %@ — only Claude runs report finishing, so this chain will never fire.",
+                        "“%@” runs %@, which doesn't report finishing, so this chain will never fire.",
                         comment: "upstream name, tool"),
                         up.name, up.tool.displayName),
                         systemImage: "exclamationmark.triangle")
@@ -1161,10 +1161,10 @@ struct AutomationEditorView: View {
                                          comment: ""),
                        isOn: $draft.cloneWorkspaceFirst)
                     .font(.system(size: 13))
-                    .disabled(draft.tool != .claude)
-                hint(draft.tool != .claude
+                    .disabled(!draft.tool.hasReliableDoneSignal)
+                hint(!draft.tool.hasReliableDoneSignal
                      ? NSLocalizedString(
-                        "Clone runs are Claude-only — tearing the clone down needs Claude's reliable completion signal.",
+                        "Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down.",
                         comment: "")
                      : (draft.cloneWorkspaceFirst
                         ? NSLocalizedString(
@@ -1227,13 +1227,13 @@ struct AutomationEditorView: View {
                 Toggle(NSLocalizedString(
                     "Close the tab when the agent finishes", comment: ""),
                        isOn: $draft.closeWhenDone)
-                    .disabled(draft.tool != .claude)
-                hint(draft.tool == .claude
+                    .disabled(!draft.tool.hasReliableDoneSignal)
+                hint(draft.tool.hasReliableDoneSignal
                      ? NSLocalizedString(
                         "The transcript is saved first — readable any time from the run's card on the automation board. Turn off to leave the session up for inspection.",
                         comment: "")
                      : NSLocalizedString(
-                        "Only Claude reports completion reliably (its Stop hook); other agents' tabs stay open.",
+                        "Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open.",
                         comment: ""))
             }
             .padding(.horizontal, 4)

@@ -118,6 +118,8 @@ enum Fusion {
         case openAISubscription(String)  // chatgpt.com backend Bearer (best-effort)
         case grokKey(String)             // api.x.ai Bearer (OpenAI-compatible)
         case grokSubscription(String)    // cli-chat-proxy.grok.com Bearer (best-effort)
+        case kimiKey(String)             // api.moonshot.ai Bearer (OpenAI-compatible)
+        case kimiSubscription(String)    // api.kimi.com/coding Bearer (OpenAI-compatible)
         case local(base: String)         // on-host vllm-mlx engine, OpenAI-compatible
     }
 
@@ -194,6 +196,12 @@ enum Fusion {
             guard let (_, r) = HTTPMitmConnection.grokSubscriptionProvider?(),
                   let tok = try? await r.accessToken(for: profileID) else { return nil }
             return .grokSubscription(tok)
+        case (.kimi, .token):
+            return realFor(["moonshot.ai"], swapper, profileID).map(Cred.kimiKey)
+        case (.kimi, .subscription):
+            guard let (_, r) = HTTPMitmConnection.kimiSubscriptionProvider?(),
+                  let tok = try? await r.accessToken(for: profileID) else { return nil }
+            return .kimiSubscription(tok)
         case (_, .local):
             // Any tool in local mode → the on-host engine (loopback). No
             // real credential needed; the engine ignores the dummy key.
@@ -247,6 +255,16 @@ enum Fusion {
             return await askCodexWebSocket(token: tok, accountID: acct, model: model,
                                            system: system, question: question,
                                            session: session, callLog: callLog)
+        case .kimiKey(let key):
+            return await askOpenAIChat(base: "https://api.moonshot.ai", model: model, system: system,
+                                       question: question, maxTokens: maxTokens, token: key,
+                                       session: session, callLog: callLog)
+        case .kimiSubscription(let tok):
+            // The managed Kimi Code endpoint is OpenAI-compatible, just on a
+            // /coding-prefixed base rather than the open platform's /v1.
+            return await askOpenAIChat(base: "https://api.kimi.com/coding", model: model, system: system,
+                                       question: question, maxTokens: maxTokens, token: tok,
+                                       session: session, callLog: callLog)
         case .grokSubscription(let tok):
             // cli-chat-proxy rejects requests without a recent client version.
             return await askResponsesAPI(url: "https://cli-chat-proxy.grok.com/v1/responses",
@@ -525,6 +543,11 @@ enum Fusion {
                let t = try? await r.accessToken(for: profileID) { cred = .grokSubscription(t) }
         case (.grok, _):
             cred = apiKey.map(Cred.grokKey)
+        case (.kimi, .subscription):
+            if let r = HTTPMitmConnection.kimiSubscriptionProvider?()?.1,
+               let t = try? await r.accessToken(for: profileID) { cred = .kimiSubscription(t) }
+        case (.kimi, _):
+            cred = apiKey.map(Cred.kimiKey)
         }
         guard let cred else { return defaultModels(provider) }
         let fetched = await fetchModels(cred: cred)
@@ -536,6 +559,7 @@ enum Fusion {
         case .claude: return ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
         case .codex:  return ["gpt-5.5-2026-04-23", "gpt-5", "gpt-4o"]
         case .grok:   return ["grok-build", "grok-4", "grok-3"]
+        case .kimi:   return ["kimi-k2.5", "kimi-k2", "kimi-k2-turbo-preview"]
         }
     }
 
@@ -548,6 +572,8 @@ enum Fusion {
             case .openAISubscription(let t): return ("https://chatgpt.com/backend-api", ("Authorization", "Bearer \(t)"))
             case .grokKey(let k):         return ("https://api.x.ai", ("Authorization", "Bearer \(k)"))
             case .grokSubscription(let t): return ("https://cli-chat-proxy.grok.com", ("Authorization", "Bearer \(t)"))
+            case .kimiKey(let k):         return ("https://api.moonshot.ai", ("Authorization", "Bearer \(k)"))
+            case .kimiSubscription(let t): return ("https://api.kimi.com/coding", ("Authorization", "Bearer \(t)"))
             case .local(let base):        return (base, ("Authorization", "Bearer \(InferenceService.apiKey)"))
             }
         }()
@@ -976,6 +1002,7 @@ enum Fusion {
         case .claude: return "claude-opus-4-8"
         case .codex:  return authMode == .subscription ? "gpt-5.5" : "gpt-5.5-2026-04-23"
         case .grok:   return "grok-build"
+        case .kimi:   return "kimi-k2.5"
         }
     }
 

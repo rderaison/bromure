@@ -160,7 +160,7 @@ final class RemoteMenuApp {
             switch sel {
             case 0: _ = editField(&doc, key: "name", label: "Workspace name", kind: .text(secret: false))
             case 1: _ = editField(&doc, key: "tool", label: "Primary tool",
-                                  kind: .pick(["claude", "codex", "grok"]))
+                                  kind: .pick(["claude", "codex", "grok", "kimi"]))
             case 2:
                 _ = editField(&doc, key: "authMode", label: "Auth mode",
                               kind: .pick(["token", "subscription", "bedrock", "local"]))
@@ -773,15 +773,15 @@ final class RemoteMenuApp {
             }
             switch sel {
             case 0:
-                let tools = ["claude", "codex", "grok"]
+                let tools = ["claude", "codex", "grok", "kimi"]
                 let on = Set(legs.compactMap { tools.firstIndex(of: $0) })
                 if let picked = tui.checklist(title: "Models to fuse (≥2 to engage)",
-                                              items: ["Claude", "Codex", "Grok"], initiallyOn: on) {
+                                              items: ["Claude", "Codex", "Grok", "Kimi"], initiallyOn: on) {
                     doc["fusionLegs"] = picked.sorted().map { tools[$0] }
                     changed = true
                 }
             case 1: if editField(&doc, key: "fusionJudgeProvider", label: "Provider",
-                                 kind: .pick(["claude", "codex", "grok"])) { changed = true }
+                                 kind: .pick(["claude", "codex", "grok", "kimi"])) { changed = true }
             case 2: if editField(&doc, key: "fusionJudgeModel", label: "Model",
                                  kind: .text(secret: false)) { changed = true }
             case 3: if editField(&doc, key: "fusionJudgeLocal", label: "Judge on local engine",
@@ -1554,7 +1554,7 @@ final class RemoteMenuApp {
         guard let rawName = tui.prompt("Task name (e.g. Website refactoring)"),
               !rawName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         let taskName = rawName.trimmingCharacters(in: .whitespaces)
-        let tools = ["claude", "codex", "grok"]
+        let tools = ["claude", "codex", "grok", "kimi"]
         let initial = tools.firstIndex(of: defaultTool) ?? 0
         guard let ti = tui.menu(title: "Tool for the worktree", items: tools, initial: initial) else { return }
         let tool = tools[ti]

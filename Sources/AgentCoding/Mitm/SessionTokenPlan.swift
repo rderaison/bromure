@@ -37,6 +37,10 @@ public struct SessionTokenPlan: Sendable {
         /// XAI_API_KEY env var — Grok Build reads this. Swapped on the wire
         /// to api.x.ai (OpenAI-style `Authorization: Bearer`).
         case xaiAPIKey
+        /// MOONSHOT_API_KEY env var + the `[providers.kimi]` api_key the
+        /// kimi.toml block writes — Kimi Code (open-platform auth) sends it
+        /// as `Authorization: Bearer` to api.moonshot.ai.
+        case moonshotAPIKey
         /// HTTPS git credential. Materialized in ~/.git-credentials and
         /// the gh / glab configs.
         case gitHTTPS(host: String, username: String)
@@ -146,6 +150,13 @@ public struct SessionTokenPlan: Sendable {
         return nil
     }
 
+    public func fakeForKimi() -> String? {
+        for e in entries {
+            if case .moonshotAPIKey = e.purpose { return e.fakeValue }
+        }
+        return nil
+    }
+
     /// Fake to embed into ~/.git-credentials for the matching host.
     public func fakeForGitHTTPS(host: String, username: String) -> String? {
         for e in entries {
@@ -162,6 +173,7 @@ public struct SessionTokenPlan: Sendable {
         case .anthropicAPIKey:        return "anthropic.com"
         case .openaiAPIKey:           return "openai.com"
         case .xaiAPIKey:              return "x.ai"
+        case .moonshotAPIKey:         return "moonshot.ai"
         case .gitHTTPS(let host, _):  return host
         case .manual(_, _, let host): return host.isEmpty ? nil : host
         case .digitalOcean:           return "digitalocean.com"
@@ -325,6 +337,18 @@ public extension Profile {
                     fakeValue: SessionTokenPlan.deriveFake(prefix: "xai-brm-",
                                                            real: real, salt: salt),
                     purpose: .xaiAPIKey,
+                    consentCredentialID: consentID,
+                    consentDisplayName: displayName))
+            case .kimi:
+                // Moonshot keys are `sk-…`; keep an sk-shaped prefix so the
+                // kimi CLI accepts the fake, with the -brm- marker for the
+                // proxy's own recognition. Swapped on requests to
+                // api.moonshot.ai (purpose .moonshotAPIKey → host moonshot.ai).
+                entries.append(.init(
+                    realValue: real,
+                    fakeValue: SessionTokenPlan.deriveFake(prefix: "sk-kimi-brm-",
+                                                           real: real, salt: salt),
+                    purpose: .moonshotAPIKey,
                     consentCredentialID: consentID,
                     consentDisplayName: displayName))
             }

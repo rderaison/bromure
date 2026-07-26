@@ -1186,7 +1186,16 @@ final class CodingTaskEngine {
         guard !slug.isEmpty,
               slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" })
         else { return nil }
-        return "d=$(ls -td ~/.claude/projects/*-\(slug) 2>/dev/null | head -1); "
+        // Kimi Code's session store is keyed by an opaque workspace id
+        // `wd_<dir-basename-slug>_<hash>` under ~/.kimi-code/sessions — and a
+        // worktree's directory basename IS the slug (or "<slug>-N" on the
+        // guest's dedup path), so the glob finds the run's bucket without
+        // recomputing the hash. Globbed alongside Claude's tree rather than
+        // instead of it: a run uses one agent, so at most one can match, and
+        // the probe stays tool-agnostic.
+        return "d=$(ls -td ~/.claude/projects/*-\(slug) "
+            + "~/.kimi-code/sessions/wd_\(slug)_* "
+            + "~/.kimi-code/sessions/wd_\(slug)-[0-9]*_* 2>/dev/null | head -1); "
             + "if [ -z \"$d\" ]; then "
             + "cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
             + "2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); "
@@ -1202,7 +1211,8 @@ final class CodingTaskEngine {
             // separate files (agent-*.jsonl, possibly nested), and a probe
             // watching only the newest top-level session file reads "quiet"
             // while five agents are hard at work.
-            + "newest=$(find \"$d\" -type f -name '*.jsonl' -printf '%T@\\n' "
+            + "newest=$(find \"$d\" -type f \\( -name '*.jsonl' -o -name '*.json' \\) "
+            + "-printf '%T@\\n' "
             + "2>/dev/null | sort -rn | head -1 | cut -d. -f1); "
             + "if [ -n \"$newest\" ]; then echo $(( $(date +%s) - newest )); fi"
     }

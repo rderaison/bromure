@@ -21,6 +21,9 @@ public final class MitmEngine {
     /// Grok (xAI) counterparts.
     public let grokSubscriptionStore: GrokSubscriptionStore
     public let grokRefresher: GrokSubscriptionRefresher
+    /// Kimi (Moonshot) counterparts.
+    public let kimiSubscriptionStore: KimiSubscriptionStore
+    public let kimiRefresher: KimiSubscriptionRefresher
     public let sshAgent: SSHAgentServer
     public let awsCreds: AWSCredentialServer
     /// Strips the (intentionally invalid) signature on AWS-bound
@@ -322,6 +325,9 @@ public final class MitmEngine {
         let grokStore = GrokSubscriptionStore()
         self.grokSubscriptionStore = grokStore
         self.grokRefresher = GrokSubscriptionRefresher(store: grokStore)
+        let kimiStore = KimiSubscriptionStore()
+        self.kimiSubscriptionStore = kimiStore
+        self.kimiRefresher = KimiSubscriptionRefresher(store: kimiStore)
         self.sshAgent = SSHAgentServer(consent: broker)
         self.awsCreds = AWSCredentialServer(consent: broker)
         self.awsResigner = AWSResigner(credServer: awsCreds)
@@ -383,6 +389,10 @@ public final class MitmEngine {
         HTTPMitmConnection.grokSubscriptionProvider = { [weak self] in
             guard let self else { return nil }
             return (self.grokSubscriptionStore, self.grokRefresher)
+        }
+        HTTPMitmConnection.kimiSubscriptionProvider = { [weak self] in
+            guard let self else { return nil }
+            return (self.kimiSubscriptionStore, self.kimiRefresher)
         }
         let holder = ListenerHolder(
             profileID: profileID,

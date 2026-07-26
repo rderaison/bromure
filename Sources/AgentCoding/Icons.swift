@@ -23,8 +23,18 @@ enum BromureIcons {
     }
 
     nonisolated static let knownAgents: [String] = [
-        "claude", "codex", "grok", "aider", "goose", "amp",
+        "claude", "codex", "grok", "kimi", "aider", "goose", "amp",
         "opencode", "gemini", "cursor",
+    ]
+
+    /// Process/label spellings that mean an agent we already know, mapped to
+    /// its canonical `knownAgents` name. Kimi Code installs its bin as
+    /// `kimi-code` (with `kimi` as the documented command) and the guest
+    /// reports the foreground program truncated — `kimi-co` is what
+    /// `pane_current_command` actually shows — so neither spelling matches a
+    /// bare stem comparison.
+    nonisolated static let agentAliases: [String: String] = [
+        "kimi-code": "kimi", "kimi-co": "kimi",
     ]
 
     /// The foreground program a tmux window reports maps to a coding agent (and
@@ -43,12 +53,14 @@ enum BromureIcons {
         if lower.hasSuffix(")"), let open = lower.lastIndex(of: "(") {
             let marker = String(lower[lower.index(after: open)..<lower.index(before: lower.endIndex)])
             if knownAgents.contains(marker) { return marker }
+            if let canonical = agentAliases[marker] { return canonical }
         }
         // Basename of the first whitespace-separated token, minus any extension.
         let firstWord = lower.split(separator: " ").first.map(String.init) ?? lower
         let base = (firstWord as NSString).lastPathComponent
         let stem = base.split(separator: ".").first.map(String.init) ?? base
         if knownAgents.contains(stem) { return stem }
+        if let canonical = agentAliases[stem] { return canonical }
         // Fallback: the agent name appears as a whole word somewhere in the
         // label (e.g. `node /opt/claude.js`) — word-wise, not a raw substring,
         // so "claudette" or "amplify" don't read as agents.

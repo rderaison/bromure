@@ -201,8 +201,9 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
     var startWorkspaceIfNeeded: Bool
     /// Run in a disposable duplicate of the workspace instead of the
     /// workspace itself: cloned (CoW) at fire time, booted, and deleted when
-    /// the run finishes (Claude-only — teardown needs the reliable done
-    /// signal). With closeWhenDone off the clone is kept for inspection.
+    /// the run finishes (hook-driven agents only — teardown needs the
+    /// reliable done signal). With closeWhenDone off the clone is kept for
+    /// inspection.
     var cloneWorkspaceFirst: Bool
     /// `.afterAutomation` only: the upstream automation whose finished run
     /// fires this one.
@@ -1416,9 +1417,9 @@ final class ScheduledAutomationEngine {
                     Self.withAutomationDirectives(promptOverride ?? a.prompt)]
 
         // Clone-first run: a disposable duplicate of the workspace, never
-        // the workspace itself. Claude-only — the teardown when the run
-        // finishes rides on Claude's reliable done signal.
-        if a.cloneWorkspaceFirst && a.tool == .claude {
+        // the workspace itself. Restricted to the agents with a real done
+        // signal — the teardown rides on it (see `hasReliableDoneSignal`).
+        if a.cloneWorkspaceFirst && a.tool.hasReliableDoneSignal {
             fireInClone(a, slug: slug, detail: detail, args: args,
                         now: now, itemKey: itemKey)
             return
@@ -1550,9 +1551,9 @@ final class ScheduledAutomationEngine {
             // Clone-first runs live in the clone, not the automation's own
             // workspace — match whichever profile the run executed in.
             (run.runProfileID ?? automation.profileID) == profileID,
-            // Only Claude's Stop hook is a trustworthy done — the Codex/Grok
-            // proxy heuristic can flip .done during a long silent stretch.
-            automation.tool == .claude
+            // Only a hook-driven done is trustworthy — the Codex/Grok proxy
+            // heuristic can flip .done during a long silent stretch.
+            automation.tool.hasReliableDoneSignal
         else { return }
         finishSent.insert(branch)
 

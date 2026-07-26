@@ -815,13 +815,32 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case claude
         case codex
         case grok
+        case kimi
         public var displayName: String {
             switch self {
             case .claude: return "Claude Code"
             case .codex:  return "Codex"
             case .grok:   return "Grok Build"
+            case .kimi:   return "Kimi Code"
             }
         }
+        /// True when this tool reports run completion through its own
+        /// per-tab hooks — a trustworthy "the agent is finished" signal the
+        /// automation engine can stamp, chain, and tear down a clone on.
+        ///
+        /// Claude Code (`Stop` hook) and Kimi Code (`[[hooks]]` event =
+        /// "Stop", plus a clean exit from its one-shot `--prompt` mode) both
+        /// qualify. Codex and Grok have neither, so their only "done" is the
+        /// proxy's 4-second traffic-silence heuristic — which fires during
+        /// any long quiet stretch mid-run and would complete a run early.
+        /// See `ACAppDelegate.hookDrivenAgents` for the UI-side twin.
+        public var hasReliableDoneSignal: Bool {
+            switch self {
+            case .claude, .kimi: return true
+            case .codex, .grok:  return false
+            }
+        }
+
         /// Env-var name the in-VM init script writes the API key to when
         /// auth mode is .token.
         public var apiKeyEnvVar: String {
@@ -829,6 +848,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .claude: return "ANTHROPIC_API_KEY"
             case .codex:  return "OPENAI_API_KEY"
             case .grok:   return "XAI_API_KEY"
+            case .kimi:   return "MOONSHOT_API_KEY"
             }
         }
 
@@ -886,6 +906,20 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                 return [
                     ("GROK_MODELS_BASE_URL", "\(base)/v1"),
                     ("XAI_API_KEY", key),
+                ]
+            case .kimi:
+                // Kimi Code doesn't read provider credentials from the shell
+                // env — the only env-driven model wiring is the KIMI_MODEL_*
+                // override family, which fully defines an ad-hoc provider and
+                // takes precedence over config.toml. Point it at the engine's
+                // OpenAI-compatible surface.
+                return [
+                    ("KIMI_MODEL_PROVIDER_TYPE", "openai"),
+                    ("KIMI_MODEL_BASE_URL", "\(base)/v1"),
+                    ("KIMI_MODEL_API_KEY", key),
+                    ("KIMI_MODEL_NAME", model),
+                    ("KIMI_CODE_NO_AUTO_UPDATE", "1"),
+                    ("KIMI_DISABLE_TELEMETRY", "1"),
                 ]
             }
         }
@@ -1984,6 +2018,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .claude: hosts.insert("anthropic.com")
             case .codex:  hosts.formUnion(["openai.com", "chatgpt.com"])
             case .grok:   hosts.formUnion(["x.ai", "grok.com"])
+            case .kimi:   hosts.formUnion(["moonshot.ai", "kimi.com", "kimi.ai"])
             }
         }
         return hosts
@@ -3613,9 +3648,14 @@ public final class ProfileStore {
                 }
             }
         }
-        if usesClaude {
+        do {
             // The reporter script the hooks call (idempotent overwrite).
             // Written in BOTH modes — it's a plain managed file, no merge.
+            // Written for EVERY profile, not just the hook-driven agents:
+            // Claude's hooks and Kimi's `[[hooks]]` (see the kimi.toml block
+            // SessionDisk stages) are the accurate per-tab reporters, but the
+            // worktree launcher also calls it on any agent's exit, so a
+            // codex/grok tab's dot settles too.
             let bromureDir = home.appendingPathComponent(".bromure", isDirectory: true)
             try? fm.createDirectory(at: bromureDir, withIntermediateDirectories: true,
                                     attributes: [.posixPermissions: NSNumber(value: 0o755)])
@@ -3749,12 +3789,14 @@ public final class ProfileStore {
         ".git-credentials", ".kube/config", ".config/doctl/config.yaml",
         ".aws/config", ".docker/config.json", ".config/gh/hosts.yml",
         ".config/glab-cli/config.yml", ".codex/auth.json", ".grok/auth.json",
+        ".kimi-code/credentials/kimi-code.json",
     ]
     /// Relpaths chmod 755 (scripts).
     private static let seed755: Set<String> = [".bromure/agent-status.sh"]
     /// Directories created 0700 (everything else 0755).
     private static let seedDir700: Set<String> = [
         ".kube", ".aws", ".claude", ".docker", ".ssh", ".codex", ".grok",
+        ".kimi-code", ".kimi-code/credentials",
     ]
 
     /// Stage the managed dotfiles into `<seedDir>/files`. Clears previous
@@ -4093,8 +4135,43 @@ public final class ProfileStore {
         fi
     fi
 
-    # MCP server configs. Installed for EVERY agent (claude/codex/grok), not
-    # just the primary tool — the built-in `browser` server (plus any user
+    # Kimi Code managed config additions (status hooks; token-mode provider
+    # when staged). Marker-guarded strip + append so re-boots stay
+    # idempotent — the CLI owns the rest of config.toml (models,
+    # default_model, whatever /login writes), we only own our block.
+    if [ -r /mnt/bromure-meta/kimi.toml ]; then
+        mkdir -p "$HOME/.kimi-code"
+        touch "$HOME/.kimi-code/config.toml"
+        _k_tmp="$HOME/.kimi-code/config.toml.tmp.$$"
+        if sed '/# >>> bromure-kimi/,/# <<< bromure-kimi/d' "$HOME/.kimi-code/config.toml" > "$_k_tmp" 2>/dev/null; then
+            # Token mode stages a [providers.kimi] table. TOML rejects a
+            # DUPLICATE table outright — so if this home already carries one
+            # (a `/login` run inside a persistent home, or a config seeded
+            # while the workspace was in subscription mode), drop it before
+            # appending ours. Subscription mode stages hooks only, and then
+            # this strip never runs — the seeded managed provider survives.
+            if grep -q '^\\[providers\\.kimi\\]' /mnt/bromure-meta/kimi.toml; then
+                if awk '
+                    /^\\[providers\\.kimi\\]/ { drop=1; next }
+                    /^\\[/ { drop=0 }
+                    drop { next }
+                    { print }
+                ' "$_k_tmp" > "$_k_tmp.2" 2>/dev/null; then
+                    mv -f "$_k_tmp.2" "$_k_tmp"
+                else
+                    rm -f "$_k_tmp.2"
+                fi
+            fi
+            { echo "# >>> bromure-kimi"; cat /mnt/bromure-meta/kimi.toml; echo "# <<< bromure-kimi"; } >> "$_k_tmp"
+            mv -f "$_k_tmp" "$HOME/.kimi-code/config.toml"
+        else
+            rm -f "$_k_tmp"
+        fi
+        unset _k_tmp
+    fi
+
+    # MCP server configs. Installed for EVERY agent (claude/codex/grok/kimi),
+    # not just the primary tool — the built-in `browser` server (plus any user
     # servers) must reach whichever agent the user runs. Each install is
     # idempotent so re-boots don't duplicate.
     if [ -d /mnt/bromure-meta/mcp ]; then
@@ -4112,6 +4189,12 @@ public final class ProfileStore {
         if [ -r /mnt/bromure-meta/mcp/claude.json ]; then
             mkdir -p "$HOME/.grok"
             python3 -c "import json,os,sys;p=os.path.expanduser('~/.grok/user-settings.json');e=(json.load(open(p)) if os.path.exists(p) else {});m=json.load(open(sys.argv[1]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};t=p+'.tmp.'+str(os.getpid());json.dump(e,open(t,'w'),indent=2);os.replace(t,p)" /mnt/bromure-meta/mcp/claude.json 2>/dev/null || true
+        fi
+        # Kimi Code — same mcpServers JSON shape as Claude, merged into
+        # ~/.kimi-code/mcp.json (its user-scope MCP declaration file).
+        if [ -r /mnt/bromure-meta/mcp/claude.json ]; then
+            mkdir -p "$HOME/.kimi-code"
+            python3 -c "import json,os,sys;p=os.path.expanduser('~/.kimi-code/mcp.json');e=(json.load(open(p)) if os.path.exists(p) else {});m=json.load(open(sys.argv[1]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};t=p+'.tmp.'+str(os.getpid());json.dump(e,open(t,'w'),indent=2);os.replace(t,p)" /mnt/bromure-meta/mcp/claude.json 2>/dev/null || true
         fi
         # Codex — marker-guarded install into config.toml (strip a prior
         # bromure block, then append) so [mcp_servers.*] tables don't stack up.
@@ -4154,6 +4237,18 @@ public final class ProfileStore {
                 if npx --yes @socketsecurity/cli npm install -g --silent @openai/codex \\
                         >>/tmp/bromure-tool-install.log 2>&1; then
                     echo "[bromure-ac] installed @openai/codex"
+                    return 0
+                fi
+                echo "[bromure-ac] install failed (see /tmp/bromure-tool-install.log)"
+                return 1
+                ;;
+            kimi)
+                # Kimi Code ships via npm as @moonshot-ai/kimi-code. Wrapped
+                # through socket.dev per project policy.
+                echo "[bromure-ac] kimi not found — installing @moonshot-ai/kimi-code…"
+                if npx --yes @socketsecurity/cli npm install -g --silent @moonshot-ai/kimi-code \\
+                        >>/tmp/bromure-tool-install.log 2>&1; then
+                    echo "[bromure-ac] installed @moonshot-ai/kimi-code"
                     return 0
                 fi
                 echo "[bromure-ac] install failed (see /tmp/bromure-tool-install.log)"
@@ -4222,23 +4317,47 @@ public final class ProfileStore {
             if [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
                 _wt_prompt=$(printf '%s' "$BROMURE_AC_WT_PROMPT" | base64 -d 2>/dev/null)
                 unset BROMURE_AC_WT_PROMPT
-                # "--" ends option parsing, so the prompt is unambiguously the
-                # positional argument. Without it a prompt whose first character
-                # is "-" — an automation written as a bullet list, say — is read
-                # as a flag by the agent's own parser, which dies before the run
-                # starts ("error: unknown option '- Generate a report…'").
-                "$_wt_tool" $_wt_flags -- "$_wt_prompt"
+                if [ "$_wt_tool" = "kimi" ]; then
+                    # kimi refuses positional prompts outright ("unknown
+                    # command"); its --prompt one-shot mode is the only way to
+                    # hand it an initial task, runs fully autonomously by
+                    # design, and ERRORS if combined with --yolo/--auto — so
+                    # the flags are dropped. The = form binds a prompt that
+                    # starts with "-" unambiguously. The process exits when
+                    # the turn completes — its own Stop hook reports done,
+                    # and so does the clean-exit path below.
+                    "$_wt_tool" --prompt="$_wt_prompt"
+                    _wt_rc=$?
+                    # One-shot mode exits when the turn ends, dropping to this
+                    # shell. Point the way back in — the session is still there.
+                    [ "$_wt_rc" -eq 0 ] && printf \\
+                        '\\033[2m[bromure-ac] run finished — `kimi -c` resumes it interactively\\033[0m\\n'
+                else
+                    # "--" ends option parsing, so the prompt is unambiguously the
+                    # positional argument. Without it a prompt whose first character
+                    # is "-" — an automation written as a bullet list, say — is read
+                    # as a flag by the agent's own parser, which dies before the run
+                    # starts ("error: unknown option '- Generate a report…'").
+                    "$_wt_tool" $_wt_flags -- "$_wt_prompt"
+                    _wt_rc=$?
+                fi
             else
                 "$_wt_tool" $_wt_flags
+                _wt_rc=$?
             fi
             # A nonzero exit means the agent DIED (bad flag, config error,
             # crash) rather than finishing — flag the tab needs-input so the
             # board card turns red instead of sitting "in progress" forever;
-            # the error is on screen in this terminal.
-            _wt_rc=$?
+            # the error is on screen in this terminal. A clean exit means the
+            # agent is genuinely finished, whatever the tool: report done so
+            # the tab's dot settles even for agents with no completion hook.
+            # (The automation engine still only ACTS on a done from a
+            # hook-driven agent — see Profile.Tool.hasReliableDoneSignal.)
             if [ "$_wt_rc" -ne 0 ]; then
                 printf '\033[31m[bromure-ac] %s exited with status %s\033[0m\n' "$_wt_tool" "$_wt_rc"
                 sh "$HOME/.bromure/agent-status.sh" needsInput 2>/dev/null || true
+            else
+                sh "$HOME/.bromure/agent-status.sh" done 2>/dev/null || true
             fi
         fi
         unset _wt_tool _wt_prompt _wt_flags _wt_dir
@@ -4260,7 +4379,15 @@ public final class ProfileStore {
             # a reboot, when /tmp is fresh and this auto-launch
             # path runs again from scratch.
             printf '\\033[2m[bromure-ac] starting %s…\\033[0m\\n' "$BROMURE_AC_TOOL"
-            "$BROMURE_AC_TOOL"
+            # kimi's TUI does NOT prompt for login on first run (the user
+            # would have to type /login); its `kimi login` subcommand drives
+            # the device-code flow directly, which is exactly what a
+            # registration VM exists for.
+            if [ "$BROMURE_AC_TOOL" = "kimi" ]; then
+                kimi login
+            else
+                "$BROMURE_AC_TOOL"
+            fi
         fi
     fi
     unset _bromure_marker
@@ -4640,6 +4767,7 @@ public extension Profile {
             case .claude: return ["anthropic.com"]
             case .codex:  return ["openai.com"]
             case .grok:   return ["x.ai"]
+            case .kimi:   return ["moonshot.ai", "kimi.com"]
             }
         }
         switch ref {

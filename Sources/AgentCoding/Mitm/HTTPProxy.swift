@@ -76,6 +76,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
     nonisolated(unsafe) static var codexSubscriptionProvider: (@Sendable () -> (CodexSubscriptionStore, CodexSubscriptionRefresher)?)?
     /// Grok (xAI) counterpart of `claudeSubscriptionProvider`.
     nonisolated(unsafe) static var grokSubscriptionProvider: (@Sendable () -> (GrokSubscriptionStore, GrokSubscriptionRefresher)?)?
+    /// Kimi (Moonshot) counterpart of `claudeSubscriptionProvider`.
+    nonisolated(unsafe) static var kimiSubscriptionProvider: (@Sendable () -> (KimiSubscriptionStore, KimiSubscriptionRefresher)?)?
     /// Process-wide consent broker for the "ask me what to do" action.
     static let promptInjectionBroker = PromptInjectionConsentBroker()
 
@@ -283,14 +285,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
                store.profileForBogusKey(apiKey) != nil {
                 leaks = leaks.filter { $0.header.lowercased() != "x-api-key" }
             }
-            // Codex / Grok: bogus Bearer on their backends.
+            // Codex / Grok / Kimi: bogus Bearer on their backends.
             let codexHost = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com"
             let grokHost = host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
                 || host == "x.ai" || host.hasSuffix(".x.ai")
-            if codexHost || grokHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
+            let kimiHost = host == "kimi.com" || host.hasSuffix(".kimi.com")
+            if codexHost || grokHost || kimiHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
                 let codexBogus = Self.codexSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
                 let grokBogus = Self.grokSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
-                if codexBogus || grokBogus {
+                let kimiBogus = Self.kimiSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
+                if codexBogus || grokBogus || kimiBogus {
                     leaks = leaks.filter { $0.header.lowercased() != "authorization" }
                 }
             }
@@ -431,6 +435,30 @@ final class HTTPMitmConnection: @unchecked Sendable {
             } catch {
                 FileHandle.standardError.write(Data(
                     "[mitm] Grok subscription token unavailable for \(host): \(error)\n".utf8))
+            }
+        }
+
+        // 5f. Kimi (Moonshot) subscription auth. The guest's
+        //     ~/.kimi-code/credentials/<name>.json holds a bogus OAuth token
+        //     with a far-future expiry (so the CLI never refreshes); it sends
+        //     that as Bearer to api.kimi.com/coding/v1. Swap it for the live
+        //     real access token from the host store, which the host refreshes
+        //     against auth.kimi.com.
+        var kimiSubStaleAccess: String? = nil
+        if host == "kimi.com" || host.hasSuffix(".kimi.com"),
+           let provider = Self.kimiSubscriptionProvider, let (store, refresher) = provider(),
+           let headerSection = Self.rawHeaderSection(of: swap.modified),
+           let bearer = Self.bearerToken(inHeaderSection: headerSection),
+           store.profileForBogusKey(bearer) != nil {
+            do {
+                let access = try await refresher.accessToken(for: profileID)
+                swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
+                kimiSubStaleAccess = access
+                FileHandle.standardError.write(Data(
+                    "[mitm] injected Kimi subscription token for \(host)\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[mitm] Kimi subscription token unavailable for \(host): \(error)\n".utf8))
             }
         }
 
@@ -1232,6 +1260,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
         if let stale = grokSubStaleAccess,
            Self.parseStatusCode(relay.buffer) == 401,
            let provider = Self.grokSubscriptionProvider, let (_, refresher) = provider() {
+            let pid = profileID
+            Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
+        }
+        if let stale = kimiSubStaleAccess,
+           Self.parseStatusCode(relay.buffer) == 401,
+           let provider = Self.kimiSubscriptionProvider, let (_, refresher) = provider() {
             let pid = profileID
             Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
         }

@@ -21,6 +21,12 @@
       "command": "curl -fsSL https://x.ai/cli/install.sh | bash\nif [ -d /root/.grok ]; then\n    rm -rf /opt/grok\n    mv /root/.grok /opt/grok\n    chmod -R a+rX /opt/grok\n    ln -sf /opt/grok/bin/grok /usr/local/bin/grok\nfi\ncommand -v grok >/dev/null 2>&1 || echo 'WARNING: grok not on PATH after install'"
     },
     {
+      "uuid": "1a04a579-a8f6-43ab-a53a-25c2edbec2cf",
+      "seq": 35,
+      "description": "Kimi Code CLI (Moonshot AI)",
+      "command": "npx --yes @socketsecurity/cli npm install -g --silent @moonshot-ai/kimi-code\ncommand -v kimi >/dev/null 2>&1 || echo 'WARNING: kimi not on PATH after install'"
+    },
+    {
       "uuid": "9d3e5f7a-1b2c-4d6e-b8f9-3a4b5c6d7e8f",
       "seq": 40,
       "description": "Google Cloud SDK (gcloud)",
