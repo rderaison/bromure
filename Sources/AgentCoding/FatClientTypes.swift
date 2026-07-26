@@ -82,6 +82,29 @@ struct RemoteHost: Codable, Identifiable, Equatable, Hashable {
     var hostKeyAlias: String? {
         peerDeviceID.map { "bromure-peer-\($0)" }
     }
+
+    /// Charset accepted for an SSH login name. A peer publishes its own
+    /// `sshUsername` to the bromure.io directory, so this string is
+    /// attacker-influenced: anything outside the whitelist — and especially a
+    /// leading `-`, which ssh would parse as another option (e.g.
+    /// `-oProxyCommand=…`) — must never reach an ssh argv. `@` is allowed for
+    /// `user@realm`-style logins.
+    static func isValidSSHUser(_ user: String) -> Bool {
+        guard !user.isEmpty, user.utf8.count <= 64, !user.hasPrefix("-") else { return false }
+        return user.allSatisfy {
+            $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "." || $0 == "-" || $0 == "@")
+        }
+    }
+
+    /// The `user@address` ssh destination argument, or nil when either side is
+    /// unsafe to place on an ssh command line (see `isValidSSHUser`; the
+    /// address likewise must never begin with `-`). Every ssh invocation must
+    /// build its destination through this, never by interpolating `user` /
+    /// `address` directly.
+    var sshDestination: String? {
+        guard Self.isValidSSHUser(user), !address.isEmpty, !address.hasPrefix("-") else { return nil }
+        return "\(user)@\(address)"
+    }
 }
 
 /// Result of probing a remote with a given credential, classified from ssh's
