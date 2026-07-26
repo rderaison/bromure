@@ -376,7 +376,14 @@ def main():
         "SWIFT_VERSION = 5.9;",
         f"IPHONEOS_DEPLOYMENT_TARGET = {DEPLOYMENT_TARGET};",
         "SDKROOT = iphoneos;",
-        "TARGETED_DEVICE_FAMILY = \"1,2\";",
+        # iPhone-only. The App Store treats a universal ("1,2") binary as
+        # iPad-capable and demands iPad (and Mac/Vision "Designed for iPad")
+        # screenshots. This generator OVERWRITES project.pbxproj on every
+        # TestFlight build, so the family MUST be set here — editing the
+        # generated pbxproj by hand doesn't stick.
+        "TARGETED_DEVICE_FAMILY = \"1\";",
+        "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;",
+        "SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;",
         "ENABLE_PREVIEWS = YES;",
     ]
     proj_debug = common + ["ONLY_ACTIVE_ARCH = YES;", "SWIFT_OPTIMIZATION_LEVEL = \"-Onone\";", "GCC_OPTIMIZATION_LEVEL = 0;", "DEBUG_INFORMATION_FORMAT = dwarf;", "SWIFT_ACTIVE_COMPILATION_CONDITIONS = \"DEBUG BROMURE_APP\";"]
