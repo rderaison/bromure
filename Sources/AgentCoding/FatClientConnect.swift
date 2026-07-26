@@ -392,8 +392,16 @@ final class RemoteConnectModel {
     /// username entered on a prior connect, then the local login as a
     /// best-effort default the login step can fix (older servers publish none).
     static func peerHost(for server: DeviceInfo) -> RemoteHost {
-        let user = server.sshUsername?.isEmpty == false ? server.sshUsername!
-            : (rememberedUser(forPeer: server.id) ?? NSUserName())
+        // The published username is peer-controlled: reject anything outside
+        // the SSH-login charset (it reaches an ssh argv on dial) and fall
+        // through to the remembered/local defaults instead.
+        let published = server.sshUsername.flatMap {
+            RemoteHost.isValidSSHUser($0) ? $0 : nil
+        }
+        let remembered = rememberedUser(forPeer: server.id).flatMap {
+            RemoteHost.isValidSSHUser($0) ? $0 : nil
+        }
+        let user = published ?? remembered ?? NSUserName()
         var host = RemoteHost(name: server.displayName, address: "", user: user)
         host.peerDeviceID = server.id
         host.lastConnected = Date()

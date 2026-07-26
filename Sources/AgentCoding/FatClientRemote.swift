@@ -267,7 +267,10 @@ enum RemoteTransport {
         return h
     }
 
-    static func sshArgs(for host: RemoteHost, interactive: Bool = false) -> [String] {
+    /// Nil when the host's user/address can't safely go on an ssh command line
+    /// (`RemoteHost.sshDestination`) — callers must treat nil as dial failure.
+    static func sshArgs(for host: RemoteHost, interactive: Bool = false) -> [String]? {
+        guard let destination = host.sshDestination else { return nil }
         var args = commonArgs(for: host)
         // Pubkey-only for the steady-state tunnel. accept-new pins a NEW host
         // key but refuses a CHANGED one (the explicit fingerprint TOFU happens
@@ -287,7 +290,7 @@ enum RemoteTransport {
                 "-o", "ControlPersist=60",
             ]
         }
-        args += ["\(host.user)@\(host.address)", FatClient.controlVerb]
+        args += [destination, FatClient.controlVerb]
         return args
     }
 
@@ -299,6 +302,9 @@ enum RemoteTransport {
     /// Fetch the remote's ed25519 host key + SHA256 fingerprint (for the
     /// user-visible TOFU prompt). Nil if the host is unreachable.
     static func scanHostKey(address: String, port: Int) -> HostKeyInfo? {
+        // The address goes into ssh-keyscan's argv — a leading `-` would be
+        // parsed as an option.
+        guard !address.isEmpty, !address.hasPrefix("-") else { return nil }
         let scan = Process()
         scan.executableURL = URL(fileURLWithPath: sshKeyscan)
         scan.arguments = ["-T", "8", "-p", String(port), "-t", "ed25519", address]
@@ -380,10 +386,13 @@ enum RemoteTransport {
     static func probe(host rawHost: RemoteHost, strictHostKey: Bool) -> RemoteProbe {
         ensureClientKey()
         let host = resolved(rawHost)
+        guard let destination = host.sshDestination else {
+            return .unreachable("invalid SSH username or address")
+        }
         var args = commonArgs(for: host)
         args += ["-o", "StrictHostKeyChecking=\(strictHostKey ? "yes" : "accept-new")",
                  "-o", "BatchMode=yes",
-                 "\(host.user)@\(host.address)", FatClient.controlVerb]
+                 destination, FatClient.controlVerb]
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -435,7 +444,8 @@ enum RemoteTransport {
         let host = resolved(rawHost)
         let args = sshArgs(for: host, interactive: interactive)
         return ControlClient(socketPath: "ssh://\(host.connectLabel)") {
-            SSHTunnel.shared.dial(args)
+            guard let args else { return nil }
+            return SSHTunnel.shared.dial(args)
         }
     }
 
@@ -454,9 +464,10 @@ enum RemoteTransport {
     static func forwardDial(host rawHost: RemoteHost, ip: String, port: Int) -> Int32? {
         ensureClientKey()
         let host = resolved(rawHost)
+        guard let destination = host.sshDestination else { return nil }
         var args = commonArgs(for: host)
         args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-                 "\(host.user)@\(host.address)", "\(FatClient.forwardVerbPrefix)\(ip) \(port)"]
+                 destination, "\(FatClient.forwardVerbPrefix)\(ip) \(port)"]
         return SSHTunnel.shared.dial(args)
     }
 
@@ -466,9 +477,10 @@ enum RemoteTransport {
     static func forwardDialUDP(host rawHost: RemoteHost, ip: String) -> Int32? {
         ensureClientKey()
         let host = resolved(rawHost)
+        guard let destination = host.sshDestination else { return nil }
         var args = commonArgs(for: host)
         args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-                 "\(host.user)@\(host.address)", "\(FatClient.forwardUDPVerbPrefix)\(ip)"]
+                 destination, "\(FatClient.forwardUDPVerbPrefix)\(ip)"]
         return SSHTunnel.shared.dial(args)
     }
 
@@ -479,9 +491,10 @@ enum RemoteTransport {
     static func browserMCPDial(host rawHost: RemoteHost, vm: String) -> Int32? {
         ensureClientKey()
         let host = resolved(rawHost)
+        guard let destination = host.sshDestination else { return nil }
         var args = commonArgs(for: host)
         args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-                 "\(host.user)@\(host.address)", "\(FatClient.browserMCPVerbPrefix)\(vm)"]
+                 destination, "\(FatClient.browserMCPVerbPrefix)\(vm)"]
         return SSHTunnel.shared.dial(args)
     }
 }

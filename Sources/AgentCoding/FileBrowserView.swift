@@ -325,6 +325,14 @@ final class FileBrowserModel {
         }
     }
 
+    /// A guest listing name is only ever a single path component. Reject
+    /// anything that could traverse or confuse host-side path handling.
+    /// (Internal — not private — so the security-guard tests can pin it.)
+    static func isSafeGuestName(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".."
+            && !name.contains("/") && !name.contains("\\") && !name.contains("\0")
+    }
+
     /// Pull a guest file into the local cache; returns the local URL.
     func download(_ entry: FileEntry) async throws -> URL {
         guard let guestOp else { throw CocoaError(.fileNoSuchFile) }
@@ -332,6 +340,15 @@ final class FileBrowserModel {
         // with the same basename in different dirs don't collide.
         let rel = String(entry.path.dropFirst(1))   // strip leading /
         let local = downloadRoot.appendingPathComponent(rel)
+        // The guest is untrusted: a crafted entry path (../ segments) must
+        // never steer the write outside the cache root. standardizedFileURL
+        // resolves `..` lexically; the root itself is host-created, so no
+        // symlink resolution is needed.
+        let rootPath = downloadRoot.standardizedFileURL.path
+        let localPath = local.standardizedFileURL.path
+        guard localPath.hasPrefix(rootPath + "/") else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
         try FileManager.default.createDirectory(
             at: local.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: local.path, contents: nil)
@@ -398,6 +415,11 @@ final class FileBrowserModel {
                     guard let name = dict["name"] as? String else { return nil }
                     // Match the host branch's .skipsHiddenFiles.
                     guard !name.hasPrefix(".") else { return nil }
+                    // The guest is untrusted: a listing name must be a bare
+                    // filename. Separators/NUL/dot-entries would let a
+                    // compromised VM steer download() writes outside the
+                    // cache root (mirror FileTransferBridge's sanitizer).
+                    guard Self.isSafeGuestName(name) else { return nil }
                     return FileEntry(
                         path: (path as NSString).appendingPathComponent(name),
                         name: name,
