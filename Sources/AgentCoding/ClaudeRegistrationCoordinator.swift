@@ -16,11 +16,8 @@ import Virtualization
 /// tokens we read them over the vsock token bridge, persist them, and destroy
 /// the VM.
 
-public extension Notification.Name {
-    /// Posted after a subscription credential is registered or forgotten, so
-    /// open editors re-read their per-tool registration status.
-    static let bromureSubscriptionStoresChanged = Notification.Name("bromureSubscriptionStoresChanged")
-}
+// Notification.Name.bromureSubscriptionStoresChanged lives in
+// ProfileViews.swift (shared with iOS) next to the editor that observes it.
 
 public enum SubscriptionProvider: Sendable {
     case claude

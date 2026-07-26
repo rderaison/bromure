@@ -50,6 +50,14 @@ SHARED = [
     # Controller + connect flow (models; iOS provides the views)
     "FatClientController.swift",
     "FatClientConnect.swift",
+    # Workspace editor (ProfileEditorView) + its data-only helpers. The panes
+    # that manage host-machine state (Local Models, Automation, browser image,
+    # subnet) are #if os(macOS) inside the view; everything else is the same
+    # editor macOS shows for a remote profile.
+    "ProfileViews.swift",
+    "EnvFileImport.swift",
+    "Inference/ModelCatalog.swift",   # CatalogModel type (pure data)
+    "Mitm/OnePasswordCLI.swift",      # reference(in:) parsing; read() is mac-only
     # Shared, platform-guarded SwiftUI views + support
     "PlatformShims.swift",
     "SharedStatusViews.swift",

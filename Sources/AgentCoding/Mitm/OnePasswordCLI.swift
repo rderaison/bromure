@@ -51,7 +51,10 @@ public enum OnePasswordCLI {
 
     /// Resolve one `op://…` reference to its secret (trailing newline stripped).
     /// Throws `.notInstalled` when `op` is missing, `.readFailed` on any op error
-    /// (not signed in, item/field not found, etc.).
+    /// (not signed in, item/field not found, etc.). Host-side only: resolution
+    /// shells out to `op`, which doesn't exist on iOS — clients only ever carry
+    /// the reference (`reference(in:)` above), never the secret.
+    #if os(macOS)
     public static func read(_ ref: String) async throws -> String {
         guard let op = locate() else { throw OpError.notInstalled }
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Swift.Error>) in
@@ -84,4 +87,5 @@ public enum OnePasswordCLI {
             }
         }
     }
+    #endif
 }

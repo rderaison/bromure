@@ -15,11 +15,13 @@
 		C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */; };
 		555114C355A323E29739E1E8 /* MobileBrowserMCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */; };
 		2ED4C4DCC04A62F04C1D3E62 /* MobileForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB7A8036C2F4D1B840537F79 /* MobileForward.swift */; };
+		A06F122E0175D55E36ADF866 /* PadHostMirror.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75D4F75C58B3B0493CEB3EA5 /* PadHostMirror.swift */; };
 		DD53AF72902E4568BC03B607 /* PlatformStubs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */; };
 		817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CD0F2B2F2F6347A584824B /* PushKeypair.swift */; };
 		53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */; };
 		4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */; };
 		B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */; };
+		64C326ED21AF5A80372F4E20 /* WorkspaceEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */; };
 		D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */; };
 		A605D8611294971B8BA65260 /* AutomationKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */; };
 		78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */; };
@@ -31,6 +33,7 @@
 		F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */; };
 		B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDCC7578E83999395F752CAF /* ConversationView.swift */; };
 		483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */; };
+		04F22AD5C1F56A6E6B665FA8 /* EnvFileImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBF986DA0C0FF0C09DA9D07 /* EnvFileImport.swift */; };
 		B4E5CE6E341AFA91837DF064 /* FatClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEF3A13DDA52AA749EE9D2B9 /* FatClient.swift */; };
 		A9CDFDBA328F79D5F6468FDC /* FatClientConnect.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB94A3FA9300ABDA1A82DADB /* FatClientConnect.swift */; };
 		EEAA27D4E60DFC8DCAC1A5BF /* FatClientController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E8564A44A7DB91577E30D50 /* FatClientController.swift */; };
@@ -44,8 +47,10 @@
 		CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 057EC22F78972A50849C0EEF /* FileExplorer.swift */; };
 		7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */; };
 		A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */; };
+		FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */; };
 		B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */; };
 		61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */; };
+		A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */; };
 		FED3004C83536B84CF8C0C61 /* Mitm__PromptInjectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */; };
 		5C0722E5CF0BF28BADBEA327 /* Mitm__SecretsVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */; };
 		B854291378C379CF05ECFEE3 /* Mitm__SessionTokenPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */; };
@@ -70,6 +75,7 @@
 		3A21079C2F6D4C95C1ABB6EA /* P2P__TurnUDP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03E1E4082369B060ED48F7E2 /* P2P__TurnUDP.swift */; };
 		E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */; };
 		3B15992E5BD329D249A9D27D /* Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2368064077094F44DF16B8E /* Profile.swift */; };
+		51EE9DAD2EADCE068EFAA010 /* ProfileViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CAE7533E1BB8D5DD3ABADCC /* ProfileViews.swift */; };
 		F3011FF5C29C08F27538AE45 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2652DA1029D0752C313AC9D0 /* PushCrypto.swift */; };
 		B47EFB48B64411BF181D2140 /* ScheduledAutomationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */; };
 		332BE05FECAFCE5409388316 /* ScheduledAutomations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */; };
@@ -132,11 +138,13 @@
 		CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "HostMirrorScreen.swift"; path = "Sources/BromureRemote/HostMirrorScreen.swift"; sourceTree = "<group>"; };
 		DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MobileBrowserMCP.swift"; path = "Sources/BromureRemote/MobileBrowserMCP.swift"; sourceTree = "<group>"; };
 		EB7A8036C2F4D1B840537F79 /* MobileForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MobileForward.swift"; path = "Sources/BromureRemote/MobileForward.swift"; sourceTree = "<group>"; };
+		75D4F75C58B3B0493CEB3EA5 /* PadHostMirror.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PadHostMirror.swift"; path = "Sources/BromureRemote/PadHostMirror.swift"; sourceTree = "<group>"; };
 		7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformStubs.swift"; path = "Sources/BromureRemote/PlatformStubs.swift"; sourceTree = "<group>"; };
 		74CD0F2B2F2F6347A584824B /* PushKeypair.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushKeypair.swift"; path = "Sources/BromureRemote/PushKeypair.swift"; sourceTree = "<group>"; };
 		D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushNotifications.swift"; path = "Sources/BromureRemote/PushNotifications.swift"; sourceTree = "<group>"; };
 		0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RemoteTransportMobile.swift"; path = "Sources/BromureRemote/RemoteTransportMobile.swift"; sourceTree = "<group>"; };
 		5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WebBrowserPane.swift"; path = "Sources/BromureRemote/WebBrowserPane.swift"; sourceTree = "<group>"; };
+		C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceEditor.swift"; path = "Sources/BromureRemote/WorkspaceEditor.swift"; sourceTree = "<group>"; };
 		0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceScreen.swift"; path = "Sources/BromureRemote/WorkspaceScreen.swift"; sourceTree = "<group>"; };
 		F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationKanbanView.swift"; path = "Sources/BromureRemote/_shared/AutomationKanbanView.swift"; sourceTree = "<group>"; };
 		C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunArchive.swift"; path = "Sources/BromureRemote/_shared/AutomationRunArchive.swift"; sourceTree = "<group>"; };
@@ -148,6 +156,7 @@
 		A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ControlClient.swift"; path = "Sources/BromureRemote/_shared/ControlClient.swift"; sourceTree = "<group>"; };
 		EDCC7578E83999395F752CAF /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConversationView.swift"; path = "Sources/BromureRemote/_shared/ConversationView.swift"; sourceTree = "<group>"; };
 		7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DockerDashboard.swift"; path = "Sources/BromureRemote/_shared/DockerDashboard.swift"; sourceTree = "<group>"; };
+		FBBF986DA0C0FF0C09DA9D07 /* EnvFileImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "EnvFileImport.swift"; path = "Sources/BromureRemote/_shared/EnvFileImport.swift"; sourceTree = "<group>"; };
 		DEF3A13DDA52AA749EE9D2B9 /* FatClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClient.swift"; path = "Sources/BromureRemote/_shared/FatClient.swift"; sourceTree = "<group>"; };
 		FB94A3FA9300ABDA1A82DADB /* FatClientConnect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientConnect.swift"; path = "Sources/BromureRemote/_shared/FatClientConnect.swift"; sourceTree = "<group>"; };
 		1E8564A44A7DB91577E30D50 /* FatClientController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientController.swift"; path = "Sources/BromureRemote/_shared/FatClientController.swift"; sourceTree = "<group>"; };
@@ -161,8 +170,10 @@
 		057EC22F78972A50849C0EEF /* FileExplorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorer.swift"; path = "Sources/BromureRemote/_shared/FileExplorer.swift"; sourceTree = "<group>"; };
 		C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorerViews.swift"; path = "Sources/BromureRemote/_shared/FileExplorerViews.swift"; sourceTree = "<group>"; };
 		D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Icons.swift"; path = "Sources/BromureRemote/_shared/Icons.swift"; sourceTree = "<group>"; };
+		C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Inference__ModelCatalog.swift"; path = "Sources/BromureRemote/_shared/Inference__ModelCatalog.swift"; sourceTree = "<group>"; };
 		D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__ConsentCredentialID.swift"; path = "Sources/BromureRemote/_shared/Mitm__ConsentCredentialID.swift"; sourceTree = "<group>"; };
 		6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__GuardrailsPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__GuardrailsPolicy.swift"; sourceTree = "<group>"; };
+		323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__OnePasswordCLI.swift"; path = "Sources/BromureRemote/_shared/Mitm__OnePasswordCLI.swift"; sourceTree = "<group>"; };
 		973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__PromptInjectionPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__PromptInjectionPolicy.swift"; sourceTree = "<group>"; };
 		0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SecretsVault.swift"; path = "Sources/BromureRemote/_shared/Mitm__SecretsVault.swift"; sourceTree = "<group>"; };
 		7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SessionTokenPlan.swift"; path = "Sources/BromureRemote/_shared/Mitm__SessionTokenPlan.swift"; sourceTree = "<group>"; };
@@ -187,6 +198,7 @@
 		03E1E4082369B060ED48F7E2 /* P2P__TurnUDP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__TurnUDP.swift"; path = "Sources/BromureRemote/_shared/P2P__TurnUDP.swift"; sourceTree = "<group>"; };
 		1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PlatformShims.swift"; path = "Sources/BromureRemote/_shared/PlatformShims.swift"; sourceTree = "<group>"; };
 		C2368064077094F44DF16B8E /* Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Profile.swift"; path = "Sources/BromureRemote/_shared/Profile.swift"; sourceTree = "<group>"; };
+		1CAE7533E1BB8D5DD3ABADCC /* ProfileViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ProfileViews.swift"; path = "Sources/BromureRemote/_shared/ProfileViews.swift"; sourceTree = "<group>"; };
 		2652DA1029D0752C313AC9D0 /* PushCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushCrypto.swift"; path = "Sources/BromureRemote/_shared/PushCrypto.swift"; sourceTree = "<group>"; };
 		9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ScheduledAutomationViews.swift"; path = "Sources/BromureRemote/_shared/ScheduledAutomationViews.swift"; sourceTree = "<group>"; };
 		6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ScheduledAutomations.swift"; path = "Sources/BromureRemote/_shared/ScheduledAutomations.swift"; sourceTree = "<group>"; };
@@ -266,11 +278,13 @@
 				CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */,
 				DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */,
 				EB7A8036C2F4D1B840537F79 /* MobileForward.swift */,
+				75D4F75C58B3B0493CEB3EA5 /* PadHostMirror.swift */,
 				7867C864A7046D1D4D6BFC0A /* PlatformStubs.swift */,
 				74CD0F2B2F2F6347A584824B /* PushKeypair.swift */,
 				D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */,
 				0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */,
 				5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */,
+				C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */,
 				0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */,
 				F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */,
 				C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */,
@@ -282,6 +296,7 @@
 				A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */,
 				EDCC7578E83999395F752CAF /* ConversationView.swift */,
 				7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */,
+				FBBF986DA0C0FF0C09DA9D07 /* EnvFileImport.swift */,
 				DEF3A13DDA52AA749EE9D2B9 /* FatClient.swift */,
 				FB94A3FA9300ABDA1A82DADB /* FatClientConnect.swift */,
 				1E8564A44A7DB91577E30D50 /* FatClientController.swift */,
@@ -295,8 +310,10 @@
 				057EC22F78972A50849C0EEF /* FileExplorer.swift */,
 				C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */,
 				D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */,
+				C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */,
 				D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */,
 				6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */,
+				323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */,
 				973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */,
 				0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */,
 				7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */,
@@ -321,6 +338,7 @@
 				03E1E4082369B060ED48F7E2 /* P2P__TurnUDP.swift */,
 				1AAA2B01FF9BEEAD9BA1D585 /* PlatformShims.swift */,
 				C2368064077094F44DF16B8E /* Profile.swift */,
+				1CAE7533E1BB8D5DD3ABADCC /* ProfileViews.swift */,
 				2652DA1029D0752C313AC9D0 /* PushCrypto.swift */,
 				9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */,
 				6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */,
@@ -459,11 +477,13 @@
 				C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */,
 				555114C355A323E29739E1E8 /* MobileBrowserMCP.swift in Sources */,
 				2ED4C4DCC04A62F04C1D3E62 /* MobileForward.swift in Sources */,
+				A06F122E0175D55E36ADF866 /* PadHostMirror.swift in Sources */,
 				DD53AF72902E4568BC03B607 /* PlatformStubs.swift in Sources */,
 				817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */,
 				53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */,
 				4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */,
 				B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */,
+				64C326ED21AF5A80372F4E20 /* WorkspaceEditor.swift in Sources */,
 				D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */,
 				A605D8611294971B8BA65260 /* AutomationKanbanView.swift in Sources */,
 				78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */,
@@ -475,6 +495,7 @@
 				F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */,
 				B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */,
 				483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */,
+				04F22AD5C1F56A6E6B665FA8 /* EnvFileImport.swift in Sources */,
 				B4E5CE6E341AFA91837DF064 /* FatClient.swift in Sources */,
 				A9CDFDBA328F79D5F6468FDC /* FatClientConnect.swift in Sources */,
 				EEAA27D4E60DFC8DCAC1A5BF /* FatClientController.swift in Sources */,
@@ -488,8 +509,10 @@
 				CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */,
 				7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */,
 				A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */,
+				FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */,
 				B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */,
 				61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */,
+				A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */,
 				FED3004C83536B84CF8C0C61 /* Mitm__PromptInjectionPolicy.swift in Sources */,
 				5C0722E5CF0BF28BADBEA327 /* Mitm__SecretsVault.swift in Sources */,
 				B854291378C379CF05ECFEE3 /* Mitm__SessionTokenPlan.swift in Sources */,
@@ -514,6 +537,7 @@
 				3A21079C2F6D4C95C1ABB6EA /* P2P__TurnUDP.swift in Sources */,
 				E8E18654C6C10B2EE2841BE3 /* PlatformShims.swift in Sources */,
 				3B15992E5BD329D249A9D27D /* Profile.swift in Sources */,
+				51EE9DAD2EADCE068EFAA010 /* ProfileViews.swift in Sources */,
 				F3011FF5C29C08F27538AE45 /* PushCrypto.swift in Sources */,
 				B47EFB48B64411BF181D2140 /* ScheduledAutomationViews.swift in Sources */,
 				332BE05FECAFCE5409388316 /* ScheduledAutomations.swift in Sources */,
@@ -558,7 +582,7 @@
 				SWIFT_VERSION = 5.9;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1";
+				TARGETED_DEVICE_FAMILY = "1,2";
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				ENABLE_PREVIEWS = YES;
@@ -577,7 +601,7 @@
 				SWIFT_VERSION = 5.9;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1";
+				TARGETED_DEVICE_FAMILY = "1,2";
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				ENABLE_PREVIEWS = YES;

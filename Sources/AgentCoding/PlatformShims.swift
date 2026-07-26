@@ -109,6 +109,34 @@ func platformCopyToPasteboard(_ string: String) {
     #endif
 }
 
+/// Open a URL in the default browser (`NSWorkspace` / `UIApplication`).
+func platformOpenURL(_ url: URL) {
+    #if os(macOS)
+    NSWorkspace.shared.open(url)
+    #else
+    UIApplication.shared.open(url)
+    #endif
+}
+
+/// Fixed-pitch font families installed on this device, for the terminal
+/// appearance picker. AppKit exposes `isFixedPitch`; UIKit callers probe a
+/// glyph-width heuristic ("i" vs "W") per family.
+func platformMonospacedFontFamilies() -> [String] {
+    #if os(macOS)
+    return NSFontManager.shared.availableFontFamilies
+        .filter { NSFont(name: $0, size: 12)?.isFixedPitch ?? false }
+        .sorted()
+    #else
+    return UIFont.familyNames.filter { family in
+        guard let font = UIFont(name: family, size: 12) else { return false }
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let narrow = ("i" as NSString).size(withAttributes: attrs).width
+        let wide = ("W" as NSString).size(withAttributes: attrs).width
+        return abs(narrow - wide) < 0.01
+    }.sorted()
+    #endif
+}
+
 
 // MARK: - Cross-platform SwiftUI style helpers
 
@@ -128,6 +156,24 @@ extension View {
         self.toggleStyle(.checkbox)
         #else
         self
+        #endif
+    }
+
+    /// `.menuStyle(.borderlessButton)` is macOS-only; iOS keeps the default.
+    @ViewBuilder func platformBorderlessMenuStyle() -> some View {
+        #if os(macOS)
+        self.menuStyle(.borderlessButton)
+        #else
+        self
+        #endif
+    }
+
+    /// `.pickerStyle(.radioGroup)` is macOS-only; iOS renders a menu picker.
+    @ViewBuilder func platformRadioGroupPickerStyle() -> some View {
+        #if os(macOS)
+        self.pickerStyle(.radioGroup)
+        #else
+        self.pickerStyle(.menu)
         #endif
     }
 

@@ -154,16 +154,36 @@ struct DockerDashboardView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
         } else {
-            HStack(spacing: 12) {
-                headerBadge
-                headerTitle
-                Spacer()
-                EmulationControl(probed: model.binfmtProbed, arches: model.binfmtArches,
-                                 onInstall: onInstallBinfmt, onUninstall: onUninstallBinfmt)
-                SearchField(text: $query, prompt: searchPrompt)
-                    .frame(width: 200)
-                panemPicker.pickerStyle(.segmented).fixedSize()
-                primaryButton
+            // One row when it fits (desktop window, iPad landscape). An iPad
+            // portrait detail column is narrower and used to crush the title
+            // ("Doc ker") — there, the search + pane picker take a second row.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    headerBadge
+                    headerTitle.fixedSize()
+                    Spacer()
+                    EmulationControl(probed: model.binfmtProbed, arches: model.binfmtArches,
+                                     onInstall: onInstallBinfmt, onUninstall: onUninstallBinfmt)
+                    SearchField(text: $query, prompt: searchPrompt)
+                        .frame(width: 200)
+                    panemPicker.pickerStyle(.segmented).fixedSize()
+                    primaryButton.fixedSize()
+                }
+                VStack(spacing: 10) {
+                    HStack(spacing: 12) {
+                        headerBadge
+                        headerTitle.fixedSize()
+                        Spacer()
+                        EmulationControl(probed: model.binfmtProbed, arches: model.binfmtArches,
+                                         onInstall: onInstallBinfmt, onUninstall: onUninstallBinfmt)
+                        primaryButton.fixedSize()
+                    }
+                    HStack(spacing: 10) {
+                        SearchField(text: $query, prompt: searchPrompt)
+                            .frame(maxWidth: .infinity)
+                        panemPicker.pickerStyle(.segmented).fixedSize()
+                    }
+                }
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 14)

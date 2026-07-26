@@ -27,6 +27,9 @@ struct HostMirrorScreen: View {
     let openWorkspace: WorkspaceDeepLink?
     @State private var deepWorkspace: WorkspaceDeepLink?
     @State private var didDeepLink = false
+    /// The workspace editor sheet (the desktop's ProfileEditorView): "+" opens
+    /// a fresh draft, a card's context menu opens the existing profile.
+    @State private var workspaceEdit: WorkspaceEdit?
 
     init(controller: RemoteHostController, host: RemoteHost,
          openWorkspace: WorkspaceDeepLink? = nil) {
@@ -100,6 +103,11 @@ struct HostMirrorScreen: View {
         }
         .alert(item: topPrompt) { prompt in
             promptAlert(prompt)
+        }
+        .sheet(item: $workspaceEdit) { edit in
+            WorkspaceEditorSheet(controller: controller, editing: edit.editingID) {
+                workspaceEdit = nil
+            }
         }
     }
 
@@ -230,9 +238,18 @@ struct HostMirrorScreen: View {
 
     @ViewBuilder private var workspacesSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("Workspaces",
-                          trailing: controller.listModel.profileRows.isEmpty ? nil
-                                    : "\(runningCount) running")
+            HStack(spacing: 6) {
+                Text("Workspaces").font(.headline)
+                Spacer()
+                if !controller.listModel.profileRows.isEmpty {
+                    Text("\(runningCount) running")
+                        .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                }
+                Button { workspaceEdit = .new } label: {
+                    Image(systemName: "plus").font(.body)
+                }
+                .accessibilityLabel("New workspace")
+            }
             if controller.listModel.profileRows.isEmpty {
                 Text(controller.hasSnapshot ? "No workspaces on this server."
                                             : "Loading workspaces…")
@@ -245,6 +262,11 @@ struct HostMirrorScreen: View {
                         WorkspaceScreen(controller: controller, profileID: row.id)
                     } label: { workspaceCard(row) }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            workspaceEdit = .existing(row.id)
+                        } label: { Label("Workspace Settings…", systemImage: "gearshape") }
+                    }
                 }
             }
         }
@@ -547,8 +569,12 @@ struct GridScreen: View {
     /// Pinch-to-zoom magnification of the whole grid: bigger tiles / fewer
     /// columns as you pinch in, an overview of smaller tiles as you pinch out.
     /// `zoom` tracks the live gesture; `zoomBase` is the committed value.
+    /// (Phone layout only — the iPad fill layout is sized by the viewport.)
     @State private var zoom: CGFloat = 1
     @State private var zoomBase: CGFloat = 1
+    /// iPad gets the desktop-stage behavior: tile the cells to FILL the
+    /// detail area (4 cells = 4 big quarters) instead of fixed-height tiles.
+    @Environment(\.horizontalSizeClass) private var hSize
 
     private var cells: [GridCell] { controller.gridStore.cells }
 
@@ -562,20 +588,10 @@ struct GridScreen: View {
                 ContentUnavailableView("No grid",
                     systemImage: "square.grid.2x2",
                     description: Text("Arrange a grid in the desktop app, or long-press a terminal tab and “Send to Grid.”"))
+            } else if hSize == .regular {
+                fillGrid
             } else {
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: baseMinWidth * zoom,
-                                                           maximum: 700), spacing: 12)],
-                              spacing: 12) {
-                        ForEach(cells) { cell in cellView(cell) }
-                    }
-                    .padding(12)
-                }
-                .simultaneousGesture(
-                    MagnificationGesture()
-                        .onChanged { v in zoom = min(2.2, max(0.55, zoomBase * v)) }
-                        .onEnded { _ in zoomBase = zoom }
-                )
+                scrollGrid
             }
         }
         .navigationTitle("Grid")
@@ -589,7 +605,79 @@ struct GridScreen: View {
         }
     }
 
-    @ViewBuilder private func cellView(_ cell: GridCell) -> some View {
+    /// Phone: fixed-height tiles in a scrolling adaptive grid, pinch to zoom.
+    private var scrollGrid: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: baseMinWidth * zoom,
+                                                   maximum: 700), spacing: 12)],
+                      spacing: 12) {
+                ForEach(cells) { cell in cellView(cell, height: cellHeight) }
+            }
+            .padding(12)
+        }
+        .simultaneousGesture(
+            MagnificationGesture()
+                .onChanged { v in zoom = min(2.2, max(0.55, zoomBase * v)) }
+                .onEnded { _ in zoomBase = zoom }
+        )
+    }
+
+    /// iPad: pack rows × columns so the cells split the whole viewport — the
+    /// same use-every-pixel behavior as the desktop grid stage. Falls back to
+    /// the scrolling layout when so many cells would make the tiles unreadable.
+    private var fillGrid: some View {
+        GeometryReader { geo in
+            let spacing: CGFloat = 12
+            let inset: CGFloat = 12
+            let (cols, rows) = Self.bestPacking(count: cells.count,
+                                                in: geo.size)
+            let w = (geo.size.width - inset * 2 - spacing * CGFloat(cols - 1)) / CGFloat(cols)
+            let h = (geo.size.height - inset * 2 - spacing * CGFloat(rows - 1)) / CGFloat(rows)
+            if h < 170 || w < 240 {
+                scrollGrid
+            } else {
+                VStack(spacing: spacing) {
+                    ForEach(0..<rows, id: \.self) { r in
+                        HStack(spacing: spacing) {
+                            ForEach(rowCells(r, cols: cols)) { cell in
+                                // -34: the tile's header row + divider, so the
+                                // terminal fills the rest of the tile exactly.
+                                cellView(cell, height: h - 34)
+                                    .frame(width: w)
+                            }
+                            // A ragged last row keeps its cells the same size,
+                            // leading-aligned like the desktop stage.
+                            if rowCells(r, cols: cols).count < cols { Spacer(minLength: 0) }
+                        }
+                    }
+                }
+                .padding(inset)
+            }
+        }
+    }
+
+    private func rowCells(_ row: Int, cols: Int) -> [GridCell] {
+        let start = row * cols
+        guard start < cells.count else { return [] }
+        return Array(cells[start..<min(start + cols, cells.count)])
+    }
+
+    /// Choose the column count whose resulting tile shape is closest to a
+    /// comfortable terminal aspect (~1.5:1), given the viewport.
+    static func bestPacking(count: Int, in size: CGSize) -> (cols: Int, rows: Int) {
+        guard count > 0, size.width > 0, size.height > 0 else { return (1, 1) }
+        var best = (cols: 1, rows: count)
+        var bestScore = CGFloat.infinity
+        for cols in 1...count {
+            let rows = Int(ceil(Double(count) / Double(cols)))
+            let aspect = (size.width / CGFloat(cols)) / (size.height / CGFloat(rows))
+            let score = abs(log(aspect / 1.5))
+            if score < bestScore { bestScore = score; best = (cols, rows) }
+        }
+        return best
+    }
+
+    @ViewBuilder private func cellView(_ cell: GridCell, height: CGFloat) -> some View {
         let name = controller.profile(for: cell.profileID)?.name ?? "?"
         let accent = controller.profile(for: cell.profileID)?.color.hexInUI ?? "#888888"
         let state = controller.runState(for: cell.profileID)
@@ -618,8 +706,10 @@ struct GridScreen: View {
                 Divider()
                 Group {
                     if running, let session = sessions[cell.id] {
+                        // Preview font grows with the tile so a quarter-screen
+                        // iPad cell reads comfortably, not like a thumbnail.
                         RemoteTerminalView(session: session, interactive: false,
-                                           fixedFontSize: 10)
+                                           fixedFontSize: max(9, min(13, height / 34)))
                             .background(Color.black)
                     } else {
                         ZStack {
@@ -633,7 +723,7 @@ struct GridScreen: View {
                         }
                     }
                 }
-                .frame(height: cellHeight)
+                .frame(height: height)
             }
             .contentShape(Rectangle())
         }

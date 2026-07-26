@@ -58,15 +58,36 @@ struct VMDashboardView: View {
 
     private var header: some View {
         // On a phone the identity row and the action buttons each need the full
-        // width, so they stack; on macOS/iPad they sit side by side.
+        // width, so they stack. Elsewhere they sit side by side WHEN they fit —
+        // an iPad portrait detail column is too narrow for both, and squeezing
+        // hyphenated the button labels ("New Termi-nal"); the fallback gives
+        // the actions their own row instead.
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 14) {
-                identityBadge
-                identityText
-                Spacer()
-                if !compact { actionBar }
+            if compact {
+                HStack(spacing: 14) {
+                    identityBadge
+                    identityText
+                    Spacer()
+                }
+                actionBar
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 14) {
+                        identityBadge
+                        identityText
+                        Spacer()
+                        actionBar.fixedSize()
+                    }
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 14) {
+                            identityBadge
+                            identityText
+                            Spacer()
+                        }
+                        actionBar.fixedSize()
+                    }
+                }
             }
-            if compact { actionBar }
         }
     }
 

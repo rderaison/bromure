@@ -182,6 +182,27 @@ struct AutomationKanbanView: View {
                     .padding(14)
                 }
             } else {
+                #if os(iOS)
+                // iPad: same horizontally-panning board as the coding kanban —
+                // a portrait detail column can't fit every column side by side.
+                GeometryReader { geo in
+                    let n = cols.needsAttention.isEmpty ? 3 : 4
+                    let w = CodingKanbanView.columnWidth(count: n, available: geo.size.width)
+                    ScrollView(.horizontal, showsIndicators: true) {
+                        HStack(alignment: .top, spacing: 14) {
+                            scheduledColumn(cols).frame(width: w)
+                            inProgressColumn(cols).frame(width: w)
+                            if !cols.needsAttention.isEmpty {
+                                attentionColumn(cols).frame(width: w)
+                                    .transition(.move(edge: .top).combined(with: .opacity))
+                            }
+                            doneColumn(done).frame(width: w)
+                        }
+                        .animation(.easeInOut(duration: 0.2), value: cols.needsAttention.isEmpty)
+                        .padding(14)
+                    }
+                }
+                #else
                 HStack(alignment: .top, spacing: 14) {
                     scheduledColumn(cols)
                     inProgressColumn(cols)
@@ -193,6 +214,7 @@ struct AutomationKanbanView: View {
                 }
                 .animation(.easeInOut(duration: 0.2), value: cols.needsAttention.isEmpty)
                 .padding(14)
+                #endif
             }
         }
         .background(Color.platformWindowBackground)

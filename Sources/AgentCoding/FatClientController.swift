@@ -1058,6 +1058,26 @@ final class RemoteHostController {
         return resp.json
     }
 
+    /// True when a save changed a field that's baked into the VM at boot (so
+    /// only a fresh launch applies it). Mirrors the local window's
+    /// `restartRequiringChanges` — the live-refreshable fields (env, guardrails,
+    /// credentials, trace level, terminal appearance) are intentionally omitted.
+    /// Shared so the macOS remote window and the iOS editor sheet prompt the
+    /// same way.
+    static func restartRequiringChanges(from old: Profile, to new: Profile) -> Bool {
+        old.memoryGB != new.memoryGB
+            || old.networkMode != new.networkMode
+            || old.bridgedInterfaceID != new.bridgedInterfaceID
+            || old.folderPaths != new.folderPaths
+            || old.tool != new.tool
+            || old.authMode != new.authMode
+            || old.additionalTools != new.additionalTools
+            || old.sshPublicKey != new.sshPublicKey
+            || old.importedSSHKeys != new.importedSSHKeys
+            || old.kubeconfigs != new.kubeconfigs
+            || old.awsCredentials != new.awsCredentials
+    }
+
     /// Create a brand-new workspace on the remote from an editor document
     /// (`POST /profiles` → 201). Returns the response body (`id`, `shortId`,
     /// and `sshPublicKey` when the doc asked for a generated key).
@@ -1993,7 +2013,7 @@ final class RemoteHostWindow: NSWindow {
                 // the workspace is actually up (off/suspended pick it up on
                 // next cold boot).
                 if let self, let original,
-                   Self.restartRequiringChanges(from: original, to: edited),
+                   RemoteHostController.restartRequiringChanges(from: original, to: edited),
                    c.runState(for: id) == .running || c.runState(for: id) == .booting {
                     self.promptRestartToApply(id)
                 }
@@ -2002,24 +2022,6 @@ final class RemoteHostWindow: NSWindow {
                     NSLocalizedString("Couldn't save the workspace", comment: ""), error)
             }
         }
-    }
-
-    /// True when a save changed a field that's baked into the VM at boot (so
-    /// only a fresh launch applies it). Mirrors the local window's
-    /// `restartRequiringChanges` — the live-refreshable fields (env, guardrails,
-    /// credentials, trace level, terminal appearance) are intentionally omitted.
-    private static func restartRequiringChanges(from old: Profile, to new: Profile) -> Bool {
-        old.memoryGB != new.memoryGB
-            || old.networkMode != new.networkMode
-            || old.bridgedInterfaceID != new.bridgedInterfaceID
-            || old.folderPaths != new.folderPaths
-            || old.tool != new.tool
-            || old.authMode != new.authMode
-            || old.additionalTools != new.additionalTools
-            || old.sshPublicKey != new.sshPublicKey
-            || old.importedSSHKeys != new.importedSSHKeys
-            || old.kubeconfigs != new.kubeconfigs
-            || old.awsCredentials != new.awsCredentials
     }
 
     private func promptRestartToApply(_ id: Profile.ID) {

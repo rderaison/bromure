@@ -51,12 +51,20 @@ struct WorkspaceScreen: View {
     /// Debounces the not-running → Info fallback (see the `isRunning` onChange):
     /// a transient snapshot dip must not yank a live terminal to the dashboard.
     @State private var stopFallback: Task<Void, Never>?
+    /// The repo file pane beside the terminals (iPad, regular width) — the
+    /// same `FileExplorerPane` + IDE-style auto-open the macOS window uses.
+    /// Open state lives on the shared listModel (`filePaneOpen`), which the
+    /// pane itself flips on repo enter/leave via `onAutoSetOpen`.
+    @State private var fileExplorer = FileExplorerModel()
     /// Compact height = the phone is on its side. A terminal is the one pane
     /// that wants every one of those few hundred points, so landscape drops the
     /// pane picker and the tab strip and hands the whole area to the surface.
     /// Rotating back brings them straight back; the nav bar stays either way
     /// (it carries Back and the reader / new-terminal actions).
     @Environment(\.verticalSizeClass) private var vSize
+    /// Regular width (iPad) keeps the pills compact and leading-aligned like a
+    /// toolbar; compact width (phone) lets the selected pill flex to fill.
+    @Environment(\.horizontalSizeClass) private var hSize
     private var terminalFullBleed: Bool { vSize == .compact && pane == .terminals }
 
     private var runState: SessionListModel.RunState { controller.runState(for: profileID) }
@@ -112,7 +120,33 @@ struct WorkspaceScreen: View {
             }
         }
         // Serve the browser MCP for this workspace while its screen is open.
-        .onAppear { browserBridge.start() }
+        .onAppear {
+            browserBridge.start()
+            // The file pane resolves "the active tab's repo" through the
+            // shared listModel selection, exactly like the macOS windows.
+            controller.listModel.selectedID = profileID
+            fileExplorer.execProvider = { [weak controller] id, command, timeout in
+                guard let controller else { throw ACAppDelegate.GuestExecError.vmNotRunning }
+                return try await controller.guestExec(id, command: command, timeout: timeout)
+            }
+        }
+        .toolbar {
+            // Constant item count (iOS 26 leaves ghost buttons behind removed
+            // toolbar items) — render nothing when the pane doesn't apply.
+            ToolbarItem(placement: .primaryAction) {
+                if hSize == .regular && pane == .terminals && isRunning {
+                    Button {
+                        withAnimation(.snappy(duration: 0.25)) {
+                            controller.listModel.filePaneOpen.toggle()
+                        }
+                    } label: {
+                        Image(systemName: "sidebar.right")
+                    }
+                    .accessibilityLabel(controller.listModel.filePaneOpen
+                                        ? "Hide repository files" : "Show repository files")
+                }
+            }
+        }
         // An agent opened a page (browser_navigate) — bring the Web pane forward.
         .onChange(of: browserBridge.showTick) { _, _ in
             if isRunning { withAnimation(.snappy(duration: 0.28)) { pane = .web } }
@@ -135,14 +169,17 @@ struct WorkspaceScreen: View {
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: p.symbol).font(.system(size: 14, weight: .semibold))
-                        if selected {
+                        if selected || hSize != .compact {
                             Text(p.rawValue).font(.subheadline.weight(.semibold))
                                 .fixedSize().lineLimit(1)
                         }
                     }
                     .padding(.horizontal, selected ? 15 : 12)
                     .padding(.vertical, 9)
-                    .frame(maxWidth: selected ? .infinity : nil)
+                    // Compact: the selected pill flexes so four pills fill a
+                    // phone's width. Regular: every pill is labeled and hugs
+                    // its content — a giant stretched capsule reads wrong.
+                    .frame(maxWidth: selected && hSize == .compact ? .infinity : nil)
                     .background(
                         Capsule().fill(selected ? Color.accentColor
                                                 : Color.secondary.opacity(0.14)))
@@ -150,6 +187,7 @@ struct WorkspaceScreen: View {
                 }
                 .buttonStyle(.plain)
             }
+            if hSize != .compact { Spacer(minLength: 0) }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -181,12 +219,29 @@ struct WorkspaceScreen: View {
             // blank terminal that repaints late and has lost the keyboard. That
             // was the "switch to Info and back to grab the focus" workaround.
             if isRunning {
-                TerminalsPane(controller: controller, profileID: profileID,
-                              initialWindow: initialWindow,
-                              hidesTabStrip: terminalFullBleed,
-                              isVisible: pane == .terminals)
-                    .opacity(pane == .terminals ? 1 : 0)
-                    .allowsHitTesting(pane == .terminals)
+                HStack(spacing: 0) {
+                    TerminalsPane(controller: controller, profileID: profileID,
+                                  initialWindow: initialWindow,
+                                  hidesTabStrip: terminalFullBleed,
+                                  isVisible: pane == .terminals)
+                    // Regular width only: the repo file pane rides beside the
+                    // terminal, macOS-style. It stays mounted at width 0 while
+                    // closed so its repo-transition watcher can auto-open it.
+                    if hSize == .regular {
+                        FileExplorerPane(
+                            model: fileExplorer,
+                            listModel: controller.listModel,
+                            onAutoSetOpen: { open in
+                                withAnimation(.snappy(duration: 0.25)) {
+                                    controller.listModel.filePaneOpen = open
+                                }
+                            })
+                            .frame(width: controller.listModel.filePaneOpen ? 320 : 0)
+                            .clipped()
+                    }
+                }
+                .opacity(pane == .terminals ? 1 : 0)
+                .allowsHitTesting(pane == .terminals)
             }
             switch pane {
             case .terminals: EmptyView()

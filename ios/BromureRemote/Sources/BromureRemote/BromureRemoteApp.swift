@@ -39,6 +39,12 @@ struct RootView: View {
     @State private var controllers = HostControllerStore()
     @State private var showAddServer = false
     @State private var pendingPeer: DeviceInfo?
+    #if DEBUG
+    /// `BROMURE_DEBUG_EDITOR=1` presents the shared workspace editor over a
+    /// dummy host at launch — screenshot/smoke the ProfileEditorView port
+    /// without a live server (the "new" flavour never dials until Save).
+    @State private var debugEditorController: RemoteHostController?
+    #endif
     /// A notification tap's target window, opened once its server connects.
     @State private var pendingWorkspace: WorkspaceDeepLink?
     /// Drives the "−" affordance: toggling it reveals delete controls on the
@@ -73,6 +79,12 @@ struct RootView: View {
             push.syncToken()
             // Publish our SSH key so the user's servers authorize us passwordless.
             RemoteTransport.publishSSHKey()
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["BROMURE_DEBUG_EDITOR"] == "1" {
+                debugEditorController = RemoteHostController(
+                    host: RemoteHost(name: "debug", address: "127.0.0.1", user: "debug"))
+            }
+            #endif
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -138,6 +150,17 @@ struct RootView: View {
                 pendingPeer = nil
             }
         }
+        #if DEBUG
+        .sheet(isPresented: Binding(
+            get: { debugEditorController != nil },
+            set: { if !$0 { debugEditorController = nil } })) {
+            if let c = debugEditorController {
+                WorkspaceEditorSheet(controller: c, editing: nil) {
+                    debugEditorController = nil
+                }
+            }
+        }
+        #endif
     }
 
     @ViewBuilder private var mainUI: some View {
@@ -149,18 +172,26 @@ struct RootView: View {
                                          host: host, openWorkspace: pendingWorkspace).id(host.id)
                     }
             }
+        } else if let host = activeHost {
+            // iPad: one host fills the screen with the macOS-window layout —
+            // sidebar (boards + workspaces) and a detail column — instead of
+            // the phone's pushed dashboard. "Servers" in the sidebar returns
+            // to the list (which tears the controller down via onChange).
+            PadHostMirror(controller: controllers.controller(for: host),
+                          host: host,
+                          openWorkspace: pendingWorkspace,
+                          onClose: { activeHost = nil })
+                .id(host.id)
         } else {
-            NavigationSplitView {
+            // iPad, nothing open: the server picker owns the whole screen — a
+            // sidebar next to an empty "Select a server" pane wasted the width
+            // and squeezed the account row into wrapping. The list stays a
+            // comfortable reading column, centered.
+            NavigationStack {
                 bootList
-            } detail: {
-                if let host = activeHost {
-                    HostMirrorScreen(controller: controllers.controller(for: host),
-                                     host: host, openWorkspace: pendingWorkspace).id(host.id)
-                } else {
-                    ContentUnavailableView("Select a server",
-                        systemImage: "server.rack",
-                        description: Text("Pick a bromure.io server or add one by address."))
-                }
+                    .frame(maxWidth: 640)
+                    .frame(maxWidth: .infinity)
+                    .background(Color(uiColor: .systemGroupedBackground))
             }
         }
     }
@@ -185,7 +216,12 @@ struct RootView: View {
 
     /// A fresh, signed-out install with no saved servers gets the branded hero;
     /// once there's an account or a by-address server it's the working list.
-    private var showHero: Bool { !directory.signedIn && savedHosts.isEmpty }
+    /// Compact widths only: on iPad the boot list lives in a split-view
+    /// sidebar, where the full-screen hero art reads squeezed — the plain
+    /// Account / My Servers list is the right furniture there.
+    private var showHero: Bool {
+        !directory.signedIn && savedHosts.isEmpty && sizeClass == .compact
+    }
 
     @ViewBuilder private var bootList: some View {
         if showHero {
@@ -217,7 +253,7 @@ struct RootView: View {
                 brandMark.padding(.bottom, 30)
                 Text("Bromure")
                     .font(.system(size: 42, weight: .heavy, design: .rounded))
-                Text("Your coding agents and terminals —\nlive, from your phone.")
+                Text("Your coding agents and terminals —\nlive, wherever you are.")
                     .font(.callout)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
@@ -290,6 +326,8 @@ struct RootView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(directory.accountLabel ?? "bromure.io")
                             .font(.body.weight(.semibold))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                         Text("Signed in").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()

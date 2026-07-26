@@ -1,8 +1,10 @@
-import AppKit
 import Foundation
-import SandboxEngine
 import SwiftUI
+#if os(macOS)
+import AppKit
+import SandboxEngine
 @preconcurrency import Virtualization
+#endif
 
 // MARK: - SwiftUI helpers
 
@@ -63,6 +65,12 @@ public extension Notification.Name {
     /// spec string: "picker", "editor:<type>", or "envimport").
     static let bromureACPresentCredentialSheet =
         Notification.Name("io.bromure.ac.presentCredentialSheet")
+    /// Posted after a subscription credential is registered or forgotten, so
+    /// open editors re-read their per-tool registration status. (Posted by the
+    /// mac registration coordinator; declared here so the editor observing it
+    /// compiles on iOS too.)
+    static let bromureSubscriptionStoresChanged =
+        Notification.Name("bromureSubscriptionStoresChanged")
 }
 
 enum EditorCategory: String, CaseIterable, Identifiable {
@@ -361,8 +369,15 @@ struct ProfileEditorView: View {
     /// Credentials pane. All sections start collapsed — the user
     /// opens whichever one they need.
     @State private var expandedCredsSections: Set<String> = []
+    #if os(macOS)
     @State private var discoveredSSOProfiles: [DiscoveredSSOProfile] = []
     @State private var awsFolderGranted: Bool = false
+    #else
+    /// iOS "Add folder…": no open panel to browse the server's disk, so the
+    /// path is typed into a prompt instead.
+    @State private var showFolderPathPrompt = false
+    @State private var newFolderPath = ""
+    #endif
 
     /// The Credentials pane's add/edit sheet — either the type picker or one
     /// type's editor. Nil when nothing is presented.
@@ -481,18 +496,34 @@ struct ProfileEditorView: View {
     /// Which categories show up in the sidebar. The Automation pane
     /// holds app-wide settings (UserDefaults), so it's only relevant
     /// when the editor is opened via Bromure → Preferences (where the
-    /// caller doesn't pass a `storageContext`).
+    /// caller doesn't pass a `storageContext`). On iOS the editor is
+    /// always remote: Automation (this-machine UserDefaults) and Local
+    /// Models (this-machine MLX catalog/downloads) don't apply.
     private var visibleCategories: [EditorCategory] {
         EditorCategory.allCases.filter { c in
-            c != .automation || storageContext == nil
+            #if os(macOS)
+            return c != .automation || storageContext == nil
+            #else
+            return c != .automation && c != .localModels
+            #endif
         }
+    }
+
+    /// Optional-selection bridge for the sidebar List (the non-optional
+    /// initializer is macOS-only). A tap elsewhere would write nil; keep the
+    /// current category instead so the detail pane never goes blank.
+    private var selectedCategoryOptional: Binding<EditorCategory?> {
+        Binding(
+            get: { selectedCategory },
+            set: { if let c = $0 { selectedCategory = c } })
     }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                // Sidebar
-                List(visibleCategories, selection: $selectedCategory) { category in
+                // Sidebar. iOS has no non-optional List-selection initializer,
+                // so it binds through an optional that ignores deselection.
+                List(visibleCategories, selection: selectedCategoryOptional) { category in
                     Label {
                         Text(LocalizedStringKey(category.rawValue))
                     } icon: {
@@ -504,7 +535,13 @@ struct ProfileEditorView: View {
                     .tag(category)
                 }
                 .listStyle(.sidebar)
+                // iOS renders sidebar rows in a larger type — 170pt wraps
+                // "Credentials" / "Environment" into two lines there.
+                #if os(macOS)
                 .frame(width: 170)
+                #else
+                .frame(width: 230)
+                #endif
 
                 Divider()
 
@@ -534,7 +571,9 @@ struct ProfileEditorView: View {
             }
             .padding(12)
         }
+        #if os(macOS)
         .frame(width: 720, height: 520)
+        #endif
         // Attach the import sheet at the root of the editor so it stays
         // in the hierarchy regardless of which sidebar category is
         // selected when the user kicks off `presentImportPicker`. When
@@ -627,6 +666,9 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private func categoryIcon(_ category: EditorCategory) -> some View {
+        // NSImage renders the bundled SVG; UIImage can't, so iOS always takes
+        // the SF-symbol fallback.
+        #if os(macOS)
         if category == .mcp, let url = acResourceBundle.url(forResource: "mcp", withExtension: "svg", subdirectory: "icons"),
            let data = try? Data(contentsOf: url),
            let svgImage = NSImage(data: data) {
@@ -642,21 +684,48 @@ struct ProfileEditorView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.white)
         }
+        #else
+        Image(systemName: category.symbol)
+            .font(.system(size: 12))
+            .foregroundStyle(.white)
+        #endif
     }
 
     @ViewBuilder
     private var localModelsSection: some View {
+        // The pane manages THIS machine's MLX catalog + downloads; it's
+        // filtered out of visibleCategories on iOS.
+        #if os(macOS)
         LocalModelsSettingsView(routing: $draft.modelRouting,
                                 activeModelID: $draft.activeModelID,
                                 selectedModelIDs: draft.distinctLocalModelIDs)
+        #else
+        EmptyView()
+        #endif
+    }
+
+    /// Local models installed on this machine (the fusion-leg / pinned-agent
+    /// pickers). A mobile client has no local engine, so the list is empty and
+    /// every "Local model" affordance renders greyed out — matching a Mac with
+    /// nothing downloaded.
+    private var installedLocalModels: [CatalogModel] {
+        #if os(macOS)
+        return CatalogStore.shared.effective().models
+            .filter { CatalogStore.shared.isInstalled(repo: $0.repo) }
+        #else
+        return []
+        #endif
     }
 
     @ViewBuilder
     private var generalSection: some View {
-        // Every row goes through Form's two-column labeled pattern
-        // (Picker(label, ...), LabeledContent, TextField(label, ...)).
-        // That's what gives us one right-aligned label column +
-        // one left-aligned control column — the System Settings look.
+        // macOS: every row goes through Form's two-column labeled pattern
+        // (Picker(label, ...), LabeledContent, TextField(label, ...)) —
+        // one right-aligned label column + one left-aligned control column,
+        // the System Settings look. iOS: a Form is a List and collapses to
+        // nothing inside the detail ScrollView, so the same rows render as
+        // labeled VStack rows like every other pane.
+        #if os(macOS)
         Form {
             // Preferences (= template) flavour: skip the Name field —
             // the template's name is forced to "Defaults" on save and
@@ -666,17 +735,7 @@ struct ProfileEditorView: View {
                           text: $draft.name)
             }
 
-            Picker(NSLocalizedString("Color", comment: "Profile color picker label"),
-                   selection: $draft.color) {
-                ForEach(ProfileColor.allCases, id: \.self) { c in
-                    HStack {
-                        Circle().fill(c.swiftUIColor.gradient).frame(width: 12, height: 12)
-                        Text(c.label)
-                    }
-                    .tag(c)
-                }
-            }
-            .pickerStyle(.menu)
+            colorPicker
 
             // (Keyboard layout / key-repeat rows removed with the
             // framebuffer: the native terminal path uses macOS input
@@ -692,6 +751,47 @@ struct ProfileEditorView: View {
                 .lineLimit(2...6)
         }
         .formStyle(.grouped)
+        #else
+        VStack(alignment: .leading, spacing: 16) {
+            if draft.id != ProfileStore.templateID {
+                LabeledContent(NSLocalizedString("Name", comment: "Profile name field label")) {
+                    TextField("", text: $draft.name)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 320)
+                }
+            }
+            LabeledContent(NSLocalizedString("Color", comment: "Profile color picker label")) {
+                colorPicker.labelsHidden()
+            }
+            LabeledContent(NSLocalizedString("When closing the window", comment: "")) {
+                closeActionPicker.labelsHidden()
+            }
+            Toggle(NSLocalizedString("Start this VM at login", comment: ""),
+                   isOn: $draft.bootAtStartup)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"))
+                    .font(.caption).foregroundStyle(.secondary)
+                TextField("", text: $draft.comments, axis: .vertical)
+                    .lineLimit(2...6)
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private var colorPicker: some View {
+        Picker(NSLocalizedString("Color", comment: "Profile color picker label"),
+               selection: $draft.color) {
+            ForEach(ProfileColor.allCases, id: \.self) { c in
+                HStack {
+                    Circle().fill(c.swiftUIColor.gradient).frame(width: 12, height: 12)
+                    Text(c.label)
+                }
+                .tag(c)
+            }
+        }
+        .pickerStyle(.menu)
     }
 
     /// Choose what happens when the user closes a session window:
@@ -718,8 +818,7 @@ struct ProfileEditorView: View {
             // Local models the user can pin a tool to — the installed ones
             // (download more in the Local Models section). Empty → the
             // "Local model" auth option is greyed out.
-            let localModels = CatalogStore.shared.effective().models
-                .filter { CatalogStore.shared.isInstalled(repo: $0.repo) }
+            let localModels = installedLocalModels
             // The single model every "Local model" agent uses — the one
             // selected in the Local Models pane. Agents no longer pick
             // their own; this is shown read-only on each card.
@@ -772,8 +871,7 @@ struct ProfileEditorView: View {
     private var fusionSection: some View {
         let usable = draft.fusionUsableProviders
         // Installed local models, available as a fuse leg / judge backend.
-        let localModels = CatalogStore.shared.effective().models
-            .filter { CatalogStore.shared.isInstalled(repo: $0.repo) }
+        let localModels = installedLocalModels
         VStack(alignment: .leading, spacing: 12) {
             // Blurb.
             VStack(alignment: .leading, spacing: 4) {
@@ -812,7 +910,7 @@ struct ProfileEditorView: View {
                         }
                     }
                 }
-                .toggleStyle(.checkbox)
+                .platformCheckboxToggle()
                 .disabled(!ok)
             }
             // Local model leg.
@@ -867,7 +965,7 @@ struct ProfileEditorView: View {
                         Text("Local model")
                     }
                 }
-                .toggleStyle(.checkbox)
+                .platformCheckboxToggle()
                 if draft.fusionLocalLeg?.isEmpty == false {
                     Picker("", selection: Binding(
                         get: { draft.fusionLocalLeg ?? localModels.first?.id ?? "" },
@@ -1076,7 +1174,7 @@ struct ProfileEditorView: View {
                         .buttonStyle(.borderless)
                     }
                     .padding(8)
-                    .background(Color(nsColor: .textBackgroundColor),
+                    .background(Color.platformTextBackground,
                                 in: RoundedRectangle(cornerRadius: 6))
                 }
             }
@@ -1091,6 +1189,23 @@ struct ProfileEditorView: View {
                 .disabled(draft.folderPaths.count >= 8)
             }
         }
+        #if !os(macOS)
+        .alert("Add a shared folder", isPresented: $showFolderPathPrompt) {
+            TextField("/Users/you/Projects/app", text: $newFolderPath)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+            Button("Add") {
+                let path = newFolderPath.trimmingCharacters(in: .whitespaces)
+                if !path.isEmpty, !draft.folderPaths.contains(path),
+                   draft.folderPaths.count < 8 {
+                    draft.folderPaths.append(path)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Enter the folder's absolute path on the server; it's mounted into the VM under its own name.")
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -1174,10 +1289,10 @@ struct ProfileEditorView: View {
             } label: {
                 Image(systemName: "ellipsis").frame(width: 22, height: 18).contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton).fixedSize()
+            .platformBorderlessMenuStyle().fixedSize()
         }
         .padding(.vertical, 5).padding(.horizontal, 8)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+        .background(Color.platformTextBackground.opacity(0.5))
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
         .onTapGesture { openCredentialEditor(ref) }
@@ -1511,18 +1626,17 @@ struct ProfileEditorView: View {
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(8)
-                            .background(Color(NSColor.textBackgroundColor))
+                            .background(Color.platformTextBackground)
                             .cornerRadius(6)
                     }
                     .frame(height: 70)
                     HStack {
                         Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(pub, forType: .string)
+                            platformCopyToPasteboard(pub)
                         }
                         Button("Open GitHub keys page") {
                             if let url = URL(string: "https://github.com/settings/keys") {
-                                NSWorkspace.shared.open(url)
+                                platformOpenURL(url)
                             }
                         }
                         Spacer()
@@ -1623,12 +1737,14 @@ struct ProfileEditorView: View {
 
             HStack {
                 Spacer()
+                #if os(macOS)
                 Button {
                     importKubeconfigFile()
                 } label: {
                     Label("Import file…", systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.borderless)
+                #endif
                 Button {
                     draft.kubeconfigs.append(KubeconfigEntry(name: "context-\(draft.kubeconfigs.count + 1)"))
                 } label: {
@@ -1639,6 +1755,7 @@ struct ProfileEditorView: View {
         }
     }
 
+    #if os(macOS)
     /// Open-panel + parse + append. Shows an error sheet if the file
     /// isn't a kubeconfig or YAML parsing failed.
     private func importKubeconfigFile() {
@@ -1672,6 +1789,7 @@ struct ProfileEditorView: View {
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
         alert.runModal()
     }
+    #endif
 
     // MARK: - DigitalOcean
 
@@ -1687,7 +1805,7 @@ struct ProfileEditorView: View {
                     .textFieldStyle(.roundedBorder)
                 Button {
                     if let url = URL(string: "https://cloud.digitalocean.com/account/api/tokens") {
-                        NSWorkspace.shared.open(url)
+                        platformOpenURL(url)
                     }
                 } label: {
                     Image(systemName: "arrow.up.right.square")
@@ -1712,7 +1830,7 @@ struct ProfileEditorView: View {
                     .textFieldStyle(.roundedBorder)
                 Button {
                     if let url = URL(string: "https://linear.app/settings/api") {
-                        NSWorkspace.shared.open(url)
+                        platformOpenURL(url)
                     }
                 } label: {
                     Image(systemName: "arrow.up.right.square")
@@ -1735,7 +1853,7 @@ struct ProfileEditorView: View {
             Text(NSLocalizedString("Require approval to use", comment: ""))
                 .font(.caption)
         }
-        .toggleStyle(.checkbox)
+        .platformCheckboxToggle()
         .controlSize(.small)
         .help(NSLocalizedString(
             "Pop a confirmation dialog the first time this credential is used in a session. Off by default.",
@@ -1802,7 +1920,7 @@ struct ProfileEditorView: View {
             Spacer()
             Button {
                 if let url = URL(string: "https://console.aws.amazon.com/iam/home#/security_credentials") {
-                    NSWorkspace.shared.open(url)
+                    platformOpenURL(url)
                 }
             } label: {
                 Label(NSLocalizedString("Open IAM credentials page", comment: ""),
@@ -1813,6 +1931,29 @@ struct ProfileEditorView: View {
         }
     }
 
+    #if !os(macOS)
+    /// SSO discovery reads ~/.aws on the machine that RUNS the workspaces; a
+    /// mobile client can't browse the server's filesystem, so the profile is
+    /// typed in directly (the host resolves it at session start, as always).
+    @ViewBuilder
+    private var awsSSOFields: some View {
+        Text("Authenticate via AWS IAM Identity Center (SSO). Enter the SSO profile name as it appears in the server's ~/.aws/config; the server resolves it at session start.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        LabeledContent(NSLocalizedString("SSO profile", comment: "")) {
+            TextField("my-sso-profile", text: $draft.awsCredentials.ssoProfileName)
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+        }
+        LabeledContent(NSLocalizedString("Default region", comment: "")) {
+            TextField("us-east-1", text: $draft.awsCredentials.region)
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+        }
+    }
+    #else
     @ViewBuilder
     private var awsSSOFields: some View {
         Text("Authenticate via AWS IAM Identity Center (SSO). Grant access to your ~/.aws directory, then select an SSO profile. On session start, if your cached token is expired, your browser will open for login.")
@@ -1881,6 +2022,7 @@ struct ProfileEditorView: View {
             }
         }
     }
+    #endif
 
 
     // MARK: - Container Registries (Docker / GHCR / GitLab CR / private)
@@ -1929,9 +2071,10 @@ struct ProfileEditorView: View {
                 } label: {
                     Label(NSLocalizedString("Add", comment: ""), systemImage: "plus")
                 }
-                .menuStyle(.borderlessButton)
+                .platformBorderlessMenuStyle()
                 .fixedSize()
 
+                #if os(macOS)
                 Button {
                     importDockerConfigFile()
                 } label: {
@@ -1942,6 +2085,7 @@ struct ProfileEditorView: View {
                 .help(NSLocalizedString(
                     "Pull entries from an existing ~/.docker/config.json. Entries that delegate to credsStore / credHelpers are skipped — those passwords live in the OS keychain, not in the file.",
                     comment: ""))
+                #endif
 
                 Spacer()
             }
@@ -2016,6 +2160,7 @@ struct ProfileEditorView: View {
             HTTPDatabaseEndpoint(engine: engine, auth: auth))
     }
 
+    #if os(macOS)
     /// Open-panel + parse a Docker config.json. For each entry under
     /// `auths`, decode the `auth` field (`base64("user:password")`),
     /// translate the JSON key back to a hostname, and append a new
@@ -2088,6 +2233,7 @@ struct ProfileEditorView: View {
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
         alert.runModal()
     }
+    #endif
 
 
     // MARK: - Other API keys (formerly Manual token rules under Advanced)
@@ -2186,7 +2332,7 @@ struct ProfileEditorView: View {
                         }
                     }
                     .padding(8)
-                    .background(Color(nsColor: .textBackgroundColor),
+                    .background(Color.platformTextBackground,
                                 in: RoundedRectangle(cornerRadius: 6))
                 }
             }
@@ -2244,6 +2390,10 @@ struct ProfileEditorView: View {
     }
 
     private func presentImportPicker() {
+        // Host-side only: reads a private key off the machine that runs the
+        // workspaces. Remote clients pass onImportSSHKey == nil, which
+        // disables the Import button, so this can never be reached on iOS.
+        #if os(macOS)
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -2269,6 +2419,7 @@ struct ProfileEditorView: View {
                 )
             }
         }
+        #endif
     }
 
     private func completeImport(sheet: ImportSheetState) {
@@ -2300,7 +2451,7 @@ struct ProfileEditorView: View {
             urlString = nil
         }
         if let s = urlString, let url = URL(string: s) {
-            NSWorkspace.shared.open(url)
+            platformOpenURL(url)
         }
     }
 
@@ -2361,7 +2512,12 @@ struct ProfileEditorView: View {
     /// Browser base image (app-wide): status + a (Re)download button
     /// driving the shared BrowserImageInstaller — the same install the
     /// browser pane triggers on first open, so progress started in one
-    /// place is visible in the other.
+    /// place is visible in the other. The image lives on the machine that
+    /// runs the browser VMs, so a mobile client has nothing to manage here.
+    #if !os(macOS)
+    @ViewBuilder
+    private var browserImageSection: some View { EmptyView() }
+    #else
     @ViewBuilder
     private var browserImageSection: some View {
         let installer = BrowserImageInstaller.shared
@@ -2438,6 +2594,7 @@ struct ProfileEditorView: View {
             return String(localized: "Not installed. Downloaded automatically the first time a workspace opens the browser, or download it now.")
         }
     }
+    #endif
 
     @ViewBuilder
     private var tracingSection: some View {
@@ -2591,10 +2748,19 @@ struct ProfileEditorView: View {
                         Text(m.displayName).tag(m)
                     }
                 }
+                #if os(macOS)
                 .pickerStyle(.radioGroup)
+                #else
+                .pickerStyle(.segmented)
+                #endif
                 .labelsHidden()
 
                 if draft.networkMode == .bridged {
+                    // Enumerating bridgeable interfaces needs Virtualization.framework
+                    // on the machine that RUNS the VMs; a remote client keeps
+                    // whatever interface id is on the profile and lets the server
+                    // resolve (or fall back to NAT) at launch.
+                    #if os(macOS)
                     let interfaces = VZBridgedNetworkInterface.networkInterfaces
                     if interfaces.isEmpty {
                         Text("No bridged interfaces available. Bromure AC will fall back to NAT at launch.")
@@ -2614,6 +2780,11 @@ struct ProfileEditorView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    #else
+                    Text("The VM gets a LAN-routable IP via DHCP on an interface the server picks (it falls back to NAT when none is bridgeable).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    #endif
                 } else {
                     Text("VM sits behind NAT. Egress works; nothing on your LAN can reach it.")
                         .font(.caption)
@@ -2623,12 +2794,16 @@ struct ProfileEditorView: View {
 
             // Workspace subnet is app-wide, not per-workspace — show it only in
             // Preferences (storageContext == nil), like the Automation pane.
+            // (Never on iOS: these panels drive THIS machine's VM subnet / relay
+            // transport defaults, which a remote client doesn't have.)
+            #if os(macOS)
             if storageContext == nil {
                 Divider()
                 SubnetSettingsView()
                 Divider()
                 RelayTransportSettingsView()
             }
+            #endif
         }
     }
 
@@ -2674,6 +2849,18 @@ struct ProfileEditorView: View {
     /// Settings are stored in UserDefaults, NOT the profile JSON.
     @ViewBuilder
     private var automationSection: some View {
+        // App-wide UserDefaults of the machine running bromure-ac; the pane is
+        // filtered out of visibleCategories on iOS.
+        #if !os(macOS)
+        EmptyView()
+        #else
+        automationSectionBody
+        #endif
+    }
+
+    #if os(macOS)
+    @ViewBuilder
+    private var automationSectionBody: some View {
         let store = AutomationDefaultsStore()
         VStack(alignment: .leading, spacing: 16) {
             Text("Automation API & MCP server")
@@ -2748,7 +2935,7 @@ struct ProfileEditorView: View {
                 .textSelection(.enabled)
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(nsColor: .textBackgroundColor),
+                .background(Color.platformTextBackground,
                             in: RoundedRectangle(cornerRadius: 6))
 
             Spacer()
@@ -2775,6 +2962,7 @@ struct ProfileEditorView: View {
           }
         }
         """#
+    #endif
 
     // MARK: - MCP servers
 
@@ -2813,7 +3001,10 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private var guardrailsSection: some View {
-        ScrollView {
+        // macOS wraps in its own ScrollView; on iOS the editor detail is
+        // already a ScrollView, and nesting a second vertical one both fights
+        // scrolling and clips the trailing toggles.
+        guardrailsScrollWrapper {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here.")
                     .font(.caption)
@@ -2845,11 +3036,21 @@ struct ProfileEditorView: View {
         }
     }
 
+    @ViewBuilder
+    private func guardrailsScrollWrapper<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        #if os(macOS)
+        ScrollView { content() }
+        #else
+        content()
+        #endif
+    }
+
     /// One configured credential in the Guardrails pane: ask-before-use, plus a
     /// write-policy picker where the credential's service has one.
     @ViewBuilder
     private func guardrailCredentialRow(_ ref: CredentialRef) -> some View {
         let hosts = draft.credentialHosts(ref)
+        #if os(macOS)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Image(systemName: ref.symbol).foregroundStyle(.secondary).frame(width: 18)
@@ -2873,6 +3074,41 @@ struct ProfileEditorView: View {
                 .padding(.leading, 26)
         }
         .padding(.vertical, 3)
+        #else
+        // iOS menu pickers render their label in body-size tinted text — at a
+        // fixed 176pt it wrapped to two lines and bled over the approval
+        // switch. Give the policy its own labeled row instead, sized naturally.
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: ref.symbol).foregroundStyle(.secondary).frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(draft.credentialTitle(ref)).font(.subheadline.weight(.medium))
+                    if !hosts.isEmpty {
+                        Text(hosts.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+            }
+            if let mode = guardrailModeBinding(for: ref) {
+                HStack(spacing: 8) {
+                    Text("Write policy").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: mode) {
+                        ForEach(GuardrailsPolicy.Mode.allCases, id: \.self) { m in
+                            Text(m.displayName).tag(m)
+                        }
+                    }
+                    .labelsHidden().pickerStyle(.menu)
+                    .font(.subheadline)
+                    .fixedSize()
+                }
+                .padding(.leading, 26)
+            }
+            requireApprovalToggle(isOn: approvalBinding(for: ref))
+                .padding(.leading, 26)
+        }
+        .padding(.vertical, 4)
+        #endif
     }
 
     /// A `Binding<Bool>` into a configured credential's `requireApproval` flag,
@@ -2956,9 +3192,14 @@ struct ProfileEditorView: View {
                         // since the detector is a no-op without its model.
                         .onChange(of: draft.promptInjection.detectSourceInjection) { _, isOn in
                             guard isOn else { return }
+                            // The detector model lives on the machine that runs
+                            // the proxy; a remote client just saves the flag and
+                            // the server downloads on demand.
+                            #if os(macOS)
                             PromptInjectionModelDownloader.start(.promptGuard) { ok in
                                 if !ok { draft.promptInjection.detectSourceInjection = false }
                             }
+                            #endif
                         }
                     Text(NSLocalizedString("Scores the file contents, web pages, and tool output the agent reads (Prompt Guard). Catches “ignore previous instructions / exfiltrate secrets” hidden in a rogue repository. Downloads ~272 MB on first enable.", comment: ""))
                         .font(.caption).foregroundStyle(.secondary)
@@ -2968,9 +3209,11 @@ struct ProfileEditorView: View {
                            isOn: $draft.promptInjection.detectRulesInjection)
                         .onChange(of: draft.promptInjection.detectRulesInjection) { _, isOn in
                             guard isOn else { return }
+                            #if os(macOS)
                             PromptInjectionModelDownloader.start(.claudeMdGuard) { ok in
                                 if !ok { draft.promptInjection.detectRulesInjection = false }
                             }
+                            #endif
                         }
                     Text(NSLocalizedString("Scores CLAUDE.md, AGENTS.md, GROK.md, and the other instruction / settings files Claude Code, Codex, and Grok load as authority. Downloads ~571 MB on first enable.", comment: ""))
                         .font(.caption).foregroundStyle(.secondary)
@@ -2987,7 +3230,7 @@ struct ProfileEditorView: View {
                             Text(a.displayName).tag(a)
                         }
                     }
-                    .pickerStyle(.radioGroup)
+                    .platformRadioGroupPickerStyle()
                     .labelsHidden()
                     .disabled(!draft.promptInjection.isActive)
                     Text(NSLocalizedString("“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright.", comment: ""))
@@ -3062,7 +3305,7 @@ struct ProfileEditorView: View {
                             Text(f.displayName).tag(f)
                         }
                     }
-                    .pickerStyle(.radioGroup)
+                    .platformRadioGroupPickerStyle()
                     .labelsHidden()
                     Text(NSLocalizedString("One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Delpi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry.", comment: ""))
                         .font(.caption)
@@ -3281,17 +3524,15 @@ struct ProfileEditorView: View {
         }
     }
 
-    /// Fixed-width font families on this Mac, sorted. A terminal only makes
+    /// Fixed-width font families on this device, sorted. A terminal only makes
     /// sense in a monospace font, so we keep just the fixed-pitch families.
     /// We also exclude families whose name starts with `.` — those are
     /// macOS-internal identifiers (`.AppleSystemUIFontMonospaced`, …) that
     /// Linux fontconfig can't resolve, so picking one would silently fall
     /// back in the terminal.
     static let allFontFamilies: [String] = {
-        NSFontManager.shared.availableFontFamilies
+        platformMonospacedFontFamilies()
             .filter { !$0.hasPrefix(".") }
-            .filter { NSFont(name: $0, size: 12)?.isFixedPitch ?? false }
-            .sorted()
     }()
 
     /// Fonts that always exist in the *guest* image even when the host doesn't
@@ -3314,6 +3555,10 @@ struct ProfileEditorView: View {
     }
 
     private func addFolder() {
+        // Folder paths live on the machine that runs the VMs. The Mac editor
+        // browses with an open panel; a mobile client types the server path
+        // instead (see the folderPathPrompt alert in foldersSection).
+        #if os(macOS)
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -3327,6 +3572,10 @@ struct ProfileEditorView: View {
                 }
             }
         }
+        #else
+        newFolderPath = ""
+        showFolderPathPrompt = true
+        #endif
     }
 
     private var profileDirHint: String {
@@ -3364,6 +3613,10 @@ struct ProfileEditorView: View {
 }
 
 // MARK: - Local Models (vLLM.md)
+
+// The pane drives THIS machine's MLX catalog, downloads, and RAM gating —
+// macOS-only (iOS filters the category out of the editor sidebar).
+#if os(macOS)
 
 /// The "Local Models" settings pane: an "Enable local models" master
 /// toggle, a Local/Hybrid mode picker, and the curated MLX catalog with
@@ -3570,7 +3823,7 @@ struct LocalModelsSettingsView: View {
                     Label("Installed", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                 }
-                .menuStyle(.borderlessButton).fixedSize()
+                .platformBorderlessMenuStyle().fixedSize()
             } else {
                 Button("Download") { startDownload(model) }
                     .controlSize(.small)
@@ -3605,6 +3858,7 @@ struct LocalModelsSettingsView: View {
         refreshTick += 1   // force the row to re-read isInstalled (see refreshTick)
     }
 }
+#endif
 
 // MARK: - Credential field label helpers
 
@@ -3690,7 +3944,7 @@ private struct ManualTokenRow: View {
                     if !OnePasswordCLI.isInstalled {
                         Button {
                             if let url = URL(string: OnePasswordCLI.installURL) {
-                                NSWorkspace.shared.open(url)
+                                platformOpenURL(url)
                             }
                         } label: {
                             Label(NSLocalizedString("Get 1Password CLI", comment: ""),
@@ -3730,7 +3984,7 @@ private struct ManualTokenRow: View {
 
         }
         .padding(10)
-        .background(Color(nsColor: .textBackgroundColor),
+        .background(Color.platformTextBackground,
                     in: RoundedRectangle(cornerRadius: 6))
     }
 }
@@ -3766,7 +4020,7 @@ private struct EnvironmentVariableRow: View {
             }
         }
         .padding(8)
-        .background(Color(nsColor: .textBackgroundColor),
+        .background(Color.platformTextBackground,
                     in: RoundedRectangle(cornerRadius: 6))
     }
 }
@@ -3826,7 +4080,7 @@ private struct MCPServerRow: View {
             }
         }
         .padding(8)
-        .background(Color(nsColor: .textBackgroundColor),
+        .background(Color.platformTextBackground,
                     in: RoundedRectangle(cornerRadius: 6))
         .opacity(server.enabled ? 1.0 : 0.6)
         .onAppear {
@@ -3877,6 +4131,7 @@ private struct MCPServerRow: View {
                                 .font(.caption)
                                 .foregroundStyle(.red)
                             } else {
+                                #if os(macOS)
                                 Button(LocalizedStringKey(isAuthorizing ? "Authorizing\u{2026}" : "Authorize with OAuth\u{2026}")) {
                                     authorizeOAuth()
                                 }
@@ -3890,6 +4145,13 @@ private struct MCPServerRow: View {
                                         .foregroundStyle(.secondary)
                                         .lineLimit(2)
                                 }
+                                #else
+                                // The OAuth dance runs on the Mac that injects
+                                // the token (localhost callback listener).
+                                Text("Authorize OAuth from the desktop app; a static token works from here.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                #endif
                             }
                         }
                         Divider()
@@ -3933,6 +4195,10 @@ private struct MCPServerRow: View {
     }
 
     private func authorizeOAuth() {
+        // The broker runs a localhost callback listener + browser dance on the
+        // machine that will inject the token — host-side only. On iOS the
+        // Authorize button is hidden (see oauthSupported).
+        #if os(macOS)
         guard !isAuthorizing else { return }
         isAuthorizing = true
         authError = nil
@@ -3968,6 +4234,7 @@ private struct MCPServerRow: View {
                 authError = error.localizedDescription
             }
         }
+        #endif
     }
 
     private var jsonEditor: some View {
@@ -3980,7 +4247,7 @@ private struct MCPServerRow: View {
                 .frame(minHeight: 80, maxHeight: 160)
                 .scrollContentBackground(.hidden)
                 .padding(4)
-                .background(Color(nsColor: .controlBackgroundColor))
+                .background(Color.platformControlBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
@@ -4131,7 +4398,7 @@ private struct StorageStackView: View {
                 noteHelp: NSLocalizedString("Affects every workspace, so it's parked outside this editor.", comment: "Base OS image rebuild help")
             )
         }
-        .background(Color(nsColor: .windowBackgroundColor),
+        .background(Color.platformWindowBackground,
                     in: RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
@@ -4501,7 +4768,7 @@ private struct ToolConfigCard: View {
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: isEnabled ? .textBackgroundColor : .windowBackgroundColor))
+                .fill(isEnabled ? Color.platformTextBackground : Color.platformWindowBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
@@ -4590,7 +4857,7 @@ private struct KubeconfigRow: View {
             }
         }
         .padding(8)
-        .background(Color(nsColor: .textBackgroundColor),
+        .background(Color.platformTextBackground,
                     in: RoundedRectangle(cornerRadius: 6))
     }
 
@@ -4807,7 +5074,7 @@ private struct HTTPSCredentialRow: View {
             }
         }
         .padding(8)
-        .background(Color(nsColor: .textBackgroundColor),
+        .background(Color.platformTextBackground,
                     in: RoundedRectangle(cornerRadius: 6))
     }
 
@@ -4953,7 +5220,7 @@ private struct DatabaseEndpointRow: View {
 
         }
         .padding(8)
-        .background(Color(nsColor: .textBackgroundColor),
+        .background(Color.platformTextBackground,
                     in: RoundedRectangle(cornerRadius: 6))
     }
 }
@@ -5023,7 +5290,7 @@ private struct DockerRegistryRow: View {
             }
         }
         .padding(8)
-        .background(Color(nsColor: .textBackgroundColor),
+        .background(Color.platformTextBackground,
                     in: RoundedRectangle(cornerRadius: 6))
     }
 
@@ -5057,19 +5324,18 @@ struct SSHKeyView: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
-                    .background(Color(NSColor.textBackgroundColor))
+                    .background(Color.platformTextBackground)
                     .cornerRadius(6)
             }
             .frame(height: 80)
 
             HStack {
                 Button("Copy to clipboard") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(publicKey, forType: .string)
+                    platformCopyToPasteboard(publicKey)
                 }
                 Button("Open GitHub keys page") {
                     if let url = URL(string: "https://github.com/settings/keys") {
-                        NSWorkspace.shared.open(url)
+                        platformOpenURL(url)
                     }
                 }
                 Spacer()
@@ -5083,6 +5349,10 @@ struct SSHKeyView: View {
 }
 
 // MARK: - Automation defaults bridge
+
+// Preferences-only panels: they configure THIS machine's VM subnet, relay
+// transport default, and automation server — none of which exist on iOS.
+#if os(macOS)
 
 /// App-wide workspace-subnet control (Preferences → Resources). Toggles this
 /// install onto a private random /24 in 172.16.0.0/12 and lets the user
@@ -5200,3 +5470,5 @@ private struct AutomationDefaultsStore {
         )
     }
 }
+
+#endif
