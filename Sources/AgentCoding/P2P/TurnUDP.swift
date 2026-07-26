@@ -120,7 +120,11 @@ final class TurnUDPClient: @unchecked Sendable {
         let boxes = Array(pending.values); pending.removeAll()
         lock.unlock()
         for b in boxes { b.sem.signal() }
-        if s >= 0 { Darwin.close(s) }
+        // shutdown the READ side first: close alone does not wake a recv
+        // blocked on another thread. SHUT_RD (not SHUT_RDWR) so an in-flight
+        // sendDatagram isn't poisoned with EPIPE — no SO_NOSIGPIPE here and
+        // iOS has no process-wide SIGPIPE ignore.
+        if s >= 0 { Darwin.shutdown(s, SHUT_RD); Darwin.close(s) }
     }
 
     // MARK: Recv loop (owns the socket)
@@ -432,6 +436,8 @@ final class TurnUDPRelayListener: @unchecked Sendable {
             guard let sshFD = P2PTCP.connect(ip: "127.0.0.1", port: self.sshPort, timeout: 5) else {
                 FatClientLog.log("p2p: local sshd :\(self.sshPort) unreachable for UDP-relayed leg")
                 ep.stop()
+                // No splice took ownership of localFD on this path — close it.
+                Darwin.close(ep.localFD)
                 return
             }
             FatForward.splice(ep.localFD, sshFD)
@@ -499,8 +505,11 @@ enum TurnUDPDialer {
             Darwin.close(fd); return nil
         }
         // Closing the UDP socket wakes and ends the recv thread; do it once the
-        // ARQ tears down (FIN, dead-link, or the spliced fd closing).
-        ep.onStop = { Darwin.close(fd) }
+        // ARQ tears down (FIN, dead-link, or the spliced fd closing). shutdown
+        // the READ side first — close alone does not wake a recv blocked on
+        // another thread; SHUT_RD keeps in-flight ARQ sends from hitting EPIPE
+        // (no SO_NOSIGPIPE on this socket, no iOS SIGPIPE ignore).
+        ep.onStop = { Darwin.shutdown(fd, SHUT_RD); Darwin.close(fd) }
         // The recv thread strong-captures `ep`, keeping the session alive until
         // the socket closes — no external owner needed.
         Thread.detachNewThread {
@@ -513,6 +522,9 @@ enum TurnUDPDialer {
         }
         guard ep.waitEstablished(timeout: timeout) else {
             ep.stop()   // closes fd via onStop
+            // stop() leaves localFD to its owner, but on this failure path it
+            // was never handed out — close it ourselves.
+            Darwin.close(ep.localFD)
             return nil
         }
         return ep.localFD

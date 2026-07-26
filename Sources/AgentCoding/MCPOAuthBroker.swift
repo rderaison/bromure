@@ -181,6 +181,10 @@ public final class MCPOAuthBroker {
     private func waitForCallback(state: String) async throws -> String {
         let fd = self.listenFD
         guard fd >= 0 else { throw BrokerError.authorizationCancelled }
+        // Ownership of the listener moves to the accept block below, whose
+        // defer is now its only closer — leaving the ivar set would let the
+        // error path / deinit close the same number a second time.
+        self.listenFD = -1
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let client = accept(fd, nil, nil)

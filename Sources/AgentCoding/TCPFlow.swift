@@ -28,6 +28,7 @@ final class TCPFlow {
     private var clientWindow: UInt32 = 65535
     private var rfd: Int32 = -1
     private var finSent = false
+    private var clientFin = false
 
     private static let mss = 1460       // utun MTU 1500 − IP(20) − TCP(20)
     private static let ourWindow: UInt16 = 65535
@@ -88,6 +89,7 @@ final class TCPFlow {
                 state = .established
                 startReader()
             }
+            closeIfFullyClosedLocked()   // may be the ACK of our FIN
         }
 
         // Data (in order only; duplicates get a re-ACK, gaps are dropped and the
@@ -103,10 +105,14 @@ final class TCPFlow {
             }
         }
 
-        if seg.flags & UtunPacket.FIN != 0, seg.seq == rcvNxt {
+        // FIN (possibly piggybacked on the last data segment — matched by
+        // sequence INCLUDING any payload the data branch just consumed).
+        if seg.flags & UtunPacket.FIN != 0, seg.seq &+ UInt32(seg.payload.count) == rcvNxt {
             rcvNxt = rcvNxt &+ 1
             emitLocked(flags: UtunPacket.ACK, payload: [][...])
             if rfd >= 0 { shutdown(rfd, SHUT_WR) }   // half-close toward the remote
+            clientFin = true
+            closeIfFullyClosedLocked()
         }
     }
 
@@ -153,6 +159,17 @@ final class TCPFlow {
         sndNxt = sndNxt &+ 1
         finSent = true
         state = .closing
+        closeIfFullyClosedLocked()
+    }
+
+    /// Once both directions have FINed and our FIN has been ACKed, the flow is
+    /// done: close the channel fd and drop it from the forwarder. Without this
+    /// a normal FIN teardown parked the flow in `.closing` forever, leaking
+    /// `rfd` per connection. Waiting for the FIN-ACK (sndUna == sndNxt) rather
+    /// than closing on the second FIN also keeps the client's final ACK from
+    /// hitting an already-removed flow and drawing a spurious RST.
+    private func closeIfFullyClosedLocked() {
+        if finSent && clientFin && sndUna == sndNxt { closeLocked() }
     }
 
     func close() { cond.lock(); closeLocked(); cond.unlock() }

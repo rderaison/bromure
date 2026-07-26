@@ -24,7 +24,9 @@ final class BrowserMCPRelayClient {
         get { runningState.withLock { $0 } }
         set { runningState.withLock { $0 = newValue } }
     }
-    private var fd: Int32 = -1
+    /// Set on the dial thread, read from stop() — boxed in a Sendable lock like
+    /// `runningState` so nonisolated access compiles under actor isolation.
+    private let fdState = OSAllocatedUnfairLock<Int32>(initialState: -1)
 
     init(host: RemoteHost, vm: String,
          browser: @escaping () -> WorkspaceBrowserController?) {
@@ -43,10 +45,14 @@ final class BrowserMCPRelayClient {
                 guard let raw = RemoteTransport.browserMCPDial(host: host, vm: vm), raw >= 0 else {
                     Thread.sleep(forTimeInterval: 1.0); continue
                 }
-                Task { @MainActor in self?.fd = raw }
+                // Atomic vs stop(): if stop() raced the dial, close and exit —
+                // otherwise the fd is adopted with no closer and pump() parks.
+                guard self?.adoptFD(raw) == true else { Darwin.close(raw); break }
                 self?.pump(raw)          // blocks until the channel drops
+                // Clear before closing so stop() can't act on a stale number;
+                // this is the sole close — stop() only shuts down.
+                self?.clearFD(raw)
                 Darwin.close(raw)
-                Task { @MainActor in if self?.fd == raw { self?.fd = -1 } }
                 if self?.runningSnapshot() == true { Thread.sleep(forTimeInterval: 0.5) }
             }
         }
@@ -54,7 +60,25 @@ final class BrowserMCPRelayClient {
 
     func stop() {
         running = false
-        if fd >= 0 { Darwin.close(fd); fd = -1 }   // unblocks pump's read
+        let f = fdState.withLock { (cur: inout Int32) -> Int32 in
+            let prev = cur; cur = -1; return prev
+        }
+        // shutdown wakes the pump's read; the dial thread then does the only
+        // close — closing here too would double-close a possibly-recycled fd.
+        if f >= 0 { Darwin.shutdown(f, SHUT_RDWR) }
+    }
+
+    /// Atomically adopt a freshly-dialed fd, unless stop() already ran.
+    /// Lock order is fdState → runningState; stop() takes fdState only.
+    private nonisolated func adoptFD(_ v: Int32) -> Bool {
+        fdState.withLock { (cur: inout Int32) -> Bool in
+            guard runningState.withLock({ $0 }) else { return false }
+            cur = v; return true
+        }
+    }
+
+    private nonisolated func clearFD(_ v: Int32) {
+        fdState.withLock { if $0 == v { $0 = -1 } }
     }
 
     private nonisolated func runningSnapshot() -> Bool {

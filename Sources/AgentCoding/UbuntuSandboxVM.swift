@@ -190,6 +190,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// Per-VM vmnet interface in bridged mode (the uplink for `.bridged`
     /// profiles). Kept alive for the VM's lifetime; torn down alongside the VM.
     private var networkFilter: NetworkFilter?
+    /// Read end of the serial-console tee. An installed `readabilityHandler`
+    /// retains its FileHandle until explicitly cleared, so this must be
+    /// released on stop — otherwise one pipe fd leaks per VM boot.
+    private var serialConsoleOut: FileHandle?
     /// The underlying VZ machine. Exposed so the host app can attach a
     /// VZVirtualMachineView for display.
     public private(set) var vm: VZVirtualMachine?
@@ -228,6 +232,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             VMNetSwitch.shared.detachPort(switchPort, releaseLease: false)
         }
         networkFilter?.stop()
+        releaseSerialConsole()
     }
 
     public func prepare() throws {
@@ -358,6 +363,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             let data = handle.availableData
             if !data.isEmpty { FileHandle.standardError.write(data) }
         }
+        serialConsoleOut = serialOut.fileHandleForReading
 
         // (SPICE clipboard console removed with the framebuffer: clipboard
         // now flows through the terminal surfaces — OSC 52 out of tmux,
@@ -893,6 +899,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     ) {
         Task { @MainActor in
             self.state = .error
+            self.releaseSerialConsole()
             self.releaseMACToPool()
             self.onStopped?(error)
         }
@@ -903,9 +910,17 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             self.state = .stopped
             self.outboxPollTask?.cancel()
             self.sessionDisk?.cleanupMetadataShare()
+            self.releaseSerialConsole()
             self.releaseMACToPool()
             self.onStopped?(nil)
         }
+    }
+
+    /// Clear the serial-console readabilityHandler so the tee's pipe fd is
+    /// released. Idempotent; also called from `deinit` as a safety net.
+    private func releaseSerialConsole() {
+        serialConsoleOut?.readabilityHandler = nil
+        serialConsoleOut = nil
     }
 
     /// Parse `ss -tuln` output (one socket per line: netid, state, queues,

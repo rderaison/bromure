@@ -194,8 +194,18 @@ final class TurnTCPClient: @unchecked Sendable {
     }
 
     func close() {
-        if fd >= 0 { Darwin.close(fd) }
-        fd = -1
+        // Take-and-clear under the lock: stop() and the serviceLoop exit can
+        // both land here concurrently — an unlocked check-then-close can close
+        // the same number twice (possibly a recycled, unrelated fd).
+        lock.lock()
+        let s = fd; fd = -1
+        lock.unlock()
+        // shutdown the READ side first: this wakes a poll/recv currently
+        // blocked on another thread, so that blocked syscall completes before
+        // the fd number can be recycled. SHUT_RD (not SHUT_RDWR) so an
+        // in-flight send isn't poisoned with EPIPE — these sockets carry no
+        // SO_NOSIGPIPE and iOS has no process-wide SIGPIPE ignore.
+        if s >= 0 { Darwin.shutdown(s, SHUT_RD); Darwin.close(s) }
     }
 
     // MARK: Verbs
