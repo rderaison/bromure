@@ -183,15 +183,11 @@ struct RootView: View {
                           onClose: { activeHost = nil })
                 .id(host.id)
         } else {
-            // iPad, nothing open: the server picker owns the whole screen — a
-            // sidebar next to an empty "Select a server" pane wasted the width
-            // and squeezed the account row into wrapping. The list stays a
-            // comfortable reading column, centered.
+            // iPad, nothing open: the boot screen (hero or server picker) owns
+            // the whole screen — a sidebar next to an empty "Select a server"
+            // pane wasted the width and squeezed the account row into wrapping.
             NavigationStack {
                 bootList
-                    .frame(maxWidth: 640)
-                    .frame(maxWidth: .infinity)
-                    .background(Color(uiColor: .systemGroupedBackground))
             }
         }
     }
@@ -216,12 +212,9 @@ struct RootView: View {
 
     /// A fresh, signed-out install with no saved servers gets the branded hero;
     /// once there's an account or a by-address server it's the working list.
-    /// Compact widths only: on iPad the boot list lives in a split-view
-    /// sidebar, where the full-screen hero art reads squeezed — the plain
-    /// Account / My Servers list is the right furniture there.
-    private var showHero: Bool {
-        !directory.signedIn && savedHosts.isEmpty && sizeClass == .compact
-    }
+    /// (The disconnected state owns the full screen on iPad too, so the hero
+    /// renders everywhere — its content column is width-capped below.)
+    private var showHero: Bool { !directory.signedIn && savedHosts.isEmpty }
 
     @ViewBuilder private var bootList: some View {
         if showHero {
@@ -235,6 +228,12 @@ struct RootView: View {
             .listSectionSpacing(.compact)
             .environment(\.editMode, $editMode)
             .navigationTitle("Bromure")
+            // A comfortable reading column on iPad's full-screen picker; a
+            // no-op on phone widths. The outer band matches the list's own
+            // grouped background so the cap is invisible.
+            .frame(maxWidth: 640)
+            .frame(maxWidth: .infinity)
+            .background(Color(uiColor: .systemGroupedBackground))
         }
     }
 
@@ -293,6 +292,10 @@ struct RootView: View {
                 .padding(.horizontal, 28)
                 .padding(.bottom, 40)
             }
+            // Phone-tuned proportions read right on iPad too as long as the
+            // column doesn't stretch — the sign-in button spanning a 13"
+            // screen edge-to-edge did not.
+            .frame(maxWidth: 480)
         }
     }
 
