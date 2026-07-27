@@ -11,15 +11,34 @@ import Foundation
 /// agent (GitHub, work, prod) to the disposable VM with no consent
 /// gate. Keys the user wants reachable from the VM now go through
 /// the explicit-import flow in the profile UI, which lands the key
-/// in `_bromurePrivate` and registers an `ImportedApproval` for
+/// in that workspace's agent and registers an `ImportedApproval` for
 /// per-key consent.
 final class HostAgentClient: @unchecked Sendable {
     let socketPath: String
 
-    /// Set by MitmEngine after it spawns the private ssh-agent. Used
-    /// as the destination for ssh-add of per-profile keys and as the
-    /// only forwarding target for in-VM SIGN_REQUESTs.
-    static var _bromurePrivate: HostAgentClient?
+    /// One client PER WORKSPACE, registered by MitmEngine when it spawns
+    /// that workspace's ssh-agent. There is deliberately no process-wide
+    /// "the agent" any more: a single shared agent signs for any key it
+    /// holds regardless of caller, so one workspace could sign with
+    /// another's key. Callers must look up by profileID, and a profile
+    /// with no agent gets nil (never a fallback to someone else's).
+    private static let registryLock = NSLock()
+    private static var byProfile: [UUID: HostAgentClient] = [:]
+
+    static func register(socketPath: String, for profileID: UUID) {
+        registryLock.lock(); defer { registryLock.unlock() }
+        byProfile[profileID] = HostAgentClient(socketPath: socketPath)
+    }
+
+    static func client(for profileID: UUID) -> HostAgentClient? {
+        registryLock.lock(); defer { registryLock.unlock() }
+        return byProfile[profileID]
+    }
+
+    static func unregister(profileID: UUID) {
+        registryLock.lock(); defer { registryLock.unlock() }
+        byProfile.removeValue(forKey: profileID)
+    }
 
     init(socketPath: String) {
         self.socketPath = socketPath

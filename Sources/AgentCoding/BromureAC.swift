@@ -3993,10 +3993,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func applicationWillTerminate(_ notification: Notification) {
         // Discard the ephemeral browser VM (if any) so we don't orphan it.
         unifiedWindow?.teardownBrowserVM()
-        // Nuke our private ssh-agent. The orphaned-process risk is
-        // small (it's idle and tiny) but worth tidying up at least
+        // Nuke every workspace's ssh-agent. The orphaned-process risk is
+        // small (they're idle and tiny) but worth tidying up at least
         // for the clean-quit path.
-        mitmEngine?.privateAgent.terminate()
+        mitmEngine?.terminateAllSSHAgents()
         // Synchronously kill the local inference engine — a detached
         // Task wouldn't run before the process exits, orphaning vllm-mlx
         // (and its large RAM footprint).
@@ -4030,7 +4030,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             src.setEventHandler { [weak self] in
                 FileHandle.standardError.write(Data(
                     "[bromure-ac] caught signal \(sig); terminating ssh-agent + engine + exiting\n".utf8))
-                self?.mitmEngine?.privateAgent.terminate()
+                self?.mitmEngine?.terminateAllSSHAgents()
                 InferenceService.killIfRunning()
                 CloudflareTunnelSupervisor.killIfRunning()
                 // Exit with a non-zero code so callers can distinguish
@@ -6767,7 +6767,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             for key in agentKeys {
                 addKeyToHostAgent(seed: key.seed,
                                   publicKey: key.publicKey,
-                                  comment: "bromure-ac:\(profile.name)")
+                                  comment: "bromure-ac:\(profile.name)",
+                                  profileID: profile.id)
             }
             // Plus any pre-existing keys the user imported via the
             // editor — passphrase-protected ones use the macOS Keychain
@@ -9054,8 +9055,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// a mere detach and only drop when the VM actually stops.
     @MainActor
     private func cleanupSessionRegistrations(for profile: Profile) {
+        // Best-effort key removal; `unregister` below kills this
+        // workspace's whole agent process anyway, which is what actually
+        // guarantees the keys are gone.
         for key in loadAgentKeys(for: profile) {
-            removeKeyFromHostAgent(publicKey: key.publicKey)
+            removeKeyFromHostAgent(publicKey: key.publicKey, profileID: profile.id)
         }
         ssoRefreshTasks[profile.id]?.cancel()
         ssoRefreshTasks.removeValue(forKey: profile.id)
@@ -9766,8 +9770,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// generated key is loaded so multiple keys end up live in the
     /// agent simultaneously.
     private func loadImportedSSHKeys(for profile: Profile) {
-        guard let agentSocket = mitmEngine?.privateAgent.socketPath,
-              !profile.importedSSHKeys.isEmpty else { return }
+        guard !profile.importedSSHKeys.isEmpty,
+              let agentSocket = mitmEngine?.sshAgentSocket(for: profile.id) else { return }
         let importedDir = store.profileDirectory(for: profile)
             .appendingPathComponent("agent/imported", isDirectory: true)
         for key in profile.importedSSHKeys {
@@ -9859,14 +9863,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// The user's macOS launchd ssh-agent is intentionally NOT a
     /// target — exposing it to the VM was the source of an earlier
     /// security gap; see `SSHAgentServer` for the full rationale.
-    private func addKeyToHostAgent(seed: Data, publicKey: Data, comment: String) {
-        // Target our private bromure ssh-agent specifically: it gives
-        // us predictable lifecycle (key gone when bromure-ac quits)
-        // and keeps the in-VM agent's reachable key set fully under
-        // bromure's control.
-        guard let sock = mitmEngine?.privateAgent.socketPath else {
+    private func addKeyToHostAgent(seed: Data, publicKey: Data, comment: String,
+                                   profileID: UUID) {
+        // Target THIS WORKSPACE's ssh-agent: predictable lifecycle (key
+        // gone when the session ends) and, critically, no other
+        // workspace's VM can enumerate or sign with it — an agent signs
+        // for anything it holds, so the agent boundary is the isolation
+        // boundary.
+        guard let sock = mitmEngine?.sshAgentSocket(for: profileID) else {
             FileHandle.standardError.write(Data(
-                "[mitm] skipping ssh-add — private agent not running\n".utf8))
+                "[mitm] skipping ssh-add — no ssh-agent for this workspace\n".utf8))
             return
         }
         let pem = OpenSSHKeyFormat.ed25519PEM(
@@ -9909,8 +9915,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Remove a key from the host ssh-agent by sending the agent
     /// protocol's REMOVE_IDENTITY message directly — sidesteps
     /// `ssh-add -d` needing a file path. Best-effort.
-    private func removeKeyFromHostAgent(publicKey: Data) {
-        guard let host = HostAgentClient._bromurePrivate else { return }
+    private func removeKeyFromHostAgent(publicKey: Data, profileID: UUID) {
+        guard let host = HostAgentClient.client(for: profileID) else { return }
         let blob = OpenSSHKeyFormat.ed25519PublicBlob(publicKey: publicKey)
         // SSH_AGENTC_REMOVE_IDENTITY = 18; payload = ssh-string(blob).
         var msg = Data([18])

@@ -1,30 +1,27 @@
 import Foundation
 
-/// Spawns an `ssh-agent -D -a <socket>` subprocess that lives as long
-/// as bromure-ac. We use this as the home for per-profile bromure
-/// keys: regardless of whether the user has a macOS launchd agent
-/// configured, we always have a writable, queryable agent of our own.
+/// Spawns an `ssh-agent -D -a <socket>` subprocess. There is ONE OF
+/// THESE PER WORKSPACE, not one per app: an agent is a signing oracle
+/// for every key loaded into it, so a shared agent let any workspace
+/// sign with any other workspace's key (the agent protocol has no
+/// notion of "which caller"). `MitmEngine` owns the registry and hands
+/// each profile's vsock bridge only its own agent's socket.
 ///
-/// The socket lives in NSTemporaryDirectory keyed by our PID so two
-/// concurrent bromure-ac launches don't collide. On clean shutdown we
-/// SIGTERM the child. On a hard crash macOS doesn't auto-reap our
-/// children, so the orphaned ssh-agent stays alive — `init()` runs a
-/// best-effort sweep at startup to kill any stale `ssh-agent` whose
-/// `-a` argument points into our socket-naming scheme.
+/// The socket lives in NSTemporaryDirectory keyed by our PID *and* a
+/// per-profile label, so concurrent bromure-ac launches don't collide
+/// and workspaces don't share a path. On clean shutdown (session end
+/// or app quit) we SIGTERM the child — the keys die with it. On a hard
+/// crash macOS doesn't auto-reap our children, so `reapOrphans()` runs
+/// once at engine startup to kill stale agents from prior runs.
 public final class PrivateSSHAgent: @unchecked Sendable {
     public let socketPath: String
     private let process: Process
 
-    public init() throws {
-        // Belt-and-braces: kill any orphaned ssh-agents from prior
-        // bromure-ac runs that crashed before their `terminate()` could
-        // fire. Each one holds a socket under NSTemporaryDirectory
-        // matching `bromure-ac-agent-<pid>.sock`, and consumes a few
-        // hundred KB resident — multiplied across many crashes that
-        // adds up. Quiet on failures: the user shouldn't care.
-        Self.reapOrphans()
-
-        let path = NSTemporaryDirectory() + "bromure-ac-agent-\(getpid()).sock"
+    /// - Parameter label: short per-workspace discriminator (8 hex chars
+    ///   of the profile UUID). Kept short on purpose: `sockaddr_un.sun_path`
+    ///   is 104 bytes on Darwin and NSTemporaryDirectory already eats ~50.
+    public init(label: String) throws {
+        let path = NSTemporaryDirectory() + "bromure-ac-agent-\(getpid())-\(label).sock"
         try? FileManager.default.removeItem(atPath: path)
 
         let p = Process()
@@ -69,12 +66,16 @@ public final class PrivateSSHAgent: @unchecked Sendable {
     /// `.sock` files from NSTemporaryDirectory afterwards.
     ///
     /// Implementation: shell out to `pgrep -af 'ssh-agent.*bromure-ac-agent'`
-    /// to find candidate PIDs, then SIGTERM each. We deliberately do
-    /// NOT touch ssh-agents the *current* process spawned (we haven't
-    /// spawned ours yet — `init()` calls this first) and we
-    /// deliberately scope the pattern to our socket-naming convention
-    /// so we never touch the user's launchd ssh-agent.
-    private static func reapOrphans() {
+    /// to find candidate PIDs, then SIGTERM each. The pattern is scoped
+    /// to our socket-naming convention so we never touch the user's
+    /// launchd ssh-agent.
+    ///
+    /// MUST be called exactly once, at engine startup, BEFORE the first
+    /// per-workspace agent is spawned — it can't tell one of our live
+    /// agents from a stale one, so calling it later would kill the
+    /// agents of already-running workspaces. (It skips sockets carrying
+    /// our own pid as a second line of defense.)
+    static func reapOrphans() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         p.arguments = ["-af", "ssh-agent .*bromure-ac-agent"]
@@ -104,7 +105,8 @@ public final class PrivateSSHAgent: @unchecked Sendable {
         if let entries = try? FileManager.default.contentsOfDirectory(
             atPath: NSTemporaryDirectory()) {
             for entry in entries
-                where entry.hasPrefix("bromure-ac-agent-") && entry.hasSuffix(".sock") {
+                where entry.hasPrefix("bromure-ac-agent-") && entry.hasSuffix(".sock")
+                    && !entry.hasPrefix("bromure-ac-agent-\(getpid())-") {
                 try? FileManager.default.removeItem(
                     atPath: NSTemporaryDirectory() + entry)
             }
