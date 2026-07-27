@@ -232,7 +232,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             VMNetSwitch.shared.detachPort(switchPort, releaseLease: false)
         }
         networkFilter?.stop()
-        releaseSerialConsole()
+        // Inlined releaseSerialConsole(): deinit is nonisolated and cannot
+        // call @MainActor methods, but it has exclusive access to stored
+        // properties, so clearing the handler directly is safe.
+        serialConsoleOut?.readabilityHandler = nil
     }
 
     public func prepare() throws {
