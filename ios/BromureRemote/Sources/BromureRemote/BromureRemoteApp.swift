@@ -83,6 +83,14 @@ struct RootView: View {
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG_EDITOR"] == "1" {
                 debugEditorController = RemoteHostController(
                     host: RemoteHost(name: "debug", address: "127.0.0.1", user: "debug"))
+                // Optional deep-link for screenshots: jump to one pane once the
+                // editor is up (same notification ScriptCommands posts on macOS).
+                if let cat = ProcessInfo.processInfo.environment["BROMURE_DEBUG_EDITOR_CATEGORY"] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        NotificationCenter.default.post(
+                            name: .bromureACSelectEditorCategory, object: cat)
+                    }
+                }
             }
             #endif
         }
