@@ -31,6 +31,7 @@
 		F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */; };
 		B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDCC7578E83999395F752CAF /* ConversationView.swift */; };
 		483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */; };
+		3D95969D8811463BD706F10D /* FDGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 719DA06B4EB5A3927DCBEC96 /* FDGuard.swift */; };
 		B4E5CE6E341AFA91837DF064 /* FatClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEF3A13DDA52AA749EE9D2B9 /* FatClient.swift */; };
 		A9CDFDBA328F79D5F6468FDC /* FatClientConnect.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB94A3FA9300ABDA1A82DADB /* FatClientConnect.swift */; };
 		EEAA27D4E60DFC8DCAC1A5BF /* FatClientController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E8564A44A7DB91577E30D50 /* FatClientController.swift */; };
@@ -148,6 +149,7 @@
 		A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ControlClient.swift"; path = "Sources/BromureRemote/_shared/ControlClient.swift"; sourceTree = "<group>"; };
 		EDCC7578E83999395F752CAF /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConversationView.swift"; path = "Sources/BromureRemote/_shared/ConversationView.swift"; sourceTree = "<group>"; };
 		7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DockerDashboard.swift"; path = "Sources/BromureRemote/_shared/DockerDashboard.swift"; sourceTree = "<group>"; };
+		719DA06B4EB5A3927DCBEC96 /* FDGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FDGuard.swift"; path = "Sources/BromureRemote/_shared/FDGuard.swift"; sourceTree = "<group>"; };
 		DEF3A13DDA52AA749EE9D2B9 /* FatClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClient.swift"; path = "Sources/BromureRemote/_shared/FatClient.swift"; sourceTree = "<group>"; };
 		FB94A3FA9300ABDA1A82DADB /* FatClientConnect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientConnect.swift"; path = "Sources/BromureRemote/_shared/FatClientConnect.swift"; sourceTree = "<group>"; };
 		1E8564A44A7DB91577E30D50 /* FatClientController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientController.swift"; path = "Sources/BromureRemote/_shared/FatClientController.swift"; sourceTree = "<group>"; };
@@ -282,6 +284,7 @@
 				A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */,
 				EDCC7578E83999395F752CAF /* ConversationView.swift */,
 				7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */,
+				719DA06B4EB5A3927DCBEC96 /* FDGuard.swift */,
 				DEF3A13DDA52AA749EE9D2B9 /* FatClient.swift */,
 				FB94A3FA9300ABDA1A82DADB /* FatClientConnect.swift */,
 				1E8564A44A7DB91577E30D50 /* FatClientController.swift */,
@@ -475,6 +478,7 @@
 				F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */,
 				B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */,
 				483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */,
+				3D95969D8811463BD706F10D /* FDGuard.swift in Sources */,
 				B4E5CE6E341AFA91837DF064 /* FatClient.swift in Sources */,
 				A9CDFDBA328F79D5F6468FDC /* FatClientConnect.swift in Sources */,
 				EEAA27D4E60DFC8DCAC1A5BF /* FatClientController.swift in Sources */,

@@ -278,6 +278,7 @@ final class ACAutomationServer {
 
     private func beginAccepting(on sock: Int32) {
         self.serverSocket = sock
+        FDGuard.adopt(sock, "automation.listen")
         let unixPath = unixSocketPath
         let source = DispatchSource.makeReadSource(fileDescriptor: sock, queue: acceptQueue)
         source.setEventHandler { [weak self] in self?.acceptConnection() }
@@ -285,7 +286,7 @@ final class ACAutomationServer {
             // Sole close of the listen fd. stop() must NOT close it too: the
             // cancel handler is dispatched asynchronously, so a synchronous
             // close in stop() races this one (double close of a recycled fd).
-            Darwin.close(sock)
+            FDGuard.close(sock, "automation.listen")
             if self?.serverSocket == sock { self?.serverSocket = -1 }
             if let unixPath { unlink(unixPath) }
         }

@@ -48,11 +48,12 @@ final class BrowserMCPRelayClient {
                 // Atomic vs stop(): if stop() raced the dial, close and exit —
                 // otherwise the fd is adopted with no closer and pump() parks.
                 guard self?.adoptFD(raw) == true else { Darwin.close(raw); break }
+                FDGuard.adopt(raw, "browser-mcp-relay")
                 self?.pump(raw)          // blocks until the channel drops
                 // Clear before closing so stop() can't act on a stale number;
                 // this is the sole close — stop() only shuts down.
                 self?.clearFD(raw)
-                Darwin.close(raw)
+                FDGuard.close(raw, "browser-mcp-relay")
                 if self?.runningSnapshot() == true { Thread.sleep(forTimeInterval: 0.5) }
             }
         }

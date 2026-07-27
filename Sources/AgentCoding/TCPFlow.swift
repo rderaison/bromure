@@ -64,6 +64,7 @@ final class TCPFlow {
                 self.sendRSTLocked(); self.closeLocked(); self.cond.unlock(); return
             }
             self.rfd = fd
+            FDGuard.adopt(fd, "tcpflow.rfd")
             self.state = .synReceived
             // SYN-ACK: seq = our ISN, ack = rcvNxt.
             self.emitLocked(flags: UtunPacket.SYN | UtunPacket.ACK, payload: [][...])
@@ -193,7 +194,7 @@ final class TCPFlow {
     private func closeLocked() {
         guard state != .closed else { return }
         state = .closed
-        if rfd >= 0 { Darwin.close(rfd); rfd = -1 }
+        if rfd >= 0 { FDGuard.close(rfd, "tcpflow.rfd"); rfd = -1 }
         cond.broadcast()
         onClosed(key)
     }

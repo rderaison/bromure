@@ -53,7 +53,7 @@ public final class MCPOAuthBroker {
     }
 
     deinit {
-        if listenFD >= 0 { close(listenFD) }
+        if listenFD >= 0 { FDGuard.close(listenFD, "oauth.listen") }
     }
 
     // MARK: - Public API
@@ -91,7 +91,7 @@ public final class MCPOAuthBroker {
                 codeVerifier: verifier, redirectURI: redirectURI,
                 callbackPort: port)
         } catch {
-            if listenFD >= 0 { close(listenFD); listenFD = -1 }
+            if listenFD >= 0 { FDGuard.close(listenFD, "oauth.listen"); listenFD = -1 }
             throw error
         }
     }
@@ -149,6 +149,7 @@ public final class MCPOAuthBroker {
         for port in candidates {
             if let fd = tryBind(port: port) {
                 self.listenFD = fd
+                FDGuard.adopt(fd, "oauth.listen")
                 return ("http://127.0.0.1:\(port)/callback", port)
             }
         }
@@ -190,7 +191,7 @@ public final class MCPOAuthBroker {
                 let client = accept(fd, nil, nil)
                 defer {
                     close(client)
-                    close(fd)
+                    FDGuard.close(fd, "oauth.listen")
                 }
                 guard client >= 0 else {
                     continuation.resume(throwing: BrokerError.authorizationCancelled)

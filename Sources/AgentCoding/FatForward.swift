@@ -57,6 +57,11 @@ enum FatForward {
         // / loopback ends.
         SocketTuning.tuneInteractive(a, keepalive: false)
         SocketTuning.tuneInteractive(b, keepalive: false)
+        // Splice owns both fds until the pump ends (the close below is the one
+        // legitimate close). Any other closer — including a caller that kept a
+        // copy of the number — trips the fd guard when armed.
+        FDGuard.adopt(a, "splice.a")
+        FDGuard.adopt(b, "splice.b")
         var buf = [UInt8](repeating: 0, count: 1 << 16)
         let pollIn = Int16(POLLIN)
         var aOpen = true, bOpen = true   // "still readable"
@@ -82,7 +87,7 @@ enum FatForward {
         // A dead-peer stall (or both directions ended) closes BOTH fds: closing
         // sshFD is what fires NIOSSH's channelInactive and reaps the session/PTY;
         // half-closing and lingering would just move the hang into poll().
-        Darwin.close(a); Darwin.close(b)
+        FDGuard.close(a, "splice.a"); FDGuard.close(b, "splice.b")
     }
 
     /// Like `splice` but for a process with SEPARATE stdin/stdout fds bridged to
