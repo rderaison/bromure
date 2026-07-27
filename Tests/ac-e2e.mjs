@@ -2998,6 +2998,19 @@ async function main() {
                 if (phases.length === 2) break;
                 await sleep(500);
               }
+              // Flake forensics (seen on CI, never locally): when the phases
+              // don't show under THIS parent, dump every task's linkage so the
+              // failure says where they DID land — filed under a stale parent
+              // (resolveTask slug match against leftover board state) reads
+              // completely differently from "not filed at all".
+              if (phases.length !== 2) {
+                const list = await api("GET", "/tasks");
+                const dump = (list.tasks || []).map((t) =>
+                  `${t.id.slice(0, 8)} "${t.title}" stage=${t.stage}` +
+                  ` parent=${t.parentTaskID ? t.parentTaskID.slice(0, 8) : "-"}` +
+                  ` slug=${t.branchSlug || "-"}`).join("\n  ");
+                console.log(`  26.7 board dump (expected parent ${PTID.slice(0, 8)}):\n  ${dump}`);
+              }
               assertEq(phases.length, 2, "phases never appeared");
               phaseIDs.push(...phases.map((p) => p.id));
               assert(phases.every((p) => p.stage === "planning"), "phases must land in Plan");
