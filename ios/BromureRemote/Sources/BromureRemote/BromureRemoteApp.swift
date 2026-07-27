@@ -59,6 +59,22 @@ struct RootView: View {
     private let push = PushManager.shared
 
     init() {
+        // Ignore SIGPIPE process-wide — the macOS app has done this since
+        // forever (BromureAC.main), but that file is macOS-only, so the phone
+        // shipped without it. We write to raw BSD sockets all over the fat
+        // client (FatForward.splice, the P2P/TURN legs, MobileForward, the ARQ
+        // socketpair); only the SSH dial's socketpair sets SO_NOSIGPIPE. A
+        // write to a peer that just closed — exactly what leaving a host does,
+        // since `stop()` closes the pooled SSH connections and the P2P shim
+        // while pump threads may still be mid-write — delivers SIGPIPE, whose
+        // default disposition kills the process instantly. Ignored, the write
+        // just returns EPIPE and the pump ends cleanly.
+        //
+        // This is why the crash left NO report in Analytics Data: a SIGPIPE
+        // death is a plain signal termination, not an exception the crash
+        // reporter writes up.
+        signal(SIGPIPE, SIG_IGN)
+
         // The directory model navigates to the mirror on a successful connect.
         // `activeHost` is assigned in `.onAppear` via a closure box so the
         // State is capturable (SwiftUI inits can't reference self yet).
