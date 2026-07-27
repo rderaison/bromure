@@ -2944,11 +2944,25 @@ async function main() {
 
           await test("26.7 board MCP: subtasks land in Plan with deps; queue auto-starts on Done", async () => {
             const PTID = "26262626-0000-4000-8000-000000000007";
+            // Children of PTID left by an EARLIER run. The parent id is a fixed
+            // UUID, so leftovers stay addressable forever — and since the
+            // success check is `phases.length === 2`, two stale cards make
+            // every future run count 4, 6, 8… and fail no matter how well the
+            // board works. (The old cleanup only deleted ids captured AFTER
+            // the assertion, so the first failure poisoned all later runs.)
+            const childrenOfParent = async () => {
+              const list = await api("GET", "/tasks");
+              return (list.tasks || []).filter(
+                (t) => t.parentTaskID &&
+                       t.parentTaskID.toUpperCase() === PTID.toUpperCase());
+            };
+            for (const stale of await childrenOfParent()) {
+              await api("DELETE", `/tasks/${stale.id}`);
+            }
             const up = await api("POST", "/tasks",
                                  taskDoc({ id: PTID, title: "ACE2E epic",
                                            profileID: id, repoPath: REPO }));
             assert(up.ok === true, `task upsert failed: ${JSON.stringify(up)}`);
-            const phaseIDs = [];
             try {
               // A running session binds the MCP channel to the parent task.
               await api("POST", `/tasks/${PTID}/start`);
@@ -2998,8 +3012,23 @@ async function main() {
                 if (phases.length === 2) break;
                 await sleep(500);
               }
+              // Flake forensics (seen on CI, never locally): when the phases
+              // don't show under THIS parent, dump every task's linkage so the
+              // failure says where they DID land — filed under a stale parent
+              // (resolveTask slug match against leftover board state) reads
+              // completely differently from "not filed at all".
+              if (phases.length !== 2) {
+                const list = await api("GET", "/tasks");
+                // FULL parent ids: every e2e task shares the "26262626"
+                // prefix, so a truncated dump can't tell the epic from the
+                // kanban task and hides exactly what went wrong.
+                const dump = (list.tasks || []).map((t) =>
+                  `${t.id} "${t.title}" stage=${t.stage}` +
+                  ` parent=${t.parentTaskID || "-"}` +
+                  ` slug=${t.branchSlug || "-"}`).join("\n  ");
+                console.log(`  26.7 board dump (expected parent ${PTID}):\n  ${dump}`);
+              }
               assertEq(phases.length, 2, "phases never appeared");
-              phaseIDs.push(...phases.map((p) => p.id));
               assert(phases.every((p) => p.stage === "planning"), "phases must land in Plan");
               assertEq((phases[1].dependsOn || [])[0], phases[0].id, "dependency not wired");
 
@@ -3019,7 +3048,12 @@ async function main() {
               assert(p2 && p2.stage === "inProgress",
                      "queued phase did not auto-start when its dependency reached Done");
             } finally {
-              for (const pid2 of phaseIDs) await api("DELETE", `/tasks/${pid2}`);
+              // Re-query rather than replaying a list captured mid-test: on a
+              // failure the capture may never have happened, and leaked
+              // children break every subsequent run (see the purge above).
+              for (const child of await childrenOfParent()) {
+                await api("DELETE", `/tasks/${child.id}`);
+              }
               await api("DELETE", `/tasks/${PTID}`);
             }
           });

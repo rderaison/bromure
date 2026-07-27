@@ -83,6 +83,14 @@ struct RootView: View {
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG_EDITOR"] == "1" {
                 debugEditorController = RemoteHostController(
                     host: RemoteHost(name: "debug", address: "127.0.0.1", user: "debug"))
+                // Optional deep-link for screenshots: jump to one pane once the
+                // editor is up (same notification ScriptCommands posts on macOS).
+                if let cat = ProcessInfo.processInfo.environment["BROMURE_DEBUG_EDITOR_CATEGORY"] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        NotificationCenter.default.post(
+                            name: .bromureACSelectEditorCategory, object: cat)
+                    }
+                }
             }
             #endif
         }
@@ -423,10 +431,15 @@ struct RootView: View {
     }
 
     private func peerRow(_ server: DeviceInfo) -> some View {
+        // ServerCard takes a plain String, which SwiftUI renders with the
+        // NON-localizing Text overload — so localize here rather than at the
+        // call site. "Last seen \(seen)" keys off "Last seen %@".
         let status: String = {
-            if server.online { return "Online" }
-            if let seen = lastSeenText(server.lastSeenAt) { return "Last seen \(seen)" }
-            return "Offline"
+            if server.online { return String(localized: "Online") }
+            if let seen = lastSeenText(server.lastSeenAt) {
+                return String(localized: "Last seen \(seen)")
+            }
+            return String(localized: "Offline")
         }()
         return ServerCard(icon: "server.rack", accent: serverAccent(server.id),
                           name: server.displayName, status: status,

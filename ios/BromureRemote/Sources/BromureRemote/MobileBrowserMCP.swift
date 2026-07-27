@@ -161,7 +161,9 @@ final class MobileBrowserMCPRelay: @unchecked Sendable {
 
     func stop() {
         lock.lock(); running = false; let f = fd; fd = -1; lock.unlock()
-        if f >= 0 { Darwin.shutdown(f, SHUT_RDWR); Darwin.close(f) }
+        // shutdown wakes the pump's read; loop() then does the only close —
+        // closing here too would double-close a possibly-recycled fd.
+        if f >= 0 { Darwin.shutdown(f, SHUT_RDWR) }
     }
 
     private func isRunning() -> Bool { lock.lock(); defer { lock.unlock() }; return running }
@@ -173,10 +175,17 @@ final class MobileBrowserMCPRelay: @unchecked Sendable {
                     host: resolved, verb: FatClient.browserMCPVerbPrefix + vm), raw >= 0 else {
                 Thread.sleep(forTimeInterval: 1.0); continue
             }
-            lock.lock(); fd = raw; lock.unlock()
+            lock.lock()
+            // Atomic vs stop(): if stop() raced the dial, close and exit —
+            // otherwise the fd is adopted with no closer and pump() parks.
+            if !running { lock.unlock(); Darwin.close(raw); break }
+            fd = raw
+            lock.unlock()
             pump(raw)                           // blocks until the channel drops
-            Darwin.close(raw)
+            // Clear before closing so stop() can't act on a stale number;
+            // this is the sole close — stop() only shuts down.
             lock.lock(); if fd == raw { fd = -1 }; lock.unlock()
+            Darwin.close(raw)
             if isRunning() { Thread.sleep(forTimeInterval: 0.5) }
         }
     }

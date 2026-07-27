@@ -231,21 +231,15 @@ def handle_connection(vsock_sock, replenish_fn):
         # Read length-prefixed JSON request
         hdr = recv_exact(vsock_sock, 4)
         if not hdr:
-            vsock_sock.close()
-            replenish_fn()
-            return
+            return  # finally: close + replenish (once — see finally)
 
         length = struct.unpack(">I", hdr)[0]
         if length > MAX_REQUEST_SIZE:
-            vsock_sock.close()
-            replenish_fn()
-            return
+            return  # finally: close + replenish (once — see finally)
 
         data = recv_exact(vsock_sock, length)
         if not data:
-            vsock_sock.close()
-            replenish_fn()
-            return
+            return  # finally: close + replenish (once — see finally)
 
         req = json.loads(data.decode("utf-8"))
         cmd = req.get("cmd", "")

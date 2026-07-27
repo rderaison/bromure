@@ -107,6 +107,7 @@ final class TurnUDPClient: @unchecked Sendable {
     func connect() -> Bool {
         guard let s = UDPSocket.connect(host: host, port: port) else { return false }
         lock.lock(); fd = s; lock.unlock()
+        FDGuard.adopt(s, "turn-udp.client")
         Thread.detachNewThread { [weak self] in self?.recvLoop(s) }
         return true
     }
@@ -120,7 +121,11 @@ final class TurnUDPClient: @unchecked Sendable {
         let boxes = Array(pending.values); pending.removeAll()
         lock.unlock()
         for b in boxes { b.sem.signal() }
-        if s >= 0 { Darwin.close(s) }
+        // shutdown the READ side first: close alone does not wake a recv
+        // blocked on another thread. SHUT_RD (not SHUT_RDWR) so an in-flight
+        // sendDatagram isn't poisoned with EPIPE — no SO_NOSIGPIPE here and
+        // iOS has no process-wide SIGPIPE ignore.
+        if s >= 0 { Darwin.shutdown(s, SHUT_RD); FDGuard.close(s, "turn-udp.client") }
     }
 
     // MARK: Recv loop (owns the socket)
@@ -339,6 +344,10 @@ final class TurnUDPRelayListener: @unchecked Sendable {
     private var pendingPermits: [String] = []
     private var peers: [String: ARQEndpoint] = [:]
     private var stopped = false
+    /// Reaper clock: when `peers` last became empty. Same orphan rule as the
+    /// TCP twin (`TurnRelayListener.idleReapAfter`) — an allocation nobody has
+    /// spoken through for that long refreshes itself forever otherwise.
+    private var idleSince = Date()
     /// Bound so one misbehaving dialer can't exhaust us with peer sessions.
     private let maxPeers = 32
     var onStopped: (() -> Void)?
@@ -432,14 +441,21 @@ final class TurnUDPRelayListener: @unchecked Sendable {
             guard let sshFD = P2PTCP.connect(ip: "127.0.0.1", port: self.sshPort, timeout: 5) else {
                 FatClientLog.log("p2p: local sshd :\(self.sshPort) unreachable for UDP-relayed leg")
                 ep.stop()
+                // No splice took ownership of localFD on this path — close it.
+                FDGuard.close(ep.localFD, "arq.localFD")
                 return
             }
+            // splice owns localFD from here (it closes both fds on teardown).
+            FDGuard.disown(ep.localFD, "arq.localFD")
             FatForward.splice(ep.localFD, sshFD)
         }
     }
 
     private func removePeer(_ key: String) {
-        lock.lock(); peers[key] = nil; lock.unlock()
+        lock.lock()
+        peers[key] = nil
+        if peers.isEmpty { idleSince = Date() }
+        lock.unlock()
     }
 
     private func serviceLoop() {
@@ -474,6 +490,14 @@ final class TurnUDPRelayListener: @unchecked Sendable {
                 nextPermRefresh = Date().addingTimeInterval(240)
             }
             if isStopped { break }
+
+            lock.lock()
+            let idle = peers.isEmpty ? Date().timeIntervalSince(idleSince) : 0
+            lock.unlock()
+            if idle > TurnRelayListener.idleReapAfter {
+                FatClientLog.log("p2p: UDP relay idle \(Int(idle))s with no peers — reaping allocation")
+                break
+            }
             Thread.sleep(forTimeInterval: 1.0)
         }
         stop()
@@ -491,16 +515,20 @@ final class TurnUDPRelayListener: @unchecked Sendable {
 enum TurnUDPDialer {
     static func open(relayIP: String, relayPort: Int, timeout: TimeInterval) -> Int32? {
         guard let fd = UDPSocket.connect(host: relayIP, port: relayPort) else { return nil }
+        FDGuard.adopt(fd, "turn-udp.dial")
         let conv = UInt32.random(in: 1 ... .max)
         guard let ep = ARQEndpoint(conv: conv, isInitiator: true,
                                    send: { bytes in
                                        _ = bytes.withUnsafeBytes { Darwin.send(fd, $0.baseAddress, bytes.count, 0) }
                                    }) else {
-            Darwin.close(fd); return nil
+            FDGuard.close(fd, "turn-udp.dial"); return nil
         }
         // Closing the UDP socket wakes and ends the recv thread; do it once the
-        // ARQ tears down (FIN, dead-link, or the spliced fd closing).
-        ep.onStop = { Darwin.close(fd) }
+        // ARQ tears down (FIN, dead-link, or the spliced fd closing). shutdown
+        // the READ side first — close alone does not wake a recv blocked on
+        // another thread; SHUT_RD keeps in-flight ARQ sends from hitting EPIPE
+        // (no SO_NOSIGPIPE on this socket, no iOS SIGPIPE ignore).
+        ep.onStop = { Darwin.shutdown(fd, SHUT_RD); FDGuard.close(fd, "turn-udp.dial") }
         // The recv thread strong-captures `ep`, keeping the session alive until
         // the socket closes — no external owner needed.
         Thread.detachNewThread {
@@ -513,8 +541,13 @@ enum TurnUDPDialer {
         }
         guard ep.waitEstablished(timeout: timeout) else {
             ep.stop()   // closes fd via onStop
+            // stop() leaves localFD to its owner, but on this failure path it
+            // was never handed out — close it ourselves.
+            FDGuard.close(ep.localFD, "arq.localFD")
             return nil
         }
+        // The caller (the shim's splice) owns localFD from here.
+        FDGuard.disown(ep.localFD, "arq.localFD")
         return ep.localFD
     }
 }

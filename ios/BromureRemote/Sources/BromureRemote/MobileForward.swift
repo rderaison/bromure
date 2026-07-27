@@ -49,6 +49,8 @@ final class MobileForward: @unchecked Sendable {
         while true {
             let cfd = Darwin.accept(lfd, nil, nil)
             if cfd < 0 { if errno == EINTR { continue }; break }   // lfd closed → stop
+            lock.lock(); let isStopped = stopped; lock.unlock()
+            if isStopped { Darwin.close(cfd); break }
             Thread.detachNewThread {
                 // Peer hosts resolve to their live loopback endpoint first (a
                 // no-op for a by-address host). Then open a raw forward channel
@@ -66,7 +68,32 @@ final class MobileForward: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard !stopped else { return }
         stopped = true
+        // shutdown() is useless here: xnu's soshutdown() returns ENOTCONN for
+        // a socket with none of SS_ISCONNECTED/SS_ISCONNECTING/SS_ISDISCONNECTING
+        // — which a listening socket never has — so it cannot wake the parked
+        // accept. The reliable Darwin wakeup is a self-connect: acceptLoop
+        // returns our connection, sees `stopped`, closes it, and breaks.
+        wakeAccept()
         Darwin.close(lfd)
+    }
+
+    /// Connect to our own loopback listener so the accept parked in
+    /// `acceptLoop` returns. Instant on loopback (the queue is empty whenever
+    /// the accept thread is parked, which is exactly the case being woken).
+    private func wakeAccept() {
+        let s = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard s >= 0 else { return }
+        defer { Darwin.close(s) }
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(localPort).bigEndian
+        addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                _ = Darwin.connect(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
     }
 
     deinit { stop() }

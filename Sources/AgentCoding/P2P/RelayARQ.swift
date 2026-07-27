@@ -578,6 +578,8 @@ final class ARQEndpoint: @unchecked Sendable {
         guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0 else { return nil }
         self.localFD = sp[0]
         self.pumpFD = sp[1]
+        FDGuard.adopt(sp[0], "arq.localFD")
+        FDGuard.adopt(sp[1], "arq.pumpFD")
         self.arq = ARQConnection(conv: conv, isInitiator: isInitiator, now: Self.nowMS())
 
         arq.output = send
@@ -626,7 +628,7 @@ final class ARQEndpoint: @unchecked Sendable {
         signalEstablished()   // unblock any waiter
         deliverCond.lock(); deliverClosed = true; deliverCond.signal(); deliverCond.unlock()
         Darwin.shutdown(pumpFD, SHUT_RDWR)
-        Darwin.close(pumpFD)
+        FDGuard.close(pumpFD, "arq.pumpFD")
         Darwin.shutdown(localFD, SHUT_RDWR)
         // localFD is closed by the owner (FatForward.splice / the shim) — closing
         // it here too would double-close; shutdown is enough to wake its reader.

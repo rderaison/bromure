@@ -6,9 +6,16 @@ import Crypto
 /// every profile via vsock — the per-profile selection happens via the
 /// VZVirtioSocketListener delegate that captures the profileID.
 ///
+/// **Workspace isolation**: every path out of here is keyed by that
+/// profileID — the in-process key set AND the spawned ssh-agent it
+/// forwards to (`HostAgentClient.client(for:)`, one agent process per
+/// workspace). Both used to be app-wide, so a VM could enumerate and
+/// sign with every other workspace's key; a profile with no agent of
+/// its own now gets nothing, never a fallback to a shared one.
+///
 /// **Threat model**: the private keys live only on the host — either
 /// in `~/Library/Application Support/BromureAC/profiles/<id>/ssh/...`
-/// (per-profile bromure-minted keys) or inside the spawned bromure
+/// (per-profile bromure-minted keys) or inside that workspace's spawned
 /// ssh-agent process (keys the user explicitly imported through the
 /// profile UI, which carry an `ImportedApproval` for per-key consent).
 /// The VM has `SSH_AUTH_SOCK` pointing at a unix socket that's bridged
@@ -155,7 +162,7 @@ public final class SSHAgentServer: @unchecked Sendable {
             seen.insert(key.publicKeyBlob)
             entries.append((key.publicKeyBlob, key.comment))
         }
-        for ident in fetchIdentities(from: HostAgentClient._bromurePrivate)
+        for ident in fetchIdentities(from: HostAgentClient.client(for: profileID))
             where !seen.contains(ident.blob)
         {
             seen.insert(ident.blob)
@@ -252,7 +259,7 @@ public final class SSHAgentServer: @unchecked Sendable {
         fwd.append(string(keyBlob))
         fwd.append(string(data))
         fwd.append(uint32(flags))
-        if let c = HostAgentClient._bromurePrivate,
+        if let c = HostAgentClient.client(for: profileID),
            let resp = c.request(fwd), !resp.isEmpty,
            resp[0] == AgentMsg.signResponse.rawValue {
             // Imported / forwarded SSH key just signed something for

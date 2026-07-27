@@ -4,6 +4,8 @@ import SwiftUI
 import AppKit
 import SandboxEngine
 @preconcurrency import Virtualization
+#else
+import UIKit
 #endif
 
 // MARK: - SwiftUI helpers
@@ -335,6 +337,11 @@ struct EnvImportReviewView: View {
 struct ProfileEditorView: View {
     @State private var draft: Profile
     @State private var selectedCategory: EditorCategory = .general
+    #if os(iOS)
+    /// iPhone navigation stack: empty = the category list, one element = the
+    /// pushed pane. (iPad keeps the two-pane split and never touches this.)
+    @State private var phonePath: [EditorCategory] = []
+    #endif
     /// Each agent's auth before local mode pinned it to `.local` (Bug#6), so
     /// turning local mode back off restores it instead of clobbering it.
     @State private var preLocalAuthModes: [Profile.Tool: Profile.AuthMode] = [:]
@@ -531,56 +538,30 @@ struct ProfileEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                // Sidebar. iOS has no non-optional List-selection initializer,
-                // so it binds through an optional that ignores deselection.
-                List(visibleCategories, selection: selectedCategoryOptional) { category in
-                    Label {
-                        Text(LocalizedStringKey(category.rawValue))
-                    } icon: {
-                        categoryIcon(category)
-                            .frame(width: 22, height: 22)
-                            .background(category.color.gradient,
-                                        in: RoundedRectangle(cornerRadius: 5))
-                    }
-                    .tag(category)
-                }
-                .listStyle(.sidebar)
-                // iOS renders sidebar rows in a larger type — 170pt wraps
-                // "Credentials" / "Environment" into two lines there.
-                #if os(macOS)
-                .frame(width: 170)
-                #else
-                .frame(width: 230)
-                #endif
+            #if os(iOS)
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                // A side-by-side split leaves ~160pt of detail on a phone —
+                // every control wraps. Settings-style instead: the categories
+                // are the first screen, each one pushes its own pane.
+                phoneNavigator
+            } else {
+                splitLayout
+            }
+            #else
+            splitLayout
+            #endif
 
+            // iPhone gets Cancel/Save as navigation-bar items instead (they
+            // survive pushes; a sibling bar under a NavigationStack does not).
+            #if os(iOS)
+            if UIDevice.current.userInterfaceIdiom != .phone {
                 Divider()
-
-                // Detail
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text(isNew ? "New workspace" : draft.name.isEmpty ? "Edit workspace" : draft.name)
-                            .font(.title2.bold())
-                        detailContent
-                    }
-                    .padding(24)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                bottomBar
             }
-
+            #else
             Divider()
-            HStack {
-                Button("Cancel", action: onCancel)
-                    .keyboardShortcut(.cancelAction)
-                Spacer()
-                Button(isNew ? "Create" : "Save") {
-                    onSave(draft, generateSSH)
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(!isValid)
-            }
-            .padding(12)
+            bottomBar
+            #endif
         }
         #if os(macOS)
         .frame(width: 720, height: 520)
@@ -624,6 +605,9 @@ struct ProfileEditorView: View {
                    $0.rawValue.lowercased().replacingOccurrences(of: " ", with: "") == raw
                }) {
                 selectedCategory = cat
+                #if os(iOS)
+                if UIDevice.current.userInterfaceIdiom == .phone { phonePath = [cat] }
+                #endif
             }
         }
         .onReceive(NotificationCenter.default.publisher(
@@ -637,6 +621,121 @@ struct ProfileEditorView: View {
         .onChange(of: draft.modelRouting) { _, _ in syncAgentsForLocalModels() }
         .onChange(of: draft.activeModelID) { _, _ in syncAgentsForLocalModels() }
     }
+
+    /// Built as `Text`, not a `String` ternary: `Text(someString)` picks the
+    /// NON-localizing overload, so the ternary rendered "New workspace" in
+    /// English even in locales that translate it. Only the literals are
+    /// localized — a user's workspace name is passed through verbatim.
+    private var editorTitle: Text {
+        if isNew { return Text("New workspace") }
+        if draft.name.isEmpty { return Text("Edit workspace") }
+        return Text(draft.name)
+    }
+
+    private var bottomBar: some View {
+        HStack {
+            Button("Cancel", action: onCancel)
+                .keyboardShortcut(.cancelAction)
+            Spacer()
+            Button(isNew ? "Create" : "Save") {
+                onSave(draft, generateSSH)
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+            .disabled(!isValid)
+        }
+        .padding(12)
+    }
+
+    /// macOS / iPad: sidebar + detail side by side.
+    private var splitLayout: some View {
+        HStack(spacing: 0) {
+            // Sidebar. iOS has no non-optional List-selection initializer,
+            // so it binds through an optional that ignores deselection.
+            List(visibleCategories, selection: selectedCategoryOptional) { category in
+                Label {
+                    Text(LocalizedStringKey(category.rawValue))
+                } icon: {
+                    categoryIcon(category)
+                        .frame(width: 22, height: 22)
+                        .background(category.color.gradient,
+                                    in: RoundedRectangle(cornerRadius: 5))
+                }
+                .tag(category)
+            }
+            .listStyle(.sidebar)
+            // iOS renders sidebar rows in a larger type — 170pt wraps
+            // "Credentials" / "Environment" into two lines there.
+            #if os(macOS)
+            .frame(width: 170)
+            #else
+            .frame(width: 230)
+            #endif
+
+            Divider()
+
+            // Detail
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    editorTitle
+                        .font(.title2.bold())
+                    detailContent
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    #if os(iOS)
+    /// iPhone: Settings-style — the category list is the whole first screen
+    /// and each category pushes its own pane. The Cancel/Save bar stays below
+    /// the stack, visible on every screen.
+    private var phoneNavigator: some View {
+        NavigationStack(path: $phonePath) {
+            List(visibleCategories) { category in
+                NavigationLink(value: category) {
+                    Label {
+                        Text(LocalizedStringKey(category.rawValue))
+                    } icon: {
+                        categoryIcon(category)
+                            .frame(width: 22, height: 22)
+                            .background(category.color.gradient,
+                                        in: RoundedRectangle(cornerRadius: 5))
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle(editorTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel)
+                }
+                ToolbarItem(placement: .confirmationAction) { phoneSaveButton }
+            }
+            .navigationDestination(for: EditorCategory.self) { category in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        detailContent(for: category)
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .navigationTitle(LocalizedStringKey(category.rawValue))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) { phoneSaveButton }
+                }
+            }
+        }
+    }
+
+    private var phoneSaveButton: some View {
+        Button(isNew ? "Create" : "Save") { onSave(draft, generateSSH) }
+            .disabled(!isValid)
+    }
+    #endif
 
     /// Keep agent auth in step with the Local Models pane (Bug#6). In local mode
     /// with a model chosen, every agent is pinned to the on-host engine; leaving
@@ -653,9 +752,11 @@ struct ProfileEditorView: View {
         }
     }
 
+    private var detailContent: some View { detailContent(for: selectedCategory) }
+
     @ViewBuilder
-    private var detailContent: some View {
-        switch selectedCategory {
+    private func detailContent(for category: EditorCategory) -> some View {
+        switch category {
         case .general:     generalSection
         case .models:      modelsSection
         case .localModels: localModelsSection

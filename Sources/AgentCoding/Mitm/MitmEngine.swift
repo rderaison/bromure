@@ -293,11 +293,18 @@ public final class MitmEngine {
     /// the VM is running. Keyed by profile UUID.
     private var listenerHolders: [UUID: ListenerHolder] = [:]
 
-    /// Our spawned ssh-agent. Owns the per-profile bromure keys
-    /// (loaded via `ssh-add` at session launch) plus any keys the
-    /// user explicitly imported through the profile UI; sole back-
-    /// end for the in-VM agent socket.
-    public let privateAgent: PrivateSSHAgent
+    /// One spawned ssh-agent PER WORKSPACE, created on first use at
+    /// session launch and killed when the session tears down. Each owns
+    /// only that profile's bromure key plus the keys the user imported
+    /// into that profile; it is the sole back-end for that profile's
+    /// in-VM agent socket.
+    ///
+    /// Per-workspace rather than per-app because an ssh-agent signs for
+    /// anything it holds without regard to who is asking: with one
+    /// shared agent, workspace A's agent socket could list and sign with
+    /// workspace B's keys.
+    private var sshAgents: [UUID: PrivateSSHAgent] = [:]
+    private let sshAgentLock = NSLock()
 
     public init() throws {
         let supportDir = FileManager.default.urls(
@@ -332,11 +339,11 @@ public final class MitmEngine {
         self.awsCreds = AWSCredentialServer(consent: broker)
         self.awsResigner = AWSResigner(credServer: awsCreds)
         self.traceStore = TraceStore()
-        // Spawn our dedicated ssh-agent BEFORE anyone reads the
-        // HostAgentClient lazy vars — that way `_bromurePrivate` is
-        // set by the time any session-launch code asks for it.
-        self.privateAgent = try PrivateSSHAgent()
-        HostAgentClient._bromurePrivate = HostAgentClient(socketPath: privateAgent.socketPath)
+        // Kill stale agents from prior runs that crashed before their
+        // terminate() could fire. Once, here, before any workspace agent
+        // exists — the sweep can't distinguish our live agents from
+        // orphans, so it must never run again after this point.
+        PrivateSSHAgent.reapOrphans()
 
         // Per-install salt for fake-token derivation. Stored alongside
         // the CA. Wiping the file rotates every fake on this Mac.
@@ -435,8 +442,54 @@ public final class MitmEngine {
         listenerHolders[profileID] = holder
     }
 
+    /// This workspace's ssh-agent socket, spawning the agent on first
+    /// use. nil only if ssh-agent itself failed to start — never another
+    /// workspace's socket.
+    public func sshAgentSocket(for profileID: UUID) -> String? {
+        sshAgentLock.lock(); defer { sshAgentLock.unlock() }
+        if let existing = sshAgents[profileID] { return existing.socketPath }
+        do {
+            // 8 hex chars keeps the socket path inside sun_path's 104 bytes.
+            let label = String(profileID.uuidString.replacingOccurrences(of: "-", with: "")
+                .prefix(8)).lowercased()
+            let agent = try PrivateSSHAgent(label: label)
+            sshAgents[profileID] = agent
+            HostAgentClient.register(socketPath: agent.socketPath, for: profileID)
+            return agent.socketPath
+        } catch {
+            let short = profileID.uuidString.prefix(8)
+            FileHandle.standardError.write(Data(
+                "[mitm] ssh-agent spawn failed for profile \(short): \(error)\n".utf8))
+            return nil
+        }
+    }
+
+    /// Kill one workspace's agent — its keys exist only in that process,
+    /// so this is what makes them unreachable at session end.
+    public func terminateSSHAgent(for profileID: UUID) {
+        sshAgentLock.lock()
+        let agent = sshAgents.removeValue(forKey: profileID)
+        sshAgentLock.unlock()
+        HostAgentClient.unregister(profileID: profileID)
+        agent?.terminate()
+    }
+
+    /// App quit / signal teardown: every workspace's agent at once.
+    public func terminateAllSSHAgents() {
+        sshAgentLock.lock()
+        let all = sshAgents
+        sshAgents.removeAll()
+        sshAgentLock.unlock()
+        for (pid, agent) in all {
+            HostAgentClient.unregister(profileID: pid)
+            agent.terminate()
+        }
+    }
+
     public func unregister(profileID: UUID) {
         listenerHolders.removeValue(forKey: profileID)
+        // Kill this workspace's signing oracle along with its key maps.
+        terminateSSHAgent(for: profileID)
         clearGuardrailsConfig(for: profileID)
         clearSupplyChainPolicy(for: profileID)
         clearFusionEngaged(for: profileID)
