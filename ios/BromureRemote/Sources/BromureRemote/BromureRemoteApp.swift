@@ -431,10 +431,15 @@ struct RootView: View {
     }
 
     private func peerRow(_ server: DeviceInfo) -> some View {
+        // ServerCard takes a plain String, which SwiftUI renders with the
+        // NON-localizing Text overload — so localize here rather than at the
+        // call site. "Last seen \(seen)" keys off "Last seen %@".
         let status: String = {
-            if server.online { return "Online" }
-            if let seen = lastSeenText(server.lastSeenAt) { return "Last seen \(seen)" }
-            return "Offline"
+            if server.online { return String(localized: "Online") }
+            if let seen = lastSeenText(server.lastSeenAt) {
+                return String(localized: "Last seen \(seen)")
+            }
+            return String(localized: "Offline")
         }()
         return ServerCard(icon: "server.rack", accent: serverAccent(server.id),
                           name: server.displayName, status: status,

@@ -92,6 +92,7 @@
 		6552B0D662751610674CFBF1 /* VMDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B2E7296B414B300A8BD7D8 /* VMDashboard.swift */; };
 		A96EA517F1904A78B727B1F7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2C9329E02D38A226363A4698 /* Assets.xcassets */; };
 		2007EF1792C302D48BBE3E57 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 8CCEC8DF327861B1EBC5BBD8 /* Settings.bundle */; };
+		68DFD3ABDADB8A288385EC2E /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = D5AF54E5DA7A08CFA7C70124 /* Localizable.strings */; };
 		06A0A4CD90FBF9FC054FB0D3 /* Crypto */ = {isa = PBXBuildFile; productRef = 8ABC8E0C7D2DBE6AA0A1B70D /* Crypto */; };
 		5DC33D49C50A56509B91FD8B /* NIOCore */ = {isa = PBXBuildFile; productRef = AE2F455E8323D50164A75332 /* NIOCore */; };
 		928678D3A79D08846C487A50 /* NIOPosix */ = {isa = PBXBuildFile; productRef = 1EB7681EA7B981649D9DDEA0 /* NIOPosix */; };
@@ -217,6 +218,14 @@
 		F53560B8D470A293B70C0526 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "App/Info.plist"; sourceTree = "<group>"; };
 		2C9329E02D38A226363A4698 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "App/Assets.xcassets"; sourceTree = "<group>"; };
 		8CCEC8DF327861B1EBC5BBD8 /* Settings.bundle */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.plug-in"; path = "App/Settings.bundle"; sourceTree = "<group>"; };
+		72E186EEDAE46F10C8DF5491 /* de */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = de; path = "../../Sources/AgentCoding/de.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		0800778BD695A0523AD96FEF /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = "../../Sources/AgentCoding/en.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		AECD68DD7C42454D5ED975CA /* es */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = es; path = "../../Sources/AgentCoding/es.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		FEFAEB719919EF7B17C99C3E /* fr */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = fr; path = "../../Sources/AgentCoding/fr.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		80133F8AA36FD8D8135D5F6F /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = "../../Sources/AgentCoding/ja.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		9AD3EFF7E74EB2429C21B9EA /* pt */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = pt; path = "../../Sources/AgentCoding/pt.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		116461E25CC7B20DFF94A57D /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = zh-Hans; path = "../../Sources/AgentCoding/zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		7E0CCCD2F386E305B8890688 /* zh-Hant */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = zh-Hant; path = "../../Sources/AgentCoding/zh-Hant.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		85673086EF6CFD3A1F8591AF /* BromureRemote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BromureRemote.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		2BCBB5252D718C8B1EC18C63 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "NotificationService.swift"; path = "../BromureNotify/NotificationService.swift"; sourceTree = "<group>"; };
 		A6217BCA986E7367ABF8208B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = "Info.plist"; path = "../BromureNotify/Info.plist"; sourceTree = "<group>"; };
@@ -365,6 +374,7 @@
 				F53560B8D470A293B70C0526 /* Info.plist */,
 				2C9329E02D38A226363A4698 /* Assets.xcassets */,
 				8CCEC8DF327861B1EBC5BBD8 /* Settings.bundle */,
+				D5AF54E5DA7A08CFA7C70124 /* Localizable.strings */,
 			);
 			name = App;
 			sourceTree = "<group>";
@@ -435,7 +445,7 @@
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
-			knownRegions = ( en, Base );
+			knownRegions = ( de, en, es, fr, ja, pt, zh-Hans, zh-Hant, Base );
 			mainGroup = E50290A24C49A459B43487C5;
 			packageReferences = (
 				6A50A05EE8982B43C00AC425 /* swift-crypto */,
@@ -461,6 +471,7 @@
 			files = (
 				A96EA517F1904A78B727B1F7 /* Assets.xcassets in Resources */,
 				2007EF1792C302D48BBE3E57 /* Settings.bundle in Resources */,
+				68DFD3ABDADB8A288385EC2E /* Localizable.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -569,6 +580,24 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXVariantGroup section */
+		D5AF54E5DA7A08CFA7C70124 /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				72E186EEDAE46F10C8DF5491 /* de */,
+				0800778BD695A0523AD96FEF /* en */,
+				AECD68DD7C42454D5ED975CA /* es */,
+				FEFAEB719919EF7B17C99C3E /* fr */,
+				80133F8AA36FD8D8135D5F6F /* ja */,
+				9AD3EFF7E74EB2429C21B9EA /* pt */,
+				116461E25CC7B20DFF94A57D /* zh-Hans */,
+				7E0CCCD2F386E305B8890688 /* zh-Hant */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
 
 /* Begin PBXTargetDependency section */
 		CC576A5113FED775756707C1 /* PBXTargetDependency */ = {

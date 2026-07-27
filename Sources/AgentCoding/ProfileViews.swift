@@ -611,6 +611,16 @@ struct ProfileEditorView: View {
         .onChange(of: draft.activeModelID) { _, _ in syncAgentsForLocalModels() }
     }
 
+    /// Built as `Text`, not a `String` ternary: `Text(someString)` picks the
+    /// NON-localizing overload, so the ternary rendered "New workspace" in
+    /// English even in locales that translate it. Only the literals are
+    /// localized — a user's workspace name is passed through verbatim.
+    private var editorTitle: Text {
+        if isNew { return Text("New workspace") }
+        if draft.name.isEmpty { return Text("Edit workspace") }
+        return Text(draft.name)
+    }
+
     private var bottomBar: some View {
         HStack {
             Button("Cancel", action: onCancel)
@@ -656,7 +666,7 @@ struct ProfileEditorView: View {
             // Detail
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text(isNew ? "New workspace" : draft.name.isEmpty ? "Edit workspace" : draft.name)
+                    editorTitle
                         .font(.title2.bold())
                     detailContent
                 }
@@ -685,7 +695,7 @@ struct ProfileEditorView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle(isNew ? "New workspace" : draft.name.isEmpty ? "Edit workspace" : draft.name)
+            .navigationTitle(editorTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
