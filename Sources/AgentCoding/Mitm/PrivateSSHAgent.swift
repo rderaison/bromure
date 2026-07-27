@@ -78,7 +78,12 @@ public final class PrivateSSHAgent: @unchecked Sendable {
     static func reapOrphans() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        p.arguments = ["-af", "ssh-agent .*bromure-ac-agent"]
+        // `-l` (not Linux's `-a`): Darwin's pgrep silently IGNORES -a and
+        // prints bare pids, so the "<pid> <command>" parse below matched
+        // nothing and this sweep was a no-op on macOS for its whole life —
+        // which is why orphaned agents piled up across crashes. `-fl` matches
+        // the full command line AND prints it.
+        p.arguments = ["-fl", "ssh-agent .*bromure-ac-agent"]
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
@@ -89,12 +94,18 @@ public final class PrivateSSHAgent: @unchecked Sendable {
 
         var killed = 0
         for line in out.split(whereSeparator: { $0 == "\n" }) {
-            // pgrep -af lines look like: "<pid> /usr/bin/ssh-agent -D -a <path>"
+            // Lines look like: "<pid> /usr/bin/ssh-agent -D -a <path>"
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard let space = trimmed.firstIndex(of: " "),
                   let pid = pid_t(trimmed[..<space]) else { continue }
-            // Don't kill ourselves or our future child (ours doesn't
-            // exist yet, but be defensive).
+            // Re-check the command itself. `-f` matches the whole command
+            // line, so a shell whose arguments merely CONTAIN the pattern
+            // (a debugging one-liner, say) would otherwise be a target.
+            let command = trimmed[trimmed.index(after: space)...]
+            guard command.contains("ssh-agent"),
+                  command.contains("bromure-ac-agent") else { continue }
+            // Don't kill ourselves or our future children (none exist yet —
+            // this runs before the first workspace agent — but be defensive).
             if pid == getpid() { continue }
             kill(pid, SIGTERM)
             killed += 1
