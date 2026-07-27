@@ -194,24 +194,49 @@ enum RemoteTransport {
     static func probe(host rawHost: RemoteHost, strictHostKey: Bool) -> RemoteProbe {
         _ = bootstrap
         ensureClientKey()
-        let host = resolved(rawHost)
-        do {
-            let conn = try SSHDialer.shared.ensureConnection(host: host, strict: strictHostKey)
-            guard let fd = conn.openVerbChannel(FatClient.controlVerb) else {
-                return .unreachable("couldn't open control channel")
+        // TWO attempts, because everything this touches can be a zombie after
+        // the app was backgrounded: iOS freezes our sockets, the peer's FIN
+        // never arrives, and both liveness checks still say yes —
+        // `SSHConnection.isAlive` is just `channel.isActive`, and a cached P2P
+        // shim's loopback listener stays up even when the relay behind it is
+        // dead. Reusing either fails on FIRST USE with a raw EOF, which the
+        // login sheet showed as "end of file". `SSHDialer.dial` already retries
+        // like this for verb channels; sign-in went without.
+        //
+        // The host is re-resolved per attempt so a dead peer path gets a chance
+        // to re-establish (off the main thread `resolved` establishes rather
+        // than just reading the cache), and the failed connection is closed so
+        // the pool evicts it instead of handing the same corpse back.
+        for attempt in 0..<2 {
+            let host = resolved(rawHost)
+            do {
+                let conn = try SSHDialer.shared.ensureConnection(host: host, strict: strictHostKey)
+                guard let fd = conn.openVerbChannel(FatClient.controlVerb) else {
+                    conn.close()
+                    if attempt == 0 { continue }
+                    return .unreachable("couldn't open control channel")
+                }
+                let client = ControlClient(socketPath: "ssh://\(host.connectLabel)") { fd }
+                let resp = try? client.request("GET", "/health")
+                if resp?.status == 200 { return .ok }
+                conn.close()
+                if attempt == 0 { continue }
+                return .unreachable("no response from remote")
+            } catch let e as SSHDialError {
+                switch e {
+                // Auth and host-key verdicts are answers, not transport
+                // failures — a retry would return the same thing.
+                case .authFailed:      return .authFailed
+                case .hostKeyChanged:  return .hostKeyChanged
+                case .unreachable(let m):
+                    if attempt == 0 { continue }
+                    return .unreachable(m)
+                }
+            } catch {
+                if attempt == 0 { continue }
+                return .unreachable("\(error)")
             }
-            let client = ControlClient(socketPath: "ssh://\(host.connectLabel)") { fd }
-            let resp = try? client.request("GET", "/health")
-            if resp?.status == 200 { return .ok }
-            return .unreachable("no response from remote")
-        } catch let e as SSHDialError {
-            switch e {
-            case .authFailed:      return .authFailed
-            case .hostKeyChanged:  return .hostKeyChanged
-            case .unreachable(let m): return .unreachable(m)
-            }
-        } catch {
-            return .unreachable("\(error)")
         }
+        return .unreachable("no response from remote")
     }
 }
