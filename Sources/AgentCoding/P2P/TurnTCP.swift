@@ -190,6 +190,7 @@ final class TurnTCPClient: @unchecked Sendable {
         guard fd < 0 else { return true }
         guard let s = STUNTCP.connect(host: host, port: port, timeout: timeout, tls: tls) else { return false }
         fd = s
+        FDGuard.adopt(s, "turn-tcp.client")
         return true
     }
 
@@ -205,7 +206,7 @@ final class TurnTCPClient: @unchecked Sendable {
         // the fd number can be recycled. SHUT_RD (not SHUT_RDWR) so an
         // in-flight send isn't poisoned with EPIPE — these sockets carry no
         // SO_NOSIGPIPE and iOS has no process-wide SIGPIPE ignore.
-        if s >= 0 { Darwin.shutdown(s, SHUT_RD); Darwin.close(s) }
+        if s >= 0 { Darwin.shutdown(s, SHUT_RD); FDGuard.close(s, "turn-tcp.client") }
     }
 
     // MARK: Verbs
@@ -440,6 +441,19 @@ final class TurnRelayListener: @unchecked Sendable {
         self.permitted = permitted
     }
 
+    /// An allocation with no spliced leg for this long is an orphan — the
+    /// dialer connected via another rung, re-dialed under a new grant, or gave
+    /// up — so reap it. Without this, an abandoned listener refreshes its
+    /// allocation forever and each one pins 3 threads + the control fd + the
+    /// TLS tunnel's socketpair. Long enough to cover the 45s grant window and
+    /// a slow first handshake; a live session's leg keeps `activeLegs` > 0.
+    static let idleReapAfter: TimeInterval = 180
+
+    /// Live relayed legs (spliced data connections). Guarded by `lock`.
+    private var activeLegs = 0
+    /// When `activeLegs` last hit zero — the reaper clock. Guarded by `lock`.
+    private var idleSince = Date()
+
     /// Allow another peer IP (a later srflx trickle); picked up by the service
     /// loop within a tick.
     func permit(ip: String) {
@@ -476,9 +490,20 @@ final class TurnRelayListener: @unchecked Sendable {
                let connID = ev.u32(STUNMessage.attrConnectionID) {
                 let peer = ev.xorAddress(STUNMessage.attrXorPeerAddress)
                 FatClientLog.log("p2p: relay connection attempt from \(peer?.ip ?? "?"):\(peer?.port ?? 0)")
+                // Touch the reaper clock: a leg is about to bind on another
+                // thread and must not race a reap at the idle boundary.
+                lock.lock(); idleSince = Date(); lock.unlock()
                 Thread.detachNewThread { [weak self] in self?.serve(connID: connID) }
             }
             if isStopped { break }
+
+            lock.lock()
+            let idle = activeLegs == 0 ? Date().timeIntervalSince(idleSince) : 0
+            lock.unlock()
+            if idle > Self.idleReapAfter {
+                FatClientLog.log("p2p: TCP relay idle \(Int(idle))s with no legs — reaping allocation")
+                break
+            }
 
             if Date() >= nextAllocRefresh {
                 guard let granted = client.refresh() else {
@@ -509,6 +534,13 @@ final class TurnRelayListener: @unchecked Sendable {
             FatClientLog.log("p2p: local sshd :\(sshPort) unreachable for relayed leg")
             Darwin.close(dataFD)
             return
+        }
+        lock.lock(); activeLegs += 1; lock.unlock()
+        defer {
+            lock.lock()
+            activeLegs -= 1
+            if activeLegs == 0 { idleSince = Date() }
+            lock.unlock()
         }
         // The relay leg is the only socket that can observe the far client dying;
         // a blocking write to a vanished client would otherwise hang this pump —
