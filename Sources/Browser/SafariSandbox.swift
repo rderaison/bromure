@@ -22,6 +22,15 @@ struct Bromure: ParsableCommand {
     /// CommandLine.arguments so ArgumentParser doesn't reject them.
     /// This lets `bromure -AppleLanguages "(fr)"` work for locale testing.
     static func main() {
+        // Ignore SIGPIPE process-wide, mirroring BromureAC.main. The app
+        // write()s to raw BSD sockets outside NIO (the package proxy, the
+        // clipboard/file vsock bridges); a peer that closes mid-write delivers
+        // SIGPIPE, whose default disposition kills the process with no crash
+        // report (a plain signal termination, not a Mach exception).
+        // AlpinePackageProxy.start() installs this too, but only when that
+        // proxy starts — every socket write before then was unprotected.
+        signal(SIGPIPE, SIG_IGN)
+
         // Strip Apple-internal flags (e.g. -AppleLanguages, -AppleLocale) so
         // ArgumentParser doesn't reject them. Lets `bromure -AppleLanguages "(fr)"` work.
         let args = Array(CommandLine.arguments.dropFirst()) // drop argv[0]
