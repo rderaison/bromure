@@ -3876,6 +3876,32 @@ def _seed_claude_settings():
     _write(settings)
 
 
+def _fsck_home_if_needed(dev):
+    """e2fsck the home image before it is first mounted, only when the
+    superblock says a check is warranted: state not plain "clean" (covers
+    "not clean" and "clean with errors") or a journal left dirty by a hard
+    stop. A clean boot skips e2fsck entirely. -y answers every repair
+    prompt yes — there is no operator on a headless boot, and an
+    unmountable home is strictly worse than an aggressive repair."""
+    if _capture(["findmnt", "-n", "-S", dev]).strip():
+        return  # device already mounted (crashed-boot retry) — never fsck live
+    sb = _capture(["sudo", "dumpe2fs", "-h", dev])
+    state = features = ""
+    for line in sb.splitlines():
+        if line.startswith("Filesystem state:"):
+            state = line.split(":", 1)[1].strip()
+        elif line.startswith("Filesystem features:"):
+            features = line.split(":", 1)[1].strip()
+    if state == "clean" and "needs_recovery" not in features.split():
+        return
+    log("home", "fs on %s needs checking (state %r) — running e2fsck -y"
+        % (dev, state or "unreadable"))
+    p = subprocess.run(["sudo", "e2fsck", "-y", dev],
+                       capture_output=True, text=True, errors="replace")
+    log("home", "e2fsck done (exit %d): %s"
+        % (p.returncode, (p.stdout + p.stderr).strip()[:500]))
+
+
 def task_home_setup():
     """One-shot (before create_session): make /home/ubuntu real per
     home.mode. Idempotent — a hot-upgrade respawn mid-session sees the
@@ -3895,6 +3921,12 @@ def task_home_setup():
         if _sudo(["mkfs.ext4", "-q", "-L", HOME_LABEL, dev]).returncode != 0:
             log("home", "mkfs.ext4 failed on %s" % dev)
             return
+    else:
+        # Existing home image: a hard-stopped VM can leave the fs dirty or
+        # with errors that make the mount below fail (home silently left as
+        # the bootstrap share). Repair BEFORE the first mount — the migrate
+        # staging mount included.
+        _fsck_home_if_needed(dev)
     if mode == "migrate":
         # The old home must actually be mounted before we snapshot it —
         # racing fstab here would migrate the base image's empty skeleton.
