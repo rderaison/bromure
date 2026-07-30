@@ -10,18 +10,12 @@ struct Ext4WriterTests {
 
     private var imagePath: String? { ProcessInfo.processInfo.environment["BROMURE_EXT4_TEST_IMAGE"] }
 
-    @Test("fsck locate + degradation are sane")
-    func fsckDegradation() throws {
-        // locate() returns nil or a real executable — never a bogus path.
-        if let p = Ext4Fsck.locate() {
-            #expect(FileManager.default.isExecutableFile(atPath: p))
-        } else {
-            #expect(!Ext4Fsck.isAvailable)
-            // With no binary, check() must throw a clear, actionable error.
-            #expect(throws: Ext4Fsck.FsckError.self) {
-                _ = try Ext4Fsck.check(imagePath: "/nonexistent.img", partitionOffset: 0, autoFix: false)
-            }
-            #expect("\(Ext4Fsck.FsckError.notInstalled)".contains("brew install e2fsprogs"))
+    @Test("fsck on a missing image throws a clear open error")
+    func fsckMissingImage() throws {
+        // Native fsck needs no external binary; the only precondition is the
+        // image itself.
+        #expect(throws: Ext4Fsck.FsckError.self) {
+            _ = try Ext4Fsck.check(imagePath: "/nonexistent.img", partitionOffset: 0, autoFix: false)
         }
     }
 

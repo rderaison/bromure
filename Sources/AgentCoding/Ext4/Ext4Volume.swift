@@ -48,14 +48,19 @@ struct Ext4Superblock {
     let firstDataBlock: UInt32    // 1 for 1K blocks, else 0
     let firstIno: UInt32
     let inodeSize: Int
+    let featureCompat: UInt32
     let featureIncompat: UInt32
     let featureRoCompat: UInt32
     let descSize: Int             // group-descriptor size (32, or 64 for 64bit)
-    let state: UInt16             // bit0 = cleanly unmounted
+    let state: UInt16             // bit0 = cleanly unmounted, bit1 = errors seen
     let volumeName: String
     let uuid: [UInt8]             // s_uuid (16 bytes), for the checksum seed
     let checksumSeedRaw: UInt32   // s_checksum_seed (valid only with CSUM_SEED)
+    let journalInum: UInt32       // s_journal_inum (normally 8)
+    let lastOrphan: UInt32        // s_last_orphan (head of the orphan chain)
 
+    // compat feature bits
+    static let COMPAT_HAS_JOURNAL: UInt32 = 0x0004
     // incompat feature bits
     static let INCOMPAT_FILETYPE:  UInt32 = 0x0002
     static let INCOMPAT_RECOVER:   UInt32 = 0x0004   // journal needs replay
@@ -70,6 +75,8 @@ struct Ext4Superblock {
     var needsRecovery: Bool { featureIncompat & Ext4Superblock.INCOMPAT_RECOVER != 0 }
     var hasMetadataCsum: Bool { featureRoCompat & Ext4Superblock.ROCOMPAT_METADATA_CSUM != 0 }
     var hasCsumSeed: Bool { featureIncompat & Ext4Superblock.INCOMPAT_CSUM_SEED != 0 }
+    var hasJournal: Bool { featureCompat & Ext4Superblock.COMPAT_HAS_JOURNAL != 0 }
+    var hasErrors: Bool { state & 0x2 != 0 }
 
     /// The fs-wide checksum seed used by metadata_csum: either stored explicitly
     /// (CSUM_SEED feature) or derived from the volume UUID.
@@ -93,12 +100,15 @@ struct Ext4Superblock {
         firstIno = le32(b, 84)
         let isz = Int(le16(b, 88))
         inodeSize = isz == 0 ? 128 : isz
+        featureCompat = le32(b, 92)
         featureIncompat = le32(b, 96)
         featureRoCompat = le32(b, 100)
         let dsz = Int(le16(b, 254))
         state = le16(b, 58)
         uuid = Array(b[104..<120])            // s_uuid @0x68, 16 bytes
         checksumSeedRaw = le32(b, 0x270)      // s_checksum_seed
+        journalInum = le32(b, 0xE0)           // s_journal_inum
+        lastOrphan = le32(b, 0xE8)            // s_last_orphan
         // 64-bit block count
         let blkHi = (featureIncompat & Ext4Superblock.INCOMPAT_64BIT != 0) ? UInt64(le32(b, 0x150)) : 0
         blocksCount = blkLo | (blkHi << 32)

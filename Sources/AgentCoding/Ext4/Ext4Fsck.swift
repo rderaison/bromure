@@ -1,166 +1,221 @@
 import Foundation
 
-// MARK: - fsck.ext4 integration
+// MARK: - Native fsck
 //
-// macOS ships no e2fsprogs, so we locate a user- or bundle-provided fsck.ext4
-// (a.k.a. e2fsck) and run it to (a) replay the journal / repair an unclean image
-// before we read or write it, and (b) reconcile metadata after a grow/create/
-// delete once those land. The tool operates on a whole-filesystem device, so:
-//   • raw ext4 image  → run e2fsck directly on the file,
-//   • partitioned disk → attach with hdiutil to expose the partition's device
-//     node, e2fsck that, then detach.
+// macOS ships no e2fsprogs and we don't rely on third-party binaries, so this
+// is a self-contained check/repair built on Ext4Volume + Ext4Journal:
 //
-// Nothing here needs the app itself to be privileged: hdiutil attaches a plain
-// file as a user-owned device, and e2fsck reads/writes that node as the user.
+//   repair (autoFix) — replay the JBD2 journal and clear INCOMPAT_RECOVER,
+//     which is the whole story for our images: they go unclean by being
+//     clonefile'd from a live disk or by a VM dying, not by bit rot. After
+//     replay the metadata is exactly what the guest kernel had committed.
+//   verify (always) — superblock + group-descriptor checksums, then a
+//     reachability walk from the root directory validating every inode's
+//     checksum and extent tree. Report-only: anything found here is real
+//     corruption beyond a dirty journal, and the honest fix is e2fsck inside
+//     a VM (bromure-agentd fscks the home image on boot), not hand-patching.
+//
+// The orphan list is left for the guest kernel, which processes it on every
+// mount regardless of the recovery flag.
 
 enum Ext4Fsck {
 
-    /// Directories to look in beyond $PATH (Homebrew keeps e2fsprogs keg-only).
-    private static let extraDirs = [
-        "/opt/homebrew/opt/e2fsprogs/sbin",
-        "/opt/homebrew/sbin",
-        "/usr/local/opt/e2fsprogs/sbin",
-        "/usr/local/sbin",
-        "/usr/sbin", "/sbin",
-    ]
-
-    /// Path to a usable fsck binary, preferring a copy bundled with the app.
-    static func locate() -> String? {
-        var dirs = [String]()
-        if let res = Bundle.main.resourceURL?.appendingPathComponent("e2fsprogs/sbin").path {
-            dirs.append(res)
-        }
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            dirs.append(contentsOf: path.split(separator: ":").map(String.init))
-        }
-        dirs.append(contentsOf: extraDirs)
-        let fm = FileManager.default
-        for dir in dirs {
-            for name in ["fsck.ext4", "e2fsck"] {
-                let p = dir + "/" + name
-                if fm.isExecutableFile(atPath: p) { return p }
-            }
-        }
-        return nil
-    }
-
-    static var isAvailable: Bool { locate() != nil }
-
     struct Result {
-        let status: Int32          // e2fsck: 0 clean, 1 errors fixed, 2 fixed+reboot, 4 left uncorrected…
+        let status: Int32          // e2fsck-compatible: 0 clean, 1 repaired, 4 errors remain, 8 error
         let output: String
-        /// e2fsck exit codes 1 and 2 mean it corrected errors.
-        var repaired: Bool { status == 1 || status == 2 }
+        var repaired: Bool { status == 1 }
         var clean: Bool { status == 0 }
         var summary: String {
             switch status {
             case 0: return "Filesystem is clean."
-            case 1: return "Filesystem errors were corrected."
-            case 2: return "Filesystem errors corrected; a reboot would normally be advised."
-            case 4: return "Filesystem errors remain UNCORRECTED."
-            case 8: return "e2fsck operational error."
-            case 16: return "e2fsck usage error."
-            default: return "e2fsck exited with status \(status)."
+            case 1: return "Journal replayed; filesystem is now consistent."
+            case 4: return "Filesystem has errors this checker cannot repair."
+            default: return "fsck could not run (status \(status))."
             }
         }
     }
 
     enum FsckError: Error, CustomStringConvertible {
-        case notInstalled
-        case attachFailed(String)
-        case noExt4Partition
+        case open(String)
         var description: String {
             switch self {
-            case .notInstalled:
-                return "fsck.ext4 not found. Install it with `brew install e2fsprogs`."
-            case .attachFailed(let m): return "could not attach the disk image: \(m)"
-            case .noExt4Partition: return "no ext4 partition found in the image"
+            case .open(let m): return "cannot check image: \(m)"
             }
         }
     }
 
-    /// Run e2fsck on the ext4 filesystem inside `imagePath`. `partitionOffset` is
-    /// the byte offset the reader found the superblock at (0 for a raw image).
-    /// `autoFix` runs `-fy` (repair); otherwise `-fn` (report only).
-    static func check(imagePath: String, partitionOffset: UInt64, autoFix: Bool) throws -> Result {
-        guard let fsck = locate() else { throw FsckError.notInstalled }
-        if partitionOffset == 0 {
-            return try runFsck(fsck, device: imagePath, autoFix: autoFix)
-        }
-        // Partitioned disk: expose device nodes, find the ext4 slice, fsck, detach.
-        let (whole, slices) = try attach(imagePath)
-        defer { detach(whole) }
-        guard let slice = ext4Slice(among: slices) else { throw FsckError.noExt4Partition }
-        return try runFsck(fsck, device: slice, autoFix: autoFix)
-    }
+    /// Check (and with `autoFix` repair) the ext4 filesystem inside `imagePath`.
+    /// `partitionOffset` is accepted for call-site compatibility; the volume
+    /// locates the filesystem itself (raw image or GPT/MBR partition).
+    static func check(imagePath: String, partitionOffset: UInt64 = 0,
+                      autoFix: Bool) throws -> Result {
+        var log = [String]()
+        var repaired = false
+        var unfixable = 0
 
-    // MARK: run
+        var vol: Ext4Volume
+        do { vol = try Ext4Volume(path: imagePath, writable: autoFix) }
+        catch { throw FsckError.open("\(error)") }
+        log.append("volume \"\(vol.volumeName.isEmpty ? "(unnamed)" : vol.volumeName)\", "
+                   + "\(vol.sb.blocksCount) blocks of \(vol.blockSize)")
 
-    private static func runFsck(_ fsck: String, device: String, autoFix: Bool) throws -> Result {
-        // -f force a full check even if the fs looks clean; -y/-n non-interactive.
-        let args = ["-f", autoFix ? "-y" : "-n", device]
-        let (status, out) = runCapturing(fsck, args)
-        return Result(status: status, output: out)
-    }
-
-    // MARK: hdiutil attach / detach
-
-    /// Attach a raw image without mounting; return (whole-disk node, [slice nodes]).
-    private static func attach(_ imagePath: String) throws -> (String, [String]) {
-        let (status, out) = runCapturing("/usr/bin/hdiutil", [
-            "attach", "-nomount", "-readwrite",
-            "-imagekey", "diskimage-class=CRawDiskImage",
-            "-plist", imagePath,
-        ])
-        guard status == 0 else { throw FsckError.attachFailed(out) }
-        // Parse the plist for every /dev/diskN[sK] entity.
-        var nodes = [String]()
-        if let data = out.data(using: .utf8),
-           let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
-           let entities = plist["system-entities"] as? [[String: Any]] {
-            for e in entities {
-                if let dev = e["dev-entry"] as? String { nodes.append(dev) }
-            }
-        }
-        guard let whole = nodes.min(by: { $0.count < $1.count }) else {
-            throw FsckError.attachFailed("no device nodes returned")
-        }
-        let slices = nodes.filter { $0 != whole }
-        return (whole, slices.isEmpty ? nodes : slices)
-    }
-
-    private static func detach(_ whole: String) {
-        _ = runCapturing("/usr/bin/hdiutil", ["detach", "-force", whole])
-    }
-
-    /// Pick the slice whose first block carries the ext4 superblock magic.
-    private static func ext4Slice(among slices: [String]) -> String? {
-        for dev in slices {
-            guard let fh = FileHandle(forReadingAtPath: dev) else { continue }
-            defer { try? fh.close() }
-            do {
-                try fh.seek(toOffset: 1024)
-                if let d = try fh.read(upToCount: 2), d.count == 2,
-                   UInt16(d[0]) | (UInt16(d[1]) << 8) == 0xEF53 {
-                    return dev
+        // Phase 1: journal. Replay is the repair; without autoFix just report.
+        if vol.sb.needsRecovery {
+            if !autoFix {
+                log.append("journal needs replay (INCOMPAT_RECOVER set) — re-run with repair enabled")
+                unfixable += 1
+            } else {
+                do {
+                    let journal = try Ext4Journal(volume: vol)
+                    if journal.needsReplay {
+                        let stats = try journal.replay()
+                        log.append("journal replayed: \(stats.transactions) transaction(s), "
+                                   + "\(stats.blocksWritten) block(s) written, "
+                                   + "\(stats.revoked) revoked")
+                        if stats.checksumErrors > 0 {
+                            log.append("journal: \(stats.checksumErrors) block(s) skipped "
+                                       + "(bad checksum or out-of-range target)")
+                            unfixable += stats.checksumErrors
+                        }
+                    } else {
+                        log.append("recovery flag set but the journal is empty — clearing the flag")
+                    }
+                    // Re-read the superblock from disk (replay may have
+                    // rewritten it), clear INCOMPAT_RECOVER, fix its checksum.
+                    try clearRecoveryFlag(vol)
+                    repaired = true
+                    vol = try Ext4Volume(path: imagePath, writable: autoFix)
+                } catch {
+                    log.append("journal replay failed: \(error)")
+                    unfixable += 1
                 }
-            } catch { continue }
+            }
+        } else {
+            log.append("journal is clean")
         }
-        return nil
+
+        // Phase 2: verification (report-only).
+        let issues = verify(vol, log: &log)
+        unfixable += issues
+
+        if vol.sb.hasErrors {
+            log.append("superblock error flag is set (the kernel hit corruption at runtime)")
+            unfixable += 1
+        }
+        if vol.sb.lastOrphan != 0 {
+            log.append("orphan list present (inode \(vol.sb.lastOrphan)) — the guest kernel "
+                       + "processes it at next mount")
+        }
+
+        let status: Int32 = unfixable > 0 ? 4 : (repaired ? 1 : 0)
+        return Result(status: status, output: log.joined(separator: "\n"))
     }
 
-    // MARK: process helper
+    // MARK: recovery flag
 
-    private static func runCapturing(_ launch: String, _ args: [String]) -> (Int32, String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: launch)
-        p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = pipe
-        do { try p.run() } catch { return (-1, "failed to launch \(launch): \(error)") }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return (p.terminationStatus, String(decoding: data, as: UTF8.self))
+    /// Clear INCOMPAT_RECOVER on the on-disk superblock and recompute its
+    /// checksum. Reads fresh bytes: journal replay may have rewritten the
+    /// superblock block itself.
+    private static func clearRecoveryFlag(_ vol: Ext4Volume) throws {
+        var sb = try vol.fsRead(at: 1024, count: 1024)
+        guard sb.count == 1024, le16(sb, 56) == 0xEF53 else {
+            throw Ext4JournalError.corrupt("superblock vanished after replay")
+        }
+        putLE32(&sb, 96, le32(sb, 96) & ~Ext4Superblock.INCOMPAT_RECOVER)
+        if le32(sb, 100) & Ext4Superblock.ROCOMPAT_METADATA_CSUM != 0 {
+            putLE32(&sb, 0x3FC, Crc32c.hash(0xFFFF_FFFF, Array(sb[0..<0x3FC])))
+        }
+        try vol.fsWrite(at: 1024, sb)
+        vol.dev.fsync()
+    }
+
+    // MARK: verification
+
+    /// Structural checks. Returns the number of problems found (0 = healthy).
+    private static func verify(_ vol: Ext4Volume, log: inout [String]) -> Int {
+        var issues = 0
+
+        // Superblock checksum.
+        if vol.sb.hasMetadataCsum {
+            if let sb = try? vol.fsRead(at: 1024, count: 1024), sb.count == 1024 {
+                let stored = le32(sb, 0x3FC)
+                let computed = Crc32c.hash(0xFFFF_FFFF, Array(sb[0..<0x3FC]))
+                if stored != computed {
+                    log.append("superblock checksum mismatch")
+                    issues += 1
+                }
+            }
+            issues += verifyGroupDescriptors(vol, log: &log)
+        }
+
+        // Reachability walk from the root: inode checksums + extent trees +
+        // directory structure. Bounded so a many-million-file image can't hang
+        // the UI; the cap is reported, never silent.
+        var visited = Set<UInt32>()
+        var bad = 0
+        let cap = 200_000
+        var stack: [UInt32] = [Ext4Volume.rootInode]
+        while let ino = stack.popLast(), visited.count < cap {
+            if !visited.insert(ino).inserted { continue }
+            do {
+                let node = try vol.inode(ino)
+                if try !vol.verifyInodeChecksum(ino) {
+                    bad += 1
+                    if bad <= 10 { log.append("inode \(ino): checksum mismatch") }
+                    continue
+                }
+                if node.isDir {
+                    for e in try vol.listDir(ino) where e.ino != 0 && e.ino <= vol.sb.inodesCount {
+                        stack.append(e.ino)
+                    }
+                } else if node.isRegular && !node.isInline {
+                    // Parses the whole extent tree / block map; throws on a
+                    // corrupt header or unreadable interior node.
+                    let blocks = (Int(node.size) + vol.blockSize - 1) / vol.blockSize
+                    _ = try vol.blockMap(node, upTo: min(blocks, 1))
+                }
+            } catch {
+                bad += 1
+                if bad <= 10 { log.append("inode \(ino): \(error)") }
+            }
+        }
+        if visited.count >= cap {
+            log.append("verification capped at \(cap) inodes — walk was NOT exhaustive")
+        }
+        log.append("verified \(visited.count) reachable inode(s)"
+                   + (bad > 0 ? ", \(bad) bad" : ""))
+        return issues + bad
+    }
+
+    /// metadata_csum group-descriptor checksums: crc32c(seed → group# (le32) →
+    /// descriptor with bg_checksum zeroed), low 16 bits, stored at +0x1E.
+    private static func verifyGroupDescriptors(_ vol: Ext4Volume, log: inout [String]) -> Int {
+        let sb = vol.sb
+        let gdtStart = (UInt64(sb.firstDataBlock) + 1) * UInt64(vol.blockSize)
+        let total = sb.groupCount * sb.descSize
+        guard let gdt = try? vol.fsRead(at: gdtStart, count: total), gdt.count == total else {
+            log.append("group descriptor table unreadable")
+            return 1
+        }
+        var bad = 0
+        for g in 0..<sb.groupCount {
+            let o = g * sb.descSize
+            let desc = Array(gdt[o..<o + sb.descSize])
+            let stored = le16(desc, 0x1E)
+            var groupLE = [UInt8](repeating: 0, count: 4)
+            putLE32(&groupLE, 0, UInt32(g))
+            var crc = Crc32c.hash(sb.csumSeed, groupLE)
+            crc = Crc32c.hash(crc, desc[0..<0x1E])
+            crc = Crc32c.hash(crc, [0, 0])                       // bg_checksum as zero
+            if sb.descSize > 0x20 {
+                crc = Crc32c.hash(crc, desc[0x20..<sb.descSize])
+            }
+            if UInt16(crc & 0xFFFF) != stored {
+                bad += 1
+                if bad <= 4 { log.append("group \(g): descriptor checksum mismatch") }
+            }
+        }
+        if bad > 0 { log.append("\(bad) group descriptor(s) bad of \(sb.groupCount)") }
+        return bad
     }
 }

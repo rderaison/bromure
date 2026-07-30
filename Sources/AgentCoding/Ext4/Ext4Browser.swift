@@ -195,25 +195,18 @@ final class Ext4BrowserModel: ObservableObject {
     // MARK: fsck
 
     func runFsck() {
-        guard Ext4Fsck.isAvailable else {
-            let a = NSAlert()
-            a.messageText = "fsck.ext4 is not installed"
-            a.informativeText = "Install it with:\n\n    brew install e2fsprogs\n\nthen reopen this window."
-            a.runModal()
-            return
-        }
         let confirm = NSAlert()
-        confirm.messageText = "Run fsck.ext4 on this image?"
+        confirm.messageText = "Check this image?"
         confirm.informativeText = """
-        This checks and repairs the filesystem, replaying the journal if needed. \
-        The workspace VM must be stopped. It can modify the image.
+        This replays the filesystem journal if it is dirty and verifies the \
+        metadata. The workspace VM must be stopped. It can modify the image.
         """
         confirm.addButton(withTitle: "Run fsck")
         confirm.addButton(withTitle: "Cancel")
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
 
         busy = true
-        banner = "Running fsck.ext4…"
+        banner = "Checking filesystem…"
         let path = imagePath
         let offset = volume.partitionOffset
         DispatchQueue.global(qos: .userInitiated).async {
