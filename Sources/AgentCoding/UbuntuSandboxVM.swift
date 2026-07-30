@@ -489,6 +489,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         let stateURL = session.savedStateURL
         state = .starting
         try await vm.restoreMachineStateFrom(url: stateURL)
+        // The snapshot is consumed — its contents are the VM's RAM now.
+        // Delete it BEFORE resuming: from the first resumed instruction the
+        // guest mutates the ext4 home image, so if the app crashed with the
+        // file still on disk, the next launch would restore stale RAM (dirty
+        // journal, page cache) against a newer disk and corrupt the fs.
+        session.clearSavedState()
         try await vm.resume()
         state = .running
         startOutboxPolling()
@@ -519,9 +525,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
         outboxPollTask?.cancel()
         try await vm.pause()
-        // VZ refuses to overwrite the destination (Code 11). After a
-        // restore the prior snapshot is still on disk; nuke it before
-        // writing the new one so suspend → restore → suspend works.
+        // VZ refuses to overwrite the destination (Code 11). restore()
+        // consumes the snapshot, so normally nothing is here — but clear
+        // any leftover (e.g. a suspend that crashed mid-teardown) first.
         try? FileManager.default.removeItem(at: session.savedStateURL)
         try await vm.saveMachineStateTo(url: session.savedStateURL)
         state = .stopped
