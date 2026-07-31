@@ -9793,6 +9793,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 win.host?.paneRequestsClose(win)
                 return
             }
+            // `prepare()` above CoW-clones a fresh disk from base.img when
+            // there isn't one — which is exactly what a Reset System Disk
+            // remedy sets up. Re-stamp the recorded base version like
+            // launch() does, or the next launch's drift check compares a
+            // stale version and asks the user to reset a disk that was just
+            // cloned from that very base.
+            if sessionDisk.didCloneOnLastEnsure, let current = self.readCurrentBaseVersion() {
+                var p = profile
+                p.baseImageVersionAtClone = current
+                try? self.store.save(p)
+                self.profiles = self.store.loadAll()
+                self.refreshSidebar()
+            }
             if let engine = self.mitmEngine, let dev = sandbox.socketDevice {
                 engine.register(socketDevice: dev, profileID: profile.id)
                 engine.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: profile.id)
