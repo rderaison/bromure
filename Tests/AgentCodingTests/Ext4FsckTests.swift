@@ -283,6 +283,55 @@ struct Ext4FsckTests {
         }
     }
 
+    @Test("error flag with a clean fs is cleared — the boot-blocker case")
+    func errorFlagClearedWhenClean() throws {
+        // The 'sub' failure mode: journal clean, filesystem consistent, but
+        // s_state carries EXT2_ERROR_FS — which makes the guest's boot-time
+        // `e2fsck -p` refuse ("RUN fsck MANUALLY") and strand the boot.
+        var img = Self.buildImage()
+        putLE16(&img, 1024 + 58, le16(img, 1024 + 58) | 0x0002)
+        putLE32(&img, 1024 + 0x188, 7)          // s_error_count
+        putLE32(&img, 1024 + 0x1C0, 1781652178) // s_last_error_time
+        try withImage(img) { path in
+            #expect((try Ext4Volume(path: path)).sb.hasErrors)
+
+            // Report-only names the blocker and does NOT touch the image.
+            let before = try Data(contentsOf: URL(fileURLWithPath: path))
+            let report = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(report.status == 4)
+            #expect(report.output.contains("error flag is set"))
+            #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == before)
+
+            // Repair clears it (check found nothing) and zeroes the records.
+            let repair = try Ext4Fsck.check(imagePath: path, autoFix: true)
+            #expect(repair.repaired, "\(repair.output)")
+            #expect(repair.output.contains("error flag cleared"))
+            let vol = try Ext4Volume(path: path)
+            #expect(!vol.sb.hasErrors)
+            #expect(vol.sb.isClean)
+            let sb = try vol.fsRead(at: 1024, count: 1024)
+            #expect(le32(sb, 0x188) == 0)       // s_error_count
+            #expect(le32(sb, 0x1C0) == 0)       // s_last_error_time
+            #expect(try Ext4Fsck.check(imagePath: path, autoFix: false).clean)
+        }
+    }
+
+    @Test("error flag is NOT cleared when the check finds damage")
+    func errorFlagKeptWhenDamaged() throws {
+        var img = Self.buildImage()
+        putLE16(&img, 1024 + 58, le16(img, 1024 + 58) | 0x0002)
+        // Corrupt hello.txt's extent/block map so the walk reports a problem:
+        // point the inode at a block far past the end of the filesystem.
+        putLE32(&img, Self.inodeOffset(12) + 4, UInt32(Self.blockSize))  // size = 1 block
+        putLE32(&img, Self.inodeOffset(12) + 40, 0xFFFF_FFF0)            // wild i_block[0]
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: true)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("leaving the flag set"), "\(r.output)")
+            #expect((try Ext4Volume(path: path)).sb.hasErrors)   // still set
+        }
+    }
+
     @Test("real image (env-gated): native fsck parses, replays, and verifies")
     func realImage() throws {
         // Point BROMURE_EXT4_TEST_IMAGE at a *clone* of a real home/disk image

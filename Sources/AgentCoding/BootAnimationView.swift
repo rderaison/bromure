@@ -32,7 +32,10 @@ final class BootOverlayModel {
 
 struct BootAnimationView: View {
     @Bindable var model: BootOverlayModel
-    /// Failure panel actions.
+    /// Watchdog panel: re-clone this workspace's system disk from the base
+    /// image already on disk (never a base-image *download* — a stuck boot is
+    /// not the moment to go to the network, and a new base image wouldn't fix
+    /// this workspace's disk anyway).
     let onReset: () -> Void
     let onKeepWaiting: () -> Void
     /// Filesystem-failure panel actions: run the host's native fsck on the
@@ -190,7 +193,7 @@ private struct FailurePanel: View {
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.7))
                     .multilineTextAlignment(.center)
-                Text("The VM may be stuck, or the base image may be damaged.")
+                Text("The VM may be stuck, or its system disk may be damaged.")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.4))
                     .multilineTextAlignment(.center)
@@ -205,7 +208,7 @@ private struct FailurePanel: View {
                 }
                 .buttonStyle(.plain)
                 Button(action: onReset) {
-                    Text("Reset Base Image…")
+                    Text("Reset System Disk…")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .padding(.horizontal, 14).padding(.vertical, 7)
                         .background(Capsule().fill(.red.opacity(0.85)))

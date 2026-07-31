@@ -28,7 +28,7 @@ enum Ext4Fsck {
         var summary: String {
             switch status {
             case 0: return "Filesystem is clean."
-            case 1: return "Journal replayed; filesystem is now consistent."
+            case 1: return "Filesystem repaired; it is now consistent."
             case 4: return "Filesystem has errors this checker cannot repair."
             default: return "fsck could not run (status \(status))."
             }
@@ -94,13 +94,42 @@ enum Ext4Fsck {
             log.append("journal is clean")
         }
 
-        // Phase 2: verification (report-only).
-        let issues = verify(vol, log: &log)
+        // Phase 2: verification.
+        let (issues, complete) = verify(vol, log: &log)
         unfixable += issues
 
+        // Phase 3: the error flag. This is the one that actually strands a
+        // boot. systemd-fsck runs `e2fsck -p` (preen), and preen REFUSES to
+        // touch a filesystem whose superblock error bit is set — it prints
+        // "UNEXPECTED INCONSISTENCY; RUN fsck MANUALLY" and exits 4, dropping
+        // the headless guest into an emergency shell nobody can reach. The
+        // flag only records that the kernel hit *an* error at some point; the
+        // filesystem itself is often perfectly consistent (ours typically get
+        // it from a hard stop mid-write). Clearing it is exactly what
+        // `e2fsck -fy` does once its check comes back clean — so we do it
+        // only when our own check was EXHAUSTIVE and found nothing, never on
+        // a truncated walk or alongside real damage.
         if vol.sb.hasErrors {
-            log.append("superblock error flag is set (the kernel hit corruption at runtime)")
-            unfixable += 1
+            if !autoFix {
+                log.append("superblock error flag is set — this is what makes the guest's "
+                           + "boot-time e2fsck -p refuse; re-run with repair enabled")
+                unfixable += 1
+            } else if issues == 0 && complete {
+                do {
+                    try clearErrorFlag(vol)
+                    repaired = true
+                    log.append("superblock error flag cleared (check found no errors) — "
+                               + "the guest's boot-time fsck will proceed")
+                } catch {
+                    log.append("could not clear the error flag: \(error)")
+                    unfixable += 1
+                }
+            } else {
+                log.append("superblock error flag is set and the check "
+                           + (complete ? "found \(issues) problem(s)" : "could not complete")
+                           + " — leaving the flag set (run e2fsck inside a VM)")
+                unfixable += 1
+            }
         }
         if vol.sb.lastOrphan != 0 {
             log.append("orphan list present (inode \(vol.sb.lastOrphan)) — the guest kernel "
@@ -129,10 +158,33 @@ enum Ext4Fsck {
         vol.dev.fsync()
     }
 
+    /// Clear the superblock's error state the way a completed `e2fsck -fy`
+    /// does: drop EXT2_ERROR_FS from s_state, zero the error counters and the
+    /// first/last error records, and stamp s_lastcheck so the guest doesn't
+    /// immediately re-check. Caller guarantees the check found nothing.
+    private static func clearErrorFlag(_ vol: Ext4Volume) throws {
+        var sb = try vol.fsRead(at: 1024, count: 1024)
+        guard sb.count == 1024, le16(sb, 56) == 0xEF53 else {
+            throw Ext4JournalError.corrupt("superblock unreadable")
+        }
+        putLE16(&sb, 58, le16(sb, 58) & ~UInt16(0x0002))     // s_state: -EXT2_ERROR_FS
+        putLE32(&sb, 0x188, 0)                               // s_error_count
+        for off in stride(from: 0x18C, through: 0x1F3, by: 4) {
+            putLE32(&sb, off, 0)                             // first/last error records
+        }
+        putLE32(&sb, 64, UInt32(truncatingIfNeeded: Int(Date().timeIntervalSince1970)))  // s_lastcheck
+        if le32(sb, 100) & Ext4Superblock.ROCOMPAT_METADATA_CSUM != 0 {
+            putLE32(&sb, 0x3FC, Crc32c.hash(0xFFFF_FFFF, Array(sb[0..<0x3FC])))
+        }
+        try vol.fsWrite(at: 1024, sb)
+        vol.dev.fsync()
+    }
+
     // MARK: verification
 
-    /// Structural checks. Returns the number of problems found (0 = healthy).
-    private static func verify(_ vol: Ext4Volume, log: inout [String]) -> Int {
+    /// Structural checks. Returns the problem count and whether the walk was
+    /// EXHAUSTIVE — clearing the error flag is only defensible when it was.
+    private static func verify(_ vol: Ext4Volume, log: inout [String]) -> (issues: Int, complete: Bool) {
         var issues = 0
 
         // Superblock checksum.
@@ -149,11 +201,14 @@ enum Ext4Fsck {
         }
 
         // Reachability walk from the root: inode checksums + extent trees +
-        // directory structure. Bounded so a many-million-file image can't hang
-        // the UI; the cap is reported, never silent.
+        // directory structure. The cap only exists so a pathological image
+        // can't spin forever — it is sized off the filesystem's own inode
+        // count, so a normal disk is walked EXHAUSTIVELY (a truncated walk
+        // can't authorize clearing the error flag). Never silent: a hit cap
+        // is reported and reported as incomplete.
         var visited = Set<UInt32>()
         var bad = 0
-        let cap = 200_000
+        let cap = Int(vol.sb.inodesCount) + 1
         var stack: [UInt32] = [Ext4Volume.rootInode]
         while let ino = stack.popLast(), visited.count < cap {
             if !visited.insert(ino).inserted { continue }
@@ -164,27 +219,40 @@ enum Ext4Fsck {
                     if bad <= 10 { log.append("inode \(ino): checksum mismatch") }
                     continue
                 }
+                // Block pointers must land inside the filesystem. Parsing the
+                // map also throws on a corrupt extent header or an unreadable
+                // interior node. Bounded per inode (the head of the file) so a
+                // huge tree can't blow up memory — walkExtents materializes one
+                // dict entry per block, not per extent.
+                if !node.isInline && (node.isDir || node.isRegular) {
+                    let want = (Int(node.size) + vol.blockSize - 1) / vol.blockSize
+                    for (_, phys) in try vol.blockMap(node, upTo: min(max(want, 1), 12))
+                    where phys != 0 && phys >= vol.sb.blocksCount {
+                        bad += 1
+                        if bad <= 10 {
+                            log.append("inode \(ino): block pointer \(phys) is past the "
+                                       + "end of the filesystem (\(vol.sb.blocksCount) blocks)")
+                        }
+                        break
+                    }
+                }
                 if node.isDir {
                     for e in try vol.listDir(ino) where e.ino != 0 && e.ino <= vol.sb.inodesCount {
                         stack.append(e.ino)
                     }
-                } else if node.isRegular && !node.isInline {
-                    // Parses the whole extent tree / block map; throws on a
-                    // corrupt header or unreadable interior node.
-                    let blocks = (Int(node.size) + vol.blockSize - 1) / vol.blockSize
-                    _ = try vol.blockMap(node, upTo: min(blocks, 1))
                 }
             } catch {
                 bad += 1
                 if bad <= 10 { log.append("inode \(ino): \(error)") }
             }
         }
-        if visited.count >= cap {
+        let complete = visited.count < cap
+        if !complete {
             log.append("verification capped at \(cap) inodes — walk was NOT exhaustive")
         }
         log.append("verified \(visited.count) reachable inode(s)"
                    + (bad > 0 ? ", \(bad) bad" : ""))
-        return issues + bad
+        return (issues + bad, complete)
     }
 
     /// metadata_csum group-descriptor checksums: crc32c(seed → group# (le32) →

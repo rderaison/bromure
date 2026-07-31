@@ -513,7 +513,7 @@ struct Profiles: ParsableCommand {
         subcommands: [WorkspacesList.self, WorkspacesCreate.self, WorkspacesEdit.self,
                       VMRun.self, VMKill.self, WorkspacesReboot.self, Exec.self,
                       VMAttach.self, ProfilesDescribe.self, ProfilesRemove.self,
-                      WorkspacesSSHKeygen.self, WorkspacePorts.self,
+                      WorkspacesSSHKeygen.self, WorkspacePorts.self, WorkspacesFsck.self,
                       VMFusion.self, VMRouting.self, VMHybrid.self],
         // Default subcommand so `vm <workspace> -L` works docker-style: an
         // unrecognized first token falls through to `ports` as its argument.
@@ -570,6 +570,55 @@ struct WorkspacesList: ParsableCommand {
                 }
             }
         }
+    }
+}
+
+/// Check / repair a workspace's ext4 images from the host, with no VM and no
+/// e2fsprogs (Ext4Fsck is native). The GUI offers the same repair when a boot
+/// strands on filesystem errors; this is the scriptable, headless twin — and
+/// the way to fix a workspace that won't boot far enough to show the overlay.
+struct WorkspacesFsck: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "fsck",
+        abstract: "Check (and with --repair, fix) a workspace's disk images.")
+
+    @Argument(help: "Workspace id or name.")
+    var workspace: String
+
+    @Flag(name: .long, help: "Repair: replay the journal and clear a stale error flag.")
+    var repair = false
+
+    @Flag(name: .long, help: "Check the home image instead of the system disk.")
+    var home = false
+
+    func run() throws {
+        let store = ProfileStore()
+        let needle = workspace.lowercased()
+        guard let profile = store.loadAll().first(where: {
+            $0.name.lowercased() == needle || $0.id.uuidString.lowercased() == needle
+                || $0.id.uuidString.lowercased().hasPrefix(needle)
+        }) else {
+            throw ValidationError("No workspace named or id'd '\(workspace)'.")
+        }
+        // Never touch an image a live VM has open — that corrupts it.
+        let client = ControlClient()
+        if client.isAgentRunning(),
+           let resp = try? client.request("GET", "/profiles/\(ControlClient.encodeSegment(profile.id.uuidString))"),
+           resp.json["running"] as? Bool == true {
+            throw ValidationError("'\(profile.name)' is running — stop it first (`vm kill \(profile.name)`).")
+        }
+        let url = home ? store.homeImageURL(for: profile) : store.diskURL(for: profile)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw ValidationError("No \(home ? "home" : "system disk") image at \(url.path)")
+        }
+        print("\(repair ? "Repairing" : "Checking") \(home ? "home" : "system disk") of '\(profile.name)' …")
+        let result = try Ext4Fsck.check(imagePath: url.path, autoFix: repair)
+        print(result.output)
+        print(result.summary)
+        if !repair && result.status != 0 {
+            print("\nRe-run with --repair to fix what can be fixed here.")
+        }
+        if result.status == 4 { throw ExitCode(4) }
     }
 }
 

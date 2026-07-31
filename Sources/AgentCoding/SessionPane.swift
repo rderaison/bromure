@@ -181,7 +181,14 @@ final class SessionPane {
         let profileID = profile.id
         let view = BootAnimationView(
             model: bootOverlayModel,
-            onReset: { [weak self] in self?.acDelegate?.rebuildBaseImageAction(nil) },
+            // NOT rebuildBaseImageAction: that downloads/rebuilds the shared
+            // base image (network, ~5–10 min) and leaves this workspace's
+            // broken disk exactly as it was. Resetting the workspace's own
+            // disk re-clones from the base image already on disk — offline,
+            // instant, and the thing that actually unwedges the boot.
+            onReset: { [weak self] in
+                self?.acDelegate?.resetSystemDiskAfterBootFailure(profileID)
+            },
             onKeepWaiting: { [weak self] in
                 // Back to the dive HUD and re-arm the watchdog for another round.
                 self?.bootOverlayModel.failed = false
