@@ -77,6 +77,13 @@ private struct DockerVolumeJSON: Decodable {
     let Size: String?
 }
 
+/// Mutable scan state for the serial-console fsck-failure detector. Only ever
+/// touched on the pipe's readability-handler queue (serial), hence @unchecked.
+private final class SerialScanState: @unchecked Sendable {
+    var buffer = Data()
+    var reported = false
+}
+
 /// Boots an Ubuntu base image for an interactive session.
 ///
 /// Per-profile session: boots from a CoW clone of the base image, mounts
@@ -91,6 +98,15 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// Called when the guest writes a URL request file into the outbox
     /// share. Wire this to NSWorkspace.shared.open in the GUI layer.
     public var onURLOpen: ((URL) -> Void)?
+
+    /// Fired (once per VM, off the main thread) when the serial console shows
+    /// the boot dying on filesystem errors — e2fsck preen giving up ("RUN fsck
+    /// MANUALLY") or systemd dropping to the emergency shell. The guest is
+    /// headless: nobody can type at that prompt, so without this hook the boot
+    /// just hangs forever. The payload is the matched console line.
+    /// nonisolated(unsafe): invoked from the serial pipe's handler queue;
+    /// assigned once (wireSandboxCallbacks) before the VM starts printing.
+    nonisolated(unsafe) public var onBootFilesystemFailure: ((String) -> Void)?
 
     /// Called every ~0.7s with the current tmux window list. tmux is the source
     /// of truth, so the host mirrors this directly as the tab bar; there's no
@@ -353,7 +369,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // bytes, not HID events. X11/kitty stay on the image's disk but
         // nothing starts them (plan phase 3).
 
-        // Serial console: tee guest stdout to host stderr so we can see boot.
+        // Serial console: tee guest stdout to host stderr so we can see boot,
+        // and scan it for a boot dying on filesystem errors (see
+        // `onBootFilesystemFailure`). The handler runs serially on the handle's
+        // own queue, so the line buffer and once-flag need no locking.
         let serialIn = Pipe()
         let serialOut = Pipe()
         let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
@@ -362,9 +381,36 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             fileHandleForWriting: serialOut.fileHandleForWriting
         )
         config.serialPorts = [serial]
-        serialOut.fileHandleForReading.readabilityHandler = { handle in
+        let scan = SerialScanState()
+        serialOut.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            if !data.isEmpty { FileHandle.standardError.write(data) }
+            guard !data.isEmpty else { return }
+            FileHandle.standardError.write(data)
+            guard !scan.reported else { return }
+            scan.buffer.append(data)
+            func report(_ match: String) {
+                scan.reported = true
+                scan.buffer.removeAll()
+                self?.onBootFilesystemFailure?(match)
+            }
+            while let nl = scan.buffer.firstIndex(of: 0x0A) {
+                let line = String(decoding: scan.buffer[..<nl], as: UTF8.self)
+                scan.buffer.removeSubrange(...nl)
+                if let match = UbuntuSandboxVM.fsBootFailureMatch(in: line) {
+                    report(match)
+                    return
+                }
+            }
+            // The emergency prompts end WITHOUT a newline ("Give root password
+            // for maintenance…:"), so the partial tail must be scanned too.
+            if !scan.buffer.isEmpty {
+                let tail = String(decoding: scan.buffer, as: UTF8.self)
+                if let match = UbuntuSandboxVM.fsBootFailureMatch(in: tail) {
+                    report(match)
+                    return
+                }
+                if scan.buffer.count > 4096 { scan.buffer.removeFirst(scan.buffer.count - 512) }
+            }
         }
         serialConsoleOut = serialOut.fileHandleForReading
 
@@ -553,6 +599,26 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// can register listeners on it after start. nil before `prepare()`.
     public var socketDevice: VZVirtioSocketDevice? {
         vm?.socketDevices.first as? VZVirtioSocketDevice
+    }
+
+    /// The console lines an Ubuntu boot prints when the root filesystem fails
+    /// its fsck and systemd gives up. e2fsck preen failure first, then the
+    /// emergency-shell breadcrumbs (which also catch non-fsck local-fs
+    /// failures — the shell is equally unreachable either way). Returns the
+    /// matched line, trimmed, or nil.
+    nonisolated static func fsBootFailureMatch(in line: String) -> String? {
+        let patterns = [
+            "UNEXPECTED INCONSISTENCY",          // e2fsck: preen can't fix, wants -y
+            "RUN fsck MANUALLY",
+            "fsck failed with exit status",      // systemd-fsck summary line
+            "Failed to check file system",
+            "You are in emergency mode",
+            "Give root password for maintenance",
+            "root account is locked",            // Ubuntu: sulogin with no root pw
+        ]
+        guard patterns.contains(where: { line.contains($0) }) else { return nil }
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(trimmed.suffix(200))
     }
 
     /// Parse a tabs.txt body into the tmux window list. Columns: idx, active,

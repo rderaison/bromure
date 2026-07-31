@@ -167,6 +167,8 @@ final class SessionPane {
         bootOverlayModel.workspaceName = profile.name
         bootOverlayModel.accentHex = accentForBoot(profile.color.hexInUI)
         bootOverlayModel.failed = false
+        bootOverlayModel.failureKind = .watchdog
+        bootOverlayModel.failureDetail = nil
         bootOverlayModel.statusText = nil
         bootOverlayModel.progress = nil
         let item = DispatchWorkItem { [weak self] in self?.presentBootOverlay() }
@@ -176,6 +178,7 @@ final class SessionPane {
 
     private func presentBootOverlay() {
         guard bootOverlayHost == nil, !sawTabList else { return }
+        let profileID = profile.id
         let view = BootAnimationView(
             model: bootOverlayModel,
             onReset: { [weak self] in self?.acDelegate?.rebuildBaseImageAction(nil) },
@@ -183,6 +186,12 @@ final class SessionPane {
                 // Back to the dive HUD and re-arm the watchdog for another round.
                 self?.bootOverlayModel.failed = false
                 self?.armBootWatchdog()
+            },
+            onRepairDisk: { [weak self] in
+                self?.acDelegate?.repairSystemDiskAction(profileID)
+            },
+            onResetDisk: { [weak self] in
+                self?.acDelegate?.resetSystemDiskAfterBootFailure(profileID)
             })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -206,6 +215,30 @@ final class SessionPane {
         bootOverlayModel.statusText = text
         bootOverlayModel.progress = progress
         if text != nil { armBootWatchdog() }
+    }
+
+    /// The serial console showed the boot dying on filesystem errors: flip the
+    /// overlay to the disk-failure panel immediately (no point waiting out the
+    /// watchdog — the emergency shell never recovers on its own). Presents the
+    /// overlay right away if the 400ms defer hasn't fired yet.
+    func showFilesystemFailure(detail: String) {
+        guard !sawTabList else { return }
+        if bootOverlayHost == nil {
+            bootOverlayShowItem?.cancel()
+            presentBootOverlay()
+        }
+        bootOverlayModel.failureKind = .filesystem
+        bootOverlayModel.failureDetail = detail
+        bootOverlayModel.failed = true
+    }
+
+    /// Back to the dive HUD (with a status line) while a repair/reset remedy
+    /// runs — the pane stays on the boot screen through the relaunch.
+    func showBootRemedyProgress(_ text: String) {
+        bootOverlayModel.failed = false
+        bootOverlayModel.failureKind = .watchdog
+        bootOverlayModel.failureDetail = nil
+        updateBootStatus(text, progress: nil)
     }
 
     private func armBootWatchdog() {

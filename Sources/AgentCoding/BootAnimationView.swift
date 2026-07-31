@@ -14,6 +14,12 @@ final class BootOverlayModel {
     var accentHex: String = "#38f9d7"
     /// Flipped by the watchdog: swap the dive HUD for the failure panel.
     var failed = false
+    /// Why the boot failed — drives which failure panel shows.
+    enum FailureKind { case watchdog, filesystem }
+    var failureKind: FailureKind = .watchdog
+    /// For `.filesystem`: the console line that tripped detection (e.g.
+    /// "/dev/vda2: UNEXPECTED INCONSISTENCY; RUN fsck MANUALLY.").
+    var failureDetail: String?
     /// Optional status line under the scan bar — e.g. the home-storage
     /// migration's "MOVING HOME — 42% OF 7.9 GB". nil = plain boot.
     var statusText: String?
@@ -29,6 +35,10 @@ struct BootAnimationView: View {
     /// Failure panel actions.
     let onReset: () -> Void
     let onKeepWaiting: () -> Void
+    /// Filesystem-failure panel actions: run the host's native fsck on the
+    /// system disk, or re-clone it from the base image.
+    var onRepairDisk: () -> Void = {}
+    var onResetDisk: () -> Void = {}
 
     private var accent: Color { Color(hex: model.accentHex) }
 
@@ -43,8 +53,15 @@ struct BootAnimationView: View {
                 colors: [.clear, .black.opacity(0.7)],
                 center: .center, startRadius: 40, endRadius: 520)
             if model.failed {
-                FailurePanel(workspaceName: model.workspaceName,
-                             onReset: onReset, onKeepWaiting: onKeepWaiting)
+                switch model.failureKind {
+                case .watchdog:
+                    FailurePanel(workspaceName: model.workspaceName,
+                                 onReset: onReset, onKeepWaiting: onKeepWaiting)
+                case .filesystem:
+                    DiskFailurePanel(workspaceName: model.workspaceName,
+                                     detail: model.failureDetail,
+                                     onRepair: onRepairDisk, onReset: onResetDisk)
+                }
             } else {
                 DiveHUD(model: model, accent: accent)
             }
@@ -199,6 +216,70 @@ private struct FailurePanel: View {
             .padding(.top, 4)
         }
         .padding(28)
+        .background(RoundedRectangle(cornerRadius: 14).fill(.black.opacity(0.75)))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.red.opacity(0.4)))
+    }
+}
+
+/// Boot died on filesystem errors: the guest is sitting at an emergency
+/// prompt nobody can type at (headless VM). Primary remedy is the host's
+/// native fsck (journal replay); the fallback re-clones the system disk from
+/// the base image (home folder untouched).
+private struct DiskFailurePanel: View {
+    let workspaceName: String
+    let detail: String?
+    let onRepair: () -> Void
+    let onReset: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "internaldrive.fill")
+                .font(.system(size: 34))
+                .foregroundStyle(.red)
+                .shadow(color: .red.opacity(0.6), radius: 10)
+            VStack(spacing: 6) {
+                Text("DISK ERROR")
+                    .font(.system(size: 15, weight: .bold, design: .monospaced))
+                    .tracking(4)
+                    .foregroundStyle(.white)
+                Text("The system disk failed its boot-time filesystem check, and the boot cannot continue.")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                if let detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.red.opacity(0.8))
+                        .lineLimit(3)
+                        .multilineTextAlignment(.center)
+                }
+                Text("Repair replays the disk's journal in place. Reset re-clones the OS from the base image — your home folder survives either way.")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .multilineTextAlignment(.center)
+            }
+            HStack(spacing: 12) {
+                Button(action: onReset) {
+                    Text("Reset System Disk…")
+                        .font(.system(size: 12, design: .monospaced))
+                        .padding(.horizontal, 14).padding(.vertical, 7)
+                        .background(Capsule().strokeBorder(.white.opacity(0.3)))
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+                .buttonStyle(.plain)
+                Button(action: onRepair) {
+                    Text("Repair Disk")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 14).padding(.vertical, 7)
+                        .background(Capsule().fill(.red.opacity(0.85)))
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 4)
+        }
+        .padding(28)
+        .frame(maxWidth: 460)
         .background(RoundedRectangle(cornerRadius: 14).fill(.black.opacity(0.75)))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.red.opacity(0.4)))
     }

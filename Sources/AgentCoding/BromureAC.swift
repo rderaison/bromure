@@ -1396,6 +1396,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// VM stops, mirroring `docker run --rm`.
     private var ephemeralProfiles: Set<Profile.ID> = []
 
+    // MARK: Boot filesystem-failure remedies
+    //
+    // The guest is headless: when its boot-time fsck fails, systemd drops to
+    // an emergency shell nobody can type at and the boot hangs forever. The
+    // serial-console scanner (UbuntuSandboxVM.onBootFilesystemFailure) detects
+    // it; these track the remedy flow — native fsck on the system disk, or a
+    // re-clone from base — chosen locally (boot overlay) or remotely
+    // (fat client / iOS via the pending-prompt broker).
+
+    /// What to run against the disk after the wedged VM stops, before the
+    /// relaunch builds the fresh VM. Consumed by `relaunchVM`.
+    enum BootRemedy { case repairDisk, resetDisk }
+    private var pendingBootRemedies: [Profile.ID: BootRemedy] = [:]
+    /// Console detail per profile currently wedged at boot (also exported to
+    /// the fat-client state so remote UIs can badge the workspace).
+    private var activeBootFailures: [Profile.ID: String] = [:]
+    /// Profiles whose current failure already got a repair this cycle — the
+    /// next prompt escalates to a disk reset. Cleared on a successful boot.
+    private var bootRepairAttempted: Set<Profile.ID> = []
+
     /// The running VM for a profile, or nil if it isn't running. The control
     /// plane (and any window-less caller) resolves a profile's VM through here.
     func sandbox(for id: Profile.ID) -> UbuntuSandboxVM? {
@@ -3428,7 +3448,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Spec numbers the fat client's VM dashboard needs even for an
             // off/suspended workspace (no `vms` entry to read them from).
             let dash = vmDashboardData(for: p.id)
-            return [
+            var row: [String: Any] = [
                 "id": p.id.uuidString,
                 "name": p.name,
                 "accentHex": p.color.hexInUI,
@@ -3442,6 +3462,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "diskAllocatedBytes": dash.diskAllocated,
                 "diskCapacityBytes": dash.diskCapacity,
             ]
+            // Wedged at boot on filesystem errors (the decision prompt rides
+            // pendingPrompts; this lets clients badge the workspace row too).
+            if let failure = activeBootFailures[p.id] { row["bootFailure"] = failure }
+            return row
         }
     }
 
@@ -8906,6 +8930,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     "[ac] guest reboot detected for '\(session.profile.name)' — riding it out\n".utf8))
             }
         }
+        sandbox.onBootFilesystemFailure = { [weak self] detail in
+            Task { @MainActor in
+                self?.handleBootFilesystemFailure(profileID: pid, detail: detail)
+            }
+        }
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
                 // If this is an OAuth login URL whose redirect_uri points at a
@@ -8942,6 +8971,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         FileHandle.standardError.write(Data(
                             "[ac] guest reboot of '\(session.profile.name)' completed\n".utf8))
                     }
+                }
+                // A roster means the guest booted all the way to tmux — any
+                // filesystem-failure cycle (detection, escalation) is over.
+                if !tabs.isEmpty {
+                    self.activeBootFailures.removeValue(forKey: pid)
+                    self.bootRepairAttempted.remove(pid)
                 }
                 // Mirror for detached `vm ls` / API / SSH, and drive the tab bar.
                 self.runningSessions[pid]?.tabs = tabs
@@ -9129,6 +9164,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor
     func handleSessionStopped(profileID: Profile.ID) {
         guard let session = runningSessions[profileID] else { return }   // already handled
+        // The boot-failure cycle (if any) dies with the session. A queued
+        // remedy only survives on the reboot-relaunch path, which never
+        // reaches here.
+        activeBootFailures.removeValue(forKey: profileID)
+        pendingBootRemedies.removeValue(forKey: profileID)
         cleanupSessionRegistrations(for: session.profile)
         unregisterSession(profileID)
         if let win = profileWindows[profileID] {
@@ -9253,10 +9293,179 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             relaunchVM(in: pane)
         } else {
             // Detached (window-less, e.g. a remote/TUI session): clean teardown +
-            // fresh window-less boot.
+            // fresh window-less boot. Take the queued remedy BEFORE the
+            // teardown — handleSessionStopped clears the remedy queue.
             let profile = runningSessions[profileID]?.profile
+            let remedy = pendingBootRemedies.removeValue(forKey: profileID)
             handleSessionStopped(profileID: profileID)
-            if let profile { launch(profile, detached: true) }
+            if let profile {
+                if let remedy {
+                    Task { @MainActor in
+                        await self.executeBootRemedy(remedy, profile: profile, pane: nil)
+                        self.launch(profile, detached: true)
+                    }
+                } else {
+                    launch(profile, detached: true)
+                }
+            }
+        }
+    }
+
+    // MARK: - Boot filesystem-failure handling
+
+    /// The serial console showed the boot dying on filesystem errors (see
+    /// UbuntuSandboxVM.onBootFilesystemFailure). Surface it on the pane's boot
+    /// overlay AND to any connected remote client (fat client / iPhone / iPad)
+    /// via the pending-prompt broker, then run whichever remedy is chosen.
+    @MainActor
+    private func handleBootFilesystemFailure(profileID pid: Profile.ID, detail: String) {
+        guard let session = runningSessions[pid] else { return }
+        guard activeBootFailures[pid] == nil else { return }   // one cycle per boot
+        let profile = session.profile
+        activeBootFailures[pid] = detail
+        FileHandle.standardError.write(Data(
+            "[ac] boot filesystem failure on '\(profile.name)': \(detail)\n".utf8))
+        pane(for: pid)?.showFilesystemFailure(detail: detail)
+
+        // Remote surfacing: keep offering the remedy while the workspace stays
+        // wedged, so a client that connects minutes later still gets the
+        // prompt. iOS collapses prompts to two buttons, so the choice is
+        // two-step: repair first; reset only once a repair was already tried.
+        Task { @MainActor [weak self] in
+            while true {
+                // Cycle over: session gone, roster arrived (onTabList clears
+                // the failure), or a remedy is already queued.
+                guard let self, self.runningSessions[pid] != nil,
+                      self.activeBootFailures[pid] != nil,
+                      self.pendingBootRemedies[pid] == nil else { return }
+                guard PendingPromptBroker.hasLiveListener() else {
+                    try? await Task.sleep(for: .seconds(3))
+                    continue
+                }
+                let escalate = self.bootRepairAttempted.contains(pid)
+                let title = "“\(profile.name)” can't boot — disk error"
+                let message = escalate
+                    ? "The filesystem is still failing after a repair.\n\n\(detail)\n\n"
+                      + "Reset re-clones the OS from the base image. Anything installed "
+                      + "with apt and changes under /etc are lost; the home folder "
+                      + "(projects, dotfiles, keys) survives."
+                    : "The system disk failed its boot-time filesystem check and the "
+                      + "boot cannot continue.\n\n\(detail)\n\n"
+                      + "Repair replays the disk's journal on the Mac and boots again. "
+                      + "Nothing is deleted."
+                let buttons = escalate ? ["Reset System Disk", "Not Now"]
+                                       : ["Repair Disk", "Not Now"]
+                // fallback -1 distinguishes timeout/disconnect (keep offering)
+                // from a real "Not Now" tap (stop nagging this boot).
+                let choice = await PendingPromptBroker.shared.askAsync(
+                    profileID: pid, title: title, message: message,
+                    buttons: buttons, fallback: -1, timeout: 600)
+                guard self.runningSessions[pid] != nil,
+                      self.activeBootFailures[pid] != nil,
+                      self.pendingBootRemedies[pid] == nil else { return }
+                switch choice {
+                case 0: self.performBootRemedy(pid, escalate ? .resetDisk : .repairDisk)
+                        return
+                case 1: return                       // explicit "Not Now"
+                default: continue                    // timeout / client went away
+                }
+            }
+        }
+    }
+
+    /// Boot-overlay "Repair Disk" (also the remote prompt's repair choice).
+    @MainActor
+    func repairSystemDiskAction(_ pid: Profile.ID) {
+        performBootRemedy(pid, .repairDisk)
+    }
+
+    /// Boot-overlay "Reset System Disk…": confirm (it discards the OS layer),
+    /// then run the reset remedy. Remote prompts confirm via their own alert.
+    @MainActor
+    func resetSystemDiskAfterBootFailure(_ pid: Profile.ID) {
+        guard let profile = runningSessions[pid]?.profile else { return }
+        let alert = NSAlert()
+        alert.messageText = "Reset “\(profile.name)” system disk to base?"
+        alert.informativeText = """
+        Wipes the per-profile read-write copy of the OS:
+        • Anything you `sudo apt install`ed inside the VM
+        • Modifications to /etc, /var, /usr, /opt
+
+        Your home folder is untouched — projects, dotfiles, .ssh keys, \
+        npm-global, .cargo, and shell history all survive.
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Reset to base")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        performBootRemedy(pid, .resetDisk)
+    }
+
+    /// Stop the wedged VM and queue `remedy` to run before the relaunch.
+    /// Rides the guest-reboot relaunch path (rebootRequested), which keeps the
+    /// pane alive with the boot overlay showing through stop → remedy → boot.
+    @MainActor
+    private func performBootRemedy(_ pid: Profile.ID, _ remedy: BootRemedy) {
+        guard let session = runningSessions[pid], !session.stopping,
+              pendingBootRemedies[pid] == nil else { return }
+        pendingBootRemedies[pid] = remedy
+        if remedy == .repairDisk { bootRepairAttempted.insert(pid) }
+        pane(for: pid)?.showBootRemedyProgress(
+            remedy == .repairDisk ? "REPAIRING FILE SYSTEM" : "RESETTING SYSTEM DISK")
+        // The emergency shell can't answer an ACPI power button reliably;
+        // never suspend it (a RAM snapshot of a wedged boot is worthless).
+        session.rebootRequested = true
+        pane(for: pid)?.rebootRequested = true
+        session.sandbox.sessionDisk?.clearSavedState()
+        guard let vm = session.sandbox.vm else { return }
+        Task { @MainActor in
+            try? vm.requestStop()
+            let deadline = Date().addingTimeInterval(5)
+            while vm.state == .running && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            if vm.state == .running { await Self.forceStop(vm) }
+            // onStopped → relaunchAfterGuestReboot → relaunchVM consumes the
+            // pending remedy before building the fresh VM.
+        }
+    }
+
+    /// Run the queued remedy against the (now stopped) VM's disk. Called from
+    /// the relaunch paths with the pane still up, before the fresh VM builds.
+    @MainActor
+    func executeBootRemedy(_ remedy: BootRemedy, profile: Profile, pane: SessionPane?) async {
+        activeBootFailures.removeValue(forKey: profile.id)
+        switch remedy {
+        case .resetDisk:
+            do {
+                try store.resetDisk(for: profile)
+                bootRepairAttempted.remove(profile.id)
+                emitDiskResetEvent(profile: profile, reason: "boot_fsck_failure")
+                FileHandle.standardError.write(Data(
+                    "[ac] system disk of '\(profile.name)' reset to base after boot failure\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[ac] disk reset for '\(profile.name)' failed: \(error)\n".utf8))
+            }
+        case .repairDisk:
+            pane?.showBootRemedyProgress("REPAIRING FILE SYSTEM")
+            let diskPath = store.diskURL(for: profile).path
+            let result = await Task.detached(priority: .userInitiated) {
+                try? Ext4Fsck.check(imagePath: diskPath, autoFix: true)
+            }.value
+            // A repaired or already-clean disk clears the escalation flag —
+            // if the NEXT boot fails again anyway, that's when reset is
+            // offered. status 4 (errors beyond the journal) keeps it set so
+            // the escalation happens immediately.
+            if let result {
+                FileHandle.standardError.write(Data(
+                    "[ac] native fsck on '\(profile.name)': \(result.summary)\n\(result.output)\n".utf8))
+            } else {
+                FileHandle.standardError.write(Data(
+                    "[ac] native fsck on '\(profile.name)' could not open the disk\n".utf8))
+            }
+            // The RAM snapshot (invalid after any disk mutation) was already
+            // dropped by performBootRemedy before the VM stopped.
         }
     }
 
@@ -9505,6 +9714,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.model.tabs = [TabsModel.Tab(label: "shell")]
 
         Task { @MainActor in
+            // A queued boot-failure remedy (native fsck / disk reset) runs
+            // first, against the stopped VM's disk, with the pane's boot
+            // overlay narrating. Only then does the fresh VM build.
+            if let remedy = self.pendingBootRemedies.removeValue(forKey: profile.id) {
+                await self.executeBootRemedy(remedy, profile: profile, pane: win)
+            }
             // Brief settle before reusing the per-profile shared dirs
             // (meta-share, outbox) while the old VZ virtiofs daemon
             // releases its handles after the previous VM stopped. The
