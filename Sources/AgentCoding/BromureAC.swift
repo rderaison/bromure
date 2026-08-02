@@ -3124,6 +3124,56 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onListPendingPrompts = {
             MainActor.assumeIsolated { PendingPromptBroker.shared.pendingList() }
         }
+        // Remote subscription registration: the fat client asks us to start
+        // the flow, then watches /state for the sign-in URL.
+        server.onPendingRegistration = { [weak self] in
+            MainActor.assumeIsolated {
+                guard var d = RemoteRegistrationBroker.shared.stateDict() else { return nil }
+                // Resolve the throwaway VM's IP live: it is discovered a beat
+                // after boot, so a one-shot publish at URL time can miss it.
+                if d["vmIP"] == nil, let self,
+                   let pid = self.claudeRegistration?.scratchProfile.id,
+                   let ip = self.runningSessions[pid]?.lastIP {
+                    d["vmIP"] = ip
+                }
+                return d
+            }
+        }
+        server.onBeginRegistration = { [weak self] provider, profileID in
+            MainActor.assumeIsolated {
+                guard let self, let p = SubscriptionProvider(rawValue: provider) else { return false }
+                guard self.claudeRegistration == nil else { return false }   // one at a time
+                let scope: SubscriptionRegistrationScope = profileID
+                    .flatMap(UUID.init(uuidString:)).map { .askPerSession($0) } ?? .alwaysShared
+                self.beginSubscriptionRegistration(provider: p, scope: scope,
+                                                   remoteInitiated: true)
+                return true
+            }
+        }
+        // Per-tool subscription state for the remote editor: when it was
+        // registered and whether the provider has since rejected it.
+        server.onSubscriptionStatus = { [weak self] profileID in
+            MainActor.assumeIsolated {
+                guard let engine = self?.mitmEngine else { return [:] }
+                let pid = profileID.flatMap(UUID.init(uuidString:))
+                func entry(_ savedAt: Date?, _ reauth: Date?) -> [String: Any]? {
+                    guard let savedAt else { return nil }
+                    var d: [String: Any] = ["registeredAt": savedAt.timeIntervalSince1970]
+                    if let reauth { d["reauthRequiredAt"] = reauth.timeIntervalSince1970 }
+                    return d
+                }
+                var out: [String: Any] = [:]
+                if let e = entry(engine.claudeSubscriptionStore.record(for: pid)?.savedAt,
+                                 engine.claudeSubscriptionStore.reauthRequiredAt(for: pid)) { out["claude"] = e }
+                if let e = entry(engine.codexSubscriptionStore.record(for: pid)?.savedAt,
+                                 engine.codexSubscriptionStore.reauthRequiredAt(for: pid)) { out["codex"] = e }
+                if let e = entry(engine.grokSubscriptionStore.record(for: pid)?.savedAt,
+                                 engine.grokSubscriptionStore.reauthRequiredAt(for: pid)) { out["grok"] = e }
+                if let e = entry(engine.kimiSubscriptionStore.record(for: pid)?.savedAt,
+                                 engine.kimiSubscriptionStore.reauthRequiredAt(for: pid)) { out["kimi"] = e }
+                return out
+            }
+        }
         server.onAnswerPrompt = { id, choice in
             MainActor.assumeIsolated { PendingPromptBroker.shared.answer(id: id, choice: choice) }
         }

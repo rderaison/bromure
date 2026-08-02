@@ -19,7 +19,7 @@ import Virtualization
 // Notification.Name.bromureSubscriptionStoresChanged lives in
 // ProfileViews.swift (shared with iOS) next to the editor that observes it.
 
-public enum SubscriptionProvider: Sendable {
+public enum SubscriptionProvider: String, Sendable, CaseIterable {
     case claude
     case codex
     case grok
@@ -91,12 +91,62 @@ final class ClaudeRegistrationState {
     }
 }
 
+/// A registration started by a REMOTE client (the macOS fat client). The
+/// throwaway VM and the credential store live here on the host, but the human
+/// is at the other end of the tunnel — so instead of opening the provider's
+/// sign-in page in this Mac's browser, we publish it for the client to open in
+/// ITS browser. The OAuth callback comes back through the client's existing
+/// `forward <ip> <port>` tunnel, which already reaches a guest's loopback via
+/// the vsock relay on port 5010 (the same path LoopbackCallbackForwarder uses
+/// locally), so no new SSH verb is needed.
+@MainActor
+final class RemoteRegistrationBroker {
+    static let shared = RemoteRegistrationBroker()
+
+    struct Pending {
+        let provider: String
+        /// The provider's sign-in URL, for the client's browser.
+        var url: String?
+        /// The throwaway VM's guest IP + the loopback port its CLI is waiting
+        /// on. The client needs both to point its local listener at the VM.
+        var vmIP: String?
+        var callbackPort: Int?
+        /// Set when the flow finished (captured or cancelled) so the client
+        /// can tear its listener down.
+        var finished = false
+    }
+
+    private(set) var pending: Pending?
+
+    func begin(provider: String) { pending = Pending(provider: provider) }
+    func publish(url: String, callbackPort: Int) {
+        pending?.url = url
+        pending?.callbackPort = callbackPort
+    }
+    func publish(vmIP: String) { pending?.vmIP = vmIP }
+    func finish() { pending?.finished = true; pending = nil }
+
+    /// `/state` payload — nil until a remote registration is in flight.
+    func stateDict() -> [String: Any]? {
+        guard let p = pending else { return nil }
+        var d: [String: Any] = ["provider": p.provider]
+        if let u = p.url { d["url"] = u }
+        if let ip = p.vmIP { d["vmIP"] = ip }
+        if let port = p.callbackPort { d["callbackPort"] = port }
+        return d
+    }
+}
+
 extension ACAppDelegate {
 
     /// Entry point for the "Register with Claude / ChatGPT" button / menu item.
+    /// `remoteInitiated`: a fat client asked for this, so skip the local
+    /// explainer alert (nobody is at this screen) and route the sign-in URL to
+    /// the client instead of this Mac's browser.
     @MainActor
     func beginSubscriptionRegistration(provider: SubscriptionProvider,
-                                       scope: SubscriptionRegistrationScope) {
+                                       scope: SubscriptionRegistrationScope,
+                                       remoteInitiated: Bool = false) {
         // One at a time — bring an in-flight registration forward instead.
         if let existing = claudeRegistration {
             existing.window?.makeKeyAndOrderFront(nil)
@@ -119,7 +169,12 @@ extension ACAppDelegate {
             comment: ""), provider.displayName)
         explainer.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
         explainer.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        guard explainer.runModal() == .alertFirstButtonReturn else { return }
+        // Remote-initiated: nobody is sitting at this Mac to answer, and the
+        // client already showed its own confirmation before calling.
+        if !remoteInitiated {
+            guard explainer.runModal() == .alertFirstButtonReturn else { return }
+        }
+        if remoteInitiated { RemoteRegistrationBroker.shared.begin(provider: provider.displayName) }
 
         // Scratch profile: the right tool + subscription, no folders / SSH /
         // creds / MCP / env, fresh random id → unique throwaway dir we delete.
@@ -239,6 +294,23 @@ extension ACAppDelegate {
         let providerName = self.claudeRegistration?.provider.displayName ?? "your account"
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
+                // Remote-initiated: the human is at the fat client, so hand
+                // it the URL + the VM's loopback port and let it open the page
+                // and tunnel the callback. Opening here would sign in on the
+                // wrong machine (and nobody would see the page).
+                // The broker holds a Pending only for a remote-initiated run,
+                // so its presence IS the "route this to the client" signal —
+                // no need to thread a flag down into the sandbox wiring.
+                if RemoteRegistrationBroker.shared.pending != nil {
+                    let port = ACAppDelegate.loopbackCallbackPort(from: url)
+                    RemoteRegistrationBroker.shared.publish(
+                        url: url.absoluteString, callbackPort: Int(port ?? 0))
+                    if let pid = self?.claudeRegistration?.scratchProfile.id,
+                       let ip = self?.runningSessions[pid]?.lastIP {
+                        RemoteRegistrationBroker.shared.publish(vmIP: ip)
+                    }
+                    return
+                }
                 if let self, let sandbox,
                    let port = ACAppDelegate.loopbackCallbackPort(from: url),
                    let dev = sandbox.socketDevice,

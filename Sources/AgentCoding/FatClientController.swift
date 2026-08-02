@@ -89,6 +89,80 @@ final class RemoteHostController {
     }
     private(set) var decisionPrompts: [DecisionPrompt] = []
 #endif
+    // MARK: Remote subscription registration
+    //
+    // The throwaway VM and the credential store live on the REMOTE; the human
+    // is here. So the remote publishes the provider's sign-in URL plus the
+    // VM's guest IP and loopback callback port, and this side opens the page
+    // in the local browser and tunnels the OAuth callback back through the
+    // existing `forward <ip> <port>` verb — which reaches a guest's loopback
+    // via the vsock relay, the same path the host uses locally.
+
+    /// Per-tool subscription state mirrored from /state: registeredAt and, when
+    /// the provider rejected the credential, reauthRequiredAt.
+    struct SubscriptionState: Equatable {
+        let registeredAt: Date
+        /// Non-nil = the provider rejected this credential; re-register.
+        let reauthRequiredAt: Date?
+    }
+    private(set) var subscriptionStatus: [String: SubscriptionState] = [:]
+    /// The local listener bridging the OAuth callback to the remote VM, and the
+    /// registration it belongs to. Torn down when the flow leaves /state.
+    private var registrationCallback: RegistrationCallbackTunnel?
+    /// Sign-in URLs already opened, so a repeated poll doesn't reopen the page.
+    private var openedRegistrationURLs: Set<String> = []
+
+    /// Ask the remote to start a registration; the URL arrives via /state.
+    func beginRemoteRegistration(provider: String, profileID: UUID?) {
+        var body: [String: Any] = ["provider": provider]
+        if let profileID { body["profileId"] = profileID.uuidString }
+        send("POST", "/subscriptions/register", body: body)
+    }
+
+    private func applySubscriptions(_ dict: [String: Any]) {
+        var out: [String: SubscriptionState] = [:]
+        for (tool, raw) in dict {
+            guard let d = raw as? [String: Any],
+                  let ts = d["registeredAt"] as? Double else { continue }
+            let reauth = (d["reauthRequiredAt"] as? Double).map(Date.init(timeIntervalSince1970:))
+            out[tool] = SubscriptionState(registeredAt: Date(timeIntervalSince1970: ts),
+                                          reauthRequiredAt: reauth)
+        }
+        if subscriptionStatus != out { subscriptionStatus = out }
+    }
+
+    /// React to the remote's in-flight registration: stand the callback tunnel
+    /// up as soon as we know the VM + port, then open the sign-in page here.
+    private func applyPendingRegistration(_ reg: [String: Any]?) {
+        guard let reg else {
+            // Flow ended (captured or cancelled) — drop the listener.
+            registrationCallback?.stop()
+            registrationCallback = nil
+            openedRegistrationURLs.removeAll()
+            return
+        }
+        guard let urlString = reg["url"] as? String,
+              let port = reg["callbackPort"] as? Int, port > 0,
+              let ip = reg["vmIP"] as? String, !ip.isEmpty,
+              let url = URL(string: urlString) else { return }
+        if registrationCallback?.port != port || registrationCallback?.vmIP != ip {
+            registrationCallback?.stop()
+            registrationCallback = RegistrationCallbackTunnel(
+                host: host, vmIP: ip, port: port)
+            registrationCallback?.start()
+        }
+        // Open once per URL: /state repeats it every poll until sign-in lands.
+        guard !openedRegistrationURLs.contains(urlString) else { return }
+        openedRegistrationURLs.insert(urlString)
+        FatClientLog.log("remote registration: opening sign-in page locally, "
+            + "callback 127.0.0.1:\(port) -> \(ip):\(port)")
+#if os(macOS)
+        NSWorkspace.shared.open(url)
+#else
+        UIApplication.shared.open(url)
+#endif
+    }
+
     /// Shared-folder paths per running VM (feeds the remote file browser's
     /// location list — browsed via the guest, since the host dirs live on A).
     private(set) var mounts: [Profile.ID: [String]] = [:]
@@ -397,6 +471,8 @@ final class RemoteHostController {
         applyAutomations(autos)
         applyTasks((snapshot["tasks"] as? [String: Any]) ?? [:])
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
+        applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
+        applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
         revision &+= 1
         if revision == 1 {
             FatClientLog.log("apply: \(workspaces.count) workspaces, \(vms.count) running, "
@@ -1978,13 +2054,47 @@ final class RemoteHostWindow: NSWindow {
                 terminalDefaults: TerminalAppDefaults.load(),
                 storageContext: nil,
                 remoteCredentialRefs: credentialRefs,
+                // Subscription registration works remotely: the throwaway VM
+                // and credential store stay on the remote, while the sign-in
+                // page opens in THIS Mac's browser and the OAuth callback
+                // tunnels back (see RegistrationCallbackTunnel).
                 onSave: { [weak self] edited, generateSSH in
                     self?.saveWorkspaceSettings(id, edited, generateSSH: generateSSH)
                 },
-                onCancel: { [weak self] in self?.closeSettingsWindow(id) }))
+                onCancel: { [weak self] in self?.closeSettingsWindow(id) },
+                claudeAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["claude"]?.registeredAt },
+                claudeReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["claude"]?.reauthRequiredAt },
+                codexReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["codex"]?.reauthRequiredAt },
+                grokReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["grok"]?.reauthRequiredAt },
+                kimiReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["kimi"]?.reauthRequiredAt },
+                onRegisterClaude: { [weak self] in self?.beginRemoteRegistration(.claude, id) },
+                codexAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["codex"]?.registeredAt },
+                onRegisterCodex: { [weak self] in self?.beginRemoteRegistration(.codex, id) },
+                grokAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["grok"]?.registeredAt },
+                onRegisterGrok: { [weak self] in self?.beginRemoteRegistration(.grok, id) },
+                kimiAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["kimi"]?.registeredAt },
+                onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, id) }))
             win.makeKeyAndOrderFront(nil)
             self.settingsWindows[id] = win
         }
+    }
+
+    /// Confirm on this Mac, then ask the remote to start the flow. The remote
+    /// skips its own explainer for a client-initiated run, so this alert is the
+    /// only one the user sees.
+    private func beginRemoteRegistration(_ provider: SubscriptionProvider, _ profileID: Profile.ID) {
+        let a = NSAlert()
+        a.messageText = String(format: NSLocalizedString("Register with %@ on %@?", comment: ""),
+                               provider.displayName, controller.host.name)
+        a.informativeText = String(format: NSLocalizedString(
+            "%@ opens a temporary, isolated VM on the remote Mac with no access to its workspaces "
+            + "or saved secrets. The sign-in page opens in YOUR browser here; the credentials are "
+            + "captured and stored on the remote, then the VM is deleted.",
+            comment: ""), provider.displayName)
+        a.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
+        a.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        controller.beginRemoteRegistration(provider: provider.rawValue, profileID: profileID)
     }
 
     private func saveWorkspaceSettings(_ id: Profile.ID, _ edited: Profile, generateSSH: Bool) {
@@ -3514,6 +3624,83 @@ final class StateStream: @unchecked Sendable {
     private func deliverActive(_ active: Bool) {
         DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated { self?.controller?.setPushActive(active) }
+        }
+    }
+}
+
+// MARK: - OAuth callback tunnel (remote subscription registration)
+
+/// Listens on `127.0.0.1:<port>` HERE and splices each connection to the same
+/// loopback port inside the remote's throwaway registration VM, over the fat
+/// client's existing `forward <ip> <port>` SSH verb.
+///
+/// Why the same port on both ends: the provider redirects the browser to the
+/// `redirect_uri` the guest CLI advertised (`http://localhost:<port>/…`), so
+/// the local listener has to answer on exactly that port for the callback to
+/// land at all.
+final class RegistrationCallbackTunnel: @unchecked Sendable {
+    let vmIP: String
+    let port: Int
+    private let host: RemoteHost
+    private var listenFD: Int32 = -1
+    private let stopped = NSLock()
+    private var isStopped = false
+
+    init(host: RemoteHost, vmIP: String, port: Int) {
+        self.host = host
+        self.vmIP = vmIP
+        self.port = port
+    }
+
+    func start() {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return }
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")   // never off-box
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0, listen(fd, 4) == 0 else {
+            FatClientLog.log("registration-callback: bind/listen 127.0.0.1:\(port) failed errno=\(errno)")
+            Darwin.close(fd)
+            return
+        }
+        listenFD = fd
+        FatClientLog.log("registration-callback: listening on 127.0.0.1:\(port)")
+        Thread.detachNewThread { [weak self] in self?.acceptLoop(fd) }
+    }
+
+    private func acceptLoop(_ fd: Int32) {
+        while true {
+            let client = accept(fd, nil, nil)
+            if client < 0 { return }                 // listener closed by stop()
+            stopped.lock(); let done = isStopped; stopped.unlock()
+            if done { Darwin.close(client); return }
+            // One SSH channel per browser connection, like forwardDial's other
+            // users. The guest side is the loopback relay, which splices to
+            // 127.0.0.1:<port> inside the VM.
+            guard let remote = RemoteTransport.forwardDial(host: host, ip: vmIP, port: port) else {
+                FatClientLog.log("registration-callback: forwardDial to \(vmIP):\(port) failed")
+                Darwin.close(client)
+                continue
+            }
+            Thread.detachNewThread { FatForward.splice(client, remote) }
+        }
+    }
+
+    func stop() {
+        stopped.lock(); isStopped = true; stopped.unlock()
+        if listenFD >= 0 {
+            Darwin.close(listenFD)   // breaks accept()
+            listenFD = -1
+            FatClientLog.log("registration-callback: stopped")
         }
     }
 }

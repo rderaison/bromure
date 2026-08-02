@@ -179,6 +179,16 @@ final class ACAutomationServer {
     var onDockerCommand: ((_ idOrName: String, _ doc: [String: Any]) -> [String: Any])?
     /// Decision prompts pending for a remote client (fat client), + answer.
     var onListPendingPrompts: (() -> [[String: Any]])?
+    /// In-flight remote subscription registration (provider, sign-in URL, and
+    /// the throwaway VM's IP + loopback callback port), or nil. The fat client
+    /// opens the URL in ITS browser and tunnels the callback back.
+    var onPendingRegistration: (() -> [String: Any]?)?
+    /// Start a subscription registration on this host for a remote client.
+    /// (provider, optional profile id) -> ok.
+    var onBeginRegistration: ((_ provider: String, _ profileID: String?) -> Bool)?
+    /// Per-tool subscription status for the editor: registered-at + whether
+    /// the provider rejected the credential (sign-in expired).
+    var onSubscriptionStatus: ((_ profileID: String?) -> [String: Any])?
     var onAnswerPrompt: ((_ id: String, _ choice: Int) -> Bool)?
 
     init(port: UInt16 = 9223, bindAddress: String = "127.0.0.1") {
@@ -499,6 +509,24 @@ final class ACAutomationServer {
         case ("GET", "/state"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             sendResponse(fd: fd, status: 200, body: buildStateSnapshot())
+
+        // Start a subscription registration on this host for the calling
+        // client. The throwaway VM + credential store stay here; the sign-in
+        // URL comes back through /state's pendingRegistration so the client
+        // opens it in its own browser.
+        case ("POST", "/subscriptions/register"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let provider = (bodyJSON["provider"] as? String) ?? ""
+            let profileID = bodyJSON["profileId"] as? String
+            guard !provider.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Missing 'provider'"]); return
+            }
+            let ok = DispatchQueue.main.sync {
+                self.onBeginRegistration?(provider, profileID) ?? false
+            }
+            sendResponse(fd: fd, status: ok ? 202 : 409,
+                         body: ["ok": ok,
+                                "error": ok ? "" : "couldn't start registration (one may be in flight)"])
 
         case ("GET", "/workspaces"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
@@ -1657,7 +1685,7 @@ final class ACAutomationServer {
             return cache
         }
         var snapshot: [String: Any] = DispatchQueue.main.sync {
-            [
+            var d: [String: Any] = [
                 "version": FatClient.protocolVersion,
                 "supportsPush": true,
                 "workspaces": self.onListWorkspaces?() ?? [],
@@ -1666,7 +1694,11 @@ final class ACAutomationServer {
                 "automations": self.onListAutomations?() ?? ["automations": [], "runs": []],
                 "tasks": self.onListTasks?() ?? ["tasks": []],
                 "pendingPrompts": self.onListPendingPrompts?() ?? [],
+                "subscriptions": self.onSubscriptionStatus?(nil) ?? [:],
             ]
+            // Only present while a client-initiated registration is in flight.
+            if let reg = self.onPendingRegistration?() { d["pendingRegistration"] = reg }
+            return d
         }
         // The workspace VM subnet, so a fat client can route/tunnel to it. nil
         // until the first VM boots the vmnet interface.
