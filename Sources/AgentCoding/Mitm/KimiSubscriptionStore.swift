@@ -34,6 +34,12 @@ public struct KimiSubscriptionRecord: Codable, Sendable, Equatable {
     public var refreshToken: String
     public var expiresAt: Date
     public var savedAt: Date
+    /// Set when a refresh was REJECTED by the provider (HTTP 400/401/403 —
+    /// the refresh token was revoked, expired, or the account signed out).
+    /// Only re-registration clears this; a plain access-token expiry never
+    /// sets it, because the refresh path renews that silently. Optional so
+    /// records written before this existed still decode.
+    public var reauthRequiredAt: Date?
     /// Filename (sans `.json`) under `~/.kimi-code/credentials/` the entry
     /// was captured from — reused when re-seeding the bogus copy.
     public var credentialName: String
@@ -48,11 +54,13 @@ public struct KimiSubscriptionRecord: Codable, Sendable, Equatable {
 
     public init(accessToken: String, refreshToken: String, expiresAt: Date,
                 savedAt: Date, credentialName: String = kimiManagedCredentialName,
-                templateJSON: Data? = nil, configTOML: String? = nil) {
+                templateJSON: Data? = nil, configTOML: String? = nil,
+                reauthRequiredAt: Date? = nil) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.expiresAt = expiresAt
         self.savedAt = savedAt
+        self.reauthRequiredAt = reauthRequiredAt
         self.credentialName = credentialName
         self.templateJSON = templateJSON
         self.configTOML = configTOML
@@ -89,6 +97,43 @@ public final class KimiSubscriptionStore: @unchecked Sendable {
         }
         cache = file
         return file
+    }
+
+    // MARK: - Re-auth state
+
+    /// When the provider last REJECTED this credential's refresh, or nil when
+    /// it is believed good. The editor surfaces this as "sign-in expired";
+    /// nothing but a fresh registration can clear it.
+    public func reauthRequiredAt(for profileID: UUID?) -> Date? {
+        record(for: profileID)?.reauthRequiredAt
+    }
+
+    /// Flag/clear the credential behind `profileID`. Writes through the same
+    /// shared-vs-override resolution `record(for:)` reads, so a profile using
+    /// the shared credential flags the shared one.
+    public func setReauthRequired(_ flagged: Bool, for profileID: UUID?) {
+        lock.lock()
+        var file = loadLocked()
+        let stamp: Date? = flagged ? Date() : nil
+        var changed = false
+        if let pid = profileID, var r = file.perProfile[pid.uuidString] {
+            if (r.reauthRequiredAt != nil) != flagged {
+                r.reauthRequiredAt = stamp
+                file.perProfile[pid.uuidString] = r
+                changed = true
+            }
+        } else if var shared = file.shared {
+            if (shared.reauthRequiredAt != nil) != flagged {
+                shared.reauthRequiredAt = stamp
+                file.shared = shared
+                changed = true
+            }
+        }
+        if changed { try? persistLocked(file) }
+        lock.unlock()
+        if changed {
+            NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+        }
     }
 
     private func persistLocked(_ file: KimiSubscriptionFile) throws {
@@ -200,7 +245,17 @@ public actor KimiSubscriptionRefresher {
         let session = URLSession(configuration: .ephemeral)
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw KimiSubscriptionError.malformedRefreshResponse }
-        guard http.statusCode == 200 else { throw KimiSubscriptionError.refreshHTTP(http.statusCode) }
+        guard http.statusCode == 200 else {
+            // 400/401/403 = the provider rejected the REFRESH TOKEN itself
+            // (revoked, expired, signed out elsewhere). Nothing retries out of
+            // that — flag the credential so the UI can say "sign-in expired"
+            // instead of every session failing with an opaque auth error. A
+            // 5xx or a rate-limit is transient and must NOT flag.
+            if (400...403).contains(http.statusCode) {
+                store.setReauthRequired(true, for: profileID)
+            }
+            throw KimiSubscriptionError.refreshHTTP(http.statusCode)
+        }
         guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let newAccess = json["access_token"] as? String, !newAccess.isEmpty
         else { throw KimiSubscriptionError.malformedRefreshResponse }
@@ -223,6 +278,8 @@ public actor KimiSubscriptionRefresher {
             templateJSON: record.templateJSON,
             configTOML: record.configTOML)
         try store.update(updated, for: profileID)
+        // Refresh worked — any earlier rejection is stale.
+        store.setReauthRequired(false, for: profileID)
         return newAccess
     }
 }

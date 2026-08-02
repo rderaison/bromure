@@ -5488,6 +5488,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         ?? self?.mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt
                 }
             },
+            claudeReauthRequiredAt: (editing ?? initialDraft).map { p in
+                { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.reauthRequiredAt(for: p.id) }
+            },
+            codexReauthRequiredAt: (editing ?? initialDraft).map { p in
+                { [weak self] in self?.mitmEngine?.codexSubscriptionStore.reauthRequiredAt(for: p.id) }
+            },
+            grokReauthRequiredAt: (editing ?? initialDraft).map { p in
+                { [weak self] in self?.mitmEngine?.grokSubscriptionStore.reauthRequiredAt(for: p.id) }
+            },
+            kimiReauthRequiredAt: (editing ?? initialDraft).map { p in
+                { [weak self] in self?.mitmEngine?.kimiSubscriptionStore.reauthRequiredAt(for: p.id) }
+            },
             onRegisterClaude: (editing ?? initialDraft).map { p in
                 { [weak self] in self?.beginSubscriptionRegistration(provider: .claude, scope: .askPerSession(p.id)) }
             },

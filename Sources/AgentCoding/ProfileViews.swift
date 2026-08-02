@@ -427,6 +427,12 @@ struct ProfileEditorView: View {
     /// captured (nil = not registered). A closure (not a value) so it's
     /// re-read live after a register/forget. nil = no proxy engine → hide.
     let claudeAccountSavedAt: (() -> Date?)?
+    /// When the provider last rejected this credential's refresh, per tool.
+    /// nil closure (or nil result) = believed good. Re-read on every render.
+    let claudeReauthRequiredAt: (() -> Date?)?
+    let codexReauthRequiredAt: (() -> Date?)?
+    let grokReauthRequiredAt: (() -> Date?)?
+    let kimiReauthRequiredAt: (() -> Date?)?
     /// Launch the "Register with Claude" flow (scope baked in by the caller).
     let onRegisterClaude: (() -> Void)?
     /// Forget the stored Claude credential for this scope.
@@ -460,6 +466,10 @@ struct ProfileEditorView: View {
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
         onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
         claudeAccountSavedAt: (() -> Date?)? = nil,
+        claudeReauthRequiredAt: (() -> Date?)? = nil,
+        codexReauthRequiredAt: (() -> Date?)? = nil,
+        grokReauthRequiredAt: (() -> Date?)? = nil,
+        kimiReauthRequiredAt: (() -> Date?)? = nil,
         onRegisterClaude: (() -> Void)? = nil,
         onForgetClaude: (() -> Void)? = nil,
         codexAccountSavedAt: (() -> Date?)? = nil,
@@ -476,6 +486,10 @@ struct ProfileEditorView: View {
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
         self.claudeAccountSavedAt = claudeAccountSavedAt
+        self.claudeReauthRequiredAt = claudeReauthRequiredAt
+        self.codexReauthRequiredAt = codexReauthRequiredAt
+        self.grokReauthRequiredAt = grokReauthRequiredAt
+        self.kimiReauthRequiredAt = kimiReauthRequiredAt
         self.onRegisterClaude = onRegisterClaude
         self.onForgetClaude = onForgetClaude
         self.codexAccountSavedAt = codexAccountSavedAt
@@ -951,6 +965,7 @@ struct ProfileEditorView: View {
                     onMakePrimary: { setPrimary(t) },
                     profileDirHint: profileDirHint,
                     subscriptionRegisteredAt: sub.savedAt,
+                    subscriptionReauthRequiredAt: sub.reauthAt,
                     onRegisterSubscription: sub.onRegister,
                     onForgetSubscription: sub.onForget
                 )
@@ -968,13 +983,17 @@ struct ProfileEditorView: View {
     /// matching account closures supplied by the host. The savedAt closures are
     /// re-read on every render (bumped by `subscriptionRefreshTick`).
     private func subscriptionInfo(for tool: Profile.Tool)
-        -> (savedAt: Date?, onRegister: (() -> Void)?, onForget: (() -> Void)?) {
+        -> (savedAt: Date?, reauthAt: Date?, onRegister: (() -> Void)?, onForget: (() -> Void)?) {
         _ = subscriptionRefreshTick   // tie re-render to the refresh counter
         switch tool {
-        case .claude: return (claudeAccountSavedAt?(), onRegisterClaude, onForgetClaude)
-        case .codex:  return (codexAccountSavedAt?(), onRegisterCodex, onForgetCodex)
-        case .grok:   return (grokAccountSavedAt?(), onRegisterGrok, onForgetGrok)
-        case .kimi:   return (kimiAccountSavedAt?(), onRegisterKimi, onForgetKimi)
+        case .claude: return (claudeAccountSavedAt?(), claudeReauthRequiredAt?(),
+                              onRegisterClaude, onForgetClaude)
+        case .codex:  return (codexAccountSavedAt?(), codexReauthRequiredAt?(),
+                              onRegisterCodex, onForgetCodex)
+        case .grok:   return (grokAccountSavedAt?(), grokReauthRequiredAt?(),
+                              onRegisterGrok, onForgetGrok)
+        case .kimi:   return (kimiAccountSavedAt?(), kimiReauthRequiredAt?(),
+                              onRegisterKimi, onForgetKimi)
         }
     }
 
@@ -4754,6 +4773,9 @@ private struct ToolConfigCard: View {
     /// Drives the inline Register / Re-register+Forget controls on the
     /// Subscription radio row. `onRegisterSubscription == nil` hides them.
     let subscriptionRegisteredAt: Date?
+    /// Non-nil when the provider REJECTED this credential's refresh — the
+    /// sign-in is dead and only re-registering fixes it.
+    var subscriptionReauthRequiredAt: Date? = nil
     let onRegisterSubscription: (() -> Void)?
     let onForgetSubscription: (() -> Void)?
 
@@ -4828,8 +4850,15 @@ private struct ToolConfigCard: View {
 
                                 if m == .subscription, let onRegister = onRegisterSubscription {
                                     if subscriptionRegisteredAt != nil {
-                                        Image(systemName: "checkmark.seal.fill")
-                                            .foregroundStyle(.green).controlSize(.small)
+                                        if subscriptionReauthRequiredAt != nil {
+                                            Image(systemName: "exclamationmark.triangle.fill")
+                                                .foregroundStyle(.orange).controlSize(.small)
+                                            Text(NSLocalizedString("Sign-in expired", comment: "subscription needs re-registration"))
+                                                .font(.caption).foregroundStyle(.orange)
+                                        } else {
+                                            Image(systemName: "checkmark.seal.fill")
+                                                .foregroundStyle(.green).controlSize(.small)
+                                        }
                                         Button(NSLocalizedString("Re-register…", comment: "")) { onRegister() }
                                             .buttonStyle(.borderless).controlSize(.small)
                                         if let onForget = onForgetSubscription {
