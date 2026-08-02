@@ -6,13 +6,12 @@ import NIOSSH
 // MARK: - NIOSSH client for the password bootstrap
 
 /// A minimal embedded SSH *client* (swift-nio-ssh) used only to bootstrap trust
-/// with a password. Rationale: the steady-state transport uses the system `ssh`
-/// binary with public-key auth (which works), but feeding a *password* to that
-/// binary from a GUI app (no TTY) means `SSH_ASKPASS` — fragile plumbing for
-/// something we fully control on both ends. Since we already embed swift-nio-ssh
-/// for the server, we speak SSH client-side directly here: send the password
-/// through the auth API, then enroll this Mac's public key over the control
-/// bridge so every subsequent connection is passwordless (system ssh + pubkey).
+/// with a password: send the password through the auth API, then enroll this
+/// Mac's public key over the control bridge so every subsequent connection is
+/// passwordless. This predates the general move to an in-process transport —
+/// the steady-state path is now `SSHDialer` (public-key auth, pooled
+/// connections) — and stays separate because password auth is a one-shot
+/// pairing step, not something the pooled dialer should ever carry.
 ///
 /// Host-key trust is already established by the connect flow (ssh-keyscan TOFU +
 /// the strict-host-key pubkey probe) before we ever get here, so this client

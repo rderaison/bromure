@@ -96,6 +96,67 @@ enum OpenSSHKeyFormat {
         return blob
     }
 
+    /// Decode an unencrypted OpenSSH ed25519 private key back to its 32-byte
+    /// seed — the inverse of `ed25519PEM`, and the bridge that lets the
+    /// in-process NIOSSH dialer use an identity that was minted as a PEM
+    /// (every fat-client Mac paired before the dialer landed). Returns nil for
+    /// anything that isn't a single unencrypted ed25519 key.
+    static func ed25519Seed(fromPEM pem: String) -> Data? {
+        let b64 = pem.split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter { !$0.hasPrefix("-----") }
+            .joined()
+        guard let blob = Data(base64Encoded: b64) else { return nil }
+
+        var i = 0
+        func need(_ n: Int) -> Bool { blob.count - i >= n }
+        func u32() -> UInt32? {
+            guard need(4) else { return nil }
+            defer { i += 4 }
+            return blob[blob.startIndex + i ..< blob.startIndex + i + 4]
+                .reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        }
+        func str() -> Data? {
+            guard let n = u32(), need(Int(n)) else { return nil }
+            defer { i += Int(n) }
+            return blob.subdata(in: blob.startIndex + i ..< blob.startIndex + i + Int(n))
+        }
+
+        let magic = Data("openssh-key-v1".utf8) + Data([0])
+        guard need(magic.count),
+              blob.subdata(in: blob.startIndex ..< blob.startIndex + magic.count) == magic
+        else { return nil }
+        i = magic.count
+        // Encrypted keys are out of scope: we only ever mint unencrypted ones,
+        // and a passphrase-protected key has no seed to recover here.
+        guard let cipher = str(), String(decoding: cipher, as: UTF8.self) == "none",
+              let kdf = str(), String(decoding: kdf, as: UTF8.self) == "none",
+              str() != nil,                               // kdf options
+              let count = u32(), count == 1,
+              str() != nil,                               // public-key blob
+              let priv = str() else { return nil }
+
+        // Private section: check || check || type || pub || seed||pub || comment
+        var j = 0
+        func pNeed(_ n: Int) -> Bool { priv.count - j >= n }
+        func pU32() -> UInt32? {
+            guard pNeed(4) else { return nil }
+            defer { j += 4 }
+            return priv[priv.startIndex + j ..< priv.startIndex + j + 4]
+                .reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        }
+        func pStr() -> Data? {
+            guard let n = pU32(), pNeed(Int(n)) else { return nil }
+            defer { j += Int(n) }
+            return priv.subdata(in: priv.startIndex + j ..< priv.startIndex + j + Int(n))
+        }
+        guard let c1 = pU32(), let c2 = pU32(), c1 == c2,
+              let type = pStr(), String(decoding: type, as: UTF8.self) == "ssh-ed25519",
+              pStr() != nil,                              // public half
+              let expanded = pStr(), expanded.count == 64 else { return nil }
+        return expanded.prefix(32)                        // seed || public
+    }
+
     // MARK: - SSH wire helpers (length-prefixed strings, big-endian u32)
 
     private static func sshString(_ s: String) -> Data {

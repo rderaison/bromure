@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import SandboxEngine
 #if canImport(Darwin)
@@ -8,9 +9,24 @@ import Darwin
 //
 // The shared types (RemoteHost, RemoteProbe, HostKeyInfo, FatClientKeyStore,
 // FatClientLog, RemoteHostStore) live in FatClientTypes.swift so the iOS
-// client can compile them; this file keeps the macOS transport — system ssh,
-// ssh-keygen/-keyscan/-agent subprocesses — which the iOS client replaces
-// with an in-process NIOSSH dialer exposing the same `RemoteTransport` API.
+// client can compile them; this file is the macOS transport.
+//
+// Both platforms now speak SSH in-process through `SSHDialer`
+// (FatClientSSHDial.swift, swift-nio-ssh) — no `ssh`, `ssh-keygen`,
+// `ssh-keyscan`, or `ssh-agent` subprocesses. What that buys over shelling
+// out to the system binary:
+//   • The keychain-held identity goes straight to the dialer. The old path
+//     couldn't (system ssh can't read the keychain), so every dial detoured
+//     through a private in-memory ssh-agent primed with `ssh-add -`.
+//   • One connection per host multiplexes every channel, including
+//     interactive attaches. ControlMaster couldn't carry those — OpenSSH
+//     buffers a multiplexed channel's spontaneous server→client output, so
+//     terminal streams needed their own TCP connection each.
+//   • Failures are typed (`SSHDialError`) instead of scraped out of ssh's
+//     stderr, and no argv quoting hazards (the support dir has a space).
+// macOS keeps its own key-at-rest format: the keychain item is an OpenSSH
+// PEM, which `OpenSSHKeyFormat.ed25519Seed(fromPEM:)` decodes for the dialer
+// so a Mac paired before this change keeps its enrolled identity.
 
 /// Nonisolated transport layer: path resolution, the SSH client identity, and
 /// building a `ControlClient` whose byte stream is an `ssh … bromure-fatclient
@@ -49,19 +65,72 @@ enum RemoteTransport {
         try? data.write(to: hostsFile, options: .atomic)
     }
 
+    /// Wire the shared NIOSSH dialer to this platform's pins + identity. Runs
+    /// once, lazily, before anything dials (`_ = bootstrap`), mirroring iOS.
+    private static let bootstrap: Void = {
+        SSHDialer.shared.knownHostsURL = knownHostsPath
+        SSHDialer.shared.loadClientKey = { loadClientKeyCrypto() }
+        reapLegacyKeyAgent()
+    }()
+
+    /// Kill the in-memory ssh-agent the old system-`ssh` transport kept the
+    /// client key in. It runs `-D` (foreground) and gets orphaned to launchd
+    /// when we exit, so upgrading would otherwise leave a signing oracle for
+    /// this Mac's fat-client identity alive indefinitely, with nothing left to
+    /// use it. One deterministic socket path per uid; safe to run every launch.
+    private static func reapLegacyKeyAgent() {
+        let sock = "/tmp/bromure-fc-agent-\(getuid()).sock"
+        defer { unlink(sock) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        // -f matches (and -l prints) the whole command line.
+        p.arguments = ["-fl", "ssh-agent .*bromure-fc-agent"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return }
+        p.waitUntilExit()
+        guard let data = try? pipe.fileHandleForReading.readToEnd(),
+              let out = String(data: data, encoding: .utf8) else { return }
+        for line in out.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let space = trimmed.firstIndex(of: " "),
+                  let pid = pid_t(trimmed[..<space]) else { continue }
+            // Re-check the command: `-f` also matches a shell whose arguments
+            // merely contain the pattern.
+            let command = trimmed[trimmed.index(after: space)...]
+            guard command.contains("ssh-agent"), command.contains(sock),
+                  pid != getpid() else { continue }
+            kill(pid, SIGTERM)
+            FatClientLog.log("reaped legacy fat-client ssh-agent (pid \(pid))")
+        }
+    }
+
+    /// The client identity as a CryptoKit key, for the in-process dialer. The
+    /// keychain item is an OpenSSH PEM (what this Mac has always stored, and
+    /// what its remotes already authorize), decoded here rather than
+    /// re-minted — a new key would mean a password re-pair against every
+    /// enrolled server.
+    static func loadClientKeyCrypto() -> Curve25519.Signing.PrivateKey? {
+        guard case .found(let pem) = FatClientKeyStore.load() else { return nil }
+        guard let seed = OpenSSHKeyFormat.ed25519Seed(fromPEM: pem) else {
+            FatClientLog.log("client key: keychain item is not an unencrypted ed25519 PEM")
+            return nil
+        }
+        return try? Curve25519.Signing.PrivateKey(rawRepresentation: seed)
+    }
+
     /// Ensure the ed25519 client identity exists; returns the OpenSSH
     /// public line to enroll on the remote's `authorized_keys`.
     ///
-    /// ONE identity per client Mac, but the PRIVATE half lives in the
+    /// ONE identity per client Mac, with the PRIVATE half in the
     /// data-protection keychain (app-scoped by code signature, no prompt —
     /// same choice as SecretsVault), not as a plaintext file: stealing the
-    /// remote-client directory yields only the public key. System ssh
-    /// can't read the keychain, so dials load the key into a private
-    /// in-memory ssh-agent via `ssh-add -` (stdin — never on disk) and
-    /// select it with the public-key file. A pre-keychain plaintext
-    /// id_ed25519 is migrated on first use and shredded.
+    /// remote-client directory yields only the public key. A pre-keychain
+    /// plaintext id_ed25519 is migrated on first use and shredded.
     @discardableResult
     static func ensureClientKey() -> String? {
+        _ = bootstrap
         ensureDirs()
         let fm = FileManager.default
         // Migrate: legacy plaintext private key → keychain, then delete.
@@ -85,48 +154,38 @@ enum RemoteTransport {
         case .notFound:
             break
         }
-        // Fresh identity: generate to a temp path, move the private half
-        // into the keychain, keep only the .pub on disk.
-        let tmp = dir.appendingPathComponent("keygen-\(UUID().uuidString)")
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
-        p.arguments = ["-t", "ed25519", "-N", "", "-C", "bromure-ac-fatclient",
-                       "-f", tmp.path]
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        do { try p.run(); p.waitUntilExit() } catch { return nil }
-        defer {
-            try? fm.removeItem(at: tmp)
-            try? fm.removeItem(at: tmp.appendingPathExtension("pub"))
-        }
-        guard let pem = try? String(contentsOf: tmp, encoding: .utf8),
-              FatClientKeyStore.store(pem),
-              let pub = try? String(contentsOf: tmp.appendingPathExtension("pub"),
-                                    encoding: .utf8) else { return nil }
-        try? pub.write(to: publicKeyPath, atomically: true, encoding: .utf8)
+        // Fresh identity, minted in-process. Stored as an OpenSSH PEM — the
+        // format this Mac's keychain item has always held, so the key stays
+        // readable by anything that expects it (and by an older build).
+        let key = Curve25519.Signing.PrivateKey()
+        let pub = key.publicKey.rawRepresentation
+        let pem = OpenSSHKeyFormat.ed25519PEM(seed: key.rawRepresentation,
+                                              publicKey: pub,
+                                              comment: "bromure-ac-fatclient")
+        guard FatClientKeyStore.store(String(decoding: pem, as: UTF8.self)) else { return nil }
+        let line = SSHKeyWire.opensshPublicLine(key.publicKey, comment: "bromure-ac-fatclient")
+        try? (line + "\n").write(to: publicKeyPath, atomically: true, encoding: .utf8)
         return clientPublicKey()
     }
 
     /// SHA256 fingerprint of the client's public key — the selector for
     /// revoking it on a server at unpair time.
     static func clientKeyFingerprint() -> String? {
-        guard FileManager.default.fileExists(atPath: publicKeyPath.path) else { return nil }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
-        p.arguments = ["-lf", publicKeyPath.path]
-        let out = Pipe(); p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
-            .split(separator: " ").map(String.init)
-            .first { $0.hasPrefix("SHA256:") }
+        guard let line = clientPublicKey() else { return nil }
+        return SSHKeyWire.fingerprint(ofPublicLine: line)
     }
 
     static func clientPublicKey() -> String? {
-        (try? String(contentsOf: publicKeyPath, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let onDisk = (try? String(contentsOf: publicKeyPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !onDisk.isEmpty {
+            return onDisk
+        }
+        // The .pub is a convenience copy; the keychain is the source of truth.
+        // Re-derive (and re-write) it if the file went missing.
+        guard let key = loadClientKeyCrypto() else { return nil }
+        let line = SSHKeyWire.opensshPublicLine(key.publicKey, comment: "bromure-ac-fatclient")
+        try? (line + "\n").write(to: publicKeyPath, atomically: true, encoding: .utf8)
+        return line
     }
 
     /// Publish this Mac's SSH public key to bromure.io so the user's servers
@@ -140,110 +199,6 @@ enum RemoteTransport {
               let (client, bearer) = ControlPlaneClient.current() else { return }
         let user = NSUserName()   // the login a client must dial this Mac as
         Task { try? await client.uploadSSHKey(bearer: bearer, sshPublicKey: line, sshUsername: user) }
-    }
-
-    /// ssh argument vector: pubkey-only (BatchMode), TOFU host-key pinning to
-    /// our dedicated known_hosts, and the fat-client control verb as the remote
-    /// command.
-    ///
-    /// `interactive`: short request/response calls (polling, commands) multiplex
-    /// over one ControlMaster TCP connection per host — cheap, especially on a
-    /// WAN. Long-lived INTERACTIVE streams (terminal attach) must NOT use
-    /// ControlMaster: OpenSSH buffers a multiplexed channel's spontaneous
-    /// server→client output (the tmux repaint never arrives until the client
-    /// types), so those get a dedicated direct connection instead.
-    ///
-    /// Two subtleties, both because the app support dir contains a space
-    /// ("Application Support"): (1) `-o KEY=VALUE` values with spaces must be
-    /// double-quoted INSIDE the option string — ssh re-tokenizes the value like
-    /// a config line, so an unquoted space becomes "extra arguments". (2) the
-    /// ControlMaster socket path (support dir + ssh's random suffix) blows past
-    /// the ~104-char AF_UNIX limit, so we put it in /tmp, keyed by host id.
-    /// Common ssh options (identity, known_hosts, keepalive). `-o KEY=VALUE`
-    /// values with spaces are double-quoted inside the option string because
-    /// ssh re-tokenizes them like a config line (the support dir has a space).
-    /// Socket of an ssh-agent holding the client key IN MEMORY, loaded from
-    /// the keychain via `ssh-add -` (the private key never touches disk).
-    /// One agent per uid at a fixed path — a stale one from a previous
-    /// process is probed and reused, so orphans don't accumulate.
-    private static let agentLock = NSLock()
-    private static var agentReady = false
-    static func keyAgentSock() -> String? {
-        agentLock.lock(); defer { agentLock.unlock() }
-        let sock = "/tmp/bromure-fc-agent-\(getuid()).sock"
-        func agentAlive() -> Bool {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
-            p.arguments = ["-l"]
-            p.environment = ["SSH_AUTH_SOCK": sock]
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError = FileHandle.nullDevice
-            do { try p.run(); p.waitUntilExit() } catch { return false }
-            return p.terminationStatus == 0 || p.terminationStatus == 1
-        }
-        if !agentAlive() {
-            agentReady = false
-            unlink(sock)
-            let agent = Process()
-            agent.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-agent")
-            agent.arguments = ["-D", "-a", sock]
-            agent.standardOutput = FileHandle.nullDevice
-            agent.standardError = FileHandle.nullDevice
-            do { try agent.run() } catch { return nil }
-            for _ in 0..<50 where !FileManager.default.fileExists(atPath: sock) {
-                usleep(100_000)
-            }
-        }
-        if !agentReady {
-            guard case .found(let pem) = FatClientKeyStore.load() else { return nil }
-            let add = Process()
-            add.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
-            add.arguments = ["-"]
-            add.environment = ["SSH_AUTH_SOCK": sock]
-            let stdin = Pipe()
-            add.standardInput = stdin
-            add.standardOutput = FileHandle.nullDevice
-            add.standardError = FileHandle.nullDevice
-            do { try add.run() } catch { return nil }
-            stdin.fileHandleForWriting.write(Data(pem.utf8))
-            try? stdin.fileHandleForWriting.close()
-            add.waitUntilExit()
-            guard add.terminationStatus == 0 else { return nil }
-            agentReady = true
-        }
-        return sock
-    }
-
-    private static func commonArgs(for host: RemoteHost) -> [String] {
-        // Keychain-backed identity through the in-memory agent; the -i
-        // PUBLIC key selects which agent key to offer (IdentitiesOnly
-        // honors it). A pre-migration plaintext private key falls back to
-        // the classic -i dial.
-        var identity: [String] = []
-        if !FileManager.default.fileExists(atPath: privateKeyPath.path),
-           let sock = keyAgentSock() {
-            identity = ["-o", "IdentityAgent=\"\(sock)\"",
-                        "-i", publicKeyPath.path]
-        } else {
-            identity = ["-i", privateKeyPath.path]
-        }
-        var args = identity + [
-            "-p", String(host.port),
-            "-o", "IdentitiesOnly=yes",
-            "-o", "UserKnownHostsFile=\"\(knownHostsPath.path)\"",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=3",
-            "-o", "ConnectTimeout=10",
-            "-o", "LogLevel=ERROR",
-        ]
-        // For a peer (P2P) connection the address is an ephemeral loopback port
-        // that changes per session, so the host-key pin must key on the peer's
-        // stable device identity instead. HostKeyAlias makes ssh store/verify
-        // the known_hosts entry under that alias regardless of the loopback port.
-        if let alias = host.hostKeyAlias {
-            args += ["-o", "HostKeyAlias=\(alias)"]
-        }
-        return args
     }
 
     /// Swap a peer host for a live loopback endpoint resolved through the P2P
@@ -267,185 +222,110 @@ enum RemoteTransport {
         return h
     }
 
-    /// Nil when the host's user/address can't safely go on an ssh command line
-    /// (`RemoteHost.sshDestination`) — callers must treat nil as dial failure.
-    static func sshArgs(for host: RemoteHost, interactive: Bool = false) -> [String]? {
-        guard let destination = host.sshDestination else { return nil }
-        var args = commonArgs(for: host)
-        // Pubkey-only for the steady-state tunnel. accept-new pins a NEW host
-        // key but refuses a CHANGED one (the explicit fingerprint TOFU happens
-        // in the connect sheet); that's the safe default here.
-        args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]
-        if !interactive {
-            // Long-lived INTERACTIVE streams (terminal attach) must NOT use
-            // ControlMaster: OpenSSH buffers a multiplexed channel's spontaneous
-            // server→client output (the tmux repaint never arrives until the
-            // client types). Short calls (polling, commands) multiplex over one
-            // ControlMaster TCP connection per host — cheap on a WAN. The socket
-            // lives in /tmp (support-dir path overflows the 104-char AF_UNIX limit).
-            let controlPath = "/tmp/bromure-ac-cm-\(host.id.uuidString.prefix(12))"
-            args += [
-                "-o", "ControlMaster=auto",
-                "-o", "ControlPath=\(controlPath)",
-                "-o", "ControlPersist=60",
-            ]
-        }
-        args += [destination, FatClient.controlVerb]
-        return args
-    }
-
     // MARK: Host-key TOFU
-
-    private static let sshKeyscan = "/usr/bin/ssh-keyscan"
-    private static let sshKeygen = "/usr/bin/ssh-keygen"
+    //
+    // Pins live in our own known_hosts, managed by the shared
+    // `KnownHostsStore` (the dialer reads the same file). A peer's loopback
+    // endpoint is ephemeral, so peer pins key on the stable device alias
+    // instead of host:port — the same policy the ssh path expressed as
+    // HostKeyAlias.
 
     /// Fetch the remote's ed25519 host key + SHA256 fingerprint (for the
     /// user-visible TOFU prompt). Nil if the host is unreachable.
     static func scanHostKey(address: String, port: Int) -> HostKeyInfo? {
-        // The address goes into ssh-keyscan's argv — a leading `-` would be
-        // parsed as an option.
-        guard !address.isEmpty, !address.hasPrefix("-") else { return nil }
-        let scan = Process()
-        scan.executableURL = URL(fileURLWithPath: sshKeyscan)
-        scan.arguments = ["-T", "8", "-p", String(port), "-t", "ed25519", address]
-        let out = Pipe(); scan.standardOutput = out; scan.standardError = FileHandle.nullDevice
-        do { try scan.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        scan.waitUntilExit()
-        let line = String(decoding: data, as: UTF8.self)
-            .split(whereSeparator: \.isNewline)
-            .map(String.init)
-            .first { !$0.hasPrefix("#") && !$0.isEmpty }
-        guard let line, let fp = fingerprint(ofKnownHostsLine: line) else { return nil }
-        return HostKeyInfo(line: line, fingerprint: fp)
-    }
-
-    private static func fingerprint(ofKnownHostsLine line: String) -> String? {
-        let tmp = NSTemporaryDirectory() + "bromure-hk-\(abs(line.hashValue)).txt"
-        defer { try? FileManager.default.removeItem(atPath: tmp) }
-        guard (try? line.write(toFile: tmp, atomically: true, encoding: .utf8)) != nil else { return nil }
-        let p = Process(); p.executableURL = URL(fileURLWithPath: sshKeygen)
-        p.arguments = ["-lf", tmp]
-        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
-            .split(separator: " ").first { $0.hasPrefix("SHA256:") }.map(String.init)
+        _ = bootstrap
+        return SSHDialer.shared.scanHostKey(address: address, port: port)
     }
 
     /// Trust a host key: replace any prior entry for this host in known_hosts
     /// with `info.line`. Called after the user confirms the fingerprint.
     static func pinHostKey(address: String, port: Int, info: HostKeyInfo) {
         ensureDirs()
-        // ssh-keygen -R removes existing entries for the host (handles [host]:port).
-        let hostSpec = port == 22 ? address : "[\(address)]:\(port)"
-        let rm = Process(); rm.executableURL = URL(fileURLWithPath: sshKeygen)
-        rm.arguments = ["-R", hostSpec, "-f", knownHostsPath.path]
-        rm.standardOutput = FileHandle.nullDevice; rm.standardError = FileHandle.nullDevice
-        try? rm.run(); rm.waitUntilExit()
-        var body = (try? String(contentsOf: knownHostsPath, encoding: .utf8)) ?? ""
-        if !body.isEmpty && !body.hasSuffix("\n") { body += "\n" }
-        body += info.line + "\n"
-        try? body.write(to: knownHostsPath, atomically: true, encoding: .utf8)
+        let token = KnownHostsStore.hostToken(address: address, port: port)
+        KnownHostsStore(url: knownHostsPath).pin(token: token, keyLine: info.line)
     }
 
-    /// Trust a host key under a HostKeyAlias (peer hosts — their loopback
+    /// Trust a host key under a peer alias (peer hosts — their loopback
     /// endpoint is ephemeral, so the pin keys on the stable device identity):
-    /// replace any prior alias entry, then write the scanned line with its host
-    /// token swapped for the alias. ssh consults the alias for both store and
-    /// verify, so `StrictHostKeyChecking=yes` matches this entry.
+    /// re-key the scanned line onto the alias and replace any prior entry.
     static func pinHostKey(alias: String, info: HostKeyInfo) {
         ensureDirs()
-        let rm = Process(); rm.executableURL = URL(fileURLWithPath: sshKeygen)
-        rm.arguments = ["-R", alias, "-f", knownHostsPath.path]
-        rm.standardOutput = FileHandle.nullDevice; rm.standardError = FileHandle.nullDevice
-        try? rm.run(); rm.waitUntilExit()
         let parts = info.line.split(separator: " ", maxSplits: 1)
         guard parts.count == 2 else { return }
-        var body = (try? String(contentsOf: knownHostsPath, encoding: .utf8)) ?? ""
-        if !body.isEmpty && !body.hasSuffix("\n") { body += "\n" }
-        body += "\(alias) \(parts[1])\n"
-        try? body.write(to: knownHostsPath, atomically: true, encoding: .utf8)
+        KnownHostsStore(url: knownHostsPath).pin(token: alias, keyLine: "\(alias) \(parts[1])")
     }
 
     /// Whether `alias` already has a pinned key in our known_hosts — i.e. this
     /// peer completed fingerprint TOFU on an earlier connect.
     static func hasAliasPin(_ alias: String) -> Bool {
-        guard let body = try? String(contentsOf: knownHostsPath, encoding: .utf8) else { return false }
-        return body.split(whereSeparator: \.isNewline).contains {
-            $0.split(separator: " ").first.map(String.init) == alias
-        }
+        KnownHostsStore(url: knownHostsPath).hasPin(token: alias)
     }
 
     // MARK: Probe (classified connection attempt)
 
-    /// Probe a remote with the client key, by running one `GET /health` over the
-    /// tunnel and classifying ssh's result. `strictHostKey` = enforce the pinned
-    /// key (detects MITM). Password auth lives in `FatClientNIOSSH` — the system
-    /// `ssh` binary is only ever used here with public-key auth (no askpass).
+    /// Probe a remote with the client key by running one `GET /health` over the
+    /// tunnel. `strictHostKey` = enforce the pinned key (detects MITM).
+    /// Password auth lives in `FatClientNIOSSH`; this path is public-key only.
+    ///
+    /// Two attempts, because a pooled connection can be a corpse: after a sleep
+    /// or a P2P path change the socket is dead but `channel.isActive` still
+    /// reads true, so the reuse fails on FIRST USE with a bare EOF. The host is
+    /// re-resolved per attempt (off the main thread that re-establishes a peer
+    /// path) and the failed connection is closed so the pool evicts it.
     static func probe(host rawHost: RemoteHost, strictHostKey: Bool) -> RemoteProbe {
+        _ = bootstrap
         ensureClientKey()
-        let host = resolved(rawHost)
-        guard let destination = host.sshDestination else {
+        guard rawHost.sshDestination != nil else {
             return .unreachable("invalid SSH username or address")
         }
-        var args = commonArgs(for: host)
-        args += ["-o", "StrictHostKeyChecking=\(strictHostKey ? "yes" : "accept-new")",
-                 "-o", "BatchMode=yes",
-                 destination, FatClient.controlVerb]
-
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        p.arguments = args
-        let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
-        p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = errPipe
-
-        do { try p.run() } catch { return .unreachable("couldn't launch ssh") }
-        let req = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-        inPipe.fileHandleForWriting.write(Data(req.utf8))
-        try? inPipe.fileHandleForWriting.close()
-        let out = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let err = errPipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-
-        let outStr = String(decoding: out, as: UTF8.self)
-        let errStr = String(decoding: err, as: UTF8.self)
-        let errLower = errStr.lowercased()
-        if outStr.contains("HTTP/1.1 200") { return .ok }
-        if errStr.contains("HOST IDENTIFICATION HAS CHANGED")
-            || (errLower.contains("host key") && errLower.contains("changed"))
-            || errLower.contains("host key verification failed") {
-            return .hostKeyChanged
+        for attempt in 0..<2 {
+            let host = resolved(rawHost)
+            do {
+                let conn = try SSHDialer.shared.ensureConnection(host: host, strict: strictHostKey)
+                guard let fd = conn.openVerbChannel(FatClient.controlVerb) else {
+                    conn.close()
+                    if attempt == 0 { continue }
+                    return .unreachable("couldn't open control channel")
+                }
+                let client = ControlClient(socketPath: "ssh://\(host.connectLabel)") { fd }
+                let resp = try? client.request("GET", "/health")
+                if resp?.status == 200 { return .ok }
+                conn.close()
+                if attempt == 0 { continue }
+                return .unreachable("no response from remote")
+            } catch let e as SSHDialError {
+                switch e {
+                // Auth and host-key verdicts are answers, not transport
+                // failures — a retry returns the same thing.
+                case .authFailed:     return .authFailed
+                case .hostKeyChanged: return .hostKeyChanged
+                case .unreachable(let m):
+                    if attempt == 0 { continue }
+                    return .unreachable(m)
+                }
+            } catch {
+                if attempt == 0 { continue }
+                return .unreachable("\(error)")
+            }
         }
-        if errLower.contains("permission denied") || errLower.contains("authentication failed") {
-            return .authFailed
-        }
-        if errLower.contains("connection refused") || errLower.contains("timed out")
-            || errLower.contains("could not resolve") || errLower.contains("no route") {
-            return .unreachable(firstLine(errStr))
-        }
-        // No 200 and no clear signal → treat as auth failure (most common:
-        // remote reachable but this key not yet authorized).
-        return errStr.isEmpty ? .unreachable("no response from remote") : .authFailed
+        return .unreachable("no response from remote")
     }
 
-    private static func firstLine(_ s: String) -> String {
-        s.split(whereSeparator: \.isNewline).map(String.init).first { !$0.isEmpty } ?? s
-    }
-
-    /// A `ControlClient` whose transport is an SSH tunnel to `host`. Each
-    /// connection is a fresh `ssh … bromure-fatclient control` channel bridged
-    /// to the remote's owner-only control socket, so the whole control-plane
-    /// HTTP API + `InteractiveExec` run over SSH unchanged. Pass
-    /// `interactive: true` for the terminal-attach stream (direct connection,
-    /// no ControlMaster buffering).
+    /// A `ControlClient` whose transport is an SSH channel to `host`: a
+    /// `bromure-fatclient control` exec channel bridged to the remote's
+    /// owner-only control socket, so the whole control-plane HTTP API +
+    /// `InteractiveExec` run over SSH unchanged.
     static func client(for rawHost: RemoteHost, interactive: Bool = false) -> ControlClient {
+        _ = bootstrap
         ensureClientKey()
         let host = resolved(rawHost)
-        let args = sshArgs(for: host, interactive: interactive)
+        // Terminal streams get their own pooled connection ("term" lane) so a
+        // long-lived, possibly backed-up PTY channel can't stall the control
+        // connection the mirror poll rides — sharing one let a wedged terminal
+        // freeze the whole mirror on "Connecting…".
+        let lane = interactive ? "term" : ""
         return ControlClient(socketPath: "ssh://\(host.connectLabel)") {
-            guard let args else { return nil }
-            return SSHTunnel.shared.dial(args)
+            SSHDialer.shared.dial(host: host, verb: FatClient.controlVerb, lane: lane)
         }
     }
 
@@ -456,97 +336,38 @@ enum RemoteTransport {
         return client(for: host, interactive: interactive)
     }
 
-    /// Open a raw TCP tunnel to a guest `ip:port` on the remote's vmnet subnet:
-    /// `ssh … bromure-fatclient/1 forward <ip> <port>`. Returns a bidirectional
-    /// fd (the ssh channel bridged to the remote guest). No ControlMaster —
-    /// it's a long-lived raw stream, same as the terminal attach. The caller
-    /// owns/closes the fd.
+    /// Open a raw TCP tunnel to a guest `ip:port` on the remote's vmnet subnet
+    /// (`bromure-fatclient/1 forward <ip> <port>`). Returns a bidirectional fd
+    /// bridged to the remote guest; the caller owns and closes it.
     static func forwardDial(host rawHost: RemoteHost, ip: String, port: Int) -> Int32? {
+        _ = bootstrap
         ensureClientKey()
         let host = resolved(rawHost)
-        guard let destination = host.sshDestination else { return nil }
-        var args = commonArgs(for: host)
-        args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-                 destination, "\(FatClient.forwardVerbPrefix)\(ip) \(port)"]
-        return SSHTunnel.shared.dial(args)
+        guard host.sshDestination != nil else { return nil }
+        return SSHDialer.shared.dial(host: host,
+                                     verb: "\(FatClient.forwardVerbPrefix)\(ip) \(port)")
     }
 
     /// Open a `forward-udp <ip>` channel: a multiplexed byte stream carrying
-    /// length-prefixed UDP datagrams to a remote guest. Fresh ssh process, like
-    /// `forwardDial`.
+    /// length-prefixed UDP datagrams to a remote guest.
     static func forwardDialUDP(host rawHost: RemoteHost, ip: String) -> Int32? {
+        _ = bootstrap
         ensureClientKey()
         let host = resolved(rawHost)
-        guard let destination = host.sshDestination else { return nil }
-        var args = commonArgs(for: host)
-        args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-                 destination, "\(FatClient.forwardUDPVerbPrefix)\(ip)"]
-        return SSHTunnel.shared.dial(args)
+        guard host.sshDestination != nil else { return nil }
+        return SSHDialer.shared.dial(host: host,
+                                     verb: "\(FatClient.forwardUDPVerbPrefix)\(ip)")
     }
 
     /// Open a `browser-mcp <vm>` channel: a raw byte stream carrying the remote
     /// workspace agent's line-delimited JSON-RPC, which the fat client answers
-    /// with its own `BrowserMCPServer`. Fresh ssh process per relay (long-lived
-    /// stream, no ControlMaster), like `forwardDial`.
+    /// with its own `BrowserMCPServer`.
     static func browserMCPDial(host rawHost: RemoteHost, vm: String) -> Int32? {
+        _ = bootstrap
         ensureClientKey()
         let host = resolved(rawHost)
-        guard let destination = host.sshDestination else { return nil }
-        var args = commonArgs(for: host)
-        args += ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-                 destination, "\(FatClient.browserMCPVerbPrefix)\(vm)"]
-        return SSHTunnel.shared.dial(args)
-    }
-}
-
-// MARK: - SSH tunnel process pool
-
-/// Spawns `ssh` subprocesses and hands back a single bidirectional fd per
-/// channel (a socketpair whose far end is the ssh child's stdin+stdout). The
-/// returned fd behaves exactly like the local AF_UNIX control-socket fd, so
-/// `ControlClient.request`/`openStream` — and therefore `InteractiveExec` —
-/// run over the SSH tunnel unchanged. Retains each Process until it exits so
-/// Foundation reaps it (no zombies) and it isn't torn down early.
-final class SSHTunnel: @unchecked Sendable {
-    static let shared = SSHTunnel()
-
-    private let lock = NSLock()
-    private var live: Set<Process> = []
-
-    /// Spawn `ssh <args>` and return a duplex fd bridged to its stdio. The
-    /// caller owns the fd and closes it; closing it makes ssh see EOF and exit.
-    func dial(_ args: [String]) -> Int32? {
-        var fds: [Int32] = [0, 0]
-        let sp = socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
-        guard sp == 0 else {
-            FatClientLog.log("dial: socketpair FAILED errno=\(errno) (\(String(cString: strerror(errno))))")
-            return nil
-        }
-        let parent = fds[0]
-        let child = fds[1]
-
-        let handle = FileHandle(fileDescriptor: child, closeOnDealloc: false)
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        p.arguments = args
-        p.standardInput = handle
-        p.standardOutput = handle
-        p.standardError = FileHandle.nullDevice
-        p.terminationHandler = { [weak self] proc in
-            guard let self else { return }
-            self.lock.lock(); self.live.remove(proc); self.lock.unlock()
-        }
-        do {
-            try p.run()
-        } catch {
-            FatClientLog.log("dial: ssh spawn FAILED: \(error)")
-            Darwin.close(parent); Darwin.close(child)
-            return nil
-        }
-        // The child holds its dup'd copies of `child` on fd 0/1; the parent
-        // keeps only `parent`.
-        Darwin.close(child)
-        lock.lock(); live.insert(p); lock.unlock()
-        return parent
+        guard host.sshDestination != nil else { return nil }
+        return SSHDialer.shared.dial(host: host,
+                                     verb: "\(FatClient.browserMCPVerbPrefix)\(vm)")
     }
 }

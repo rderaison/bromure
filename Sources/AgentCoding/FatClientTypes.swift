@@ -125,9 +125,9 @@ struct HostKeyInfo: Equatable {
 
 /// The fat client's private key at rest: one generic-password item in the
 /// data-protection keychain (app-scoped by code signature, no UI — the
-/// SecretsVault choice). System ssh can't read it, so macOS dials go through an
-/// in-memory ssh-agent (see RemoteTransport.keyAgentSock); the iOS client hands
-/// it straight to its in-process NIOSSH dialer.
+/// SecretsVault choice). Both platforms hand it straight to the in-process
+/// NIOSSH dialer; macOS stores it as an OpenSSH PEM (decoded by
+/// `OpenSSHKeyFormat.ed25519Seed(fromPEM:)`), iOS as a raw base64 seed.
 enum FatClientKeyStore {
     private static let service = "io.bromure.agentic-coding.fatclient"
     private static let account = "client-key-ed25519"

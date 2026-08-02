@@ -9,19 +9,19 @@ import Darwin
 
 // MARK: - In-process SSH dialer (fat client)
 //
-// A swift-nio-ssh replacement for the system-`ssh`-subprocess transport in
-// FatClientRemote.swift: one SSH connection per remote host, and one exec
-// child channel per dial, bridged to a socketpair so the caller still gets a
-// plain bidirectional fd — `ControlClient.request`/`openStream` and the
+// A swift-nio-ssh replacement for the system-`ssh`-subprocess transport that
+// FatClientRemote.swift used to run: one SSH connection per remote host, and
+// one exec child channel per dial, bridged to a socketpair so the caller still
+// gets a plain bidirectional fd — `ControlClient.request`/`openStream` and the
 // framed PTY pump run over it unchanged.
 //
-// This is the ONLY transport on iOS (no Process there); on macOS it is
-// compiled and typechecked but the proven system-ssh path stays the default.
-// Compared to ssh+ControlMaster, all channels multiplex over a single
-// connection — including interactive attaches, which is safe here because the
-// OpenSSH mux quirk (buffering a multiplexed channel's spontaneous
-// server→client output) is specific to the ControlMaster implementation, not
-// to SSH channel multiplexing itself.
+// This is now the transport on BOTH platforms (iOS never had a Process to
+// spawn; macOS moved over so the two behave identically). Compared to
+// ssh+ControlMaster, all channels multiplex over a single connection —
+// including interactive attaches, which is safe here because the OpenSSH mux
+// quirk (buffering a multiplexed channel's spontaneous server→client output)
+// is specific to the ControlMaster implementation, not to SSH channel
+// multiplexing itself.
 
 // MARK: ed25519 key material helpers
 
@@ -177,9 +177,9 @@ final class SSHDialer: @unchecked Sendable {
         dead.values.forEach { $0.close() }
     }
 
-    /// Where host-key pins live. Configured once at startup by the platform
-    /// transport layer (RemoteTransport on iOS; unused while macOS stays on
-    /// system ssh, whose known_hosts the ssh binary manages itself).
+    /// Where host-key pins live. Configured once at startup by the platform's
+    /// `RemoteTransport` (both macOS and iOS point it at their own
+    /// remote-client/known_hosts).
     var knownHostsURL: URL?
     /// Loads the client's ed25519 identity for public-key auth. Configured by
     /// the platform transport layer.
