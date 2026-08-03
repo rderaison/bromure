@@ -1354,6 +1354,19 @@ struct ProfileEditorView: View {
                     .textFieldStyle(.roundedBorder)
                 Text("Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults.")
                     .font(.caption).foregroundStyle(.secondary)
+                #if os(macOS)
+                HStack {
+                    Spacer()
+                    Button {
+                        importGitConfigFile()
+                    } label: {
+                        Label(NSLocalizedString("Import .gitconfig…", comment: ""),
+                              systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                }
+                #endif
             }
 
             Divider()
@@ -2301,6 +2314,91 @@ struct ProfileEditorView: View {
     /// `credsStore` / `credHelpers` are skipped — those passwords live
     /// in the host's OS keychain, not in the file. Always reports a
     /// summary alert so the user knows what landed.
+#if os(macOS)
+    /// Import an existing `~/.gitconfig`: fills the identity fields and turns
+    /// any token baked into a URL rewrite into a `GitHTTPSCredential`.
+    ///
+    /// That last part is the point. A token living in the user's gitconfig is
+    /// cleartext; imported here it is stored on the host and the VM receives a
+    /// FAKE, which the proxy swaps back on outbound requests to that host. So
+    /// importing is strictly safer than sharing the file into the guest — and
+    /// `git clone` keeps working with no further setup.
+    private func importGitConfigFile() {
+        let panel = NSOpenPanel()
+        panel.title = NSLocalizedString("Import .gitconfig", comment: "")
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true          // it's a dotfile
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let parsed: GitConfigImport.Result
+        do {
+            parsed = try GitConfigImport.parse(try Data(contentsOf: url))
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("Couldn't import .gitconfig", comment: "")
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            alert.runModal()
+            return
+        }
+
+        // Identity: fill only what's blank, so an import never clobbers what
+        // the user already typed here.
+        var filledIdentity = false
+        if draft.gitUserName.trimmingCharacters(in: .whitespaces).isEmpty,
+           !parsed.identity.name.isEmpty {
+            draft.gitUserName = parsed.identity.name
+            filledIdentity = true
+        }
+        if draft.gitUserEmail.trimmingCharacters(in: .whitespaces).isEmpty,
+           !parsed.identity.email.isEmpty {
+            draft.gitUserEmail = parsed.identity.email
+            filledIdentity = true
+        }
+
+        // Tokens: same duplicate rule as the Docker import — an existing
+        // (host, username) pair is left alone rather than overwritten.
+        var added = 0
+        for e in parsed.entries {
+            let dup = draft.gitHTTPSCredentials.contains {
+                $0.host.lowercased() == e.host.lowercased() && $0.username == e.username
+            }
+            if dup { continue }
+            draft.gitHTTPSCredentials.append(
+                GitHTTPSCredential(host: e.host, username: e.username, token: e.token))
+            expandedCredsSections.insert(disclosureKey(for: e.host))
+            added += 1
+        }
+
+        let alert = NSAlert()
+        alert.messageText = added == 1
+            ? NSLocalizedString("Imported 1 token", comment: "")
+            : String(format: NSLocalizedString("Imported %d tokens", comment: ""), added)
+        var parts: [String] = []
+        if filledIdentity { parts.append(NSLocalizedString("Git identity filled in.", comment: "")) }
+        if added > 0 {
+            parts.append(NSLocalizedString(
+                "Each token stays on this Mac — the VM gets a fake that the proxy swaps back on requests to that host.",
+                comment: ""))
+        }
+        if parsed.skippedNoToken > 0 {
+            parts.append(String(format: NSLocalizedString(
+                "%d entry/entries named a host but carried no token, so they were skipped.",
+                comment: ""), parsed.skippedNoToken))
+        }
+        if added == 0 && !filledIdentity && parsed.skippedNoToken == 0 {
+            parts.append(NSLocalizedString("Everything in that file was already configured.", comment: ""))
+        }
+        alert.informativeText = parts.joined(separator: "\n\n")
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+#endif
+
     private func importDockerConfigFile() {
         let panel = NSOpenPanel()
         panel.title = NSLocalizedString("Import Docker config.json", comment: "")
