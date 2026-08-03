@@ -318,7 +318,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onDuplicate: { [weak self] id in self?.acDelegate?.sidebarDuplicateProfile(id) },
             onReset:     { [weak self] id in self?.acDelegate?.sidebarResetProfile(id) },
             onDelete:    { [weak self] id in self?.acDelegate?.sidebarDeleteProfile(id) },
-            onNewProfile: { [weak self] in self?.acDelegate?.openEditorWindow(editing: nil) },
+            // Option-click runs the credential wizard first (same as the
+            // Workspaces menu's alternate item), so the new workspace starts
+            // pre-filled from this Mac's config files.
+            onNewProfile: { [weak self] in
+                self?.acDelegate?.beginNewWorkspace(
+                    withWizard: NSEvent.modifierFlags.contains(.option))
+            },
             automationStore: acDelegate.scheduledAutomationStore,
             onNewAutomation:    { [weak self] in self?.showAutomationEditor(nil) },
             onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },

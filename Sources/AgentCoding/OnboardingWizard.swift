@@ -27,6 +27,13 @@ final class OnboardingWizardModel {
         case done
     }
 
+    /// Why the wizard is open. First run walks the whole flow; a
+    /// new-workspace run (option-click on New Workspace) skips the welcome and
+    /// install and goes straight to the credential scan, because the user
+    /// already knows what Bromure is and asked for exactly this.
+    enum Purpose { case firstRun, newWorkspace }
+    let purpose: Purpose
+
     var step: Step = .welcome
     /// Discovered config files, in scan order. `include` drives the checkboxes.
     var findings: [ConfigScan.Finding] = []
@@ -34,12 +41,15 @@ final class OnboardingWizardModel {
     var scanning = false
     /// Set once the import has been applied — drives the summary on `.done`.
     var summary: ConfigScan.Summary?
+    /// The workspace this run created or filled, so leaving can open its editor.
+    var createdProfileID: UUID?
     /// Whether a base image already exists, so step 2 can be skipped.
     let needsImage: Bool
 
-    init(needsImage: Bool) {
+    init(needsImage: Bool, purpose: Purpose = .firstRun) {
         self.needsImage = needsImage
-        step = .welcome
+        self.purpose = purpose
+        step = purpose == .newWorkspace ? .scanOffer : .welcome
     }
 
     var selectedCount: Int { findings.filter(\.include).count }
@@ -150,7 +160,10 @@ struct OnboardingWizardView: View {
             Spacer()
             Image(systemName: "key.horizontal.fill")
                 .font(.system(size: 44)).foregroundStyle(.tint)
-            Text("Import your existing credentials?").font(.title3.bold())
+            Text(model.purpose == .newWorkspace
+                 ? "Set up this workspace from your existing credentials?"
+                 : "Import your existing credentials?")
+                .font(.title3.bold())
             Text("Bromure can look through the config files already on this Mac — git, Docker, AWS, Kubernetes, npm, the GitHub and GitLab CLIs, your agent logins, and more — and offer to bring them in.\n\nReal values never leave your Mac: each one is stored here and the VM receives only a fake, which the proxy swaps back on outbound requests. Nothing is read until you say yes, and nothing is imported until you pick it on the next screen.")
                 .font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 480)

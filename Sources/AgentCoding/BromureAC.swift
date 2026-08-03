@@ -447,6 +447,18 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     newWsItem.target = delegate
     wsMenu.addItem(newWsItem)
 
+    // Option-variant of the item above: same slot in the menu, revealed while
+    // Option is held. This is what makes the option-click on the sidebar's "+"
+    // discoverable rather than folklore.
+    let newWsFromConfigs = NSMenuItem(
+        title: L("New Workspace from My Configs…"),
+        action: #selector(ACAppDelegate.newWorkspaceFromConfigsAction(_:)),
+        keyEquivalent: "n")
+    newWsFromConfigs.keyEquivalentModifierMask = [.command, .shift, .option]
+    newWsFromConfigs.isAlternate = true
+    newWsFromConfigs.target = delegate
+    wsMenu.addItem(newWsFromConfigs)
+
     // Fat client: mirror a remote bromure-ac (its grid, workspaces, tabs,
     // automations) 1:1 over SSH. A peer of "New Workspace…" — both bring a
     // source of workspaces into the app.
@@ -2131,6 +2143,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // before the base image exists, the setup window in `mainWindow`.
         if imageManager.hasBaseImage && !profiles.isEmpty {
             showUnifiedWindowAsHome()
+            // Debug: exercise the option-click path (wizard over an open home)
+            // without synthesizing a modifier-held click.
+            if ProcessInfo.processInfo.environment["BROMURE_DEBUG_WIZARD"] == "newworkspace" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    self?.beginNewWorkspace(withWizard: true)
+                }
+            }
             // Image-maintenance checks (non-blocking; the user keeps
             // working with the existing base throughout). Refresh the
             // image catalog, then in priority order:
@@ -5071,7 +5090,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return (id, pane, pane.model.activeIndex)
     }
 
-    @objc func newWorkspaceAction(_ sender: Any?) { openEditorWindow(editing: nil) }
+    /// New Workspace. Holding Option (or picking the alternate menu item) runs
+    /// the credential wizard first, so the workspace starts pre-filled from the
+    /// config files already on this Mac instead of an empty editor.
+    @objc func newWorkspaceAction(_ sender: Any?) {
+        beginNewWorkspace(withWizard: NSEvent.modifierFlags.contains(.option))
+    }
+
+    /// The alternate ("New Workspace from My Configs…") menu item.
+    @objc func newWorkspaceFromConfigsAction(_ sender: Any?) {
+        beginNewWorkspace(withWizard: true)
+    }
+
+    @MainActor
+    func beginNewWorkspace(withWizard: Bool) {
+        guard withWizard else { openEditorWindow(editing: nil); return }
+        // Reuse the wizard, entering at the scan offer: the app is already
+        // running, so there's nothing to install and no welcome to give.
+        onboarding = OnboardingWizardModel(needsImage: false, purpose: .newWorkspace)
+        ensureInstallWindow()
+        renderSetup()
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     @objc func newTabAction(_ sender: Any?) {
         if let ctx = currentWorkspaceContext() { spawnNewTab(in: ctx.pane) }
@@ -5517,15 +5557,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let wizard = onboarding else { leaveOnboarding(); return }
 
         if findings.isEmpty {
+            // Declined or nothing ticked. For an explicit new-workspace run
+            // that means "just give me the editor" — don't make them read a
+            // summary of nothing.
+            if wizard.purpose == .newWorkspace {
+                onboarding = nil
+                if let w = mainWindow { w.close() }
+                mainWindow = nil
+                showUnifiedWindowAsHome()
+                openEditorWindow(editing: nil)
+                return
+            }
             wizard.summary = nil
             wizard.step = .done
             renderSetup()
             return
         }
 
-        // Fold into a first workspace. A brand-new install has none, so this is
-        // the profile every imported credential belongs to.
-        var profile = profiles.first ?? store.newProfileFromTemplate(name: "Default")
+        // First run folds into the one workspace a fresh install will have;
+        // an explicit "new workspace" run always mints its own.
+        var profile = wizard.purpose == .newWorkspace
+            ? store.newProfileFromTemplate(name: nextDefaultProfileName())
+            : (profiles.first ?? store.newProfileFromTemplate(name: "Default"))
         let summary = ConfigScan.apply(findings, to: &profile)
         do { try store.save(profile) } catch {
             FileHandle.standardError.write(Data(
@@ -5551,6 +5604,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         try? store.save(profile)
         profiles = store.loadAll()
 
+        wizard.createdProfileID = profile.id
         wizard.summary = summary
         wizard.step = .done
         renderSetup()
@@ -5582,11 +5636,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Tear the setup window down and land on the unified home.
     @MainActor
     private func leaveOnboarding() {
+        let created = onboarding?.createdProfileID
+        let wasNewWorkspace = onboarding?.purpose == .newWorkspace
         onboarding = nil
         if let w = mainWindow { w.close() }
         mainWindow = nil
         showUnifiedWindowAsHome()
-        if profiles.isEmpty { openEditorWindow(editing: nil) }
+        // A new-workspace run lands in the editor for what it just built, so
+        // the user can name it and review what came in.
+        if wasNewWorkspace, let id = created,
+           let p = profiles.first(where: { $0.id == id }) {
+            openEditorWindow(editing: p)
+        } else if profiles.isEmpty {
+            openEditorWindow(editing: nil)
+        }
     }
 
     func openEditorWindow(editing: Profile?) {
