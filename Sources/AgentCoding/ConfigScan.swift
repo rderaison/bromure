@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 // MARK: - Host credential discovery
 //
@@ -40,6 +41,11 @@ enum ConfigScan {
         case digitalOcean(String)
         case gitTokens([GitCred])
         case subscription(provider: String, access: String, refresh: String)
+        /// A subscription whose tokens live in the login keychain. The secret
+        /// is read at IMPORT time, not scan time — reading another app's item
+        /// raises a macOS access prompt, which must not fire from a scan the
+        /// user hasn't agreed to act on yet.
+        case keychainSubscription(provider: String, service: String)
         case sshKey(label: String)
         case env([EnvFileImport.ParsedVar])
         case agentKeys([(tool: Profile.Tool, value: String)])
@@ -362,7 +368,22 @@ enum ConfigScan {
 
     // MARK: agent subscriptions (the user's own CLI logins)
 
+    /// Claude Code on macOS keeps its OAuth tokens in the LOGIN KEYCHAIN
+    /// ("Claude Code-credentials"), not in `~/.claude/.credentials.json` —
+    /// that path is where the *Linux* build (and our guest) stores them. Check
+    /// the keychain first, then fall back to the file.
+    private static let claudeKeychainService = "Claude Code-credentials"
+
     private static func detectClaudeSubscription() -> Finding? {
+        if keychainItemExists(service: claudeKeychainService) {
+            return Finding(id: Kind.claudeSubscription.rawValue, kind: .claudeSubscription,
+                           path: URL(fileURLWithPath: "/Keychain/\(claudeKeychainService)"),
+                           title: "Claude subscription",
+                           detail: "your Claude Code login, from the login keychain",
+                           credentialCount: 1, symbol: "sparkles",
+                           payload: .keychainSubscription(provider: "claude",
+                                                          service: claudeKeychainService))
+        }
         let url = home.appendingPathComponent(".claude/.credentials.json")
         guard let d = try? Data(contentsOf: url),
               let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
@@ -515,6 +536,59 @@ enum ConfigScan {
                        payload: .env(vars))
     }
 
+    // MARK: - Keychain
+
+    /// Does a generic-password item exist for `service`? Attributes only — no
+    /// `kSecReturnData`, so macOS does NOT prompt for access. Presence is all a
+    /// scan needs; the secret is fetched later, once the user ticks the row.
+    static func keychainItemExists(service: String) -> Bool {
+        let q: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecReturnAttributes: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+        ]
+        var out: AnyObject?
+        return SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess
+    }
+
+    /// Read a generic password. This is what raises the access prompt, so call
+    /// it only from `apply` — after the user has chosen to import.
+    static func keychainSecret(service: String) -> String? {
+        let q: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+        ]
+        var out: AnyObject?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+              let data = out as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Pull an OAuth pair out of a provider's stored JSON. Claude Code uses the
+    /// same `claudeAiOauth` shape in the keychain as it does in its file.
+    static func oauthPair(fromJSON json: String, provider: String) -> (String, String)? {
+        guard let d = json.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+        else { return nil }
+        switch provider {
+        case "claude":
+            guard let o = obj["claudeAiOauth"] as? [String: Any],
+                  let a = o["accessToken"] as? String,
+                  let r = o["refreshToken"] as? String, !a.isEmpty, !r.isEmpty else { return nil }
+            return (a, r)
+        case "codex":
+            guard let tk = obj["tokens"] as? [String: Any],
+                  let a = tk["access_token"] as? String,
+                  let r = tk["refresh_token"] as? String, !a.isEmpty, !r.isEmpty else { return nil }
+            return (a, r)
+        default:
+            return nil
+        }
+    }
+
     // MARK: - Apply
 
     /// Fold the chosen findings into a workspace draft. Secrets that have no
@@ -615,6 +689,17 @@ enum ConfigScan {
                     }
                     s.total += 1
                 }
+
+            case .keychainSubscription(let provider, let service):
+                // Reads the item — macOS may ask the user to allow access.
+                // That prompt belongs here, at explicit import, not in a scan.
+                guard let json = keychainSecret(service: service),
+                      let (access, refresh) = oauthPair(fromJSON: json, provider: provider) else {
+                    continue
+                }
+                s.subscriptions.append(SubscriptionImport(
+                    provider: provider, access: access, refresh: refresh))
+                s.total += 1
 
             case .subscription(let provider, let access, let refresh):
                 s.subscriptions.append(SubscriptionImport(

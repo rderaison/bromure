@@ -208,3 +208,41 @@ struct ConfigScanAgentTests {
         #expect(s.total == 4)
     }
 }
+
+// Claude Code on macOS stores its OAuth tokens in the LOGIN KEYCHAIN, not in
+// ~/.claude/.credentials.json (that path is the Linux/guest one). Reading the
+// wrong place is why Claude never showed up in the wizard.
+@Suite("Keychain-backed agent logins")
+struct KeychainCredentialTests {
+
+    @Test("the claude keychain shape parses to an OAuth pair")
+    func claudeShape() throws {
+        let json = """
+        {"claudeAiOauth":{"accessToken":"sk-ant-oat01-x","refreshToken":"sk-ant-ort01-y",
+        "expiresAt":1785788541082,"scopes":["user:inference"],"subscriptionType":"max"}}
+        """
+        let pair = try #require(ConfigScan.oauthPair(fromJSON: json, provider: "claude"))
+        #expect(pair.0 == "sk-ant-oat01-x")
+        #expect(pair.1 == "sk-ant-ort01-y")
+    }
+
+    @Test("codex shape parses too, and junk is refused")
+    func codexAndJunk() throws {
+        let ok = try #require(ConfigScan.oauthPair(
+            fromJSON: #"{"tokens":{"access_token":"a","refresh_token":"r","id_token":"i"}}"#,
+            provider: "codex"))
+        #expect(ok.0 == "a")
+        // Wrong provider for the shape, empty tokens, and non-JSON all yield nil
+        // rather than a half-built credential.
+        #expect(ConfigScan.oauthPair(fromJSON: #"{"tokens":{}}"#, provider: "codex") == nil)
+        #expect(ConfigScan.oauthPair(fromJSON: "not json", provider: "claude") == nil)
+        #expect(ConfigScan.oauthPair(
+            fromJSON: #"{"claudeAiOauth":{"accessToken":"","refreshToken":"r"}}"#,
+            provider: "claude") == nil)
+    }
+
+    @Test("existence probe is safe on a service that isn't there")
+    func missingService() {
+        #expect(!ConfigScan.keychainItemExists(service: "definitely-not-a-real-service-\(UUID())"))
+    }
+}
