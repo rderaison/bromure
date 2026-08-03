@@ -162,3 +162,49 @@ struct ConfigScanTests {
               + found.map { "\($0.kind.rawValue)(\($0.credentialCount))" }.joined(separator: ", "))
     }
 }
+
+// The agent credentials specifically: all four tools must be routable, and
+// each must land in the right place — API keys on the profile, subscription
+// logins deferred to the MITM stores (a draft can't hold them).
+@Suite("Config scan — agent credentials")
+struct ConfigScanAgentTests {
+
+    @Test("api keys land on the right tool")
+    func agentKeys() {
+        var p = Profile(name: "w", tool: .claude, authMode: .subscription)
+        let f = ConfigScan.Finding(
+            id: "k", kind: .agentAPIKey, path: URL(fileURLWithPath: "/tmp/settings.json"),
+            title: "keys", detail: "", credentialCount: 2, symbol: "x", include: true,
+            payload: .agentKeys([(tool: .claude, value: "sk-ant-key"),
+                                 (tool: .grok, value: "xai-key")]))
+        let s = ConfigScan.apply([f], to: &p)
+        // Primary tool gets the profile's own key and flips to token auth.
+        #expect(p.apiKey == "sk-ant-key")
+        #expect(p.authMode == .token)
+        // A non-primary tool becomes an additionalTools entry.
+        let grok = p.additionalTools.first { $0.tool == .grok }
+        #expect(grok?.apiKey == "xai-key")
+        #expect(grok?.authMode == .token)
+        #expect(s.total == 2)
+    }
+
+    @Test("all four subscription providers are carried, not dropped")
+    func subscriptionsForEveryAgent() {
+        var p = Profile(name: "w", tool: .claude, authMode: .subscription)
+        let providers = ["claude", "codex", "grok", "kimi"]
+        let findings = providers.map { name in
+            ConfigScan.Finding(
+                id: name, kind: .claudeSubscription,
+                path: URL(fileURLWithPath: "/tmp/\(name).json"),
+                title: name, detail: "", credentialCount: 1, symbol: "x", include: true,
+                payload: .subscription(provider: name, access: "a-\(name)", refresh: "r-\(name)"))
+        }
+        let s = ConfigScan.apply(findings, to: &p)
+        #expect(s.subscriptions.count == 4)
+        #expect(Set(s.subscriptions.map(\.provider)) == Set(providers))
+        // They belong to the credential stores, so nothing should have been
+        // written onto the profile itself.
+        #expect(p.apiKey == nil || p.apiKey?.isEmpty == true)
+        #expect(s.total == 4)
+    }
+}

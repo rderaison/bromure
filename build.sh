@@ -128,6 +128,14 @@ elif [ -f "$SCRIPT_DIR/Resources/AppIcon.icns" ]; then
     cp "$SCRIPT_DIR/Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 fi
 
+# bromure-ac: onboarding wizard artwork (day/night rail images lifted from the
+# marketing site, cropped vertical). Small enough to ship uncompressed.
+if [ -d "$SCRIPT_DIR/Resources/ac" ]; then
+    for img in "$SCRIPT_DIR/Resources/ac"/wizard-*.jpg; do
+        [ -f "$img" ] && cp "$img" "$RESOURCES_DIR/$(basename "$img")"
+    done
+fi
+
 # Browser-only: AppleScript scripting definition.
 if [ -n "$SDEF_FILE" ] && [ -f "$SDEF_FILE" ]; then
     cp "$SDEF_FILE" "$RESOURCES_DIR/$(basename "$SDEF_FILE")"

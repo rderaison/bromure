@@ -52,6 +52,20 @@ final class OnboardingWizardModel {
         step = purpose == .newWorkspace ? .scanOffer : .welcome
     }
 
+    /// Where a rail step sits relative to the current one, so the list can show
+    /// a tick, a filled dot, or a hollow dot.
+    enum StepState { case done, current, upcoming }
+
+    /// Linear order used only for the rail's progress rendering.
+    private var order: [Step] { [.welcome, .installing, .scanOffer, .pick, .done] }
+
+    func state(of s: Step) -> StepState {
+        guard let a = order.firstIndex(of: s), let b = order.firstIndex(of: step) else {
+            return .upcoming
+        }
+        return a < b ? .done : (a == b ? .current : .upcoming)
+    }
+
     var selectedCount: Int { findings.filter(\.include).count }
     var totalCredentials: Int {
         findings.filter(\.include).reduce(0) { $0 + $1.credentialCount }
@@ -84,6 +98,12 @@ final class OnboardingWizardModel {
 }
 
 // MARK: - Wizard view
+//
+// Classic macOS setup-assistant chrome: an artwork rail down the left with the
+// step list over it, the current step's content on the right, and a fixed
+// button bar along the bottom. The rail art is the marketing site's hero photo
+// (day/night, matched to the system appearance) cropped vertical, under a
+// gradient scrim so the step list stays legible over any part of the image.
 
 struct OnboardingWizardView: View {
     @Bindable var model: OnboardingWizardModel
@@ -96,53 +116,163 @@ struct OnboardingWizardView: View {
     /// Leave setup and land on the workspace home.
     let onDone: () -> Void
 
+    @Environment(\.colorScheme) private var scheme
+
+    /// Wizard content size. The window is fixed, so the root carries a definite
+    /// frame — an `.infinity` max height reads as "as tall as possible" to
+    /// NSHostingView, which AppKit then clamps to the whole screen.
+    static let contentSize = CGSize(width: 780, height: 470)
+
     var body: some View {
-        VStack(spacing: 0) {
-            switch model.step {
-            case .welcome:    welcome
-            case .installing: installing
-            case .scanOffer:  scanOffer
-            case .pick:       pick
-            case .done:       done
+        HStack(spacing: 0) {
+            rail
+            VStack(spacing: 0) {
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                Divider()
+                buttonBar
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
             }
+            .background(.background)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(width: Self.contentSize.width, height: Self.contentSize.height)
     }
 
-    // MARK: 1 — Welcome
+    // MARK: Rail
+
+    /// Steps shown in the rail. The install step is hidden when there's nothing
+    /// to install, so the list never advertises work that won't happen.
+    private var railSteps: [(step: OnboardingWizardModel.Step, label: String)] {
+        var s: [(OnboardingWizardModel.Step, String)] = []
+        if model.purpose == .firstRun { s.append((.welcome, "Welcome")) }
+        if model.needsImage { s.append((.installing, "Install")) }
+        s.append((.scanOffer, "Credentials"))
+        s.append((.pick, "Choose"))
+        s.append((.done, "Done"))
+        return s
+    }
+
+    private var railImage: Image? {
+        let name = scheme == .dark ? "wizard-night" : "wizard-day"
+        guard let url = Bundle.main.url(forResource: name, withExtension: "jpg"),
+              let img = NSImage(contentsOf: url) else { return nil }
+        return Image(nsImage: img)
+    }
+
+    private var rail: some View {
+        // The step list is the PRIMARY view here; the photo and scrim are
+        // backgrounds behind it. That matters for layout: a background is sized
+        // to its primary view, so the rail's height comes from the window
+        // rather than from the image (a GeometryReader here has no intrinsic
+        // height and blows the hosting view up to thousands of points).
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(spacing: 8) {
+                if let icon = NSApp.applicationIconImage {
+                    Image(nsImage: icon)
+                        .resizable().interpolation(.high)
+                        .frame(width: 26, height: 26)
+                }
+                Text("Bromure")
+                    .font(.headline).foregroundStyle(.white)
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Array(railSteps.enumerated()), id: \.offset) { _, entry in
+                    stepRow(entry.step, entry.label)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 22)
+        .frame(width: 208, alignment: .topLeading)
+        .frame(maxHeight: .infinity, alignment: .top)
+        // Bottom-anchored: the lower half of the photo (lake, reflection,
+        // campfire) is the interesting part, so an overflowing fill should lose
+        // sky, not subject.
+        // One background holding both layers: stacked `.background` modifiers
+        // go progressively FURTHER back, so a second one would put the scrim
+        // behind the photo instead of over it.
+        .background {
+            ZStack(alignment: .bottom) {
+                if let railImage {
+                    railImage.resizable().scaledToFill()
+                } else {
+                    // No artwork (unbundled dev build) — a flat tint still
+                    // reads as a rail rather than a broken layout.
+                    Color.accentColor.opacity(0.85)
+                }
+                // Scrim: heaviest at the top where the wordmark and step list
+                // sit, easing off so the image shows through lower down.
+                LinearGradient(
+                    colors: [.black.opacity(0.80), .black.opacity(0.55), .black.opacity(0.25)],
+                    startPoint: .top, endPoint: .bottom)
+            }
+            .clipped()
+        }
+        .clipped()
+    }
+
+    private func stepRow(_ step: OnboardingWizardModel.Step, _ label: String) -> some View {
+        let state = model.state(of: step)
+        return HStack(spacing: 9) {
+            Group {
+                switch state {
+                case .done:
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.white)
+                case .current:
+                    Image(systemName: "circle.fill").foregroundStyle(.white)
+                        .font(.system(size: 8))
+                        .frame(width: 13, height: 13)
+                        .background(Circle().stroke(.white, lineWidth: 1.5))
+                case .upcoming:
+                    Image(systemName: "circle").foregroundStyle(.white.opacity(0.45))
+                }
+            }
+            .font(.system(size: 13))
+            .frame(width: 16)
+            Text(label)
+                .font(.system(size: 13, weight: state == .current ? .semibold : .regular))
+                .foregroundStyle(state == .upcoming ? .white.opacity(0.55) : .white)
+        }
+    }
+
+    // MARK: Content
+
+    @ViewBuilder
+    private var content: some View {
+        switch model.step {
+        case .welcome:    welcome
+        case .installing: installing
+        case .scanOffer:  scanOffer
+        case .pick:       pick
+        case .done:       done
+        }
+    }
+
+    /// Shared heading so every step lines up on the same baseline.
+    private func heading(_ title: String, _ subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title).font(.system(size: 21, weight: .semibold))
+            Text(subtitle)
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
 
     private var welcome: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            if let icon = NSApp.applicationIconImage {
-                Image(nsImage: { $0.size = NSSize(width: 96, height: 96); return $0 }(icon))
-                    .resizable().interpolation(.high)
-                    .frame(width: 96, height: 96)
-            }
-            Text("Welcome to Bromure").font(.title2.bold())
-            Text("Let's get started.").font(.title3).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 18) {
+            heading(NSLocalizedString("Welcome to Bromure", comment: ""),
+                    NSLocalizedString("Let's get started.", comment: ""))
             Text(model.needsImage
-                 ? "Bromure runs your coding agents inside disposable Linux VMs. First we'll install the base image, then optionally bring over the credentials you already have on this Mac."
-                 : "Bromure runs your coding agents inside disposable Linux VMs. Your base image is ready — next we can bring over the credentials you already have on this Mac.")
+                 ? NSLocalizedString("Bromure runs your coding agents inside disposable Linux VMs. First we'll install the base image, then optionally bring over the credentials you already have on this Mac.", comment: "")
+                 : NSLocalizedString("Bromure runs your coding agents inside disposable Linux VMs. Your base image is ready — next we can bring over the credentials you already have on this Mac.", comment: ""))
                 .font(.callout).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center).frame(maxWidth: 460)
-
-            Button {
-                model.advanceFromWelcome()
-                if model.step == .installing { onStartInstall() }
-            } label: {
-                Label(model.needsImage ? "Get Started" : "Continue",
-                      systemImage: "arrow.right.circle.fill")
-                    .frame(width: 180)
-            }
-            .controlSize(.large).buttonStyle(.borderedProminent)
-            .keyboardShortcut(.defaultAction)
+                .fixedSize(horizontal: false, vertical: true)
             Spacer()
         }
-        .padding(24)
+        .padding(28)
     }
-
-    // MARK: 2 — Install (reuses the existing installer surface)
 
     private var installing: some View {
         InitializingView(model: installProgress,
@@ -153,43 +283,52 @@ struct OnboardingWizardView: View {
                          onCancel: onCancelInstall)
     }
 
-    // MARK: 3 — Offer the scan
-
     private var scanOffer: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "key.horizontal.fill")
-                .font(.system(size: 44)).foregroundStyle(.tint)
-            Text(model.purpose == .newWorkspace
-                 ? "Set up this workspace from your existing credentials?"
-                 : "Import your existing credentials?")
-                .font(.title3.bold())
-            Text("Bromure can look through the config files already on this Mac — git, Docker, AWS, Kubernetes, npm, the GitHub and GitLab CLIs, your agent logins, and more — and offer to bring them in.\n\nReal values never leave your Mac: each one is stored here and the VM receives only a fake, which the proxy swaps back on outbound requests. Nothing is read until you say yes, and nothing is imported until you pick it on the next screen.")
-                .font(.callout).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center).frame(maxWidth: 480)
+        VStack(alignment: .leading, spacing: 16) {
+            heading(model.purpose == .newWorkspace
+                    ? NSLocalizedString("Set up from your existing credentials?", comment: "")
+                    : NSLocalizedString("Import your existing credentials?", comment: ""),
+                    NSLocalizedString("Bromure can read the config files already on this Mac and offer to bring them in.", comment: ""))
 
-            HStack(spacing: 12) {
-                Button("No thanks") { onFinish([]) }
-                    .controlSize(.large)
-                Button {
-                    model.beginScan()
-                } label: {
-                    Label("Scan my Mac", systemImage: "magnifyingglass")
-                        .frame(width: 160)
-                }
-                .controlSize(.large).buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
+            // What we look at, so "scan my Mac" isn't a blank cheque.
+            VStack(alignment: .leading, spacing: 6) {
+                sourceLine("arrow.triangle.branch", "git config, saved passwords, GitHub & GitLab CLIs")
+                sourceLine("shippingbox.fill", "Docker, npm, PyPI, crates.io")
+                sourceLine("cloud.fill", "AWS, Kubernetes, DigitalOcean")
+                sourceLine("sparkles", "Claude, ChatGPT, Grok & Kimi logins and API keys")
+                sourceLine("key.horizontal.fill", "SSH keys, .env files")
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+
+            Label {
+                Text("Real values never leave this Mac. The VM receives only a fake, which the proxy swaps back on outbound requests.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "lock.shield.fill").foregroundStyle(.green)
             }
             Spacer()
         }
-        .padding(24)
+        .padding(28)
     }
 
-    // MARK: 4 — Pick what to import
+    private func sourceLine(_ symbol: String, _ text: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol).foregroundStyle(.tint).frame(width: 18)
+            Text(text).font(.caption)
+            Spacer()
+        }
+    }
 
     private var pick: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Here's what I found").font(.title3.bold())
+            heading(NSLocalizedString("Here's what I found", comment: ""),
+                    model.findings.isEmpty && !model.scanning
+                    ? NSLocalizedString("Nothing to import — you can still add a .env file by hand.", comment: "")
+                    : NSLocalizedString("Tick what to bring in. Each secret stays on this Mac; the VM only ever sees a fake.", comment: ""))
+
             if model.scanning {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -199,49 +338,86 @@ struct OnboardingWizardView: View {
             } else if model.findings.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "questionmark.folder")
-                        .font(.title).foregroundStyle(.secondary)
-                    Text("No config files found.").font(.subheadline.weight(.medium))
-                    Text("You can still add a .env file by hand, or skip and configure credentials later in the workspace editor.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+                        .font(.title).foregroundStyle(.tertiary)
+                    Text("No config files found.").font(.subheadline).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                Text("Tick what you'd like to bring in. Each secret stays on this Mac — the VM only ever sees a fake.")
-                    .font(.caption).foregroundStyle(.secondary)
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach($model.findings) { $f in
-                            FindingRow(finding: $f)
-                        }
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach($model.findings) { $f in FindingRow(finding: $f) }
                     }
-                    .padding(.vertical, 2)
                 }
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.03)))
             }
+        }
+        .padding(.horizontal, 28)
+        .padding(.top, 28)
+        .padding(.bottom, 4)
+    }
 
-            HStack {
+    private var done: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 30)).foregroundStyle(.green)
+                heading(NSLocalizedString("You're all set", comment: ""),
+                        model.summary.map(\.headline)
+                            ?? NSLocalizedString("Enjoy — add credentials any time from a workspace's Credentials pane.", comment: ""))
+            }
+            if let d = model.summary?.detail, !d.isEmpty {
+                Text(d).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(28)
+    }
+
+    // MARK: Button bar
+
+    @ViewBuilder
+    private var buttonBar: some View {
+        HStack(spacing: 10) {
+            if model.step == .pick {
                 Button {
                     addEnvFile()
                 } label: {
                     Label("Add .env file…", systemImage: "plus")
                 }
-                .controlSize(.small)
-                Spacer()
-                Button("Skip") { onFinish([]) }
-                Button {
-                    onFinish(model.findings.filter(\.include))
-                } label: {
-                    Text(model.selectedCount == 0
-                         ? "Continue"
-                         : "Import \(model.totalCredentials) credential\(model.totalCredentials == 1 ? "" : "s")")
-                        .frame(minWidth: 140)
+            }
+            Spacer()
+            switch model.step {
+            case .welcome:
+                Button(model.needsImage ? "Get Started" : "Continue") {
+                    model.advanceFromWelcome()
+                    if model.step == .installing { onStartInstall() }
                 }
-                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            case .installing:
+                // The installer view owns its own cancel affordance on error.
+                EmptyView()
+            case .scanOffer:
+                Button("Not Now") { onFinish([]) }
+                Button("Scan This Mac") { model.beginScan() }
+                    .keyboardShortcut(.defaultAction)
+            case .pick:
+                Button("Skip") { onFinish([]) }
+                Button(model.totalCredentials == 0
+                       ? NSLocalizedString("Continue", comment: "")
+                       : String(format: NSLocalizedString("Import %d", comment: "n credentials"),
+                                model.totalCredentials)) {
+                    onFinish(model.findings.filter(\.include))
+                }
                 .keyboardShortcut(.defaultAction)
                 .disabled(model.scanning)
+            case .done:
+                Button("Start Using Bromure", action: onDone)
+                    .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(20)
+        .controlSize(.large)
+        .buttonStyle(.automatic)
     }
 
     private func addEnvFile() {
@@ -254,37 +430,6 @@ struct OnboardingWizardView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         model.addEnvFile(url)
     }
-
-    // MARK: 5 — Done
-
-    private var done: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 52)).foregroundStyle(.green)
-            Text("You're all set").font(.title2.bold())
-            if let s = model.summary, s.total > 0 {
-                Text(s.headline).font(.callout).multilineTextAlignment(.center)
-                if !s.detail.isEmpty {
-                    Text(s.detail).font(.caption).foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center).frame(maxWidth: 460)
-                }
-            } else {
-                Text("Enjoy — you can add credentials any time from a workspace's Credentials pane.")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center).frame(maxWidth: 440)
-            }
-            Button(action: onDone) {
-                Label("Start using Bromure", systemImage: "arrow.right.circle.fill")
-                    .frame(width: 200)
-            }
-            .controlSize(.large).buttonStyle(.borderedProminent)
-            .keyboardShortcut(.defaultAction)
-            .padding(.top, 6)
-            Spacer()
-        }
-        .padding(24)
-    }
 }
 
 // MARK: - One discovered file
@@ -296,24 +441,23 @@ private struct FindingRow: View {
         Toggle(isOn: $finding.include) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: finding.symbol)
-                    .foregroundStyle(.tint)
-                    .frame(width: 18)
-                VStack(alignment: .leading, spacing: 2) {
+                    .foregroundStyle(.tint).frame(width: 16)
+                VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 6) {
-                        Text(finding.title).font(.body.weight(.medium))
+                        Text(finding.title).font(.system(size: 12, weight: .medium))
                         Text(finding.displayPath)
-                            .font(.caption.monospaced()).foregroundStyle(.secondary)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.middle)
                     }
-                    Text(finding.detail).font(.caption).foregroundStyle(.secondary)
+                    Text(finding.detail).font(.system(size: 10)).foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
                 Spacer()
             }
         }
         .toggleStyle(.checkbox)
-        .padding(.vertical, 3)
-        .padding(.horizontal, 6)
-        .background(RoundedRectangle(cornerRadius: 6)
-            .fill(Color.primary.opacity(finding.include ? 0.05 : 0)))
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
     }
 }

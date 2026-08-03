@@ -4557,7 +4557,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             onFinish: { [weak self] findings in self?.finishOnboarding(findings) },
             onDone: { [weak self] in self?.leaveOnboarding() }))
         win.contentMinSize = .zero
-        win.setContentSize(NSSize(width: 560, height: 500))
+        // Wider than the old welcome pane: the wizard is a two-column
+        // setup-assistant layout (artwork rail + content) with a button bar.
+        win.setContentSize(NSSize(width: OnboardingWizardView.contentSize.width,
+                                  height: OnboardingWizardView.contentSize.height))
         win.center()
     }
 
@@ -5627,6 +5630,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             try? engine.codexSubscriptionStore.update(
                 CodexSubscriptionRecord(accessToken: sub.access, refreshToken: sub.refresh,
                                         idToken: "", expiresAt: .distantPast, savedAt: Date()),
+                for: nil)
+        case "grok":
+            try? engine.grokSubscriptionStore.update(
+                GrokSubscriptionRecord(accessToken: sub.access, refreshToken: sub.refresh,
+                                       expiresAt: .distantPast, savedAt: Date()),
+                for: nil)
+        case "kimi":
+            try? engine.kimiSubscriptionStore.update(
+                KimiSubscriptionRecord(accessToken: sub.access, refreshToken: sub.refresh,
+                                       expiresAt: .distantPast, savedAt: Date()),
                 for: nil)
         default: break
         }

@@ -22,7 +22,8 @@ enum ConfigScan {
     enum Kind: String {
         case gitconfig, gitCredentials, docker, awsStatic, awsSSO, kube
         case npm, ghCLI, glabCLI, netrc, doctl, pypi, cargo
-        case claudeSubscription, codexSubscription, sshKey, envFile
+        case claudeSubscription, codexSubscription, grokSubscription, kimiSubscription
+        case agentAPIKey, sshKey, envFile
     }
 
     /// What `apply` needs, captured at scan time so nothing is re-read (and no
@@ -41,6 +42,7 @@ enum ConfigScan {
         case subscription(provider: String, access: String, refresh: String)
         case sshKey(label: String)
         case env([EnvFileImport.ParsedVar])
+        case agentKeys([(tool: Profile.Tool, value: String)])
     }
 
     struct GitCred: Equatable {
@@ -97,7 +99,8 @@ enum ConfigScan {
                       detectAWSStatic, detectAWSSSO, detectKube, detectNPM,
                       detectGHCLI, detectGlabCLI, detectNetrc, detectDoctl,
                       detectPyPI, detectCargo, detectClaudeSubscription,
-                      detectCodexSubscription] {
+                      detectCodexSubscription, detectGrokSubscription,
+                      detectKimiSubscription, detectClaudeSettingsKeys] {
             if let f = probe() { out.append(f) }
         }
         out.append(contentsOf: detectSSHKeys())
@@ -389,6 +392,92 @@ enum ConfigScan {
                        payload: .subscription(provider: "codex", access: access, refresh: refresh))
     }
 
+    /// Grok CLI: `~/.grok/auth.json` — `{ "<scope>": { key, refresh_token, … } }`.
+    /// The scope key is account-specific, so take the first entry that carries
+    /// a token pair rather than guessing its name.
+    private static func detectGrokSubscription() -> Finding? {
+        let url = home.appendingPathComponent(".grok/auth.json")
+        guard let d = try? Data(contentsOf: url),
+              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return nil }
+        for (_, raw) in obj {
+            guard let e = raw as? [String: Any],
+                  let access = e["key"] as? String,
+                  let refresh = e["refresh_token"] as? String,
+                  !access.isEmpty, !refresh.isEmpty else { continue }
+            return Finding(id: Kind.grokSubscription.rawValue, kind: .grokSubscription, path: url,
+                           title: "Grok subscription",
+                           detail: "your Grok CLI login — skips the register-with-Grok step",
+                           credentialCount: 1, symbol: "sparkles",
+                           payload: .subscription(provider: "grok", access: access, refresh: refresh))
+        }
+        return nil
+    }
+
+    /// Kimi CLI: `~/.kimi-code/credentials/<name>.json` — one file per
+    /// credential, `{ access_token, refresh_token, … }`.
+    private static func detectKimiSubscription() -> Finding? {
+        let dir = home.appendingPathComponent(".kimi-code/credentials", isDirectory: true)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return nil }
+        for name in names.sorted() where name.hasSuffix(".json") {
+            let url = dir.appendingPathComponent(name)
+            guard let d = try? Data(contentsOf: url),
+                  let e = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                  let access = e["access_token"] as? String,
+                  let refresh = e["refresh_token"] as? String,
+                  !access.isEmpty, !refresh.isEmpty else { continue }
+            return Finding(id: Kind.kimiSubscription.rawValue, kind: .kimiSubscription, path: url,
+                           title: "Kimi subscription",
+                           detail: "your Kimi CLI login — skips the register-with-Kimi step",
+                           credentialCount: 1, symbol: "sparkles",
+                           payload: .subscription(provider: "kimi", access: access, refresh: refresh))
+        }
+        return nil
+    }
+
+    /// Agent API keys that live in a CLI's own settings rather than the shell:
+    /// Claude Code keeps an `env` block in `~/.claude/settings.json`, and Codex
+    /// an `[env]`-ish table in `~/.codex/config.toml`. Both are common for
+    /// people who never exported the key from a dotfile.
+    private static func detectClaudeSettingsKeys() -> Finding? {
+        var found: [(tool: Profile.Tool, value: String)] = []
+        var sources: [String] = []
+
+        let settings = home.appendingPathComponent(".claude/settings.json")
+        if let d = try? Data(contentsOf: settings),
+           let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+           let env = obj["env"] as? [String: Any] {
+            for (k, v) in env {
+                guard let s = v as? String, !s.isEmpty,
+                      case let .toolKey(tool)? = EnvFileImport.slot(forName: k) else { continue }
+                found.append((tool, s))
+            }
+            if !found.isEmpty { sources.append("settings.json") }
+        }
+
+        let codex = home.appendingPathComponent(".codex/config.toml")
+        if let body = text(codex) {
+            for line in body.split(whereSeparator: \.isNewline) {
+                let l = line.trimmingCharacters(in: .whitespaces)
+                guard let eq = l.firstIndex(of: "="), !l.hasPrefix("#") else { continue }
+                let key = String(l[..<eq]).trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                guard case let .toolKey(tool)? = EnvFileImport.slot(forName: key) else { continue }
+                let v = unquote(String(l[l.index(after: eq)...]).trimmingCharacters(in: .whitespaces))
+                guard !v.isEmpty, !v.hasPrefix("${") else { continue }
+                if !found.contains(where: { $0.tool == tool }) { found.append((tool, v)) }
+                if !sources.contains("config.toml") { sources.append("config.toml") }
+            }
+        }
+
+        guard !found.isEmpty else { return nil }
+        let names = found.map { $0.tool.rawValue }.joined(separator: ", ")
+        return Finding(id: Kind.agentAPIKey.rawValue, kind: .agentAPIKey,
+                       path: sources.first == "config.toml" ? codex : settings,
+                       title: "Agent API keys", detail: "\(names) (from \(sources.joined(separator: " + ")))",
+                       credentialCount: found.count, symbol: "key.horizontal.fill",
+                       payload: .agentKeys(found))
+    }
+
     // MARK: ssh
 
     private static func detectSSHKeys() -> [Finding] {
@@ -513,6 +602,19 @@ enum ConfigScan {
                 profile.manualTokens.append(ManualToken(
                     name: name, realValue: value, envVarName: envVar, hostFilters: hosts))
                 s.total += 1
+
+            case .agentKeys(let keys):
+                for (tool, value) in keys {
+                    if profile.tool == tool {
+                        profile.apiKey = value; profile.authMode = .token
+                    } else if let i = profile.additionalTools.firstIndex(where: { $0.tool == tool }) {
+                        profile.additionalTools[i].apiKey = value
+                        profile.additionalTools[i].authMode = .token
+                    } else {
+                        profile.additionalTools.append(.init(tool: tool, authMode: .token, apiKey: value))
+                    }
+                    s.total += 1
+                }
 
             case .subscription(let provider, let access, let refresh):
                 s.subscriptions.append(SubscriptionImport(
