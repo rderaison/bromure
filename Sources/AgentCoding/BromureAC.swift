@@ -1576,6 +1576,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// window-close handler can route to its teardown instead of the normal
     /// session cleanup, and to guard against launching two at once.
     var claudeRegistration: ClaudeRegistrationState?
+    /// First-run wizard state (welcome → install → scan → pick → done). Non-nil
+    /// only while the setup window is showing it.
+    var onboarding: OnboardingWizardModel?
 
     /// If `url` is an OAuth authorize URL whose `redirect_uri` is a loopback
     /// callback (`http://127.0.0.1:<port>` or `localhost`), return that port —
@@ -2126,9 +2129,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Pick the right initial home: with a base image, the unified window
         // (the source list of every profile — the standalone picker is gone);
         // before the base image exists, the setup window in `mainWindow`.
-        if imageManager.hasBaseImage {
+        if imageManager.hasBaseImage && !profiles.isEmpty {
             showUnifiedWindowAsHome()
-            if profiles.isEmpty { openEditorWindow(editing: nil) }
             // Image-maintenance checks (non-blocking; the user keeps
             // working with the existing base throughout). Refresh the
             // image catalog, then in priority order:
@@ -2171,6 +2173,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Pure fat client (no local base image needed): skip the setup
             // window — this instance only mirrors remote hosts.
         } else {
+            // First run for onboarding purposes: either there's no base image,
+            // or there is one but no workspace has ever been configured (a
+            // reinstall, or an image built from the CLI). The wizard handles
+            // both — it skips its install step when an image already exists —
+            // so the credential-import offer isn't reachable only in the
+            // seconds after a fresh download.
             ensureInstallWindow()
             renderSetup()
             NSApp.activate(ignoringOtherApps: true)
@@ -4509,9 +4517,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // constraints + contentMinSize=560 (set in renderInitializing)
         // pin the window above the 540 we want here. Cancel-during-
         // bake therefore left the welcome screen oversized.
-        win.contentView = NSHostingView(rootView: SetupView(onStart: { [weak self] in
-            self?.startInit()
-        }))
+        let model = onboarding ?? OnboardingWizardModel(needsImage: !imageManager.hasBaseImage)
+        // Debug: jump straight to a wizard step so the later screens can be
+        // inspected without a real install (sibling of BROMURE_DEBUG_EDITOR).
+        if onboarding == nil,
+           let want = ProcessInfo.processInfo.environment["BROMURE_DEBUG_WIZARD"] {
+            switch want {
+            case "scan": model.step = .scanOffer
+            case "pick": model.beginScan()
+            case "done": model.step = .done
+            default: break
+            }
+        }
+        onboarding = model
+        win.contentView = NSHostingView(rootView: OnboardingWizardView(
+            model: model,
+            installProgress: initProgress,
+            onStartInstall: { [weak self] in self?.startInit(fromWizard: true) },
+            onCancelInstall: { [weak self] in self?.renderSetup() },
+            onFinish: { [weak self] findings in self?.finishOnboarding(findings) },
+            onDone: { [weak self] in self?.leaveOnboarding() }))
         win.contentMinSize = .zero
         win.setContentSize(NSSize(width: 560, height: 500))
         win.center()
@@ -4539,7 +4564,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         ))
     }
 
-    private func startInit(force: Bool = false, buildLocal: Bool = false) {
+    private func startInit(force: Bool = false, buildLocal: Bool = false,
+                           fromWizard: Bool = false) {
         // Note: we do NOT delete the version stamp here even when
         // force == true. The stamp gates whether existing sessions
         // can launch from the old image — wiping it would brick the
@@ -4621,6 +4647,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.profiles = self.store.loadAll()
                 // Base image is ready — close the installer window and open the
                 // unified home (the standalone picker is gone).
+                // Driven by the wizard: stay in the window and move to the
+                // credential-scan offer instead of dropping the user at home.
+                if fromWizard, let wizard = self.onboarding {
+                    wizard.step = .scanOffer
+                    self.renderSetup()
+                    return
+                }
                 if let w = self.mainWindow { w.close() }
                 self.mainWindow = nil
                 self.showUnifiedWindowAsHome()
@@ -5473,6 +5506,89 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// editing == nil → create. editing != nil → modify in place.
+    /// End of the onboarding wizard: fold the chosen config files into a first
+    /// workspace, finish the parts that need a saved profile (SSH keys) or the
+    /// credential stores (subscription logins), then show the summary.
+    ///
+    /// An empty `findings` means the user declined the scan or ticked nothing —
+    /// we still create nothing and simply leave setup, matching "No thanks".
+    @MainActor
+    private func finishOnboarding(_ findings: [ConfigScan.Finding]) {
+        guard let wizard = onboarding else { leaveOnboarding(); return }
+
+        if findings.isEmpty {
+            wizard.summary = nil
+            wizard.step = .done
+            renderSetup()
+            return
+        }
+
+        // Fold into a first workspace. A brand-new install has none, so this is
+        // the profile every imported credential belongs to.
+        var profile = profiles.first ?? store.newProfileFromTemplate(name: "Default")
+        let summary = ConfigScan.apply(findings, to: &profile)
+        do { try store.save(profile) } catch {
+            FileHandle.standardError.write(Data(
+                "[onboarding] couldn't save the workspace: \(error)\n".utf8))
+        }
+
+        // SSH keys copy into the profile directory, so they need it saved first.
+        for key in summary.deferredSSHKeys {
+            do {
+                let imported = try importSSHKey(at: key.url, passphrase: nil,
+                                                label: key.label, for: profile)
+                profile.importedSSHKeys.append(imported)
+            } catch {
+                // A passphrase-protected key can't be imported unattended; the
+                // user can add it from the editor, where we can prompt.
+                FileHandle.standardError.write(Data(
+                    "[onboarding] ssh key \(key.label) skipped: \(error)\n".utf8))
+            }
+        }
+        // Subscription logins live in the MITM stores, not the profile.
+        for sub in summary.subscriptions { applyImportedSubscription(sub) }
+
+        try? store.save(profile)
+        profiles = store.loadAll()
+
+        wizard.summary = summary
+        wizard.step = .done
+        renderSetup()
+    }
+
+    /// Write a subscription login lifted from the user's own CLI config into the
+    /// matching store as the SHARED credential. `expiresAt: .distantPast` forces
+    /// a proactive refresh on first use, which both establishes the real expiry
+    /// and proves the refresh path — the same contract registration uses.
+    @MainActor
+    private func applyImportedSubscription(_ sub: ConfigScan.SubscriptionImport) {
+        guard let engine = mitmEngine else { return }
+        switch sub.provider {
+        case "claude":
+            try? engine.claudeSubscriptionStore.update(
+                ClaudeSubscriptionRecord(accessToken: sub.access, refreshToken: sub.refresh,
+                                         expiresAt: .distantPast, savedAt: Date()),
+                for: nil)
+        case "codex":
+            try? engine.codexSubscriptionStore.update(
+                CodexSubscriptionRecord(accessToken: sub.access, refreshToken: sub.refresh,
+                                        idToken: "", expiresAt: .distantPast, savedAt: Date()),
+                for: nil)
+        default: break
+        }
+        NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+    }
+
+    /// Tear the setup window down and land on the unified home.
+    @MainActor
+    private func leaveOnboarding() {
+        onboarding = nil
+        if let w = mainWindow { w.close() }
+        mainWindow = nil
+        showUnifiedWindowAsHome()
+        if profiles.isEmpty { openEditorWindow(editing: nil) }
+    }
+
     func openEditorWindow(editing: Profile?) {
         // Reuse the open editor ONLY when it's already editing this same
         // profile; for a different profile (or a new-profile draft) tear the
