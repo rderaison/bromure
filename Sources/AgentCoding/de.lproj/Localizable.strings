@@ -1543,3 +1543,8 @@
 "%d config file(s) carried over whole, minus their secrets." = "%d Konfigurationsdatei(en) vollständig übernommen, ohne die Geheimnisse.";
 "Imported %d config file(s)." = "%d Konfigurationsdatei(en) importiert.";
 "Your settings came over; there were no secrets to bring." = "Ihre Einstellungen wurden übernommen; Geheimnisse gab es keine.";
+
+/* Agent CLI configuration import */
+"%d file(s)" = "%d Datei(en)";
+"%d skipped (too large)" = "%d übersprungen (zu groß)";
+"%@ settings" = "%@-Einstellungen";

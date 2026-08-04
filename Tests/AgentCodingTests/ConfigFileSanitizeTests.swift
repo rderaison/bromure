@@ -384,3 +384,84 @@ struct ImportedIdentityOwnershipTests {
         #expect(text.contains("co = checkout"))
     }
 }
+
+// core.excludesfile names a path on the HOST. Left as-is it points at
+// /Users/… inside the VM, and git ignores a missing excludes file silently —
+// so the rules just stop working, with nothing to notice.
+@Suite("Global gitignore follows the config")
+struct GlobalIgnoreTests {
+
+    @Test("excludesfile is repointed at the guest copy")
+    func repointed() {
+        let r = ConfigFileSanitize.gitConfig("""
+        [core]
+            excludesfile = /Users/ada/.gitignore_global
+            editor = vim
+        """)
+        #expect(!r.contents.contains("/Users/ada"))
+        #expect(r.contents.contains("excludesfile = ~/.gitignore_global"))
+        #expect(r.contents.contains("editor = vim"))
+        #expect(r.referencedExcludesFile == "/Users/ada/.gitignore_global")
+    }
+
+    @Test("a tilde or $HOME path is reported for the caller to read")
+    func tildePath() {
+        #expect(ConfigFileSanitize.gitConfig("[core]\n excludesfile = ~/.gitignore\n")
+            .referencedExcludesFile == "~/.gitignore")
+        #expect(ConfigFileSanitize.gitConfig("[core]\n excludesfile = \"$HOME/.ign\"\n")
+            .referencedExcludesFile == "$HOME/.ign")
+    }
+
+    @Test("no excludesfile, nothing referenced")
+    func none() {
+        #expect(ConfigFileSanitize.gitConfig("[core]\n editor = vim\n")
+            .referencedExcludesFile == nil)
+    }
+
+    @Test("the ignore file lands in the guest home")
+    func writtenToGuest() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("bromure-ign-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+
+        var p = Profile(name: "ws", tool: .claude, authMode: .token)
+        p.importedConfigFiles = [
+            ImportedConfigFile(path: ".gitconfig",
+                               contents: "[core]\n\texcludesfile = ~/.gitignore_global\n"),
+            ImportedConfigFile(path: ".gitignore_global", contents: ".DS_Store\n*.swp\n"),
+        ]
+        try store.prepareHomeDirectory(for: p, terminalDefaults: TerminalAppDefaults.load())
+
+        let home = store.homeDirectory(for: p)
+        let ign = try String(contentsOf: home.appendingPathComponent(".gitignore_global"),
+                             encoding: .utf8)
+        #expect(ign.contains(".DS_Store"))
+        let cfg = try String(contentsOf: home.appendingPathComponent(".gitconfig"),
+                             encoding: .utf8)
+        #expect(cfg.contains("excludesfile = ~/.gitignore_global"))
+    }
+
+    @Test("an imported file is seeded once, not rewritten over an in-VM edit")
+    func seededOnce() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("bromure-seed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+
+        var p = Profile(name: "ws", tool: .claude, authMode: .token)
+        p.importedConfigFiles = [ImportedConfigFile(
+            path: ".claude/settings.json", contents: #"{"model":"imported"}"#)]
+        try store.prepareHomeDirectory(for: p, terminalDefaults: TerminalAppDefaults.load())
+
+        // Stand in for the user editing it inside the VM.
+        let dest = store.homeDirectory(for: p).appendingPathComponent(".claude/settings.json")
+        try #"{"model":"edited-in-vm"}"#.write(to: dest, atomically: true, encoding: .utf8)
+        try store.prepareHomeDirectory(for: p, terminalDefaults: TerminalAppDefaults.load())
+
+        let after = try String(contentsOf: dest, encoding: .utf8)
+        #expect(after.contains("edited-in-vm"))
+    }
+}

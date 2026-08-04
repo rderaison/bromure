@@ -1543,3 +1543,8 @@
 "%d config file(s) carried over whole, minus their secrets." = "設定ファイル %d 件を、秘密情報を除いてまるごと取り込みました。";
 "Imported %d config file(s)." = "設定ファイルを %d 件取り込みました。";
 "Your settings came over; there were no secrets to bring." = "設定は引き継がれました。取り込む秘密情報はありませんでした。";
+
+/* Agent CLI configuration import */
+"%d file(s)" = "%d 件のファイル";
+"%d skipped (too large)" = "%d 件をスキップ (サイズ超過)";
+"%@ settings" = "%@ の設定";

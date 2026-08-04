@@ -3442,6 +3442,12 @@ public final class ProfileStore {
         where f.path != ".gitconfig" && f.path != ".npmrc" && !f.contents.isEmpty {
             guard ImportedConfigFile.isSafeRelativePath(f.path) else { continue }
             let dest = home.appendingPathComponent(f.path)
+            // Seed, don't manage: these are the user's own settings, so an edit
+            // made inside the VM has to survive the next launch. (In seedMode
+            // `home` is a staging dir that was just cleared, so this always
+            // writes there — the guest-side manifest carries the same
+            // if-missing rule through to the ext4 home.)
+            if !seedMode && fm.fileExists(atPath: dest.path) { continue }
             let parent = dest.deletingLastPathComponent()
             if !fm.fileExists(atPath: parent.path) {
                 try? fm.createDirectory(at: parent, withIntermediateDirectories: true)
@@ -3927,6 +3933,7 @@ public final class ProfileStore {
     public func finalizeHomeSeed(for profile: Profile, seedDir: URL,
                                  anthropicEnvKey: String? = nil) throws {
         let files = seedDir.appendingPathComponent("files", isDirectory: true)
+        let importedPaths = Set(profile.importedConfigFiles.map(\.path))
         var dirLines: [String] = []
         var fileLines: [String] = []
         var present: Set<String> = []
@@ -3945,7 +3952,14 @@ public final class ProfileStore {
                     dirLines.append("D\t\(perms)\t\(rel)")
                 } else {
                     present.insert(rel)
-                    let mode = Self.seedIfMissing.contains(rel) ? "m" : "o"
+                    // Imported config is seeded once; everything else is
+                    // managed and rewritten every launch. `.gitconfig` and
+                    // `.npmrc` are excluded because they carry a managed block
+                    // (identity, npm prefix) that must stay current.
+                    let seedOnce = Self.seedIfMissing.contains(rel)
+                        || (rel != ".gitconfig" && rel != ".npmrc"
+                            && importedPaths.contains(rel))
+                    let mode = seedOnce ? "m" : "o"
                     let perms = Self.seed600.contains(rel) ? "600"
                         : Self.seed755.contains(rel) ? "755" : "644"
                     fileLines.append("\(mode)\t\(perms)\t\(rel)")

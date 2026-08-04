@@ -27,11 +27,18 @@ enum ConfigFileSanitize {
         var strippedSecrets: Int
         /// Settings dropped or forced off, named for the UI to report.
         var disabled: [String]
+        /// Host path named by `core.excludesfile`, if any. The caller reads it
+        /// and carries it along — the setting here has already been rewritten
+        /// to where that file will live in the guest.
+        var referencedExcludesFile: String?
 
         var isEmpty: Bool {
             contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
+
+    /// Guest home-relative path for an imported `core.excludesfile`.
+    static let guestExcludesFile = ".gitignore_global"
 
     // MARK: - git
 
@@ -46,6 +53,7 @@ enum ConfigFileSanitize {
         var stripped = 0
         var disabled: [String] = []
         var section = "", subsection = ""
+        var excludes: String?
         // Set while skipping the body of a dropped [url "…token…"] section.
         var skippingSection = false
 
@@ -88,6 +96,14 @@ enum ConfigFileSanitize {
             }
 
             switch (section, key) {
+            case ("core", "excludesfile"):
+                // Repoint at the guest copy: the host path (/Users/…) does not
+                // exist in the VM, and git ignores a missing excludes file
+                // silently — so left alone this fails quietly, which is the
+                // worst way for it to fail.
+                excludes = unquote(String(value))
+                out.append(indentation(of: raw) + "excludesfile = ~/\(guestExcludesFile)")
+
             case ("user", "name"), ("user", "email"):
                 // The identity has a typed home on the profile and an editor
                 // field. A second copy here would be a rival source of truth:
@@ -114,7 +130,8 @@ enum ConfigFileSanitize {
             }
         }
         return Result(contents: joined(pruneEmptySections(out)),
-                      strippedSecrets: stripped, disabled: disabled)
+                      strippedSecrets: stripped, disabled: disabled,
+                      referencedExcludesFile: excludes)
     }
 
     /// Drop section headers left with no settings under them. Removing
@@ -177,7 +194,8 @@ enum ConfigFileSanitize {
             }
             out.append(raw)
         }
-        return Result(contents: joined(out), strippedSecrets: stripped, disabled: disabled)
+        return Result(contents: joined(out), strippedSecrets: stripped,
+                      disabled: disabled, referencedExcludesFile: nil)
     }
 
     // MARK: - PyPI
@@ -202,7 +220,8 @@ enum ConfigFileSanitize {
             }
             out.append(raw)
         }
-        return Result(contents: joined(out), strippedSecrets: stripped, disabled: [])
+        return Result(contents: joined(out), strippedSecrets: stripped,
+                      disabled: [], referencedExcludesFile: nil)
     }
 
     // MARK: - helpers

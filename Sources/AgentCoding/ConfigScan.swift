@@ -25,6 +25,7 @@ enum ConfigScan {
         case npm, ghCLI, glabCLI, netrc, doctl, pypi, cargo
         case claudeSubscription, codexSubscription, grokSubscription, kimiSubscription
         case agentAPIKey, sshKey, envFile
+        case agentConfig
     }
 
     /// What `apply` needs, captured at scan time so nothing is re-read (and no
@@ -49,6 +50,8 @@ enum ConfigScan {
         case sshKey(label: String)
         case env([EnvFileImport.ParsedVar])
         case agentKeys([(tool: Profile.Tool, value: String)])
+        /// Nothing typed to apply — the row carries only `wholeFiles`.
+        case none
     }
 
     struct GitCred: Equatable {
@@ -72,8 +75,8 @@ enum ConfigScan {
         /// The rest of the file, carried verbatim. The typed `payload` lifts
         /// the secrets (so the proxy can swap them); this keeps everything else
         /// the user configured, which the typed model would otherwise discard.
-        /// nil = nothing beyond what `payload` already covers.
-        var wholeFile: ImportedConfigFile?
+        /// Empty = nothing beyond what `payload` already covers.
+        var wholeFiles: [ImportedConfigFile] = []
 
         var displayPath: String {
             let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -117,6 +120,7 @@ enum ConfigScan {
             if let f = probe() { out.append(f) }
         }
         out.append(contentsOf: detectSSHKeys())
+        out.append(contentsOf: detectAgentConfigs())
         return out
     }
 
@@ -150,9 +154,35 @@ enum ConfigScan {
                        credentialCount: r.creds.count,
                        symbol: "arrow.triangle.branch",
                        payload: .git(identity: r.identity, creds: r.creds),
-                       wholeFile: whole.isEmpty ? nil : ImportedConfigFile(
-                        path: ".gitconfig", contents: whole.contents,
-                        strippedSecrets: whole.strippedSecrets, disabled: whole.disabled))
+                       wholeFiles: gitFiles(whole))
+    }
+
+    /// `.gitconfig` plus anything it points at. `core.excludesfile` is the one
+    /// that matters in practice: without the file it names, every rule the user
+    /// relies on to keep .DS_Store and editor droppings out of commits is gone
+    /// in the VM. The sanitizer has already rewritten the setting to the guest
+    /// path, so all that's left is to carry the file it used to point at.
+    private static func gitFiles(_ whole: ConfigFileSanitize.Result) -> [ImportedConfigFile] {
+        var out: [ImportedConfigFile] = []
+        if !whole.isEmpty {
+            out.append(ImportedConfigFile(path: ".gitconfig", contents: whole.contents,
+                                          strippedSecrets: whole.strippedSecrets,
+                                          disabled: whole.disabled))
+        }
+        if let ref = whole.referencedExcludesFile,
+           let body = text(expandTilde(ref)), !body.isEmpty {
+            out.append(ImportedConfigFile(path: ConfigFileSanitize.guestExcludesFile,
+                                          contents: body))
+        }
+        return out
+    }
+
+    /// `~/x`, `$HOME/x` and bare relative paths all appear in real configs.
+    private static func expandTilde(_ p: String) -> URL {
+        if p.hasPrefix("~/") { return home.appendingPathComponent(String(p.dropFirst(2))) }
+        if p.hasPrefix("$HOME/") { return home.appendingPathComponent(String(p.dropFirst(6))) }
+        if p.hasPrefix("/") { return URL(fileURLWithPath: p) }
+        return home.appendingPathComponent(p)
     }
 
     private static func detectGitCredentials() -> Finding? {
@@ -261,10 +291,10 @@ enum ConfigScan {
                            credentialCount: 1, symbol: "cube.box.fill",
                            payload: .manual(name: "npm (\(hostOnly))", value: token,
                                             envVar: "NPM_TOKEN", hosts: [hostOnly]),
-                           wholeFile: npmWhole.isEmpty ? nil : ImportedConfigFile(
+                           wholeFiles: npmWhole.isEmpty ? [] : [ImportedConfigFile(
                             path: ".npmrc", contents: npmWhole.contents,
                             strippedSecrets: npmWhole.strippedSecrets,
-                            disabled: npmWhole.disabled))
+                            disabled: npmWhole.disabled)])
         }
         return nil
     }
@@ -281,10 +311,10 @@ enum ConfigScan {
                            credentialCount: 1, symbol: "shippingbox",
                            payload: .manual(name: "PyPI (\(s.name))", value: pw,
                                             envVar: "TWINE_PASSWORD", hosts: ["pypi.org"]),
-                           wholeFile: pyWhole.isEmpty ? nil : ImportedConfigFile(
+                           wholeFiles: pyWhole.isEmpty ? [] : [ImportedConfigFile(
                             path: ".pypirc", contents: pyWhole.contents,
                             strippedSecrets: pyWhole.strippedSecrets,
-                            disabled: pyWhole.disabled))
+                            disabled: pyWhole.disabled)])
         }
         return nil
     }
@@ -568,6 +598,40 @@ enum ConfigScan {
         return out
     }
 
+    // MARK: agent CLI configuration (settings, commands, subagents, memory)
+
+    /// One row per agent that has a config directory. Separate from that
+    /// agent's *login* row on purpose: wanting your slash commands in the VM
+    /// and wanting your subscription there are different decisions, and the
+    /// wizard should let you make them separately.
+    private static func detectAgentConfigs() -> [Finding] {
+        AgentConfigScan.sources.compactMap { source in
+            guard let r = AgentConfigScan.scan(source, home: home) else { return nil }
+            var bits = [String(format: NSLocalizedString("%d file(s)", comment: ""),
+                               r.files.count)]
+            let named = r.files.map { ($0.path as NSString).lastPathComponent }
+            bits.append(named.prefix(3).joined(separator: ", ")
+                        + (named.count > 3 ? "…" : ""))
+            if r.skipped > 0 {
+                bits.append(String(format: NSLocalizedString("%d skipped (too large)",
+                                                             comment: ""), r.skipped))
+            }
+            return Finding(
+                id: "\(Kind.agentConfig.rawValue):\(source.tool.rawValue)",
+                kind: .agentConfig,
+                path: home.appendingPathComponent(source.dir),
+                title: String(format: NSLocalizedString("%@ settings", comment: "scan finding"),
+                              source.tool.displayName),
+                detail: bits.joined(separator: " · "),
+                // Settings, not secrets: the count drives the credential total,
+                // and nothing here is a credential.
+                credentialCount: 0,
+                symbol: "slider.horizontal.3",
+                payload: .none,
+                wholeFiles: r.files)
+        }
+    }
+
     // MARK: env files (hand-picked)
 
     static func envFinding(at url: URL) -> Finding? {
@@ -666,7 +730,7 @@ enum ConfigScan {
             // Independent of the typed payload: one row can contribute both
             // (git config brings an identity AND the rest of the file).
             // Re-importing the same path replaces rather than duplicates.
-            if let whole = f.wholeFile, ImportedConfigFile.isSafeRelativePath(whole.path) {
+            for whole in f.wholeFiles where ImportedConfigFile.isSafeRelativePath(whole.path) {
                 profile.importedConfigFiles.removeAll { $0.path == whole.path }
                 profile.importedConfigFiles.append(whole)
                 s.importedFiles += 1
@@ -763,6 +827,9 @@ enum ConfigScan {
             case .sshKey(let label):
                 s.deferredSSHKeys.append((url: f.path, label: label))
                 s.total += 1
+
+            case .none:
+                break
 
             case .env(let vars):
                 for v in vars {

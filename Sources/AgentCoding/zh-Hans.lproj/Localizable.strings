@@ -1543,3 +1543,8 @@
 "%d config file(s) carried over whole, minus their secrets." = "已完整导入 %d 个配置文件（不含其中的密钥）。";
 "Imported %d config file(s)." = "已导入 %d 个配置文件。";
 "Your settings came over; there were no secrets to bring." = "你的设置已导入；没有需要带入的密钥。";
+
+/* Agent CLI configuration import */
+"%d file(s)" = "%d 个文件";
+"%d skipped (too large)" = "已跳过 %d 个（过大）";
+"%@ settings" = "%@ 设置";
