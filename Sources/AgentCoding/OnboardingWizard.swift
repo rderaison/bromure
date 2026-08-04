@@ -161,8 +161,15 @@ struct OnboardingWizardView: View {
 
     private var railImage: Image? {
         let name = scheme == .dark ? "wizard-night" : "wizard-day"
-        guard let url = Bundle.main.url(forResource: name, withExtension: "jpg"),
-              let img = NSImage(contentsOf: url) else { return nil }
+        // Ships in the SPM resource bundle, like every other asset here — a
+        // hand copy into Contents/Resources only exists on machines whose
+        // build script put it there, which is how this came to render as a
+        // bare gradient elsewhere. Bundle.main is kept as a fallback so app
+        // bundles laid out the old way still find it.
+        let url = acResourceBundle.url(forResource: name, withExtension: "jpg",
+                                       subdirectory: "ac")
+            ?? Bundle.main.url(forResource: name, withExtension: "jpg")
+        guard let url, let img = NSImage(contentsOf: url) else { return nil }
         return Image(nsImage: img)
     }
 

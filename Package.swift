@@ -80,6 +80,7 @@ let package = Package(
             path: "Sources/AgentCoding",
             exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef"],
             resources: [.copy("Resources/vm-setup"), .copy("Resources/icons"),
+                        .copy("Resources/ac"),
                         .copy("Resources/catalog.json"),
                         .copy("Resources/img-catalog.json"),
                         .copy("Resources/highlightr")],
