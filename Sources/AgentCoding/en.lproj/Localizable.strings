@@ -1533,3 +1533,15 @@
 "Edit workspace" = "Edit workspace";
 "Some items can't be imported remotely" = "Some items can't be imported remotely";
 "%d SSH key(s) and %d agent login(s) were skipped: those are stored on the machine running the workspace, and there's no remote import for them yet. Everything else was carried over." = "%d SSH key(s) and %d agent login(s) were skipped: those are stored on the machine running the workspace, and there's no remote import for them yet. Everything else was carried over.";
+
+/* Whole-file config import */
+"%d more setting(s)" = "%d more setting(s)";
+"%d setting(s)" = "%d setting(s)";
+"%d secret(s) left out" = "%d secret(s) left out";
+"%@ disabled" = "%@ disabled";
+"Imported Config Files" = "Imported Config Files";
+"Remove this file from the workspace" = "Remove this file from the workspace";
+"Copied into the VM as-is. Secrets were left out — those come in as credentials above, so the VM only ever sees a fake." = "Copied into the VM as-is. Secrets were left out — those come in as credentials above, so the VM only ever sees a fake.";
+"%d config file(s) carried over whole, minus their secrets." = "%d config file(s) carried over whole, minus their secrets.";
+"Imported %d config file(s)." = "Imported %d config file(s).";
+"Your settings came over; there were no secrets to bring." = "Your settings came over; there were no secrets to bring.";

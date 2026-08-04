@@ -69,6 +69,11 @@ enum ConfigScan {
         let symbol: String
         var include: Bool = true
         let payload: Payload
+        /// The rest of the file, carried verbatim. The typed `payload` lifts
+        /// the secrets (so the proxy can swap them); this keeps everything else
+        /// the user configured, which the typed model would otherwise discard.
+        /// nil = nothing beyond what `payload` already covers.
+        var wholeFile: ImportedConfigFile?
 
         var displayPath: String {
             let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -86,6 +91,8 @@ enum ConfigScan {
 
     struct Summary {
         var total = 0
+        /// Config files carried over whole (on top of the typed credentials).
+        var importedFiles = 0
         /// SSH keys can only be copied once the profile exists on disk, so the
         /// caller finishes these after saving.
         var deferredSSHKeys: [(url: URL, label: String)] = []
@@ -132,12 +139,20 @@ enum ConfigScan {
         if !r.creds.isEmpty {
             bits.append(String(format: NSLocalizedString("%d embedded token(s)", comment: ""), r.creds.count))
         }
+        let whole = ConfigFileSanitize.gitConfig(body)
+        if !whole.isEmpty {
+            bits.append(String(format: NSLocalizedString("%d more setting(s)", comment: ""),
+                               settingCount(whole.contents)))
+        }
         return Finding(id: Kind.gitconfig.rawValue, kind: .gitconfig, path: url,
                        title: NSLocalizedString("Git config", comment: "scan finding"),
                        detail: bits.joined(separator: ", "),
                        credentialCount: r.creds.count,
                        symbol: "arrow.triangle.branch",
-                       payload: .git(identity: r.identity, creds: r.creds))
+                       payload: .git(identity: r.identity, creds: r.creds),
+                       wholeFile: whole.isEmpty ? nil : ImportedConfigFile(
+                        path: ".gitconfig", contents: whole.contents,
+                        strippedSecrets: whole.strippedSecrets, disabled: whole.disabled))
     }
 
     private static func detectGitCredentials() -> Finding? {
@@ -233,12 +248,23 @@ enum ConfigScan {
             let registry = String(l[..<l.range(of: ":_authToken=")!.lowerBound])
                 .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             let hostOnly = registry.split(separator: "/").first.map(String.init) ?? "registry.npmjs.org"
+            let npmWhole = ConfigFileSanitize.npmrc(body)
+            var npmDetail = String(format: NSLocalizedString("registry %@", comment: ""), hostOnly)
+            if !npmWhole.isEmpty {
+                npmDetail += ", " + String(
+                    format: NSLocalizedString("%d more setting(s)", comment: ""),
+                    settingCount(npmWhole.contents))
+            }
             return Finding(id: Kind.npm.rawValue, kind: .npm, path: url,
                            title: NSLocalizedString("npm token", comment: "scan finding"),
-                           detail: String(format: NSLocalizedString("registry %@", comment: ""), hostOnly),
+                           detail: npmDetail,
                            credentialCount: 1, symbol: "cube.box.fill",
                            payload: .manual(name: "npm (\(hostOnly))", value: token,
-                                            envVar: "NPM_TOKEN", hosts: [hostOnly]))
+                                            envVar: "NPM_TOKEN", hosts: [hostOnly]),
+                           wholeFile: npmWhole.isEmpty ? nil : ImportedConfigFile(
+                            path: ".npmrc", contents: npmWhole.contents,
+                            strippedSecrets: npmWhole.strippedSecrets,
+                            disabled: npmWhole.disabled))
         }
         return nil
     }
@@ -248,12 +274,17 @@ enum ConfigScan {
         guard let body = text(url) else { return nil }
         for s in INI.parse(body) {
             guard let pw = s.values["password"], !pw.isEmpty else { continue }
+            let pyWhole = ConfigFileSanitize.pypirc(body)
             return Finding(id: Kind.pypi.rawValue, kind: .pypi, path: url,
                            title: NSLocalizedString("PyPI token", comment: "scan finding"),
                            detail: String(format: NSLocalizedString("index \"%@\"", comment: ""), s.name),
                            credentialCount: 1, symbol: "shippingbox",
                            payload: .manual(name: "PyPI (\(s.name))", value: pw,
-                                            envVar: "TWINE_PASSWORD", hosts: ["pypi.org"]))
+                                            envVar: "TWINE_PASSWORD", hosts: ["pypi.org"]),
+                           wholeFile: pyWhole.isEmpty ? nil : ImportedConfigFile(
+                            path: ".pypirc", contents: pyWhole.contents,
+                            strippedSecrets: pyWhole.strippedSecrets,
+                            disabled: pyWhole.disabled))
         }
         return nil
     }
@@ -632,6 +663,14 @@ enum ConfigScan {
         }
 
         for f in findings where f.include {
+            // Independent of the typed payload: one row can contribute both
+            // (git config brings an identity AND the rest of the file).
+            // Re-importing the same path replaces rather than duplicates.
+            if let whole = f.wholeFile, ImportedConfigFile.isSafeRelativePath(whole.path) {
+                profile.importedConfigFiles.removeAll { $0.path == whole.path }
+                profile.importedConfigFiles.append(whole)
+                s.importedFiles += 1
+            }
             switch f.payload {
             case .git(let identity, let creds):
                 if profile.gitUserName.isEmpty { profile.gitUserName = identity.name }
@@ -758,6 +797,13 @@ enum ConfigScan {
             }
         }
 
+        if s.total == 0 && s.importedFiles > 0 {
+            s.headline = String(format: NSLocalizedString(
+                "Imported %d config file(s).", comment: ""), s.importedFiles)
+            s.detail = NSLocalizedString(
+                "Your settings came over; there were no secrets to bring.", comment: "")
+            return s
+        }
         s.headline = s.total == 1
             ? NSLocalizedString("Imported 1 credential.", comment: "")
             : String(format: NSLocalizedString("Imported %d credentials.", comment: ""), s.total)
@@ -766,6 +812,11 @@ enum ConfigScan {
             bits.append(NSLocalizedString(
                 "Each one stays on this Mac — the VM only ever receives a fake, swapped back by the proxy.",
                 comment: ""))
+        }
+        if s.importedFiles > 0 {
+            bits.append(String(format: NSLocalizedString(
+                "%d config file(s) carried over whole, minus their secrets.", comment: ""),
+                s.importedFiles))
         }
         if !s.deferredSSHKeys.isEmpty {
             bits.append(String(format: NSLocalizedString(
@@ -785,6 +836,17 @@ enum ConfigScan {
         guard names.count > shown else { return head }
         return String(format: NSLocalizedString("%1$@ +%2$d more", comment: "list overflow"),
                       head, names.count - shown)
+    }
+
+    /// Settings in a sanitized config body — non-blank lines that aren't
+    /// comments or section headers. Only ever shown to the user as "N more
+    /// setting(s)", so an approximate count is fine.
+    static func settingCount(_ body: String) -> Int {
+        body.split(whereSeparator: \.isNewline).reduce(0) { n, line in
+            let l = line.trimmingCharacters(in: .whitespaces)
+            if l.isEmpty || l.hasPrefix("#") || l.hasPrefix(";") || l.hasPrefix("[") { return n }
+            return n + 1
+        }
     }
 
     private static func unquote(_ v: String) -> String {

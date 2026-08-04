@@ -1531,3 +1531,15 @@
 "Edit workspace" = "编辑工作区";
 "Some items can't be imported remotely" = "部分项目无法远程导入";
 "%d SSH key(s) and %d agent login(s) were skipped: those are stored on the machine running the workspace, and there's no remote import for them yet. Everything else was carried over." = "已跳过 %d 个 SSH 密钥和 %d 个代理登录：它们保存在运行该工作区的机器上，目前还不支持远程导入。其余内容都已导入。";
+
+/* Whole-file config import */
+"%d more setting(s)" = "另外 %d 项设置";
+"%d setting(s)" = "%d 项设置";
+"%d secret(s) left out" = "已剔除 %d 项密钥";
+"%@ disabled" = "已停用 %@";
+"Imported Config Files" = "已导入的配置文件";
+"Remove this file from the workspace" = "从工作区中移除此文件";
+"Copied into the VM as-is. Secrets were left out — those come in as credentials above, so the VM only ever sees a fake." = "原样复制到虚拟机。其中的密钥已被剔除——它们作为上方的凭据导入，因此虚拟机只会看到伪造值。";
+"%d config file(s) carried over whole, minus their secrets." = "已完整导入 %d 个配置文件（不含其中的密钥）。";
+"Imported %d config file(s)." = "已导入 %d 个配置文件。";
+"Your settings came over; there were no secrets to bring." = "你的设置已导入；没有需要带入的密钥。";

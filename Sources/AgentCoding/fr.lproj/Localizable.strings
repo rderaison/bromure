@@ -1531,3 +1531,15 @@
 "Edit workspace" = "Modifier l’espace de travail";
 "Some items can't be imported remotely" = "Certains éléments ne peuvent pas être importés à distance";
 "%d SSH key(s) and %d agent login(s) were skipped: those are stored on the machine running the workspace, and there's no remote import for them yet. Everything else was carried over." = "%d clé(s) SSH et %d connexion(s) d’agent ont été ignorées : elles sont stockées sur la machine qui exécute l’espace de travail, et aucun import à distance n’existe encore. Tout le reste a été repris.";
+
+/* Whole-file config import */
+"%d more setting(s)" = "%d autre(s) réglage(s)";
+"%d setting(s)" = "%d réglage(s)";
+"%d secret(s) left out" = "%d secret(s) retiré(s)";
+"%@ disabled" = "%@ désactivé";
+"Imported Config Files" = "Fichiers de configuration importés";
+"Remove this file from the workspace" = "Retirer ce fichier de l’espace de travail";
+"Copied into the VM as-is. Secrets were left out — those come in as credentials above, so the VM only ever sees a fake." = "Copiés tels quels dans la VM. Les secrets en ont été retirés — ils arrivent comme identifiants ci-dessus, si bien que la VM ne voit qu’un leurre.";
+"%d config file(s) carried over whole, minus their secrets." = "%d fichier(s) de configuration repris intégralement, sans leurs secrets.";
+"Imported %d config file(s)." = "%d fichier(s) de configuration importé(s).";
+"Your settings came over; there were no secrets to bring." = "Vos réglages ont été repris ; il n’y avait aucun secret à importer.";

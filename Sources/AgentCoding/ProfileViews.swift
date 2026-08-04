@@ -1365,6 +1365,52 @@ struct ProfileEditorView: View {
         #endif
     }
 
+    /// Config files carried over whole by the setup wizard. Listed so the user
+    /// can see what a scan actually put in the VM — and drop any of it.
+    @ViewBuilder
+    private var importedFilesSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Imported Config Files").font(.headline)
+            ForEach(draft.importedConfigFiles) { f in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "doc.text").foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("~/" + f.path).font(.system(size: 12, design: .monospaced))
+                        Text(importedFileSubtitle(f))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        draft.importedConfigFiles.removeAll { $0.path == f.path }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(Text("Remove this file from the workspace"))
+                }
+                .padding(8)
+                .background(Color.platformTextBackground, in: RoundedRectangle(cornerRadius: 6))
+            }
+            Text("Copied into the VM as-is. Secrets were left out — those come in as credentials above, so the VM only ever sees a fake.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func importedFileSubtitle(_ f: ImportedConfigFile) -> String {
+        var bits = [String(format: NSLocalizedString("%d setting(s)", comment: ""),
+                           ConfigScan.settingCount(f.contents))]
+        if f.strippedSecrets > 0 {
+            bits.append(String(format: NSLocalizedString("%d secret(s) left out", comment: ""),
+                               f.strippedSecrets))
+        }
+        if !f.disabled.isEmpty {
+            bits.append(String(format: NSLocalizedString("%@ disabled", comment: "setting names"),
+                               f.disabled.joined(separator: ", ")))
+        }
+        return bits.joined(separator: " · ")
+    }
+
     @ViewBuilder
     private var credentialsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1378,6 +1424,11 @@ struct ProfileEditorView: View {
                     .textFieldStyle(.roundedBorder)
                 Text("Written to ~/.gitconfig in the VM. Leave both blank to keep git's defaults.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+
+            if !draft.importedConfigFiles.isEmpty {
+                Divider()
+                importedFilesSection
             }
 
             Divider()

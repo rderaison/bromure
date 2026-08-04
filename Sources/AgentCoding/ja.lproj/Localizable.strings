@@ -1531,3 +1531,15 @@
 "Edit workspace" = "ワークスペースを編集";
 "Some items can't be imported remotely" = "リモートでは取り込めない項目があります";
 "%d SSH key(s) and %d agent login(s) were skipped: those are stored on the machine running the workspace, and there's no remote import for them yet. Everything else was carried over." = "SSH 鍵 %d 件とエージェントのログイン %d 件をスキップしました。これらはワークスペースを実行しているマシンに保存され、リモートからの取り込みにはまだ対応していません。ほかの項目はすべて引き継がれました。";
+
+/* Whole-file config import */
+"%d more setting(s)" = "他 %d 件の設定";
+"%d setting(s)" = "設定 %d 件";
+"%d secret(s) left out" = "秘密情報 %d 件を除外";
+"%@ disabled" = "%@ を無効化";
+"Imported Config Files" = "取り込んだ設定ファイル";
+"Remove this file from the workspace" = "このファイルをワークスペースから削除";
+"Copied into the VM as-is. Secrets were left out — those come in as credentials above, so the VM only ever sees a fake." = "そのまま VM にコピーされます。秘密情報は含まれません。上の資格情報として渡されるため、VM にはダミーだけが見えます。";
+"%d config file(s) carried over whole, minus their secrets." = "設定ファイル %d 件を、秘密情報を除いてまるごと取り込みました。";
+"Imported %d config file(s)." = "設定ファイルを %d 件取り込みました。";
+"Your settings came over; there were no secrets to bring." = "設定は引き継がれました。取り込む秘密情報はありませんでした。";

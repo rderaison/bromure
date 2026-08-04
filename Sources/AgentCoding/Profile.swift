@@ -810,6 +810,36 @@ public struct MCPOAuthState: Codable, Equatable, Sendable {
 
 /// One agentic-coding profile: which tool, how it auths, what folder it
 /// works against, and where its persistent disk lives.
+/// A config file carried over whole rather than reduced to one attribute.
+public struct ImportedConfigFile: Codable, Equatable, Sendable, Identifiable {
+    public var id: String { path }
+    /// Path relative to the guest's home, e.g. ".gitconfig". Validated on the
+    /// way in — an absolute path or one containing ".." is rejected, so an
+    /// imported file can never be written outside /home/ubuntu.
+    public var path: String
+    /// Sanitized body. Never contains a secret.
+    public var contents: String
+    /// How many secret-bearing lines were removed, so the UI can say so.
+    public var strippedSecrets: Int
+    /// Settings dropped or forced off because they don't work in the guest.
+    public var disabled: [String]
+
+    public init(path: String, contents: String, strippedSecrets: Int = 0,
+                disabled: [String] = []) {
+        self.path = path
+        self.contents = contents
+        self.strippedSecrets = strippedSecrets
+        self.disabled = disabled
+    }
+
+    /// Rejects anything that isn't a plain relative path under the home dir.
+    public static func isSafeRelativePath(_ p: String) -> Bool {
+        guard !p.isEmpty, !p.hasPrefix("/"), !p.hasPrefix("~") else { return false }
+        let parts = p.split(separator: "/", omittingEmptySubsequences: false)
+        return !parts.contains("..") && !parts.contains("") && !p.contains("\\0")
+    }
+}
+
 public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public enum Tool: String, Codable, CaseIterable, Sendable {
         case claude
@@ -1397,6 +1427,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var gitUserName: String
     public var gitUserEmail: String
 
+    /// Config files imported whole from the user's Mac (see
+    /// `ConfigFileSanitize`). Secrets are already stripped — those still come
+    /// in through the typed credential path so the VM only sees a fake — and
+    /// host-only settings are neutralized. Written into the guest home at
+    /// prepare time, under whatever the managed generator produces for the
+    /// same path.
+    public var importedConfigFiles: [ImportedConfigFile]
+
     /// Terminal styling. When `useTerminalAppDefaults` is true (default),
     /// kitty inherits the Terminal.app default-profile font + colors
     /// captured at app startup. When false, the four `customX` overrides
@@ -1498,6 +1536,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         networkMode: NetworkMode = .nat,
         bridgedInterfaceID: String? = nil,
         gitUserName: String = "",
+        importedConfigFiles: [ImportedConfigFile] = [],
         gitUserEmail: String = "",
         useTerminalAppDefaults: Bool = false,
         customFontFamily: String? = nil,
@@ -1582,6 +1621,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.keyRepeatDelayMs = keyRepeatDelayMs
         self.keyRepeatRateHz = keyRepeatRateHz
         self.gitUserName = gitUserName
+        self.importedConfigFiles = importedConfigFiles
         self.gitUserEmail = gitUserEmail
         self.useTerminalAppDefaults = useTerminalAppDefaults
         self.customFontFamily = customFontFamily
@@ -1601,7 +1641,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case folderPath  // legacy: single folder, migrated to folderPaths
         case folderPaths
         case createdAt, lastUsedAt, baseImageVersionAtClone, color, comments
-        case memoryGB, nativeTerminal, gitUserName, gitUserEmail
+        case memoryGB, nativeTerminal, gitUserName, gitUserEmail, importedConfigFiles
         case useTerminalAppDefaults, customFontFamily, customFontSize
         case customBackgroundHex, customForegroundHex, fontLigatures
         case networkMode, bridgedInterfaceID
@@ -1679,6 +1719,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         memoryGB        = try c.decodeIfPresent(Int.self, forKey: .memoryGB) ?? 8
         nativeTerminal  = try c.decodeIfPresent(Bool.self, forKey: .nativeTerminal) ?? false
         gitUserName     = try c.decodeIfPresent(String.self, forKey: .gitUserName) ?? ""
+        importedConfigFiles = (try c.decodeIfPresent([ImportedConfigFile].self,
+                                                     forKey: .importedConfigFiles) ?? [])
+            .filter { ImportedConfigFile.isSafeRelativePath($0.path) }
         gitUserEmail    = try c.decodeIfPresent(String.self, forKey: .gitUserEmail) ?? ""
         useTerminalAppDefaults = try c.decodeIfPresent(Bool.self, forKey: .useTerminalAppDefaults) ?? true
         customFontFamily       = try c.decodeIfPresent(String.self, forKey: .customFontFamily)
@@ -1778,6 +1821,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(memoryGB, forKey: .memoryGB)
         try c.encode(nativeTerminal, forKey: .nativeTerminal)
         try c.encode(gitUserName, forKey: .gitUserName)
+        try c.encode(importedConfigFiles, forKey: .importedConfigFiles)
         try c.encode(gitUserEmail, forKey: .gitUserEmail)
         try c.encode(useTerminalAppDefaults, forKey: .useTerminalAppDefaults)
         try c.encodeIfPresent(customFontFamily, forKey: .customFontFamily)
@@ -3297,7 +3341,15 @@ public final class ProfileStore {
         try Self.profileContent.write(
             to: home.appendingPathComponent(".profile"),
             atomically: true, encoding: .utf8)
-        try "prefix=/home/ubuntu/.npm-global\n".write(
+        // .npmrc: the prefix is ours (globally-installed CLIs must land where
+        // the guest's PATH expects), but anything else the user configured —
+        // scopes, registries, strict-ssl — is appended below it.
+        var npmrc = "prefix=/home/ubuntu/.npm-global\n"
+        if let f = profile.importedConfigFiles.first(where: { $0.path == ".npmrc" }),
+           !f.contents.isEmpty {
+            npmrc += "\n# --- imported from your Mac ---\n" + f.contents
+        }
+        try npmrc.write(
             to: home.appendingPathComponent(".npmrc"),
             atomically: true, encoding: .utf8)
         // Stale X-era dotfiles from previous sessions: the persistent home
@@ -3347,8 +3399,19 @@ public final class ProfileStore {
         let gitconfig = home.appendingPathComponent(".gitconfig")
         let name = profile.gitUserName.trimmingCharacters(in: .whitespaces)
         let email = profile.gitUserEmail.trimmingCharacters(in: .whitespaces)
-        if !name.isEmpty || !email.isEmpty || !usableCreds.isEmpty {
-            var lines = ["# Managed by Bromure Agentic Coding."]
+        let importedGit = profile.importedConfigFiles.first { $0.path == ".gitconfig" }
+        if !name.isEmpty || !email.isEmpty || !usableCreds.isEmpty || importedGit != nil {
+            var lines = [Self.managedSentinel]
+            // The user's own file goes FIRST: git resolves single-valued keys
+            // last-wins, so the managed block below overrides identity and the
+            // credential helper while everything else they configured stands.
+            if let importedGit, !importedGit.contents.isEmpty {
+                lines.append("")
+                lines.append("# --- imported from your Mac ---")
+                lines.append(importedGit.contents.trimmingCharacters(in: .newlines))
+                lines.append("")
+                lines.append("# --- Bromure ---")
+            }
             if !name.isEmpty || !email.isEmpty {
                 lines.append("[user]")
                 if !name.isEmpty { lines.append("    name  = \(name)") }
@@ -3368,6 +3431,22 @@ public final class ProfileStore {
                contents.hasPrefix("# Managed by Bromure Agentic Coding.") {
                 try? fm.removeItem(at: gitconfig)
             }
+        }
+
+        // Any other imported config file, verbatim. `.gitconfig` and `.npmrc`
+        // are handled above (they merge with a managed file); the rest have no
+        // generator to collide with. The path check is a belt-and-braces repeat
+        // of the one on decode — this writes to disk, so it does not get to
+        // trust its input.
+        for f in profile.importedConfigFiles
+        where f.path != ".gitconfig" && f.path != ".npmrc" && !f.contents.isEmpty {
+            guard ImportedConfigFile.isSafeRelativePath(f.path) else { continue }
+            let dest = home.appendingPathComponent(f.path)
+            let parent = dest.deletingLastPathComponent()
+            if !fm.fileExists(atPath: parent.path) {
+                try? fm.createDirectory(at: parent, withIntermediateDirectories: true)
+            }
+            try? f.contents.write(to: dest, atomically: true, encoding: .utf8)
         }
 
         // gh / glab CLI configs for known hosts. Lets `gh pr create` and
