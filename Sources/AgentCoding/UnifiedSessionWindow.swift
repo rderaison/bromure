@@ -1569,6 +1569,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         case .createAutomation:
             showAutomationEditor(nil, prefill: AutomationPrefill(
                 profileID: id, repoPath: tab.cwd ?? "~"))
+        case .summarizeChanges:
+            guard let dir = tab.cwd, !dir.isEmpty else { return }
+            acDelegate?.showMeatSummary(profileID: id, repoPath: dir)
         }
     }
     func dockerAttach(profileID id: Profile.ID, containerID: String, shell: String) {
@@ -2387,6 +2390,13 @@ private struct TabRow: View {
 
             // Always available: automations run in a plain tab when the cwd
             // isn't a git repo, so there's no gating to explain.
+            // EXPERIMENT: abridge this repo's diff with meat.
+            Button(NSLocalizedString("Summarize changes…",
+                                     comment: "Tab context menu: meat reading diff")) {
+                onAction(.summarizeChanges)
+            }
+            .disabled(!inRepo)
+
             Button(NSLocalizedString("New automation…",
                                      comment: "Tab context menu: create an automation seeded with this tab's directory")) {
                 onAction(.createAutomation)

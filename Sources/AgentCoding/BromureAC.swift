@@ -1591,6 +1591,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// First-run wizard state (welcome → install → scan → pick → done). Non-nil
     /// only while the setup window is showing it.
     var onboarding: OnboardingWizardModel?
+    /// EXPERIMENT: open meat reading-diff windows, keyed by workspace.
+    var meatWindows: [Profile.ID: NSWindow] = [:]
 
     /// If `url` is an OAuth authorize URL whose `redirect_uri` is a loopback
     /// callback (`http://127.0.0.1:<port>` or `localhost`), return that port —
@@ -2145,6 +2147,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             showUnifiedWindowAsHome()
             // Debug: exercise the option-click path (wizard over an open home)
             // without synthesizing a modifier-held click.
+            if ProcessInfo.processInfo.environment["BROMURE_DEBUG_MEAT"] != nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    self?.showMeatSummaryDemo()
+                }
+            }
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG_WIZARD"] == "newworkspace" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                     self?.beginNewWorkspace(withWizard: true)

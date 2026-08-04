@@ -367,6 +367,7 @@ enum TabAction {
     case removeWorktree     // a worktree tab → discard (remove + delete branch)
     case resolveConflicts   // a "Merge → …" tab → spawn the agent to resolve
     case createAutomation   // any tab → automation editor seeded with its cwd
+    case summarizeChanges   // EXPERIMENT: any tab in a repo → meat reading diff
 }
 
 /// Nesting depth of a tab in the worktree tree: 0 for ordinary tabs, N for a
