@@ -52,6 +52,7 @@ enum AgentConfigScan {
         ]),
         Source(tool: .grok, dir: ".grok", deny: [
             "auth.json", "sessions", "history.jsonl", "history", "log", "logs", "cache",
+            "bin",   // the CLI ships binaries here
         ]),
         Source(tool: .kimi, dir: ".kimi-code", deny: [
             "credentials", "sessions", "history.jsonl", "history", "log", "logs", "cache",
@@ -116,13 +117,19 @@ enum AgentConfigScan {
             if r.files.count >= maxFiles || total >= maxTotalBytes { r.skipped += 1; continue }
             guard let data = try? Data(contentsOf: url),
                   let body = String(data: data, encoding: .utf8) else { continue }
-            let clean = SecretRedact.redact(body, pathExtension: url.pathExtension.lowercased())
+            let ext = url.pathExtension.lowercased()
+            var clean = SecretRedact.redact(body, pathExtension: ext)
+            // Routing settings have to go before the file is usable in a VM —
+            // see AgentRouting.
+            let routed = AgentRouting.strip(clean.text, pathExtension: ext)
+            clean.text = routed.text
+            clean.stripped += routed.stripped
             guard !clean.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             total += clean.text.utf8.count
             r.strippedSecrets += clean.stripped
             r.files.append(ImportedConfigFile(
                 path: "\(source.dir)/\(rel)", contents: clean.text,
-                strippedSecrets: clean.stripped))
+                strippedSecrets: clean.stripped, disabled: routed.disabled))
         }
         return r.files.isEmpty ? nil : r
     }
@@ -239,5 +246,120 @@ enum SecretRedact {
 
     static func looksLikeToken(_ s: String) -> Bool {
         tokenPatterns.contains { s.contains($0) }
+    }
+}
+
+/// Strips the settings that decide **where an agent sends its requests**.
+///
+/// Every agent in a Bromure VM is pointed at the local MITM engine, which is
+/// what makes the fake-token swap work: the guest holds a dummy key, the proxy
+/// substitutes the real one on the way out. Each CLI is aimed there
+/// differently — Claude by `ANTHROPIC_BASE_URL`, Codex by a `model_provider`
+/// in config.toml, Grok by `GROK_MODELS_BASE_URL`, Kimi by `KIMI_MODEL_*`.
+///
+/// A config file copied off the host carries that same surface pointed
+/// somewhere else — usually straight at the vendor's API. Importing it as-is
+/// would send the guest's dummy key to the real endpoint, which fails with a
+/// 401 that looks like a Bromure bug, and quietly defeats the proxy the design
+/// depends on. So these keys are removed and the workspace's own wiring stands.
+///
+/// `mcpServers` goes too, for a different reason: MCP entries name host
+/// commands and absolute host paths that don't exist in the guest, and the
+/// profile already has a typed MCP list that the launcher merges in properly.
+enum AgentRouting {
+
+    struct Result {
+        var text: String
+        var stripped: Int
+        var disabled: [String]
+    }
+
+    /// Key names that redirect an agent, matched case-insensitively.
+    private static let routingKeys = [
+        "base_url", "baseurl", "base-url", "api_base", "apibase",
+        "endpoint", "env_key", "provider_url", "models_base_url",
+    ]
+    /// Top-level JSON keys that are the routing/credential surface wholesale.
+    private static let routingObjects = ["env", "mcpservers", "apikeyhelper"]
+    /// TOML section prefixes that define a provider.
+    private static let routingSections = [
+        "model_provider", "model_providers", "models", "providers", "mcp_servers",
+    ]
+
+    static func strip(_ body: String, pathExtension ext: String) -> Result {
+        switch ext {
+        case "json", "jsonc": return stripJSON(body) ?? Result(text: body, stripped: 0, disabled: [])
+        case "toml":          return stripTOML(body)
+        default:              return Result(text: body, stripped: 0, disabled: [])
+        }
+    }
+
+    private static func stripJSON(_ body: String) -> Result? {
+        guard let data = body.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        else { return nil }
+        var count = 0
+        var names: [String] = []
+        let cleaned = walk(obj, &count, &names)
+        guard let out = try? JSONSerialization.data(withJSONObject: cleaned,
+                                                    options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: out, encoding: .utf8) else { return nil }
+        return Result(text: text + "\n", stripped: count, disabled: names)
+    }
+
+    private static func walk(_ value: Any, _ count: inout Int, _ names: inout [String]) -> Any {
+        guard let dict = value as? [String: Any] else {
+            if let arr = value as? [Any] {
+                return arr.map { walk($0, &count, &names) }
+            }
+            return value
+        }
+        var out: [String: Any] = [:]
+        for (k, v) in dict {
+            let lower = k.lowercased()
+            if routingObjects.contains(lower) || routingKeys.contains(where: { lower.contains($0) }) {
+                count += 1
+                if !names.contains(k) { names.append(k) }
+                continue
+            }
+            out[k] = walk(v, &count, &names)
+        }
+        return out
+    }
+
+    /// TOML: drop provider-defining sections whole, plus stray routing keys.
+    private static func stripTOML(_ body: String) -> Result {
+        var out: [String] = []
+        var count = 0
+        var names: [String] = []
+        var skipping = false
+
+        for line in body.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") {
+                let name = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                    .lowercased()
+                let head = name.split(separator: ".").first.map(String.init) ?? name
+                skipping = routingSections.contains(head)
+                if skipping {
+                    count += 1
+                    if !names.contains(head) { names.append(head) }
+                    continue
+                }
+                out.append(line)
+                continue
+            }
+            if skipping { continue }
+            if let eq = trimmed.firstIndex(of: "=") {
+                let key = trimmed[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+                if routingKeys.contains(where: { key.contains($0) }) {
+                    count += 1
+                    if !names.contains(key) { names.append(key) }
+                    continue
+                }
+            }
+            out.append(line)
+        }
+        return Result(text: out.joined(separator: "\n"), stripped: count, disabled: names)
     }
 }
