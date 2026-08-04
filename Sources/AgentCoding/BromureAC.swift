@@ -5687,7 +5687,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false
         )
-        win.title = editing == nil ? "New workspace" : "Edit workspace"
+        win.title = editing?.name ?? NSLocalizedString("New workspace", comment: "editor window title")
         win.center()
         // For new profiles, hand the editor a draft pre-populated from
         // the user's preferences template (Bromure → Preferences…)
@@ -5705,6 +5705,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.handleEditorSave(profile: profile, generateSSH: generateSSH, editing: editing)
             },
             onCancel: { self.closeEditorWindow() },
+            onTitleChange: { [weak win] title in win?.title = title },
             onImportSSHKey: { [weak self] url, passphrase, label in
                 // Import requires a saved profile (we need an id for
                 // the on-disk path + keychain account). For new

@@ -2043,9 +2043,8 @@ final class RemoteHostWindow: NSWindow {
                 contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
                 styleMask: [.titled, .closable],
                 backing: .buffered, defer: false)
-            win.title = String(
-                format: NSLocalizedString("Edit workspace — %@", comment: "remote settings title"),
-                c.host.name)
+            let hostName = c.host.name
+            win.title = "\(profile.name) — \(hostName)"
             win.center()
             win.isReleasedWhenClosed = false
             win.contentView = NSHostingView(rootView: ProfileEditorView(
@@ -2062,6 +2061,7 @@ final class RemoteHostWindow: NSWindow {
                     self?.saveWorkspaceSettings(id, edited, generateSSH: generateSSH)
                 },
                 onCancel: { [weak self] in self?.closeSettingsWindow(id) },
+                onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
                 claudeAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["claude"]?.registeredAt },
                 claudeReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["claude"]?.reauthRequiredAt },
                 codexReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["codex"]?.reauthRequiredAt },
@@ -2242,9 +2242,10 @@ final class RemoteHostWindow: NSWindow {
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
-        win.title = String(
-            format: NSLocalizedString("New workspace — %@", comment: "remote new workspace title"),
-            controller.host.name)
+        // Remote editors keep the "— host" suffix: with several mirrors open,
+        // which machine the workspace lands on is the thing you can't guess.
+        let hostName = controller.host.name
+        win.title = "\(draft.name) — \(hostName)"
         win.center()
         win.isReleasedWhenClosed = false
         win.contentView = NSHostingView(rootView: ProfileEditorView(
@@ -2255,7 +2256,8 @@ final class RemoteHostWindow: NSWindow {
             onSave: { [weak self] edited, generateSSH in
                 self?.createWorkspaceFromEditor(edited, generateSSH: generateSSH)
             },
-            onCancel: { [weak self] in self?.closeNewWorkspaceWindow() }))
+            onCancel: { [weak self] in self?.closeNewWorkspaceWindow() },
+            onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" }))
         win.makeKeyAndOrderFront(nil)
         newWorkspaceWindow = win
     }

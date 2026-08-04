@@ -415,6 +415,10 @@ struct ProfileEditorView: View {
 
     let onSave: (Profile, _ generateSSH: Bool) -> Void
     let onCancel: () -> Void
+    /// Fires as the name is typed so a hosting NSWindow can keep its title bar
+    /// in sync. SwiftUI's `navigationTitle` doesn't reach the window behind an
+    /// NSHostingView, so the host is told explicitly.
+    let onTitleChange: ((String) -> Void)?
 
     /// Synchronous import callback: returns the metadata to append on
     /// the draft profile, or throws. Provided by ACAppDelegate so the
@@ -463,6 +467,7 @@ struct ProfileEditorView: View {
         remoteCredentialRefs: [CredentialRef]? = nil,
         onSave: @escaping (Profile, _ generateSSH: Bool) -> Void,
         onCancel: @escaping () -> Void,
+        onTitleChange: ((String) -> Void)? = nil,
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
         onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
         claudeAccountSavedAt: (() -> Date?)? = nil,
@@ -523,6 +528,7 @@ struct ProfileEditorView: View {
         self.remoteCredentialRefs = remoteCredentialRefs
         self.onSave = onSave
         self.onCancel = onCancel
+        self.onTitleChange = onTitleChange
     }
 
     /// Which categories show up in the sidebar. The Automation pane
@@ -580,6 +586,10 @@ struct ProfileEditorView: View {
         #if os(macOS)
         .frame(width: 720, height: 520)
         #endif
+        // Title bar follows the name live, and is seeded on appear so a
+        // pre-filled draft doesn't sit under a stale title until first keypress.
+        .onAppear { onTitleChange?(editorTitleString) }
+        .onChange(of: draft.name) { _, _ in onTitleChange?(editorTitleString) }
         // Attach the import sheet at the root of the editor so it stays
         // in the hierarchy regardless of which sidebar category is
         // selected when the user kicks off `presentImportPicker`. When
@@ -641,9 +651,23 @@ struct ProfileEditorView: View {
     /// English even in locales that translate it. Only the literals are
     /// localized — a user's workspace name is passed through verbatim.
     private var editorTitle: Text {
-        if isNew { return Text("New workspace") }
-        if draft.name.isEmpty { return Text("Edit workspace") }
-        return Text(draft.name)
+        // Name first, in both modes: a new workspace that has been named is no
+        // longer usefully described as "New workspace". `draft` is @State bound
+        // to the name field, so this re-renders per keystroke by itself.
+        let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { return Text(name) }
+        return isNew ? Text("New workspace") : Text("Edit workspace")
+    }
+
+    /// The same string as `editorTitle`, for a hosting NSWindow's title bar.
+    /// Kept separate because `Text` deliberately avoids localizing a user's
+    /// workspace name, and an NSWindow needs a plain String.
+    private var editorTitleString: String {
+        let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { return name }
+        return isNew
+            ? NSLocalizedString("New workspace", comment: "editor title, unnamed")
+            : NSLocalizedString("Edit workspace", comment: "editor title, unnamed")
     }
 
     private var bottomBar: some View {
@@ -1275,7 +1299,7 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var foldersSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Each folder is mounted into the VM under its real name (e.g. ~/Documents → ~ubuntu/Documents). Capped at 8 folders per workspace.")
+            Text("Add your personal projects and folders to mount in this workspace. Each one keeps its name inside, and you can add up to 8.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

@@ -126,11 +126,15 @@ enum ConfigScan {
         guard !r.identity.name.isEmpty || !r.identity.email.isEmpty || !r.creds.isEmpty else { return nil }
         var bits: [String] = []
         if !r.identity.name.isEmpty || !r.identity.email.isEmpty {
-            bits.append("identity \(r.identity.email.isEmpty ? r.identity.name : r.identity.email)")
+            bits.append(String(format: NSLocalizedString("identity %@", comment: "git identity line"),
+                               r.identity.email.isEmpty ? r.identity.name : r.identity.email))
         }
-        if !r.creds.isEmpty { bits.append("\(r.creds.count) embedded token(s)") }
+        if !r.creds.isEmpty {
+            bits.append(String(format: NSLocalizedString("%d embedded token(s)", comment: ""), r.creds.count))
+        }
         return Finding(id: Kind.gitconfig.rawValue, kind: .gitconfig, path: url,
-                       title: "Git config", detail: bits.joined(separator: ", "),
+                       title: NSLocalizedString("Git config", comment: "scan finding"),
+                       detail: bits.joined(separator: ", "),
                        credentialCount: r.creds.count,
                        symbol: "arrow.triangle.branch",
                        payload: .git(identity: r.identity, creds: r.creds))
@@ -145,7 +149,9 @@ enum ConfigScan {
         guard !creds.isEmpty else { return nil }
         let hosts = Set(creds.map(\.host)).sorted().joined(separator: ", ")
         return Finding(id: Kind.gitCredentials.rawValue, kind: .gitCredentials, path: url,
-                       title: "Git saved passwords", detail: "\(creds.count) token(s): \(hosts)",
+                       title: NSLocalizedString("Git saved passwords", comment: "scan finding"),
+                       detail: String(format: NSLocalizedString("%1$d token(s): %2$@", comment: ""),
+                                      creds.count, hosts),
                        credentialCount: creds.count, symbol: "key.fill",
                        payload: .gitTokens(creds))
     }
@@ -156,11 +162,14 @@ enum ConfigScan {
         let url = home.appendingPathComponent(".docker/config.json")
         guard let d = try? Data(contentsOf: url),
               let r = try? DockerConfigImport.parse(d), !r.entries.isEmpty else { return nil }
-        var detail = "\(r.entries.count) registry login(s): "
-            + r.entries.map(\.host).joined(separator: ", ")
-        if r.skippedHelper > 0 { detail += " (\(r.skippedHelper) in a credential helper, skipped)" }
+        var detail = String(format: NSLocalizedString("%1$d registry login(s): %2$@", comment: ""),
+                            r.entries.count, r.entries.map(\.host).joined(separator: ", "))
+        if r.skippedHelper > 0 {
+            detail = String(format: NSLocalizedString("%1$@ (%2$d in a credential helper, skipped)", comment: ""),
+                            detail, r.skippedHelper)
+        }
         return Finding(id: Kind.docker.rawValue, kind: .docker, path: url,
-                       title: "Docker registries", detail: detail,
+                       title: NSLocalizedString("Docker registries", comment: "scan finding"), detail: detail,
                        credentialCount: r.entries.count, symbol: "shippingbox.fill",
                        payload: .docker(r.entries))
     }
@@ -178,8 +187,9 @@ enum ConfigScan {
               let key = s.values["aws_access_key_id"], !key.isEmpty,
               let secret = s.values["aws_secret_access_key"], !secret.isEmpty else { return nil }
         return Finding(id: Kind.awsStatic.rawValue, kind: .awsStatic, path: url,
-                       title: "AWS access keys",
-                       detail: "profile \"\(s.name)\", key \(redactTail(key))",
+                       title: NSLocalizedString("AWS access keys", comment: "scan finding"),
+                       detail: String(format: NSLocalizedString("profile \"%1$@\", key %2$@", comment: ""),
+                                      s.name, redactTail(key)),
                        credentialCount: 1, symbol: "cloud.fill",
                        payload: .awsStatic(accessKeyID: key, secret: secret,
                                            session: s.values["aws_session_token"] ?? ""))
@@ -190,9 +200,8 @@ enum ConfigScan {
         let profiles = AWSConfigParser.discover(configPath: url.path)
         guard !profiles.isEmpty else { return nil }
         return Finding(id: Kind.awsSSO.rawValue, kind: .awsSSO, path: url,
-                       title: "AWS SSO profiles",
-                       detail: profiles.prefix(3).map(\.name).joined(separator: ", ")
-                            + (profiles.count > 3 ? " +\(profiles.count - 3) more" : ""),
+                       title: NSLocalizedString("AWS SSO profiles", comment: "scan finding"),
+                       detail: overflowList(profiles.map(\.name)),
                        credentialCount: profiles.count, symbol: "person.badge.key.fill",
                        payload: .awsSSO(profiles))
     }
@@ -204,9 +213,8 @@ enum ConfigScan {
         guard let body = text(url),
               let ctxs = try? KubeconfigImport.parse(body), !ctxs.isEmpty else { return nil }
         return Finding(id: Kind.kube.rawValue, kind: .kube, path: url,
-                       title: "Kubernetes contexts",
-                       detail: ctxs.prefix(3).map(\.name).joined(separator: ", ")
-                            + (ctxs.count > 3 ? " +\(ctxs.count - 3) more" : ""),
+                       title: NSLocalizedString("Kubernetes contexts", comment: "scan finding"),
+                       detail: overflowList(ctxs.map(\.name)),
                        credentialCount: ctxs.count, symbol: "helm",
                        payload: .kube(ctxs))
     }
@@ -226,7 +234,8 @@ enum ConfigScan {
                 .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             let hostOnly = registry.split(separator: "/").first.map(String.init) ?? "registry.npmjs.org"
             return Finding(id: Kind.npm.rawValue, kind: .npm, path: url,
-                           title: "npm token", detail: "registry \(hostOnly)",
+                           title: NSLocalizedString("npm token", comment: "scan finding"),
+                           detail: String(format: NSLocalizedString("registry %@", comment: ""), hostOnly),
                            credentialCount: 1, symbol: "cube.box.fill",
                            payload: .manual(name: "npm (\(hostOnly))", value: token,
                                             envVar: "NPM_TOKEN", hosts: [hostOnly]))
@@ -240,7 +249,8 @@ enum ConfigScan {
         for s in INI.parse(body) {
             guard let pw = s.values["password"], !pw.isEmpty else { continue }
             return Finding(id: Kind.pypi.rawValue, kind: .pypi, path: url,
-                           title: "PyPI token", detail: "index \"\(s.name)\"",
+                           title: NSLocalizedString("PyPI token", comment: "scan finding"),
+                           detail: String(format: NSLocalizedString("index \"%@\"", comment: ""), s.name),
                            credentialCount: 1, symbol: "shippingbox",
                            payload: .manual(name: "PyPI (\(s.name))", value: pw,
                                             envVar: "TWINE_PASSWORD", hosts: ["pypi.org"]))
@@ -259,7 +269,8 @@ enum ConfigScan {
                 let token = unquote(String(l[l.index(after: eq)...]).trimmingCharacters(in: .whitespaces))
                 guard !token.isEmpty else { continue }
                 return Finding(id: Kind.cargo.rawValue, kind: .cargo, path: url,
-                               title: "crates.io token", detail: "cargo registry",
+                               title: NSLocalizedString("crates.io token", comment: "scan finding"),
+                               detail: NSLocalizedString("cargo registry", comment: ""),
                                credentialCount: 1, symbol: "shippingbox",
                                payload: .manual(name: "crates.io", value: token,
                                                 envVar: "CARGO_REGISTRY_TOKEN",
@@ -277,7 +288,7 @@ enum ConfigScan {
         let creds = YAMLLite.hostTokens(body, tokenKeys: ["oauth_token"], userKeys: ["user"])
         guard !creds.isEmpty else { return nil }
         return Finding(id: Kind.ghCLI.rawValue, kind: .ghCLI, path: url,
-                       title: "GitHub CLI login",
+                       title: NSLocalizedString("GitHub CLI login", comment: "scan finding"),
                        detail: creds.map { "\($0.host)\($0.username.isEmpty ? "" : " (\($0.username))")" }
                             .joined(separator: ", "),
                        credentialCount: creds.count, symbol: "terminal.fill",
@@ -291,7 +302,7 @@ enum ConfigScan {
             let creds = YAMLLite.hostTokens(body, tokenKeys: ["token"], userKeys: ["username", "user"])
             guard !creds.isEmpty else { continue }
             return Finding(id: Kind.glabCLI.rawValue, kind: .glabCLI, path: url,
-                           title: "GitLab CLI login",
+                           title: NSLocalizedString("GitLab CLI login", comment: "scan finding"),
                            detail: creds.map(\.host).joined(separator: ", "),
                            credentialCount: creds.count, symbol: "terminal.fill",
                            payload: .gitTokens(creds))
@@ -306,7 +317,7 @@ enum ConfigScan {
             let creds = parseNetrc(body)
             guard !creds.isEmpty else { continue }
             return Finding(id: Kind.netrc.rawValue, kind: .netrc, path: url,
-                           title: "netrc logins",
+                           title: NSLocalizedString("netrc logins", comment: "scan finding"),
                            detail: creds.map(\.host).joined(separator: ", "),
                            credentialCount: creds.count, symbol: "doc.text.fill",
                            payload: .gitTokens(creds))
@@ -358,7 +369,8 @@ enum ConfigScan {
                     .trimmingCharacters(in: .whitespaces))
                 guard !token.isEmpty else { continue }
                 return Finding(id: Kind.doctl.rawValue, kind: .doctl, path: u,
-                               title: "DigitalOcean token", detail: "doctl CLI",
+                               title: NSLocalizedString("DigitalOcean token", comment: "scan finding"),
+                               detail: NSLocalizedString("doctl CLI", comment: ""),
                                credentialCount: 1, symbol: "cloud",
                                payload: .digitalOcean(token))
             }
@@ -378,8 +390,8 @@ enum ConfigScan {
         if keychainItemExists(service: claudeKeychainService) {
             return Finding(id: Kind.claudeSubscription.rawValue, kind: .claudeSubscription,
                            path: URL(fileURLWithPath: "/Keychain/\(claudeKeychainService)"),
-                           title: "Claude subscription",
-                           detail: "your Claude Code login, from the login keychain",
+                           title: NSLocalizedString("Claude subscription", comment: "scan finding"),
+                           detail: NSLocalizedString("your Claude Code login, from the login keychain", comment: ""),
                            credentialCount: 1, symbol: "sparkles",
                            payload: .keychainSubscription(provider: "claude",
                                                           service: claudeKeychainService))
@@ -392,8 +404,8 @@ enum ConfigScan {
               let refresh = oauth["refreshToken"] as? String,
               !access.isEmpty, !refresh.isEmpty else { return nil }
         return Finding(id: Kind.claudeSubscription.rawValue, kind: .claudeSubscription, path: url,
-                       title: "Claude subscription",
-                       detail: "your Claude Code login — skips the register-with-Claude step",
+                       title: NSLocalizedString("Claude subscription", comment: "scan finding"),
+                       detail: NSLocalizedString("your Claude Code login — skips the register-with-Claude step", comment: ""),
                        credentialCount: 1, symbol: "sparkles",
                        payload: .subscription(provider: "claude", access: access, refresh: refresh))
     }
@@ -407,8 +419,8 @@ enum ConfigScan {
               let refresh = tokens["refresh_token"] as? String,
               !access.isEmpty, !refresh.isEmpty else { return nil }
         return Finding(id: Kind.codexSubscription.rawValue, kind: .codexSubscription, path: url,
-                       title: "ChatGPT subscription",
-                       detail: "your Codex CLI login — skips the register-with-ChatGPT step",
+                       title: NSLocalizedString("ChatGPT subscription", comment: "scan finding"),
+                       detail: NSLocalizedString("your Codex CLI login — skips the register-with-ChatGPT step", comment: ""),
                        credentialCount: 1, symbol: "sparkles",
                        payload: .subscription(provider: "codex", access: access, refresh: refresh))
     }
@@ -426,8 +438,8 @@ enum ConfigScan {
                   let refresh = e["refresh_token"] as? String,
                   !access.isEmpty, !refresh.isEmpty else { continue }
             return Finding(id: Kind.grokSubscription.rawValue, kind: .grokSubscription, path: url,
-                           title: "Grok subscription",
-                           detail: "your Grok CLI login — skips the register-with-Grok step",
+                           title: NSLocalizedString("Grok subscription", comment: "scan finding"),
+                           detail: NSLocalizedString("your Grok CLI login — skips the register-with-Grok step", comment: ""),
                            credentialCount: 1, symbol: "sparkles",
                            payload: .subscription(provider: "grok", access: access, refresh: refresh))
         }
@@ -447,8 +459,8 @@ enum ConfigScan {
                   let refresh = e["refresh_token"] as? String,
                   !access.isEmpty, !refresh.isEmpty else { continue }
             return Finding(id: Kind.kimiSubscription.rawValue, kind: .kimiSubscription, path: url,
-                           title: "Kimi subscription",
-                           detail: "your Kimi CLI login — skips the register-with-Kimi step",
+                           title: NSLocalizedString("Kimi subscription", comment: "scan finding"),
+                           detail: NSLocalizedString("your Kimi CLI login — skips the register-with-Kimi step", comment: ""),
                            credentialCount: 1, symbol: "sparkles",
                            payload: .subscription(provider: "kimi", access: access, refresh: refresh))
         }
@@ -494,7 +506,9 @@ enum ConfigScan {
         let names = found.map { $0.tool.rawValue }.joined(separator: ", ")
         return Finding(id: Kind.agentAPIKey.rawValue, kind: .agentAPIKey,
                        path: sources.first == "config.toml" ? codex : settings,
-                       title: "Agent API keys", detail: "\(names) (from \(sources.joined(separator: " + ")))",
+                       title: NSLocalizedString("Agent API keys", comment: "scan finding"),
+                       detail: String(format: NSLocalizedString("%1$@ (from %2$@)", comment: ""),
+                                      names, sources.joined(separator: " + ")),
                        credentialCount: found.count, symbol: "key.horizontal.fill",
                        payload: .agentKeys(found))
     }
@@ -512,10 +526,10 @@ enum ConfigScan {
             let encrypted = head.contains("ENCRYPTED") || head.contains("Proc-Type: 4,ENCRYPTED")
             out.append(Finding(
                 id: "\(Kind.sshKey.rawValue):\(name)", kind: .sshKey, path: url,
-                title: "SSH key \(name)",
+                title: String(format: NSLocalizedString("SSH key %@", comment: "scan finding"), name),
                 detail: encrypted
-                    ? "passphrase-protected — you'll be asked for it after setup"
-                    : "used for git over SSH inside the VM",
+                    ? NSLocalizedString("passphrase-protected — you'll be asked for it after setup", comment: "")
+                    : NSLocalizedString("used for git over SSH inside the VM", comment: ""),
                 credentialCount: 1, symbol: "key.horizontal",
                 include: !encrypted,          // don't silently commit to a prompt
                 payload: .sshKey(label: name)))
@@ -531,7 +545,8 @@ enum ConfigScan {
         let known = vars.filter { EnvFileImport.slot(forName: $0.name) != nil }
         guard !known.isEmpty else { return nil }
         return Finding(id: "env:\(url.path)", kind: .envFile, path: url,
-                       title: "Env file", detail: "\(known.count) recognized variable(s)",
+                       title: NSLocalizedString("Env file", comment: "scan finding"),
+                       detail: String(format: NSLocalizedString("%d recognized variable(s)", comment: ""), known.count),
                        credentialCount: known.count, symbol: "doc.plaintext.fill",
                        payload: .env(vars))
     }
@@ -762,6 +777,15 @@ enum ConfigScan {
     }
 
     // MARK: - Small helpers
+
+    /// "a, b, c +4 more" — the two list findings (AWS SSO, kube) render the
+    /// same way, and the overflow clause has to be one localizable unit.
+    private static func overflowList(_ names: [String], shown: Int = 3) -> String {
+        let head = names.prefix(shown).joined(separator: ", ")
+        guard names.count > shown else { return head }
+        return String(format: NSLocalizedString("%1$@ +%2$d more", comment: "list overflow"),
+                      head, names.count - shown)
+    }
 
     private static func unquote(_ v: String) -> String {
         var s = v

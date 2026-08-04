@@ -66,10 +66,10 @@ final class OnboardingWizardModel {
         return a < b ? .done : (a == b ? .current : .upcoming)
     }
 
+    /// Ticked rows — what the Import button counts. Deliberately rows and not
+    /// credentials: a .gitconfig contributing only an identity carries no
+    /// credential, yet it is plainly one of the items the user ticked.
     var selectedCount: Int { findings.filter(\.include).count }
-    var totalCredentials: Int {
-        findings.filter(\.include).reduce(0) { $0 + $1.credentialCount }
-    }
 
     /// Welcome → install (first run) or straight to the scan offer.
     func advanceFromWelcome() {
@@ -145,11 +145,17 @@ struct OnboardingWizardView: View {
     /// to install, so the list never advertises work that won't happen.
     private var railSteps: [(step: OnboardingWizardModel.Step, label: String)] {
         var s: [(OnboardingWizardModel.Step, String)] = []
-        if model.purpose == .firstRun { s.append((.welcome, "Welcome")) }
-        if model.needsImage { s.append((.installing, "Install")) }
-        s.append((.scanOffer, "Credentials"))
-        s.append((.pick, "Choose"))
-        s.append((.done, "Done"))
+        // Explicit NSLocalizedString, not a bare literal: these travel as
+        // `String` into `Text(label)`, and Text only auto-localizes a literal.
+        if model.purpose == .firstRun {
+            s.append((.welcome, NSLocalizedString("Welcome", comment: "wizard step")))
+        }
+        if model.needsImage {
+            s.append((.installing, NSLocalizedString("Install", comment: "wizard step")))
+        }
+        s.append((.scanOffer, NSLocalizedString("Credentials", comment: "wizard step")))
+        s.append((.pick, NSLocalizedString("Choose", comment: "wizard step")))
+        s.append((.done, NSLocalizedString("Done", comment: "wizard step")))
         return s
     }
 
@@ -292,11 +298,21 @@ struct OnboardingWizardView: View {
 
             // What we look at, so "scan my Mac" isn't a blank cheque.
             VStack(alignment: .leading, spacing: 6) {
-                sourceLine("arrow.triangle.branch", "git config, saved passwords, GitHub & GitLab CLIs")
-                sourceLine("shippingbox.fill", "Docker, npm, PyPI, crates.io")
-                sourceLine("cloud.fill", "AWS, Kubernetes, DigitalOcean")
-                sourceLine("sparkles", "Claude, ChatGPT, Grok & Kimi logins and API keys")
-                sourceLine("key.horizontal.fill", "SSH keys, .env files")
+                sourceLine("arrow.triangle.branch",
+                           NSLocalizedString("git config, saved passwords, GitHub & GitLab CLIs",
+                                             comment: "wizard: what the scan reads"))
+                sourceLine("shippingbox.fill",
+                           NSLocalizedString("Docker, npm, PyPI, crates.io",
+                                             comment: "wizard: what the scan reads"))
+                sourceLine("cloud.fill",
+                           NSLocalizedString("AWS, Kubernetes, DigitalOcean",
+                                             comment: "wizard: what the scan reads"))
+                sourceLine("sparkles",
+                           NSLocalizedString("Claude, ChatGPT, Grok & Kimi logins and API keys",
+                                             comment: "wizard: what the scan reads"))
+                sourceLine("key.horizontal.fill",
+                           NSLocalizedString("SSH keys, .env files",
+                                             comment: "wizard: what the scan reads"))
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -403,10 +419,10 @@ struct OnboardingWizardView: View {
                     .keyboardShortcut(.defaultAction)
             case .pick:
                 Button("Skip") { onFinish([]) }
-                Button(model.totalCredentials == 0
+                Button(model.selectedCount == 0
                        ? NSLocalizedString("Continue", comment: "")
-                       : String(format: NSLocalizedString("Import %d", comment: "n credentials"),
-                                model.totalCredentials)) {
+                       : String(format: NSLocalizedString("Import %d", comment: "n items"),
+                                model.selectedCount)) {
                     onFinish(model.findings.filter(\.include))
                 }
                 .keyboardShortcut(.defaultAction)
