@@ -2163,14 +2163,81 @@ final class RemoteHostWindow: NSWindow {
     /// remote (`POST /profiles`), so the workspace is actually created on the
     /// server. Host-side-only affordances stay hidden (their callbacks are nil),
     /// exactly like `openWorkspaceSettings`.
-    private func createWorkspace() {
-        if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }
-        // A numbered placeholder name so the user can save immediately.
+    /// New workspace. Option-click runs the credential wizard first, exactly
+    /// like the local window — but note WHOSE files it reads: the scan looks at
+    /// THIS Mac (where the user and their dotfiles are), while the workspace is
+    /// created on the remote. That is the useful direction, and it is why the
+    /// wizard is worth having here at all.
+    private func createWorkspace(withWizard: Bool = false) {
+        if withWizard { presentRemoteCredentialWizard(); return }
+        presentNewWorkspaceEditor(draft: freshWorkspaceDraft())
+    }
+
+    /// A blank draft with a free numbered name, so the editor can be saved
+    /// immediately.
+    private func freshWorkspaceDraft() -> Profile {
         let taken = Set(controller.profiles.map { $0.name })
         var n = controller.profiles.count + 1
         var name = "Workspace \(n)"
         while taken.contains(name) { n += 1; name = "Workspace \(n)" }
-        let draft = Profile(name: name, tool: .claude, authMode: .subscription)
+        return Profile(name: name, tool: .claude, authMode: .subscription)
+    }
+
+    /// The credential wizard, entering at its scan offer. On finish the chosen
+    /// findings are folded into a draft and handed to the ordinary new-workspace
+    /// editor, so the save path (POST /profiles to the remote) is unchanged.
+    private func presentRemoteCredentialWizard() {
+        if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }
+        let model = OnboardingWizardModel(needsImage: false, purpose: .newWorkspace)
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0,
+                                width: OnboardingWizardView.contentSize.width,
+                                height: OnboardingWizardView.contentSize.height),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false)
+        win.title = String(
+            format: NSLocalizedString("New workspace — %@", comment: "remote new workspace title"),
+            controller.host.name)
+        win.center()
+        win.isReleasedWhenClosed = false
+        win.contentView = NSHostingView(rootView: OnboardingWizardView(
+            model: model,
+            installProgress: InitProgressModel(),   // unused: needsImage is false
+            onStartInstall: {},
+            onCancelInstall: { [weak self] in self?.closeNewWorkspaceWindow() },
+            onFinish: { [weak self] findings in
+                self?.finishRemoteCredentialWizard(findings)
+            },
+            onDone: { [weak self] in self?.closeNewWorkspaceWindow() }))
+        win.makeKeyAndOrderFront(nil)
+        newWorkspaceWindow = win
+    }
+
+    private func finishRemoteCredentialWizard(_ findings: [ConfigScan.Finding]) {
+        var draft = freshWorkspaceDraft()
+        let summary = ConfigScan.apply(findings, to: &draft)
+        closeNewWorkspaceWindow()
+
+        // Two kinds can't cross the tunnel: an SSH key has to be copied into
+        // the profile directory (which lives on the remote), and a subscription
+        // login belongs in the remote's credential stores. Neither has a
+        // control-plane route yet, so say so rather than silently dropping them.
+        let skipped = summary.deferredSSHKeys.count + summary.subscriptions.count
+        if skipped > 0 {
+            let a = NSAlert()
+            a.messageText = NSLocalizedString("Some items can't be imported remotely",
+                                              comment: "")
+            a.informativeText = String(format: NSLocalizedString(
+                "%d SSH key(s) and %d agent login(s) were skipped: those are stored on the machine running the workspace, and there's no remote import for them yet. Everything else was carried over.",
+                comment: ""), summary.deferredSSHKeys.count, summary.subscriptions.count)
+            a.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            a.runModal()
+        }
+        presentNewWorkspaceEditor(draft: draft)
+    }
+
+    private func presentNewWorkspaceEditor(draft: Profile) {
+        if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
             styleMask: [.titled, .closable],
@@ -2720,6 +2787,12 @@ final class RemoteHostWindow: NSWindow {
                     "inProgress": tasks.filter { $0.stage == .inProgress }.count,
                     "testing": tasks.filter { $0.stage == .testing }.count,
                     "done": tasks.filter { $0.stage == .done }.count]
+        case "new-workspace-wizard":
+            // Exercises the option-click path without a modifier-held click
+            // (synthetic events need accessibility permission).
+            createWorkspace(withWizard: true)
+            return ["ok": true]
+
         case "automation-board":
             // Show the mirrored kanban board and report its column counts —
             // the FC-board E2E assertion surface. Optional "shot" writes an
@@ -3145,7 +3218,11 @@ final class RemoteHostWindow: NSWindow {
             onDuplicate: { _ in },
             onReset: { _ in },
             onDelete: { _ in },
-            onNewProfile: { [weak self] in self?.createWorkspace() },
+            // Option-click runs the credential wizard first, same gesture as
+            // the local window's "+".
+            onNewProfile: { [weak self] in
+                self?.createWorkspace(withWizard: NSEvent.modifierFlags.contains(.option))
+            },
             automationStore: c.automationStore,
             onNewAutomation: { [weak self] in self?.showAutomationEditor(nil) },
             onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
