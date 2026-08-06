@@ -43,6 +43,21 @@
     <integer>86400</integer>
     <key>SUEnableInstallerLauncherService</key>
     <true/>
+    <!-- ATS re-evaluates every URLSession server cert against the system trust
+         store and ignores what a URLSessionDelegate accepted, so a cert anchored
+         at a user-pinned cluster CA (ClusterCATrustRegistry) is rejected with
+         -1200/errSSLFatalAlert no matter what PinnedClusterTrust decides. The
+         pinned hosts are per-profile and only known at runtime, so they can't be
+         expressed as NSExceptionDomains. ATS only governs URLSession, which is
+         why the raw SecureTransport path (TLSClientStream, kubectl exec) always
+         worked. Turning it off does not relax ordinary validation: the proxy
+         still does default system-trust handling for every host without a pinned
+         CA — it only restores the delegate's authority over the ones that have one. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
     <!-- Deep link for P2P device enrollment: bromure://enroll?v=1&code=…&api=…
          (REMOTE_P2P_PLAN.md). Opens the "Connect to Peer" window and redeems
          the one-time code. A pasted code is the fallback when the scheme isn't
