@@ -38,6 +38,10 @@ final class PlanSessionWindowManager {
         /// Streamed session: a typed user turn. nil = not streaming — the
         /// composer falls back to `send` (tmux typing).
         var sendUser: (_ task: CodingTask, _ text: String) async -> Bool? = { _, _ in nil }
+        /// Called when a task's window is reaped, so the context owner can
+        /// drop any per-task cache it grew for the window (e.g. the fat
+        /// client's streamed-items cache, which is otherwise unbounded).
+        var onReap: (_ taskID: UUID) -> Void = { _ in }
     }
 
     private let context: Context
@@ -129,6 +133,7 @@ final class PlanSessionWindowManager {
         pollers[taskID] = nil
         models[taskID] = nil
         windows[taskID] = nil
+        context.onReap(taskID)
     }
 
     /// Immediate refresh — the plan-stream hub calls this on every event so

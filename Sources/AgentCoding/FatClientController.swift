@@ -2610,6 +2610,9 @@ final class RemoteHostWindow: NSWindow {
                 // ok:false / error / old host → nil → the tmux typing path.
                 guard resp?["ok"] as? Bool == true else { return nil }
                 return true
+            },
+            onReap: { [weak self] taskID in
+                self?.planStreamItems[taskID] = nil
             }))
 
     /// Fat-client cache of streamed plan items, per task — grown by the
@@ -3642,7 +3645,11 @@ final class StateStream: @unchecked Sendable {
     private func loop(host: RemoteHost) {
         var backoff: TimeInterval = 1
         while !isStopped {
-            let connected = runOnce(host: host)
+            // Pool per connection attempt: this raw Thread has no runloop, so
+            // nothing else ever drains autoreleased temporaries (openStream's
+            // JSON encode, error paths) — without this they pin for the
+            // thread's lifetime.
+            let connected = autoreleasepool { runOnce(host: host) }
             if isStopped { break }
             backoff = connected ? 1 : min(backoff * 2, 30)
             Thread.sleep(forTimeInterval: backoff)
@@ -3676,20 +3683,28 @@ final class StateStream: @unchecked Sendable {
             let n = rbuf.withUnsafeMutableBufferPointer { Darwin.read(fd, $0.baseAddress!, $0.count) }
             if n <= 0 { break }
             buf.append(contentsOf: rbuf[0..<n])
-            while buf.count >= 4 {
-                let len = (Int(buf[0]) << 24) | (Int(buf[1]) << 16) | (Int(buf[2]) << 8) | Int(buf[3])
-                if len < 1 || len > 32 * 1024 * 1024 { return true }   // bogus frame → drop + reconnect
-                if buf.count < 4 + len { break }
-                let flag = buf[4]
-                var data = Data(buf[5 ..< 4 + len])
-                buf.removeFirst(4 + len)
-                if flag == 1, let inflated = try? (data as NSData).decompressed(using: .zlib) {
-                    data = inflated as Data
-                }
-                if let snap = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-                    deliverSnapshot(snap)
+            // Pool per read batch: decompressed(using:) and JSONSerialization
+            // autorelease every frame's body + parsed graph, and this raw
+            // Thread never drains its implicit pool — a busy mirror (every
+            // terminal refresh pushes a frame) pinned tens of GB over hours.
+            var bogus = false
+            autoreleasepool {
+                while buf.count >= 4 {
+                    let len = (Int(buf[0]) << 24) | (Int(buf[1]) << 16) | (Int(buf[2]) << 8) | Int(buf[3])
+                    if len < 1 || len > 32 * 1024 * 1024 { bogus = true; return }   // bogus frame → drop + reconnect
+                    if buf.count < 4 + len { break }
+                    let flag = buf[4]
+                    var data = Data(buf[5 ..< 4 + len])
+                    buf.removeFirst(4 + len)
+                    if flag == 1, let inflated = try? (data as NSData).decompressed(using: .zlib) {
+                        data = inflated as Data
+                    }
+                    if let snap = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                        deliverSnapshot(snap)
+                    }
                 }
             }
+            if bogus { return true }
         }
         deliverActive(false)
         return true

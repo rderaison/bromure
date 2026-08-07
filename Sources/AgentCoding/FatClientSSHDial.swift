@@ -672,7 +672,7 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
                 bb.writeBytes(buf[0..<n])
                 let data = SSHChannelData(type: .channel, data: .byteBuffer(bb))
                 loop.execute {
-                    channel.writeAndFlush(NIOAny(data), promise: nil)
+                    channel.writeAndFlush(data, promise: nil)
                 }
             } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR) {
                 // App closed its end (or hard error): stop reading and send
@@ -724,8 +724,10 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
     /// channel→fd write lands before the app side sees EOF.
     private func teardownFD() {
         stopFDReader()
-        writeQueue.async { [weak self] in
-            guard let self else { return }
+        // Strong capture on purpose: NIO releases the handler right after
+        // channelInactive, and a weak self here let the block no-op — leaking
+        // the pump fd (and its socket buffers) once per dropped channel.
+        writeQueue.async {
             self.stateLock.lock()
             let already = self.fdClosed
             self.fdClosed = true

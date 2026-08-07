@@ -94,33 +94,39 @@ final class BrowserMCPRelayClient {
         while true {
             let n = Darwin.read(fd, &buf, buf.count)
             if n <= 0 { break }
-            pending.append(contentsOf: buf[0..<n])
-            if pending.count > 16 * 1024 * 1024 { break }   // pathological
-            while let nl = pending.firstIndex(of: 0x0A) {
-                let lineData = Data(pending[pending.startIndex..<nl])
-                pending = Data(pending[(nl + 1)...])
-                guard !lineData.isEmpty,
-                      let line = String(data: lineData, encoding: .utf8) else { continue }
-                let sem = DispatchSemaphore(value: 0)
-                var response: String?
-                Task { @MainActor [weak self] in
-                    response = await self?.server.handle(line: line)
-                    sem.signal()
-                }
-                sem.wait()   // MCP is serial per connection → keep responses ordered
-                if let response {
-                    var out = Data(response.utf8); out.append(0x0A)
-                    out.withUnsafeBytes { raw in
-                        guard let base = raw.baseAddress else { return }
-                        var off = 0, rem = raw.count
-                        while rem > 0 {
-                            let w = Darwin.write(fd, base.advanced(by: off), rem)
-                            if w <= 0 { break }
-                            off += w; rem -= w
+            // Pool per read batch: this raw Thread never drains its implicit
+            // pool, so the bridged-string/JSON temporaries of every request
+            // line would pin for the relay's lifetime (same bug StateStream
+            // had, which grew the mirror to tens of GB).
+            autoreleasepool {
+                pending.append(contentsOf: buf[0..<n])
+                while let nl = pending.firstIndex(of: 0x0A) {
+                    let lineData = Data(pending[pending.startIndex..<nl])
+                    pending = Data(pending[(nl + 1)...])
+                    guard !lineData.isEmpty,
+                          let line = String(data: lineData, encoding: .utf8) else { continue }
+                    let sem = DispatchSemaphore(value: 0)
+                    var response: String?
+                    Task { @MainActor [weak self] in
+                        response = await self?.server.handle(line: line)
+                        sem.signal()
+                    }
+                    sem.wait()   // MCP is serial per connection → keep responses ordered
+                    if let response {
+                        var out = Data(response.utf8); out.append(0x0A)
+                        out.withUnsafeBytes { raw in
+                            guard let base = raw.baseAddress else { return }
+                            var off = 0, rem = raw.count
+                            while rem > 0 {
+                                let w = Darwin.write(fd, base.advanced(by: off), rem)
+                                if w <= 0 { break }
+                                off += w; rem -= w
+                            }
                         }
                     }
                 }
             }
+            if pending.count > 16 * 1024 * 1024 { break }   // pathological
         }
     }
 }

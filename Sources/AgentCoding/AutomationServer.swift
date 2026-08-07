@@ -1723,6 +1723,10 @@ final class ACAutomationServer {
         guard Self.writeAllStreaming(fd, Data(header.utf8)) else { Darwin.close(fd); return }
         var lastSent = Data()
         var lastSentAt = Date.distantPast
+        // Pool per wake: this loop never returns to the GCD worker while the
+        // subscriber is connected, so the work item's pool never drains — and
+        // every wake autoreleases a snapshot build + JSON encode (+ zlib on
+        // change). Days of one subscriber pinned GBs on the server.
         while true {
             // Exit as soon as the client hangs up, even while the snapshot is
             // unchanged — otherwise a dead subscription is only noticed on the
@@ -1732,23 +1736,27 @@ final class ACAutomationServer {
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             if poll(&pfd, 1, 0) > 0,
                (pfd.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0 { break }
-            let snapshot = buildStateSnapshot()
-            let json = (try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data()
-            let now = Date()
-            if json != lastSent || now.timeIntervalSince(lastSentAt) > 15 {
-                lastSent = json
-                lastSentAt = now
-                var payload = json
-                var flag: UInt8 = 0
-                if let z = try? (json as NSData).compressed(using: .zlib) as Data, z.count < json.count {
-                    payload = z; flag = 1
+            let alive = autoreleasepool { () -> Bool in
+                let snapshot = buildStateSnapshot()
+                let json = (try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data()
+                let now = Date()
+                if json != lastSent || now.timeIntervalSince(lastSentAt) > 15 {
+                    lastSent = json
+                    lastSentAt = now
+                    var payload = json
+                    var flag: UInt8 = 0
+                    if let z = try? (json as NSData).compressed(using: .zlib) as Data, z.count < json.count {
+                        payload = z; flag = 1
+                    }
+                    var lenBE = UInt32(payload.count + 1).bigEndian
+                    var frame = Data(bytes: &lenBE, count: 4)
+                    frame.append(flag)
+                    frame.append(payload)
+                    guard Self.writeAllStreaming(fd, frame) else { return false }
                 }
-                var lenBE = UInt32(payload.count + 1).bigEndian
-                var frame = Data(bytes: &lenBE, count: 4)
-                frame.append(flag)
-                frame.append(payload)
-                guard Self.writeAllStreaming(fd, frame) else { break }
+                return true
             }
+            if !alive { break }
             Thread.sleep(forTimeInterval: 0.5)
         }
         Darwin.close(fd)

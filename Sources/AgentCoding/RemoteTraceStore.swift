@@ -71,5 +71,10 @@ final class RemoteTraceStore: TraceInspectorStore {
         let records = await controller.fetchTraceRecords(profileID: nil)
         // The remote already sorts newest-first, but be defensive.
         recent = records.sorted { $0.timestamp > $1.timestamp }
+        // Drop cached bodies whose record rotated out of `recent` — they're
+        // unreachable from the UI, and without eviction the cache holds every
+        // body ever viewed for as long as the inspector stays open.
+        let live = Set(recent.map { $0.id.uuidString })
+        bodyCache = bodyCache.filter { live.contains(String($0.key.prefix(36))) }
     }
 }
