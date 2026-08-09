@@ -78,7 +78,7 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
     func send(_ frame: OutgoingSignalFrame) async throws {
         let data = try frame.encoded()
         guard let str = String(data: data, encoding: .utf8) else { throw P2PSignalError.frameTooLarge(data.count) }
-        lock.lock(); let t = task; lock.unlock()
+        let t = lock.withLock { task }
         guard let t else { throw ControlPlaneError.transport("device channel not connected") }
         try await t.send(.string(str))
     }

@@ -680,9 +680,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         filePaneResizeHandle?.isHidden = !open
         if open { filePaneHost.isHidden = false }
         let target = open ? expandedFilePaneWidth : 0
-        let hideWhenClosed: () -> Void = { [weak self] in
-            guard let self, !self.filePaneOpen else { return }
-            self.filePaneHost.isHidden = true
+        // @Sendable for runAnimationGroup's completion handler; it always fires
+        // on the main thread, so the isolation assumption holds.
+        let hideWhenClosed: @Sendable () -> Void = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.filePaneOpen else { return }
+                self.filePaneHost.isHidden = true
+            }
         }
         if animated {
             NSAnimationContext.runAnimationGroup({ ctx in
@@ -862,9 +866,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         }
 
         let target = open ? clampedBrowserPaneWidth(expandedBrowserPaneWidth) : 0
-        let hideWhenClosed: () -> Void = { [weak self] in
-            guard let self, !self.browserPaneOpen else { return }
-            self.browserPaneHost.isHidden = true
+        let hideWhenClosed: @Sendable () -> Void = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.browserPaneOpen else { return }
+                self.browserPaneHost.isHidden = true
+            }
         }
         if animated {
             NSAnimationContext.runAnimationGroup({ ctx in

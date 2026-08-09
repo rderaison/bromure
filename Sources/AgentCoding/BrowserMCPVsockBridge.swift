@@ -159,7 +159,7 @@ final class BrowserMCPVsockBridge: NSObject {
                 guard !lineData.isEmpty,
                       let line = String(data: Data(lineData), encoding: .utf8) else { continue }
                 MainActor.assumeIsolated {
-                    Task { [weak self] in
+                    _ = Task { [weak self] in
                         guard let self else { return }
                         if let resp = await self.server.handle(line: line) {
                             self.writeLine(resp)

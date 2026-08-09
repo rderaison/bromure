@@ -270,7 +270,7 @@ final class FileBrowserModel {
 
     /// Upload one local file into the current guest directory, chunked.
     private func upload(_ src: URL) async throws {
-        guard let guestOp else { return }
+        guard guestOp != nil else { return }
         // Directories: create and recurse — a dropped folder should arrive
         // whole, like the host-path copyItem did.
         var isDir: ObjCBool = false

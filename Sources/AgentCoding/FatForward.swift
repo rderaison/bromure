@@ -15,6 +15,15 @@ final class SpliceRetain<T>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
 }
 
+/// Carries an immutable non-Sendable value across a `@Sendable` boundary when a
+/// third-party type simply lacks the conformance (MLX's `Chat.Message`, etc.).
+/// Only sound when the value is not mutated or read concurrently — say so at
+/// each use site.
+final class UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
 enum FatForward {
     /// Why `copyOnce` stopped. `.more` copied a chunk (keep going); `.eof` hit
     /// end-of-stream or a hard error on this direction (a graceful half-close —

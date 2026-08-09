@@ -264,7 +264,12 @@ final class RemoteAuthThrottle: @unchecked Sendable {
 /// and pumps bytes between the SSH channel and the PTY master. A real PTY means
 /// the menu's TUI and the `tmux attach` path work unmodified (they assume a
 /// tty on fd 0/1).
-final class SSHPTYSessionHandler: ChannelDuplexHandler {
+/// `@unchecked Sendable`: every stored property is read and written only on the
+/// channel's event loop. The async fd resolvers (`forward`, `browser-mcp`) call
+/// back on an arbitrary thread and capture `self` weakly, but each hops back via
+/// `el.execute` before touching anything — the capture is a reference handoff,
+/// not shared mutable access.
+final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     typealias InboundIn = SSHChannelData
     typealias InboundOut = SSHChannelData
     typealias OutboundIn = SSHChannelData

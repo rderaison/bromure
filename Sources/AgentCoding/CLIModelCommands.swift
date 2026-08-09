@@ -176,7 +176,10 @@ struct SpecBench: ParsableCommand {
             FileHandle.standardError.write(Data("loading main \(rlabel) + draft \(dlabel) …\n".utf8))
             let mainC = try await loadModelContainer(from: mainDir, using: #huggingFaceTokenizerLoader())
             let draftC = try await loadModelContainer(from: draftDir, using: #huggingFaceTokenizerLoader())
-            let draftModel = await draftC.perform { (c: ModelContext) in c.model }
+            // MLX's `LanguageModel` isn't Sendable; the box carries it across the
+            // `perform` boundary. Both containers are used serially here, so the
+            // model is never touched from two contexts at once.
+            let draftModel = await draftC.perform { (c: ModelContext) in UncheckedBox(c.model) }
             let gp = GenerateParameters(maxTokens: mt, temperature: 0)
             try await mainC.perform { (ctx: ModelContext) in
                 let input = try await ctx.processor.prepare(input: UserInput(chat: [.user(p)]))
@@ -194,7 +197,7 @@ struct SpecBench: ParsableCommand {
                 let (offN, offS) = await measure(try generateTokens(input: input, parameters: gp, context: ctx))
                 let (onN, onS) = await measure(try generateTokens(
                     input: input, parameters: gp, context: ctx,
-                    draftModel: draftModel, numDraftTokens: nd))
+                    draftModel: draftModel.value, numDraftTokens: nd))
                 let offTps = Double(max(0, offN - 1)) / max(0.001, offS)
                 let onTps = Double(max(0, onN - 1)) / max(0.001, onS)
                 let r = String(

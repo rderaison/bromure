@@ -63,10 +63,9 @@ enum ClaudeTranscriptParser {
         /// tool_use id → tool name, so results can name their tool.
         var toolNames: [String: String] = [:]
         /// Question texts of the last AskUserQuestion seen in the
-        /// transcript proper, and whether its result already landed —
-        /// a pq hook dump matching a RESOLVED call is stale, not pending.
+        /// transcript proper — a pq hook dump matching that round is
+        /// stale or already displayed, not pending.
         var lastAskedQuestions: [String] = []
-        var lastAskResolved = false
         var pendingDumps: [[TranscriptQuestion]] = []
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -127,7 +126,6 @@ enum ClaudeTranscriptParser {
                         ? TranscriptQuestion.parse(input) : []
                     if !questions.isEmpty {
                         lastAskedQuestions = questions.map(\.question)
-                        lastAskResolved = false
                         questions.forEach { add(.question($0)) }
                     } else {
                         add(.toolUse(name: name,
@@ -137,7 +135,6 @@ enum ClaudeTranscriptParser {
                 case "tool_result":
                     let tool = (block["tool_use_id"] as? String)
                         .flatMap { toolNames[$0] } ?? "tool"
-                    if tool == "AskUserQuestion" { lastAskResolved = true }
                     add(.toolResult(tool: tool,
                                     content: resultText(block["content"]),
                                     isError: block["is_error"] as? Bool ?? false))

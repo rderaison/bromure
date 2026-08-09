@@ -340,7 +340,7 @@ final class P2PBroker: @unchecked Sendable {
             guard let self else { return }
             guard let mapping = await Self.blocking({ PortMapClient.mapTCP(internalPort: sshPort) })
             else { return }
-            self.lock.lock(); self.portMapping = mapping; self.lock.unlock()
+            self.lock.withLock { self.portMapping = mapping }
             // Renew at half-life until cancelled. A renewal that fails (router
             // rebooted, lease dropped) clears the candidate rather than
             // advertising a hole that no longer exists.
@@ -350,9 +350,7 @@ final class P2PBroker: @unchecked Sendable {
                 try? await Task.sleep(nanoseconds: UInt64(half * 1_000_000_000))
                 if Task.isCancelled { break }
                 let renewed = await Self.blocking { PortMapClient.mapTCP(internalPort: sshPort) }
-                self.lock.lock()
-                self.portMapping = renewed
-                self.lock.unlock()
+                self.lock.withLock { self.portMapping = renewed }
                 guard let renewed else {
                     FatClientLog.log("p2p: port-map renewal failed — dropping the mapped candidate")
                     break
@@ -432,7 +430,7 @@ final class P2PBroker: @unchecked Sendable {
                                        report: .connected(pathKind: .direct, timeToConnectedMs: 0))
             // 4. Grace for late dialer frames, then drop the session.
             try? await Task.sleep(nanoseconds: 15_000_000_000)
-            self?.lock.lock(); self?.sessions[grant.id] = nil; self?.lock.unlock()
+            self?.lock.withLock { self?.sessions[grant.id] = nil }
         }
     }
 
@@ -462,8 +460,11 @@ final class P2PBroker: @unchecked Sendable {
             return
         }
         // Allocate on the nearest relay (by measured RTT, cached per network path).
-        var relayCreds = creds
-        relayCreds.urls = await orderedRelayURLs(creds.urls)
+        // Built up first, then bound to a `let` — the listener starts inside a
+        // @Sendable closure, which can't capture a still-mutable var.
+        var mutableCreds = creds
+        mutableCreds.urls = await orderedRelayURLs(creds.urls)
+        let relayCreds = mutableCreds
         let started = await Self.blocking {
             TurnRelayListener.start(creds: relayCreds, permitIP: permitIP, sshPort: sshPort)
         }
@@ -519,15 +520,15 @@ final class P2PBroker: @unchecked Sendable {
         func regroup(by order: [String]) -> [String] {
             order.flatMap { h in urls.filter { TurnRelayTransport.parseHostPort(fromURL: $0)?.host == h } }
         }
-        lock.lock(); let gen = pathGeneration; let cached = relayHostRank; lock.unlock()
+        let (gen, cached) = lock.withLock { (pathGeneration, relayHostRank) }
         if let cached, Set(cached) == Set(hosts) { return regroup(by: cached) }
         let ordered = await Self.blocking { TurnRelayTransport.orderURLsByRTT(urls) }
         // Commit only if the network path hasn't changed under us — otherwise this
         // ranking is for a path that no longer applies and must not resurrect the
         // cache resetPeerPaths just cleared.
-        lock.lock()
-        if pathGeneration == gen { relayHostRank = TurnRelayTransport.distinctHosts(ordered) }
-        lock.unlock()
+        lock.withLock {
+            if pathGeneration == gen { relayHostRank = TurnRelayTransport.distinctHosts(ordered) }
+        }
         return ordered
     }
 
@@ -585,10 +586,10 @@ final class P2PBroker: @unchecked Sendable {
         Task.detached { [weak self] in
             let ep = await self?.establish(peerDeviceID: id, timeout: timeout)
             if let self {
-                self.establishGate.lock()
-                self.establishing.remove(id)
-                self.establishGate.broadcast()
-                self.establishGate.unlock()
+                self.establishGate.withLock {
+                    self.establishing.remove(id)
+                    self.establishGate.broadcast()
+                }
             }
             result = ep
             sem.signal()
@@ -727,8 +728,8 @@ final class P2PBroker: @unchecked Sendable {
         }
 
         let session = P2PSession(grant: grant, role: .dialer)
-        lock.lock(); sessions[grant.id] = session; lock.unlock()
-        defer { lock.lock(); sessions[grant.id] = nil; lock.unlock() }
+        lock.withLock { sessions[grant.id] = session }
+        defer { lock.withLock { sessions[grant.id] = nil } }
 
         // 2. Offer (seq 1), immediately — the LAN fast path must not wait on
         // TURN round-trips.
@@ -809,7 +810,7 @@ final class P2PBroker: @unchecked Sendable {
             await reportComplete(client, id, connectionId: grant.id, report: .failed(stage: .transport))
             return nil
         }
-        lock.lock(); liveShims[peerDeviceID] = (shim, win.path); lock.unlock()
+        lock.withLock { liveShims[peerDeviceID] = (shim, win.path) }
 
         // 6. Report the path/quality summary (first report wins, closes the
         // grant) — organizations only; a personal account records nothing.

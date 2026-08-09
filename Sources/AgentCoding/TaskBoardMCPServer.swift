@@ -450,7 +450,7 @@ final class TaskMCPVsockBridge: NSObject {
                 }
                 let bound = branch
                 MainActor.assumeIsolated {
-                    Task { [weak self] in
+                    _ = Task { [weak self] in
                         guard let self else { return }
                         if let resp = await self.server.handle(line: line, branch: bound) {
                             self.writeLine(resp)

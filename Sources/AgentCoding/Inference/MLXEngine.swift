@@ -453,12 +453,20 @@ actor MLXEngine {
         // Pin this model's working set as non-pageable for the run — Apple's
         // recommendation for LLM serving (WWDC25 298) so a memory-pressured host
         // (the VMs share unified memory) can't page weights out mid-decode.
-        // Scoped: the previous limit is restored when generation returns.
+        // Scoped: the ticket releases (restoring the previous limit) when
+        // generation returns or the task is cancelled. `WiredMaxPolicy` gives
+        // max(baseline, ticket size), matching the absolute limit the old
+        // `Memory.withWiredLimit` set — and generations are serialized by
+        // genLock anyway, so only one ticket is ever active.
         let wiredBytes = (estMemGB > 0 ? estMemGB : max(memoryBudgetGB, 1)) << 30
-        return try await MLX.Memory.withWiredLimit(wiredBytes) {
+        let ticket = WiredMaxPolicy().ticket(size: wiredBytes)
+        // MLX's `Chat.Message` isn't Sendable; the box carries the prompt across
+        // the `perform` boundary. It's read once, before any token is generated.
+        let chat = UncheckedSendableBox(messages)
+        return try await ticket.withWiredLimit {
         try await container.perform { [sessions] (context: ModelContext) in
             let input = try await context.processor.prepare(
-                input: UserInput(chat: MLXEngine.withToolReminder(messages, hasTools: tools?.isEmpty == false,
+                input: UserInput(chat: MLXEngine.withToolReminder(chat.value, hasTools: tools?.isEmpty == false,
                                                                   gemma: MLXEngine.isGemmaModel(repo)),
                                  tools: tools?.map(\.asToolSpec),
                                  additionalContext: ["enable_thinking": enableThinking]))
@@ -529,6 +537,10 @@ actor MLXEngine {
             let start = Date()
             var firstTokenAt: Date?
 
+            // Deliberately the callback form, not the AsyncStream `generate`
+            // that deprecates it: the stream yields decoded text only, and this
+            // engine needs the raw token ids below to keep `session.tokens`
+            // aligned with the KV-cache offset for prefix reuse across turns.
             let info = MLXLMCommon.generate(
                 input: lmInput, context: context, iterator: iterator
             ) { (token: Int) in

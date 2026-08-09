@@ -37,11 +37,11 @@ final class PendingPromptBroker {
     /// (not just on the main actor) because the MITM consent brokers ask,
     /// off-main from their actors, whether a fat client is watching — see
     /// `hasLiveListener()`.
-    private static let pollLock = NSLock()
+    nonisolated private static let pollLock = NSLock()
     nonisolated(unsafe) private static var lastPollAt: Date?
     /// A recent `/state` poll means a fat client is watching, so consent
     /// prompts should route to its NSAlert. Window matches `ask`'s own guard.
-    private static let listenerWindow: TimeInterval = 10
+    nonisolated private static let listenerWindow: TimeInterval = 10
 
     private static func recordPoll() {
         pollLock.lock(); lastPollAt = Date(); pollLock.unlock()
@@ -52,9 +52,10 @@ final class PendingPromptBroker {
     /// own screen. Thread-safe: the MITM consent brokers call this from their
     /// actors to decide between a fat-client alert and a tmux popup.
     nonisolated static func hasLiveListener() -> Bool {
-        pollLock.lock(); defer { pollLock.unlock() }
-        guard let t = lastPollAt else { return false }
-        return Date().timeIntervalSince(t) < listenerWindow
+        pollLock.withLock {
+            guard let t = lastPollAt else { return false }
+            return Date().timeIntervalSince(t) < listenerWindow
+        }
     }
 
     /// Unanswered prompts, for `/state`. Also records the poll so `ask` and

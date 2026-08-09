@@ -43,7 +43,14 @@ if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
 fi
 
 # Build the requested product in release mode.
-swift build -c release --arch arm64 --product "$PRODUCT_NAME" 2>&1
+# Dev-loop build: disable whole-module optimization so files compile in
+# parallel across all cores instead of one long single-core job per module
+# (the AgentCoding/Browser modules dominate). Costs cross-file optimization,
+# which is fine here — package.sh does its own WMO build for shipped
+# binaries. Note the flag difference means alternating build.sh/package.sh
+# invalidates the shared .build cache and triggers a full rebuild.
+swift build -c release --arch arm64 --product "$PRODUCT_NAME" \
+    -Xswiftc -no-whole-module-optimization 2>&1
 
 BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
 BINARY="$BUILD_DIR/$PRODUCT_NAME"

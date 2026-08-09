@@ -942,6 +942,23 @@ enum GitHubPRPoller {
     }
 }
 
+/// Linear stamps timestamps with fractional seconds, but not always — try both
+/// shapes. The formatters live behind a lock because `ISO8601DateFormatter`
+/// isn't Sendable and the decoding strategy runs in a `@Sendable` closure.
+private enum LinearDateParser {
+    nonisolated(unsafe) private static let fractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    nonisolated(unsafe) private static let plain = ISO8601DateFormatter()
+    private static let lock = NSLock()
+
+    static func date(from s: String) -> Date? {
+        lock.withLock { fractional.date(from: s) ?? plain.date(from: s) }
+    }
+}
+
 /// Host-side Linear polling for the Linear issue trigger: one GraphQL query
 /// against api.linear.app with the workspace's personal API key (raw
 /// `Authorization` header, per Linear's personal-key scheme). Same
@@ -1017,12 +1034,9 @@ enum LinearPoller {
         }
         let decoder = JSONDecoder()
         // Linear timestamps carry fractional seconds; plain .iso8601 rejects them.
-        let isoFractional = ISO8601DateFormatter()
-        isoFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let isoPlain = ISO8601DateFormatter()
         decoder.dateDecodingStrategy = .custom { d in
             let s = try d.singleValueContainer().decode(String.self)
-            if let t = isoFractional.date(from: s) ?? isoPlain.date(from: s) { return t }
+            if let t = LinearDateParser.date(from: s) { return t }
             throw DecodingError.dataCorrupted(.init(
                 codingPath: [], debugDescription: "unparseable date: \(s)"))
         }

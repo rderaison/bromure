@@ -1,7 +1,7 @@
 import AppKit
 import BrowserBridges
 import Foundation
-import SandboxEngine
+@preconcurrency import SandboxEngine
 @preconcurrency import Virtualization
 
 // Owns the ephemeral sidecar browser VM for one workspace (agentic web
