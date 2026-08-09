@@ -6,6 +6,15 @@ import Foundation
 import Darwin
 #endif
 
+/// Keeps a non-Sendable value alive across a `Thread.detachNewThread` splice.
+/// The splice pumps dup'd fds and never touches the boxed value — it exists
+/// only so ARC can't release the owner (e.g. a `VZVirtioSocketConnection`,
+/// which closes its fd on deinit) while the pump is still running.
+final class SpliceRetain<T>: @unchecked Sendable {
+    private let value: T
+    init(_ value: T) { self.value = value }
+}
+
 enum FatForward {
     /// Why `copyOnce` stopped. `.more` copied a chunk (keep going); `.eof` hit
     /// end-of-stream or a hard error on this direction (a graceful half-close —

@@ -88,8 +88,11 @@ final class BrowserMCPVsockBridge: NSObject {
                 Thread.detachNewThread {
                     FatForward.splice(agentFd, remoteDup)   // closes both dups at EOF
                     DispatchQueue.main.async {
-                        self.splicedConns.removeValue(forKey: key)
-                        conn.close()
+                        // splicedConns owns the retain; take it back rather than
+                        // capturing the (non-Sendable) connection in this thread.
+                        MainActor.assumeIsolated {
+                            self.splicedConns.removeValue(forKey: key)?.close()
+                        }
                     }
                 }
                 return

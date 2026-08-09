@@ -7717,9 +7717,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // `conn` for the connection's lifetime; hand the other end back.
                 let dupFD = dup(vfd)
                 let peer = sp[1]
+                let hold = SpliceRetain(conn)   // keeps the vsock open for the splice
                 Thread.detachNewThread {
                     FatForward.splice(dupFD, peer)
-                    _ = conn   // hold the vsock connection open until the splice ends
+                    _ = hold
                 }
                 FatClientLog.log("forward-resolver: \(ip):\(port) -> vsock relay ok")
                 completion(sp[0])
@@ -7759,7 +7760,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0 else { completion(-1); return }
                 let dupFD = dup(vfd)
                 let peer = sp[1]
-                Thread.detachNewThread { FatForward.splice(dupFD, peer); _ = conn }
+                let hold = SpliceRetain(conn)
+                Thread.detachNewThread { FatForward.splice(dupFD, peer); _ = hold }
                 FatClientLog.log("udp-forward-resolver: \(ip) -> vsock UDP relay ok")
                 completion(sp[0])
             case .failure(let err):
