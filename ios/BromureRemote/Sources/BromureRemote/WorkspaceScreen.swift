@@ -328,6 +328,10 @@ private struct TerminalsPane: View {
     let controller: RemoteHostController
     let profileID: Profile.ID
     var initialWindow: Int? = nil
+    #if os(visionOS)
+    /// Pops a terminal tab out into its own pinnable window (VisionScenes).
+    @Environment(\.openWindow) private var openWindow
+    #endif
     /// Landscape: the tab chips go away with the pane picker so the surface
     /// gets the full height (WorkspaceScreen.terminalFullBleed).
     var hidesTabStrip = false
@@ -544,6 +548,30 @@ private struct TerminalsPane: View {
         .onChange(of: tabs.map(\.index)) { _, _ in syncMounted() }
         .onAppear { syncMounted() }
         .toolbar {
+            #if os(visionOS)
+            // Pop the current terminal out into its own pinnable window. The
+            // tab chips' long-press menu has the same command, but press-and-
+            // hold is clumsy with eye tracking — this is the one-look,
+            // one-pinch path. (Same constant-slot rule as below: render
+            // nothing rather than dropping the item.)
+            ToolbarItem(placement: .primaryAction) {
+                if let win = effectiveWindow {
+                    Button {
+                        openWindow(id: "terminal", value: TerminalWindowValue(
+                            hostID: controller.host.id,
+                            profileID: profileID,
+                            windowIndex: win,
+                            workspaceName: controller.profile(for: profileID)?.name ?? "?",
+                            windowLabel: currentTab?.shownLabel ?? "",
+                            accentHex: controller.profile(for: profileID)?.color.hexInUI ?? "#888888"))
+                    } label: {
+                        Image(systemName: "rectangle.badge.plus")
+                    }
+                    .help("Open this terminal as its own window")
+                    .accessibilityLabel("Open this terminal as its own window")
+                }
+            }
+            #endif
             // Keep the toolbar-item COUNT constant. Conditionally adding/removing
             // a ToolbarItem (as this did for the reader toggle) leaves a ghost
             // glass circle behind on iOS 26 — the stray button the user saw. So
@@ -706,6 +734,19 @@ private struct TerminalsPane: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            #if os(visionOS)
+            // The spatial superpower: this terminal as its own window, pinned
+            // wherever the user puts it.
+            Button {
+                openWindow(id: "terminal", value: TerminalWindowValue(
+                    hostID: controller.host.id,
+                    profileID: profileID,
+                    windowIndex: tab.index,
+                    workspaceName: controller.profile(for: profileID)?.name ?? "?",
+                    windowLabel: tab.shownLabel,
+                    accentHex: controller.profile(for: profileID)?.color.hexInUI ?? "#888888"))
+            } label: { Label("Open as Window", systemImage: "rectangle.badge.plus") }
+            #endif
             Button {
                 _ = controller.gridStore.add(profileID: profileID, windowIndex: tab.index,
                                              label: tab.shownLabel)

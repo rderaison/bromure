@@ -163,6 +163,22 @@ enum RemoteTransport {
         return client(for: host, interactive: interactive)
     }
 
+    // MARK: Forward tunnel
+
+    /// Open a raw TCP tunnel to a guest `ip:port` on the remote's vmnet subnet
+    /// (`bromure-fatclient/1 forward <ip> <port>`) — the mobile twin of the
+    /// macOS `RemoteTransport.forwardDial` (Process ssh there, SSHDialer here;
+    /// same verb MobileForward opens per browser connection). Returns a
+    /// bidirectional fd bridged to the remote guest; the caller owns and
+    /// closes it.
+    static func forwardDial(host rawHost: RemoteHost, ip: String, port: Int) -> Int32? {
+        _ = bootstrap
+        ensureClientKey()
+        let host = resolved(rawHost)
+        return SSHDialer.shared.dial(host: host,
+                                     verb: "\(FatClient.forwardVerbPrefix)\(ip) \(port)")
+    }
+
     // MARK: Host-key TOFU
 
     static func scanHostKey(address: String, port: Int) -> HostKeyInfo? {

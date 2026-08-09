@@ -1,11 +1,20 @@
-// Bromure Client (iOS/iPadOS) → TestFlight.
+// Bromure Client (iOS/iPadOS/visionOS) → TestFlight.
 //
 // Archives the app + its BromureNotify notification-service extension and
-// uploads them to App Store Connect. Signing is fully MANUAL and pinned: the
-// agent's build keychain holds the Apple Distribution identity, and the two App
-// Store profiles arrive as Jenkins file credentials. Nothing is minted on
-// demand, which is what lets this run for a team with no registered devices.
-// The App Store Connect API key authenticates the upload only.
+// uploads them to App Store Connect. One UNIVERSAL app record
+// (io.bromure.remote) carries two per-platform binaries: an iOS archive
+// (iPhone + iPad) and — when BUILD_VISIONOS is on — a native visionOS archive
+// from the same generated project and sources. xcodebuild archives are
+// per-platform, so "universal" here means two archive+upload passes, not one;
+// TestFlight files them under separate per-platform build trains, which is
+// also why both can share CURRENT_PROJECT_VERSION. visionOS distribution uses
+// the SAME iOS App Store profiles and Apple Distribution identity.
+//
+// Signing is fully MANUAL and pinned: the agent's build keychain holds the
+// Apple Distribution identity, and the two App Store profiles arrive as
+// Jenkins file credentials. Nothing is minted on demand, which is what lets
+// this run for a team with no registered devices. The App Store Connect API
+// key authenticates the upload only.
 //
 // Jenkins credentials required (see README block at the bottom of this file):
 //   ASC_API_KEY (file)   ASC_KEY_ID (string)   ASC_ISSUER_ID (string)
@@ -27,6 +36,11 @@ pipeline {
             defaultValue: '1.0',
             description: 'User-visible version (CFBundleShortVersionString).'
         )
+        booleanParam(
+            name: 'BUILD_VISIONOS',
+            defaultValue: true,
+            description: 'Also archive + upload the native visionOS binary (same bundle id — one universal app). Requires the visionOS platform installed in the agent\'s Xcode, and visionOS enabled on the App Store Connect app record.'
+        )
     }
 
     environment {
@@ -37,6 +51,10 @@ pipeline {
         SCHEME  = 'BromureRemote'
         ARCHIVE = "${WORKSPACE}/build/BromureRemote.xcarchive"
         EXPORT  = "${WORKSPACE}/build/export"
+        // The visionOS pass gets its own archive + export dir so the two
+        // .ipas (same app name) never clobber each other.
+        ARCHIVE_XR = "${WORKSPACE}/build/BromureRemote-xr.xcarchive"
+        EXPORT_XR  = "${WORKSPACE}/build/export-xr"
 
         // CFBundleVersion must be unique for every TestFlight upload; the
         // Jenkins build number gives us a monotonic one for free. Both
@@ -68,6 +86,13 @@ pipeline {
                     xcodebuild -version
                     python3 --version
                     xcodebuild -showsdks | grep -q iphoneos
+                    if [ "$BUILD_VISIONOS" = "true" ]; then
+                        xcodebuild -showsdks | grep -q xros || {
+                            echo "visionOS SDK missing on this agent — install the" \
+                                 "visionOS platform in Xcode, or run with BUILD_VISIONOS=false"
+                            exit 1
+                        }
+                    fi
                     echo "Building Bromure Client ${MARKETING_VERSION} (${BUILD_VERSION})"
                 '''
             }
@@ -184,6 +209,26 @@ pipeline {
                             PROFILE_NSE="$PROFILE_NSE" \
                             MARKETING_VERSION="$MARKETING_VERSION" \
                             CURRENT_PROJECT_VERSION="$BUILD_VERSION"
+
+                        # The native visionOS slice of the SAME universal app:
+                        # an archive is per-platform, so the spatial client is a
+                        # second pass over the same project — same bundle ids,
+                        # same iOS App Store profiles (visionOS shares them),
+                        # same build number (TestFlight trains are per-platform).
+                        if [ "$BUILD_VISIONOS" = "true" ]; then
+                            rm -rf "$ARCHIVE_XR"
+                            xcodebuild archive \
+                                -project "$PROJECT" \
+                                -scheme "$SCHEME" \
+                                -configuration Release \
+                                -destination 'generic/platform=visionOS' \
+                                -archivePath "$ARCHIVE_XR" \
+                                IOS_SIGN_IDENTITY="$IOS_SIGN_IDENTITY" \
+                                PROFILE_APP="$PROFILE_APP" \
+                                PROFILE_NSE="$PROFILE_NSE" \
+                                MARKETING_VERSION="$MARKETING_VERSION" \
+                                CURRENT_PROJECT_VERSION="$BUILD_VERSION"
+                        fi
                     '''
                 }
             }
@@ -251,6 +296,22 @@ PLIST
                             -authenticationKeyPath "$ASC_KEY" \
                             -authenticationKeyID "$ASC_KEY_ID" \
                             -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+
+                        # visionOS binary of the same universal app: identical
+                        # export options (the bundle-id -> profile map is what
+                        # matters, and it's the same), separate export dir so
+                        # the .ipas don't clobber. The ASC app record must have
+                        # visionOS enabled or this upload is rejected.
+                        if [ "$BUILD_VISIONOS" = "true" ]; then
+                            rm -rf "$EXPORT_XR"; mkdir -p "$EXPORT_XR"
+                            xcodebuild -exportArchive \
+                                -archivePath "$ARCHIVE_XR" \
+                                -exportPath "$EXPORT_XR" \
+                                -exportOptionsPlist "$EXPORT/ExportOptions.plist" \
+                                -authenticationKeyPath "$ASC_KEY" \
+                                -authenticationKeyID "$ASC_KEY_ID" \
+                                -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+                        fi
                     '''
                 }
             }
@@ -259,11 +320,13 @@ PLIST
 
     post {
         success {
-            echo "Build ${env.BUILD_VERSION} done. If uploaded, it shows up in " +
-                 "App Store Connect → TestFlight once processing finishes (~5-15 min)."
+            echo "Build ${env.BUILD_VERSION} done (iOS" +
+                 (params.BUILD_VISIONOS ? " + visionOS" : "") +
+                 "). If uploaded, it shows up in App Store Connect → TestFlight " +
+                 "once processing finishes (~5-15 min), one build train per platform."
         }
         always {
-            archiveArtifacts artifacts: 'build/export/**/*.ipa',
+            archiveArtifacts artifacts: 'build/export/**/*.ipa, build/export-xr/**/*.ipa',
                              allowEmptyArchive: true, fingerprint: true
         }
     }
@@ -294,6 +357,10 @@ PLIST
 // kept current (App Store profiles expire yearly).
 //
 // The agent (label: macosx-builder) additionally needs Xcode with the iOS SDK
-// and python3. The app record must already exist in App Store Connect with
-// bundle id io.bromure.remote, otherwise the upload step is rejected.
+// and python3 — plus the visionOS platform when BUILD_VISIONOS is on (the
+// Toolchain stage checks and says so). The app record must already exist in
+// App Store Connect with bundle id io.bromure.remote — with visionOS added as
+// a platform for the visionOS upload — otherwise the upload step is rejected.
+// No extra credentials for visionOS: it distributes with the same iOS App
+// Store profiles and Apple Distribution identity.
 // ---------------------------------------------------------------------------

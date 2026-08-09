@@ -11,10 +11,48 @@ import SwiftUI
 #endif
 struct BromureRemoteApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
+    init() {
+        // Ignore SIGPIPE at PROCESS ENTRY, before any scene exists. This used
+        // to live in RootView.init — fine on iPhone/iPad, where RootView is
+        // the only scene and always runs first. On visionOS it left a hole: a
+        // launch that restores only pinned terminal / grid windows (the main
+        // window closed — a completely normal spatial arrangement) never
+        // creates RootView, so the process ran with SIGPIPE at its default
+        // disposition and the first write to a closed socket — a pump thread
+        // mid-write while a pinned window closes, the guest dropping a stream
+        // — killed the app instantly. A SIGPIPE death is a plain signal
+        // termination, not an exception, so it leaves NO crash report; if the
+        // app "just vanished" without an .ips anywhere, suspect this. Ignored,
+        // the write returns EPIPE and the pump ends cleanly.
+        signal(SIGPIPE, SIG_IGN)
+    }
+
     var body: some Scene {
+        #if os(visionOS)
+        // The main shell — same split layout as the iPad — plus two extra scene
+        // types the spatial canvas earns: any terminal can be popped out into
+        // its own window and pinned anywhere in the room, and the grid can run
+        // as a stage window of live terminals (VisionScenes.swift).
+        WindowGroup(id: "main") {
+            RootView()
+        }
+        .defaultSize(width: 1480, height: 940)
+
+        WindowGroup(id: "terminal", for: TerminalWindowValue.self) { $value in
+            if let value { PinnedTerminalWindow(value: value) }
+        }
+        .defaultSize(width: 920, height: 640)
+
+        WindowGroup(id: "grid", for: GridWindowValue.self) { $value in
+            if let value { GridStageWindow(value: value) }
+        }
+        .defaultSize(width: 1760, height: 1080)
+        #else
         WindowGroup {
             RootView()
         }
+        #endif
     }
 }
 
@@ -36,7 +74,7 @@ struct RootView: View {
     /// session-cache trap). Without deterministic teardown here, leaving a host
     /// left its poll timer + P2P connection alive; reconnecting stacked a second
     /// one on the stale cached path and stalled until the app was killed.
-    @State private var controllers = HostControllerStore()
+    @State private var controllers = HostControllerStore.shared
     @State private var showAddServer = false
     @State private var pendingPeer: DeviceInfo?
     #if DEBUG
@@ -59,21 +97,10 @@ struct RootView: View {
     private let push = PushManager.shared
 
     init() {
-        // Ignore SIGPIPE process-wide — the macOS app has done this since
-        // forever (BromureAC.main), but that file is macOS-only, so the phone
-        // shipped without it. We write to raw BSD sockets all over the fat
-        // client (FatForward.splice, the P2P/TURN legs, MobileForward, the ARQ
-        // socketpair); only the SSH dial's socketpair sets SO_NOSIGPIPE. A
-        // write to a peer that just closed — exactly what leaving a host does,
-        // since `stop()` closes the pooled SSH connections and the P2P shim
-        // while pump threads may still be mid-write — delivers SIGPIPE, whose
-        // default disposition kills the process instantly. Ignored, the write
-        // just returns EPIPE and the pump ends cleanly.
-        //
-        // This is why the crash left NO report in Analytics Data: a SIGPIPE
-        // death is a plain signal termination, not an exception the crash
-        // reporter writes up.
-        signal(SIGPIPE, SIG_IGN)
+        // SIGPIPE is ignored in BromureRemoteApp.init — process entry, before
+        // any scene. It lived here once, which left visionOS launches that
+        // restore only pinned terminal windows (no RootView) unprotected; see
+        // the comment there before moving it again.
 
         // The directory model navigates to the mirror on a successful connect.
         // `activeHost` is assigned in `.onAppear` via a closure box so the
@@ -254,10 +281,13 @@ struct RootView: View {
             .navigationTitle("Bromure")
             // A comfortable reading column on iPad's full-screen picker; a
             // no-op on phone widths. The outer band matches the list's own
-            // grouped background so the cap is invisible.
+            // grouped background so the cap is invisible. (visionOS: no band —
+            // an opaque fill would paint over the window's glass.)
             .frame(maxWidth: 640)
             .frame(maxWidth: .infinity)
+            #if !os(visionOS)
             .background(Color(uiColor: .systemGroupedBackground))
+            #endif
         }
     }
 
@@ -265,7 +295,11 @@ struct RootView: View {
 
     private var heroLanding: some View {
         ZStack {
+            #if !os(visionOS)
+            // visionOS: keep the window's glass — an opaque backdrop under the
+            // glow reads as a giant white card floating in the room.
             Color(uiColor: .systemBackground).ignoresSafeArea()
+            #endif
             RadialGradient(
                 colors: [Color.blue.opacity(colorScheme == .dark ? 0.30 : 0.15), .clear],
                 center: UnitPoint(x: 0.5, y: 0.30), startRadius: 6, endRadius: 340)
@@ -285,6 +319,22 @@ struct RootView: View {
                 Spacer()
 
                 VStack(spacing: 14) {
+                    #if os(visionOS)
+                    // The system's prominent glass capsule — a hand-painted
+                    // gradient rectangle reads as an iOS transplant here.
+                    Button { directory.signIn() } label: {
+                        HStack(spacing: 8) {
+                            if directory.p2pBusy { ProgressView() }
+                            else { Image(systemName: "person.crop.circle.badge.plus") }
+                            Text(directory.p2pBusy ? "Finishing sign-in…" : "Sign in to bromure.io")
+                                .fontWeight(.semibold)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(directory.p2pBusy)
+                    #else
                     Button { directory.signIn() } label: {
                         HStack(spacing: 8) {
                             if directory.p2pBusy { ProgressView().tint(.white) }
@@ -302,6 +352,7 @@ struct RootView: View {
                         .shadow(color: .blue.opacity(0.35), radius: 12, y: 6)
                     }
                     .disabled(directory.p2pBusy)
+                    #endif
 
                     Button { showAddServer = true } label: {
                         Text("Add a server by address")
@@ -579,18 +630,70 @@ final class HostBox {
 /// later reconnect never reuses a stale cached connection. A reference type: the
 /// view body's get-or-create must not mutate @State (SwiftUI won't persist it),
 /// the same reason the terminal session cache is a class.
+///
+/// A process-wide singleton: on iPhone/iPad there is a single scene, so this is
+/// equivalent to the old per-RootView store; on visionOS the pinned terminal /
+/// grid windows are SEPARATE scenes that must reach the same live controller as
+/// the main shell. Those aux scenes `claim`/`release` the host — while claims
+/// are outstanding, `leave` defers the teardown (so popping the main shell back
+/// to the server list doesn't kill a terminal the user pinned to the wall) and
+/// the LAST release performs it.
 @MainActor
 final class HostControllerStore {
+    static let shared = HostControllerStore()
+
     private var map: [UUID: RemoteHostController] = [:]
+    /// Outstanding aux-scene claims per host id.
+    private var claims: [UUID: Int] = [:]
+    /// Hosts the main shell left while still claimed — stopped on last release.
+    private var leftWhileClaimed: Set<UUID> = []
 
     func controller(for host: RemoteHost) -> RemoteHostController {
+        leftWhileClaimed.remove(host.id)   // main shell is (back) on this host
         if let c = map[host.id] { return c }
         let c = RemoteHostController(host: host)
         map[host.id] = c
         return c
     }
 
+    /// A live controller for an aux window (pinned terminal / grid stage): the
+    /// main shell's if the host is open, else a fresh dial for a saved
+    /// by-address host. nil = unresolvable — a bromure.io peer that isn't open,
+    /// since those are dialed through the account directory, which only the
+    /// main shell runs.
+    func claim(_ hostID: UUID) -> RemoteHostController? {
+        if let c = map[hostID] {
+            claims[hostID, default: 0] += 1
+            return c
+        }
+        guard let host = RemoteHostStore.shared.hosts.first(where: { $0.id == hostID })
+        else { return nil }
+        let c = RemoteHostController(host: host)
+        map[hostID] = c
+        claims[hostID] = 1
+        // Nobody's main shell owns this controller; treat it as claimed-only so
+        // the last window closing tears it down.
+        leftWhileClaimed.insert(hostID)
+        return c
+    }
+
+    func release(_ hostID: UUID) {
+        guard let n = claims[hostID] else { return }
+        if n > 1 {
+            claims[hostID] = n - 1
+            return
+        }
+        claims[hostID] = nil
+        if leftWhileClaimed.remove(hostID) != nil {
+            map.removeValue(forKey: hostID)?.stop()
+        }
+    }
+
     func leave(_ host: RemoteHost) {
+        if (claims[host.id] ?? 0) > 0 {
+            leftWhileClaimed.insert(host.id)
+            return
+        }
         map.removeValue(forKey: host.id)?.stop()
     }
 }

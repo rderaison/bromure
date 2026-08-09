@@ -511,7 +511,7 @@ struct FileBrowserView: View {
     /// the fixed min-width is dropped. `.regular` on macOS (layout unchanged).
     @Environment(\.horizontalSizeClass) private var hSize
     private var compact: Bool { hSize == .compact }
-#if os(iOS)
+#if os(iOS) || os(visionOS)
     /// iOS: a downloaded file pending the share / Save-to-Files sheet.
     @State private var shareItem: ShareItem?
     /// iOS: the Files picker for uploading into the current directory.
@@ -529,7 +529,7 @@ struct FileBrowserView: View {
             loadDropped(providers)
             return true
         }
-#if os(iOS)
+#if os(iOS) || os(visionOS)
         // Upload: pick from the Files app and copy into the current directory.
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item],
                       allowsMultipleSelection: true) { handleImport($0) }
@@ -681,7 +681,7 @@ struct FileBrowserView: View {
             .buttonStyle(.borderless)
             .help(NSLocalizedString("New folder", comment: ""))
 
-#if os(iOS)
+#if os(iOS) || os(visionOS)
             Button { showImporter = true } label: {
                 Image(systemName: "square.and.arrow.up")
             }
@@ -781,7 +781,7 @@ struct FileBrowserView: View {
         }
     }
 
-#if os(iOS)
+#if os(iOS) || os(visionOS)
     /// Copy the picked Files-app documents into a temp dir (holding their
     /// security scope) and upload them into the current guest directory.
     private func handleImport(_ result: Result<[URL], Error>) {

@@ -337,7 +337,7 @@ struct EnvImportReviewView: View {
 struct ProfileEditorView: View {
     @State private var draft: Profile
     @State private var selectedCategory: EditorCategory = .general
-    #if os(iOS)
+    #if os(iOS) || os(visionOS)
     /// iPhone navigation stack: empty = the category list, one element = the
     /// pushed pane. (iPad keeps the two-pane split and never touches this.)
     @State private var phonePath: [EditorCategory] = []
@@ -558,7 +558,7 @@ struct ProfileEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            #if os(iOS)
+            #if os(iOS) || os(visionOS)
             if UIDevice.current.userInterfaceIdiom == .phone {
                 // A side-by-side split leaves ~160pt of detail on a phone —
                 // every control wraps. Settings-style instead: the categories
@@ -573,7 +573,7 @@ struct ProfileEditorView: View {
 
             // iPhone gets Cancel/Save as navigation-bar items instead (they
             // survive pushes; a sibling bar under a NavigationStack does not).
-            #if os(iOS)
+            #if os(iOS) || os(visionOS)
             if UIDevice.current.userInterfaceIdiom != .phone {
                 Divider()
                 bottomBar
@@ -629,7 +629,7 @@ struct ProfileEditorView: View {
                    $0.rawValue.lowercased().replacingOccurrences(of: " ", with: "") == raw
                }) {
                 selectedCategory = cat
-                #if os(iOS)
+                #if os(iOS) || os(visionOS)
                 if UIDevice.current.userInterfaceIdiom == .phone { phonePath = [cat] }
                 #endif
             }
@@ -725,7 +725,7 @@ struct ProfileEditorView: View {
         }
     }
 
-    #if os(iOS)
+    #if os(iOS) || os(visionOS)
     /// iPhone: Settings-style — the category list is the whole first screen
     /// and each category pushes its own pane. The Cancel/Save bar stays below
     /// the stack, visible on every screen.

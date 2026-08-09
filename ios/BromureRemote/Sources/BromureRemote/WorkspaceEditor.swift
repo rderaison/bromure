@@ -220,7 +220,7 @@ extension View {
     /// portrait. Page sizing hands it a near-full-height sheet on iOS 18+;
     /// iOS 17 keeps the stock form sheet (no smaller than before).
     @ViewBuilder func editorSheetSizing() -> some View {
-        if #available(iOS 18.0, *) {
+        if #available(iOS 18.0, visionOS 2.0, *) {
             self.presentationSizing(.page)
         } else {
             self

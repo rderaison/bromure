@@ -225,7 +225,11 @@ struct PadHostMirror: View {
         case .automations:
             AutomationsBoardScreen(controller: controller)
         case .grid:
+            #if os(visionOS)
+            VisionGridScreen(controller: controller)
+            #else
             GridScreen(controller: controller)
+            #endif
         case .workspace(let id):
             // .id() forces a fresh screen per workspace — its @StateObject
             // browser bridge and session caches are keyed to the profile at

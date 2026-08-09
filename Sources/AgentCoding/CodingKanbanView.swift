@@ -281,7 +281,7 @@ struct CodingKanbanView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            #if !os(iOS)
+            #if os(macOS)
             header
             Divider()
             #endif
@@ -298,7 +298,7 @@ struct CodingKanbanView: View {
                     .padding(14)
                 }
             } else {
-                #if os(iOS)
+                #if os(iOS) || os(visionOS)
                 // iPad: five columns rarely fit the detail column (portrait
                 // leaves ~700pt), so the board pans horizontally. Columns fill
                 // the width when there's room, and never shrink below a
@@ -333,7 +333,7 @@ struct CodingKanbanView: View {
         // across the top — so the in-board header would be the SECOND title on
         // screen. Hand the same icon + title + New action to that bar instead
         // and give the columns the space back.
-        #if os(iOS)
+        #if os(iOS) || os(visionOS)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -393,7 +393,7 @@ struct CodingKanbanView: View {
         .padding(.vertical, 10)
     }
 
-    #if os(iOS)
+    #if os(iOS) || os(visionOS)
     /// Kanban column width for the horizontally-panning iPad board: split the
     /// viewport when it's wide enough, floor at 300pt (then the strip scrolls),
     /// cap at the column's own 400pt max so wide boards don't balloon.

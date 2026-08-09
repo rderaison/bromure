@@ -195,7 +195,7 @@ extension View {
 }
 
 
-#if os(iOS)
+#if os(iOS) || os(visionOS)
 import UniformTypeIdentifiers
 
 /// A downloaded file to hand to the iOS share sheet (Save to Files / share).

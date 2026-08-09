@@ -608,7 +608,7 @@ struct TranscriptQuestionBatchCard: View {
 struct TranscriptItemView: View {
     let item: TranscriptItem
 
-    #if os(iOS)
+    #if os(iOS) || os(visionOS)
     private static let userTextSize: CGFloat = 16
     #else
     private static let userTextSize: CGFloat = 12.5
@@ -673,7 +673,7 @@ struct TranscriptItemView: View {
     /// elements: lists showed their literal markers and code fences ran together.
     @ViewBuilder
     private func assistantText(_ text: String) -> some View {
-        #if os(iOS)
+        #if os(iOS) || os(visionOS)
         let bodySize: CGFloat = 17     // a reading surface on the phone
         let serif = true
         #else

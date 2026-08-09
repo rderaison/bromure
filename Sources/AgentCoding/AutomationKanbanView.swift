@@ -87,7 +87,7 @@ struct AutomationKanbanView: View {
         // iOS shows this board inside a NavigationStack — its bar carries the
         // title, so the in-board header would repeat it. One title, with the
         // icon, at the top (see CodingKanbanView for the same trade).
-        #if os(iOS)
+        #if os(iOS) || os(visionOS)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -162,7 +162,7 @@ struct AutomationKanbanView: View {
         let cols = columns
         let done = doneRuns(cols)
         return VStack(alignment: .leading, spacing: 0) {
-            #if !os(iOS)
+            #if os(macOS)
             header
             Divider()
             #endif
@@ -182,7 +182,7 @@ struct AutomationKanbanView: View {
                     .padding(14)
                 }
             } else {
-                #if os(iOS)
+                #if os(iOS) || os(visionOS)
                 // iPad: same horizontally-panning board as the coding kanban —
                 // a portrait detail column can't fit every column side by side.
                 GeometryReader { geo in

@@ -39,3 +39,20 @@ enum BACEnrollmentStore {
     static func load() -> BACInstall? { nil }
     static func loadInstallToken() -> String? { nil }
 }
+
+/// The host-side config-file scanner (ConfigScan.swift) walks the Mac's
+/// dotfiles and is macOS-only. The mirrored editor needs exactly one helper
+/// from it — the "N setting(s)" subtitle count for imported config files —
+/// duplicated here verbatim.
+enum ConfigScan {
+    /// Settings in a sanitized config body — non-blank lines that aren't
+    /// comments or section headers. Only ever shown to the user as "N more
+    /// setting(s)", so an approximate count is fine.
+    static func settingCount(_ body: String) -> Int {
+        body.split(whereSeparator: \.isNewline).reduce(0) { n, line in
+            let l = line.trimmingCharacters(in: .whitespaces)
+            if l.isEmpty || l.hasPrefix("#") || l.hasPrefix(";") || l.hasPrefix("[") { return n }
+            return n + 1
+        }
+    }
+}

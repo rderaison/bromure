@@ -12,7 +12,7 @@ extension Notification.Name {
     static let p2pIdentityChanged = Notification.Name("io.bromure.p2pIdentityChanged")
 }
 
-#if os(iOS)
+#if os(iOS) || os(visionOS)
 /// Anchors the in-app sign-in web sheet to the app's foreground window.
 private final class WebAuthPresenter: NSObject, ASWebAuthenticationPresentationContextProviding {
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -48,7 +48,7 @@ final class P2PEnrollmentCoordinator {
     /// link can't enroll this Mac into an attacker's workspace.
     private var pendingState: String?
 
-#if os(iOS)
+#if os(iOS) || os(visionOS)
     /// Retained while the in-app sign-in web sheet is on screen; the callback
     /// (a `bromure://enroll` redirect) is captured by the session itself.
     private var webAuthSession: ASWebAuthenticationSession?
@@ -81,13 +81,22 @@ final class P2PEnrollmentCoordinator {
         if let url = comps.url {
 #if os(macOS)
             NSWorkspace.shared.open(url)
+#elseif os(visionOS)
+            // No in-app web sheet here: ASWebAuthenticationSession's visionOS
+            // presentation is a fixed compact browser card that clips the
+            // login form, and the session offers no sizing API. Safari opens
+            // as its own full-size, user-resizable window in the room instead
+            // — passkeys and the user's existing bromure.io session included —
+            // and the `bromure://enroll` redirect deep-links back into the app
+            // (RootView.onOpenURL), the same round-trip macOS makes.
+            UIApplication.shared.open(url)
 #else
             startWebAuth(url: url)
 #endif
         }
     }
 
-#if os(iOS)
+#if os(iOS) || os(visionOS)
     /// iOS sign-in in an in-app web sheet (ASWebAuthenticationSession) rather
     /// than kicking out to Safari. It shares Safari's cookies (so an existing
     /// bromure.io login carries over) and intercepts the `bromure://enroll`

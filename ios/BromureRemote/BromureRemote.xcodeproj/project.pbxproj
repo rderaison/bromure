@@ -20,6 +20,8 @@
 		817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CD0F2B2F2F6347A584824B /* PushKeypair.swift */; };
 		53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */; };
 		4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */; };
+		DFA9952B65FAE0782AD6D79F /* VisionGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8078F914F8C902B789A224E /* VisionGrid.swift */; };
+		CDF818D2CB4FFE21FF6F242B /* VisionScenes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 891E17FE47B164B5A25F2306 /* VisionScenes.swift */; };
 		B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */; };
 		64C326ED21AF5A80372F4E20 /* WorkspaceEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */; };
 		D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */; };
@@ -145,6 +147,8 @@
 		74CD0F2B2F2F6347A584824B /* PushKeypair.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushKeypair.swift"; path = "Sources/BromureRemote/PushKeypair.swift"; sourceTree = "<group>"; };
 		D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushNotifications.swift"; path = "Sources/BromureRemote/PushNotifications.swift"; sourceTree = "<group>"; };
 		0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RemoteTransportMobile.swift"; path = "Sources/BromureRemote/RemoteTransportMobile.swift"; sourceTree = "<group>"; };
+		C8078F914F8C902B789A224E /* VisionGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "VisionGrid.swift"; path = "Sources/BromureRemote/VisionGrid.swift"; sourceTree = "<group>"; };
+		891E17FE47B164B5A25F2306 /* VisionScenes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "VisionScenes.swift"; path = "Sources/BromureRemote/VisionScenes.swift"; sourceTree = "<group>"; };
 		5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WebBrowserPane.swift"; path = "Sources/BromureRemote/WebBrowserPane.swift"; sourceTree = "<group>"; };
 		C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceEditor.swift"; path = "Sources/BromureRemote/WorkspaceEditor.swift"; sourceTree = "<group>"; };
 		0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceScreen.swift"; path = "Sources/BromureRemote/WorkspaceScreen.swift"; sourceTree = "<group>"; };
@@ -294,6 +298,8 @@
 				74CD0F2B2F2F6347A584824B /* PushKeypair.swift */,
 				D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */,
 				0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */,
+				C8078F914F8C902B789A224E /* VisionGrid.swift */,
+				891E17FE47B164B5A25F2306 /* VisionScenes.swift */,
 				5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */,
 				C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */,
 				0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */,
@@ -496,6 +502,8 @@
 				817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */,
 				53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */,
 				4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */,
+				DFA9952B65FAE0782AD6D79F /* VisionGrid.swift in Sources */,
+				CDF818D2CB4FFE21FF6F242B /* VisionScenes.swift in Sources */,
 				B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */,
 				64C326ED21AF5A80372F4E20 /* WorkspaceEditor.swift in Sources */,
 				D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */,
@@ -614,8 +622,10 @@
 				CLANG_ENABLE_MODULES = YES;
 				SWIFT_VERSION = 5.9;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				XROS_DEPLOYMENT_TARGET = 1.0;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator xros xrsimulator";
+				TARGETED_DEVICE_FAMILY = "1,2,7";
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				ENABLE_PREVIEWS = YES;
@@ -633,8 +643,10 @@
 				CLANG_ENABLE_MODULES = YES;
 				SWIFT_VERSION = 5.9;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				XROS_DEPLOYMENT_TARGET = 1.0;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator xros xrsimulator";
+				TARGETED_DEVICE_FAMILY = "1,2,7";
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				ENABLE_PREVIEWS = YES;

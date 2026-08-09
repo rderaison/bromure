@@ -30,6 +30,7 @@ LOCALIZATION_SRC = os.path.join(REPO, "Sources", "AgentCoding")
 
 BUNDLE_ID = "io.bromure.remote"
 DEPLOYMENT_TARGET = "17.0"
+XR_DEPLOYMENT_TARGET = "1.0"
 TEAM = "W3RD8G85BC"
 
 # The Notification Service Extension: its own source, plus the two shared files
@@ -419,14 +420,18 @@ def main():
         "CLANG_ENABLE_MODULES = YES;",
         "SWIFT_VERSION = 5.9;",
         f"IPHONEOS_DEPLOYMENT_TARGET = {DEPLOYMENT_TARGET};",
+        f"XROS_DEPLOYMENT_TARGET = {XR_DEPLOYMENT_TARGET};",
         "SDKROOT = iphoneos;",
-        # iPhone + iPad. The iPad build is a first-class client (macOS-like
-        # split-view UI), so the App Store listing carries iPad screenshots.
-        # Mac/Vision "Designed for iPad" stay off — those idioms are untested.
+        "SUPPORTED_PLATFORMS = \"iphoneos iphonesimulator xros xrsimulator\";",
+        # iPhone + iPad + Vision Pro. The iPad build is a first-class client
+        # (macOS-like split-view UI), so the App Store listing carries iPad
+        # screenshots. visionOS is NATIVE (family 7 + the xros platforms above)
+        # — the spatial multi-window shell in VisionScenes.swift — so the
+        # "Designed for iPad" compatibility modes stay off.
         # This generator OVERWRITES project.pbxproj on every TestFlight build,
         # so the family MUST be set here — editing the generated pbxproj by
         # hand doesn't stick.
-        "TARGETED_DEVICE_FAMILY = \"1,2\";",
+        "TARGETED_DEVICE_FAMILY = \"1,2,7\";",
         "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;",
         "SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;",
         "ENABLE_PREVIEWS = YES;",
@@ -553,7 +558,33 @@ def main():
     os.makedirs(PROJ, exist_ok=True)
     with open(os.path.join(PROJ, "project.pbxproj"), "w") as f:
         f.write("\n".join(L) + "\n")
-    print(f"wrote {os.path.relpath(PROJ, REPO)} ({len(sources)} sources, {len(PRODUCTS)} linked products, +NSE)")
+
+    # A SHARED scheme, so headless `xcodebuild -scheme BromureRemote` (CI, the
+    # visionOS/iOS simulator builds) works without Xcode ever having opened the
+    # project to autocreate one in xcuserdata.
+    scheme_dir = os.path.join(PROJ, "xcshareddata", "xcschemes")
+    os.makedirs(scheme_dir, exist_ok=True)
+    scheme = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="1600" version="1.7">
+  <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES">
+    <BuildActionEntries>
+      <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{target_id}" BuildableName="BromureRemote.app" BlueprintName="BromureRemote" ReferencedContainer="container:BromureRemote.xcodeproj"/>
+      </BuildActionEntry>
+    </BuildActionEntries>
+  </BuildAction>
+  <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" debugServiceExtension="internal" allowLocationSimulation="YES">
+    <BuildableProductRunnable runnableDebuggingMode="0">
+      <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{target_id}" BuildableName="BromureRemote.app" BlueprintName="BromureRemote" ReferencedContainer="container:BromureRemote.xcodeproj"/>
+    </BuildableProductRunnable>
+  </LaunchAction>
+  <ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/>
+</Scheme>
+"""
+    with open(os.path.join(scheme_dir, "BromureRemote.xcscheme"), "w") as f:
+        f.write(scheme)
+
+    print(f"wrote {os.path.relpath(PROJ, REPO)} ({len(sources)} sources, {len(PRODUCTS)} linked products, +NSE, +shared scheme)")
     return 0
 
 

@@ -1,11 +1,11 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// Bromure Remote — iOS / iPadOS fat client.
+// Bromure Remote — iOS / iPadOS / visionOS fat client.
 //
 // This package compiles the fat-client SUBSET of Sources/AgentCoding (linked in
 // by `Sources/BromureRemote/_shared/`, a farm of symlinks kept in sync by
-// `scripts/gen-ios-sources.py`) together with the iOS-only sources in
+// `scripts/gen-ios-sources.py`) together with the mobile-only sources in
 // `Sources/BromureRemote/`. It builds as a library so the whole port is
 // compile-checkable from the command line:
 //
@@ -13,13 +13,17 @@ import PackageDescription
 //     -destination 'generic/platform=iOS Simulator' \
 //     -derivedDataPath .build-ios CODE_SIGNING_ALLOWED=NO build
 //
+//   xcodebuild -scheme BromureRemote \
+//     -destination 'generic/platform=visionOS Simulator' \
+//     -derivedDataPath .build-xr CODE_SIGNING_ALLOWED=NO build
+//
 // The shipping app bundle is produced by the generated Xcode project
 // (scripts/gen-ios-project.py), which reuses these exact sources and defines
 // BROMURE_APP to switch on the `@main` entry point.
 let package = Package(
     name: "BromureRemote",
     defaultLocalization: "en",
-    platforms: [.iOS(.v17)],
+    platforms: [.iOS(.v17), .visionOS(.v1)],
     products: [
         .library(name: "BromureRemote", targets: ["BromureRemote"]),
     ],
