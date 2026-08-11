@@ -6,7 +6,7 @@
 
 /* MainView — Setup */
 "First-Time Setup" = "First-Time Setup";
-"Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once." = "Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once.";
+"Downloads the browser image (Linux + Chromium)\nand personalizes it for your Mac. This only needs to happen once." = "Downloads the browser image (Linux + Chromium)\nand personalizes it for your Mac. This only needs to happen once.";
 "Get Started" = "Get Started";
 
 /* MainView — Warming up */
@@ -713,3 +713,16 @@
 "Import .ovpn File\U2026" = "Import .ovpn File\U2026";
 "Credentials" = "Credentials";
 "Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs." = "Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs.";
+
+/* Browser choice + Google Workspace management */
+"Browser" = "Browser";
+"This profile's saved browsing data was created by %@. Delete the profile data below to switch browsers." = "This profile's saved browsing data was created by %@. Delete the profile data below to switch browsers.";
+"Google Workspace Management" = "Google Workspace Management";
+"Enroll this profile’s browser with Chrome Enterprise Core so your Google Workspace admin can manage it. Paste the enrollment token from the Admin console (Devices → Chrome → Managed browsers). Requires Google Chrome." = "Enroll this profile’s browser with Chrome Enterprise Core so your Google Workspace admin can manage it. Paste the enrollment token from the Admin console (Devices → Chrome → Managed browsers). Requires Google Chrome.";
+"Enrollment token" = "Enrollment token";
+"Sessions will enroll as a managed Google Chrome browser." = "Sessions will enroll as a managed Google Chrome browser.";
+"Managed browsing requires Google Chrome" = "Managed browsing requires Google Chrome";
+"Switch to Google Chrome" = "Switch to Google Chrome";
+"Google Workspace can only manage the Google Chrome browser. Switch this profile to Google Chrome to use the enrollment token." = "Google Workspace can only manage the Google Chrome browser. Switch this profile to Google Chrome to use the enrollment token.";
+"Google Workspace can only manage the Google Chrome browser, and this profile’s saved browsing data was created by Chromium. Delete the profile data in General settings first, then switch the browser to Google Chrome." = "Google Workspace can only manage the Google Chrome browser, and this profile’s saved browsing data was created by Chromium. Delete the profile data in General settings first, then switch the browser to Google Chrome.";
+"OK" = "OK";

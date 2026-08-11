@@ -3,7 +3,7 @@
   "name": "Bromure File Picker",
   "version": "1.0.0",
   "description": "Intercepts file upload dialogs and routes them through the host file picker.",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwUPVglV0oJW4ZhVi+67rqzCSbW/9vVsPkE/hsubDucrNJOhwq453qwmySVpI64AcwODZuYm9unZBB59DbXuOlbfeZ/LpgQ1/oILkJ4RR/aeW3VWBeSSe+mrSVqtJCq0eVl1vPGChJ432g+pcGD94E+3wzgVdjtthjCnPeV/yHeODIee8ycIZkq9rctCK9zzJVs+QvuBt7oMNxstODwcFEdRMyACVa7OcEPszte67hAbktTy4V8rneub8pVquPoBDOp60IIDlYiTy73eUxWWitfiEURgxW6q+hicnQaJ7P94qeePmF5MdsSxeWM8gSeoXaiBqz+AD1RE2gf8WU+db2wIDAQAB",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvB/5OJ6SayWuLTkVI/6ItUTr82QuiC4xy8iNwPpReYbw5lNHnlWOLon9KWeIJQB5v7bBhyuNsIaOhHrS+S/6Yv6O/wPRmdE1g+fIVkAS+AlCbN7fGmPeD/p8cr/SI/U1Ysn24gt9x9wgD3jFhFiOcsxm+ihKfZ4bRAmcX/uiEuRx3zqlpVThGFDbTIvFj2ENeLHUCLRZzhi24sKrxqN/kmZlummOif4k3oCW87ELUb8f2bS/ee1QHJvOCnLu0IViAJYhIhDNPoVP7iu37i5YxKL7xowyson6tp6JrtCWuDcDvQFApOHLw5wqx1jvgUnwVaUH7qpmIPb+tIJIWcoyfwIDAQAB",
   "permissions": [
     "nativeMessaging",
     "debugger",
@@ -11,8 +11,12 @@
   ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
     }

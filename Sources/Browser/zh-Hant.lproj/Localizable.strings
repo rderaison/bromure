@@ -6,7 +6,7 @@
 
 /* MainView — Setup */
 "First-Time Setup" = "首次設定";
-"Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once." = "下載 Alpine Linux（約 50 MB）並安裝\nChromium。此步驟只需執行一次。";
+"Downloads the browser image (Linux + Chromium)\nand personalizes it for your Mac. This only needs to happen once." = "下載瀏覽器映像檔（Linux + Chromium）\n並針對您的 Mac 進行個人化設定。此步驟只需執行一次。";
 "Get Started" = "開始使用";
 
 /* MainView — Warming up */
@@ -713,3 +713,16 @@
 "Import .ovpn File\U2026" = "\U532F\U5165 .ovpn \U6A94\U6848\U2026";
 "Credentials" = "\U6191\U8B49";
 "Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs." = "\U50C5\U7576\U4F60\U7684\U8A2D\U5B9A\U4F7F\U7528\U4F7F\U7528\U8005\U540D\U7A31/\U5BC6\U78BC\UFF08auth-user-pass\UFF09\U6642\U624D\U9700\U8981\U3002\U5C0D\U65BC\U50C5\U4F7F\U7528\U6191\U8B49\U7684\U8A2D\U5B9A\UFF0C\U8ACB\U7559\U7A7A\U3002";
+
+/* Browser choice + Google Workspace management */
+"Browser" = "瀏覽器";
+"This profile's saved browsing data was created by %@. Delete the profile data below to switch browsers." = "此設定檔儲存的瀏覽資料由 %@ 建立。若要切換瀏覽器,請先在下方刪除設定檔資料。";
+"Google Workspace Management" = "Google Workspace 管理";
+"Enroll this profile’s browser with Chrome Enterprise Core so your Google Workspace admin can manage it. Paste the enrollment token from the Admin console (Devices → Chrome → Managed browsers). Requires Google Chrome." = "將此設定檔的瀏覽器註冊至 Chrome Enterprise Core,讓您的 Google Workspace 管理員能加以管理。請貼上管理控制台(裝置 → Chrome → 受管理的瀏覽器)中的註冊權杖。需要 Google Chrome。";
+"Enrollment token" = "註冊權杖";
+"Sessions will enroll as a managed Google Chrome browser." = "工作階段將註冊為受管理的 Google Chrome 瀏覽器。";
+"Managed browsing requires Google Chrome" = "受管理的瀏覽需要 Google Chrome";
+"Switch to Google Chrome" = "切換至 Google Chrome";
+"Google Workspace can only manage the Google Chrome browser. Switch this profile to Google Chrome to use the enrollment token." = "Google Workspace 只能管理 Google Chrome 瀏覽器。若要使用註冊權杖,請將此設定檔切換至 Google Chrome。";
+"Google Workspace can only manage the Google Chrome browser, and this profile’s saved browsing data was created by Chromium. Delete the profile data in General settings first, then switch the browser to Google Chrome." = "Google Workspace 只能管理 Google Chrome 瀏覽器,而此設定檔儲存的瀏覽資料由 Chromium 建立。請先在「一般」設定中刪除設定檔資料,再將瀏覽器切換至 Google Chrome。";
+"OK" = "好";

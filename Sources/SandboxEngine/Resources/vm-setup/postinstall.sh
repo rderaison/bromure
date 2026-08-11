@@ -166,13 +166,20 @@ fi
 cp /mnt/etc/resolv.conf /tmp/resolv.conf.image 2>/dev/null || true
 cp /etc/resolv.conf /mnt/etc/resolv.conf
 
-# Same treatment for apk's repositories: point them at the proxy for the
-# duration of the steps (plain HTTP, host-side TLS), restore the image's
-# canonical HTTPS URLs afterwards.
+# Route the chroot's apt through the proxy for the duration of the
+# steps (the env vars exported above cover wget/curl; apt gets an
+# explicit config on top). Removed again after the steps — it points at
+# a bake-time-only listener.
 if [ -n "$PROXIED" ]; then
-    cp /mnt/etc/apk/repositories /tmp/repositories.image 2>/dev/null || true
-    sed "s|https://dl-cdn.alpinelinux.org|$ALPINE_REPO_BASE|" \
-        /tmp/repositories.image > /mnt/etc/apk/repositories 2>/dev/null || true
+    _host_port="${ALPINE_REPO_BASE##*://}"
+    _proxy_host="${_host_port%%:*}"
+    mkdir -p /mnt/etc/apt/apt.conf.d
+    cat > /mnt/etc/apt/apt.conf.d/99-bromure-proxy <<APTCONF
+Acquire::http::Proxy "$ALPINE_REPO_BASE";
+Acquire::https::Proxy "$ALPINE_REPO_BASE";
+Acquire::http::Proxy::$_proxy_host DIRECT;
+Acquire::https::Proxy::$_proxy_host DIRECT;
+APTCONF
 fi
 
 if [ "$STEP_COUNT" -gt 0 ]; then
@@ -196,10 +203,11 @@ if [ "$STEP_COUNT" -gt 0 ]; then
     done
     [ -n "$NETWORK_OK" ] || fail "no network connectivity in the postinstall VM — the packages (Cloudflare WARP) cannot be downloaded; check VPN/DNS settings and retry"
 
-    log "entering alpine chroot"
+    log "entering image chroot"
     chroot /mnt /bin/sh -e <<'CHROOT_EOF'
 set -e
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin
+export DEBIAN_FRONTEND=noninteractive
 
 log() { printf '[browser-postinstall-chroot] %s\n' "$*"; }
 
@@ -229,6 +237,14 @@ done
 # Leave no residue in the image.
 rm -rf /tmp/bromure-postinstall
 
+# The steps ran apt-get update + installs (Chrome/WARP), which repopulate
+# the package cache and lists — ~270 MB setup.sh's own clean can't reach
+# because these run later, against the finished disk. Clear them so the
+# downloaded/amended image doesn't ship the cache. (apt-get may be absent
+# on an Alpine-era image being amended; ignore failures.)
+apt-get clean 2>/dev/null || true
+rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb 2>/dev/null || true
+
 log "chroot phase complete"
 CHROOT_EOF
 fi
@@ -242,9 +258,7 @@ if [ -f /tmp/resolv.conf.image ]; then
 else
     printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /mnt/etc/resolv.conf
 fi
-if [ -n "$PROXIED" ] && [ -f /tmp/repositories.image ]; then
-    cp /tmp/repositories.image /mnt/etc/apk/repositories
-fi
+rm -f /mnt/etc/apt/apt.conf.d/99-bromure-proxy
 rm -rf /mnt/tmp/bromure-postinstall
 
 log "unmounting target"

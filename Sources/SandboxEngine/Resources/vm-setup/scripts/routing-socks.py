@@ -92,6 +92,31 @@ def connect_via_upstream(atyp, addr, port):
         raise
 
 
+def connect_direct(addr, port):
+    """Direct connect, IPv4 first.
+
+    socket.create_connection tries getaddrinfo results in order — AAAA
+    first when the host has any global v6 — and burns its full timeout
+    per address. On a v4-only NAT path (vmnet) every v6 attempt
+    blackholes, stalling each connection 10s+ before v4 is tried, which
+    is enough to freeze a proxychained squid's event loop. Sort v4
+    before v6 and keep per-attempt timeouts short.
+    """
+    infos = socket.getaddrinfo(addr, port, type=socket.SOCK_STREAM)
+    infos.sort(key=lambda ai: 0 if ai[0] == socket.AF_INET else 1)
+    err = None
+    for family, stype, proto, _, sockaddr in infos:
+        s = socket.socket(family, stype, proto)
+        s.settimeout(5)
+        try:
+            s.connect(sockaddr)
+            return s
+        except OSError as e:
+            err = e
+            s.close()
+    raise err if err else OSError("no addresses for " + repr(addr))
+
+
 def handle_client(client):
     """Handle one SOCKS5 client connection."""
     remote = None
@@ -145,7 +170,7 @@ def handle_client(client):
             if os.path.exists(WARP_FLAG):
                 remote = connect_via_upstream(atyp, addr, port)
             else:
-                remote = socket.create_connection((addr, port), timeout=10)
+                remote = connect_direct(addr, port)
         except OSError:
             # Connection refused / host unreachable
             client.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)

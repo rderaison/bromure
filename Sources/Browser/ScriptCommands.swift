@@ -27,6 +27,8 @@ private func readSetting(_ s: ProfileSettings, key: String) -> String? {
     switch key {
     case "homePage":        return s.homePage
     case "userAgent":       return s.userAgent
+    case "browser":         return s.browser.rawValue
+    case "chromeEnrollmentToken": return s.chromeEnrollmentToken
     case "persistent":      return String(s.persistent)
     case "encryptOnDisk":   return String(s.encryptOnDisk)
     case "clipboard":       return String(s.enableClipboardSharing)
@@ -91,6 +93,8 @@ private func writeSetting(_ s: inout ProfileSettings, key: String, value: String
     switch key {
     case "homePage":        s.homePage = value
     case "userAgent":       s.userAgent = value
+    case "browser":         s.browser = BrowserChoice(rawValue: value) ?? s.browser
+    case "chromeEnrollmentToken": s.chromeEnrollmentToken = value
     case "persistent":      s.persistent = b
     case "encryptOnDisk":   s.encryptOnDisk = b
     case "clipboard":       s.enableClipboardSharing = b

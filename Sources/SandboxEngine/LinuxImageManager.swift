@@ -4,25 +4,28 @@ import Virtualization
 
 /// Manages creation of a minimal Linux disk image with Chromium for instant-on browsing.
 ///
-/// Uses Alpine Linux ARM64 with:
-/// - Minimal base system
-/// - Chromium browser in kiosk mode
+/// Uses Ubuntu (glibc) ARM64 with:
+/// - minbase system debootstrapped from an Alpine netboot installer
+///   (the installer environment stays Alpine — tiny, and the whole
+///   serial-console orchestration is built around it)
+/// - Chromium browser in kiosk mode (native deb; Google Chrome arrives
+///   via a browser-img-catalog.json postinstall step)
 /// - Auto-login, auto-start X + Chromium fullscreen
 /// - virtio drivers for GPU, network, and disk
 public final class LinuxImageManager {
     /// Bump this to force a rebuild of the base image on next launch.
-    /// 364 vs the released 362 (v3.6.3) covers this branch's image
-    /// changes in one hop: Cloudflare WARP moved out of setup.sh into a
-    /// browser-img-catalog.json postinstall step (the published prebuilt
-    /// image must contain free software only), and the debug
-    /// passwordless-root sshd is gone entirely.
-    public static let imageVersion = "364"
+    /// 400 starts the Ubuntu line (≤364 were Alpine-based): the target
+    /// rootfs is debootstrapped Ubuntu with systemd, Chromium comes from
+    /// the xtradeb PPA as a native deb, and glibc means Cloudflare WARP
+    /// (and soon official Google Chrome) install as normal debs — the
+    /// gcompat/resolv-stub compat layer is gone.
+    public static let imageVersion = "400"
 
     /// Human description of the image — surfaces in
     /// browser-img-catalog.json (via `bromure init-foss-image`'s
     /// build-info.json) and the setup UI.
     public static var imageDescription: String {
-        "Alpine Linux \(alpineVersion) + Chromium"
+        "Ubuntu \(ubuntuVersion) + Chromium"
     }
 
     // Internal (not private): LinuxImageManager+Remote.swift — the
@@ -79,7 +82,7 @@ public final class LinuxImageManager {
     /// see ImageCatalog). The local-build path applies them so it
     /// converges on the same image the download path produces.
     public func createBaseImage(
-        diskSizeMB: UInt64 = 4608,
+        diskSizeMB: UInt64 = 5120,
         keyboardLayout: String? = nil,
         naturalScrolling: Bool? = nil,
         locale: String? = nil,
@@ -114,8 +117,9 @@ public final class LinuxImageManager {
         try createRawDisk(at: linuxDiskURL, sizeMB: diskSizeMB)
         progress(.stepDone("Creating disk image"))
 
-        // 3. Boot Alpine netboot, install to disk, add Chromium.
-        progress(.stepStart("Installing Alpine Linux with Chromium"))
+        // 3. Boot the Alpine netboot installer, debootstrap Ubuntu to
+        //    disk, add Chromium.
+        progress(.stepStart("Installing Ubuntu Linux with Chromium"))
         try await installLinux(
             netbootKernel: netbootKernel,
             netbootInitrd: netbootInitrd,
@@ -128,7 +132,7 @@ public final class LinuxImageManager {
             fossOnly: fossOnly,
             progress: progress
         )
-        progress(.stepDone("Installing Alpine Linux with Chromium"))
+        progress(.stepDone("Installing Ubuntu Linux with Chromium"))
 
         // 4. Read kernel + initramfs from the transfer disk (written by install VM).
         //    The installed kernel and mkinitfs initramfs must match versions.
@@ -228,7 +232,14 @@ public final class LinuxImageManager {
         // console=hvc0 also outputs to serial for logging.
         let bootLoader = VZLinuxBootLoader(kernelURL: linuxKernelURL)
         bootLoader.initialRamdiskURL = linuxInitrdURL
-        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,virtiofs,loop,dm-crypt rw \(config.extraKernelOptions)"
+        // net.ifnames=0 keeps the NIC named eth0 — every guest script
+        // (on-boot.sh probe, xinitrc lease release, network-interfaces)
+        // addresses eth0, and Ubuntu would otherwise name it enp0s1.
+        // The `modules=` param is Alpine-mkinitfs-specific and ignored by
+        // Ubuntu's initramfs-tools; it stays so this binary can still
+        // boot a not-yet-rebuilt Alpine image (AC's shared-image path
+        // skips the version check, so that mix really occurs).
+        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,virtiofs,loop,dm-crypt rw net.ifnames=0 \(config.extraKernelOptions)"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.cpuCount = config.cpuCount
@@ -317,7 +328,13 @@ public final class LinuxImageManager {
 
     // MARK: - Private
 
+    /// Target guest OS. The Alpine constants below describe the netboot
+    /// INSTALLER environment only — the OS the bake runs in, not the OS
+    /// it installs.
     // Public: surfaces in `bromure init-foss-image`'s build-info.json.
+    public static let ubuntuRelease = "noble"
+    public static let ubuntuVersion = "24.04"
+
     public static let alpineVersion = "3.22"
     public static let alpineRelease = "3.22.3"
     static let releasesBase =
@@ -782,11 +799,11 @@ public final class LinuxImageManager {
         // "foss" builds the redistributable image: no WARP, no macOS
         // fonts, and missing kernel modules FAIL the build.
         let mode = fossOnly ? "foss" : "user"
-        // ALPINE_REPO_BASE routes setup.sh's own fetches (chroot apk,
-        // the ad-block/Tranco lists, kernel modules) through the host
+        // ALPINE_REPO_BASE routes setup.sh's own fetches (debootstrap,
+        // the chroot's apt, the ad-block/Tranco lists) through the host
         // proxy too; unset, the script goes direct.
         let envPrefix = alpineRepoBase.map { "ALPINE_REPO_BASE='\($0)' " } ?? ""
-        writer.write(Data("\(envPrefix)sh /tmp/vm-setup/setup.sh \(kbLayout) \(natScroll) \(loc) \(scale) \(Self.alpineVersion) \(mode)\n".utf8))
+        writer.write(Data("\(envPrefix)sh /tmp/vm-setup/setup.sh \(kbLayout) \(natScroll) \(loc) \(scale) \(Self.ubuntuRelease) \(mode)\n".utf8))
 
         do {
             // The explicit failure marker short-circuits immediately (the
@@ -830,22 +847,21 @@ public final class LinuxImageManager {
             throw error
         }
 
-        // Extract initramfs to the transfer disk (vdb).
-        // We're still in the netboot environment, so ext4 is available via the
-        // already-mounted target disk. We need to copy the mkinitfs-generated
-        // initramfs to vdb so we can read it on macOS.
+        // Extract the installed kernel + initramfs to the transfer disk
+        // (vdb). We're still in the netboot environment, so ext4 is
+        // available via the already-mounted target disk. setup.sh's
+        // chroot phase already ran update-initramfs with the virtio
+        // modules pinned; here we only need to copy the artifacts out.
         progress(.message("Extracting initramfs to transfer disk..."))
         let extractLines = [
             "modprobe ext4 2>/dev/null",
             "mount -t ext4 /dev/vda /mnt",
-            // Ensure mkinitfs config includes virtio_blk for boot
-            "printf '%s\\n' 'features=\"base ext4 virtio\"' > /mnt/etc/mkinitfs/mkinitfs.conf",
-            // Rebuild initramfs with correct modules
-            "chroot /mnt sh -c 'KVER=$(ls /lib/modules/ | head -1) && mkinitfs -o /boot/initramfs-custom $KVER'",
-            // Find the installed kernel (vmlinuz-lts is the EFI stub,
-            // but we need the raw Image for VZLinuxBootLoader)
-            "KERNEL=/mnt/boot/vmlinuz-lts",
-            "INITRD=/mnt/boot/initramfs-custom",
+            // Newest installed Ubuntu kernel + matching initramfs.
+            // (vmlinuz is an EFI-stubbed compressed image; the host
+            // extracts the raw ARM64 Image for VZLinuxBootLoader.)
+            "KERNEL=$(ls /mnt/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)",
+            "INITRD=$(ls /mnt/boot/initrd.img-* 2>/dev/null | sort -V | tail -1)",
+            "echo \"KERNEL=$KERNEL INITRD=$INITRD\"",
             "KSIZE=$(stat -c%s $KERNEL)",
             "ISIZE=$(stat -c%s $INITRD)",
             "echo \"KERNEL_SIZE=$KSIZE INITRD_SIZE=$ISIZE\"",

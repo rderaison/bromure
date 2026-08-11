@@ -1,7 +1,9 @@
 {
   "name": "com.bromure.trace",
-  "description": "Bromure trace agent — forwards request telemetry to host over vsock.",
+  "description": "Bromure trace agent \u2014 forwards request telemetry to host over vsock.",
   "path": "/usr/local/bin/trace-agent.py",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://ianphpmabbpccnochnggokbpnlecfapj/"]
+  "allowed_origins": [
+    "chrome-extension://fpmmahdfjnndjnidkbmpihhnamfbgbca/"
+  ]
 }

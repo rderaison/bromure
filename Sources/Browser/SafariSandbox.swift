@@ -4180,7 +4180,7 @@ struct Init: ParsableCommand {
     func run() throws {
         let guestOS = try parseGuestOS(os)
         let dir = storageDir.map { URL(filePath: $0) } ?? VMConfig.defaultStorageDirectory
-        let defaultDiskSize: UInt64 = guestOS == .linux ? 4608 : 64 * 1024
+        let defaultDiskSize: UInt64 = guestOS == .linux ? 5120 : 64 * 1024
 
         switch guestOS {
         case .linux:
@@ -4303,7 +4303,8 @@ struct Init: ParsableCommand {
 /// scripts/publish-browser-image.sh): produce the redistributable browser
 /// base image containing free software only — no Cloudflare WARP (that's
 /// a browser-img-catalog.json postinstall step applied on the end-user's
-/// machine), no Apple fonts — with neutral keyboard/locale defaults. A missing out-of-tree kernel module FAILS the build.
+/// machine, as is Google Chrome), no Apple fonts — with neutral
+/// keyboard/locale defaults. A failed v4l2loopback dkms build FAILS the build.
 /// The artifacts (linux-base.img, vmlinuz, initrd, build-info.json) land
 /// in --output, never in Application Support, so a publish run can't
 /// clobber a developer's own base image.

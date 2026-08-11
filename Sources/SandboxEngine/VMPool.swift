@@ -502,6 +502,12 @@ public final class VMPool {
         if config.enablePasswords { cfg["passwords"] = true }
         if config.blockMalwareSites { cfg["blockMalware"] = true }
         if config.enableAdBlocking { cfg["adBlocking"] = true }
+        // Absent = chromium; config-agent maps "chrome" to the
+        // google-chrome-stable binary in chrome-env's BROWSER_BIN.
+        if config.browser == .chrome { cfg["browser"] = "chrome" }
+        if let token = config.chromeEnrollmentToken {
+            cfg["chromeEnrollmentToken"] = token
+        }
         cfg["currentTime"] = Int(Date().timeIntervalSince1970)
         // Per-VM MTU clamp. VPNs (WireGuard ~1420, IKEv2 ~1400) push
         // path MTU below 1500 and PMTUD doesn't always recover. Default

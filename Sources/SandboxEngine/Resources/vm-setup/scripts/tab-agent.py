@@ -662,7 +662,7 @@ def _xdotool_active_window_title():
     # A bare "Chromium" means the active tab has no title yet (fresh
     # about:blank, page still loading); matching on it would pick an
     # arbitrary tab. Let the caller fall through to tracked-id logic.
-    if not out or out.lower() in ("chromium", "chromium-browser"):
+    if not out or out.lower() in ("chromium", "chromium-browser", "google chrome", "chrome"):
         return None
     return out
 

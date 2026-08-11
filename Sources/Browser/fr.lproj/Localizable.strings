@@ -6,7 +6,7 @@
 
 /* MainView — Setup */
 "First-Time Setup" = "Configuration initiale";
-"Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once." = "T\U00E9l\U00E9charge Alpine Linux (~50 Mo) et installe\nChromium. Cette op\U00E9ration n\U2019est n\U00E9cessaire qu\U2019une seule fois.";
+"Downloads the browser image (Linux + Chromium)\nand personalizes it for your Mac. This only needs to happen once." = "Télécharge l'image du navigateur (Linux + Chromium)\net la personnalise pour votre Mac. Cette opération n'est nécessaire qu'une seule fois.";
 "Get Started" = "D\U00E9marrer";
 
 /* MainView — Warming up */
@@ -713,3 +713,16 @@
 "Import .ovpn File\U2026" = "Importer un fichier .ovpn\U2026";
 "Credentials" = "Identifiants";
 "Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs." = "N\U00E9cessaire uniquement si votre configuration utilise un nom d\U2019utilisateur/mot de passe (auth-user-pass). Laissez vide pour les configurations utilisant uniquement un certificat.";
+
+/* Browser choice + Google Workspace management */
+"Browser" = "Navigateur";
+"This profile's saved browsing data was created by %@. Delete the profile data below to switch browsers." = "Les données de navigation enregistrées de ce profil ont été créées par %@. Supprimez les données du profil ci-dessous pour changer de navigateur.";
+"Google Workspace Management" = "Gestion Google Workspace";
+"Enroll this profile’s browser with Chrome Enterprise Core so your Google Workspace admin can manage it. Paste the enrollment token from the Admin console (Devices → Chrome → Managed browsers). Requires Google Chrome." = "Inscrivez le navigateur de ce profil à Chrome Enterprise Core afin que votre administrateur Google Workspace puisse le gérer. Collez le jeton d'inscription depuis la console d'administration (Appareils → Chrome → Navigateurs gérés). Nécessite Google Chrome.";
+"Enrollment token" = "Jeton d'inscription";
+"Sessions will enroll as a managed Google Chrome browser." = "Les sessions s'inscriront comme navigateur Google Chrome géré.";
+"Managed browsing requires Google Chrome" = "La navigation gérée nécessite Google Chrome";
+"Switch to Google Chrome" = "Passer à Google Chrome";
+"Google Workspace can only manage the Google Chrome browser. Switch this profile to Google Chrome to use the enrollment token." = "Google Workspace ne peut gérer que le navigateur Google Chrome. Passez ce profil à Google Chrome pour utiliser le jeton d'inscription.";
+"Google Workspace can only manage the Google Chrome browser, and this profile’s saved browsing data was created by Chromium. Delete the profile data in General settings first, then switch the browser to Google Chrome." = "Google Workspace ne peut gérer que le navigateur Google Chrome, et les données de navigation enregistrées de ce profil ont été créées par Chromium. Supprimez d'abord les données du profil dans les réglages Général, puis choisissez Google Chrome comme navigateur.";
+"OK" = "OK";

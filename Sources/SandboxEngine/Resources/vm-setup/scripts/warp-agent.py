@@ -48,10 +48,13 @@ RESOLV_STUB = "/usr/lib/libresolv_stub.so"
 WARP_PORT = 40000
 WARP_FLAG = "/tmp/bromure/warp-active"
 
-# WARP is a glibc binary on musl Alpine — needs the resolver stub.
-# Force C locale so warp-cli output is always English.
-WARP_ENV = dict(os.environ, LD_PRELOAD=RESOLV_STUB,
-                LANG="C", LC_ALL="C", LANGUAGE="C")
+# On the old musl (Alpine) image WARP was a foreign glibc binary and
+# needed the resolver stub preloaded; on the Ubuntu image the stub
+# doesn't exist and none is needed. Force C locale so warp-cli output
+# is always English.
+WARP_ENV = dict(os.environ, LANG="C", LC_ALL="C", LANGUAGE="C")
+if os.path.exists(RESOLV_STUB):
+    WARP_ENV["LD_PRELOAD"] = RESOLV_STUB
 
 LOG_FILE = "/tmp/bromure/warp-agent.log"
 

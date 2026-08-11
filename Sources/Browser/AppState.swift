@@ -274,7 +274,7 @@ final class AppState: @unchecked Sendable {
                     _ = await store.refresh()
                     let catalog = store.effective()
                     try await imageManager.createBaseImage(
-                        diskSizeMB: 4608,
+                        diskSizeMB: 5120,
                         keyboardLayout: keyboard,
                         naturalScrolling: scrolling,
                         displayScale: scale,

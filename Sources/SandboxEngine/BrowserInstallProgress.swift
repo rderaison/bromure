@@ -123,7 +123,7 @@ public final class BrowserInstallProgress {
             // "copied 213 macOS font files" — surface the count verbatim.
             status = line.replacingOccurrences(of: "[browser-postinstall] ", with: "")
             bumpTail(0.35)
-        } else if line.contains("entering alpine chroot") {
+        } else if line.contains("entering image chroot") {
             bumpTail(0.40)
         } else if let name = Self.stepName(of: line, marker: "BEGIN step ") {
             status = String(format: String(localized: "Installing %@…"), name)

@@ -4,7 +4,7 @@ import Virtualization
 /// Manages the lifecycle of an ephemeral Linux sandbox VM with optional
 /// state save/restore for instant boot.
 ///
-/// On first run, boots Alpine Linux with Chromium from the base image.
+/// On first run, boots Ubuntu Linux with Chromium from the base image.
 /// After Chromium is ready, saves VM state to disk. Subsequent runs
 /// restore from that snapshot for sub-second startup.
 public final class LinuxSandboxVM: NSObject, VZVirtualMachineDelegate, @unchecked Sendable {

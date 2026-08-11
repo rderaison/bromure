@@ -17,7 +17,9 @@ modprobe loop 2>/dev/null
 mkdir -p /mnt/share
 
 # Start dbus early (needed by warp-svc if VPN is enabled later).
-/usr/bin/dbus-daemon --system 2>/dev/null
+# On the Ubuntu image systemd owns the system bus — only start one if
+# no bus is up (Alpine/openrc, or a degraded boot).
+[ -S /run/dbus/system_bus_socket ] || /usr/bin/dbus-daemon --system 2>/dev/null
 
 # Network health probe — backgrounded so on-boot.sh returns quickly.
 # Waits up to 8s for DHCP, then validates gateway + external reachability.
@@ -34,10 +36,21 @@ mkdir -p /mnt/share
         sleep 0.5
         i=$((i + 1))
     done
+    # Wait for the default route too: under systemd this probe starts
+    # earlier than it did under OpenRC, and dhclient installs the address
+    # a moment before the route — probing in that gap misreports
+    # BROMURE_NET_NO_TRAFFIC on a perfectly healthy boot.
+    GW=""
+    i=0
+    while [ $i -lt 16 ]; do
+        GW=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')
+        [ -n "$GW" ] && break
+        sleep 0.5
+        i=$((i + 1))
+    done
     if [ -z "$IP" ]; then
         echo "BROMURE_NET_NO_IP"
     else
-        GW=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')
         if [ -n "$GW" ] \
            && ping -c1 -W2 "$GW" >/dev/null 2>&1 \
            && ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; then

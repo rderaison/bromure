@@ -638,10 +638,14 @@ extension LinuxImageManager {
 
         let bootLoader = VZLinuxBootLoader(kernelURL: kernelURL)
         bootLoader.initialRamdiskURL = initrdURL
-        // Same cmdline shape as a real session boot (buildLinuxVMConfig),
-        // minus the user's extra options — the verify must gate the
-        // published artifact, not the local host's tweaks.
-        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,virtiofs,loop,dm-crypt rw"
+        // Boot EXACTLY as a real session does (buildLinuxVMConfig) so the
+        // verify gates what users actually get: net.ifnames=0 (the guest
+        // network config addresses eth0) and the default extra options
+        // (arm64.nosme — the Ubuntu generic kernel can early-fault probing
+        // SME on Apple Silicon without it). Uses the default extra options,
+        // not the local host's tweaks — the verify gates the published
+        // artifact, not one machine's overrides.
+        bootLoader.commandLine = "console=tty1 console=hvc0 root=/dev/vda rootfstype=ext4 modules=virtio_blk,virtiofs,loop,dm-crypt rw net.ifnames=0 \(VMConfig.defaultExtraKernelOptions)"
         vzConfig.bootLoader = bootLoader
 
         vzConfig.platform = VZGenericPlatformConfiguration()
@@ -697,11 +701,10 @@ extension LinuxImageManager {
 
         progress(.message("Booting image (waiting for the root serial prompt)…"))
         do {
-            // The image's inittab spawns `/bin/login -f root` on hvc0;
-            // Alpine's /etc/profile sets PS1 to `\h:\w\$ `. The image
-            // never configures a hostname (config-agent deliberately
-            // avoids the kernel hostname), so match only the `:~#` tail —
-            // it covers `localhost:~#` and `(none):~#` alike.
+            // systemd's serial-getty@hvc0 autologs root in; bash's PS1 is
+            // `\u@\h:\w\$ ` → `root@bromure:~#`. Match only the `:~#` tail
+            // so it holds regardless of hostname (and still covered the old
+            // Alpine `localhost:~#` / `(none):~#` prompts).
             try await consoleOutput.waitFor(
                 marker: ":~#",
                 timeout: timeout,
