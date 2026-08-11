@@ -23,6 +23,12 @@ import time
 VSOCK_PORT = 5000
 HOST_CID = 2
 
+# Non-default user-data-dir for ephemeral (non-persistent) Google Chrome
+# sessions. Branded Chrome refuses --remote-debugging-port on the default
+# dir; a persistent profile already supplies its own dir. Lives only for
+# the VM's lifetime.
+EPHEMERAL_CHROME_DIR = "/home/chrome/.bromure-chrome"
+
 
 def run(cmd, check=False):
     """Run a shell command, return (returncode, stdout)."""
@@ -256,13 +262,20 @@ def sh_escape(s):
 _FALLBACK_CHROME_MAJOR = "142"
 
 
-def chromium_major_version():
+def browser_binary(cfg):
+    """The browser binary this session launches. Both are baked into the
+    image; the host sends "chrome" for profiles that picked official
+    Google Chrome, absent/anything-else means Chromium."""
+    return "google-chrome-stable" if cfg.get("browser") == "chrome" else "chromium-browser"
+
+
+def chromium_major_version(binary="chromium-browser"):
     """Best-effort Chrome major version (e.g. '142') from the installed
-    Chromium, so a spoofed macOS UA reports a version consistent with the
+    browser, so a spoofed macOS UA reports a version consistent with the
     real engine instead of a stale hardcoded one."""
     try:
         out = subprocess.run(
-            ["chromium-browser", "--version"],
+            [binary, "--version"],
             capture_output=True, text=True, timeout=10,
         ).stdout
         m = re.search(r"\b(\d+)\.\d+\.\d+\.\d+\b", out)
@@ -283,7 +296,7 @@ def resolve_user_agent(cfg):
     custom = (cfg.get("userAgent") or "").strip()
     if custom:
         return custom
-    major = chromium_major_version()
+    major = chromium_major_version(browser_binary(cfg))
     return (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -302,6 +315,16 @@ def write_chrome_env(cfg):
     # grayscale AA; disabling here matches that path and avoids the slight
     # chromatic fringing/blur that subpixel rendering produces on this display.
     disable_features = ["LcdText"]
+
+    # Branded Chrome ≥137 ignores --load-extension (an anti-sideloading
+    # hardening for user desktops) unless this kill-switch feature is
+    # disabled — without it none of the Bromure extensions (link sender,
+    # file picker, credential bridge, …) load. Inside a disposable VM
+    # running our own images the hardening protects nothing. If Google
+    # removes the kill-switch in a future Chrome, the fallback is packing
+    # the extensions as CRX + external-extensions descriptors.
+    if browser_binary(cfg) == "google-chrome-stable":
+        disable_features.append("DisableLoadExtensionCommandLineSwitch")
 
     if cfg.get("darkMode"):
         extra_flags.append("--force-dark-mode")
@@ -413,6 +436,17 @@ def write_chrome_env(cfg):
     if profile_dir:
         extra_flags.append(f"--user-data-dir={profile_dir}")
         enable_features.append("WebAuthenticationNewPasskeyUI")
+    elif browser_binary(cfg) == "google-chrome-stable":
+        # Branded Google Chrome (unlike Chromium) refuses to open the
+        # --remote-debugging-port on the DEFAULT data directory — it logs
+        # "DevTools remote debugging requires a non-default data
+        # directory" and never binds the port, which breaks the CDP
+        # automation bridge and the CJK input agent. An ephemeral
+        # (non-persistent) profile normally gets no --user-data-dir, so
+        # point Chrome at an explicit non-default dir. It lives only for
+        # the VM's lifetime; seed_browser_data_dir() below copies the
+        # baked Preferences into it.
+        extra_flags.append(f"--user-data-dir={EPHEMERAL_CHROME_DIR}")
     if cfg.get("restoreSession"):
         extra_flags.append("--restore-last-session")
     if cfg.get("microphone"):
@@ -532,6 +566,9 @@ def write_chrome_env(cfg):
     lines.append(f"export LANG={sh_escape(f'{locale}.UTF-8')}")
     lines.append(f"export LC_ALL={sh_escape(f'{locale}.UTF-8')}")
     lines.append(f"export LANGUAGE={sh_escape(base_lang)}")
+
+    # Which browser binary xinitrc launches (Chromium or Google Chrome).
+    lines.append(f"BROWSER_BIN={browser_binary(cfg)}")
 
     # User-Agent. Passed as its own var (not folded into EXTRA_FLAGS, whose
     # values xinitrc word-splits on spaces) so the spaced UA string reaches
@@ -898,6 +935,15 @@ def write_dynamic_policy(cfg):
             }
         policy["ExtensionSettings"] = ext_settings
 
+    # Chrome Enterprise Core (Google Workspace) enrollment: the admin's
+    # enrollment token makes branded Chrome register with the Admin
+    # console as a managed browser. Chromium ships no CBCM client — the
+    # host UI steers the profile to Chrome before sending the token, and
+    # the gate here keeps a stray token from landing in a Chromium
+    # session's policies.
+    if cfg.get("chromeEnrollmentToken") and browser_binary(cfg) == "google-chrome-stable":
+        policy["CloudManagementEnrollmentToken"] = cfg["chromeEnrollmentToken"]
+
     policy_path = "/etc/chromium/policies/managed/session.json"
     os.makedirs(os.path.dirname(policy_path), exist_ok=True)
     with open(policy_path, "w") as f:
@@ -928,8 +974,9 @@ def configure_services(cfg, ca_count):
 
         # Start warp-svc early so it can boot while Chrome starts
         if os.path.isfile("/bin/warp-svc"):
-            warp_env = dict(os.environ, LD_PRELOAD="/usr/lib/libresolv_stub.so",
-                            LANG="C", LC_ALL="C", LANGUAGE="C")
+            warp_env = dict(os.environ, LANG="C", LC_ALL="C", LANGUAGE="C")
+            if os.path.isfile("/usr/lib/libresolv_stub.so"):
+                warp_env["LD_PRELOAD"] = "/usr/lib/libresolv_stub.so"
             svc_log = open("/tmp/bromure/warp-svc.log", "a")
             subprocess.Popen(
                 ["/bin/warp-svc"],
@@ -1083,8 +1130,12 @@ def configure_services(cfg, ca_count):
              "squid", "-N", "-f", "/etc/squid/squid.conf"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # Profile preferences
+    # Profile preferences. Persistent profiles use their mounted dir;
+    # ephemeral Chrome sessions use the non-default dir we point Chrome at
+    # so remote debugging works (see the --user-data-dir logic above).
     profile_dir = cfg.get("profileDir")
+    if not profile_dir and browser_binary(cfg) == "google-chrome-stable":
+        profile_dir = EPHEMERAL_CHROME_DIR
     if profile_dir:
         prefs_dir = f"{profile_dir}/Default"
         prefs_file = f"{prefs_dir}/Preferences"

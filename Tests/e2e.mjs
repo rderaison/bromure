@@ -243,6 +243,15 @@ async function withSession(profileName, profileSettings, checkFn) {
     `set profile setting "${profileName}" key "allowAutomation" to value "true"`
   );
 
+  // BROMURE_E2E_BROWSER=chrome|chromium forces every test profile onto
+  // that browser, so the whole suite can be run once per browser.
+  // Explicit per-test `browser` settings still win (applied below).
+  if (process.env.BROMURE_E2E_BROWSER && !("browser" in profileSettings)) {
+    osascript(
+      `set profile setting "${profileName}" key "browser" to value "${process.env.BROMURE_E2E_BROWSER}"`
+    );
+  }
+
   // Apply additional settings
   for (const [key, value] of Object.entries(profileSettings)) {
     if (["persistent", "color", "homePage", "comments"].includes(key)) continue;
@@ -1963,7 +1972,7 @@ print('n/a')
         // 10.0.0.1 should be blocked by the private range filter.
         const result = await vmExec(
           sessionId,
-          "wget -q -O /dev/null --timeout=3 http://10.0.0.1/ 2>&1; echo EXIT=$?",
+          "wget -q -O /dev/null --tries=1 --timeout=3 http://10.0.0.1/ 2>&1; echo EXIT=$?",
           10
         );
         assertIncludes(result.stdout, "EXIT=", "wget did not complete");
@@ -1999,7 +2008,7 @@ print('n/a')
         // Port 8080 should be blocked
         const alt = await vmExec(
           sessionId,
-          "wget -q -O /dev/null --timeout=3 http://1.1.1.1:8080/ 2>&1; echo EXIT=$?",
+          "wget -q -O /dev/null --tries=1 --timeout=3 http://1.1.1.1:8080/ 2>&1; echo EXIT=$?",
           10
         );
         assert(!alt.stdout.includes("EXIT=0"), "Port 8080 should be blocked");
@@ -2200,7 +2209,7 @@ print('n/a')
         // Private ranges should be blocked
         const priv = await vmExec(
           sessionId,
-          "wget -q -O /dev/null --timeout=3 http://10.0.0.1/ 2>&1; echo EXIT=$?",
+          "wget -q -O /dev/null --tries=1 --timeout=3 http://10.0.0.1/ 2>&1; echo EXIT=$?",
           10
         );
         assert(!priv.stdout.includes("EXIT=0"), "10.0.0.1 should be blocked in isolated mode");

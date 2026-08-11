@@ -1,6 +1,13 @@
 #!/bin/sh
-# Bromure VM setup script — installs Alpine Linux with Chromium
-# Usage: setup.sh KEYBOARD_LAYOUT NATURAL_SCROLLING LOCALE DISPLAY_SCALE ALPINE_VERSION [BUILD_MODE]
+# Bromure VM setup script — installs Ubuntu (glibc) with Chromium.
+#
+# Runs inside the Alpine netboot installer environment driven by the host
+# over the serial console (the installer stays Alpine — it's tiny and the
+# whole console orchestration depends on it; only the TARGET rootfs is
+# Ubuntu). debootstraps Ubuntu onto the whole-disk ext4 /dev/vda, then
+# chroots to install the kernel, X, Chromium and the Bromure agents.
+#
+# Usage: setup.sh KEYBOARD_LAYOUT NATURAL_SCROLLING LOCALE DISPLAY_SCALE UBUNTU_RELEASE [BUILD_MODE]
 # No set -e: non-critical sections (ad blocking) may fail gracefully
 #
 # BUILD_MODE:
@@ -8,20 +15,22 @@
 #                    macOS fonts.
 #   foss           — redistributable build for the publish pipeline
 #                    (bromure init-foss-image → dl.bromure.io/browser-images/):
-#                    free software only — no Apple fonts — and a missing
-#                    out-of-tree kernel module FAILS the build instead of
-#                    degrading. (Cloudflare WARP is never installed here
-#                    in either mode; it's a browser-img-catalog.json
-#                    postinstall step.)
+#                    free software only — no Apple fonts — and a failed
+#                    v4l2loopback dkms build FAILS the build instead of
+#                    degrading. (Cloudflare WARP and Google Chrome are
+#                    never installed here in either mode; they're
+#                    browser-img-catalog.json postinstall steps.)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KB_LAYOUT_SPEC="${1:-us}"
 NATURAL_SCROLLING="${2:-true}"
 LOCALE="${3:-en_US}"
 DISPLAY_SCALE="${4:-2}"
-ALPINE_VERSION="${5:-3.22}"
+UBUNTU_RELEASE="${5:-noble}"
 BUILD_MODE="${6:-user}"
 CURSOR_SIZE=$((DISPLAY_SCALE * 24))
+
+UBUNTU_MIRROR="${UBUNTU_MIRROR:-http://ports.ubuntu.com/ubuntu-ports}"
 
 # Parse layout:variant format (e.g. "ch:fr" → layout="ch", variant="fr")
 case "$KB_LAYOUT_SPEC" in
@@ -33,11 +42,11 @@ esac
 # Host-side package proxy (same channel as the AC bake). When the host
 # runs its HTTP→HTTPS proxy (AlpinePackageProxy) it passes the guest URL
 # in ALPINE_REPO_BASE; the kernel cmdline's alpine_repo/modloop already
-# point at it. Export it as http(s)_proxy so every other fetch — chroot
-# apk, the ad-block/Tranco lists, kernel modules — rides the host's TLS
-# stack too (guest-direct TLS is unreliable on VPN/MITM hosts and the
-# build server). The proxy host itself must be in no_proxy or requests
-# to the proxy would recurse through it forever.
+# point at it. Export it as http(s)_proxy so every other fetch — the
+# installer's apk, debootstrap, the chroot's apt, the ad-block/Tranco
+# lists — rides the host's TLS stack too (guest-direct TLS is unreliable
+# on VPN/MITM hosts and the build server). The proxy host itself must be
+# in no_proxy or requests to the proxy would recurse through it forever.
 # ---------------------------------------------------------------------------
 
 : "${ALPINE_REPO_BASE:=https://dl-cdn.alpinelinux.org}"
@@ -121,58 +130,413 @@ http_proxy= https_proxy= wget -q -O /dev/null --spider "$NET_PROBE" 2>/dev/null 
 }
 
 # ---------------------------------------------------------------------------
-# Format and mount target disk
+# Installer-side toolchain. debootstrap is in Alpine's community repo
+# (already enabled in the netboot env). GNU tar + xz + zstd because
+# debootstrap's dpkg-deb extractor shells out to tar and BusyBox tar
+# fails on some Ubuntu .deb data tarballs; zstd for control.tar.zst.
+# GNU wget + CA certs: the ad-block/Tranco fetches below use https URLs
+# and busybox wget's proxy/TLS support isn't dependable.
 # ---------------------------------------------------------------------------
 
 modprobe ext4
-# GNU wget + CA certs alongside e2fsprogs: the ad-block/Tranco/kernel-
-# module fetches below use https URLs, and busybox wget's proxy/TLS
-# support isn't dependable — GNU wget honors http(s)_proxy/no_proxy.
-retry apk add e2fsprogs wget ca-certificates
+retry apk add e2fsprogs wget ca-certificates debootstrap tar xz zstd
 mkfs.ext4 -q -F /dev/vda
 mkdir -p /mnt
 mount -t ext4 /dev/vda /mnt
 
 # ---------------------------------------------------------------------------
-# Install Alpine base system
+# debootstrap Ubuntu onto the target disk. Whole-disk ext4, no partition
+# table — the image direct-kernel-boots via VZLinuxBootLoader.
+# --variant=minbase keeps the rootfs small; everything else lands in the
+# chroot phase below.
 # ---------------------------------------------------------------------------
 
-retry apk add alpine-base --root /mnt --initdb \
-    --keys-dir /etc/apk/keys --repositories-file /etc/apk/repositories
+echo "SANDBOX_STEP_START:Installing Ubuntu base system"
+retry debootstrap \
+    --arch=arm64 \
+    --variant=minbase \
+    --include=ca-certificates,curl,gnupg,locales,tzdata \
+    --components=main,universe \
+    "$UBUNTU_RELEASE" /mnt "$UBUNTU_MIRROR"
+echo "SANDBOX_STEP_DONE:Installing Ubuntu base system"
 
-mkdir -p /mnt/etc/apk
-# During the bake the image's apk fetches ride the proxy (plain HTTP,
-# host-side TLS); the canonical HTTPS URLs are restored in the cleanup
-# section so the shipped image points straight at the CDN.
-printf '%s\n' \
-    "${ALPINE_REPO_BASE}/alpine/v${ALPINE_VERSION}/main" \
-    "${ALPINE_REPO_BASE}/alpine/v${ALPINE_VERSION}/community" \
-    > /mnt/etc/apk/repositories
+cat > /mnt/etc/apt/sources.list <<EOF
+deb $UBUNTU_MIRROR $UBUNTU_RELEASE main universe
+deb $UBUNTU_MIRROR ${UBUNTU_RELEASE}-updates main universe
+deb $UBUNTU_MIRROR ${UBUNTU_RELEASE}-security main universe
+EOF
 
-# Write well-known public DNS as initial resolv.conf for the installed image.
-# DHCP (eth0 inet dhcp) will overwrite this at boot, but it serves as a sane
-# fallback if DHCP is slow or the DHCP-provided DNS doesn't work.
-# Don't copy the installer's resolv.conf — it contains the vmnet gateway IP
-# from the build-time vmnet instance, which may differ at runtime.
-printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /mnt/etc/resolv.conf
+echo "bromure" > /mnt/etc/hostname
+cat > /mnt/etc/hosts <<'EOH'
+127.0.0.1       localhost
+127.0.1.1       bromure
+::1             localhost ip6-localhost ip6-loopback
+EOH
 
-# Bind-mount for chroot
+# The chroot needs a working resolver during the bake; the canonical
+# static fallback is restored in the cleanup section (DHCP overwrites it
+# at runtime anyway) so no build-time network detail leaks into the image.
+cp /etc/resolv.conf /mnt/etc/resolv.conf
+
+# Stash build-time vars so the chroot can read them back without us
+# having to interpolate through a quoted heredoc.
+mkdir -p /mnt/tmp
+{
+    echo "BROMURE_PROXY=$([ -n "$PROXIED" ] && echo "$ALPINE_REPO_BASE")"
+    echo "LOCALE=$LOCALE"
+    echo "BUILD_MODE=$BUILD_MODE"
+} > /mnt/tmp/bromure-build.env
+
+# Bind-mount for chroot. The netboot's /dev is a bare devtmpfs from the
+# rdinit shim — materialise /dev/pts first or the bind of it fails.
+[ -d /dev/pts ] || mkdir /dev/pts
+mountpoint -q /dev/pts 2>/dev/null || mount -t devpts devpts /dev/pts
+mount --bind /dev /mnt/dev
+mount --bind /dev/pts /mnt/dev/pts
 mount -t proc proc /mnt/proc
 mount -t sysfs sys /mnt/sys
-mount --bind /dev /mnt/dev
 
 # ---------------------------------------------------------------------------
-# Install packages
+# Chroot phase: kernel, systemd, X, Chromium, agents' runtime, users,
+# services. Single heredoc so this file stays the one script the host
+# shares via virtiofs.
 # ---------------------------------------------------------------------------
 
-retry chroot /mnt apk update
-retry chroot /mnt apk add openrc linux-lts linux-firmware-none mkinitfs e2fsprogs
-retry chroot /mnt apk add \
-    chromium chromium-lang xorg-server xinit mesa-dri-gallium mesa-egl mesa-gl mesa-gles \
-    mesa-gbm eudev dbus dbus-x11 ttf-freefont ttf-dejavu font-noto-emoji font-liberation \
-    xf86-input-libinput agetty util-linux openbox xrandr xdotool setxkbmap \
-    pipewire pipewire-pulse wireplumber pipewire-tools alsa-utils alsa-plugins-pulse adwaita-icon-theme \
-    spice-vdagent
+echo "SANDBOX_STEP_START:Installing packages"
+chroot /mnt /bin/bash <<'CHROOT_EOF'
+set -e
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+. /tmp/bromure-build.env
+
+log() { printf '[bromure-chroot] %s (t+%ss)\n' "$*" "$SECONDS"; }
+fail() { printf 'SANDBOX_SETUP_FAILED: %s\n' "$*"; exit 1; }
+
+retry() {
+    for i in 1 2 3; do
+        "$@" && return 0
+        log "retry $i/3 failed: $*"
+        sleep 3
+    done
+    fail "command failed after 3 attempts: $*"
+}
+
+# Route every chroot HTTP(S) request through the host's proxy (see the
+# outer proxy section). apt gets an explicit config on top of the env
+# vars — defensive, and a visible record of the override (removed in
+# cleanup; it points at a bake-time-only listener).
+if [ -n "$BROMURE_PROXY" ]; then
+    export http_proxy="$BROMURE_PROXY"
+    export https_proxy="$BROMURE_PROXY"
+    export HTTP_PROXY="$BROMURE_PROXY"
+    export HTTPS_PROXY="$BROMURE_PROXY"
+    _host_port="${BROMURE_PROXY##*://}"
+    _proxy_host="${_host_port%%:*}"
+    export no_proxy="localhost,127.0.0.1,::1,$_proxy_host"
+    export NO_PROXY="$no_proxy"
+    mkdir -p /etc/apt/apt.conf.d
+    cat > /etc/apt/apt.conf.d/99-bromure-proxy <<APTCONF
+Acquire::http::Proxy "$BROMURE_PROXY";
+Acquire::https::Proxy "$BROMURE_PROXY";
+Acquire::http::Proxy::$_proxy_host DIRECT;
+Acquire::https::Proxy::$_proxy_host DIRECT;
+APTCONF
+fi
+
+# Locales: the browser session locale plus en_US as the baseline.
+sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+grep -q "^${LOCALE}.UTF-8" /etc/locale.gen || echo "${LOCALE}.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen
+update-locale LANG=en_US.UTF-8
+
+log "apt-get update"
+retry apt-get update -y -qq
+log "apt-get dist-upgrade (catch security + bug fixes)"
+retry apt-get dist-upgrade -y -q -o Dpkg::Options::="--force-confnew"
+
+# Kernel + init + network base. linux-image-virtual is the minimal
+# generic kernel; modules-extra below adds virtio_snd, uinput, the V4L2
+# core, and friends that the browser image needs.
+log "apt-get install kernel + systemd + network base"
+retry apt-get install -y -q --no-install-recommends \
+    linux-image-virtual initramfs-tools kmod \
+    systemd systemd-sysv udev dbus dbus-x11 \
+    ifupdown isc-dhcp-client iproute2 iputils-ping netbase \
+    ca-certificates wget curl gnupg
+
+KVER=$(ls /lib/modules)
+log "kernel $KVER — installing linux-modules-extra"
+retry apt-get install -y -q --no-install-recommends "linux-modules-extra-$KVER"
+
+# Pre-seed keyboard-configuration so the X install below never prompts
+# and Xorg gets a coherent /etc/default/keyboard baseline (the real
+# layout comes from the templated xorg.conf.d file the outer script
+# installs).
+echo "keyboard-configuration keyboard-configuration/layoutcode select us"       | debconf-set-selections
+echo "keyboard-configuration keyboard-configuration/modelcode select pc105"     | debconf-set-selections
+echo "keyboard-configuration keyboard-configuration/variantcode select"         | debconf-set-selections
+echo "keyboard-configuration keyboard-configuration/optionscode select"         | debconf-set-selections
+echo "keyboard-configuration keyboard-configuration/xkb-keymap select us"       | debconf-set-selections
+echo "console-setup console-setup/codeset47 select Guess optimal character set" | debconf-set-selections
+
+log "apt-get install X + WM + fonts + audio"
+retry apt-get install -y -q --no-install-recommends \
+    xserver-xorg-core xserver-xorg-legacy \
+    xserver-xorg-input-libinput xserver-xorg-video-modesetting \
+    xinit xauth x11-xserver-utils x11-xkb-utils \
+    keyboard-configuration console-setup xkb-data \
+    openbox xdotool \
+    spice-vdagent \
+    libgl1-mesa-dri \
+    fonts-dejavu-core fonts-freefont-ttf fonts-liberation fonts-noto-color-emoji \
+    adwaita-icon-theme \
+    pipewire pipewire-pulse wireplumber pulseaudio-utils alsa-utils \
+    fontconfig
+
+log "apt-get install proxy/DNS/VPN tools"
+retry apt-get install -y -q --no-install-recommends \
+    squid dnsmasq proxychains4 cryptsetup inotify-tools jq python3 \
+    v4l-utils libnss3-tools bash wireguard-tools \
+    strongswan strongswan-swanctl charon-systemd openvpn openssl \
+    doas nftables unzip
+
+# ---------------------------------------------------------------------------
+# Chromium — native deb from the xtradeb PPA (Ubuntu's own
+# chromium-browser package is a transitional stub that installs the
+# snap, unusable here: no snapd in this image). Static keyring, PPA
+# pinned low so only Chromium ever comes from it.
+# ---------------------------------------------------------------------------
+
+log "adding xtradeb PPA (native Chromium debs)"
+install -d -m 0755 /etc/apt/keyrings
+retry sh -c 'curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x5301FA4FD93244FBC6F6149982BB6851C64F6880" \
+    | gpg --dearmor > /etc/apt/keyrings/xtradeb.gpg'
+echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/xtradeb.gpg] https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) main" \
+    > /etc/apt/sources.list.d/xtradeb.list
+cat > /etc/apt/preferences.d/xtradeb <<'EOP'
+Package: *
+Pin: release o=LP-PPA-xtradeb-apps
+Pin-Priority: 100
+
+Package: chromium chromium-*
+Pin: release o=LP-PPA-xtradeb-apps
+Pin-Priority: 500
+EOP
+retry apt-get update -y -qq
+log "apt-get install chromium"
+retry apt-get install -y -q --no-install-recommends chromium
+apt-get install -y -q --no-install-recommends chromium-l10n || true
+
+# Compat shim: every Bromure script and agent launches `chromium-browser`
+# (the Alpine-era binary name). Keep that name working regardless of
+# which browser package provides the real binary.
+cat > /usr/local/bin/chromium-browser <<'EOSH'
+#!/bin/sh
+exec /usr/bin/chromium "$@"
+EOSH
+chmod 755 /usr/local/bin/chromium-browser
+
+# Google Chrome (installed later by a browser-img-catalog.json
+# postinstall step) reads /etc/opt/chrome/{policies,native-messaging-hosts}.
+# Point it at the Chromium tree so both browsers see the same Bromure
+# policies and extension hosts.
+mkdir -p /etc/opt /etc/chromium
+ln -sfn /etc/chromium /etc/opt/chrome
+
+# ---------------------------------------------------------------------------
+# Users and permissions
+# ---------------------------------------------------------------------------
+
+passwd -d root
+id chrome >/dev/null 2>&1 || useradd -m -s /bin/sh chrome
+for g in video render input audio tty; do
+    getent group "$g" >/dev/null || groupadd -r "$g"
+done
+usermod -a -G video,render,input,audio,tty chrome
+# Suppress Ubuntu's motd/legal spam on the autologin consoles.
+touch /home/chrome/.hushlogin /root/.hushlogin
+chown chrome:chrome /home/chrome/.hushlogin
+
+# ---------------------------------------------------------------------------
+# Boot services (systemd replaces Alpine's OpenRC + inittab)
+# ---------------------------------------------------------------------------
+
+# Autologin chrome on tty1 (the graphical console; .profile starts X).
+install -d /etc/systemd/system/getty@tty1.service.d
+cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<'EOG'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin chrome --noclear %I $TERM
+EOG
+
+# Autologin root on the hvc0 serial console (host-side debug channel).
+install -d /etc/systemd/system/serial-getty@hvc0.service.d
+cat > /etc/systemd/system/serial-getty@hvc0.service.d/autologin.conf <<'EOG'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --keep-baud 115200,57600,38400,9600 %I $TERM
+EOG
+systemctl enable serial-getty@hvc0.service >/dev/null 2>&1 || true
+
+# Classic ifupdown networking (reads /etc/network/interfaces, installed
+# by the outer script) — same DHCP semantics as the Alpine image, and
+# `ifdown eth0` releases the vmnet lease before poweroff.
+systemctl enable networking >/dev/null 2>&1 || true
+
+# spice-vdagentd is the system half of the clipboard bridge; the apt
+# postinst enable doesn't always fire inside a debootstrap chroot.
+systemctl enable spice-vdagentd.socket spice-vdagentd.service >/dev/null 2>&1 || true
+
+# Daemons the agents start BY HAND per-profile (squid -N, dnsmasq -C,
+# openvpn, charon) must not autostart as system services. Mask rather
+# than disable: masking is symlink-to-/dev/null and cannot be undone by
+# a later postinst/preset pass, and one systemctl call per unit so an
+# unknown unit name can't short-circuit the rest.
+for svc in squid dnsmasq openvpn strongswan-starter strongswan charon-systemd; do
+    systemctl mask "$svc.service" >/dev/null 2>&1 || true
+done
+systemctl mask apt-daily.timer apt-daily-upgrade.timer motd-news.timer \
+    e2scrub_all.timer fstrim.timer man-db.timer >/dev/null 2>&1 || true
+
+# on-boot.sh first, then the Bromure agents (Alpine's inittab `::once`
+# entries, one unit each; resilient-launch.sh supplies the restart loop).
+cat > /etc/systemd/system/bromure-onboot.service <<'EOS'
+[Unit]
+Description=Bromure early boot setup
+DefaultDependencies=no
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=basic.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/on-boot.sh
+[Install]
+WantedBy=basic.target
+EOS
+
+cat > /etc/systemd/system/bromure-config-agent.service <<'EOS'
+[Unit]
+Description=Bromure config agent
+After=bromure-onboot.service
+Wants=bromure-onboot.service
+[Service]
+Type=simple
+Restart=no
+# config-agent applies the claim-time config, spawns the per-profile
+# daemons (squid/routing-socks/warp-svc/download-guard via
+# resilient-launch), then EXITS by design. Default KillMode
+# (control-group) would reap those daemons the moment the main process
+# exits — on Alpine's inittab they survived as orphans. process = only
+# the main pid is ever signalled; the spawned daemons live on.
+KillMode=process
+ExecStart=/usr/local/bin/config-agent.py
+[Install]
+WantedBy=multi-user.target
+EOS
+
+bromure_agent_unit() {
+    # bromure_agent_unit <name> <user> <script>
+    cat > "/etc/systemd/system/bromure-$1.service" <<EOS
+[Unit]
+Description=Bromure $1
+After=bromure-onboot.service
+Wants=bromure-onboot.service
+[Service]
+Type=simple
+User=$2
+ExecStart=/usr/local/bin/resilient-launch.sh /usr/local/bin/$3
+[Install]
+WantedBy=multi-user.target
+EOS
+}
+
+bromure_agent_unit file-agent            chrome file-agent.py
+bromure_agent_unit webcam-agent          root   webcam-agent.py
+bromure_agent_unit precision-scroll-agent root  precision-scroll-agent.py
+bromure_agent_unit warp-agent            root   warp-agent.py
+bromure_agent_unit wireguard-agent       root   wireguard-agent.py
+bromure_agent_unit ikev2-agent           root   ikev2-agent.py
+bromure_agent_unit openvpn-agent         root   openvpn-agent.py
+bromure_agent_unit network-refresh-agent root   network-refresh-agent.py
+bromure_agent_unit keyboard-agent        chrome keyboard-agent.py
+bromure_agent_unit cjk-input-agent       chrome cjk-input-agent.py
+
+systemctl enable bromure-onboot.service bromure-config-agent.service \
+    bromure-file-agent.service bromure-webcam-agent.service \
+    bromure-precision-scroll-agent.service bromure-warp-agent.service \
+    bromure-wireguard-agent.service bromure-ikev2-agent.service \
+    bromure-openvpn-agent.service bromure-network-refresh-agent.service \
+    bromure-keyboard-agent.service bromure-cjk-input-agent.service \
+    >/dev/null 2>&1
+
+# ---------------------------------------------------------------------------
+# initramfs: make sure the virtio boot path is present, then rebuild.
+# ---------------------------------------------------------------------------
+
+for m in virtio_blk virtio_pci virtio_console ext4; do
+    grep -qx "$m" /etc/initramfs-tools/modules 2>/dev/null || echo "$m" >> /etc/initramfs-tools/modules
+done
+update-initramfs -u -k "$KVER" || update-initramfs -c -k "$KVER"
+
+# ---------------------------------------------------------------------------
+# v4l2loopback via dkms (webcam sharing). Ubuntu has no prebuilt module;
+# build it against the installed kernel, then purge the toolchain.
+#
+# The built .ko must be STASHED before the cleanup: removing the dkms
+# package (which apt-get autoremove does once gcc/make/headers are gone,
+# leaving it with no reverse-deps) runs its prerm `dkms remove`, which
+# deletes the module from /lib/modules. So copy the .ko to a plain file
+# outside the dkms tree first, run the cleanup, then restore it and
+# depmod — the shipped module is then an ordinary file the package
+# manager no longer tracks. (This mirrors the old Alpine image, which
+# copied a prebuilt .ko in rather than building in place.)
+# ---------------------------------------------------------------------------
+
+log "building v4l2loopback (dkms)"
+V4L2_OK=true
+# zstd: this kernel's modules are all .ko.zst, and dkms 3.x shells out
+# to the `zstd` CLI to compress what it builds. Without it the install
+# silently produces no usable module ("zstd: command not found", then an
+# empty updates/dkms). It's a build-time tool only — modprobe/kmod
+# decompress zstd modules on their own — so it's purged with the rest of
+# the toolchain below.
+apt-get install -y -q --no-install-recommends \
+    dkms "linux-headers-$KVER" gcc make zstd || V4L2_OK=false
+if [ "$V4L2_OK" = "true" ]; then
+    apt-get install -y -q --no-install-recommends v4l2loopback-dkms || V4L2_OK=false
+fi
+V4L2_KO=$(ls "/lib/modules/$KVER/updates/dkms/v4l2loopback.ko"* 2>/dev/null | head -1)
+if [ -n "$V4L2_KO" ]; then
+    cp "$V4L2_KO" "/tmp/v4l2loopback.ko.stash"
+    log "V4L2LOOPBACK_INSTALLED_OK"
+else
+    V4L2_OK=false
+    log "warning: v4l2loopback module missing — webcam sharing will not work"
+fi
+if [ "$BUILD_MODE" = "foss" ] && [ "$V4L2_OK" != "true" ]; then
+    fail "v4l2loopback dkms build failed for $KVER — a distribution build must not degrade"
+fi
+apt-get purge -y -q "linux-headers-*" gcc make dkms v4l2loopback-dkms zstd >/dev/null 2>&1 || true
+apt-get autoremove -y -q >/dev/null 2>&1 || true
+# Restore the stashed module now that the toolchain (and the dkms
+# bookkeeping that would delete it) is gone. Gzip it so it matches how
+# depmod/modprobe expect compressed modules on Ubuntu and to save space.
+if [ -f /tmp/v4l2loopback.ko.stash ]; then
+    mkdir -p "/lib/modules/$KVER/updates"
+    case "$V4L2_KO" in
+        *.zst) cp /tmp/v4l2loopback.ko.stash "/lib/modules/$KVER/updates/v4l2loopback.ko.zst" ;;
+        *.gz)  cp /tmp/v4l2loopback.ko.stash "/lib/modules/$KVER/updates/v4l2loopback.ko.gz" ;;
+        *)     cp /tmp/v4l2loopback.ko.stash "/lib/modules/$KVER/updates/v4l2loopback.ko" ;;
+    esac
+    rm -f /tmp/v4l2loopback.ko.stash
+fi
+depmod "$KVER"
+
+log "chroot phase complete"
+CHROOT_EOF
+[ $? -eq 0 ] || { echo "SANDBOX_SETUP_FAILED: chroot provisioning failed"; exit 1; }
+echo "SANDBOX_STEP_DONE:Installing packages"
 
 ls -la /mnt/sbin/init || {
     echo "SANDBOX_SETUP_FAILED: /sbin/init not found — package installation likely failed"
@@ -180,44 +544,11 @@ ls -la /mnt/sbin/init || {
 }
 
 # ---------------------------------------------------------------------------
-# Cloudflare WARP runtime dependencies (FOSS). The proprietary WARP
-# binary itself is NOT installed here — it can't ship in the
-# redistributable image, so it's declared as a postinstall step in
-# browser-img-catalog.json and lands on the end-user's machine (both the
-# download path and the local build apply catalog steps after this
-# script). Only the free glibc-compat layer and our own resolver stub
-# are baked.
-# ---------------------------------------------------------------------------
-
-retry chroot /mnt apk add gcompat libstdc++ ca-certificates nftables iproute2 \
-    glib nss nspr libgcc
-
-# Install the glibc resolver stub. gcompat lacks __res_init and newer
-# warp-cli also needs fcntl64; the shim (configs/resolv-stub.c) supplies
-# both. It's cross-compiled for arm64/musl by Jenkinsfile.resolv-stub and
-# committed to git, so image generation just copies the prebuilt .so in —
-# no gcc/musl-dev toolchain needed in the installer VM. Fail the build if
-# it's missing, mirroring the kernel-module distribution gate below.
-STUB_SO="$SCRIPT_DIR/resolv-stub/libresolv_stub.so"
-[ -f "$STUB_SO" ] || {
-    echo "SANDBOX_SETUP_FAILED: prebuilt libresolv_stub.so missing at $STUB_SO — build it with Jenkinsfile.resolv-stub"
-    exit 1
-}
-cp "$STUB_SO" /mnt/usr/lib/libresolv_stub.so
-chmod 0755 /mnt/usr/lib/libresolv_stub.so
-
-# ---------------------------------------------------------------------------
-# Install proxy and DNS tools
-# ---------------------------------------------------------------------------
-
-retry chroot /mnt apk add squid dnsmasq proxychains-ng cryptsetup inotify-tools jq python3 \
-    sqlite-libs v4l-utils nss-tools bash wireguard-tools strongswan openvpn openssl
-
-# ---------------------------------------------------------------------------
 # Configuration files (static)
 # ---------------------------------------------------------------------------
 
 # Proxy & DNS
+mkdir -p /mnt/etc/proxychains
 install_config configs/proxychains.conf /mnt/etc/proxychains/proxychains.conf
 
 mkdir -p /mnt/etc/pihole /mnt/var/log/pihole /mnt/etc/dnsmasq.d
@@ -252,58 +583,15 @@ install_config configs/fontconfig-local.conf /mnt/etc/fonts/local.conf
 mkdir -p /mnt/home/chrome/.config/gtk-3.0
 install_config configs/gtk3-settings.ini /mnt/home/chrome/.config/gtk-3.0/settings.ini
 
+# doas (opendoas on Ubuntu reads the single /etc/doas.conf)
+install_config configs/doas-chrome.conf /mnt/etc/doas.conf
+chmod 0400 /mnt/etc/doas.conf
+
 # ---------------------------------------------------------------------------
 # Configuration files (templated)
 # ---------------------------------------------------------------------------
 
 install_template configs/locale.sh /mnt/etc/profile.d/locale.sh
-
-# ---------------------------------------------------------------------------
-# Users and permissions
-# ---------------------------------------------------------------------------
-
-chroot /mnt sh -c 'echo "root:" | chpasswd'
-chroot /mnt adduser -D -s /bin/sh chrome
-chroot /mnt addgroup chrome video
-chroot /mnt addgroup -S render 2>/dev/null || true
-chroot /mnt addgroup chrome render
-chroot /mnt addgroup chrome input
-chroot /mnt addgroup chrome audio
-retry chroot /mnt apk add doas
-install_config configs/doas-chrome.conf /mnt/etc/doas.d/chrome.conf
-
-# ---------------------------------------------------------------------------
-# Services
-# ---------------------------------------------------------------------------
-
-chroot /mnt rc-update add devfs sysinit
-chroot /mnt rc-update add dmesg sysinit
-chroot /mnt rc-update add udev sysinit
-chroot /mnt rc-update add networking boot
-chroot /mnt rc-update add modules boot
-chroot /mnt rc-update add dbus default
-chroot /mnt rc-update add spice-vdagentd default
-
-# ---------------------------------------------------------------------------
-# Console and login
-# ---------------------------------------------------------------------------
-
-sed -i 's|^tty1::.*|tty1::respawn:/bin/login -f chrome|' /mnt/etc/inittab
-echo 'hvc0::respawn:/bin/login -f root' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/config-agent.py' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/file-agent.py' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/webcam-agent.py' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/precision-scroll-agent.py' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/warp-agent.py' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/wireguard-agent.py' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/ikev2-agent.py' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/openvpn-agent.py' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/resilient-launch.sh /usr/local/bin/network-refresh-agent.py' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/keyboard-agent.py' >> /mnt/etc/inittab
-echo '::once:/usr/local/bin/resilient-launch.sh su -s /bin/sh chrome -c /usr/local/bin/cjk-input-agent.py' >> /mnt/etc/inittab
-
-install_config scripts/debug.sh        /mnt/root/debug.sh          755
-install_config scripts/root-profile.sh /mnt/root/.profile
 
 # ---------------------------------------------------------------------------
 # Display and input
@@ -337,6 +625,9 @@ install_config   scripts/on-boot.sh        /mnt/usr/local/bin/on-boot.sh 755
 install_template scripts/xinitrc           /mnt/home/chrome/.xinitrc
 chroot /mnt chown chrome:chrome /home/chrome/.xinitrc
 
+install_config scripts/debug.sh        /mnt/root/debug.sh          755
+install_config scripts/root-profile.sh /mnt/root/.profile
+
 # Openbox
 mkdir -p /mnt/home/chrome/.config/openbox
 mkdir -p /mnt/home/chrome/.cache/openbox/sessions
@@ -344,9 +635,13 @@ install_config configs/openbox-rc.xml          /mnt/home/chrome/.config/openbox/
 install_config configs/openbox-rc-nativetabs.xml /mnt/home/chrome/.config/openbox/rc-nativetabs.xml
 install_config configs/openbox-menu.xml /mnt/home/chrome/.config/openbox/menu.xml
 
-# Chromium preferences
+# Browser preferences — same seed for both browsers (a session without a
+# persistent profile disk uses the default dotdir of whichever browser
+# the profile selects).
 mkdir -p /mnt/home/chrome/.config/chromium/Default
 install_config configs/chromium-preferences.json /mnt/home/chrome/.config/chromium/Default/Preferences
+mkdir -p /mnt/home/chrome/.config/google-chrome/Default
+install_config configs/chromium-preferences.json /mnt/home/chrome/.config/google-chrome/Default/Preferences
 chroot /mnt chown -R chrome:chrome /home/chrome/.config /home/chrome/.cache
 
 # ---------------------------------------------------------------------------
@@ -541,113 +836,59 @@ fi
 echo "SANDBOX_STEP_DONE:Downloading popular domains list"
 
 # ---------------------------------------------------------------------------
-# Out-of-tree kernel modules (v4l2loopback, rtc-pl031)
-#
-# Pre-built .ko.gz files are bundled in the app for the kernel version they
-# were compiled against (recorded in KVER).  If the installed kernel is
-# newer, fetch matching modules from bromure.io/downloads/<kver>/ instead.
-#
-# A local build degrades gracefully when a module can't be found (webcam
-# sharing / guest clock lose function, everything else works). A foss/
-# distribution build must NEVER degrade: the published image reaches
-# every end-user, so a missing module fails the build altogether.
+# Kernel modules loaded at boot. Ubuntu's kernel has rtc-pl031 built in
+# (Alpine's virt kernel needed an out-of-tree build); v4l2loopback was
+# dkms-built in the chroot phase.
 # ---------------------------------------------------------------------------
 
-KVER=$(ls /mnt/lib/modules/)
-BUNDLED_KVER=""
-[ -f "$SCRIPT_DIR/v4l2loopback/KVER" ] && BUNDLED_KVER=$(cat "$SCRIPT_DIR/v4l2loopback/KVER" | tr -d '[:space:]')
-mkdir -p "/mnt/lib/modules/$KVER/extra"
-
-MODULES_OK=true
-
-if [ "$KVER" = "$BUNDLED_KVER" ]; then
-    echo "Kernel $KVER matches bundled modules"
-
-    # v4l2loopback
-    if [ -f "$SCRIPT_DIR/v4l2loopback/v4l2loopback.ko.gz" ]; then
-        cp "$SCRIPT_DIR/v4l2loopback/v4l2loopback.ko.gz" "/mnt/lib/modules/$KVER/extra/"
-        gunzip "/mnt/lib/modules/$KVER/extra/v4l2loopback.ko.gz"
-        echo "V4L2LOOPBACK_INSTALLED_OK"
-    else
-        echo "Warning: v4l2loopback.ko.gz not found in bundle"
-        MODULES_OK=false
-    fi
-
-    # rtc-pl031
-    if [ -f "$SCRIPT_DIR/rtc-pl031/rtc-pl031.ko.gz" ]; then
-        cp "$SCRIPT_DIR/rtc-pl031/rtc-pl031.ko.gz" "/mnt/lib/modules/$KVER/extra/"
-        gunzip "/mnt/lib/modules/$KVER/extra/rtc-pl031.ko.gz"
-        echo "RTC_PL031_INSTALLED_OK"
-    elif [ -f "$SCRIPT_DIR/rtc-pl031/rtc-pl031.ko" ]; then
-        cp "$SCRIPT_DIR/rtc-pl031/rtc-pl031.ko" "/mnt/lib/modules/$KVER/extra/"
-        echo "RTC_PL031_INSTALLED_OK"
-    else
-        echo "Warning: rtc-pl031.ko not found in bundle"
-        MODULES_OK=false
-    fi
-else
-    echo "Kernel $KVER differs from bundled $BUNDLED_KVER — downloading modules from bromure.io"
-    DOWNLOAD_BASE="https://bromure.io/downloads/${KVER}"
-
-    if wget -q -O "/mnt/lib/modules/$KVER/extra/v4l2loopback.ko" "$DOWNLOAD_BASE/v4l2loopback.ko"; then
-        echo "V4L2LOOPBACK_INSTALLED_OK (downloaded)"
-    else
-        echo "Warning: failed to download v4l2loopback.ko for $KVER — webcam sharing will not work"
-        rm -f "/mnt/lib/modules/$KVER/extra/v4l2loopback.ko"
-        MODULES_OK=false
-    fi
-
-    if wget -q -O "/mnt/lib/modules/$KVER/extra/rtc-pl031.ko" "$DOWNLOAD_BASE/rtc-pl031.ko"; then
-        echo "RTC_PL031_INSTALLED_OK (downloaded)"
-    else
-        echo "Warning: failed to download rtc-pl031.ko for $KVER — guest clock will need manual sync"
-        rm -f "/mnt/lib/modules/$KVER/extra/rtc-pl031.ko"
-        MODULES_OK=false
-    fi
-
-    if [ "$MODULES_OK" = "false" ]; then
-        echo "Warning: some kernel modules unavailable for $KVER — rebuild and upload to $DOWNLOAD_BASE/"
-    fi
-fi
-
-# Distribution gate: a published image must carry every module.
-if [ "$BUILD_MODE" = "foss" ] && [ "$MODULES_OK" != "true" ]; then
-    echo "SANDBOX_SETUP_FAILED: kernel modules missing for $KVER (bundled: ${BUNDLED_KVER:-none}) — a distribution build must not degrade; build the modules for this kernel and upload them to https://bromure.io/downloads/$KVER/ (or refresh the bundled v4l2loopback/rtc-pl031 .ko.gz)"
-    exit 1
-fi
-
-chroot /mnt depmod "$KVER"
-echo "rtc-pl031" >> /mnt/etc/modules
-
-install_config configs/mkinitfs.conf /mnt/etc/mkinitfs/mkinitfs.conf
-chroot /mnt ls /etc/mkinitfs/features.d/ 2>/dev/null || true
-chroot /mnt sh -c 'mkinitfs $(ls /lib/modules/)'
-
-# Kernel modules
 cat "$SCRIPT_DIR/configs/modules" >> /mnt/etc/modules
 
 # ---------------------------------------------------------------------------
-# Swap file (1 GB)
+# Swap file (1 GB) — activated via the fstab entry.
 # ---------------------------------------------------------------------------
 
 dd if=/dev/zero of=/mnt/swap bs=1M count=1024
 chmod 600 /mnt/swap
 mkswap /mnt/swap
-chroot /mnt rc-update add swap boot
 
 # ---------------------------------------------------------------------------
 # Cleanup and finish
 # ---------------------------------------------------------------------------
 
-# The shipped image must point at the real CDN, not the bake-time proxy.
-printf '%s\n' \
-    "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/main" \
-    "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community" \
-    > /mnt/etc/apk/repositories
+# The shipped image must not carry bake-time-only state: the proxy conf
+# points at a listener that only exists during the bake, and the apt
+# lists/caches are dead weight.
+rm -f /mnt/etc/apt/apt.conf.d/99-bromure-proxy
+chroot /mnt apt-get clean
+rm -rf /mnt/var/lib/apt/lists/*
+rm -f /mnt/tmp/bromure-build.env
 
-umount /mnt/dev
-umount /mnt/sys
-umount /mnt/proc
-umount /mnt
+# Static public DNS as the baked fallback; DHCP overwrites it at boot.
+printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /mnt/etc/resolv.conf
+
+# A chroot step may have left a process running (dpkg triggers, dbus);
+# its open fds would keep /mnt busy. Kill anything still rooted there —
+# this teardown runs with root '/', so it never matches itself.
+for p in /proc/[0-9]*; do
+    [ -e "$p/root" ] || continue
+    case "$(readlink "$p/root" 2>/dev/null)" in
+        /mnt|/mnt/*) kill -9 "${p#/proc/}" 2>/dev/null || true ;;
+    esac
+done
+sync
+
+# debootstrap/apt stack extra mounts inside the target (a second /proc,
+# /dev/shm, …) — unmount each point repeatedly until it's clear, or the
+# final umount /mnt fails EBUSY and the extract phase inherits a dirty,
+# still-mounted filesystem.
+for m in /mnt/dev/pts /mnt/dev/shm /mnt/dev /mnt/sys /mnt/proc; do
+    while mountpoint -q "$m" 2>/dev/null; do
+        umount "$m" 2>/dev/null || break
+    done
+done
+umount /mnt || { sleep 2; umount /mnt; } || {
+    echo "SANDBOX_SETUP_FAILED: could not cleanly unmount /mnt"
+    exit 1
+}
 
 echo SANDBOX_SETUP_DONE

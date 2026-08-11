@@ -713,3 +713,16 @@
 "Import .ovpn File\U2026" = ".ovpn \U30D5\U30A1\U30A4\U30EB\U3092\U8AAD\U307F\U8FBC\U3080\U2026";
 "Credentials" = "\U8A8D\U8A3C\U60C5\U5831";
 "Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs." = "\U8A2D\U5B9A\U3067\U30E6\U30FC\U30B6\U30FC\U540D/\U30D1\U30B9\U30EF\U30FC\U30C9\UFF08auth-user-pass\UFF09\U3092\U4F7F\U7528\U3059\U308B\U5834\U5408\U306B\U306E\U307F\U5FC5\U8981\U3067\U3059\U3002\U8A3C\U660E\U66F8\U306E\U307F\U306E\U8A2D\U5B9A\U306E\U5834\U5408\U306F\U7A7A\U767D\U306E\U307E\U307E\U306B\U3057\U3066\U304F\U3060\U3055\U3044\U3002";
+
+/* Browser choice + Google Workspace management */
+"Browser" = "ブラウザ";
+"This profile's saved browsing data was created by %@. Delete the profile data below to switch browsers." = "このプロファイルの保存された閲覧データは %@ によって作成されました。ブラウザを切り替えるには、下のプロファイルデータを削除してください。";
+"Google Workspace Management" = "Google Workspace 管理";
+"Enroll this profile’s browser with Chrome Enterprise Core so your Google Workspace admin can manage it. Paste the enrollment token from the Admin console (Devices → Chrome → Managed browsers). Requires Google Chrome." = "このプロファイルのブラウザを Chrome Enterprise Core に登録すると、Google Workspace 管理者が管理できるようになります。管理コンソール(デバイス → Chrome → 管理対象ブラウザ)の登録トークンを貼り付けてください。Google Chrome が必要です。";
+"Enrollment token" = "登録トークン";
+"Sessions will enroll as a managed Google Chrome browser." = "セッションは管理対象の Google Chrome ブラウザとして登録されます。";
+"Managed browsing requires Google Chrome" = "管理対象ブラウジングには Google Chrome が必要です";
+"Switch to Google Chrome" = "Google Chrome に切り替える";
+"Google Workspace can only manage the Google Chrome browser. Switch this profile to Google Chrome to use the enrollment token." = "Google Workspace が管理できるのは Google Chrome ブラウザのみです。登録トークンを使用するには、このプロファイルを Google Chrome に切り替えてください。";
+"Google Workspace can only manage the Google Chrome browser, and this profile’s saved browsing data was created by Chromium. Delete the profile data in General settings first, then switch the browser to Google Chrome." = "Google Workspace が管理できるのは Google Chrome ブラウザのみですが、このプロファイルの保存された閲覧データは Chromium によって作成されています。まず「一般」設定でプロファイルデータを削除してから、ブラウザを Google Chrome に切り替えてください。";
+"OK" = "OK";

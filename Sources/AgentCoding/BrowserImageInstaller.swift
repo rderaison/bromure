@@ -171,9 +171,10 @@ final class BrowserImageInstaller {
                 // download-side failures fall back to the local bake.
                 handle(.message(String(localized:
                     "Prebuilt image unavailable — building it locally instead (~10 min).")))
-                // The local bake is line-driven; its Alpine/apk output is
-                // shorter than the AC Ubuntu bake's.
-                model.expectedTotalLines = 4000
+                // The local bake is line-driven; the browser image is a
+                // debootstrap + apt bake now, comparable in verbosity to
+                // the AC Ubuntu bake.
+                model.expectedTotalLines = 12000
                 _ = await catalogStore.refresh()
                 let catalog = catalogStore.effective()
                 try await manager.createBaseImage(

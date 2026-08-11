@@ -149,6 +149,13 @@ public struct VMConfig {
     /// Chromium verbatim via `--user-agent`.
     public var userAgent: String
 
+    /// Which browser the session launches (Chromium or Google Chrome).
+    public var browser: BrowserChoice
+
+    /// Chrome Enterprise Core enrollment token (Google Workspace managed
+    /// browsing). Only ever non-nil when `browser == .chrome`.
+    public var chromeEnrollmentToken: String?
+
     /// Whether GPU acceleration is enabled in the browser.
     public var enableGPU: Bool
 
@@ -331,6 +338,8 @@ public struct VMConfig {
         swapCmdCtrl: Bool = true,
         homePage: String = "https://bromure.io/hello",
         userAgent: String = "",
+        browser: BrowserChoice = .chromium,
+        chromeEnrollmentToken: String? = nil,
         enableGPU: Bool = true,
         enableWebGL: Bool = false,
         enableZeroCopy: Bool = true,
@@ -415,6 +424,8 @@ public struct VMConfig {
         self.swapCmdCtrl = swapCmdCtrl
         self.homePage = homePage
         self.userAgent = userAgent
+        self.browser = browser
+        self.chromeEnrollmentToken = chromeEnrollmentToken
         self.enableGPU = enableGPU
         self.enableWebGL = enableWebGL
         self.enableZeroCopy = enableZeroCopy

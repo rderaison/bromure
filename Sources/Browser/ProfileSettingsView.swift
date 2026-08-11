@@ -61,6 +61,65 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 
 // MARK: - Main View
 
+/// Renders the small browser-brand glyphs shown in the profile editor's
+/// browser dropdown. There is no SF Symbol for either browser, so we
+/// draw the shared logo geometry (three 120° ring segments around a
+/// cored disc) with Canvas — blue shades for Chromium, red/green/yellow
+/// with the blue core for Chrome — and rasterize once via ImageRenderer
+/// so the images survive the NSMenu bridge.
+@MainActor
+enum BrowserGlyph {
+    private static var cache: [BrowserChoice: NSImage] = [:]
+
+    static func icon(for choice: BrowserChoice) -> NSImage {
+        if let cached = cache[choice] { return cached }
+        let colors: [Color]
+        let core: Color
+        switch choice {
+        case .chromium:
+            colors = [Color(red: 0.23, green: 0.44, blue: 0.87),
+                      Color(red: 0.35, green: 0.60, blue: 0.95),
+                      Color(red: 0.16, green: 0.32, blue: 0.68)]
+            core = Color(red: 0.55, green: 0.75, blue: 0.98)
+        case .chrome:
+            colors = [Color(red: 0.86, green: 0.20, blue: 0.15),
+                      Color(red: 0.10, green: 0.62, blue: 0.28),
+                      Color(red: 0.98, green: 0.74, blue: 0.02)]
+            core = Color(red: 0.26, green: 0.52, blue: 0.96)
+        }
+        let renderer = ImageRenderer(content: glyph(segments: colors, core: core))
+        renderer.scale = 2
+        let image = renderer.nsImage ?? NSImage(size: NSSize(width: 16, height: 16))
+        image.size = NSSize(width: 16, height: 16)
+        cache[choice] = image
+        return image
+    }
+
+    private static func glyph(segments: [Color], core: Color) -> some View {
+        Canvas { context, size in
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let radius = size.width / 2
+            for (i, color) in segments.enumerated() {
+                var wedge = Path()
+                wedge.move(to: center)
+                wedge.addArc(center: center, radius: radius,
+                             startAngle: .degrees(Double(i) * 120 - 90),
+                             endAngle: .degrees(Double(i + 1) * 120 - 90),
+                             clockwise: false)
+                wedge.closeSubpath()
+                context.fill(wedge, with: .color(color))
+            }
+            let ring = CGRect(x: center.x - radius * 0.58, y: center.y - radius * 0.58,
+                              width: radius * 1.16, height: radius * 1.16)
+            context.fill(Path(ellipseIn: ring), with: .color(.white))
+            let disc = CGRect(x: center.x - radius * 0.42, y: center.y - radius * 0.42,
+                              width: radius * 0.84, height: radius * 0.84)
+            context.fill(Path(ellipseIn: disc), with: .color(core))
+        }
+        .frame(width: 16, height: 16)
+    }
+}
+
 struct ProfileSettingsView: View {
     @State var draft: Profile
     let profileDiskExists: Bool
@@ -124,6 +183,7 @@ struct ProfileSettingsView: View {
     @State private var extensionImportError: String?
     @State private var extensionDownloading = false
     @State private var showDisableNativeTabsAlert = false
+    @State private var showEnrollmentBrowserAlert = false
 
     // IKEv2 keychain-backed secrets (not stored in profile JSON)
     @State private var ikev2Password: String = ""
@@ -138,6 +198,26 @@ struct ProfileSettingsView: View {
     private enum VTKeyStatus {
         case valid
         case invalid(String)
+    }
+
+    /// Shared by the Enterprise token field and the General browser
+    /// picker — whichever tab is on screen hosts the alert.
+    private func enrollmentBrowserAlert<V: View>(_ content: V) -> some View {
+        content.alert("Managed browsing requires Google Chrome",
+                      isPresented: $showEnrollmentBrowserAlert) {
+            if profileDiskExists {
+                Button("OK") { draft.settings.chromeEnrollmentToken = "" }
+            } else {
+                Button("Switch to Google Chrome") { draft.settings.browser = .chrome }
+                Button("Cancel", role: .cancel) { draft.settings.chromeEnrollmentToken = "" }
+            }
+        } message: {
+            if profileDiskExists {
+                Text("Google Workspace can only manage the Google Chrome browser, and this profile\u{2019}s saved browsing data was created by Chromium. Delete the profile data in General settings first, then switch the browser to Google Chrome.")
+            } else {
+                Text("Google Workspace can only manage the Google Chrome browser. Switch this profile to Google Chrome to use the enrollment token.")
+            }
+        }
     }
 
     var body: some View {
@@ -314,6 +394,35 @@ struct ProfileSettingsView: View {
                 TextField("Name", text: $draft.name)
                     .textFieldStyle(.roundedBorder)
             }
+
+            settingsDivider
+
+            // Browser
+            enrollmentBrowserAlert(VStack(alignment: .leading, spacing: 6) {
+                Text("Browser").font(.headline)
+                Picker(selection: $draft.settings.browser) {
+                    ForEach(BrowserChoice.allCases, id: \.self) { choice in
+                        HStack(spacing: 6) {
+                            Image(nsImage: BrowserGlyph.icon(for: choice))
+                            Text(verbatim: choice.displayName)
+                        }
+                        .tag(choice)
+                    }
+                } label: { EmptyView() }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 220, alignment: .leading)
+                .disabled(profileDiskExists)
+                .onChange(of: draft.settings.browser) { _, newValue in
+                    if newValue == .chromium && !draft.settings.chromeEnrollmentToken.isEmpty {
+                        showEnrollmentBrowserAlert = true
+                    }
+                }
+                if profileDiskExists {
+                    Text("This profile's saved browsing data was created by \(draft.settings.browser.displayName). Delete the profile data below to switch browsers.")
+                        .settingDescription()
+                }
+            })
 
             settingsDivider
 
@@ -1469,6 +1578,28 @@ struct ProfileSettingsView: View {
     private var enterpriseView: some View {
         VStack(alignment: .leading, spacing: 20) {
             sectionHeader("Enterprise", subtitle: "Settings for managed environments")
+
+            // Chrome Enterprise Core (Google Workspace) managed browsing
+            enrollmentBrowserAlert(VStack(alignment: .leading, spacing: 10) {
+                Text("Google Workspace Management").font(.headline)
+                Text("Enroll this profile\u{2019}s browser with Chrome Enterprise Core so your Google Workspace admin can manage it. Paste the enrollment token from the Admin console (Devices \u{2192} Chrome \u{2192} Managed browsers). Requires Google Chrome.")
+                    .settingDescription()
+                TextField("Enrollment token", text: $draft.settings.chromeEnrollmentToken)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: draft.settings.chromeEnrollmentToken) { old, new in
+                        if old.isEmpty && !new.isEmpty && draft.settings.browser == .chromium {
+                            showEnrollmentBrowserAlert = true
+                        }
+                    }
+                if !draft.settings.chromeEnrollmentToken.isEmpty && draft.settings.browser == .chrome {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                        Text("Sessions will enroll as a managed Google Chrome browser.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            })
+            settingsDivider
 
             // Proxy
             VStack(alignment: .leading, spacing: 10) {

@@ -713,3 +713,16 @@
 "Import .ovpn File\U2026" = "\U5BFC\U5165 .ovpn \U6587\U4EF6\U2026";
 "Credentials" = "\U51ED\U636E";
 "Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs." = "\U4EC5\U5F53\U4F60\U7684\U914D\U7F6E\U4F7F\U7528\U7528\U6237\U540D/\U5BC6\U7801\UFF08auth-user-pass\UFF09\U65F6\U624D\U9700\U8981\U3002\U5BF9\U4E8E\U4EC5\U4F7F\U7528\U8BC1\U4E66\U7684\U914D\U7F6E\UFF0C\U8BF7\U7559\U7A7A\U3002";
+
+/* Browser choice + Google Workspace management */
+"Browser" = "浏览器";
+"This profile's saved browsing data was created by %@. Delete the profile data below to switch browsers." = "此配置文件保存的浏览数据由 %@ 创建。要切换浏览器,请先在下方删除配置文件数据。";
+"Google Workspace Management" = "Google Workspace 管理";
+"Enroll this profile’s browser with Chrome Enterprise Core so your Google Workspace admin can manage it. Paste the enrollment token from the Admin console (Devices → Chrome → Managed browsers). Requires Google Chrome." = "将此配置文件的浏览器注册到 Chrome Enterprise Core,以便您的 Google Workspace 管理员进行管理。请粘贴管理控制台(设备 → Chrome → 受管理的浏览器)中的注册令牌。需要 Google Chrome。";
+"Enrollment token" = "注册令牌";
+"Sessions will enroll as a managed Google Chrome browser." = "会话将注册为受管理的 Google Chrome 浏览器。";
+"Managed browsing requires Google Chrome" = "受管理的浏览需要 Google Chrome";
+"Switch to Google Chrome" = "切换到 Google Chrome";
+"Google Workspace can only manage the Google Chrome browser. Switch this profile to Google Chrome to use the enrollment token." = "Google Workspace 只能管理 Google Chrome 浏览器。要使用注册令牌,请将此配置文件切换到 Google Chrome。";
+"Google Workspace can only manage the Google Chrome browser, and this profile’s saved browsing data was created by Chromium. Delete the profile data in General settings first, then switch the browser to Google Chrome." = "Google Workspace 只能管理 Google Chrome 浏览器,而此配置文件保存的浏览数据由 Chromium 创建。请先在“通用”设置中删除配置文件数据,然后将浏览器切换到 Google Chrome。";
+"OK" = "确定";

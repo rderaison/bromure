@@ -115,6 +115,23 @@ public enum VPNMode: String, Codable, CaseIterable, Equatable, Sendable {
     case openVPN
 }
 
+/// Which browser binary the session launches. The Ubuntu image bakes
+/// both: Chromium (native deb) and official Google Chrome (catalog
+/// postinstall step). A persistent profile disk holds the browser's
+/// user-data-dir, whose content belongs to whichever browser wrote it —
+/// the editor locks this choice once that disk exists.
+public enum BrowserChoice: String, Codable, CaseIterable, Equatable, Sendable {
+    case chromium
+    case chrome
+
+    public var displayName: String {
+        switch self {
+        case .chromium: return "Chromium"
+        case .chrome: return "Google Chrome"
+        }
+    }
+}
+
 /// IKEv2 authentication method.
 public enum IKEv2AuthMethod: String, Codable, CaseIterable, Equatable, Sendable {
     /// EAP-MSCHAPv2 (username/password).
@@ -209,6 +226,8 @@ public struct ProfileSettings: Codable, Equatable {
     /// the Chrome version stays accurate). A non-empty value is sent to
     /// Chromium verbatim via `--user-agent`.
     public var userAgent: String = ""
+    /// Which browser the session launches (Chromium or Google Chrome).
+    public var browser: BrowserChoice = .chromium
 
     // Network
     public var enableAdBlocking: Bool = false
@@ -248,6 +267,10 @@ public struct ProfileSettings: Codable, Equatable {
     public var proxyPort: Int = 0
     public var proxyUsername: String = ""
     public var proxyPassword: String = ""
+
+    // Enterprise — Chrome Enterprise Core (Google Workspace) enrollment
+    // token; requires browser == .chrome (Chromium has no CBCM client).
+    public var chromeEnrollmentToken: String = ""
 
     /// Whether a custom proxy is configured.
     public var hasProxy: Bool {
@@ -344,13 +367,14 @@ public struct ProfileSettings: Codable, Equatable {
     public init() {}
 
     enum CodingKeys: String, CodingKey {
-        case homePage, enableGPU, enableWebGL, enableZeroCopy, enableSmoothScrolling, userAgent
+        case homePage, enableGPU, enableWebGL, enableZeroCopy, enableSmoothScrolling, userAgent, browser
         case enableAdBlocking, enableWarp, warpAutoConnect
         case vpnMode, wireGuardConfig, wireGuardAutoConnect
         case ikev2Server, ikev2RemoteID, ikev2AuthMethod, ikev2Username, ikev2UseDNS, ikev2AutoConnect
         case ikev2ProxyHost, ikev2ProxyPort, ikev2ProxyUsername, ikev2ProxyPassword
         case openVPNConfig, openVPNUsername, openVPNAutoConnect
         case proxyHost, proxyPort, proxyUsername, proxyPassword
+        case chromeEnrollmentToken
         case enableClipboardSharing
         case canUpload, canDownload, virusTotalEnabled, virusTotalAPIKey, blockThreats, blockUnscannable
         case blockMalwareSites, phishingWarning
@@ -375,6 +399,7 @@ public struct ProfileSettings: Codable, Equatable {
         enableZeroCopy = try c.decodeIfPresent(Bool.self, forKey: .enableZeroCopy) ?? defaults.enableZeroCopy
         enableSmoothScrolling = try c.decodeIfPresent(Bool.self, forKey: .enableSmoothScrolling) ?? defaults.enableSmoothScrolling
         userAgent = try c.decodeIfPresent(String.self, forKey: .userAgent) ?? defaults.userAgent
+        browser = try c.decodeIfPresent(BrowserChoice.self, forKey: .browser) ?? defaults.browser
         enableAdBlocking = try c.decodeIfPresent(Bool.self, forKey: .enableAdBlocking) ?? defaults.enableAdBlocking
         // Migration: legacy enableWarp bool → vpnMode enum
         let legacyEnableWarp = try c.decodeIfPresent(Bool.self, forKey: .enableWarp) ?? false
@@ -403,6 +428,7 @@ public struct ProfileSettings: Codable, Equatable {
         proxyPort = try c.decodeIfPresent(Int.self, forKey: .proxyPort) ?? defaults.proxyPort
         proxyUsername = try c.decodeIfPresent(String.self, forKey: .proxyUsername) ?? defaults.proxyUsername
         proxyPassword = try c.decodeIfPresent(String.self, forKey: .proxyPassword) ?? defaults.proxyPassword
+        chromeEnrollmentToken = try c.decodeIfPresent(String.self, forKey: .chromeEnrollmentToken) ?? defaults.chromeEnrollmentToken
         enableClipboardSharing = try c.decodeIfPresent(Bool.self, forKey: .enableClipboardSharing) ?? defaults.enableClipboardSharing
         canUpload = try c.decodeIfPresent(Bool.self, forKey: .canUpload) ?? defaults.canUpload
         canDownload = try c.decodeIfPresent(Bool.self, forKey: .canDownload) ?? defaults.canDownload
@@ -456,6 +482,7 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encode(enableZeroCopy, forKey: .enableZeroCopy)
         try c.encode(enableSmoothScrolling, forKey: .enableSmoothScrolling)
         try c.encode(userAgent, forKey: .userAgent)
+        try c.encode(browser, forKey: .browser)
         try c.encode(enableAdBlocking, forKey: .enableAdBlocking)
         try c.encode(vpnMode, forKey: .vpnMode)
         // Keep encoding enableWarp for compatibility with older app versions reading this profile
@@ -480,6 +507,7 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encode(proxyPort, forKey: .proxyPort)
         try c.encode(proxyUsername, forKey: .proxyUsername)
         try c.encode(proxyPassword, forKey: .proxyPassword)
+        try c.encode(chromeEnrollmentToken, forKey: .chromeEnrollmentToken)
         try c.encode(enableClipboardSharing, forKey: .enableClipboardSharing)
         try c.encode(canUpload, forKey: .canUpload)
         try c.encode(canDownload, forKey: .canDownload)
@@ -580,6 +608,9 @@ public struct ProfileSettings: Codable, Equatable {
             swapCmdCtrl: defaults.object(forKey: "vm.swapCmdCtrl") as? Bool ?? true,
             homePage: homePage,
             userAgent: userAgent,
+            browser: browser,
+            chromeEnrollmentToken: browser == .chrome && !chromeEnrollmentToken.isEmpty
+                ? chromeEnrollmentToken : nil,
             enableGPU: enableGPU,
             enableWebGL: enableGPU ? enableWebGL : false,  // WebGL requires GPU
             enableZeroCopy: enableZeroCopy,

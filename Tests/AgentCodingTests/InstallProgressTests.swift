@@ -160,7 +160,7 @@ struct BrowserInstallProgressTests {
         m.appendLog("[browser-postinstall] copied 213 macOS font files\n")
         #expect(abs(m.progress - (0.78 + 0.21 * 0.35)) < 0.005)
         #expect(m.status.contains("213"))
-        m.appendLog("[browser-postinstall] entering alpine chroot\n")
+        m.appendLog("[browser-postinstall] entering image chroot\n")
         #expect(abs(m.progress - (0.78 + 0.21 * 0.40)) < 0.005)
 
         m.appendLog("[browser-postinstall-chroot] BEGIN step Cloudflare WARP client\n")

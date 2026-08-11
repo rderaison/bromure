@@ -40,6 +40,7 @@ AUDIO_VOLUME=
 PROFILE_DIR=
 CHROME_LANG=
 CHROME_UA=
+BROWSER_BIN=
 DISPLAY_SCALE=
 MTU=
 KEY_REPEAT_DELAY_MS=
@@ -60,6 +61,16 @@ set +a
 # nested tunnels lower). Override on the host via:
 #   defaults write io.bromure.app vm.mtu -int <value>
 [ -z "$MTU" ] && MTU=1280
+# Wait (briefly) for DHCP to land the default route before Chrome can
+# start: under systemd, dhclient runs async and a claim right at boot
+# could otherwise race it — the address change mid-page-load surfaces
+# as ERR_NETWORK_CHANGED. (Pre-warmed VMs have long settled by claim.)
+i=0
+while [ $i -lt 40 ]; do
+    ip route show default 2>/dev/null | grep -q default && break
+    sleep 0.25
+    i=$((i + 1))
+done
 NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
 [ -n "$NIC" ] && doas ip link set dev "$NIC" mtu "$MTU" 2>/dev/null
 echo "xinitrc: ${NIC:-<no-default-route>} mtu=$MTU" > /dev/hvc0
@@ -120,8 +131,11 @@ echo "xinitrc: EXTRA_FLAGS=$EXTRA_FLAGS CHROME_URL=$CHROME_URL SWAP_CMD_CTRL=$SW
 
 # Boost Xorg and Chromium to high CPU priority (-10 nice).
 # Xorg is already running; renice it now, then renice Chrome once it starts.
-doas renice -10 $(pgrep -f /usr/libexec/Xorg) 2>/dev/null
-(sleep 1; for pid in $(pgrep -f chromium-browser); do doas renice -10 $pid 2>/dev/null; done) &
+# Match by basename: Xorg lives at /usr/libexec/Xorg on Alpine but
+# /usr/lib/xorg/Xorg on Ubuntu, and the chromium-browser shim execs
+# /usr/bin/chromium.
+doas renice -10 $(pgrep -f Xorg) 2>/dev/null
+(sleep 1; for pid in $(pgrep -f 'chromium\|chrome'); do doas renice -10 $pid 2>/dev/null; done) &
 
 if [ "$TEST_SUITE" = "1" ]; then
     /usr/local/bin/test-runner.sh
@@ -137,7 +151,7 @@ LANG_FLAG=
 # and the host clips off the top rows. Chromium itself runs completely
 # unmodified — same launch flags, same maximize behaviour, same window
 # manager rules. tab-agent + the native titlebar handle the visible UI.
-CHROME_CMD="chromium-browser --no-first-run --start-maximized --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan --font-render-hinting=none $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
+CHROME_CMD="${BROWSER_BIN:-chromium-browser} --no-first-run --start-maximized --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan --font-render-hinting=none $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
 
 # VPN splash: when a VPN is configured to connect at startup, the tunnel
 # takes a few seconds to establish. Loading the user's URL in that window
@@ -197,7 +211,7 @@ if [ -n "$VPN_AUTO_CONNECT" ]; then
             wait "$SPLASH_PID"
         fi
         echo "xinitrc: VPN failed, skipping Chrome launch" > /dev/hvc0
-        doas udhcpc -R -i eth0 2>/dev/null
+        doas ifdown eth0 2>/dev/null
         doas poweroff
         exit 0
     fi
@@ -239,6 +253,8 @@ for attempt in 1 2 3 4 5; do
     fi
 done
 
-doas udhcpc -R -i eth0 2>/dev/null
+# Release the DHCP lease so the vmnet pool doesn't exhaust (ifdown runs
+# dhclient -r under ifupdown — the udhcpc -R equivalent from Alpine days).
+doas ifdown eth0 2>/dev/null
 doas poweroff
 

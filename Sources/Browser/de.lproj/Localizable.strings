@@ -713,3 +713,16 @@
 "Import .ovpn File\U2026" = ".ovpn-Datei importieren\U2026";
 "Credentials" = "Anmeldedaten";
 "Only needed when your config uses username/password (auth-user-pass). Leave blank for certificate-only configs." = "Nur erforderlich, wenn Ihre Konfiguration Benutzername/Passwort (auth-user-pass) verwendet. Lassen Sie das Feld bei Konfigurationen mit reiner Zertifikatsauthentifizierung leer.";
+
+/* Browser choice + Google Workspace management */
+"Browser" = "Browser";
+"This profile's saved browsing data was created by %@. Delete the profile data below to switch browsers." = "Die gespeicherten Browserdaten dieses Profils wurden von %@ erstellt. Löschen Sie unten die Profildaten, um den Browser zu wechseln.";
+"Google Workspace Management" = "Google Workspace-Verwaltung";
+"Enroll this profile’s browser with Chrome Enterprise Core so your Google Workspace admin can manage it. Paste the enrollment token from the Admin console (Devices → Chrome → Managed browsers). Requires Google Chrome." = "Registrieren Sie den Browser dieses Profils bei Chrome Enterprise Core, damit Ihr Google Workspace-Administrator ihn verwalten kann. Fügen Sie das Registrierungstoken aus der Admin-Konsole ein (Geräte → Chrome → Verwaltete Browser). Erfordert Google Chrome.";
+"Enrollment token" = "Registrierungstoken";
+"Sessions will enroll as a managed Google Chrome browser." = "Sitzungen werden als verwalteter Google Chrome-Browser registriert.";
+"Managed browsing requires Google Chrome" = "Verwaltetes Browsen erfordert Google Chrome";
+"Switch to Google Chrome" = "Zu Google Chrome wechseln";
+"Google Workspace can only manage the Google Chrome browser. Switch this profile to Google Chrome to use the enrollment token." = "Google Workspace kann nur den Google Chrome-Browser verwalten. Stellen Sie dieses Profil auf Google Chrome um, um das Registrierungstoken zu verwenden.";
+"Google Workspace can only manage the Google Chrome browser, and this profile’s saved browsing data was created by Chromium. Delete the profile data in General settings first, then switch the browser to Google Chrome." = "Google Workspace kann nur den Google Chrome-Browser verwalten, und die gespeicherten Browserdaten dieses Profils wurden von Chromium erstellt. Löschen Sie zuerst die Profildaten in den allgemeinen Einstellungen und wechseln Sie dann zu Google Chrome.";
+"OK" = "OK";
