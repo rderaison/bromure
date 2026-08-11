@@ -973,7 +973,18 @@ def write_dynamic_policy(cfg):
     # the gate here keeps a stray token from landing in a Chromium
     # session's policies.
     if cfg.get("chromeEnrollmentToken") and browser_binary(cfg) == "google-chrome-stable":
+        # On Linux the CBCM controller does NOT read this from managed
+        # policy JSON (that path is Windows-registry/Mac-plist only) — it
+        # wants a dedicated plain-text file, and without it enrollment is
+        # skipped silently while chrome://policy still shows the token as
+        # loaded ("Enrollment token =" empty in chrome://policy/logs).
+        # https://support.google.com/chrome/a/answer/9301891
+        # Keep the policy row too: it makes the token visible to admins.
         policy["CloudManagementEnrollmentToken"] = cfg["chromeEnrollmentToken"]
+        enroll_dir = "/etc/opt/chrome/policies/enrollment"
+        os.makedirs(enroll_dir, exist_ok=True)
+        with open(os.path.join(enroll_dir, "CloudManagementEnrollmentToken"), "w") as f:
+            f.write(cfg["chromeEnrollmentToken"])
 
     policy_path = "/etc/chromium/policies/managed/session.json"
     os.makedirs(os.path.dirname(policy_path), exist_ok=True)
