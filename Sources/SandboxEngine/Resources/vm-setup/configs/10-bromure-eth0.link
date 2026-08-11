@@ -1,0 +1,18 @@
+# Force the single virtio NIC to be named eth0, whatever the kernel's
+# interface-naming policy. The guest's whole network layer addresses eth0
+# (/etc/network/interfaces, on-boot.sh's probe, xinitrc's lease release),
+# and the host normally guarantees that by booting with net.ifnames=0.
+# But this image is also downloaded and booted by already-distributed
+# Bromure Agentic Coding binaries whose (older) boot cmdline predates that
+# flag — under predictable naming the NIC would come up as enp0s1, no
+# interfaces stanza would match, and the browser would have no network.
+#
+# systemd-udevd applies this .link during device coldplug, before
+# networking.service / ifup@eth0 runs, and its Name= wins over predictable
+# naming — so the NIC is eth0 under either cmdline. Belt-and-suspenders
+# with net.ifnames=0 (which newer app builds still pass).
+[Match]
+Driver=virtio_net
+
+[Link]
+Name=eth0

@@ -628,6 +628,10 @@ install_config configs/sysctl-warp.conf    /mnt/etc/sysctl.d/warp.conf
 # Network
 install_config configs/network-interfaces /mnt/etc/network/interfaces
 install_config configs/fstab              /mnt/etc/fstab
+# Pin the virtio NIC to eth0 regardless of the booting app's cmdline
+# (net.ifnames=0 or not) — see the .link file's header.
+mkdir -p /mnt/etc/systemd/network
+install_config configs/10-bromure-eth0.link /mnt/etc/systemd/network/10-bromure-eth0.link
 
 # Font rendering (match macOS Core Text: no hinting, stem darkening, SF Pro default)
 install_config configs/fontconfig-local.conf /mnt/etc/fonts/local.conf

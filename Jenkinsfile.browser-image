@@ -9,11 +9,11 @@
 // artifacts per build (base.img.gz + vmlinuz.gz + initrd.gz, because the
 // browser image direct-kernel-boots instead of using EFI/GRUB), and with
 // the strict kernel-module gate: `bromure init-foss-image` FAILS the
-// build when the out-of-tree modules (v4l2loopback, rtc-pl031) can't be
-// found for the installed kernel — a published image must never silently
-// lack webcam/RTC support.
+// build when v4l2loopback can't be dkms-built for the installed kernel —
+// a published image must never silently lack webcam support. (rtc-pl031
+// is built into Ubuntu's kernel, so no out-of-tree build is needed.)
 //
-// Weekly because the image bakes in current Alpine packages: new
+// Weekly because the image bakes in current Ubuntu packages: new
 // installations always start fresh without the catalog version changing
 // (existing users are NOT re-prompted — the version only moves when
 // LinuxImageManager.imageVersion is bumped deliberately, which is what

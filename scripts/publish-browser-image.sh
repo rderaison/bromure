@@ -4,7 +4,7 @@
 # and publish it to the DigitalOcean Space that Bromure Web downloads
 # from at install time. Jenkins runs this weekly
 # (Jenkinsfile.browser-image) so new installations always start from an
-# image with current Alpine packages.
+# image with current Ubuntu packages.
 #
 # Publishes, under https://dl.bromure.io/ (the `bromure-dl` bucket):
 #
@@ -26,7 +26,7 @@
 # end-user's own Mac during postinstall).
 #
 # Sequence (mirrors scripts/publish-image.sh):
-#   1. Build the image with the latest Alpine packages
+#   1. Build the image with the latest Ubuntu packages
 #      (bromure init-foss-image — strict: missing kernel modules FAIL).
 #   2. Boot-check an APFS CLONE of the disk (bromure verify-image): the
 #      image must reach the root serial prompt, but the published
@@ -108,7 +108,7 @@ gz_compress() {  # src dest
 sha256_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 
 # --- 1. Build the free-software image -----------------------------------
-echo "=== Building free-software browser image (latest Alpine packages) ==="
+echo "=== Building free-software browser image (latest Ubuntu packages) ==="
 IMAGE_DIR="$STAGING/image"
 "$BROMURE" init-foss-image --output "$IMAGE_DIR"
 
