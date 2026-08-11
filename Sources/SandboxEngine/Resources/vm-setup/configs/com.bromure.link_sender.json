@@ -1,10 +1,10 @@
 {
   "name": "com.bromure.link_sender",
-  "description": "Bromure link sender agent — forwards URLs to host for cross-profile opening.",
+  "description": "Bromure link sender agent \u2014 forwards URLs to host for cross-profile opening.",
   "path": "/usr/local/bin/link-agent.py",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://enbpbmcnhegfldincheobkbmcddgngeo/",
-    "chrome-extension://nneafipcodbpeapjcagfcinodkidcjcp/"
+    "chrome-extension://hocccfpcbddogofdmdkppifodlfdioog/",
+    "chrome-extension://pokgagebkogjohnoclppongjnfeinpjo/"
   ]
 }

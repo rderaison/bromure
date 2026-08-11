@@ -8,20 +8,29 @@
   ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content-main.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content-main.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": true
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["content-isolated.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content-isolated.js"
+      ],
       "run_at": "document_start",
       "all_frames": false
     }
   ],
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6AWH9K6x6JrsxNfBZjeHJ+2yujETP0Bw+erFCLCw7HxqZONjYUoRyBxUuhLAwQnvDOeCXEB3I1W5VQpJT1LRFxELE/dss1Tn206dqYmWW287LerUSLTcXVLUIDqCJ+q5n/mmk5brfj5i9auEm8AN9GTFAhOqvk7Ri9GdbaYcuoW58DPdLIeA9EWap+yFWRVa+VRN04dNsE1S0kS98KD+gzUZ9UzTB0ROG9+DgmwQaBZyT4NOflHpGn88JY+M7Z1gRKTk5ajOipUjx1fjRbplNW5Nb/jRp31R9XEv10bbpYZowUJvyltV1u4UZBabwEDGgfl4WpUddij9htJfIUNL/wIDAQAB"
 }

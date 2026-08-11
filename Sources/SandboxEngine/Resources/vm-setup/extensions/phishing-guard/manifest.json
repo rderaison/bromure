@@ -3,7 +3,7 @@
   "name": "Bromure Phishing Guard",
   "version": "2.1.0",
   "description": "Detects and warns about potential phishing sites when password fields are present.",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2J+X7DuVqY9wa+VXERT6PSsh0k/vMRgES54WXFVjECKjfktGhipTzEdasGThDyVJoZ7oHuZJUsQE8N6yQuJ13IwcENIhVJvDtDRPI1Hv/IAzz2VqTZBqZFuABbBqjjNjvF5pSMIERAVXOdvaGRSIELFUF/ND+9crXZIeYo/OA7iBmcOvdo0cxhyD6GJX8IN8JHLJLNJTbqpzX8ZIdy50/IyuD9xtZnjFYnQiKFjQWMGqWfuUKtDDCd9ADA/1DYkWFch3vxlgLdzzJj1THkYYTP4plsG3uVZ+wX7s20BWuThh9q/eNhdgEbmP83dLxNsRevJgOBacHtYkzck89DqXQwIDAQAB",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv+L0/HW0UnVVVDgBrj47orHZSRv95itgFQVsgSvvOYv/vbVyIUqScpxJuvuoYwD5cH/y0HlFdZkPMLHXC1GhQpkVFoW9sSgygMca+slFpCseWv6Uw0hTmw45FG8qNxOtCAY+4Ow50IeGs5nQlZVS6NeqZL2j+RCnVeD1uIFGcVC+6OOp9q2b1Jo6wVBaJTG9xLrCOdJEi7DC53Wzgwmd0L/qjak1Y96+DmxiykeeyMJIMX+VoRYxsKuc9Q1Jf55M9xL2fNMC7gt63iqI2j7cEuGxyxUND53MuFE45zneWnySYpR4Cd0Xr1opU45X9kmniPjCCB/WvVjUQ7Qy7l2EBwIDAQAB",
   "permissions": [
     "activeTab",
     "storage",
@@ -15,15 +15,24 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["clickfix-inject.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "clickfix-inject.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": true
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["jsQR.min.js", "content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "jsQR.min.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
@@ -33,8 +42,13 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["blocked.html", "top-domains.json"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "blocked.html",
+        "top-domains.json"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ]
 }

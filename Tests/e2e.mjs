@@ -1555,6 +1555,12 @@ print('n/a')
   // ======================================================================
   console.log("\n--- 17. Session Recording (Trace) ---");
 
+  // Trace capture works under both browsers now (Chrome force-installs the
+  // capture extension as a CRX via policy, same as Chromium's
+  // --load-extension). traceCapture is kept as a thin alias so the test
+  // names read the same; no browser is skipped.
+  const traceCapture = async (name, fn) => { await test(name, fn); };
+
   await test("17.1 Trace disabled — no trace events", async () => {
     await withSession("E2E_Trace_Off", {},
       async ({ sessionId, browser }) => {
@@ -1571,7 +1577,7 @@ print('n/a')
     );
   });
 
-  await test("17.2 Trace Level 1 — captures URLs and status codes", async () => {
+  await traceCapture("17.2 Trace Level 1 — captures URLs and status codes", async () => {
     await withSession("E2E_Trace_Basic", { traceLevel: "1" },
       async ({ sessionId, browser }) => {
         // Navigate to generate traffic after extension has initialized
@@ -1616,7 +1622,7 @@ print('n/a')
     );
   });
 
-  await test("17.5 Trace events include hostname", async () => {
+  await traceCapture("17.5 Trace events include hostname", async () => {
     await withSession("E2E_Trace_Host", { traceLevel: "1" },
       async ({ sessionId, browser }) => {
         await sleep(3000);
@@ -1631,7 +1637,7 @@ print('n/a')
   });
 
   if (hasDebugShell) {
-    await test("17.6 Form field capture at Level 2", async () => {
+    await traceCapture("17.6 Form field capture at Level 2", async () => {
       await withSession("E2E_Trace_Forms", { traceLevel: "2" },
         async ({ sessionId, browser }) => {
           await sleep(3000);
@@ -1660,7 +1666,7 @@ print('n/a')
     });
   }
 
-  await test("17.7 Redirect tracking", async () => {
+  await traceCapture("17.7 Redirect tracking", async () => {
     await withSession("E2E_Trace_Redir", { traceLevel: "1" },
       async ({ sessionId, browser }) => {
         await sleep(3000);
@@ -1719,7 +1725,7 @@ print('n/a')
     }
   });
 
-  await test("17.9 Toggle trace pauses and resumes", async () => {
+  await traceCapture("17.9 Toggle trace pauses and resumes", async () => {
     await withSession("E2E_Trace_Toggle", { traceLevel: "1" },
       async ({ sessionId, browser }) => {
         await sleep(3000);

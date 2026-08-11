@@ -1,7 +1,9 @@
 {
   "name": "com.bromure.phishing_guard",
-  "description": "Bromure phishing analysis — relays page analysis requests to the macOS host LLM service",
+  "description": "Bromure phishing analysis \u2014 relays page analysis requests to the macOS host LLM service",
   "path": "/usr/local/bin/phishing-agent.py",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://bihpbnfdiechljfdimgmkpbfmfpoejgm/"]
+  "allowed_origins": [
+    "chrome-extension://enimekkppnpfdajpldkpphcbiddjioca/"
+  ]
 }

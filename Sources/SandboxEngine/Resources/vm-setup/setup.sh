@@ -865,6 +865,7 @@ install_config configs/com.bromure.file_picker.json \
 install_config configs/com.bromure.trace.json \
     /mnt/etc/chromium/native-messaging-hosts/com.bromure.trace.json
 
+
 # Download Tranco top domains list (research-grade popularity ranking)
 echo "SANDBOX_STEP_START:Downloading popular domains list"
 TRANCO_URL="https://tranco-list.eu/top-1m.csv.zip"
@@ -887,6 +888,27 @@ else
     echo "[]" > /mnt/opt/bromure/extensions/phishing-guard/top-domains.json
 fi
 echo "SANDBOX_STEP_DONE:Downloading popular domains list"
+
+# ---------------------------------------------------------------------------
+# Pack the extensions as signed CRXs for Google Chrome. Branded Chrome
+# ignores --load-extension (Chromium honours it), so Chrome force-installs
+# them via ExtensionInstallForcelist from a self-hosted update manifest —
+# which needs each extension packed + signed. crx-pack.py does that in the
+# chroot (has chromium + python3), keyed by the committed signing keys
+# whose public halves are each manifest's "key", so both browsers resolve
+# the same extension id. The keys are removed afterward — only the .crx +
+# update.xml land in the image.
+# ---------------------------------------------------------------------------
+
+if [ -d "$SCRIPT_DIR/crx-keys" ]; then
+    echo "SANDBOX_STEP_START:Packing browser extensions"
+    rm -rf /mnt/tmp/crx-keys
+    cp -r "$SCRIPT_DIR/crx-keys" /mnt/tmp/crx-keys
+    install_config scripts/crx-pack.py /mnt/usr/local/bin/crx-pack.py 755
+    chroot /mnt /usr/local/bin/crx-pack.py || echo "warning: CRX packing failed — Chrome will have no extensions"
+    rm -rf /mnt/tmp/crx-keys
+    echo "SANDBOX_STEP_DONE:Packing browser extensions"
+fi
 
 # ---------------------------------------------------------------------------
 # Kernel modules loaded at boot. Ubuntu's kernel has rtc-pl031 built in

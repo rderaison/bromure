@@ -3,11 +3,15 @@
   "name": "Bromure WebRTC Block",
   "version": "1.0.0",
   "description": "Blocks WebRTC IP leak by overriding RTCPeerConnection.",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv0dcU3YUCJMrdo2oIJMkQZpPEXGRCRTxRQ2knM4iYmatAJb6BORdCw+0wHAicuUhiAF9KVcKMlmkWY0qM9VJJ8vXs4JTWoX7pBUsV1RxAXNEabMdd9rDyDyAcaH9zpINBF4kHBewLw8iNIF+BiNBXb5VGpIRSmlGpcZQRiQhRD80wze+FKn57+zbQ9Bw5LVRJkCTMjTuYukBDFOW8BBHJWtpJPpF1/FK74iUmKpLFjeyFH5keoesr/KoK6ZbNN+oPRRfDU+GAeRGLg6OkdaL/SkPvco65iRJfNtwf35rwJ5RH3/ALkM2ByzWMVtnDduHalDLaKeu0oQ7Iu61t3ps0QIDAQAB",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyLRGXlrx7zp3KXj4OMeooZ3uCv7Iy2E9ab3FLfIvLs9dMVH8wNflx262pMI44NoOPRPsVYMw5nUKWAEVKF8mzhxo9/TiJ2MZvS2z2UULqanWCAWe99B1CxjltAv9U9JpTSVrSoIy9H4FqLba/7Y6uwENCpQ2F5sT1kgkKPGVnegyPN+pd9Sd7sbPpdtYIeVOoyK/nm2efjVMjOiy9bSLgAjbjlHBE1nlzu3kXDnoDsrd4ckHkqj44Y7l70RvapdMzwMRGWqkzXTL1EqmFJ1ep2r2tQf3qeRmJnCKlghHKhJW1X4BTov7drVfMQo/+B4GUFtuIG0p6oB3l3PcZty+PwIDAQAB",
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["block.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "block.js"
+      ],
       "run_at": "document_start",
       "all_frames": true,
       "world": "MAIN"

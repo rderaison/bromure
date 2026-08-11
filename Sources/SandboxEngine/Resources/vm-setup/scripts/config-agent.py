@@ -177,12 +177,12 @@ def write_chromium_mtls_policy(url):
 # Stable Chromium extension id for our corporate-guard extension,
 # derived from the RSA public key in its manifest. If the manifest key
 # changes, this ID must be recomputed.
-CORPORATE_GUARD_EXT_ID = "nneafipcodbpeapjcagfcinodkidcjcp"
+CORPORATE_GUARD_EXT_ID = "pokgagebkogjohnoclppongjnfeinpjo"
 
 # Stable ID derived from the RSA key in
 # extensions/file-picker/manifest.json. Must match for the 3rdparty
 # managed-storage policy to reach the extension.
-FILE_PICKER_EXT_ID = "cjdidalalgkgekmhonlcaleiafjbkdfn"
+FILE_PICKER_EXT_ID = "dllblhgbnjchoipknlflefkgfjlblkmf"
 
 
 def write_corporate_guard_policy(cfg):
@@ -262,6 +262,38 @@ def sh_escape(s):
 _FALLBACK_CHROME_MAJOR = "142"
 
 
+CRX_DIR = "/opt/bromure/crx"
+
+
+def write_chrome_extension_forcelist(ext_paths):
+    """Force-install the given extensions under branded Google Chrome via
+    the ExtensionInstallForcelist policy. Chrome ignores --load-extension,
+    so each extension is served as a bake-time signed .crx from a local
+    file:// update manifest (see crx-pack.py). No-op for any extension we
+    didn't pack (the policy just skips it)."""
+    try:
+        ids = json.load(open(os.path.join(CRX_DIR, "ids.json")))
+    except (OSError, ValueError):
+        print("config-agent: no packed CRXs (ids.json missing) — Chrome "
+              "extensions unavailable", file=sys.stderr)
+        return
+    forcelist = []
+    for path in ext_paths:
+        name = os.path.basename(path)
+        ext_id = ids.get(name)
+        update_xml = os.path.join(CRX_DIR, name, "update.xml")
+        if ext_id and os.path.isfile(update_xml):
+            forcelist.append(f"{ext_id};file://{update_xml}")
+    if not forcelist:
+        return
+    policies_dir = "/etc/chromium/policies/managed"
+    os.makedirs(policies_dir, exist_ok=True)
+    with open(f"{policies_dir}/bromure-extensions.json", "w") as f:
+        json.dump({"ExtensionInstallForcelist": forcelist}, f)
+    print(f"config-agent: force-installing {len(forcelist)} extension(s) "
+          "under Chrome", file=sys.stderr)
+
+
 def browser_binary(cfg):
     """The browser binary this session launches. Both are baked into the
     image; the host sends "chrome" for profiles that picked official
@@ -315,16 +347,6 @@ def write_chrome_env(cfg):
     # grayscale AA; disabling here matches that path and avoids the slight
     # chromatic fringing/blur that subpixel rendering produces on this display.
     disable_features = ["LcdText"]
-
-    # Branded Chrome ≥137 ignores --load-extension (an anti-sideloading
-    # hardening for user desktops) unless this kill-switch feature is
-    # disabled — without it none of the Bromure extensions (link sender,
-    # file picker, credential bridge, …) load. Inside a disposable VM
-    # running our own images the hardening protects nothing. If Google
-    # removes the kill-switch in a future Chrome, the fallback is packing
-    # the extensions as CRX + external-extensions descriptors.
-    if browser_binary(cfg) == "google-chrome-stable":
-        disable_features.append("DisableLoadExtensionCommandLineSwitch")
 
     if cfg.get("darkMode"):
         extra_flags.append("--force-dark-mode")
@@ -394,7 +416,7 @@ def write_chrome_env(cfg):
         # only suppress the "extensions are debugging your browser"
         # banner in that case.
         extra_flags.append("--silent-debugger-extension-api")
-    # Trace extension: loaded when traceLevel > 0
+    # Trace extension: loaded when traceLevel > 0.
     trace_level = cfg.get("traceLevel", 0)
     if trace_level > 0:
         extensions.append("/opt/bromure/extensions/trace")
@@ -425,12 +447,21 @@ def write_chrome_env(cfg):
     if cfg.get("mtls") and cfg.get("corporateGuard"):
         extensions.append("/opt/bromure/extensions/corporate-guard")
     if extensions:
-        extra_flags.append(f"--load-extension={','.join(extensions)}")
-        # Only restrict extensions when no user extensions are configured.
-        # Policy-installed user extensions need unrestricted loading;
-        # the ExtensionSettings policy controls what gets installed.
-        if not cfg.get("userExtensionIDs"):
-            extra_flags.append(f"--disable-extensions-except={','.join(extensions)}")
+        if browser_binary(cfg) == "google-chrome-stable":
+            # Branded Chrome ignores --load-extension entirely (the
+            # DisableLoadExtensionCommandLineSwitch escape hatch was
+            # removed by Chrome 151). Force-install the same extensions
+            # from their bake-time CRXs via enterprise policy instead;
+            # write_chrome_extension_forcelist maps each to its signed
+            # .crx + file:// update manifest.
+            write_chrome_extension_forcelist(extensions)
+        else:
+            extra_flags.append(f"--load-extension={','.join(extensions)}")
+            # Only restrict extensions when no user extensions are configured.
+            # Policy-installed user extensions need unrestricted loading;
+            # the ExtensionSettings policy controls what gets installed.
+            if not cfg.get("userExtensionIDs"):
+                extra_flags.append(f"--disable-extensions-except={','.join(extensions)}")
 
     profile_dir = cfg.get("profileDir")
     if profile_dir:

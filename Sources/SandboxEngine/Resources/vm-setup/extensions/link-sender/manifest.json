@@ -3,7 +3,7 @@
   "name": "Bromure Link Sender",
   "version": "1.0.0",
   "description": "Send a link to another Bromure browser session.",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3w7oFCxMj49cxNFpYq7pUujnmqbqP4YiMKg3vixUGzafImy9n0tGHrKi77d5KR37OYh8izs2foJHMbN9xIbSz2W6Zo9ht3P+XDtGPICOdonX3fQP7hOS6kiS34sz/aXI396o8mAJQIkQjvBT9sCUrq9BuJ2LmDNhfNJpCVA8UPw/Suw3TNXQSaZbl9zve28netqk7GaijV/rexamhTE+amDAIo2SUIsx+J8x+OXrBhSHRI2cB/2IirAD+6FU/YF9Ix0o8JHBtk6C29C41AeRS9sx/0DxbdKMiZCmRGuhHOoPMVHakM3LIGSmdPMYnW36zE6a4bOHyaytBUKk/Z8WUwIDAQAB",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm6rwNTNrPBSAfaIvbiZfH/UnbdMpYvoqXJtSNd6t7nvk0+V6W1ymTlaTjXOf+w/9QcT2lFJhgQeA/nds/gYJSP/MSpwEW7EFEcaNLDmrBdyaPO4G9hkGIvbj60GaEYRXjojgwZD9cTwVZoRlOqGsl0EjLnT0daeYIl4O+QoBxXbADdGU4o5uhtHyYLChZcDkjLHE4ov6msumRhq26zDG3Gi0fXKJxSsTWvp3mrFR5oyO0lejCUvWFqE6MgR0Qg80uEmU1boHKR2llR/HbMRgWK2+GxP0ULqXckm+3nJJWM11yn0N3RsC6HbfR6kpn9CAqV08X57UhMKycXJEzPA0qQIDAQAB",
   "permissions": [
     "contextMenus",
     "nativeMessaging"
