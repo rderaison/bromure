@@ -12,7 +12,7 @@ extension Notification.Name {
     static let p2pIdentityChanged = Notification.Name("io.bromure.p2pIdentityChanged")
 }
 
-#if os(iOS) || os(visionOS)
+#if os(iOS)
 /// Anchors the in-app sign-in web sheet to the app's foreground window.
 private final class WebAuthPresenter: NSObject, ASWebAuthenticationPresentationContextProviding {
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -48,11 +48,22 @@ final class P2PEnrollmentCoordinator {
     /// link can't enroll this Mac into an attacker's workspace.
     private var pendingState: String?
 
-#if os(iOS) || os(visionOS)
+#if os(iOS)
     /// Retained while the in-app sign-in web sheet is on screen; the callback
     /// (a `bromure://enroll` redirect) is captured by the session itself.
     private var webAuthSession: ASWebAuthenticationSession?
     private let webAuthPresenter = WebAuthPresenter()
+#endif
+
+#if os(visionOS)
+    /// An in-flight in-app sign-in: the enroll page the embedded web sheet
+    /// loads. `RootView` presents `SignInWebSheet` while this is non-nil.
+    struct WebSignIn: Identifiable {
+        let state: String
+        let url: URL
+        var id: String { state }
+    }
+    var webSignIn: WebSignIn?
 #endif
 
     init() { identity = P2PIdentity.current() }
@@ -78,25 +89,34 @@ final class P2PEnrollmentCoordinator {
             URLQueryItem(name: "capability", value: "client"),
             URLQueryItem(name: "state", value: state),
         ]
+#if os(visionOS)
+        // Name the device class (the web view's UA reads as a Mac) and flag
+        // the embedded sheet so the login page hides its passkey button —
+        // WebAuthn is unavailable inside WKWebView.
+        comps.queryItems?.append(contentsOf: [
+            URLQueryItem(name: "platform", value: "vision"),
+            URLQueryItem(name: "embedded", value: "1"),
+        ])
+#endif
         if let url = comps.url {
 #if os(macOS)
             NSWorkspace.shared.open(url)
 #elseif os(visionOS)
-            // No in-app web sheet here: ASWebAuthenticationSession's visionOS
-            // presentation is a fixed compact browser card that clips the
-            // login form, and the session offers no sizing API. Safari opens
-            // as its own full-size, user-resizable window in the room instead
-            // — passkeys and the user's existing bromure.io session included —
-            // and the `bromure://enroll` redirect deep-links back into the app
-            // (RootView.onOpenURL), the same round-trip macOS makes.
-            UIApplication.shared.open(url)
+            // Embedded WKWebView sheet (SignInWebSheet), not
+            // ASWebAuthenticationSession: its visionOS presentation is a fixed
+            // compact browser card that clips the login form, with no sizing
+            // API. Not Safari-in-the-room either — App Review rejects sign-in
+            // that bounces out of the app, and the deep-link round-trip lost
+            // users who never found their way back. The sheet intercepts the
+            // same `bromure://enroll` redirect the iOS session captures.
+            webSignIn = WebSignIn(state: state, url: url)
 #else
             startWebAuth(url: url)
 #endif
         }
     }
 
-#if os(iOS) || os(visionOS)
+#if os(iOS)
     /// iOS sign-in in an in-app web sheet (ASWebAuthenticationSession) rather
     /// than kicking out to Safari. It shares Safari's cookies (so an existing
     /// bromure.io login carries over) and intercepts the `bromure://enroll`
@@ -126,6 +146,26 @@ final class P2PEnrollmentCoordinator {
         if !session.start() {
             error = "Couldn’t open the sign-in page."
         }
+    }
+#endif
+
+#if os(visionOS)
+    /// The embedded sheet caught the `bromure://enroll` redirect: dismiss it
+    /// and feed the same completion path the iOS web sheet and the macOS
+    /// deep link use.
+    func completeWebSignIn(_ callbackURL: URL) {
+        webSignIn = nil
+        guard let link = EnrollLink(parsing: callbackURL.absoluteString) else { return }
+        let state = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
+            .queryItems?.first { $0.name == "state" }?.value
+        complete(link, state: state)
+    }
+
+    /// The sheet was dismissed without completing — forget the nonce so a
+    /// stray later `bromure://enroll` link can't ride the dead attempt.
+    func cancelWebSignIn() {
+        webSignIn = nil
+        pendingState = nil
     }
 #endif
 

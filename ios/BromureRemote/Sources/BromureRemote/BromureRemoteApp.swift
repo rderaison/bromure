@@ -77,6 +77,11 @@ struct RootView: View {
     @State private var controllers = HostControllerStore.shared
     @State private var showAddServer = false
     @State private var pendingPeer: DeviceInfo?
+    #if os(visionOS)
+    /// The identity owner, held as @State so body observes `webSignIn` — the
+    /// embedded sign-in sheet presents the moment `signIn()` publishes it.
+    @State private var enroll = P2PEnrollmentCoordinator.shared
+    #endif
     #if DEBUG
     /// `BROMURE_DEBUG_EDITOR=1` presents the shared workspace editor over a
     /// dummy host at launch — screenshot/smoke the ProfileEditorView port
@@ -186,6 +191,17 @@ struct RootView: View {
             P2PEnrollmentCoordinator.shared.complete(link, state: state)
             directory.refreshAccount()
         }
+        #if os(visionOS)
+        // The embedded bromure.io sign-in: `signIn()` publishes the enroll URL
+        // instead of bouncing out to Safari (an App Review rejection), and this
+        // sheet renders it in-app. Dismissing without completing cancels the
+        // attempt so its nonce dies with it.
+        .sheet(item: Binding(
+            get: { enroll.webSignIn },
+            set: { if $0 == nil { enroll.cancelWebSignIn() } })) { request in
+            SignInWebSheet(request: request)
+        }
+        #endif
         .sheet(isPresented: $showAddServer) {
             NavigationStack {
                 ConnectScreen { host in

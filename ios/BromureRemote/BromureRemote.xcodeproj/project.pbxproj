@@ -20,6 +20,7 @@
 		817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CD0F2B2F2F6347A584824B /* PushKeypair.swift */; };
 		53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */; };
 		4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */; };
+		95973F70B7D437345CD94939 /* SignInWebSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F318FD1C356FA5300DB74E7 /* SignInWebSheet.swift */; };
 		DFA9952B65FAE0782AD6D79F /* VisionGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8078F914F8C902B789A224E /* VisionGrid.swift */; };
 		CDF818D2CB4FFE21FF6F242B /* VisionScenes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 891E17FE47B164B5A25F2306 /* VisionScenes.swift */; };
 		B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */; };
@@ -147,6 +148,7 @@
 		74CD0F2B2F2F6347A584824B /* PushKeypair.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushKeypair.swift"; path = "Sources/BromureRemote/PushKeypair.swift"; sourceTree = "<group>"; };
 		D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushNotifications.swift"; path = "Sources/BromureRemote/PushNotifications.swift"; sourceTree = "<group>"; };
 		0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RemoteTransportMobile.swift"; path = "Sources/BromureRemote/RemoteTransportMobile.swift"; sourceTree = "<group>"; };
+		1F318FD1C356FA5300DB74E7 /* SignInWebSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SignInWebSheet.swift"; path = "Sources/BromureRemote/SignInWebSheet.swift"; sourceTree = "<group>"; };
 		C8078F914F8C902B789A224E /* VisionGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "VisionGrid.swift"; path = "Sources/BromureRemote/VisionGrid.swift"; sourceTree = "<group>"; };
 		891E17FE47B164B5A25F2306 /* VisionScenes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "VisionScenes.swift"; path = "Sources/BromureRemote/VisionScenes.swift"; sourceTree = "<group>"; };
 		5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WebBrowserPane.swift"; path = "Sources/BromureRemote/WebBrowserPane.swift"; sourceTree = "<group>"; };
@@ -298,6 +300,7 @@
 				74CD0F2B2F2F6347A584824B /* PushKeypair.swift */,
 				D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */,
 				0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */,
+				1F318FD1C356FA5300DB74E7 /* SignInWebSheet.swift */,
 				C8078F914F8C902B789A224E /* VisionGrid.swift */,
 				891E17FE47B164B5A25F2306 /* VisionScenes.swift */,
 				5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */,
@@ -502,6 +505,7 @@
 				817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */,
 				53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */,
 				4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */,
+				95973F70B7D437345CD94939 /* SignInWebSheet.swift in Sources */,
 				DFA9952B65FAE0782AD6D79F /* VisionGrid.swift in Sources */,
 				CDF818D2CB4FFE21FF6F242B /* VisionScenes.swift in Sources */,
 				B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */,

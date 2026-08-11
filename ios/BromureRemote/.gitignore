@@ -3,6 +3,7 @@
 .build-ios/
 .build-ios-signed/
 .build-xr/
+.build-xr-signed/
 .build-sim/
 .dd-app/
 .swiftpm/
