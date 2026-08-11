@@ -222,6 +222,25 @@ retry() {
     fail "command failed after 3 attempts: $*"
 }
 
+# Slim the image at the source: tell dpkg to drop documentation, man
+# pages, and locale data as packages unpack, so the X/Chromium/tooling
+# installs below never write ~100 MB we'd only delete afterward. The
+# guest is a single-purpose disposable browser VM — none of it is user-
+# facing. Set BEFORE the big apt installs. /usr/share/locale is kept for
+# the browser session locales the product ships (re-rendered per install)
+# plus en; everything else is excluded.
+mkdir -p /etc/dpkg/dpkg.cfg.d
+cat > /etc/dpkg/dpkg.cfg.d/01-bromure-slim <<'EOF'
+path-exclude /usr/share/doc/*
+path-exclude /usr/share/man/*
+path-exclude /usr/share/groff/*
+path-exclude /usr/share/info/*
+path-exclude /usr/share/lintian/*
+path-exclude /usr/share/locale/*
+path-include /usr/share/locale/locale.alias
+path-include /usr/share/doc/*/copyright
+EOF
+
 # Route every chroot HTTP(S) request through the host's proxy (see the
 # outer proxy section). apt gets an explicit config on top of the env
 # vars — defensive, and a visible record of the override (removed in
@@ -532,6 +551,40 @@ if [ -f /tmp/v4l2loopback.ko.stash ]; then
     rm -f /tmp/v4l2loopback.ko.stash
 fi
 depmod "$KVER"
+
+# ---------------------------------------------------------------------------
+# Image slimming. The guest is a single-purpose disposable browser VM, so
+# strip packages nothing here uses. dpkg path-excludes (set at the top of
+# the chroot) already kept docs/man/locale out of everything installed
+# after debootstrap; below removes the rest.
+# ---------------------------------------------------------------------------
+
+log "slimming: reclaiming orphans + docs/man/locale"
+# Package removal here is DELIBERATELY limited to autoremove of genuine
+# orphans (the dkms-toolchain transitives). Do NOT purge named packages:
+# the print stack (libcups2 → libgs10/ghostscript) and even the Ubuntu
+# icon themes turned out to be load-bearing — purging any of them
+# cascades and takes Chromium + all of GTK/X with it. autoremove only
+# touches auto-installed packages nothing manual still needs, so Chromium
+# (explicitly installed = manual) and its dependency tree are safe.
+apt-get autoremove -y -q --purge >/dev/null 2>&1 || true
+
+# The path-excludes stop NEW docs/man/locale, but debootstrap's own
+# minbase set was unpacked before the exclude file existed — clear it.
+# In /usr/share/doc keep the copyright files (license compliance for the
+# redistributable image); drop everything else there and the rest wholesale.
+find /usr/share/doc -type f ! -name copyright -delete 2>/dev/null || true
+find /usr/share/doc -type l -delete 2>/dev/null || true
+rm -rf /usr/share/man/* /usr/share/info/* /usr/share/groff/* \
+       /usr/share/lintian/* /var/cache/apt/archives/*.deb 2>/dev/null || true
+# Keep only the locales the product ships (session locales + en); drop the
+# rest of /usr/share/locale left by minbase.
+( cd /usr/share/locale 2>/dev/null && for d in */; do
+    case "${d%/}" in
+        en|en_US|en_GB|fr|de|es|pt|pt_BR|ja|zh|zh_CN|zh_TW|zh_Hans|zh_Hant|locale.alias) ;;
+        *) rm -rf "$d" ;;
+    esac
+done ) || true
 
 log "chroot phase complete"
 CHROOT_EOF

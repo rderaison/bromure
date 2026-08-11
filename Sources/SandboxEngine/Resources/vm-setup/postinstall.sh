@@ -237,6 +237,14 @@ done
 # Leave no residue in the image.
 rm -rf /tmp/bromure-postinstall
 
+# The steps ran apt-get update + installs (Chrome/WARP), which repopulate
+# the package cache and lists — ~270 MB setup.sh's own clean can't reach
+# because these run later, against the finished disk. Clear them so the
+# downloaded/amended image doesn't ship the cache. (apt-get may be absent
+# on an Alpine-era image being amended; ignore failures.)
+apt-get clean 2>/dev/null || true
+rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb 2>/dev/null || true
+
 log "chroot phase complete"
 CHROOT_EOF
 fi
