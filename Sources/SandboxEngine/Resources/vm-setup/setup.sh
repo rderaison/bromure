@@ -314,10 +314,21 @@ retry apt-get install -y -q --no-install-recommends \
     fontconfig
 
 log "apt-get install proxy/DNS/VPN tools"
+# strongSwan plugin packs: Debian splits what Alpine ships in one
+# package, and --no-install-recommends drops them — leaving charon
+# without openssl (the ECDH ecp256/ecp384 groups and ECDSA certs in our
+# proposals), gcm (every aes256gcm16 ESP proposal), or any eap-*
+# (eap-mschapv2 is the default ikev2AuthMethod). Without these the
+# tunnel negotiates nothing: charon runs, swanctl shows zero SAs.
+#   libstrongswan-standard-plugins — openssl, gcm
+#   libcharon-extra-plugins       — eap-identity/md5/tls/gtc/...
+#   libcharon-extauth-plugins     — eap-mschapv2, xauth-generic
 retry apt-get install -y -q --no-install-recommends \
     squid dnsmasq proxychains4 cryptsetup inotify-tools jq python3 \
     v4l-utils libnss3-tools bash wireguard-tools \
-    strongswan strongswan-swanctl charon-systemd openvpn openssl \
+    strongswan strongswan-swanctl charon-systemd \
+    libstrongswan-standard-plugins libcharon-extra-plugins \
+    libcharon-extauth-plugins openvpn openssl \
     doas nftables unzip
 
 # ---------------------------------------------------------------------------
