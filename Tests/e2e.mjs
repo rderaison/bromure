@@ -1118,6 +1118,22 @@ print('n/a')
         }
       }
 
+      // Poll for the tunnel to reach (up=true) or leave (up=false)
+      // ESTABLISHED instead of a fixed sleep: IKE_AUTH + EAP against the
+      // WAN test server routinely needs retransmits, and the server-side
+      // log shows establishment landing 20-30s after initiate — past any
+      // reasonable single deadline. Returns the last swanctl output.
+      async function waitForTunnel(sessionId, up, timeoutMs) {
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+          const sa = await vmExec(sessionId, "doas swanctl --list-sas 2>/dev/null");
+          const out = sa.stdout || "";
+          if (out.includes("ESTABLISHED") === up) return out;
+          if (Date.now() > deadline) return out;
+          await sleep(2000);
+        }
+      }
+
       await test("10.4 IKEv2 OFF — strongSwan not running", async () => {
         await withSession("E2E_IKEv2_Off", { vpnMode: "none" },
           async ({ sessionId }) => {
@@ -1149,28 +1165,22 @@ print('n/a')
 
       await test("10.6 IKEv2 ON — charon running and tunnel established", async () => {
         await withIKEv2Session("E2E_IKEv2_On", {}, true, async (sessionId) => {
-          // Wait for IKEv2 to connect (strongSwan + auto-connect)
-          await sleep(20000);
+          // Wait for IKEv2 auto-connect
+          const saText = await waitForTunnel(sessionId, true, 45000);
 
           // Verify charon (strongSwan daemon) is running
           const charon = await vmExec(sessionId, "pgrep -f '[c]haron' | wc -l");
           assert(parseInt(charon.stdout.trim()) > 0, "charon not running");
 
-          // Verify tunnel is established via swanctl
-          const sa = await vmExec(sessionId, "doas swanctl --list-sas 2>/dev/null || echo NO_SA");
-          assert(!sa.stdout.includes("NO_SA"), `swanctl failed: ${sa.stderr}`);
-          assertIncludes(sa.stdout, "ESTABLISHED", `Tunnel not established: ${sa.stdout.slice(0, 200)}`);
+          assertIncludes(saText, "ESTABLISHED", `Tunnel not established: ${saText.slice(0, 200)}`);
         });
       });
 
       await test("10.7 IKEv2 toggle — IP changes via titlebar button", async () => {
         await withIKEv2Session("E2E_IKEv2_Toggle", {}, true, async (sessionId) => {
           // Wait for IKEv2 auto-connect
-          await sleep(20000);
-
-          // Verify tunnel is up
-          const saBefore = await vmExec(sessionId, "doas swanctl --list-sas 2>/dev/null");
-          assertIncludes(saBefore.stdout, "ESTABLISHED", "Tunnel not established before toggle");
+          const saBefore = await waitForTunnel(sessionId, true, 45000);
+          assertIncludes(saBefore, "ESTABLISHED", "Tunnel not established before toggle");
 
           // Get IP with VPN on
           const getIP = "wget -qO- --timeout=10 'http://checkip.amazonaws.com' 2>/dev/null | tr -d '\\n '";
@@ -1182,11 +1192,10 @@ print('n/a')
 
           // Toggle VPN off
           osascript(`toggle warp "${sessionId}"`);
-          await sleep(8000);
 
           // Verify tunnel is down
-          const saAfter = await vmExec(sessionId, "doas swanctl --list-sas 2>/dev/null");
-          assert(!saAfter.stdout.includes("ESTABLISHED"), "Tunnel still established after toggle off");
+          const saAfter = await waitForTunnel(sessionId, false, 20000);
+          assert(!saAfter.includes("ESTABLISHED"), "Tunnel still established after toggle off");
 
           // Get IP with VPN off
           const rOff = await vmExec(sessionId, getIP);
@@ -1196,12 +1205,12 @@ print('n/a')
           // IPs should differ
           assert(ipOn !== ipOff, `IP didn't change: on=${ipOn}, off=${ipOff}`);
 
-          // Toggle back on
+          // Toggle back on — cold charon restart + full EAP exchange, so
+          // give it the same window as the initial connect.
           osascript(`toggle warp "${sessionId}"`);
-          await sleep(15000);
 
-          const saReOn = await vmExec(sessionId, "doas swanctl --list-sas 2>/dev/null");
-          assertIncludes(saReOn.stdout, "ESTABLISHED", "Tunnel not re-established after toggle on");
+          const saReOn = await waitForTunnel(sessionId, true, 45000);
+          assertIncludes(saReOn, "ESTABLISHED", "Tunnel not re-established after toggle on");
 
           const rReOn = await vmExec(sessionId, getIP);
           const ipReOn = rReOn.stdout.trim();
@@ -1212,14 +1221,14 @@ print('n/a')
       await test("10.8 IKEv2 DNS — resolves through tunnel", async () => {
         await withIKEv2Session("E2E_IKEv2_DNS", { ikev2UseDNS: "true" }, true, async (sessionId) => {
           // Wait for IKEv2 auto-connect
-          await sleep(20000);
+          const sa = await waitForTunnel(sessionId, true, 45000);
+          assertIncludes(sa, "ESTABLISHED", "Tunnel not established");
 
-          // Verify tunnel established
-          const sa = await vmExec(sessionId, "doas swanctl --list-sas 2>/dev/null");
-          assertIncludes(sa.stdout, "ESTABLISHED", "Tunnel not established");
-
-          // DNS resolution should work through the tunnel
-          const dns = await vmExec(sessionId, "nslookup example.com 2>/dev/null | grep -i 'address' | tail -1");
+          // DNS resolution should work through the tunnel. getent, not
+          // nslookup: the Ubuntu image ships no dnsutils (Alpine's busybox
+          // provided nslookup for free), and getent exercises the same
+          // glibc/resolv.conf path the tunnel's DNS attribute configures.
+          const dns = await vmExec(sessionId, "getent hosts example.com");
           assert(dns.exitCode === 0, `DNS lookup failed: ${dns.stderr}`);
           assert(dns.stdout.trim().length > 0, "Empty DNS response");
 
