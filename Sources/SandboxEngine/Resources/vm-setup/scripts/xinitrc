@@ -151,7 +151,7 @@ LANG_FLAG=
 # and the host clips off the top rows. Chromium itself runs completely
 # unmodified — same launch flags, same maximize behaviour, same window
 # manager rules. tab-agent + the native titlebar handle the visible UI.
-CHROME_CMD="${BROWSER_BIN:-chromium-browser} --no-first-run --start-maximized --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan --font-render-hinting=none $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
+CHROME_CMD="${BROWSER_BIN:-chromium-browser} --no-first-run --no-default-browser-check --disable-pings --start-maximized --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan --font-render-hinting=none $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
 
 # VPN splash: when a VPN is configured to connect at startup, the tunnel
 # takes a few seconds to establish. Loading the user's URL in that window

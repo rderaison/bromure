@@ -356,6 +356,18 @@ exec /usr/bin/chromium "$@"
 EOSH
 chmod 755 /usr/local/bin/chromium-browser
 
+# The Debian-style /usr/bin/chromium wrapper sources /etc/chromium.d/*
+# into every launch. Two fragments fight the host-owned session flags:
+# default-flags injects --enable-gpu-rasterization unconditionally (even
+# when the profile turned GPU off), and extensions enables remote
+# extension loading + sweeps /usr/share/chromium/extensions. Remove
+# them; their still-wanted switches (--no-default-browser-check,
+# --disable-pings) live on xinitrc's launch line instead. KEEP apikeys
+# (without it Chromium shows a missing-API-keys infobar every session)
+# and dev-shm (--disable-dev-shm-usage crash guard — /dev/shm in these
+# VMs is always under its 3.8 GB threshold).
+rm -f /etc/chromium.d/default-flags /etc/chromium.d/extensions
+
 # Google Chrome (installed later by a browser-img-catalog.json
 # postinstall step) reads /etc/opt/chrome/{policies,native-messaging-hosts}.
 # Point it at the Chromium tree so both browsers see the same Bromure
