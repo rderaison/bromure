@@ -6,7 +6,7 @@
 
 /* MainView — Setup */
 "First-Time Setup" = "\U521d\U59cb\U8bbe\U7f6e";
-"Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once." = "\U4e0b\U8f7d Alpine Linux\Uff08\U7ea6 50 MB\Uff09\U5e76\U5b89\U88c5\nChromium\U3002\U6b64\U64cd\U4f5c\U53ea\U9700\U6267\U884c\U4e00\U6b21\U3002";
+"Downloads the browser image (Linux + Chromium)\nand personalizes it for your Mac. This only needs to happen once." = "下载浏览器映像（Linux + Chromium）\n并针对您的 Mac 进行个性化设置。此操作只需执行一次。";
 "Get Started" = "\U5f00\U59cb\U4f7f\U7528";
 
 /* MainView — Warming up */

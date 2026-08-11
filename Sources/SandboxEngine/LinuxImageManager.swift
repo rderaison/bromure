@@ -82,7 +82,7 @@ public final class LinuxImageManager {
     /// see ImageCatalog). The local-build path applies them so it
     /// converges on the same image the download path produces.
     public func createBaseImage(
-        diskSizeMB: UInt64 = 8192,
+        diskSizeMB: UInt64 = 5120,
         keyboardLayout: String? = nil,
         naturalScrolling: Bool? = nil,
         locale: String? = nil,

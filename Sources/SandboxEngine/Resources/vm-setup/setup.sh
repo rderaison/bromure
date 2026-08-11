@@ -923,10 +923,13 @@ fi
 cat "$SCRIPT_DIR/configs/modules" >> /mnt/etc/modules
 
 # ---------------------------------------------------------------------------
-# Swap file (1 GB) — activated via the fstab entry.
+# Swap file (256 MB) — activated via the fstab entry. Small on purpose: the
+# VM has 2-3 GB RAM plus a memory balloon, the session is disposable, and
+# every megabyte of swap is a megabyte of the (now 5 GB) disk the browser
+# can't use — swap is just OOM insurance, not working storage.
 # ---------------------------------------------------------------------------
 
-dd if=/dev/zero of=/mnt/swap bs=1M count=1024
+dd if=/dev/zero of=/mnt/swap bs=1M count=256
 chmod 600 /mnt/swap
 mkswap /mnt/swap
 

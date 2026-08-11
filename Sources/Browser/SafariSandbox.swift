@@ -4180,7 +4180,7 @@ struct Init: ParsableCommand {
     func run() throws {
         let guestOS = try parseGuestOS(os)
         let dir = storageDir.map { URL(filePath: $0) } ?? VMConfig.defaultStorageDirectory
-        let defaultDiskSize: UInt64 = guestOS == .linux ? 8192 : 64 * 1024
+        let defaultDiskSize: UInt64 = guestOS == .linux ? 5120 : 64 * 1024
 
         switch guestOS {
         case .linux:

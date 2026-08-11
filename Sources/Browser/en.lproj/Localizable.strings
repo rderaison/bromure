@@ -6,7 +6,7 @@
 
 /* MainView — Setup */
 "First-Time Setup" = "First-Time Setup";
-"Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once." = "Downloads Alpine Linux (~50 MB) and installs\nChromium. This only needs to happen once.";
+"Downloads the browser image (Linux + Chromium)\nand personalizes it for your Mac. This only needs to happen once." = "Downloads the browser image (Linux + Chromium)\nand personalizes it for your Mac. This only needs to happen once.";
 "Get Started" = "Get Started";
 
 /* MainView — Warming up */
