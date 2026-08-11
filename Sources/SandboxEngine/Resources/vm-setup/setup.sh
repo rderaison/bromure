@@ -957,6 +957,25 @@ for p in /proc/[0-9]*; do
         /mnt|/mnt/*) kill -9 "${p#/proc/}" 2>/dev/null || true ;;
     esac
 done
+
+# ---------------------------------------------------------------------------
+# Scrub free space. Files deleted during the bake (apt archives, extracted
+# tarballs) otherwise survive as free-but-nonzero blocks in the raw image —
+# ~1.2 GB of mostly already-compressed .deb payload that inflates
+# base.img.gz by ~800 MB. fstrim (Ubuntu's, via chroot — busybox may lack
+# it) punches the freed blocks out as host-side holes when the virtio disk
+# supports discard; if it doesn't, overwrite all free space with zeros so
+# it at least compresses to nothing. The fill dd is EXPECTED to fail with
+# ENOSPC — filling the disk is the point.
+# ---------------------------------------------------------------------------
+if chroot /mnt fstrim -v /; then
+    echo "sandbox-setup: free space trimmed"
+else
+    echo "sandbox-setup: fstrim unsupported — zero-filling free space"
+    dd if=/dev/zero of=/mnt/.zerofill bs=4M 2>/dev/null || true
+    sync
+    rm -f /mnt/.zerofill
+fi
 sync
 
 # debootstrap/apt stack extra mounts inside the target (a second /proc,
