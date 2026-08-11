@@ -879,6 +879,27 @@ log "chroot phase complete"
 CHROOT_EOF
 
 # ---------------------------------------------------------------------------
+# Scrub free space before teardown. Files deleted during the bake (apt
+# archives, extracted tarballs) otherwise survive as free-but-nonzero
+# blocks in the raw image — largely already-compressed payload that
+# inflates base.img.gz (halved the browser image's download). fstrim
+# punches the freed blocks out as host-side holes (Virtualization.framework
+# passes virtio-blk discard through — verified on the browser bake); if
+# that ever stops working, fill free space with zeros instead so it at
+# least compresses to nothing (the dd is EXPECTED to end on ENOSPC).
+# The ESP stays as-is: vfat has no FITRIM and its few MB never churn.
+# ---------------------------------------------------------------------------
+log "trimming free space on target"
+if chroot /mnt fstrim -v /; then
+    log "free space trimmed"
+else
+    log "fstrim unsupported - zero-filling free space"
+    dd if=/dev/zero of=/mnt/.zerofill bs=4M 2>/dev/null || true
+    sync
+    rm -f /mnt/.zerofill
+fi
+
+# ---------------------------------------------------------------------------
 # Tear down chroot mounts and unmount target.
 # ---------------------------------------------------------------------------
 
