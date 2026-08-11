@@ -273,9 +273,16 @@ async function withSession(profileName, profileSettings, checkFn) {
     // Wait for page to settle and CDP pool to fill
     await sleep(5000);
 
-    // Connect Puppeteer (with retries for CDP pool availability)
+    // Connect Puppeteer (with retries for CDP pool availability).
+    // VPN auto-connect sessions gate Chrome behind the splash page for
+    // up to 120s while the tunnel registers/connects — give them a CDP
+    // budget that outlasts the gate instead of the default ~25s.
+    const vpnGated =
+      profileSettings.warpAutoConnect === "true" ||
+      profileSettings.ikev2AutoConnect === "true" ||
+      profileSettings.wireguardAutoConnect === "true";
     try {
-      browser = await connectSession(sessionId);
+      browser = await connectSession(sessionId, vpnGated ? 75 : 10);
     } catch (e) {
       throw new Error(`CDP connect failed for ${sessionId}: ${e.message}`);
     }

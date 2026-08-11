@@ -35,6 +35,15 @@ public final class WarpBridge: NSObject, @unchecked Sendable {
     /// Whether an enable/disable operation is in flight.
     public private(set) var busy = false
 
+    /// Where the in-flight enable/disable is heading (true = connected),
+    /// and the state the user most recently asked for while one was in
+    /// flight. Without the queue, a titlebar click during a transition
+    /// hits `guard !busy` and is silently dropped — the button feels
+    /// dead, and a fast off→on toggle never re-enables. The queued
+    /// intent is applied when the in-flight command's response lands.
+    private var inFlightTarget = false
+    private var queuedIntent: Bool?
+
     public init(socketDevice: VZVirtioSocketDevice) {
         self.socketDevice = socketDevice
         super.init()
@@ -64,21 +73,29 @@ public final class WarpBridge: NSObject, @unchecked Sendable {
 
     /// Tell the guest agent to start WARP and route squid through it.
     public func enable() {
-        guard !busy else { return }
+        guard !busy else { queuedIntent = true; return }
         busy = true
+        inFlightTarget = true
         state = .connecting
         sendCommand(["type": "enable"])
     }
 
     /// Tell the guest agent to stop WARP and restart squid directly.
     public func disable() {
-        guard !busy else { return }
+        guard !busy else { queuedIntent = false; return }
         busy = true
+        inFlightTarget = false
         sendCommand(["type": "disable"])
     }
 
     /// Toggle WARP based on current state.
     public func toggle() {
+        if busy {
+            // A click during a transition means "end up the other way"
+            // relative to where the in-flight command is heading.
+            queuedIntent = !(queuedIntent ?? inFlightTarget)
+            return
+        }
         switch state {
         case .connected:
             disable()
@@ -88,6 +105,16 @@ public final class WarpBridge: NSObject, @unchecked Sendable {
             break // Already in progress
         default:
             requestStatus()
+        }
+    }
+
+    /// Apply the click that arrived while an enable/disable was in
+    /// flight, once that command has resolved.
+    private func applyQueuedIntent() {
+        guard !busy, let want = queuedIntent else { return }
+        queuedIntent = nil
+        if want != (state == .connected) {
+            want ? enable() : disable()
         }
     }
 
@@ -196,6 +223,7 @@ public final class WarpBridge: NSObject, @unchecked Sendable {
         default:
             break
         }
+        applyQueuedIntent()
     }
 
     private func parseState(_ str: String, error: String?) -> WarpState {
