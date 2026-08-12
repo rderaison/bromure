@@ -63,13 +63,13 @@ def write_vpn_status(ok, error=None):
         log(f"write_vpn_status failed: {e}")
 
 
-def run(cmd, quiet=False):
+def run(cmd, quiet=False, timeout=30):
     if not quiet:
         log(f"  exec: {cmd}")
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        log(f"  TIMEOUT after 30s: {cmd}")
+        log(f"  TIMEOUT after {timeout}s: {cmd}")
         return 1, ""
     if not quiet and r.returncode != 0:
         log(f"  rc={r.returncode} stdout={r.stdout.strip()!r} stderr={r.stderr.strip()!r}")
@@ -91,6 +91,15 @@ def is_connected():
 
 def charon_running():
     rc, _ = run("pgrep -f charon", quiet=True)
+    return rc == 0
+
+
+def vici_alive():
+    """Whether charon's VICI socket actually answers — not merely exists.
+    After a hard stop the socket file can survive its daemon, and enable
+    must take the restart path then, or every swanctl call just fails
+    against a dead socket."""
+    rc, _ = run("swanctl --stats >/dev/null 2>&1", quiet=True)
     return rc == 0
 
 
@@ -118,8 +127,9 @@ def do_enable():
     if not os.path.isfile(SWANCTL_CONF):
         return False, "IKEv2 config not found"
 
-    # Start charon if not running (or socket is gone)
-    if not charon_running() or not os.path.exists("/var/run/charon.vici"):
+    # (Re)start charon unless it's running AND its VICI socket answers —
+    # existence alone isn't enough, see vici_alive().
+    if not charon_running() or not vici_alive():
         # Kill any leftover charon before restarting
         if charon_running():
             run("ipsec stop 2>&1", quiet=True)
@@ -135,9 +145,9 @@ def do_enable():
         rc, out = run("ipsec start 2>&1")
         if rc != 0:
             return False, f"ipsec start failed: {out}"
-        # Wait for charon's VICI socket to be ready
+        # Wait for charon's VICI socket to answer
         for _ in range(20):
-            if os.path.exists("/var/run/charon.vici"):
+            if vici_alive():
                 break
             time.sleep(0.5)
         else:
@@ -148,8 +158,11 @@ def do_enable():
     if rc != 0:
         return False, f"swanctl --load-all failed: {out}"
 
-    # Initiate the connection
-    rc, out = run(f"swanctl --initiate --child {CHILD_SA} 2>&1")
+    # Initiate the connection. IKE_AUTH over a retransmitting WAN path
+    # can take 20-30s (observed against the e2e server), which sat right
+    # at run()'s default 30s kill — after which the error masked an SA
+    # that often completed anyway. Give the blocking initiate real room.
+    rc, out = run(f"swanctl --initiate --child {CHILD_SA} 2>&1", timeout=90)
     if rc != 0:
         return False, parse_swanctl_error(out)
 

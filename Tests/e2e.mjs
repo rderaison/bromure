@@ -1217,7 +1217,13 @@ print('n/a')
           osascript(`toggle warp "${sessionId}"`);
 
           const saReOn = await waitForTunnel(sessionId, true, 45000);
-          assertIncludes(saReOn, "ESTABLISHED", "Tunnel not re-established after toggle on");
+          if (!saReOn.includes("ESTABLISHED")) {
+            // The swanctl output alone says nothing about WHY — the
+            // agent log records the exact enable/disable commands and
+            // their errors.
+            const alog = await vmExec(sessionId, "tail -40 /tmp/bromure/ikev2-agent.log 2>/dev/null");
+            assert(false, `Tunnel not re-established after toggle on. agent log:\n${(alog.stdout || "").trim()}`);
+          }
 
           const rReOn = await vmExec(sessionId, getIP);
           const ipReOn = rReOn.stdout.trim();
