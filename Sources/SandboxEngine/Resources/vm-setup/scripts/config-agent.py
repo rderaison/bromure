@@ -79,6 +79,25 @@ def mount_profile_disk(cfg):
         run(f"mount -o loop {disk_path} {mount_point}", check=True)
         run(f"chown chrome:chrome {mount_point}")
 
+    # Clear Chromium's profile lock from the previous session. The lock
+    # symlink encodes hostname-pid; when the hostname matches, Chromium
+    # cleans a stale lock itself (dead pid), but a mismatched hostname
+    # reads as "profile in use on another computer" and it refuses to
+    # start — the Alpine guests were `localhost`, this image is
+    # `bromure`, so every persistent profile carried across the upgrade
+    # insta-exited Chromium until xinitrc's crash-loop heuristic
+    # quarantined the profile into disabled-prefs.* (looked like lost
+    # bookmarks/history). A same-hostname lock with a recycled live pid
+    # fails the same way. We just booted, so no Chromium is running and
+    # persistent profiles are single-session — always safe to clear.
+    for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        try:
+            os.unlink(os.path.join(mount_point, lock))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            print(f"config-agent: profile lock cleanup: {lock}: {e}", file=sys.stderr)
+
 
 def write_custom_cas(cas):
     """Write custom root CA certificates to disk."""
