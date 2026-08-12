@@ -323,12 +323,21 @@ log "apt-get install proxy/DNS/VPN tools"
 #   libstrongswan-standard-plugins — openssl, gcm
 #   libcharon-extra-plugins       — eap-identity/md5/tls/gtc/...
 #   libcharon-extauth-plugins     — eap-mschapv2, xauth-generic
+# libpcap + libtss2: the runtime libraries Cloudflare WARP's warp-svc /
+# warp-cli link. WARP itself is non-free and stays a catalog postinstall
+# step, but that step EXTRACTS the deb rather than apt-installing it —
+# the deb's Depends drag in its tray GUI's stack (libwebkit2gtk +
+# libayatana-appindicator, a huge closure Bromure never runs). With
+# these baked, the postinstall downloads exactly one deb and nothing
+# else. (esys pulls libtss2-mu itself; dbus/nss/iproute2/nftables/
+# certutil/ca-certificates are already in this list or chromium's.)
 retry apt-get install -y -q --no-install-recommends \
     squid dnsmasq proxychains4 cryptsetup inotify-tools jq python3 \
     v4l-utils libnss3-tools bash wireguard-tools \
     strongswan strongswan-swanctl charon-systemd \
     libstrongswan-standard-plugins libcharon-extra-plugins \
     libcharon-extauth-plugins openvpn openssl \
+    libpcap0.8t64 libtss2-esys-3.0.2-0t64 libtss2-tctildr0t64 \
     doas nftables unzip
 
 # ---------------------------------------------------------------------------
