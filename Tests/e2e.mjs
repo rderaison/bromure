@@ -1436,10 +1436,13 @@ print('n/a')
 
   await test("14.3 Persistent storage — tabs restored after restart", async () => {
     const profileName = "E2E_Restore";
+    // Three distinct hostnames, all IANA-run: the test only needs tabs
+    // that restore recognizably, and httpbin.org's slowness has cost CI
+    // runs here just like it did in section 17.
     const sites = [
       "https://example.com",
-      "https://httpbin.org/get",
-      "https://httpbin.org/html",
+      "https://example.org",
+      "https://example.net",
     ];
 
     osascript(`create profile "${profileName}" persistent true`);
