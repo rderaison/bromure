@@ -1602,16 +1602,22 @@ print('n/a')
   await traceCapture("17.2 Trace Level 1 — captures URLs and status codes", async () => {
     await withSession("E2E_Trace_Basic", { traceLevel: "1" },
       async ({ sessionId, browser }) => {
-        // Navigate to generate traffic after extension has initialized
+        // Navigate to generate traffic after extension has initialized.
+        // example.com, not httpbin: tests that only need "an HTTPS page
+        // that produces a traced request" use the IANA-stable host —
+        // httpbin.org is community-run and slow enough under load to
+        // blow the navigation timeout (it cost 17.5 a CI run). httpbin
+        // remains only where its endpoints are semantic (forms,
+        // redirects).
         await sleep(3000);
         const page = await getPage(browser);
-        await page.goto("https://httpbin.org/get", { waitUntil: "load", timeout: 15000 });
+        await page.goto("https://example.com", { waitUntil: "load", timeout: 15000 });
         await sleep(5000);
         const trace = await api("GET", `/sessions/${sessionId}/trace`);
         assert(trace.events && trace.events.length > 0, `No trace events captured at Level 1 (count: ${trace.count})`);
         // Verify basic fields present
-        const ev = trace.events.find((e) => e.url && e.url.includes("httpbin"));
-        assert(ev, "No httpbin request in trace");
+        const ev = trace.events.find((e) => e.url && e.url.includes("example.com"));
+        assert(ev, "No example.com request in trace");
         assert(ev.method, "Missing method");
         assert(ev.timestamp, "Missing timestamp");
       }
@@ -1635,7 +1641,7 @@ print('n/a')
       async ({ sessionId, browser }) => {
         await sleep(3000);
         const page = await getPage(browser);
-        await page.goto("https://httpbin.org/get", { waitUntil: "load", timeout: 15000 });
+        await page.goto("https://example.com", { waitUntil: "load", timeout: 15000 });
         await sleep(5000);
         const trace = await api("GET", `/sessions/${sessionId}/trace`);
         assert(typeof trace.count === "number", "Missing count field");
@@ -1649,11 +1655,11 @@ print('n/a')
       async ({ sessionId, browser }) => {
         await sleep(3000);
         const page = await getPage(browser);
-        await page.goto("https://httpbin.org/get", { waitUntil: "load", timeout: 15000 });
+        await page.goto("https://example.com", { waitUntil: "load", timeout: 15000 });
         await sleep(5000);
         const trace = await api("GET", `/sessions/${sessionId}/trace`);
-        const ev = trace.events?.find((e) => e.hostname === "httpbin.org");
-        assert(ev, `No event with hostname httpbin.org. Hostnames: ${trace.events?.map(e => e.hostname).filter(Boolean).join(", ")}`);
+        const ev = trace.events?.find((e) => e.hostname === "example.com");
+        assert(ev, `No event with hostname example.com. Hostnames: ${trace.events?.map(e => e.hostname).filter(Boolean).join(", ")}`);
       }
     );
   });
@@ -1665,7 +1671,7 @@ print('n/a')
           await sleep(3000);
           const page = await getPage(browser);
           // Navigate to a page with a login form
-          await page.goto("https://httpbin.org/forms/post", { waitUntil: "load", timeout: 15000 });
+          await page.goto("https://httpbin.org/forms/post", { waitUntil: "load", timeout: 30000 });
           await sleep(2000);
           // Fill in the form
           await page.evaluate(() => {
@@ -1693,7 +1699,7 @@ print('n/a')
       async ({ sessionId, browser }) => {
         await sleep(3000);
         const page = await getPage(browser);
-        await page.goto("https://httpbin.org/redirect/2", { waitUntil: "load", timeout: 15000 });
+        await page.goto("https://httpbin.org/redirect/2", { waitUntil: "load", timeout: 30000 });
         await sleep(5000);
         const trace = await api("GET", `/sessions/${sessionId}/trace`);
         assert(trace.events && trace.events.length > 0, "No trace events for redirect test");
@@ -1732,7 +1738,7 @@ print('n/a')
       // Navigate to generate traffic
       const browser = await connectSession(sessionId);
       const page = await getPage(browser);
-      await page.goto("https://httpbin.org/get", { waitUntil: "load", timeout: 15000 });
+      await page.goto("https://example.com", { waitUntil: "load", timeout: 15000 });
       await sleep(3000);
       browser.disconnect();
       await sleep(500);
@@ -1754,7 +1760,7 @@ print('n/a')
         const page = await getPage(browser);
 
         // Generate traffic while recording
-        await page.goto("https://httpbin.org/get", { waitUntil: "load", timeout: 15000 });
+        await page.goto("https://example.com", { waitUntil: "load", timeout: 15000 });
         await sleep(3000);
         const trace1 = await api("GET", `/sessions/${sessionId}/trace`);
         const count1 = trace1.events?.length || 0;
@@ -1764,8 +1770,9 @@ print('n/a')
         osascript(`toggle trace "${sessionId}"`);
         await sleep(1000);
 
-        // Generate more traffic
-        await page.goto("https://httpbin.org/post", { waitUntil: "load", timeout: 15000 });
+        // Generate more traffic — a distinct URL, so a still-recording
+        // trace would definitely gain an event.
+        await page.goto("https://example.com/?paused", { waitUntil: "load", timeout: 15000 });
         await sleep(3000);
         const trace2 = await api("GET", `/sessions/${sessionId}/trace`);
         const count2 = trace2.events?.length || 0;
