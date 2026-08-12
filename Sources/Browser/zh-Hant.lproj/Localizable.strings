@@ -726,3 +726,10 @@
 "Google Workspace can only manage the Google Chrome browser. Switch this profile to Google Chrome to use the enrollment token." = "Google Workspace 只能管理 Google Chrome 瀏覽器。若要使用註冊權杖,請將此設定檔切換至 Google Chrome。";
 "Google Workspace can only manage the Google Chrome browser, and this profile’s saved browsing data was created by Chromium. Delete the profile data in General settings first, then switch the browser to Google Chrome." = "Google Workspace 只能管理 Google Chrome 瀏覽器,而此設定檔儲存的瀏覽資料由 Chromium 建立。請先在「一般」設定中刪除設定檔資料,再將瀏覽器切換至 Google Chrome。";
 "OK" = "好";
+
+/* Stale-base-image refresh prompt */
+"Your browser image is over a month old" = "您的瀏覽器映像已超過一個月";
+"A newer image with the latest security updates for Linux and the browser is available. Downloading it takes a few minutes; your profiles and their data are kept, and open sessions keep running." = "包含 Linux 與瀏覽器最新安全更新的新映像已可用。下載需要幾分鐘；您的設定檔及其資料將被保留，已開啟的工作階段可繼續運作。";
+"Download Latest" = "下載最新版本";
+"Not Now" = "暫時不要";
+"Never ask me again" = "不再詢問";

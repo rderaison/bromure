@@ -726,3 +726,10 @@
 "Google Workspace can only manage the Google Chrome browser. Switch this profile to Google Chrome to use the enrollment token." = "Google Workspace ne peut gérer que le navigateur Google Chrome. Passez ce profil à Google Chrome pour utiliser le jeton d'inscription.";
 "Google Workspace can only manage the Google Chrome browser, and this profile’s saved browsing data was created by Chromium. Delete the profile data in General settings first, then switch the browser to Google Chrome." = "Google Workspace ne peut gérer que le navigateur Google Chrome, et les données de navigation enregistrées de ce profil ont été créées par Chromium. Supprimez d'abord les données du profil dans les réglages Général, puis choisissez Google Chrome comme navigateur.";
 "OK" = "OK";
+
+/* Stale-base-image refresh prompt */
+"Your browser image is over a month old" = "Votre image de navigateur date de plus d’un mois";
+"A newer image with the latest security updates for Linux and the browser is available. Downloading it takes a few minutes; your profiles and their data are kept, and open sessions keep running." = "Une image plus récente avec les dernières mises à jour de sécurité pour Linux et le navigateur est disponible. Le téléchargement prend quelques minutes ; vos profils et leurs données sont conservés, et les sessions ouvertes continuent de fonctionner.";
+"Download Latest" = "Télécharger la dernière version";
+"Not Now" = "Pas maintenant";
+"Never ask me again" = "Ne plus me demander";

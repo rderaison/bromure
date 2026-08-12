@@ -329,9 +329,80 @@ final class AppState: @unchecked Sendable {
             guard let catalog = await store.refresh() ?? store.remote() else { return }
             let applied = self.imageManager.loadImageState()?.appliedStepUUIDs ?? []
             let pending = catalog.pendingSteps(appliedUUIDs: applied)
-            guard !pending.isEmpty else { return }
-            await self.promptAndApplyPostinstallSteps(pending)
+            if !pending.isEmpty {
+                // One dialog per launch: applying steps also rewrites the
+                // base image (fresh mtime), which resets the age check.
+                await self.promptAndApplyPostinstallSteps(pending)
+                return
+            }
+            self.maybePromptForImageRefresh()
         }
+    }
+
+    /// Wired by the app delegate to Sparkle: true while an update check /
+    /// update alert is in progress, so the image-refresh prompt never
+    /// stacks on top of an app-update dialog.
+    var updateAlertActive: () -> Bool = { false }
+
+    /// How old the base image may get before suggesting a reinstall —
+    /// the weekly publish means a 30-day-old image is ~4 Ubuntu package
+    /// syncs and several Chrome releases behind.
+    private static let imageRefreshMaxAge: TimeInterval = 30 * 24 * 3600
+
+    /// Once linux-base.img is over 30 days old on disk, offer to
+    /// redownload the current image. At most one ask per 30 days;
+    /// the suppression checkbox is a permanent opt-out.
+    private func maybePromptForImageRefresh() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "imageRefresh.neverAsk") else { return }
+        if let last = defaults.object(forKey: "imageRefresh.lastPromptAt") as? Date,
+           Date().timeIntervalSince(last) < Self.imageRefreshMaxAge {
+            return
+        }
+        guard let mtime = (try? FileManager.default.attributesOfItem(
+                  atPath: imageManager.linuxDiskURL.path))?[.modificationDate] as? Date,
+              Date().timeIntervalSince(mtime) > Self.imageRefreshMaxAge else {
+            return
+        }
+        // Never stack on an app-update alert (or any other modal) —
+        // dismissing two upgrade prompts in a row is worse than asking
+        // a day later.
+        guard !updateAlertActive(), NSApp.modalWindow == nil else { return }
+
+        defaults.set(Date(), forKey: "imageRefresh.lastPromptAt")
+
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString(
+            "Your browser image is over a month old",
+            comment: "Title of the stale-base-image refresh prompt")
+        alert.informativeText = NSLocalizedString(
+            "A newer image with the latest security updates for Linux and the browser is available. Downloading it takes a few minutes; your profiles and their data are kept, and open sessions keep running.",
+            comment: "Body of the stale-base-image refresh prompt")
+        alert.addButton(withTitle: NSLocalizedString(
+            "Download Latest", comment: "Consent button of the stale-base-image refresh prompt"))
+        alert.addButton(withTitle: NSLocalizedString(
+            "Not Now", comment: "Decline button of the stale-base-image refresh prompt"))
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = NSLocalizedString(
+            "Never ask me again", comment: "Suppression checkbox of the stale-base-image refresh prompt")
+
+        let response = alert.runModal()
+        if alert.suppressionButton?.state == .on {
+            defaults.set(true, forKey: "imageRefresh.neverAsk")
+        }
+        guard response == .alertFirstButtonReturn else { return }
+
+        // Same teardown restartPool() uses, then the normal install flow —
+        // open sessions run on clones and keep going; the warm pool VM is
+        // recycled onto the fresh image when startInit finishes.
+        warmUpTask?.cancel()
+        warmUpTask = nil
+        poolReady = false
+        let oldPool = pool
+        pool = nil
+        Task { await oldPool?.shutdown() }
+        deleteImageFiles()
+        startInit()
     }
 
     private func promptAndApplyPostinstallSteps(_ steps: [PostinstallStep]) async {

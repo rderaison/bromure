@@ -186,6 +186,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
+        // The stale-image refresh prompt defers to Sparkle so the user is
+        // never asked to sit through two upgrade dialogs in a row.
+        state.updateAlertActive = { [weak self] in
+            self?.updaterController?.updater.sessionInProgress ?? false
+        }
         setupMenu()
         NSApp.activate(ignoringOtherApps: true)
 
