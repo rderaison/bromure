@@ -21,6 +21,12 @@ struct RemoteAccessSettingsView: View {
     @State private var newKey = ""
     @State private var errorText: String?
 
+    /// App-global TLS-interception bypass list (`proxy.noMitmDomains`). Built-in
+    /// cert-pinners are always bypassed and shown read-only.
+    @State private var noMitmDomains: [String] = []
+    @State private var newDomain = ""
+    private static let noMitmBuiltins = ["google.com", "gstatic.com", "googleapis.com"]
+
     @State private var account = P2PEnrollmentCoordinator.shared
 
     var body: some View {
@@ -35,6 +41,8 @@ struct RemoteAccessSettingsView: View {
                 hostKeySection
                 Divider()
                 keysSection
+                Divider()
+                noMitmSection
                 if let errorText {
                     Text(errorText).foregroundColor(.red).font(.callout)
                 }
@@ -43,7 +51,7 @@ struct RemoteAccessSettingsView: View {
             .padding(20)
         }
         .frame(minWidth: 480, minHeight: 560)
-        .onAppear { refresh(); account.refresh() }
+        .onAppear { refresh(); account.refresh(); loadNoMitmDomains() }
     }
 
     /// Reach this Mac from anywhere over bromure.io — peer-to-peer, no port
@@ -172,6 +180,65 @@ struct RemoteAccessSettingsView: View {
                 }
             }
         }
+    }
+
+    /// TLS interception bypass. Traffic to these domains is spliced straight to
+    /// the origin — never MiTM'd — so it isn't inspected. App-global and enforced
+    /// host-side; the guest can't change it. Built-in cert-pinners are always
+    /// bypassed (MiTM would break them) and can't be removed.
+    private var noMitmSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Don't intercept (no-MITM domains)").font(.headline)
+            Text("HTTPS to these domains is passed through untouched — not decrypted or inspected. Use for sites that pin certificates or that you don't want inspected.")
+                .font(.caption).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(Self.noMitmBuiltins, id: \.self) { d in
+                HStack {
+                    Text(d).font(.system(.caption, design: .monospaced))
+                    Text("built-in").font(.caption2).foregroundColor(.secondary)
+                    Spacer()
+                    Image(systemName: "lock").foregroundColor(.secondary)
+                }
+            }
+            ForEach(Array(noMitmDomains.enumerated()), id: \.offset) { idx, d in
+                HStack {
+                    Text(d).font(.system(.caption, design: .monospaced))
+                    Spacer()
+                    Button(role: .destructive) {
+                        noMitmDomains.remove(at: idx)
+                        saveNoMitmDomains()
+                    } label: { Image(systemName: "trash") }
+                    .buttonStyle(.borderless)
+                }
+            }
+            HStack {
+                TextField("example.com", text: $newDomain)
+                Button("Add") { addNoMitmDomain() }
+            }
+        }
+    }
+
+    private func loadNoMitmDomains() {
+        noMitmDomains = UserDefaults.standard.stringArray(forKey: "proxy.noMitmDomains") ?? []
+    }
+
+    private func saveNoMitmDomains() {
+        UserDefaults.standard.set(noMitmDomains, forKey: "proxy.noMitmDomains")
+    }
+
+    private func addNoMitmDomain() {
+        // Normalize: lowercase, strip scheme/path/port and a leading "www.".
+        var d = newDomain.lowercased().trimmingCharacters(in: .whitespaces)
+        if let r = d.range(of: "://") { d = String(d[r.upperBound...]) }
+        d = d.components(separatedBy: "/").first ?? d
+        d = d.components(separatedBy: ":").first ?? d
+        if d.hasPrefix("www.") { d = String(d.dropFirst(4)) }
+        guard !d.isEmpty, d.contains("."),
+              !Self.noMitmBuiltins.contains(d), !noMitmDomains.contains(d) else { return }
+        noMitmDomains.append(d)
+        newDomain = ""
+        saveNoMitmDomains()
     }
 
     // MARK: Actions

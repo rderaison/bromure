@@ -1728,12 +1728,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return GuardrailsConfig.DBGuardrail(engine: db.engine, host: host, mode: db.guardrail)
         }
         let g = profile.guardrails
+        let httpWriteHosts = g.httpWriteHosts
+            .filter { !$0.host.trimmingCharacters(in: .whitespaces).isEmpty }
+            .map { GuardrailsConfig.HostGuardrail(host: $0.host, mode: $0.mode) }
         return GuardrailsConfig(kubernetes: g.kubernetes, kubeHosts: kubeHosts,
                                 aws: g.aws,
                                 digitalOcean: g.digitalOcean,
                                 docker: g.docker, dockerHosts: dockerHosts,
                                 github: g.github, gitlab: g.gitlab, bitbucket: g.bitbucket,
-                                databases: databases)
+                                databases: databases,
+                                httpWriteDefault: g.httpWriteDefault,
+                                httpWriteHosts: httpWriteHosts)
     }
 
     static func loopbackCallbackPort(from url: URL) -> UInt16? {
@@ -1981,6 +1986,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // starts on the right network. AC-only; Bromure Web never calls this.
         if UserDefaults.standard.bool(forKey: "vmnet.useRandom172") {
             VMNetSwitch.shared.setSubnetStrategy(.randomClassB172)
+        }
+
+        // Transparent host-side interception (opt-in during rollout via the
+        // BROMURE_TRANSPARENT env var). Diverts guest TCP to :443 at the switch
+        // into the existing MiTM regardless of the guest's proxy env vars — the
+        // cooperative HTTP_PROXY path stays live alongside it. The switch retains
+        // the forwarder (as its interceptor), which retains the engine; both are
+        // process-lifetime, so the reference cycle is intentional and harmless.
+        if ProcessInfo.processInfo.environment["BROMURE_TRANSPARENT"] != nil,
+           let engine = mitmEngine {
+            let forwarder = SwitchMitmForwarder(engine: engine, switch: VMNetSwitch.shared)
+            VMNetSwitch.shared.setInterceptor(forwarder, ports: [443])
+        }
+
+        // Egress firewall (allow + log): surface every off-subnet destination a
+        // VM opens, attributed per profile — the visibility half of the firewall.
+        // Nothing is denied yet; this is where a future deny verdict hooks in.
+        VMNetSwitch.shared.setEgressObserver { profileID, dstIP, dstPort, proto in
+            let p = proto == 6 ? "tcp" : proto == 17 ? "udp" : "ip\(proto)"
+            let who = profileID.map { String($0.uuidString.prefix(8)) } ?? "-"
+            let dst = dstPort > 0 ? "\(UtunPacket.ipString(dstIP)):\(dstPort)" : UtunPacket.ipString(dstIP)
+            FileHandle.standardError.write(Data("[fw] egress \(who) \(dst)/\(p)\n".utf8))
         }
 
         // Offer to install the `bromure-cli` command-line tool (admin prompt).

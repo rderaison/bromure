@@ -609,6 +609,12 @@ public final class SessionDisk {
                 // Deno + AWS CLI each ignore SSL_CERT_FILE and read their own.
                 "export DENO_CERT=/etc/ssl/certs/ca-certificates.crt",
                 "export AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
+                // gcloud bundles its own certifi — this is the only knob it reads.
+                "export CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE=/etc/ssl/certs/ca-certificates.crt",
+                // gRPC clients (some Google SDKs, buf, etc.) read their own roots.
+                "export GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt",
+                // OpenSSL dir-based lookups (belt-and-suspenders alongside SSL_CERT_FILE).
+                "export SSL_CERT_DIR=/etc/ssl/certs",
                 // No private key in the VM — use the host-bridged agent.
                 "export SSH_AUTH_SOCK=/tmp/bromure-agent.sock",
             ]

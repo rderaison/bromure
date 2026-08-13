@@ -442,6 +442,62 @@ public final class MitmEngine {
         listenerHolders[profileID] = holder
     }
 
+    /// Accept a transparently-intercepted TCP flow (from `SwitchMitmForwarder`).
+    /// `appFD` is the guest side of a socketpair carrying the raw TLS stream;
+    /// there is no CONNECT, so the destination is recovered by peeking the
+    /// ClientHello's SNI. Passthrough (no-MiTM) hosts — the built-in pinners plus
+    /// the operator's Preferences list — and non-TLS/unparseable flows are
+    /// spliced raw (fail open); everything else is MiTM'd through the identical
+    /// per-profile policy chain as the vsock path. Takes ownership of `appFD`.
+    @available(macOS, deprecated: 10.15)
+    public nonisolated func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int) {
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { close(appFD); return }
+
+            let decision = TLSClientHello.peek(fd: appFD)
+            let passthrough = PassthroughList.current()
+            let host: String
+            let shouldSplice: Bool
+            switch decision {
+            case .sni(let s):
+                host = s
+                shouldSplice = passthrough.matches(s)          // pinned / operator-listed
+            case .noSNI:
+                host = destIP                                  // MiTM with an IP-literal leaf
+                shouldSplice = false
+            case .notTLS, .needMoreData:
+                host = destIP
+                shouldSplice = true                            // fail open — not our protocol
+            }
+
+            if shouldSplice {
+                MitmPassthrough.splice(appFD: appFD, destIP: destIP, destPort: destPort)
+                return
+            }
+
+            let conn = HTTPMitmConnection(
+                fd: appFD,
+                profileID: profileID,
+                certCache: self.certCache,
+                swapper: self.swapper,
+                awsResigner: self.awsResigner,
+                traceStore: self.traceStore,
+                clientIdentities: self.clientIdentities,
+                clusterCAs: self.clusterCAs,
+                consent: self.consent,
+                guardrailsBroker: self.guardrailsBroker,
+                supplyChainBroker: self.supplyChainBroker,
+                osvClient: self.osvClient,
+                socketClient: self.socketClient,
+                publishTimeCache: self.publishTimeCache,
+                sessionTraceProvider: { [weak self] in self?.sessionTrace(for: profileID) },
+                guardrailsProvider: { [weak self] in self?.guardrailsConfig(for: profileID) },
+                supplyChainProvider: { [weak self] in self?.supplyChainPolicy(for: profileID) }
+            )
+            await conn.runTransparentTLS(host: host, port: destPort)
+        }
+    }
+
     /// This workspace's ssh-agent socket, spawning the agent on first
     /// use. nil only if ssh-agent itself failed to start — never another
     /// workspace's socket.

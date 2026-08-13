@@ -76,9 +76,24 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
     /// Bitbucket (bitbucket.org + API).
     public var bitbucket: Mode
 
+    /// One generic-HTTP write rule: which arbitrary website (host or subdomain)
+    /// may receive writes, and how strictly. Distinct from the protocol-specific
+    /// modes above.
+    public struct HTTPWriteRule: Codable, Equatable, Sendable {
+        public var host: String
+        public var mode: Mode
+        public init(host: String, mode: Mode) { self.host = host; self.mode = mode }
+    }
+    /// Write policy for HTTP hosts not covered by a specific protocol above
+    /// (`.off` = allow all writes — the backward-compatible default).
+    public var httpWriteDefault: Mode
+    /// Per-host overrides of `httpWriteDefault` (most specific match wins).
+    public var httpWriteHosts: [HTTPWriteRule]
+
     public init(kubernetes: Mode = .off, aws: Mode = .off,
                 digitalOcean: Mode = .off, docker: Mode = .off,
-                github: Mode = .off, gitlab: Mode = .off, bitbucket: Mode = .off) {
+                github: Mode = .off, gitlab: Mode = .off, bitbucket: Mode = .off,
+                httpWriteDefault: Mode = .off, httpWriteHosts: [HTTPWriteRule] = []) {
         self.kubernetes = kubernetes
         self.aws = aws
         self.digitalOcean = digitalOcean
@@ -86,6 +101,8 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         self.github = github
         self.gitlab = gitlab
         self.bitbucket = bitbucket
+        self.httpWriteDefault = httpWriteDefault
+        self.httpWriteHosts = httpWriteHosts
     }
 
     /// Construction default used when creating a *new* profile.
@@ -108,12 +125,14 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
     public var isActive: Bool {
         [kubernetes, aws, digitalOcean, docker, github, gitlab, bitbucket]
             .contains { $0 != .off }
+            || httpWriteDefault != .off || httpWriteHosts.contains { $0.mode != .off }
     }
 
-    // Tolerant Codable — every field defaults to .off so older/newer profile
-    // JSON loads cleanly, and only non-default modes are persisted.
+    // Tolerant Codable — every field defaults to .off / empty so older/newer
+    // profile JSON loads cleanly, and only non-default values are persisted.
     enum CodingKeys: String, CodingKey {
         case kubernetes, aws, digitalOcean, docker, github, gitlab, bitbucket
+        case httpWriteDefault, httpWriteHosts
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -127,6 +146,8 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         github       = try mode(.github)
         gitlab       = try mode(.gitlab)
         bitbucket    = try mode(.bitbucket)
+        httpWriteDefault = try mode(.httpWriteDefault)
+        httpWriteHosts = try c.decodeIfPresent([HTTPWriteRule].self, forKey: .httpWriteHosts) ?? []
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -137,6 +158,8 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         if github       != .off { try c.encode(github,       forKey: .github) }
         if gitlab       != .off { try c.encode(gitlab,       forKey: .gitlab) }
         if bitbucket    != .off { try c.encode(bitbucket,    forKey: .bitbucket) }
+        if httpWriteDefault != .off { try c.encode(httpWriteDefault, forKey: .httpWriteDefault) }
+        if !httpWriteHosts.isEmpty { try c.encode(httpWriteHosts, forKey: .httpWriteHosts) }
     }
 }
 
@@ -173,6 +196,24 @@ public struct GuardrailsConfig: Sendable {
     /// Per-endpoint database guardrails (Mongo Data API / ClickHouse / Elastic).
     public let databases: [DBGuardrail]
 
+    /// One generic-HTTP write guardrail: a host pattern (exact or subdomain)
+    /// and the mode applied to writes to it. For arbitrary websites not covered
+    /// by a specific protocol guardrail above — "which sites may receive a
+    /// POST/PUT/PATCH/DELETE vs GET-only".
+    public struct HostGuardrail: Sendable {
+        public let host: String
+        public let mode: GuardrailsPolicy.Mode
+        public init(host: String, mode: GuardrailsPolicy.Mode) {
+            self.host = host.lowercased().trimmingCharacters(in: .whitespaces)
+            self.mode = mode
+        }
+    }
+    /// Write policy for HTTP hosts not otherwise guardrailed (`.off` = allow, so
+    /// the feature is opt-in and non-breaking).
+    public let httpWriteDefault: GuardrailsPolicy.Mode
+    /// Per-host overrides of `httpWriteDefault` (most specific match wins).
+    public let httpWriteHosts: [HostGuardrail]
+
     public init(kubernetes: GuardrailsPolicy.Mode, kubeHosts: Set<String>,
                 aws: GuardrailsPolicy.Mode = .off,
                 digitalOcean: GuardrailsPolicy.Mode = .off,
@@ -180,7 +221,9 @@ public struct GuardrailsConfig: Sendable {
                 github: GuardrailsPolicy.Mode = .off,
                 gitlab: GuardrailsPolicy.Mode = .off,
                 bitbucket: GuardrailsPolicy.Mode = .off,
-                databases: [DBGuardrail] = []) {
+                databases: [DBGuardrail] = [],
+                httpWriteDefault: GuardrailsPolicy.Mode = .off,
+                httpWriteHosts: [HostGuardrail] = []) {
         self.kubernetes = kubernetes
         self.kubeHosts = kubeHosts
         self.aws = aws
@@ -191,6 +234,8 @@ public struct GuardrailsConfig: Sendable {
         self.gitlab = gitlab
         self.bitbucket = bitbucket
         self.databases = databases
+        self.httpWriteDefault = httpWriteDefault
+        self.httpWriteHosts = httpWriteHosts
     }
 
     public var isActive: Bool {
@@ -198,6 +243,35 @@ public struct GuardrailsConfig: Sendable {
             || digitalOcean != .off || (docker != .off && !dockerHosts.isEmpty)
             || github != .off || gitlab != .off || bitbucket != .off
             || databases.contains { $0.mode != .off }
+            || httpWriteDefault != .off || httpWriteHosts.contains { $0.mode != .off }
+    }
+
+    /// The write mode for an arbitrary HTTP host: the most specific matching
+    /// override, else the default.
+    func httpWriteMode(for host: String) -> GuardrailsPolicy.Mode {
+        let h = host.lowercased()
+        var best: (len: Int, mode: GuardrailsPolicy.Mode)?
+        for g in httpWriteHosts where h == g.host || h.hasSuffix("." + g.host) {
+            if best == nil || g.host.count > best!.len { best = (g.host.count, g.mode) }
+        }
+        return best?.mode ?? httpWriteDefault
+    }
+
+    /// Whether a generic HTTP write to `host` with `method` is blocked (reads
+    /// always pass). Callers gate this on `protocolMode(...) == nil` so a host
+    /// governed by a specific protocol guardrail uses only that guardrail.
+    func httpWriteBlockReason(host: String, method: String) -> String? {
+        Self.methodBlockReason(mode: httpWriteMode(for: host), method: method, label: host)
+    }
+
+    /// The generic-HTTP route for `.promptOnWrite` escalation, or nil when the
+    /// host's effective write mode is `.off`.
+    func genericHTTPRoute(host: String)
+            -> (mode: GuardrailsPolicy.Mode, scopeKey: String, scopeLabel: String)? {
+        let h = host.lowercased()
+        let mode = httpWriteMode(for: h)
+        guard mode != .off else { return nil }
+        return (mode, "http:\(h)", h)
     }
 
     /// Whether any configured database endpoint needs the request body / query
@@ -616,7 +690,8 @@ public struct GuardrailsConfig: Sendable {
         // this host is `.promptOnWrite`, escalate to the broker — on
         // user approval we let the request through; on denial we
         // forward the same Denial sync would have produced.
-        guard let route = protocolMode(host: host, method: method, path: path),
+        guard let route = protocolMode(host: host, method: method, path: path)
+                ?? genericHTTPRoute(host: host),
               route.mode == .promptOnWrite else {
             return denial
         }
@@ -675,6 +750,13 @@ public struct GuardrailsConfig: Sendable {
                           contentType: "application/json", amzErrorType: nil)
         }
         if let reason = gitForgeBlockReason(host: h, method: method, path: path) {
+            return Denial(reason: reason, body: jsonMessageBody(reason),
+                          contentType: "application/json", amzErrorType: nil)
+        }
+        // Generic per-host HTTP write policy — only for hosts NOT governed by a
+        // specific protocol guardrail above (which has its own verb semantics).
+        if protocolMode(host: h, method: method, path: path) == nil,
+           let reason = httpWriteBlockReason(host: h, method: method) {
             return Denial(reason: reason, body: jsonMessageBody(reason),
                           contentType: "application/json", amzErrorType: nil)
         }

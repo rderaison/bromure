@@ -150,8 +150,11 @@ final class UtunForwarder {
 
     private func openFlow(_ key: FlowKey, _ seg: UtunPacket.TCPSegment) {
         let target = UtunForwarder.aliasToRemote(UtunPacket.ipString(seg.dstIP), remoteCIDR: remoteCIDR)
-        let flow = TCPFlow(key: key, clientISN: seg.seq, host: host, targetIP: target,
-                           targetPort: Int(seg.dstPort), dial: dial,
+        let port = Int(seg.dstPort)
+        let host = self.host
+        let dial = self.dial
+        let flow = TCPFlow(key: key, clientISN: seg.seq,
+                           dial: { dial(host, target, port) },
                            send: { [weak self] s in self?.writePacket(s) },
                            onClosed: { [weak self] k in
                                self?.flowsLock.lock(); self?.flows.removeValue(forKey: k); self?.flowsLock.unlock()

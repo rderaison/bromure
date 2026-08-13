@@ -12,10 +12,11 @@ import Darwin
 /// thread blocks on it for send-window room and is woken by inbound ACKs.
 final class TCPFlow {
     private let key: UtunForwarder.FlowKey
-    private let host: RemoteHost
-    private let targetIP: String
-    private let targetPort: Int
-    private let dial: (RemoteHost, String, Int) -> Int32?
+    /// Opens the upstream byte stream for this flow and returns its fd, or nil to
+    /// RST. The target is captured by the closure — this keeps TCPFlow transport-
+    /// agnostic (an SSH forward channel for the utun tunnel, a socketpair end for
+    /// the switch MiTM forwarder).
+    private let dial: () -> Int32?
     private let send: (UtunPacket.TCPSegment) -> Void
     private let onClosed: (UtunForwarder.FlowKey) -> Void
 
@@ -30,18 +31,18 @@ final class TCPFlow {
     private var finSent = false
     private var clientFin = false
 
-    private static let mss = 1460       // utun MTU 1500 − IP(20) − TCP(20)
+    /// Max segment size we emit. utun path: 1460 (MTU 1500 − IP/TCP). Switch
+    /// path: 1240, since the guest NIC MTU is 1280 (VMConfig.resolvedNICMTU).
+    private let mss: Int
     private static let ourWindow: UInt16 = 65535
 
-    init(key: UtunForwarder.FlowKey, clientISN: UInt32, host: RemoteHost,
-         targetIP: String, targetPort: Int,
-         dial: @escaping (RemoteHost, String, Int) -> Int32?,
+    init(key: UtunForwarder.FlowKey, clientISN: UInt32,
+         mss: Int = 1460,
+         dial: @escaping () -> Int32?,
          send: @escaping (UtunPacket.TCPSegment) -> Void,
          onClosed: @escaping (UtunForwarder.FlowKey) -> Void) {
         self.key = key
-        self.host = host
-        self.targetIP = targetIP
-        self.targetPort = targetPort
+        self.mss = mss
         self.dial = dial
         self.send = send
         self.onClosed = onClosed
@@ -54,9 +55,9 @@ final class TCPFlow {
     /// Dial the remote (blocking) off-thread; on success complete the handshake,
     /// on failure RST. The client keeps retransmitting its SYN meanwhile.
     func start() {
-        let ip = targetIP, port = targetPort, host = self.host, dial = self.dial
+        let dial = self.dial
         Thread.detachNewThread { [weak self] in
-            let fd = dial(host, ip, port) ?? -1
+            let fd = dial() ?? -1
             guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
             self.cond.lock()
             guard self.state == .connecting else { self.cond.unlock(); if fd >= 0 { Darwin.close(fd) }; return }
@@ -121,8 +122,9 @@ final class TCPFlow {
 
     private func startReader() {
         let fd = rfd
+        let mss = self.mss
         Thread.detachNewThread { [weak self] in
-            var buf = [UInt8](repeating: 0, count: TCPFlow.mss)
+            var buf = [UInt8](repeating: 0, count: mss)
             while true {
                 let n = Darwin.read(fd, &buf, buf.count)
                 if n > 0 {
@@ -145,7 +147,7 @@ final class TCPFlow {
             while state == .established && inFlight() >= clientWindow { cond.wait() }
             guard state == .established else { return false }
             let room = Int(clientWindow) - Int(inFlight())
-            let n = min(bytes.count - off, TCPFlow.mss, max(room, 1))
+            let n = min(bytes.count - off, mss, max(room, 1))
             emitLocked(flags: UtunPacket.PSH | UtunPacket.ACK, payload: bytes[off..<(off + n)])
             sndNxt = sndNxt &+ UInt32(n)
             off += n

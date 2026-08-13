@@ -4,6 +4,23 @@ import Virtualization
 
 private let switchDebug = ProcessInfo.processInfo.environment["BROMURE_SWITCH_DEBUG"] != nil
 
+/// Host-side hook for transparently intercepting guest TCP flows at the switch.
+///
+/// SandboxEngine cannot depend on AgentCoding, where the userspace TCP stack
+/// (`TCPFlow`) and the MiTM live — the dependency is one-way. So the switch
+/// classifies and diverts here, and calls out through this protocol; the
+/// implementation (which terminates the TCP flow and feeds the MiTM) lives on
+/// the AgentCoding side and is registered via `VMNetSwitch.setInterceptor`.
+public protocol VMNetTCPInterceptor: AnyObject, Sendable {
+    /// A diverted IPv4/TCP packet — IP header onward, no Ethernet framing — from
+    /// the VM on `portID`, owned by `profileID` (nil if the port was attached
+    /// without one). Reply packets are delivered back with
+    /// `VMNetSwitch.injectIPToPort`.
+    func handleDivertedPacket(portID: Int, profileID: UUID?, ipPacket: [UInt8])
+    /// The VM port was detached — drop any flow state bound to it.
+    func portClosed(portID: Int)
+}
+
 /// Process-wide host-side L2 software switch that multiplexes many VMs onto a
 /// single shared vmnet (NAT) interface.
 ///
@@ -59,6 +76,31 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// Learned forwarding table: 48-bit MAC (packed into a UInt64) → port id.
     private var macTable: [UInt64: Int] = [:]
     private var nextPortID = 0
+
+    /// port id → the profile that owns the VM on it (set at `attachPort`). Lets
+    /// the transparent interceptor attribute a diverted flow to a profile with a
+    /// direct lookup — no srcIP→MAC→port chain. Guarded by `lock`.
+    private var portProfileID: [Int: UUID] = [:]
+    /// port id → the VM's source MAC (packed), learned from its frames. Used as
+    /// the destination MAC when injecting reply frames into a port. Guarded by
+    /// `lock`.
+    private var portGuestMAC: [Int: UInt64] = [:]
+
+    /// Optional TCP interceptor (AgentCoding installs one). When set, unicast
+    /// IPv4/TCP frames bound off-subnet to a port in `interceptPorts` are diverted
+    /// to it instead of the vmnet uplink. Guarded by `lock`.
+    private var interceptor: VMNetTCPInterceptor?
+    private var interceptPorts: Set<UInt16> = []
+
+    /// Egress firewall (allow + log). Called once per new off-subnet destination
+    /// tuple a VM opens — the "what is leaving, per profile" visibility the
+    /// firewall provides in v1. Everything is still allowed; the observer is
+    /// where a future deny verdict hooks in. Guarded by `lock`.
+    public typealias EgressObserver = @Sendable (_ profileID: UUID?, _ dstIP: UInt32,
+                                                 _ dstPort: UInt16, _ proto: UInt8) -> Void
+    private var egressObserver: EgressObserver?
+    private struct EgressKey: Hashable { let portID: Int; let dstIP: UInt32; let dstPort: UInt16; let proto: UInt8 }
+    private var egressSeen: Set<EgressKey> = []
 
     private var vmnetInterface: interface_ref?
     private let vmnetQueue = DispatchQueue(label: "io.bromure.vmnetswitch.vmnet", qos: .userInteractive)
@@ -177,7 +219,7 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// Returns a `FileHandle` to pass to `VZFileHandleNetworkDeviceAttachment`,
     /// or `nil` if the shared vmnet interface can't be started (e.g. missing
     /// entitlement) — callers should fall back to `VZNATNetworkDeviceAttachment`.
-    public func attachPort() -> FileHandle? {
+    public func attachPort(profileID: UUID? = nil) -> FileHandle? {
         lock.lock()
 
         if !started {
@@ -222,6 +264,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         let port = Port(id: id, hostFD: hostFD, vmFileHandle: handle)
         ports[id] = port
         portByHandle[ObjectIdentifier(handle)] = id
+        if let profileID { portProfileID[id] = profileID }
         lock.unlock()
 
         if switchDebug { print("[VMNetSwitch] port \(id) attached (\(ports.count) total)") }
@@ -250,10 +293,18 @@ public final class VMNetSwitch: @unchecked Sendable {
         port.stopped = true
         let macsOnPort = macTable.compactMap { $0.value == id ? $0.key : nil }
         macTable = macTable.filter { $0.value != id }
+        portProfileID[id] = nil
+        portGuestMAC[id] = nil
+        egressSeen = egressSeen.filter { $0.portID != id }
+        let intercept = interceptor
         if releaseLease {
             for m in macsOnPort { dhcpLeases[m] = nil }
         }
         lock.unlock()
+
+        // Let the interceptor tear down any flows it holds for this port before
+        // the fd is closed out from under them.
+        intercept?.portClosed(portID: id)
 
         // Closing the host fd unblocks the port's read loop; closing the VM-side
         // fd (which the FileHandle no longer auto-closes) reclaims the second
@@ -375,6 +426,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         let dst = Self.mac(buf, 0)
         let src = Self.mac(buf, 6)
         learn(src, port: srcPortID)
+        recordGuestMAC(src, port: srcPortID)
 
         // Intercept client DHCP (UDP/67) and answer it ourselves rather than
         // forwarding to vmnet, whose single-lease bootpd hands every VM the
@@ -396,6 +448,33 @@ public final class VMNetSwitch: @unchecked Sendable {
             writeToVmnet(buf, n)
             return
         }
+
+        // Transparent interception: divert off-subnet unicast TCP bound for an
+        // intercepted port into the host interceptor (AgentCoding's MiTM
+        // forwarder) instead of the vmnet uplink. Broadcast/DHCP are handled
+        // above; ARP, UDP/DNS, IPv6, and same-subnet peer traffic are not
+        // TCP-to-an-off-subnet-port, so they fall through unchanged. The guest
+        // reaches real public IPs (DNS still resolves via the gateway) and
+        // addresses the SYN to the gateway MAC — so this is pure L3/L4 inspection
+        // of a frame that would otherwise hit the uplink; no ARP work needed.
+        if let (dstIP, dport) = Self.interceptableTCP(buf, n),
+           (dstIP & subnetMask) != (gatewayIP & subnetMask) {
+            lock.lock()
+            let intercept = interceptor
+            let match = intercept != nil && interceptPorts.contains(dport)
+            let pid = match ? portProfileID[srcPortID] : nil
+            lock.unlock()
+            if match, let intercept {
+                let ipPacket = [UInt8](UnsafeBufferPointer(start: buf + 14, count: n - 14))
+                intercept.handleDivertedPacket(portID: srcPortID, profileID: pid, ipPacket: ipPacket)
+                return
+            }
+        }
+
+        // Egress firewall (allow + log): record each new off-subnet destination
+        // this VM opens. Covers everything the interceptor didn't take (other
+        // TCP ports, UDP, etc.); DNS to the gateway is in-subnet and excluded.
+        logEgressIfNeeded(srcPortID, buf, n)
 
         switch lookupPort(forMAC: dst) {
         case Self.uplinkPortID:
@@ -755,12 +834,108 @@ public final class VMNetSwitch: @unchecked Sendable {
         return ck == 0 ? 0xFFFF : ck   // 0 means "no checksum"; send all-ones instead
     }
 
+    // MARK: - Transparent TCP interception
+
+    /// Register (or clear) the interceptor and the TCP destination ports to
+    /// divert (e.g. `[443]`, optionally `[80, 6443]`). Passing nil disables
+    /// interception. Safe to call at any time; takes effect for subsequent
+    /// frames. AgentCoding calls this once at startup with its MiTM forwarder.
+    public func setInterceptor(_ interceptor: VMNetTCPInterceptor?, ports: Set<UInt16>) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.interceptor = interceptor
+        self.interceptPorts = interceptor == nil ? [] : ports
+    }
+
+    /// Register the egress firewall observer (allow + log). Called once per new
+    /// off-subnet destination tuple a VM opens.
+    public func setEgressObserver(_ observer: EgressObserver?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.egressObserver = observer
+        egressSeen.removeAll()
+    }
+
+    /// Fire the egress observer for a new off-subnet destination this VM opens.
+    /// Deduped per (port, dstIP, dstPort, proto); the dedup set is capped so a
+    /// long-lived busy switch can't grow it without bound.
+    private func logEgressIfNeeded(_ srcPortID: Int, _ buf: UnsafeMutablePointer<UInt8>, _ n: Int) {
+        guard n >= 14 + 20, Self.u16(buf, 12) == 0x0800 else { return }   // IPv4
+        let ihl = Int(buf[14] & 0x0F) * 4
+        guard ihl >= 20, n >= 14 + ihl else { return }
+        let dstIP = Self.u32(buf, 14 + 16)
+        guard (dstIP & subnetMask) != (gatewayIP & subnetMask) else { return }  // off-subnet only
+        let proto = buf[14 + 9]
+        var dport: UInt16 = 0
+        if (proto == 6 || proto == 17), n >= 14 + ihl + 4 {
+            dport = Self.u16(buf, 14 + ihl + 2)
+        }
+        let key = EgressKey(portID: srcPortID, dstIP: dstIP, dstPort: dport, proto: proto)
+
+        lock.lock()
+        guard let observer = egressObserver, !egressSeen.contains(key) else { lock.unlock(); return }
+        if egressSeen.count > 8192 { egressSeen.removeAll() }  // bound; re-log after reset
+        egressSeen.insert(key)
+        let pid = portProfileID[srcPortID]
+        lock.unlock()
+
+        observer(pid, dstIP, dport, proto)
+    }
+
+    /// Inject an IPv4 packet (IP header onward) toward the VM on `portID`, framed
+    /// as Ethernet from the DHCP-server MAC to the VM's learned MAC. Called by the
+    /// interceptor's userspace TCP stack to deliver reply segments. The guest
+    /// accepts inbound frames by destination MAC, so the synthetic source MAC is
+    /// fine. One call = one `write` = one datagram = one frame (SOCK_DGRAM is
+    /// atomic), so concurrent flows on a port never interleave.
+    public func injectIPToPort(_ portID: Int, ipPacket: [UInt8]) {
+        lock.lock()
+        guard let p = ports[portID], !p.stopped, let guestMAC = portGuestMAC[portID] else {
+            lock.unlock()
+            return
+        }
+        let fd = p.hostFD
+        lock.unlock()
+
+        var frame = [UInt8]()
+        frame.reserveCapacity(14 + ipPacket.count)
+        for shift in stride(from: 40, through: 0, by: -8) {
+            frame.append(UInt8((guestMAC >> UInt64(shift)) & 0xFF))    // dst = guest
+        }
+        frame.append(contentsOf: Self.dhcpServerMAC)                    // src = us
+        frame.append(0x08); frame.append(0x00)                         // EtherType IPv4
+        frame.append(contentsOf: ipPacket)
+        frame.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, frame.count) }
+    }
+
+    /// (dstIP, dstPort) for a unicast IPv4/TCP frame, else nil. Skips fragments
+    /// (no reassembly) so only whole-header first segments are considered.
+    private static func interceptableTCP(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> (UInt32, UInt16)? {
+        guard n >= 14 + 20, u16(buf, 12) == 0x0800 else { return nil }   // IPv4
+        let ihl = Int(buf[14] & 0x0F) * 4
+        guard ihl >= 20, n >= 14 + ihl + 20 else { return nil }          // room for TCP header
+        guard buf[14 + 9] == 6 else { return nil }                       // proto TCP
+        let flagsFrag = u16(buf, 14 + 6)
+        guard (flagsFrag & 0x1FFF) == 0, (flagsFrag & 0x2000) == 0 else { return nil }  // no MF, offset 0
+        let dstIP = u32(buf, 14 + 16)                                     // IP dst
+        let dport = u16(buf, 14 + ihl + 2)                               // TCP dst port
+        return (dstIP, dport)
+    }
+
     // MARK: - Table helpers (lock-guarded)
 
     private func learn(_ mac: UInt64, port: Int) {
         lock.lock()
         defer { lock.unlock() }
         if macTable[mac] != port { macTable[mac] = port }
+    }
+
+    /// Record the VM's source MAC for `port` (the destination for injected reply
+    /// frames). Only called for VM ingress, never the uplink.
+    private func recordGuestMAC(_ mac: UInt64, port: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        if portGuestMAC[port] != mac { portGuestMAC[port] = mac }
     }
 
     private func lookupPort(forMAC mac: UInt64) -> Int? {

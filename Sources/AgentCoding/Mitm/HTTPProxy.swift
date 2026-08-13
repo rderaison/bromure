@@ -149,6 +149,33 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // 2. Confirm the tunnel.
         try writeAll(fd: fd, bytes: Array("HTTP/1.1 200 Connection established\r\n\r\n".utf8))
 
+        try await driveTLS(host: host, port: port, t0: t0)
+    }
+
+    /// Transparent-interception entry point. The flow arrives already TCP-
+    /// terminated (a socketpair end handed over by the switch MiTM forwarder),
+    /// with the destination recovered from the TLS SNI / destination IP rather
+    /// than a CONNECT line — so no CONNECT read and no `200` are sent. Everything
+    /// from cert-minting onward is the shared `driveTLS` body. Closes the FD on
+    /// exit, like `run()`.
+    @available(macOS, deprecated: 10.15, message: "drives TLSServerStream which wraps SecureTransport")
+    func runTransparentTLS(host: String, port: Int) async {
+        defer { close(fd) }
+        do {
+            try await driveTLS(host: host, port: port, t0: Date())
+        } catch {
+            FileHandle.standardError.write(Data("[mitm] \(error)\n".utf8))
+        }
+    }
+
+    /// Everything from server-side TLS termination onward: forge the leaf for
+    /// `host`, terminate TLS on `fd`, read the inner request, and run the full
+    /// policy / token-swap / relay chain. Shared by the CONNECT path (`drive`)
+    /// and the transparent path (`runTransparentTLS`); `host` is the sole
+    /// destination identity the chain (and the `mitmUpstreamURL` invariant) keys
+    /// off, so anchoring it to the SNI keeps that invariant intact.
+    @available(macOS, deprecated: 10.15, message: "creates TLSServerStream which wraps SecureTransport")
+    private func driveTLS(host: String, port: Int, t0: Date) async throws {
         // 3. Server-side TLS using the cached forged leaf cert for `host`.
         let identity = try certCache.identity(for: host)
         let tls = try TLSServerStream(fd: fd, identity: identity)
