@@ -457,23 +457,30 @@ public final class VMNetSwitch: @unchecked Sendable {
         // reaches real public IPs (DNS still resolves via the gateway) and
         // addresses the SYN to the gateway MAC — so this is pure L3/L4 inspection
         // of a frame that would otherwise hit the uplink; no ARP work needed.
+        //
+        // ONLY ports with a profile (a real session) are diverted. Image
+        // bake / postinstall / installer VMs attach without a profileID
+        // (UbuntuImageManager/LinuxImageManager `attachPort()`), and they haven't
+        // installed the Bromure CA yet — MiTM'ing them would break the install
+        // with untrusted-cert failures. They take the untouched native path.
         if let (dstIP, dport) = Self.interceptableTCP(buf, n),
            (dstIP & subnetMask) != (gatewayIP & subnetMask) {
             lock.lock()
             let intercept = interceptor
-            let match = intercept != nil && interceptPorts.contains(dport)
-            let pid = match ? portProfileID[srcPortID] : nil
+            let pid = portProfileID[srcPortID]
+            let match = intercept != nil && pid != nil && interceptPorts.contains(dport)
             lock.unlock()
-            if match, let intercept {
+            if match, let intercept, let pid {
                 let ipPacket = [UInt8](UnsafeBufferPointer(start: buf + 14, count: n - 14))
                 intercept.handleDivertedPacket(portID: srcPortID, profileID: pid, ipPacket: ipPacket)
                 return
             }
         }
 
-        // Egress firewall (allow + log): record each new off-subnet destination
-        // this VM opens. Covers everything the interceptor didn't take (other
-        // TCP ports, UDP, etc.); DNS to the gateway is in-subnet and excluded.
+        // Egress firewall (allow + log): record each new off-subnet destination a
+        // *session* VM opens. Same profile gate as interception, so bake /
+        // postinstall / installer traffic isn't intercepted OR logged — the
+        // firewall is fully off during image installation.
         logEgressIfNeeded(srcPortID, buf, n)
 
         switch lookupPort(forMAC: dst) {
@@ -873,10 +880,12 @@ public final class VMNetSwitch: @unchecked Sendable {
         let key = EgressKey(portID: srcPortID, dstIP: dstIP, dstPort: dport, proto: proto)
 
         lock.lock()
-        guard let observer = egressObserver, !egressSeen.contains(key) else { lock.unlock(); return }
+        // Only session VMs are firewalled. A port without a profileID is an image
+        // bake / postinstall / installer VM — the firewall stays off for those.
+        guard let observer = egressObserver, let pid = portProfileID[srcPortID],
+              !egressSeen.contains(key) else { lock.unlock(); return }
         if egressSeen.count > 8192 { egressSeen.removeAll() }  // bound; re-log after reset
         egressSeen.insert(key)
-        let pid = portProfileID[srcPortID]
         lock.unlock()
 
         observer(pid, dstIP, dport, proto)
