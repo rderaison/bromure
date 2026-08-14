@@ -118,8 +118,11 @@ public final class TraceStore {
             self?.queue_periodicCleanup()
         }
 
-        // Streaming hook — fire-and-forget.
-        uploader?.upload(record)
+        // Streaming hook — fire-and-forget. The bodies are handed
+        // straight through (already header-redacted by the proxy) so
+        // the uploader never has to race the async disk write above to
+        // reload them from `traces/`.
+        uploader?.upload(record, requestBody: requestBody, responseBody: responseBody)
     }
 
     // MARK: - Reading (called from UI)
@@ -358,11 +361,18 @@ public final class TraceStore {
     }
 }
 
-/// Plug-in interface for shipping records to a remote sink. The
-/// engine optionally injects an implementation that POSTs to
-/// analytics.bromure.io (TBD, not implemented yet).
+/// Plug-in interface for shipping records to a remote sink. The engine
+/// injects `BACTraceUploader` (enrollment-gated) to stream detailed HTTP
+/// logs to analytics.bromure.io in the same shape the Web browser uses,
+/// so they land in the shared `session_events` store and render in the
+/// same admin session view.
+///
+/// `requestBody` / `responseBody` are the raw HTTP messages the proxy
+/// captured (start line + headers + body), already redacted of
+/// sensitive headers. They're nil when the session's TraceLevel / host
+/// didn't authorize body capture — in which case only metadata ships.
 public protocol TraceUploader: Sendable {
-    func upload(_ record: TraceRecord)
+    func upload(_ record: TraceRecord, requestBody: Data?, responseBody: Data?)
 }
 
 // MARK: - JSON convenience

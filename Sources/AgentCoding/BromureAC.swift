@@ -1502,6 +1502,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Process-lifetime MITM engine. One instance per app run, holds
     /// the CA + per-profile token swap maps + ssh-agent keystore. Lazy
     /// because CA generation hits disk on first access.
+    /// Non-forcing handle to the MITM engine once it's been created by
+    /// the lazy `mitmEngine` accessor. Lets `refreshStreamingState()`
+    /// (which fires from `profiles.didSet` at launch, before the engine
+    /// spawns) touch the trace uploader without forcing early creation.
+    private var loadedMitmEngine: MitmEngine?
+
     lazy var mitmEngine: MitmEngine? = {
         do {
             let e = try MitmEngine()
@@ -1509,6 +1515,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // animated "thinking" dots.
             e.traceStore.onConversationActivity = { [weak self] pid in
                 self?.noteAgentActivity(pid)
+            }
+            // Detailed HTTP logs → analytics.bromure.io/session_events,
+            // same wire shape + admin view as the Web browser. Enrollment-
+            // gated; enroll/unenroll + private-mode changes flow through
+            // refreshStreamingState() via the non-forcing `loadedMitmEngine`
+            // handle (profiles.didSet must never spawn the engine early).
+            self.loadedMitmEngine = e
+            if BACEnrollmentStore.load() != nil {
+                let up = BACTraceUploader()
+                up.setPrivateProfiles(Set(self.profiles.filter { $0.privateMode }.map { $0.id }))
+                e.traceStore.uploader = up
             }
             return e
         }
@@ -2013,6 +2030,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let pid = ev.profileID {
                 BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "egress.firewall", eventData: [
                     "action": .string(action),
+                    "layer": .string("l4"),
                     "proto": .string(proto),
                     "host": .of(ev.hostnames.first),
                     "ip": .string(UtunPacket.ipString(ev.dstIP)),
@@ -5104,6 +5122,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let privateIDs = Set(profiles.filter { $0.privateMode }.map { $0.id })
         BACEventEmitter.shared.setPrivateProfiles(privateIDs)
         let enrolled = BACEnrollmentStore.load() != nil
+        // Keep the detailed-HTTP-log uploader in lockstep with enrollment
+        // (stand up on enroll, tear down + drop buffer on unenroll) and
+        // push the latest private-profile set. Only touches the engine if
+        // it's already loaded — never forces creation from profiles.didSet.
+        if let store = loadedMitmEngine?.traceStore {
+            if enrolled {
+                if let up = store.uploader as? BACTraceUploader {
+                    up.setPrivateProfiles(privateIDs)
+                } else if store.uploader == nil {
+                    let up = BACTraceUploader()
+                    up.setPrivateProfiles(privateIDs)
+                    store.uploader = up
+                }
+            } else if let up = store.uploader as? BACTraceUploader {
+                up.shutdown()
+                store.uploader = nil
+            }
+        }
         for (profileID, pane) in panes {
             pane.model.streamingActive = enrolled && !privateIDs.contains(profileID)
         }
