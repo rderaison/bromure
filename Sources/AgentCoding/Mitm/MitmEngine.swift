@@ -454,6 +454,35 @@ public final class MitmEngine {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { close(appFD); return }
 
+            // Plain HTTP (:80) — no TLS. Peek the Host header to identify the
+            // destination (the switch has no SNI for cleartext), apply the egress
+            // policy, then MiTM as cleartext (or splice on passthrough / non-HTTP).
+            if destPort == 80 {
+                let host = Self.peekHTTPHost(fd: appFD) ?? destIP
+                var shouldSplice = PassthroughList.current().matches(host)
+                if let policy = self.guardrailsConfig(for: profileID)?.egressPolicy {
+                    switch policy.verdict(ip: nil, hostnames: [host], proto: .tcp,
+                                          port: UInt16(truncatingIfNeeded: destPort)) {
+                    case .deny:
+                        SupplyChainLog.shared.record(
+                            "[firewall] ✗ deny tcp \(host):\(destPort) (\(profileID.uuidString.prefix(8)))")
+                        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
+                            eventData: ["action": .string("deny"), "proto": .string("tcp"),
+                                        "host": .string(host), "port": .int(destPort), "layer": .string("l4")])
+                        close(appFD); return
+                    case .mitm:  shouldSplice = false
+                    case .allow: break
+                    }
+                }
+                if shouldSplice {
+                    MitmPassthrough.splice(appFD: appFD, destIP: destIP, destPort: destPort)
+                } else {
+                    await self.makeConnection(fd: appFD, profileID: profileID)
+                        .runTransparentHTTP(host: host, port: destPort)
+                }
+                return
+            }
+
             let decision = TLSClientHello.peek(fd: appFD)
             let passthrough = PassthroughList.current()
             let host: String
@@ -493,27 +522,60 @@ public final class MitmEngine {
                 return
             }
 
-            let conn = HTTPMitmConnection(
-                fd: appFD,
-                profileID: profileID,
-                certCache: self.certCache,
-                swapper: self.swapper,
-                awsResigner: self.awsResigner,
-                traceStore: self.traceStore,
-                clientIdentities: self.clientIdentities,
-                clusterCAs: self.clusterCAs,
-                consent: self.consent,
-                guardrailsBroker: self.guardrailsBroker,
-                supplyChainBroker: self.supplyChainBroker,
-                osvClient: self.osvClient,
-                socketClient: self.socketClient,
-                publishTimeCache: self.publishTimeCache,
-                sessionTraceProvider: { [weak self] in self?.sessionTrace(for: profileID) },
-                guardrailsProvider: { [weak self] in self?.guardrailsConfig(for: profileID) },
-                supplyChainProvider: { [weak self] in self?.supplyChainPolicy(for: profileID) }
-            )
+            let conn = self.makeConnection(fd: appFD, profileID: profileID)
             await conn.runTransparentTLS(host: host, port: destPort)
         }
+    }
+
+    /// Build a MITM connection wired to this engine's per-profile policy chain.
+    /// Shared by the TLS (:443) and cleartext (:80) transparent paths.
+    private nonisolated func makeConnection(fd: Int32, profileID: UUID) -> HTTPMitmConnection {
+        HTTPMitmConnection(
+            fd: fd,
+            profileID: profileID,
+            certCache: self.certCache,
+            swapper: self.swapper,
+            awsResigner: self.awsResigner,
+            traceStore: self.traceStore,
+            clientIdentities: self.clientIdentities,
+            clusterCAs: self.clusterCAs,
+            consent: self.consent,
+            guardrailsBroker: self.guardrailsBroker,
+            supplyChainBroker: self.supplyChainBroker,
+            osvClient: self.osvClient,
+            socketClient: self.socketClient,
+            publishTimeCache: self.publishTimeCache,
+            sessionTraceProvider: { [weak self] in self?.sessionTrace(for: profileID) },
+            guardrailsProvider: { [weak self] in self?.guardrailsConfig(for: profileID) },
+            supplyChainProvider: { [weak self] in self?.supplyChainPolicy(for: profileID) }
+        )
+    }
+
+    /// MSG_PEEK the start of a plain-HTTP request and extract the destination
+    /// host from an absolute-form request target or the `Host:` header, without
+    /// consuming the bytes (the connection re-reads them). nil if it doesn't look
+    /// like HTTP or carries no host — the caller then falls back to the dest IP.
+    private nonisolated static func peekHTTPHost(fd: Int32) -> String? {
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let n = buf.withUnsafeMutableBytes { Darwin.recv(fd, $0.baseAddress, 4096, Int32(MSG_PEEK)) }
+        guard n > 0, let text = String(bytes: buf.prefix(n), encoding: .isoLatin1),
+              let firstLineEnd = text.range(of: "\r\n") else { return nil }
+        let parts = text[..<firstLineEnd.lowerBound].split(separator: " ")
+        guard parts.count >= 3, parts[2].hasPrefix("HTTP/") else { return nil }   // looks like HTTP?
+        // absolute-form target: METHOD http://host[:port]/path HTTP/1.1
+        let target = String(parts[1])
+        if let schemeSep = target.range(of: "://") {
+            let hostPart = target[schemeSep.upperBound...].prefix { $0 != "/" }
+            let host = hostPart.split(separator: ":").first.map(String.init) ?? String(hostPart)
+            if !host.isEmpty { return host.lowercased() }
+        }
+        // origin-form: pull the Host header.
+        for line in text.split(separator: "\r\n") where line.lowercased().hasPrefix("host:") {
+            let v = line.dropFirst("host:".count).trimmingCharacters(in: .whitespaces)
+            let host = v.split(separator: ":").first.map(String.init) ?? v
+            if !host.isEmpty { return host.lowercased() }
+        }
+        return nil
     }
 
     /// This workspace's ssh-agent socket, spawning the agent on first

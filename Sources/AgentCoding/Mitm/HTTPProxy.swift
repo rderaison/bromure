@@ -168,6 +168,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
     }
 
+    /// Transparent plain-HTTP entry point (intercepted :80). No TLS: the request
+    /// is read straight off the socket and the same policy / relay chain runs as
+    /// for HTTPS, forwarding upstream over `http`. `host` comes from the peeked
+    /// `Host` header (the switch has no SNI for cleartext). Closes the FD on exit.
+    @available(macOS, deprecated: 10.15, message: "shares driveTLS, which drives SecureTransport for the HTTPS path")
+    func runTransparentHTTP(host: String, port: Int) async {
+        defer { close(fd) }
+        do {
+            try await driveTLS(host: host, port: port, t0: Date(), cleartext: true)
+        } catch {
+            FileHandle.standardError.write(Data("[mitm] \(error)\n".utf8))
+        }
+    }
+
     /// Everything from server-side TLS termination onward: forge the leaf for
     /// `host`, terminate TLS on `fd`, read the inner request, and run the full
     /// policy / token-swap / relay chain. Shared by the CONNECT path (`drive`)
@@ -175,11 +189,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// destination identity the chain (and the `mitmUpstreamURL` invariant) keys
     /// off, so anchoring it to the SNI keeps that invariant intact.
     @available(macOS, deprecated: 10.15, message: "creates TLSServerStream which wraps SecureTransport")
-    private func driveTLS(host: String, port: Int, t0: Date) async throws {
-        // 3. Server-side TLS using the cached forged leaf cert for `host`.
-        let identity = try certCache.identity(for: host)
-        let tls = try TLSServerStream(fd: fd, identity: identity)
-        try tls.handshake()
+    private func driveTLS(host: String, port: Int, t0: Date, cleartext: Bool = false) async throws {
+        // 3. Terminate the client side. HTTPS: forge a leaf for `host` and run
+        //    server-side TLS. Plain HTTP (:80, transparent): no TLS — read and
+        //    write the socket directly. Everything downstream is identical; only
+        //    the upstream scheme differs (http vs https).
+        let tls: MitmServerStream
+        if cleartext {
+            tls = PlaintextServerStream(fd: fd)
+        } else {
+            let identity = try certCache.identity(for: host)
+            let stream = try TLSServerStream(fd: fd, identity: identity)
+            try stream.handshake()
+            tls = stream
+        }
+        let upstreamScheme = cleartext ? "http" : "https"
 
         // 4. Read the wrapped HTTP request through TLS.
         let request = try readRawHTTPRequest(via: tls, maxBytes: 8 * 1024 * 1024)
@@ -700,7 +724,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     ? Self.forceFullNpmPackument(toForward) : toForward
                 let relay = try await relayUpstreamBuffered(
                     rawRequest: metaForward, host: upstreamHost, port: upstreamPort,
-                    session: session, tls: tls,
+                    session: session, tls: tls, scheme: upstreamScheme,
                     rewrite: { raw in
                         if delpiRouted,
                            let substitute = Self.delpiResponseGate(
@@ -1039,7 +1063,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     var didStripFlag = false
                     let relay = try await relayUpstreamBuffered(
                         rawRequest: toForward, host: upstreamHost, port: upstreamPort,
-                        session: session, tls: tls,
+                        session: session, tls: tls, scheme: upstreamScheme,
                         rewrite: { raw in
                             if delpiRouted,
                                let substitute = Self.delpiResponseGate(
@@ -1232,7 +1256,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // tarballs already.
             relay = try await relayUpstreamBuffered(
                 rawRequest: toForward, host: upstreamHost, port: upstreamPort,
-                session: relaySession, tls: tls,
+                session: relaySession, tls: tls, scheme: upstreamScheme,
                 rewrite: { raw in
                     Self.delpiResponseGate(raw: raw, apiKey: delpiKey,
                                            profileID: self.profileID,
@@ -1243,7 +1267,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                             host: upstreamHost, port: upstreamPort,
                                             session: relaySession,
                                             tls: tls,
-                                            upstreamScheme: routedBackend == .local ? "http" : "https")
+                                            upstreamScheme: (cleartext || routedBackend == .local) ? "http" : "https")
         }
 
         // Feed the hybrid policy engine from this cloud turn (§4.3). The
@@ -1370,7 +1394,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// chronological transcript that the caller renders into the
     /// trace's response body.
     @available(macOS, deprecated: 10.15, message: "takes TLSServerStream which wraps SecureTransport")
-    private func handleWebSocketUpgrade(serverTLS: TLSServerStream,
+    private func handleWebSocketUpgrade(serverTLS: MitmServerStream,
                                         rawRequest: Data,
                                         host: String, port: Int,
                                         captureBody: Bool,
@@ -2234,7 +2258,8 @@ func mitmUpstreamURL(scheme: String, host: String, port: Int, path: String) thro
         throw MitmError.upstreamTargetRejected(
             "non-origin-form request target \(path.debugDescription) on \(host)")
     }
-    let portStr = (port == 443) ? "" : ":\(port)"
+    let isDefaultPort = (scheme == "https" && port == 443) || (scheme == "http" && port == 80)
+    let portStr = isDefaultPort ? "" : ":\(port)"
     guard let url = URL(string: "\(scheme)://\(host)\(portStr)\(path)") else {
         throw MitmError.malformedHTTPRequest
     }
@@ -2261,7 +2286,7 @@ private func readRawHTTPRequest(plainFD fd: Int32, maxBytes: Int) throws -> Data
 }
 
 @available(macOS, deprecated: 10.15)
-private func readRawHTTPRequest(via tls: TLSServerStream, maxBytes: Int) throws -> Data {
+private func readRawHTTPRequest(via tls: MitmServerStream, maxBytes: Int) throws -> Data {
     return try readUntilCompleteHTTP(maxBytes: maxBytes) { buf in
         try tls.read(maxBytes: buf)
     }
@@ -2464,10 +2489,11 @@ private func writeAll(fd: Int32, bytes: [UInt8]) throws {
 @available(macOS, deprecated: 10.15)
 private func relayUpstreamBuffered(rawRequest: Data, host: String, port: Int,
                                    session: URLSession,
-                                   tls: TLSServerStream,
+                                   tls: MitmServerStream,
+                                   scheme: String = "https",
                                    rewrite: (Data) -> Data) async throws -> RelayResponse {
     let buffered = try await relayUpstreamCollecting(
-        rawRequest: rawRequest, host: host, port: port, session: session)
+        rawRequest: rawRequest, host: host, port: port, session: session, scheme: scheme)
     let rewritten = rewrite(buffered)
     try tls.write(rewritten)
     return RelayResponse(buffer: rewritten,
@@ -2479,7 +2505,7 @@ private func relayUpstreamBuffered(rawRequest: Data, host: String, port: Int,
 /// Shared between the buffered relay and any other call site that
 /// needs the full body before responding to the client.
 private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
-                                     session: URLSession) async throws -> Data {
+                                     session: URLSession, scheme: String = "https") async throws -> Data {
     guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
         throw MitmError.malformedHTTPRequest
     }
@@ -2496,7 +2522,7 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
     guard lineParts.count >= 3 else { throw MitmError.malformedHTTPRequest }
     let method = String(lineParts[0])
     let path   = String(lineParts[1])
-    let url = try mitmUpstreamURL(scheme: "https", host: host, port: port, path: path)
+    let url = try mitmUpstreamURL(scheme: scheme, host: host, port: port, path: path)
     var req = URLRequest(url: url)
     req.httpMethod = method
     if !body.isEmpty { req.httpBody = body }
@@ -2691,7 +2717,7 @@ private func emitSupplyChainFetch(profileID: UUID,
 @available(macOS, deprecated: 10.15)
 private func relayUpstream(rawRequest: Data, host: String, port: Int,
                            session: URLSession,
-                           tls: TLSServerStream,
+                           tls: MitmServerStream,
                            upstreamScheme: String = "https") async throws -> RelayResponse {
     guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
         throw MitmError.malformedHTTPRequest

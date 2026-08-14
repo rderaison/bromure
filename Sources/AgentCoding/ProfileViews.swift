@@ -3242,6 +3242,14 @@ struct ProfileEditorView: View {
 
                 Divider().padding(.vertical, 4)
                 EgressRulesEditor(pfText: $draft.egressRules)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Disable transparent interception", isOn: $draft.disableTransparentProxy)
+                    Text("Interception (on by default) diverts the VM's HTTP/HTTPS to Bromure so the rules above are enforced host-side even if the guest unsets HTTP(S)_PROXY. Turn this on to stop intercepting — the rules then only apply to traffic that uses the proxy, so the workspace can bypass them. Use only for a workspace that breaks under interception (e.g. strict certificate pinning).")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 6)
             }
             .padding(.bottom, 8)
         }

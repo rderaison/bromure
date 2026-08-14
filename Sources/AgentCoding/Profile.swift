@@ -1238,6 +1238,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         return (try? EgressPolicy.parse(egressRules)) ?? .allowAll
     }
 
+    /// Opt out of host-side transparent interception for this workspace. When
+    /// true, the switch stops diverting the VM's :80/:443 flows into the MiTM,
+    /// so guardrails only apply to traffic that cooperatively uses the proxy
+    /// env vars. Default false (interception on) — the firewall is meant to be
+    /// unbypassable; this is an escape hatch for a workspace that breaks under
+    /// interception (e.g. heavy cert-pinning not covered by the passthrough list).
+    public var disableTransparentProxy: Bool = false
+
     /// Supply-chain security policy — age-gate package installs,
     /// look up OSV / socket.dev for known-bad versions, strip
     /// install scripts. Enforced host-side in the MITM; the in-VM
@@ -1688,6 +1696,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case kubeconfigs
         case guardrails
         case egressRules
+        case disableTransparentProxy
         case supplyChain
         case promptInjection
         case digitalOceanToken
@@ -1796,6 +1805,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         guardrails = try c.decodeIfPresent(GuardrailsPolicy.self, forKey: .guardrails) ?? GuardrailsPolicy()
         egressRules = try c.decodeIfPresent(String.self, forKey: .egressRules) ?? ""
+        disableTransparentProxy = try c.decodeIfPresent(Bool.self, forKey: .disableTransparentProxy) ?? false
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
         promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
@@ -1932,6 +1942,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if !egressRules.isEmpty {
             try c.encode(egressRules, forKey: .egressRules)
+        }
+        if disableTransparentProxy {
+            try c.encode(disableTransparentProxy, forKey: .disableTransparentProxy)
         }
         // Encode supply-chain unconditionally: its empty/default form
         // already represents "all defaults" via the inner encode()

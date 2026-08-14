@@ -110,6 +110,10 @@ public final class VMNetSwitch: @unchecked Sendable {
     private var egressSeen: Set<EgressKey> = []
     /// port id → firewall rules (nil = allow-all). Guarded by `lock`.
     private var portEgressPolicy: [Int: EgressPolicy] = [:]
+    /// port ids that opted out of transparent interception (Profile
+    /// `disableTransparentProxy`). Their off-subnet flows are never diverted
+    /// into the MiTM — the firewall's L4 allow/deny still applies. Guarded by `lock`.
+    private var portInterceptDisabled: Set<Int> = []
     /// IPv4 → hostnames learned from the guest's DNS answers, for hostname rule
     /// matching across all protocols. Own lock (not `lock`).
     private let dnsCache = DNSSnoopCache()
@@ -231,7 +235,8 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// Returns a `FileHandle` to pass to `VZFileHandleNetworkDeviceAttachment`,
     /// or `nil` if the shared vmnet interface can't be started (e.g. missing
     /// entitlement) — callers should fall back to `VZNATNetworkDeviceAttachment`.
-    public func attachPort(profileID: UUID? = nil, egressPolicy: EgressPolicy? = nil) -> FileHandle? {
+    public func attachPort(profileID: UUID? = nil, egressPolicy: EgressPolicy? = nil,
+                           interceptDisabled: Bool = false) -> FileHandle? {
         lock.lock()
 
         if !started {
@@ -278,6 +283,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         portByHandle[ObjectIdentifier(handle)] = id
         if let profileID { portProfileID[id] = profileID }
         if let egressPolicy { portEgressPolicy[id] = egressPolicy }
+        if interceptDisabled { portInterceptDisabled.insert(id) }
         lock.unlock()
 
         if switchDebug { print("[VMNetSwitch] port \(id) attached (\(ports.count) total)") }
@@ -309,6 +315,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         portProfileID[id] = nil
         portGuestMAC[id] = nil
         portEgressPolicy[id] = nil
+        portInterceptDisabled.remove(id)
         egressSeen = egressSeen.filter { $0.portID != id }
         let intercept = interceptor
         if releaseLease {
@@ -865,6 +872,16 @@ public final class VMNetSwitch: @unchecked Sendable {
         portEgressPolicy[id] = policy
     }
 
+    /// Toggle transparent interception for a VM's port mid-session. When
+    /// disabled, off-subnet flows are never diverted into the MiTM (the L4
+    /// firewall still applies).
+    public func setInterceptDisabled(_ disabled: Bool, for handle: FileHandle) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let id = portByHandle[ObjectIdentifier(handle)] else { return }
+        if disabled { portInterceptDisabled.insert(id) } else { portInterceptDisabled.remove(id) }
+    }
+
     /// Firewall + interception for one off-subnet frame from a session VM.
     /// Returns true when the frame was consumed (dropped by policy, or diverted
     /// into the MiTM); false to let the native switch forward it.
@@ -897,6 +914,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         let policy = portEgressPolicy[srcPortID]
         let intercept = interceptor
         let canIntercept = intercept != nil && proto == 6 && interceptPorts.contains(dport)
+            && !portInterceptDisabled.contains(srcPortID)
         lock.unlock()
 
         let hostnames = dnsCache.names(for: dstIP)

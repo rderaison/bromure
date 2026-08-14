@@ -13,8 +13,44 @@ import Foundation
 /// The `@available(macOS, deprecated: 10.15)` annotation matches the
 /// underlying SSLContext APIs so the compiler doesn't double-warn —
 /// callers (only `HTTPMitmConnection`) are similarly annotated.
+/// The minimal client-side byte stream the MITM request/response pipeline
+/// needs: a (possibly no-op) handshake, blocking reads, and whole-buffer
+/// writes. Implemented by `TLSServerStream` (HTTPS, :443) and
+/// `PlaintextServerStream` (plain HTTP, :80) so `driveTLS` handles both the
+/// same way — the only difference is TLS termination vs. raw socket I/O.
+protocol MitmServerStream: AnyObject {
+    func handshake() throws
+    func read(maxBytes: Int) throws -> Data
+    func write(_ data: Data) throws
+}
+
+/// Cleartext client stream for transparent :80 interception. Same surface as
+/// `TLSServerStream`, but reads/writes the socket FD directly — no TLS, so the
+/// handshake is a no-op and no forged cert is needed.
+final class PlaintextServerStream: MitmServerStream, @unchecked Sendable {
+    private let fd: Int32
+    init(fd: Int32) { self.fd = fd }
+    func handshake() throws {}
+    func read(maxBytes: Int) throws -> Data {
+        var buf = [UInt8](repeating: 0, count: maxBytes)
+        let n = buf.withUnsafeMutableBytes { p in Darwin.recv(fd, p.baseAddress, maxBytes, 0) }
+        if n < 0 { throw MitmError.tlsReadFailed(errno) }
+        return Data(buf.prefix(max(0, n)))
+    }
+    func write(_ data: Data) throws {
+        try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var sent = 0
+            while sent < data.count {
+                let w = Darwin.send(fd, raw.baseAddress!.advanced(by: sent), data.count - sent, 0)
+                if w <= 0 { throw MitmError.tlsWriteFailed(errno) }
+                sent += w
+            }
+        }
+    }
+}
+
 @available(macOS, deprecated: 10.15, message: "wraps SSLContext deliberately — Network.framework can't take a raw socket FD")
-final class TLSServerStream: @unchecked Sendable {
+final class TLSServerStream: MitmServerStream, @unchecked Sendable {
     private let fd: Int32
     private let ctx: SSLContext
 

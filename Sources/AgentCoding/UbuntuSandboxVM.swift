@@ -317,7 +317,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             // instead of each VM getting its own island that collides on .2.
             // Fall back to Apple's NAT if the switch can't bring up vmnet.
             if let port = VMNetSwitch.shared.attachPort(profileID: sessionDisk?.profile.id,
-                                                        egressPolicy: sessionDisk?.profile.resolvedEgressPolicy) {
+                                                        egressPolicy: sessionDisk?.profile.resolvedEgressPolicy,
+                                                        interceptDisabled: sessionDisk?.profile.disableTransparentProxy ?? false) {
                 net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: port)
                 self.switchPort = port
             } else {

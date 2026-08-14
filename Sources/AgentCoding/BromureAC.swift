@@ -2001,16 +2001,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             VMNetSwitch.shared.setSubnetStrategy(.randomClassB172)
         }
 
-        // Transparent host-side interception (opt-in during rollout via the
-        // BROMURE_TRANSPARENT env var). Diverts guest TCP to :443 at the switch
-        // into the existing MiTM regardless of the guest's proxy env vars — the
-        // cooperative HTTP_PROXY path stays live alongside it. The switch retains
-        // the forwarder (as its interceptor), which retains the engine; both are
-        // process-lifetime, so the reference cycle is intentional and harmless.
-        if ProcessInfo.processInfo.environment["BROMURE_TRANSPARENT"] != nil,
+        // Transparent host-side interception. Diverts guest TCP to :80 and :443
+        // at the switch into the MiTM regardless of the guest's proxy env vars,
+        // so guardrails (egress verb rules, credential swapping, tracing) can't
+        // be bypassed by unsetting HTTP(S)_PROXY. On by default; a profile can
+        // opt out (Profile.disableTransparentProxy → the switch skips the divert
+        // for that VM's port). The cooperative HTTP_PROXY path stays live
+        // alongside it. The switch retains the forwarder (as its interceptor),
+        // which retains the engine; both are process-lifetime, so the reference
+        // cycle is intentional and harmless. `BROMURE_NO_TRANSPARENT` is an
+        // escape hatch to force the whole feature off (debugging).
+        if ProcessInfo.processInfo.environment["BROMURE_NO_TRANSPARENT"] == nil,
            let engine = mitmEngine {
             let forwarder = SwitchMitmForwarder(engine: engine, switch: VMNetSwitch.shared)
-            VMNetSwitch.shared.setInterceptor(forwarder, ports: [443])
+            VMNetSwitch.shared.setInterceptor(forwarder, ports: [80, 443])
         }
 
         // Egress firewall: each new off-subnet flow (allowed or denied by the

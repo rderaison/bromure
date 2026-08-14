@@ -611,7 +611,7 @@ enum Fusion {
                     host: String,
                     port: Int,
                     session: URLSession,
-                    tls: TLSServerStream,
+                    tls: MitmServerStream,
                     swapper: TokenSwapper,
                     config: Config,
                     profileID: UUID) async throws -> Outcome? {
