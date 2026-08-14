@@ -1728,17 +1728,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return GuardrailsConfig.DBGuardrail(engine: db.engine, host: host, mode: db.guardrail)
         }
         let g = profile.guardrails
-        let httpWriteHosts = g.httpWriteHosts
-            .filter { !$0.host.trimmingCharacters(in: .whitespaces).isEmpty }
-            .map { GuardrailsConfig.HostGuardrail(host: $0.host, mode: $0.mode) }
         return GuardrailsConfig(kubernetes: g.kubernetes, kubeHosts: kubeHosts,
                                 aws: g.aws,
                                 digitalOcean: g.digitalOcean,
                                 docker: g.docker, dockerHosts: dockerHosts,
                                 github: g.github, gitlab: g.gitlab, bitbucket: g.bitbucket,
                                 databases: databases,
-                                httpWriteDefault: g.httpWriteDefault,
-                                httpWriteHosts: httpWriteHosts)
+                                egressPolicy: profile.resolvedEgressPolicy)
     }
 
     static func loopbackCallbackPort(from url: URL) -> UInt16? {
@@ -2000,14 +1996,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             VMNetSwitch.shared.setInterceptor(forwarder, ports: [443])
         }
 
-        // Egress firewall (allow + log): surface every off-subnet destination a
-        // VM opens, attributed per profile — the visibility half of the firewall.
-        // Nothing is denied yet; this is where a future deny verdict hooks in.
-        VMNetSwitch.shared.setEgressObserver { profileID, dstIP, dstPort, proto in
-            let p = proto == 6 ? "tcp" : proto == 17 ? "udp" : "ip\(proto)"
-            let who = profileID.map { String($0.uuidString.prefix(8)) } ?? "-"
-            let dst = dstPort > 0 ? "\(UtunPacket.ipString(dstIP)):\(dstPort)" : UtunPacket.ipString(dstIP)
-            FileHandle.standardError.write(Data("[fw] egress \(who) \(dst)/\(p)\n".utf8))
+        // Egress firewall: each new off-subnet flow (allowed or denied by the
+        // profile's rules) is surfaced in the Security Log window and, for
+        // enterprise-enrolled installs, uploaded to the cloud. The switch
+        // (SandboxEngine) can't reach these AgentCoding sinks directly, so it
+        // calls out through this observer.
+        VMNetSwitch.shared.setEgressObserver { ev in
+            let proto = ev.proto == 6 ? "tcp" : ev.proto == 17 ? "udp" : ev.proto == 41 ? "ipv6" : "ip\(ev.proto)"
+            let host = ev.proto == 41 ? "(no IPv6 rules)"
+                     : (ev.hostnames.first ?? UtunPacket.ipString(ev.dstIP))
+            let dst = ev.port > 0 ? "\(host):\(ev.port)" : host
+            let action = ev.denied ? "deny" : "allow"
+            let who = ev.profileID.map { String($0.uuidString.prefix(8)) } ?? "-"
+            // ✗ colors blocks red, → colors allows blue in the Security Log view.
+            SupplyChainLog.shared.record("[firewall] \(ev.denied ? "✗" : "→") \(action) \(proto) \(dst) (\(who))")
+            if let pid = ev.profileID {
+                BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "egress.firewall", eventData: [
+                    "action": .string(action),
+                    "proto": .string(proto),
+                    "host": .of(ev.hostnames.first),
+                    "ip": .string(UtunPacket.ipString(ev.dstIP)),
+                    "port": .int(Int(ev.port)),
+                    "hostnames": .array(ev.hostnames.map { .string($0) }),
+                ])
+            }
         }
 
         // Offer to install the `bromure-cli` command-line tool (admin prompt).

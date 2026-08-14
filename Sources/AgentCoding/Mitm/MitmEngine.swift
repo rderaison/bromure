@@ -457,7 +457,7 @@ public final class MitmEngine {
             let decision = TLSClientHello.peek(fd: appFD)
             let passthrough = PassthroughList.current()
             let host: String
-            let shouldSplice: Bool
+            var shouldSplice: Bool
             switch decision {
             case .sni(let s):
                 host = s
@@ -468,6 +468,24 @@ public final class MitmEngine {
             case .notTLS, .needMoreData:
                 host = destIP
                 shouldSplice = true                            // fail open — not our protocol
+            }
+
+            // Egress firewall by SNI hostname (the authoritative check for TLS,
+            // and the fallback for hostnames the switch couldn't DNS-resolve at
+            // L4). deny → close; a `web` rule → force MiTM over passthrough.
+            if case .sni(let sni) = decision,
+               let policy = self.guardrailsConfig(for: profileID)?.egressPolicy {
+                switch policy.verdict(ip: nil, hostnames: [sni], proto: .tcp, port: UInt16(truncatingIfNeeded: destPort)) {
+                case .deny:
+                    SupplyChainLog.shared.record(
+                        "[firewall] ✗ deny tcp \(sni):\(destPort) (\(profileID.uuidString.prefix(8)))")
+                    BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
+                        eventData: ["action": .string("deny"), "proto": .string("tcp"),
+                                    "host": .string(sni), "port": .int(destPort), "layer": .string("sni")])
+                    close(appFD); return
+                case .mitm:  shouldSplice = false               // `web` rule overrides passthrough
+                case .allow: break
+                }
             }
 
             if shouldSplice {

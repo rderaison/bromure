@@ -3239,6 +3239,9 @@ struct ProfileEditorView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                         .padding(.top, 2)
                 }
+
+                Divider().padding(.vertical, 4)
+                EgressRulesEditor(pfText: $draft.egressRules)
             }
             .padding(.bottom, 8)
         }

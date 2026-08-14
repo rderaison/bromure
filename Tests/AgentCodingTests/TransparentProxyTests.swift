@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SandboxEngine
 @testable import bromure_ac
 
 /// Builds a minimal TLS 1.2/1.3 ClientHello record carrying an optional SNI, so
@@ -75,38 +76,30 @@ struct TLSClientHelloTests {
     }
 }
 
-@Suite("Generic HTTP write-verb policy")
-struct HTTPWritePolicyTests {
-    func cfg(_ def: GuardrailsPolicy.Mode, _ hosts: [GuardrailsConfig.HostGuardrail] = []) -> GuardrailsConfig {
-        GuardrailsConfig(kubernetes: .off, kubeHosts: [], httpWriteDefault: def, httpWriteHosts: hosts)
+@Suite("Egress web-rule verb enforcement via GuardrailsConfig")
+struct EgressWebMethodTests {
+    func cfg(_ pf: String) throws -> GuardrailsConfig {
+        GuardrailsConfig(kubernetes: .off, kubeHosts: [], egressPolicy: try EgressPolicy.parse(pf))
     }
 
-    @Test("Default off allows every verb")
-    func defaultOff() {
-        let c = cfg(.off)
-        #expect(c.deny(host: "api.acme.com", method: "POST", path: "/x", amzTarget: nil, formAction: nil) == nil)
-    }
-
-    @Test("readOnly default blocks writes, allows reads")
-    func readOnlyDefault() {
-        let c = cfg(.readOnly)
+    @Test("web read-only blocks writes, allows reads")
+    func readOnly() throws {
+        let c = try cfg("web api.acme.com read-only\ndefault allow")
         #expect(c.deny(host: "api.acme.com", method: "GET", path: "/x", amzTarget: nil, formAction: nil) == nil)
         #expect(c.deny(host: "api.acme.com", method: "POST", path: "/x", amzTarget: nil, formAction: nil) != nil)
+    }
+
+    @Test("web methods allowlist; subdomain matches")
+    func allowlist() throws {
+        let c = try cfg("web acme.com methods GET,POST\ndefault allow")
+        #expect(c.deny(host: "api.acme.com", method: "POST", path: "/x", amzTarget: nil, formAction: nil) == nil)
         #expect(c.deny(host: "api.acme.com", method: "DELETE", path: "/x", amzTarget: nil, formAction: nil) != nil)
     }
 
-    @Test("Per-host override wins, subdomain matches")
-    func perHostOverride() {
-        let c = cfg(.off, [GuardrailsConfig.HostGuardrail(host: "acme.com", mode: .readOnly)])
-        #expect(c.deny(host: "api.acme.com", method: "POST", path: "/x", amzTarget: nil, formAction: nil) != nil)
-        #expect(c.deny(host: "other.com", method: "POST", path: "/x", amzTarget: nil, formAction: nil) == nil)
-    }
-
-    @Test("destructive blocks only DELETE")
-    func destructive() {
-        let c = cfg(.destructive)
-        #expect(c.deny(host: "api.acme.com", method: "PUT", path: "/x", amzTarget: nil, formAction: nil) == nil)
-        #expect(c.deny(host: "api.acme.com", method: "DELETE", path: "/x", amzTarget: nil, formAction: nil) != nil)
+    @Test("Host with no web rule allows every verb")
+    func noRule() throws {
+        let c = try cfg("allow tcp api.acme.com:443\ndefault allow")
+        #expect(c.deny(host: "api.acme.com", method: "DELETE", path: "/x", amzTarget: nil, formAction: nil) == nil)
     }
 }
 

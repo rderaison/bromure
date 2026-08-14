@@ -92,15 +92,27 @@ public final class VMNetSwitch: @unchecked Sendable {
     private var interceptor: VMNetTCPInterceptor?
     private var interceptPorts: Set<UInt16> = []
 
-    /// Egress firewall (allow + log). Called once per new off-subnet destination
-    /// tuple a VM opens — the "what is leaving, per profile" visibility the
-    /// firewall provides in v1. Everything is still allowed; the observer is
-    /// where a future deny verdict hooks in. Guarded by `lock`.
-    public typealias EgressObserver = @Sendable (_ profileID: UUID?, _ dstIP: UInt32,
-                                                 _ dstPort: UInt16, _ proto: UInt8) -> Void
+    /// Egress firewall. Per-VM `EgressPolicy` (set at `attachPort`) decides
+    /// allow/deny for each new off-subnet flow; the observer is fired once per new
+    /// destination tuple for the Security Logs window + cloud upload. Guarded by
+    /// `lock`.
+    public struct EgressEvent: Sendable {
+        public let profileID: UUID?
+        public let dstIP: UInt32
+        public let hostnames: [String]   // DNS-snooped names for dstIP (may be empty)
+        public let proto: UInt8          // 6 = TCP, 17 = UDP
+        public let port: UInt16
+        public let denied: Bool          // true = blocked by the policy
+    }
+    public typealias EgressObserver = @Sendable (EgressEvent) -> Void
     private var egressObserver: EgressObserver?
     private struct EgressKey: Hashable { let portID: Int; let dstIP: UInt32; let dstPort: UInt16; let proto: UInt8 }
     private var egressSeen: Set<EgressKey> = []
+    /// port id → firewall rules (nil = allow-all). Guarded by `lock`.
+    private var portEgressPolicy: [Int: EgressPolicy] = [:]
+    /// IPv4 → hostnames learned from the guest's DNS answers, for hostname rule
+    /// matching across all protocols. Own lock (not `lock`).
+    private let dnsCache = DNSSnoopCache()
 
     private var vmnetInterface: interface_ref?
     private let vmnetQueue = DispatchQueue(label: "io.bromure.vmnetswitch.vmnet", qos: .userInteractive)
@@ -219,7 +231,7 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// Returns a `FileHandle` to pass to `VZFileHandleNetworkDeviceAttachment`,
     /// or `nil` if the shared vmnet interface can't be started (e.g. missing
     /// entitlement) — callers should fall back to `VZNATNetworkDeviceAttachment`.
-    public func attachPort(profileID: UUID? = nil) -> FileHandle? {
+    public func attachPort(profileID: UUID? = nil, egressPolicy: EgressPolicy? = nil) -> FileHandle? {
         lock.lock()
 
         if !started {
@@ -265,6 +277,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         ports[id] = port
         portByHandle[ObjectIdentifier(handle)] = id
         if let profileID { portProfileID[id] = profileID }
+        if let egressPolicy { portEgressPolicy[id] = egressPolicy }
         lock.unlock()
 
         if switchDebug { print("[VMNetSwitch] port \(id) attached (\(ports.count) total)") }
@@ -295,6 +308,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         macTable = macTable.filter { $0.value != id }
         portProfileID[id] = nil
         portGuestMAC[id] = nil
+        portEgressPolicy[id] = nil
         egressSeen = egressSeen.filter { $0.portID != id }
         let intercept = interceptor
         if releaseLease {
@@ -449,39 +463,13 @@ public final class VMNetSwitch: @unchecked Sendable {
             return
         }
 
-        // Transparent interception: divert off-subnet unicast TCP bound for an
-        // intercepted port into the host interceptor (AgentCoding's MiTM
-        // forwarder) instead of the vmnet uplink. Broadcast/DHCP are handled
-        // above; ARP, UDP/DNS, IPv6, and same-subnet peer traffic are not
-        // TCP-to-an-off-subnet-port, so they fall through unchanged. The guest
-        // reaches real public IPs (DNS still resolves via the gateway) and
-        // addresses the SYN to the gateway MAC — so this is pure L3/L4 inspection
-        // of a frame that would otherwise hit the uplink; no ARP work needed.
-        //
-        // ONLY ports with a profile (a real session) are diverted. Image
-        // bake / postinstall / installer VMs attach without a profileID
-        // (UbuntuImageManager/LinuxImageManager `attachPort()`), and they haven't
-        // installed the Bromure CA yet — MiTM'ing them would break the install
-        // with untrusted-cert failures. They take the untouched native path.
-        if let (dstIP, dport) = Self.interceptableTCP(buf, n),
-           (dstIP & subnetMask) != (gatewayIP & subnetMask) {
-            lock.lock()
-            let intercept = interceptor
-            let pid = portProfileID[srcPortID]
-            let match = intercept != nil && pid != nil && interceptPorts.contains(dport)
-            lock.unlock()
-            if match, let intercept, let pid {
-                let ipPacket = [UInt8](UnsafeBufferPointer(start: buf + 14, count: n - 14))
-                intercept.handleDivertedPacket(portID: srcPortID, profileID: pid, ipPacket: ipPacket)
-                return
-            }
-        }
-
-        // Egress firewall (allow + log): record each new off-subnet destination a
-        // *session* VM opens. Same profile gate as interception, so bake /
-        // postinstall / installer traffic isn't intercepted OR logged — the
-        // firewall is fully off during image installation.
-        logEgressIfNeeded(srcPortID, buf, n)
+        // Egress firewall + transparent interception for off-subnet flows from a
+        // *session* VM. Evaluates the per-profile EgressPolicy (deny → drop+RST),
+        // logs the flow, and diverts intercepted TCP (443) into the MiTM. Returns
+        // true when it consumed the frame. Broadcast/DHCP/ARP are handled above;
+        // same-subnet peer traffic and non-session (bake/installer) ports fall
+        // through to the native switch unchanged.
+        if handleEgress(srcPortID, buf, n) { return }
 
         switch lookupPort(forMAC: dst) {
         case Self.uplinkPortID:
@@ -508,6 +496,10 @@ public final class VMNetSwitch: @unchecked Sendable {
         let dst = Self.mac(buf, 0)
         let src = Self.mac(buf, 6)
         learn(src, port: Self.uplinkPortID)
+
+        // Snoop the guest's DNS answers (UDP src port 53) so hostname firewall
+        // rules can match by destination IP for every protocol.
+        Self.snoopDNSResponse(buf, n, into: dnsCache)
 
         if buf[0] & 0x01 != 0 {
             for fd in peerPortFDs(except: nil) { _ = Darwin.write(fd, buf, n) }
@@ -854,8 +846,9 @@ public final class VMNetSwitch: @unchecked Sendable {
         self.interceptPorts = interceptor == nil ? [] : ports
     }
 
-    /// Register the egress firewall observer (allow + log). Called once per new
-    /// off-subnet destination tuple a VM opens.
+    /// Register the egress firewall observer — fired once per new off-subnet
+    /// destination a session VM opens (allowed or denied), for the Security Logs
+    /// window + cloud upload.
     public func setEgressObserver(_ observer: EgressObserver?) {
         lock.lock()
         defer { lock.unlock() }
@@ -863,32 +856,171 @@ public final class VMNetSwitch: @unchecked Sendable {
         egressSeen.removeAll()
     }
 
-    /// Fire the egress observer for a new off-subnet destination this VM opens.
-    /// Deduped per (port, dstIP, dstPort, proto); the dedup set is capped so a
-    /// long-lived busy switch can't grow it without bound.
-    private func logEgressIfNeeded(_ srcPortID: Int, _ buf: UnsafeMutablePointer<UInt8>, _ n: Int) {
-        guard n >= 14 + 20, Self.u16(buf, 12) == 0x0800 else { return }   // IPv4
-        let ihl = Int(buf[14] & 0x0F) * 4
-        guard ihl >= 20, n >= 14 + ihl else { return }
-        let dstIP = Self.u32(buf, 14 + 16)
-        guard (dstIP & subnetMask) != (gatewayIP & subnetMask) else { return }  // off-subnet only
-        let proto = buf[14 + 9]
-        var dport: UInt16 = 0
-        if (proto == 6 || proto == 17), n >= 14 + ihl + 4 {
-            dport = Self.u16(buf, 14 + ihl + 2)
+    /// Set (or clear) the firewall rules for a VM's port. Live-updatable mid-
+    /// session; nil = allow-all.
+    public func setEgressPolicy(_ policy: EgressPolicy?, for handle: FileHandle) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let id = portByHandle[ObjectIdentifier(handle)] else { return }
+        portEgressPolicy[id] = policy
+    }
+
+    /// Firewall + interception for one off-subnet frame from a session VM.
+    /// Returns true when the frame was consumed (dropped by policy, or diverted
+    /// into the MiTM); false to let the native switch forward it.
+    ///
+    /// Only session ports (a profileID) are governed. Bake/installer VMs attach
+    /// without one — no firewall, no interception, native path (they also lack
+    /// the Bromure CA, so MiTM would break them).
+    private func handleEgress(_ srcPortID: Int, _ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
+        // IPv6: the firewall only matches IPv4 rules, so a v4 `deny` could be
+        // trivially bypassed by the guest's IPv6 fallback. When any policy is
+        // active, drop global-unicast v6 egress (the guest then falls back to
+        // the filtered IPv4). Link-local / multicast (ND / RA / DHCPv6) pass, so
+        // v6 autoconfig still works. Ports with no active policy pass v6 through.
+        if Self.u16(buf, 12) == 0x86DD {
+            lock.lock()
+            let pid = portProfileID[srcPortID]
+            let active = pid != nil && (portEgressPolicy[srcPortID]?.isActive ?? false)
+            lock.unlock()
+            guard active, let pid, Self.isGlobalUnicastV6Dst(buf, n) else { return false }
+            fireEgress(portID: srcPortID, profileID: pid, dstIP: 0, hostnames: [],
+                       proto: 41, port: 0, denied: true)
+            return true      // drop
         }
-        let key = EgressKey(portID: srcPortID, dstIP: dstIP, dstPort: dport, proto: proto)
+
+        guard let (proto, dstIP, dport) = Self.offSubnetL4(buf, n),
+              (dstIP & subnetMask) != (gatewayIP & subnetMask) else { return false }
 
         lock.lock()
-        // Only session VMs are firewalled. A port without a profileID is an image
-        // bake / postinstall / installer VM — the firewall stays off for those.
-        guard let observer = egressObserver, let pid = portProfileID[srcPortID],
-              !egressSeen.contains(key) else { lock.unlock(); return }
-        if egressSeen.count > 8192 { egressSeen.removeAll() }  // bound; re-log after reset
-        egressSeen.insert(key)
+        guard let pid = portProfileID[srcPortID] else { lock.unlock(); return false }  // non-session → native
+        let policy = portEgressPolicy[srcPortID]
+        let intercept = interceptor
+        let canIntercept = intercept != nil && proto == 6 && interceptPorts.contains(dport)
         lock.unlock()
 
-        observer(pid, dstIP, dport, proto)
+        let hostnames = dnsCache.names(for: dstIP)
+        let ep: EgressPolicy.Proto = proto == 6 ? .tcp : .udp
+        let verdict = policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport) ?? .allow
+
+        if verdict == .deny {
+            fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
+                       proto: proto, port: dport, denied: true)
+            if proto == 6, Self.isTCPSyn(buf, n) {           // fail the connect fast
+                injectIPToPort(srcPortID, ipPacket: Self.buildTCPReset(buf, n))
+            }
+            return true                                       // dropped
+        }
+
+        fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
+                   proto: proto, port: dport, denied: false)
+
+        // Allowed: divert intercepted TCP into the MiTM (the SNI layer re-checks
+        // the host + `web` rules); otherwise let the native switch forward it.
+        if canIntercept, let intercept {
+            let ipPacket = [UInt8](UnsafeBufferPointer(start: buf + 14, count: n - 14))
+            intercept.handleDivertedPacket(portID: srcPortID, profileID: pid, ipPacket: ipPacket)
+            return true
+        }
+        return false
+    }
+
+    /// Fire the observer for a new flow, deduped per (port, dstIP, port, proto),
+    /// separately for allow vs deny so a state change re-logs.
+    private func fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String],
+                            proto: UInt8, port: UInt16, denied: Bool) {
+        let key = EgressKey(portID: portID, dstIP: dstIP, dstPort: port, proto: denied ? proto | 0x80 : proto)
+        lock.lock()
+        guard let observer = egressObserver, !egressSeen.contains(key) else { lock.unlock(); return }
+        if egressSeen.count > 8192 { egressSeen.removeAll() }
+        egressSeen.insert(key)
+        lock.unlock()
+        observer(EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
+                             proto: proto, port: port, denied: denied))
+    }
+
+    /// (proto, dstIP, dstPort) for a unicast IPv4 TCP/UDP frame (first fragment
+    /// only), else nil.
+    private static func offSubnetL4(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> (UInt8, UInt32, UInt16)? {
+        guard n >= 14 + 20, u16(buf, 12) == 0x0800 else { return nil }    // IPv4
+        let ihl = Int(buf[14] & 0x0F) * 4
+        guard ihl >= 20, n >= 14 + ihl + 4 else { return nil }
+        let proto = buf[14 + 9]
+        guard proto == 6 || proto == 17 else { return nil }              // TCP/UDP
+        guard (u16(buf, 14 + 6) & 0x1FFF) == 0 else { return nil }       // first fragment only
+        return (proto, u32(buf, 14 + 16), u16(buf, 14 + ihl + 2))
+    }
+
+    private static func isTCPSyn(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
+        let ihl = Int(buf[14] & 0x0F) * 4
+        guard n >= 14 + ihl + 14 else { return false }
+        let flags = buf[14 + ihl + 13]
+        return (flags & 0x02) != 0 && (flags & 0x10) == 0               // SYN, not ACK
+    }
+
+    /// True if an IPv6 frame's destination is a routable (global / ULA) unicast
+    /// address — i.e. egress. Link-local (fe80::/10), multicast (ff00::/8), and
+    /// loopback/unspecified are local and return false.
+    private static func isGlobalUnicastV6Dst(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
+        let off = 14 + 24                                               // IPv6 dst address
+        guard n >= off + 16 else { return false }
+        if buf[off] == 0xFF { return false }                           // multicast
+        if buf[off] == 0xFE, (buf[off + 1] & 0xC0) == 0x80 { return false }  // fe80::/10
+        var allZero = true
+        for i in 0..<15 where buf[off + i] != 0 { allZero = false; break }
+        if allZero { return false }                                    // :: or ::1
+        return true
+    }
+
+    /// Snoop a DNS response frame (UDP src port 53) into the IP→hostname cache.
+    private static func snoopDNSResponse(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int, into cache: DNSSnoopCache) {
+        guard n >= 14 + 20 + 8, u16(buf, 12) == 0x0800 else { return }
+        let ihl = Int(buf[14] & 0x0F) * 4
+        guard ihl >= 20, buf[14 + 9] == 17, n >= 14 + ihl + 8 else { return }  // UDP
+        guard u16(buf, 14 + ihl) == 53 else { return }                        // src port 53
+        let dnsOff = 14 + ihl + 8
+        guard n > dnsOff else { return }
+        let payload = [UInt8](UnsafeBufferPointer(start: buf + dnsOff, count: n - dnsOff))
+        for a in DNSSnoop.parseResponse(payload) { cache.record(ip: a.ip, name: a.name, ttl: a.ttl) }
+    }
+
+    /// Build an IPv4 TCP RST+ACK toward the guest in response to its SYN, so a
+    /// firewall-denied connect fails immediately instead of retransmitting.
+    private static func buildTCPReset(_ syn: UnsafeMutablePointer<UInt8>, _ n: Int) -> [UInt8] {
+        let ihl = Int(syn[14] & 0x0F) * 4
+        let gIP = u32(syn, 14 + 12), dIP = u32(syn, 14 + 16)             // guest, dst
+        let sPort = u16(syn, 14 + ihl), dPort = u16(syn, 14 + ihl + 2)
+        let gSeq = u32(syn, 14 + ihl + 4)
+
+        var ip = [UInt8](repeating: 0, count: 20 + 20)
+        // IPv4 header
+        ip[0] = 0x45; ip[2] = 0; ip[3] = 40; ip[8] = 64; ip[9] = 6       // ver/ihl, total len 40, ttl, proto TCP
+        putU32(&ip, 12, dIP); putU32(&ip, 16, gIP)                       // src = dst, dst = guest
+        putU16(&ip, 10, ipChecksum(ip, 0, 20))
+        // TCP header (RST+ACK, seq 0, ack gSeq+1)
+        putU16(&ip, 20 + 0, dPort); putU16(&ip, 20 + 2, sPort)
+        putU32(&ip, 20 + 4, 0); putU32(&ip, 20 + 8, gSeq &+ 1)
+        ip[20 + 12] = 0x50                                               // data offset 5
+        ip[20 + 13] = 0x14                                              // RST | ACK
+        putU16(&ip, 20 + 16, tcpChecksum(ip, dIP, gIP))
+        return ip
+    }
+
+    private static func ipChecksum(_ b: [UInt8], _ off: Int, _ len: Int) -> UInt16 {
+        var sum: UInt32 = 0
+        var i = off
+        while i < off + len { sum += UInt32(b[i]) << 8 | UInt32(b[i+1]); i += 2 }
+        while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16) }
+        return ~UInt16(sum & 0xFFFF)
+    }
+    private static func tcpChecksum(_ ip: [UInt8], _ src: UInt32, _ dst: UInt32) -> UInt16 {
+        var sum: UInt32 = 0
+        sum += (src >> 16) + (src & 0xFFFF) + (dst >> 16) + (dst & 0xFFFF)
+        sum += 6 + 20                                                    // proto + TCP length
+        var i = 20
+        while i < 40 { sum += UInt32(ip[i]) << 8 | UInt32(ip[i+1]); i += 2 }
+        while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16) }
+        return ~UInt16(sum & 0xFFFF)
     }
 
     /// Inject an IPv4 packet (IP header onward) toward the VM on `portID`, framed
@@ -917,19 +1049,6 @@ public final class VMNetSwitch: @unchecked Sendable {
         frame.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, frame.count) }
     }
 
-    /// (dstIP, dstPort) for a unicast IPv4/TCP frame, else nil. Skips fragments
-    /// (no reassembly) so only whole-header first segments are considered.
-    private static func interceptableTCP(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> (UInt32, UInt16)? {
-        guard n >= 14 + 20, u16(buf, 12) == 0x0800 else { return nil }   // IPv4
-        let ihl = Int(buf[14] & 0x0F) * 4
-        guard ihl >= 20, n >= 14 + ihl + 20 else { return nil }          // room for TCP header
-        guard buf[14 + 9] == 6 else { return nil }                       // proto TCP
-        let flagsFrag = u16(buf, 14 + 6)
-        guard (flagsFrag & 0x1FFF) == 0, (flagsFrag & 0x2000) == 0 else { return nil }  // no MF, offset 0
-        let dstIP = u32(buf, 14 + 16)                                     // IP dst
-        let dport = u16(buf, 14 + ihl + 2)                               // TCP dst port
-        return (dstIP, dport)
-    }
 
     // MARK: - Table helpers (lock-guarded)
 
