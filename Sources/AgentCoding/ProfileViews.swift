@@ -336,6 +336,13 @@ struct EnvImportReviewView: View {
 
 struct ProfileEditorView: View {
     @State private var draft: Profile
+    /// Terminal bg/text as live `Color`s the ColorPicker binds to directly.
+    /// Binding a ColorPicker to an inline `Binding(get:{Color(hex:…)},set:…)`
+    /// round-trips through a freshly-built Color every render, and the picker
+    /// never commits the pick — so colours silently stayed at the seeded
+    /// default. A stable @State source + write-back on change fixes it.
+    @State private var bgColor: Color
+    @State private var fgColor: Color
     @State private var selectedCategory: EditorCategory = .general
     #if os(iOS) || os(visionOS)
     /// iPhone navigation stack: empty = the category list, one element = the
@@ -513,6 +520,8 @@ struct ProfileEditorView: View {
         // values. We always render the editable fields (no inherit toggle).
         p.seedAppearance(from: terminalDefaults)
         _draft = State(initialValue: p)
+        _bgColor = State(initialValue: Color(hex: p.customBackgroundHex ?? terminalDefaults.backgroundHex))
+        _fgColor = State(initialValue: Color(hex: p.customForegroundHex ?? terminalDefaults.foregroundHex))
         // Caller-supplied isNew lets the picker pre-seed a draft from
         // the user's preferences template while still telling the
         // editor "this is a brand-new profile". Falls back to the
@@ -3705,14 +3714,10 @@ struct ProfileEditorView: View {
             // Colors
             HStack(spacing: 24) {
                 Text("Colors").frame(width: 110, alignment: .trailing)
-                ColorPicker("Background", selection: Binding(
-                    get: { Color(hex: draft.customBackgroundHex ?? terminalDefaults.backgroundHex) },
-                    set: { draft.customBackgroundHex = $0.hexString }
-                ))
-                ColorPicker("Text", selection: Binding(
-                    get: { Color(hex: draft.customForegroundHex ?? terminalDefaults.foregroundHex) },
-                    set: { draft.customForegroundHex = $0.hexString }
-                ))
+                ColorPicker("Background", selection: $bgColor, supportsOpacity: false)
+                    .onChange(of: bgColor) { draft.customBackgroundHex = bgColor.hexString }
+                ColorPicker("Text", selection: $fgColor, supportsOpacity: false)
+                    .onChange(of: fgColor) { draft.customForegroundHex = fgColor.hexString }
                 Spacer()
             }
 
@@ -3738,6 +3743,8 @@ struct ProfileEditorView: View {
                     draft.customFontSize = terminalDefaults.fontSize
                     draft.customBackgroundHex = terminalDefaults.backgroundHex
                     draft.customForegroundHex = terminalDefaults.foregroundHex
+                    bgColor = Color(hex: terminalDefaults.backgroundHex)
+                    fgColor = Color(hex: terminalDefaults.foregroundHex)
                 }
             }
         }
