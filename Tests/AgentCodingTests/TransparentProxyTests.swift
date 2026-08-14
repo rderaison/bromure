@@ -82,17 +82,26 @@ struct EgressWebMethodTests {
         GuardrailsConfig(kubernetes: .off, kubeHosts: [], egressPolicy: try EgressPolicy.parse(pf))
     }
 
-    @Test("web read-only blocks writes, allows reads")
+    @Test("allow web read-only blocks writes, allows reads")
     func readOnly() throws {
-        let c = try cfg("web api.acme.com read-only\ndefault allow")
+        let c = try cfg("allow web api.acme.com read-only\ndefault allow")
         #expect(c.deny(host: "api.acme.com", method: "GET", path: "/x", amzTarget: nil, formAction: nil) == nil)
         #expect(c.deny(host: "api.acme.com", method: "POST", path: "/x", amzTarget: nil, formAction: nil) != nil)
     }
 
-    @Test("web methods allowlist; subdomain matches")
+    @Test("allow web with a bare method list is an allowlist; subdomain matches")
     func allowlist() throws {
-        let c = try cfg("web acme.com methods GET,POST\ndefault allow")
+        let c = try cfg("allow web acme.com GET,POST\ndefault allow")
         #expect(c.deny(host: "api.acme.com", method: "POST", path: "/x", amzTarget: nil, formAction: nil) == nil)
+        #expect(c.deny(host: "api.acme.com", method: "DELETE", path: "/x", amzTarget: nil, formAction: nil) != nil)
+    }
+
+    @Test("deny web with a method list is a blocklist — those verbs 403, rest pass")
+    func denylist() throws {
+        let c = try cfg("deny web api.acme.com PUT,DELETE\ndefault allow")
+        #expect(c.deny(host: "api.acme.com", method: "GET", path: "/x", amzTarget: nil, formAction: nil) == nil)
+        #expect(c.deny(host: "api.acme.com", method: "POST", path: "/x", amzTarget: nil, formAction: nil) == nil)
+        #expect(c.deny(host: "api.acme.com", method: "PUT", path: "/x", amzTarget: nil, formAction: nil) != nil)
         #expect(c.deny(host: "api.acme.com", method: "DELETE", path: "/x", amzTarget: nil, formAction: nil) != nil)
     }
 

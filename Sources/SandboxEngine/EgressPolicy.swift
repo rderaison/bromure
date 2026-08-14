@@ -12,13 +12,16 @@ import Foundation
 /// to the structured form and mirrors it as text. See `parse` / `serialize`.
 ///
 ///     allow tcp api.github.com:443
-///     web   api.example.com  methods GET,POST
+///     allow web api.example.com GET,POST          # only these verbs reach the site
+///     deny  web api.internal PUT,DELETE           # block these verbs, allow the rest
 ///     deny  udp any:53
 ///     deny  any 10.0.0.0/8
 ///     default deny
 public struct EgressPolicy: Sendable, Equatable, Codable {
-    public enum Action: String, Sendable, Equatable, Codable { case allow, deny, web }
-    public enum Proto: String, Sendable, Equatable, Codable { case tcp, udp, any }
+    public enum Action: String, Sendable, Equatable, Codable { case allow, deny }
+    /// `web` is HTTP(S)-over-TCP — a proto whose rules can additionally restrict
+    /// request methods. At the switch (L4) a `web` rule governs the TCP flow.
+    public enum Proto: String, Sendable, Equatable, Codable { case tcp, udp, web, any }
     public enum DefaultAction: String, Sendable, Equatable, Codable { case allow, deny }
 
     /// What a matched flow is permitted to do at the connection layer.
@@ -59,18 +62,22 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
         public func contains(_ p: UInt16) -> Bool { ranges.isEmpty || ranges.contains { $0.contains(p) } }
     }
 
-    /// HTTP method restriction for a `web` rule. Absent = all methods allowed
-    /// (still MiTM'd, so still traced).
+    /// The method list carried by a `web`-proto rule. The rule's `action`
+    /// decides how it reads: with `allow` it's an allowlist (only these verbs
+    /// pass), with `deny` a denylist (these verbs are blocked). `readOnly` is
+    /// sugar for GET/HEAD/OPTIONS. A `web` rule with no list means all methods
+    /// (allow) or none (deny).
     public enum MethodSpec: Sendable, Equatable, Codable {
         case readOnly              // GET / HEAD / OPTIONS
-        case allow([String])       // uppercased allowlist; others → 403
+        case list([String])        // uppercased method names
 
         static let readMethods: Set<String> = ["GET", "HEAD", "OPTIONS"]
-        public func permits(_ method: String) -> Bool {
+        /// Membership only — the allow/deny sense is applied by the rule.
+        public func contains(_ method: String) -> Bool {
             let m = method.uppercased()
             switch self {
-            case .readOnly:      return MethodSpec.readMethods.contains(m)
-            case .allow(let ms): return ms.contains(m)
+            case .readOnly:     return MethodSpec.readMethods.contains(m)
+            case .list(let ms): return ms.contains(m)
             }
         }
     }
@@ -80,7 +87,7 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
         public var proto: Proto
         public var target: Target
         public var ports: PortSet
-        public var methods: MethodSpec?   // only meaningful for `.web`
+        public var methods: MethodSpec?   // only meaningful for a `.web` proto
 
         public init(action: Action, proto: Proto, target: Target,
                     ports: PortSet = PortSet(), methods: MethodSpec? = nil) {
@@ -92,7 +99,22 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
             protoMatches(proto) && ports.contains(port) && target.matches(ip: ip, hostnames: hostnames)
         }
         private func protoMatches(_ p: Proto) -> Bool {
-            self.proto == .any || p == .any || self.proto == p
+            if self.proto == .any || p == .any { return true }
+            if self.proto == p { return true }
+            // `web` is HTTP(S)-over-TCP, so a web rule governs TCP flows (and a
+            // TCP query resolves a web rule) — the switch's L4 (TCP) check and
+            // the verb layer land on the same rule.
+            return (self.proto == .web && p == .tcp) || (self.proto == .tcp && p == .web)
+        }
+
+        /// Whether `method` is permitted by this rule. Only a `.web` rule can
+        /// forbid a method; `action` sets the sense of `methods` (allow =
+        /// allowlist, deny = denylist). No list ⇒ all (allow) or none (deny).
+        func methodAllowed(_ method: String) -> Bool {
+            guard proto == .web else { return true }
+            guard let methods else { return action == .allow }
+            let inList = methods.contains(method)
+            return action == .allow ? inList : !inList
         }
     }
 
@@ -128,19 +150,25 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
             return defaultAction == .deny ? .deny : .allow
         }
         switch rule.action {
-        case .deny:  return .deny
-        case .web:   return .mitm
-        case .allow: return .allow
+        case .allow:
+            // A `web` allow forces MiTM so the verb layer can see the request.
+            return rule.proto == .web ? .mitm : .allow
+        case .deny:
+            // `deny web host M,N` blocks only those verbs, so the connection is
+            // allowed + MiTM'd to inspect the method. A blanket web deny (no
+            // list) or any non-web deny drops the flow.
+            if rule.proto == .web, rule.methods != nil { return .mitm }
+            return .deny
         }
     }
 
-    /// Whether an HTTP `method` to this host is allowed. Only a matching `web`
-    /// rule with a `methods` restriction can forbid a method; everything else
-    /// permits it (deny is handled at the connection layer).
+    /// Whether an HTTP `method` to this host is allowed. Resolves the same
+    /// first-matching rule as the connection layer; only a `.web` rule can
+    /// forbid a method (allow-list or deny-list per its action). Everything
+    /// else permits — connection deny is handled at the connection layer.
     public func permitsMethod(hostnames: [String], port: UInt16, method: String) -> Bool {
-        guard let rule = firstMatch(ip: nil, hostnames: hostnames, proto: .tcp, port: port),
-              rule.action == .web, let spec = rule.methods else { return true }
-        return spec.permits(method)
+        guard let rule = firstMatch(ip: nil, hostnames: hostnames, proto: .tcp, port: port) else { return true }
+        return rule.methodAllowed(method)
     }
 }
 
@@ -170,15 +198,13 @@ extension EgressPolicy {
             }
 
             guard let action = Action(rawValue: toks[0].lowercased()) else {
-                throw ParseError(line: ln, message: "unknown action '\(toks[0])' (allow / deny / web)")
+                throw ParseError(line: ln, message: "unknown action '\(toks[0])' (allow / deny)")
             }
             // Optional proto: token[1] is a proto keyword, else it's the target.
             var idx = 1
-            let proto: Proto
+            var proto: Proto = .any
             if idx < toks.count, let p = Proto(rawValue: toks[idx].lowercased()) {
                 proto = p; idx += 1
-            } else {
-                proto = action == .web ? .tcp : .any
             }
             guard idx < toks.count else {
                 throw ParseError(line: ln, message: "missing target host / IP / CIDR")
@@ -188,10 +214,10 @@ extension EgressPolicy {
 
             var methods: MethodSpec?
             if idx < toks.count {
-                methods = try parseMethods(Array(toks[idx...]), line: ln)
-                guard action == .web else {
-                    throw ParseError(line: ln, message: "method restrictions apply only to 'web' rules")
+                guard proto == .web else {
+                    throw ParseError(line: ln, message: "HTTP methods apply only to 'web' rules")
                 }
+                methods = try parseMethods(Array(toks[idx...]), line: ln)
             }
             rules.append(Rule(action: action, proto: proto, target: target, ports: ports, methods: methods))
         }
@@ -201,10 +227,9 @@ extension EgressPolicy {
     /// Canonical pf text for the ruleset (round-trips through `parse`).
     public func serialize() -> String {
         var out = rules.map { rule -> String in
-            var parts: [String] = [rule.action.rawValue]
-            if rule.action != .web { parts.append(rule.proto.rawValue) }
-            parts.append(Self.targetString(rule.target, ports: rule.ports))
-            if let m = rule.methods { parts.append(Self.methodsString(m)) }
+            var parts: [String] = [rule.action.rawValue, rule.proto.rawValue,
+                                    Self.targetString(rule.target, ports: rule.ports)]
+            if rule.proto == .web, let m = rule.methods { parts.append(Self.methodsString(m)) }
             return parts.joined(separator: " ")
         }
         out.append("default \(defaultAction.rawValue)")
@@ -238,7 +263,8 @@ extension EgressPolicy {
     }
 
     private static func parsePorts(_ s: String, line: Int) throws -> PortSet {
-        if s.isEmpty || s == "*" { return PortSet() }
+        let t = s.lowercased()
+        if t.isEmpty || t == "*" || t == "any" { return PortSet() }   // any port
         var ranges: [ClosedRange<UInt16>] = []
         for part in s.split(separator: ",") {
             let bits = part.split(separator: "-", maxSplits: 1)
@@ -254,15 +280,21 @@ extension EgressPolicy {
     }
 
     private static func parseMethods(_ toks: [String], line: Int) throws -> MethodSpec {
-        if toks.count == 1, toks[0].lowercased() == "read-only" { return .readOnly }
-        if toks.count >= 1, toks[0].lowercased() == "methods" {
-            let list = toks.dropFirst().joined()
-                .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).uppercased() }
-                .filter { !$0.isEmpty }
-            guard !list.isEmpty else { throw ParseError(line: line, message: "'methods' needs a list, e.g. GET,POST") }
-            return .allow(list)
+        // Accept a bare comma list (GET,POST), the `read-only` shorthand, or a
+        // legacy `methods GET,POST` form.
+        var parts = toks
+        if parts.first?.lowercased() == "methods" { parts = Array(parts.dropFirst()) }
+        if parts.count == 1, parts[0].lowercased() == "read-only" { return .readOnly }
+        let list = parts.joined()
+            .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).uppercased() }
+            .filter { !$0.isEmpty }
+        guard !list.isEmpty else {
+            throw ParseError(line: line, message: "expected HTTP methods (e.g. GET,POST) or 'read-only'")
         }
-        throw ParseError(line: line, message: "expected 'read-only' or 'methods GET,POST'")
+        for m in list where !m.allSatisfy({ $0.isLetter }) {
+            throw ParseError(line: line, message: "bad HTTP method '\(m)'")
+        }
+        return .list(list)
     }
 
     private static func parseCIDR(_ s: String, line: Int) throws -> Target {
@@ -309,8 +341,8 @@ extension EgressPolicy {
 
     private static func methodsString(_ m: MethodSpec) -> String {
         switch m {
-        case .readOnly:      return "read-only"
-        case .allow(let ms): return "methods \(ms.joined(separator: ","))"
+        case .readOnly:     return "read-only"
+        case .list(let ms): return ms.joined(separator: ",")
         }
     }
 }
@@ -349,9 +381,9 @@ extension EgressPolicy {
                 .joined(separator: ",")
             let methods: String
             switch r.methods {
-            case .readOnly?:        methods = "read-only"
-            case .allow(let ms)?:   methods = ms.joined(separator: ",")
-            case nil:               methods = ""
+            case .readOnly?:       methods = "read-only"
+            case .list(let ms)?:   methods = ms.joined(separator: ",")
+            case nil:              methods = ""
             }
             return EditRow(action: r.action.rawValue, proto: r.proto.rawValue,
                            host: host, ports: ports, methods: methods)
@@ -364,13 +396,14 @@ extension EgressPolicy {
         var lines = rows.compactMap { row -> String? in
             let host = row.host.trimmingCharacters(in: .whitespaces)
             guard !host.isEmpty else { return nil }
-            var parts = [row.action]
-            if row.action != "web" { parts.append(row.proto) }
+            let proto = row.proto.trimmingCharacters(in: .whitespaces).isEmpty ? "any" : row.proto
+            var parts = [row.action, proto]
             let ports = row.ports.trimmingCharacters(in: .whitespaces)
-            parts.append(ports.isEmpty ? host : "\(host):\(ports)")
+            let anyPort = ports.isEmpty || ports.lowercased() == "any" || ports == "*"
+            parts.append(anyPort ? host : "\(host):\(ports)")
             let m = row.methods.trimmingCharacters(in: .whitespaces)
-            if row.action == "web", !m.isEmpty {
-                parts.append(m == "read-only" ? "read-only" : "methods \(m)")
+            if proto == "web", !m.isEmpty {
+                parts.append(m)   // bare list or read-only — parseMethods handles both
             }
             return parts.joined(separator: " ")
         }

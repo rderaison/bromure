@@ -12,8 +12,8 @@ struct EgressRulesEditor: View {
     @State private var showPF = false
     @State private var loaded = false
 
-    private let actions = ["allow", "deny", "web"]
-    private let protos = ["tcp", "udp", "any"]
+    private let actions = ["allow", "deny"]
+    private let protos = ["tcp", "udp", "web", "any"]
 
     private var validationError: String? {
         do { _ = try EgressPolicy.parse(pfText); return nil }
@@ -24,12 +24,12 @@ struct EgressRulesEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Outbound connections").font(.headline)
-            Text("Allow or deny the VM's TCP/UDP connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. A **web** rule allows the site but lets you restrict HTTP methods (e.g. read-only, or GET,POST). Enforced host-side, so a compromised agent can't bypass it.")
+            Text("Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Log, and enforcement is host-side so a compromised agent can't bypass it.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
             Picker("Unmatched traffic", selection: $defaultAllow) {
-                Text("Allow + log").tag(true)
-                Text("Deny (allowlist)").tag(false)
+                Text("Allow").tag(true)
+                Text("Deny").tag(false)
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 320)
@@ -51,11 +51,11 @@ struct EgressRulesEditor: View {
                     Picker("", selection: $row.action) { ForEach(actions, id: \.self) { Text($0).tag($0) } }
                         .labelsHidden().frame(width: 66)
                     Picker("", selection: $row.proto) { ForEach(protos, id: \.self) { Text($0).tag($0) } }
-                        .labelsHidden().frame(width: 56).disabled(row.action == "web")
+                        .labelsHidden().frame(width: 56)
                     TextField("any / example.com / 10.0.0.0/8", text: $row.host).frame(maxWidth: .infinity)
                     TextField("any", text: $row.ports).frame(width: 84)
-                    TextField(row.action == "web" ? "read-only / GET,POST" : "—", text: $row.methods)
-                        .frame(width: 128).disabled(row.action != "web")
+                    TextField(methodsPlaceholder(row), text: $row.methods)
+                        .frame(width: 128).disabled(row.proto != "web")
                     HStack(spacing: 2) {
                         Button { move(row, by: -1) } label: { Image(systemName: "chevron.up") }.buttonStyle(.borderless)
                         Button { move(row, by: 1) } label: { Image(systemName: "chevron.down") }.buttonStyle(.borderless)
@@ -99,6 +99,13 @@ struct EgressRulesEditor: View {
 
     private func syncToText() {
         pfText = EgressPolicy.pfText(rows: rows, defaultAllow: defaultAllow)
+    }
+
+    /// Hint text for the Methods field — only meaningful for `web` rules, and
+    /// reads the opposite way for allow vs deny (allowlist vs blocklist).
+    private func methodsPlaceholder(_ row: EgressPolicy.EditRow) -> String {
+        guard row.proto == "web" else { return "—" }
+        return row.action == "deny" ? "PUT,DELETE (block)" : "GET,POST / read-only"
     }
 
     private func move(_ row: EgressPolicy.EditRow, by delta: Int) {
