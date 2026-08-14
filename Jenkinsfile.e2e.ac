@@ -396,6 +396,20 @@ pipeline {
                 }
             }
         }
+
+        stage('27. Egress firewall (VM-side)') {
+            // Boots a session with `deny web any POST` and proves the verb rule
+            // is enforced host-side on DIRECT connections (proxy bypassed via
+            // --noproxy) for BOTH https:443 (TLS MiTM) and http:80 (plain-HTTP
+            // MiTM) — i.e. the firewall is unbypassable — plus the
+            // disableTransparentProxy opt-out. Needs the base image; self-skips
+            // (SKIP) without one.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^27\\."'
+                }
+            }
+        }
     }
 
     post {

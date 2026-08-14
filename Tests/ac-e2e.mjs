@@ -3063,6 +3063,116 @@ async function main() {
   }
 
   // ======================================================================
+  // 27. Egress firewall — VM-side (host-side transparent interception)
+  //
+  //   `web` verb rules are L7: they only enforce when a request reaches the
+  //   MiTM. Interception is ON BY DEFAULT for :80 and :443, so a guest that
+  //   bypasses the proxy (here `--noproxy '*'`, a DIRECT connection) must still
+  //   hit the firewall. This proves a `deny web any POST` rule blocks POST on
+  //   BOTH https:443 (TLS MiTM) and http:80 (plain-HTTP MiTM) while GET passes —
+  //   i.e. the firewall is unbypassable — and that the per-profile
+  //   `disableTransparentProxy` opt-out actually opts out.
+  // ======================================================================
+  if (!SKIP_SESSIONS) {
+    console.log("\n--- 27. Egress firewall — VM-side ---");
+
+    await test("27.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", async () => {
+      const h = await api("GET", "/health");
+      assertEq(h.status, "ok");
+      assert(h.debugEnabled === true,
+             "app is running without BROMURE_DEBUG_CLAUDE=1 — quit it and rerun");
+    });
+    {
+      const RULES = "allow web any GET\ndeny web any POST\ndefault allow";
+
+      // Boot a session whose profile carries the egress RULES (+ any extra
+      // profile fields), wait for the guest shell, run cb(id), then tear down.
+      async function withFWSession(profileName, extra, cb) {
+        const id = createProfile(profileName);
+        try {
+          const p = getProfileJSON(id);
+          p.egressRules = RULES;
+          Object.assign(p, extra || {});
+          setProfileJSON(id, p);
+          await api("POST", "/sessions", { profile: id });
+          let lastErr;
+          for (let attempt = 0; attempt < 6; attempt++) {
+            const r = await api("POST", `/sessions/${id}/exec`, { command: "true", timeout: 5 });
+            if (r._status === 200) { await cb(id); return; }
+            lastErr = `status=${r._status} error=${r.error}`;
+            await sleep(3000);
+          }
+          throw new Error(`VM shell never came up: ${lastErr}`);
+        } finally {
+          await api("DELETE", `/sessions/${id}`);
+          await sleep(500);
+          deleteProfile(id);
+        }
+      }
+
+      // Pull a `KEY=value` line out of the probe's stdout (first line only).
+      const grab = (out, key) =>
+        ((out.match(new RegExp(`^${key}=(.*)$`, "m")) || [, ""])[1] || "").trim();
+
+      await test("27.1 deny-web-POST enforces on DIRECT connections (443 TLS + 80 plain-HTTP)", async () => {
+        await withFWSession("ACE2E_FW_Enforce", null, async (id) => {
+          // Everything runs with `--noproxy '*'` — a direct connection that
+          // ignores the guest's HTTP(S)_PROXY, so the only thing that can
+          // enforce is host-side interception. No `-f`: we want the 403 status
+          // without curl bailing out. neverssl.com is guaranteed plain HTTP.
+          const r = await api("POST", `/sessions/${id}/exec`, {
+            timeout: 90,
+            command: `set +e
+ISSUER=$(curl --noproxy '*' -sSv https://bromure.io/ 2>&1 | grep -i 'issuer:' | head -1)
+GET443=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' https://bromure.io/en)
+POST443=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' -X POST https://bromure.io/en)
+BODY443=$(curl --noproxy '*' -sS -X POST https://bromure.io/en | head -c 200)
+GET80=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' http://neverssl.com/)
+POST80=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' -X POST http://neverssl.com/)
+BODY80=$(curl --noproxy '*' -sS -X POST http://neverssl.com/ | head -c 200)
+echo "ISSUER=$ISSUER"; echo "GET443=$GET443"; echo "POST443=$POST443"; echo "BODY443=$BODY443"
+echo "GET80=$GET80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
+          });
+          assertEq(r._status, 200);
+          const out = r.stdout || "";
+          // 443 is really MiTM'd (our forged leaf) — proves the direct
+          // connection was intercepted, not passed through.
+          assertIncludes(grab(out, "ISSUER"), "Bromure",
+            `443 not MiTM'd on a direct connection: ${grab(out, "ISSUER") || out.slice(0, 200)}`);
+          // GET allowed (reaches upstream), POST blocked with OUR 403.
+          assert(Number(grab(out, "GET443")) < 400, `GET https should be allowed, got ${grab(out, "GET443")}`);
+          assertEq(grab(out, "POST443"), "403", `POST https should be blocked (403), got ${grab(out, "POST443")}`);
+          assertIncludes(grab(out, "BODY443"), "Bromure Guardrails", "443 POST 403 not from Bromure Guardrails");
+          assert(Number(grab(out, "GET80")) < 400, `GET http:80 should be allowed, got ${grab(out, "GET80")}`);
+          assertEq(grab(out, "POST80"), "403", `POST http:80 should be blocked (403), got ${grab(out, "POST80")}`);
+          assertIncludes(grab(out, "BODY80"), "Bromure Guardrails", "80 POST 403 not from Bromure Guardrails");
+        });
+      });
+
+      await test("27.2 disableTransparentProxy opts out — a direct connection is NOT intercepted", async () => {
+        await withFWSession("ACE2E_FW_OptOut", { disableTransparentProxy: true }, async (id) => {
+          const r = await api("POST", `/sessions/${id}/exec`, {
+            timeout: 60,
+            command: `set +e
+ISSUER=$(curl --noproxy '*' -sSv https://bromure.io/ 2>&1 | grep -i 'issuer:' | head -1)
+BODY=$(curl --noproxy '*' -sS -X POST https://bromure.io/en | head -c 200)
+echo "ISSUER=$ISSUER"; echo "BODY=$BODY"`,
+          });
+          assertEq(r._status, 200);
+          const out = r.stdout || "";
+          // With interception disabled, the direct connection sees the REAL
+          // upstream cert (not our forged Bromure leaf) and the POST reaches
+          // bromure.io itself rather than our guardrails 403.
+          assert(!grab(out, "ISSUER").includes("Bromure"),
+            `interception should be OFF but 443 was still MiTM'd: ${grab(out, "ISSUER")}`);
+          assert(!grab(out, "BODY").includes("Bromure Guardrails"),
+            "POST should reach upstream (not be blocked) when interception is disabled");
+        });
+      });
+    }
+  }
+
+  // ======================================================================
   // Done
   // ======================================================================
   console.log(
