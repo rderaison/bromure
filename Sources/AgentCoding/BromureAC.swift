@@ -105,7 +105,70 @@ struct BromureAC: ParsableCommand {
         if filtered.isEmpty, invokedName == "bromure-cli" {
             filtered = ["help"]
         }
+        // Hidden docs/screenshot hook: render the reworked "Log in to bromure.io"
+        // sheet to a PNG and exit — no servers, no VMs. Sibling of /debug/ui-shot.
+        if filtered.first == "__shot-enrollment" {
+            renderEnrollmentSheet(to: filtered.count > 1 ? filtered[1] : "/tmp/bromure-enrollment.png")
+            return
+        }
         Self.main(filtered)
+    }
+
+    /// Render `BACEnrollmentSheet` offscreen to a PNG using the same
+    /// `cacheDisplay` technique as `/debug/ui-shot`, then exit. Standalone: no
+    /// app delegate, control socket, servers, or VMs — safe to run alongside a
+    /// live instance.
+    static func renderEnrollmentSheet(to path: String) {
+        MainActor.assumeIsolated {
+            let app = NSApplication.shared
+            app.setActivationPolicy(.accessory)
+            // Constrain the width so long text wraps the way it does in the real
+            // sheet (otherwise fittingSize stretches to fit the subtitle on one line).
+            let host = NSHostingView(rootView: BACEnrollmentSheet { _ in }.frame(width: 480))
+            host.frame = NSRect(x: 0, y: 0, width: 480, height: 620)
+            let window = NSWindow(contentRect: host.frame,
+                                  styleMask: [.titled, .fullSizeContentView],
+                                  backing: .buffered, defer: false)
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+            app.activate(ignoringOtherApps: true)
+            func pump(_ seconds: TimeInterval) {
+                let end = Date().addingTimeInterval(seconds)
+                while Date() < end {
+                    RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+                }
+            }
+            pump(1.2)
+            // Snug the window to SwiftUI's fitting size, then let it settle.
+            let fit = host.fittingSize
+            if fit.width > 20, fit.height > 20 {
+                window.setContentSize(fit)
+                pump(0.5)
+            }
+            let content = window.contentView!
+            let bounds = content.bounds
+            let scale: CGFloat = 2
+            if bounds.width > 0, bounds.height > 0,
+               let rep = NSBitmapImageRep(
+                   bitmapDataPlanes: nil,
+                   pixelsWide: Int(bounds.width * scale), pixelsHigh: Int(bounds.height * scale),
+                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) {
+                rep.size = bounds.size
+                content.cacheDisplay(in: bounds, to: rep)
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    try? data.write(to: URL(fileURLWithPath: path))
+                    FileHandle.standardError.write(Data("[shot] wrote \(data.count) bytes → \(path)\n".utf8))
+                } else {
+                    FileHandle.standardError.write(Data("[shot] PNG encode failed\n".utf8))
+                }
+            }
+            Foundation.exit(0)
+        }
     }
 }
 
@@ -4914,7 +4977,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             .filter { ($0.representedObject as? String) == "bromure.enrollment" }
             .forEach { appMenu.removeItem($0) }
         let title = BACEnrollmentStore.load() == nil
-            ? NSLocalizedString("Enroll in bromure.io…", comment: "")
+            ? NSLocalizedString("Log in to bromure.io…", comment: "")
             : NSLocalizedString("bromure.io Enrollment…", comment: "")
         let item = NSMenuItem(
             title: title,
@@ -5157,7 +5220,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for item in windowMenu.items + (main.items.flatMap { $0.submenu?.items ?? [] }) {
             guard item.action == #selector(openEnrollmentAction(_:)) else { continue }
             item.title = BACEnrollmentStore.load() == nil
-                ? NSLocalizedString("Enroll in bromure.io…", comment: "")
+                ? NSLocalizedString("Log in to bromure.io…", comment: "")
                 : NSLocalizedString("bromure.io Enrollment…", comment: "")
         }
     }

@@ -1548,3 +1548,13 @@
 "%d file(s)" = "%d fichier(s)";
 "%d skipped (too large)" = "%d ignoré(s) (trop volumineux)";
 "%@ settings" = "Réglages %@";
+
+/* bromure.io login (reworked enrollment sheet) */
+"Log in to bromure.io" = "Se connecter à bromure.io";
+"Log in to bromure.io…" = "Se connecter à bromure.io…";
+"Sign in with your bromure.io account to connect this Mac to your workspace. Once connected, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream." = "Connectez-vous avec votre compte bromure.io pour associer ce Mac à votre espace de travail. Une fois connecté, Bromure Agentic Coding envoie les métadonnées de session (outils, fichiers, commandes, utilisation des jetons) à votre espace de travail afin que les administrateurs puissent examiner l’activité. Les espaces de travail en mode privé ne transmettent jamais.";
+"Finish signing in in your browser — this window will complete automatically." = "Terminez la connexion dans votre navigateur — cette fenêtre se complétera automatiquement.";
+"If your administrator gave you an enrollment code, enter it here" = "Si votre administrateur vous a fourni un code d’inscription, saisissez-le ici";
+"Enroll with code" = "S’inscrire avec un code";
+"six-word-enrollment-code" = "code-d-inscription-de-six-mots";
+"Open Window → Log in to bromure.io… to connect this Mac to your workspace." = "Ouvrez « Fenêtre → Se connecter à bromure.io… » pour associer ce Mac à votre espace de travail.";

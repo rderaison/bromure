@@ -9,71 +9,134 @@ import SandboxEngine
 struct BACEnrollmentSheet: View {
     let onDone: (BACInstall?) -> Void
 
+    /// The bromure.io browser sign-in (opens bromure.io/app/enroll and
+    /// completes via the `bromure://enroll` deep link). Same account flow the
+    /// remote-access sign-in uses; the web side enrolls this device for the
+    /// user's workspace (personal or enterprise) based on who signs in.
+    @State private var account = P2PEnrollmentCoordinator.shared
+    @State private var awaitingLogin = false
+
     @State private var code: String = ""
     @State private var serverURL: String = ""
     @State private var deviceName: String = Host.current().localizedName ?? ""
     @State private var inFlight: Bool = false
     @State private var errorMessage: String?
+    @State private var showCodeEntry = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(NSLocalizedString("Enroll in bromure.io",
+                Text(NSLocalizedString("Log in to bromure.io",
                                        comment: "BAC enrollment sheet title"))
                     .font(.title2).bold()
-                Text(NSLocalizedString("Your administrator will give you a 6-word enrollment code. Once enrolled, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream.",
+                Text(NSLocalizedString("Sign in with your bromure.io account to connect this Mac to your workspace. Once connected, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream.",
                                        comment: "BAC enrollment sheet subtitle"))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text(NSLocalizedString("Enrollment Code",
-                                       comment: "BAC enrollment code label"))
-                    .font(.headline)
-                TextField("six-word-enrollment-code", text: $code)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-                    .disableAutocorrection(true)
-                    .frame(minWidth: 360)
+            // Primary path: sign in through the browser.
+            Button {
+                errorMessage = nil
+                account.error = nil
+                awaitingLogin = true
+                account.signIn()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle.badge.checkmark")
+                    Text(NSLocalizedString("Log in to bromure.io",
+                                           comment: "BAC enrollment primary button"))
+                }
+                .frame(maxWidth: .infinity)
             }
+            .controlSize(.large)
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+            .disabled(awaitingLogin)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text(NSLocalizedString("Device Name",
-                                       comment: "BAC device name label"))
-                    .font(.headline)
-                TextField("", text: $deviceName)
-                    .textFieldStyle(.roundedBorder)
-                    .disableAutocorrection(true)
-                    .frame(minWidth: 360)
-                Text(NSLocalizedString("Shown to your administrator so they can recognize this Mac.",
-                                       comment: "BAC device name help"))
+            if awaitingLogin {
+                Text(NSLocalizedString("Finish signing in in your browser — this window will complete automatically.",
+                                       comment: "BAC enrollment browser-wait hint"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let e = account.error {
+                Text(e)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            DisclosureGroup(NSLocalizedString("Advanced",
-                                              comment: "BAC enrollment advanced section")) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(NSLocalizedString("Server URL (optional)",
-                                           comment: "Server URL label"))
-                        .font(.subheadline)
-                    TextField(BACEnrollment.defaultServerURL.absoluteString,
-                              text: $serverURL)
+            // Secondary path (collapsed): an admin-issued enrollment code.
+            DisclosureGroup(isExpanded: $showCodeEntry) {
+                VStack(alignment: .leading, spacing: 12) {
+                    TextField(NSLocalizedString("six-word-enrollment-code",
+                                                comment: "BAC enrollment code placeholder"),
+                              text: $code)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.body, design: .monospaced))
                         .disableAutocorrection(true)
                         .frame(minWidth: 360)
-                }
-                .padding(.top, 4)
-            }
 
-            if let msg = errorMessage {
-                Text(msg)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(NSLocalizedString("Device Name",
+                                               comment: "BAC device name label"))
+                            .font(.subheadline)
+                        TextField("", text: $deviceName)
+                            .textFieldStyle(.roundedBorder)
+                            .disableAutocorrection(true)
+                            .frame(minWidth: 360)
+                        Text(NSLocalizedString("Shown to your administrator so they can recognize this Mac.",
+                                               comment: "BAC device name help"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    DisclosureGroup(NSLocalizedString("Advanced",
+                                                      comment: "BAC enrollment advanced section")) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(NSLocalizedString("Server URL (optional)",
+                                                   comment: "Server URL label"))
+                                .font(.subheadline)
+                            TextField(BACEnrollment.defaultServerURL.absoluteString,
+                                      text: $serverURL)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced))
+                                .disableAutocorrection(true)
+                                .frame(minWidth: 360)
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    if let msg = errorMessage {
+                        Text(msg)
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    HStack {
+                        Spacer()
+                        Button {
+                            submit()
+                        } label: {
+                            if inFlight {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Text(NSLocalizedString("Enroll with code",
+                                                       comment: "BAC enrollment submit button"))
+                            }
+                        }
+                        .disabled(inFlight || trimmedCode.isEmpty)
+                    }
+                }
+                .padding(.top, 8)
+            } label: {
+                Text(NSLocalizedString("If your administrator gave you an enrollment code, enter it here",
+                                       comment: "BAC enrollment code disclosure label"))
                     .font(.callout)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack {
@@ -82,23 +145,17 @@ struct BACEnrollmentSheet: View {
                     onDone(nil)
                 }
                 .keyboardShortcut(.cancelAction)
-
-                Button {
-                    submit()
-                } label: {
-                    if inFlight {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Text(NSLocalizedString("Enroll",
-                                               comment: "BAC enrollment submit button"))
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(inFlight || trimmedCode.isEmpty)
             }
         }
         .padding(24)
         .frame(minWidth: 460)
+        // Browser sign-in finished (deep link → coordinator): close the sheet.
+        .onChange(of: account.signedIn) {
+            if account.signedIn { onDone(BACEnrollmentStore.load()) }
+        }
+        .onChange(of: account.error) {
+            if account.error != nil { awaitingLogin = false }
+        }
     }
 
     private var trimmedCode: String {
@@ -199,7 +256,7 @@ struct BACEnrollmentStatusView: View {
                 Text(NSLocalizedString("Not enrolled",
                                        comment: "BAC status — not enrolled state"))
                     .font(.title3).bold()
-                Text(NSLocalizedString("Open Window → Enroll in bromure.io… to register this Mac with your workspace.",
+                Text(NSLocalizedString("Open Window → Log in to bromure.io… to connect this Mac to your workspace.",
                                        comment: "BAC status — not enrolled hint"))
                     .font(.callout)
                     .foregroundStyle(.secondary)

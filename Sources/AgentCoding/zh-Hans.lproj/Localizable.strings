@@ -1548,3 +1548,13 @@
 "%d file(s)" = "%d 个文件";
 "%d skipped (too large)" = "已跳过 %d 个（过大）";
 "%@ settings" = "%@ 设置";
+
+/* bromure.io login (reworked enrollment sheet) */
+"Log in to bromure.io" = "登录 bromure.io";
+"Log in to bromure.io…" = "登录 bromure.io…";
+"Sign in with your bromure.io account to connect this Mac to your workspace. Once connected, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream." = "使用您的 bromure.io 账户登录，以将此 Mac 连接到您的工作区。连接后，Bromure Agentic Coding 会将会话元数据（工具、文件、命令、令牌用量）发送到您的工作区，以便管理员查看活动。私密模式下的工作区绝不会传输。";
+"Finish signing in in your browser — this window will complete automatically." = "在浏览器中完成登录——此窗口将自动完成。";
+"If your administrator gave you an enrollment code, enter it here" = "如果管理员向您提供了注册码，请在此处输入";
+"Enroll with code" = "使用注册码注册";
+"six-word-enrollment-code" = "六个单词的注册码";
+"Open Window → Log in to bromure.io… to connect this Mac to your workspace." = "打开“窗口 → 登录 bromure.io…”以将此 Mac 连接到您的工作区。";

@@ -1548,3 +1548,13 @@
 "%d file(s)" = "%d 件のファイル";
 "%d skipped (too large)" = "%d 件をスキップ (サイズ超過)";
 "%@ settings" = "%@ の設定";
+
+/* bromure.io login (reworked enrollment sheet) */
+"Log in to bromure.io" = "bromure.io にログイン";
+"Log in to bromure.io…" = "bromure.io にログイン…";
+"Sign in with your bromure.io account to connect this Mac to your workspace. Once connected, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream." = "bromure.io アカウントでサインインして、この Mac をワークスペースに接続します。接続すると、Bromure Agentic Coding はセッションのメタデータ（ツール、ファイル、コマンド、トークン使用量）をワークスペースに送信し、管理者がアクティビティを確認できるようになります。プライベートモードのワークスペースは決して送信しません。";
+"Finish signing in in your browser — this window will complete automatically." = "ブラウザでサインインを完了してください。このウインドウは自動的に完了します。";
+"If your administrator gave you an enrollment code, enter it here" = "管理者から登録コードを受け取っている場合は、ここに入力してください";
+"Enroll with code" = "コードで登録";
+"six-word-enrollment-code" = "6 語の登録コード";
+"Open Window → Log in to bromure.io… to connect this Mac to your workspace." = "「ウインドウ →『bromure.io にログイン…』」を開いて、この Mac をワークスペースに接続します。";

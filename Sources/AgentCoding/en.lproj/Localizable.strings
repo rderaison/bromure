@@ -1550,3 +1550,13 @@
 "%d file(s)" = "%d file(s)";
 "%d skipped (too large)" = "%d skipped (too large)";
 "%@ settings" = "%@ settings";
+
+/* bromure.io login (reworked enrollment sheet) */
+"Log in to bromure.io" = "Log in to bromure.io";
+"Log in to bromure.io…" = "Log in to bromure.io…";
+"Sign in with your bromure.io account to connect this Mac to your workspace. Once connected, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream." = "Sign in with your bromure.io account to connect this Mac to your workspace. Once connected, Bromure Agentic Coding sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream.";
+"Finish signing in in your browser — this window will complete automatically." = "Finish signing in in your browser — this window will complete automatically.";
+"If your administrator gave you an enrollment code, enter it here" = "If your administrator gave you an enrollment code, enter it here";
+"Enroll with code" = "Enroll with code";
+"six-word-enrollment-code" = "six-word-enrollment-code";
+"Open Window → Log in to bromure.io… to connect this Mac to your workspace." = "Open Window → Log in to bromure.io… to connect this Mac to your workspace.";
