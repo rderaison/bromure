@@ -6272,7 +6272,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         try store.save(profile)
-        try store.prepareHomeDirectory(for: profile, terminalDefaults: terminalDefaults)
+        // Write the managed home with FAKE credentials, not reals. The editor
+        // save previously called prepareHomeDirectory with NO token plan, so
+        // its git / gh / glab / docker writers fell back to the real secret —
+        // and for a virtiofs workspace that home IS the live `/home/ubuntu`,
+        // so a cosmetic save (rename, opacity…) left a real token in the
+        // guest until a later credential-affecting edit happened to rewrite
+        // the fakes. Build the same per-session plan the launch/refresh paths
+        // use so the editor can only ever write fakes. (The plan is
+        // deterministic in (real value, install salt); a not-yet-running
+        // profile gets re-seeded with the same fakes on its next boot.)
+        let editSalt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
+        let editPlan = sessionTokenPlan(for: profile, salt: editSalt)
+        try store.prepareHomeDirectory(for: profile, terminalDefaults: terminalDefaults,
+                                       tokenPlan: editPlan)
         let agentDir = store.profileDirectory(for: profile)
             .appendingPathComponent("agent", isDirectory: true)
         if generateSSH {
@@ -6739,12 +6752,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                   for: profile.id)
         }
 
-        // Rewrite the guest-side credential files with fakes. virtiofs
-        // homes are written directly (this also overwrites any real-token
-        // copy the plan-less editor-save `prepareHomeDirectory` just wrote
-        // there, closing that window for a running session). ext4 homes
-        // can't be written from the host — restage the home-seed and bump
-        // seed.generation so the in-VM agent re-applies it.
+        // Rewrite the guest-side credential files with the freshly-minted
+        // fakes. virtiofs homes are written directly; ext4 homes can't be
+        // written from the host — restage the home-seed and bump
+        // seed.generation so the in-VM agent re-applies it. (Both the editor
+        // save and this refresh now write only fakes — prepareHomeDirectory
+        // never writes a real token — so there's no real-token window to
+        // close here anymore; this just moves a changed credential's fake in
+        // place without a reboot.)
         if profile.homeModel == .virtiofs {
             try? store.prepareHomeDirectory(for: profile,
                                             terminalDefaults: terminalDefaults,
@@ -7057,31 +7072,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         var profile = profile
 
-        // Home-storage upgrade offer (virtiofs → ext4 image). Asked on
-        // every GUI launch (boot or resume) until the user accepts —
-        // "Not Now" only skips this launch. Accepting makes THIS boot a
-        // migrate boot — the guest agent copies the old home into a fresh
-        // image before the session starts, with progress on the boot
-        // overlay.
+        // Home-storage migration (virtiofs → ext4 image) is MANDATORY: a
+        // legacy virtiofs home is live-mounted as the guest's `/home/ubuntu`,
+        // which is the surface C1 abused (a host-side write into that dir is a
+        // guest-visible file). Every virtiofs workspace migrates to a private
+        // ext4 image on its next boot, no prompt — the guest agent copies the
+        // old home into a fresh image before the session starts, and only on a
+        // verified copy is the profile stamped `.ext4` and the old home parked
+        // as a backup (`wireHomeMigration`/`onHomeMigrated`). A failed or
+        // interrupted copy leaves the profile on virtiofs with its data intact
+        // and simply retries next boot — data is never stranded.
+        //
+        // Applies to every launch type. There's no prompt to block a headless
+        // or fat-client boot (removing it is what fixes the old reboot-hang),
+        // and the boot-overlay progress is wired whenever a pane exists.
+        // Registration's throwaway virtiofs VM boots on its own path (it never
+        // reaches this `launch`), so it stays virtiofs as its flow requires.
         var migrateHomeThisBoot = false
-        // Headless (CLI) AND remote-initiated (fat client) launches never prompt
-        // for this OPTIONAL storage upgrade: the workspace keeps its current
-        // storage and the offer waits for a local GUI launch. A fat-client
-        // reboot in particular must not block here — the migrate offer would
-        // stall the reboot's control response waiting for an answer that has to
-        // arrive over the same control channel, which the user sees as the whole
-        // connection hanging on every reboot of a legacy-home workspace. (The
-        // safety-critical drift-reset / compromise-wipe prompts above still route
-        // to the fat client, since they gate whether the VM should boot at all.)
-        if profile.homeModel == .virtiofs && !headless && !remoteInitiated {
-            if promptHomeStorageUpgrade(profile: profile) {
-                migrateHomeThisBoot = true
-                // The dual-attach migrate config can't restore a snapshot
-                // saved against the old config — boot fresh (the dialog
-                // said so).
-                SessionDisk(profile: profile, store: store,
-                            baseDiskURL: imageManager.baseDiskURL).clearSavedState()
-            }
+        if profile.homeModel == .virtiofs {
+            migrateHomeThisBoot = true
+            // The dual-attach migrate config can't restore a snapshot saved
+            // against the old single-home config — boot fresh.
+            SessionDisk(profile: profile, store: store,
+                        baseDiskURL: imageManager.baseDiskURL).clearSavedState()
         }
 
         // Build the per-session token plan up front: real values stay
@@ -7513,44 +7526,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.startNetworkHealerWatch(profile: profile, pane: win)
             }
         }
-    }
-
-    /// Home-storage upgrade offer for a legacy (virtiofs-home) workspace,
-    /// shown on every GUI launch until the user accepts. Returns true when
-    /// the user picked "Upgrade Now". Remote-initiated launches route the
-    /// question to the fat client that asked (never a server-side modal).
-    @MainActor
-    private func promptHomeStorageUpgrade(profile: Profile, remoteInitiated: Bool = false) -> Bool {
-        let title = String(
-            format: NSLocalizedString("Upgrade “%@”’s home storage?", comment: ""),
-            profile.name)
-        var info = NSLocalizedString(
-            "This workspace's home folder currently lives in a macOS folder shared into the VM. Bromure can move it onto a private ext4 disk image instead.\n\nWhy: suspended workspaces resume without confused tools (files keep their identity across suspend/resume), git repositories in the home are no longer exposed to shared-folder corruption, and the image automatically shrinks on your Mac as files are deleted inside the VM.\n\nThe move happens once, during the next boot — a large home can take a few minutes, with progress shown on the boot screen. Your current home folder is kept on the Mac as a backup.",
-            comment: "")
-        let probe = SessionDisk(profile: profile, store: store,
-                                baseDiskURL: imageManager.baseDiskURL)
-        if probe.hasSavedState {
-            info += "\n\n" + NSLocalizedString(
-                "This workspace has a suspended session; upgrading restarts it fresh.",
-                comment: "")
-        }
-        info += "\n\n" + NSLocalizedString(
-            "If you choose Not Now, Bromure will ask again the next time this workspace starts.",
-            comment: "")
-        if remoteInitiated {
-            return PendingPromptBroker.shared.ask(
-                profileID: profile.id, title: title, message: info,
-                buttons: [NSLocalizedString("Upgrade Now", comment: ""),
-                          NSLocalizedString("Not Now", comment: "")],
-                fallback: 1) == 0
-        }
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = info
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: NSLocalizedString("Upgrade Now", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Not Now", comment: ""))
-        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Wire a migrate boot's guest-agent signals: progress → the pane's

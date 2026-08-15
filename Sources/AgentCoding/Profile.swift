@@ -3406,19 +3406,27 @@ public final class ProfileStore {
         // git's `store` helper expects. One line per usable cred. File is
         // chmod 600 because it carries cleartext tokens.
         //
-        // When a tokenPlan is provided, the value written is the FAKE
-        // — the real value lives only in the host's MITM swap map.
+        // Only the FAKE is ever written — the real token lives solely in the
+        // host's MITM swap map. A cred without a fake (no token plan, or a
+        // plan that has no entry for it) is SKIPPED, never written with its
+        // real value: a real secret must not reach the guest-visible home
+        // (the whole wire-boundary guarantee), and for virtiofs that home is
+        // the live `/home/ubuntu`. Every production caller supplies a plan
+        // whose coverage over usable creds is total, so this only drops
+        // degenerate creds (e.g. a whitespace-only token) a session couldn't
+        // have used anyway.
         let gitCredsURL = home.appendingPathComponent(".git-credentials")
         let usableCreds = profile.gitHTTPSCredentials.filter { $0.isUsable }
-        if !usableCreds.isEmpty {
-            let lines = usableCreds.map { c -> String in
-                let user = Self.percentEncode(c.username)
-                let useToken = tokenPlan?.fakeForGitHTTPS(host: c.host, username: c.username) ?? c.token
-                let tok  = Self.percentEncode(useToken)
-                let host = c.host.trimmingCharacters(in: .whitespaces)
-                return "https://\(user):\(tok)@\(host)"
-            }
-            try (lines.joined(separator: "\n") + "\n")
+        let gitLines = usableCreds.compactMap { c -> String? in
+            guard let fake = tokenPlan?.fakeForGitHTTPS(host: c.host, username: c.username)
+            else { return nil }
+            let user = Self.percentEncode(c.username)
+            let tok  = Self.percentEncode(fake)
+            let host = c.host.trimmingCharacters(in: .whitespaces)
+            return "https://\(user):\(tok)@\(host)"
+        }
+        if !gitLines.isEmpty {
+            try (gitLines.joined(separator: "\n") + "\n")
                 .write(to: gitCredsURL, atomically: true, encoding: .utf8)
             try fm.setAttributes(
                 [.posixPermissions: NSNumber(value: 0o600)],
@@ -3818,30 +3826,24 @@ public final class ProfileStore {
         let dockerConfigURL = dockerDir.appendingPathComponent("config.json")
         let usableRegs = profile.dockerRegistries.filter { $0.isUsable }
         let bromureSentinel = "_bromureManaged"
-        if !usableRegs.isEmpty {
+        // Only the FAKE base64 auth is ever written; a registry without a
+        // plan entry is skipped, never written with the real
+        // `base64("<user>:<password>")`. Keeping a real credential out of the
+        // guest-visible home is the boundary guarantee — for virtiofs this
+        // file is the live home. Every production caller passes a plan whose
+        // coverage over usable regs is total.
+        var dockerAuths: [String: [String: String]] = [:]
+        for reg in usableRegs {
+            guard let fake = tokenPlan?.fakeForDockerRegistry(
+                host: reg.host, username: reg.username) else { continue }
+            dockerAuths[Self.dockerConfigKey(for: reg.host)] = ["auth": fake]
+        }
+        if !dockerAuths.isEmpty {
             try fm.createDirectory(at: dockerDir, withIntermediateDirectories: true,
                                    attributes: [.posixPermissions: NSNumber(value: 0o700)])
-            var auths: [String: [String: String]] = [:]
-            for reg in usableRegs {
-                let useB64: String
-                if let plan = tokenPlan,
-                   let fake = plan.fakeForDockerRegistry(host: reg.host,
-                                                        username: reg.username) {
-                    useB64 = fake
-                } else {
-                    // Plan-less path (no MitmEngine): fall back to the
-                    // real base64. Won't be reached in practice since
-                    // every session has a token plan, but keeps the
-                    // file useful if someone runs prepareHomeDirectory
-                    // directly.
-                    let raw = "\(reg.username):\(reg.password)"
-                    useB64 = Data(raw.utf8).base64EncodedString()
-                }
-                auths[Self.dockerConfigKey(for: reg.host)] = ["auth": useB64]
-            }
             let payload: [String: Any] = [
                 bromureSentinel: "Managed by Bromure Agentic Coding.",
-                "auths": auths,
+                "auths": dockerAuths,
             ]
             let data = try JSONSerialization.data(
                 withJSONObject: payload,
@@ -3853,6 +3855,8 @@ public final class ProfileStore {
                   let json = try? JSONSerialization.jsonObject(with: data),
                   let dict = json as? [String: Any],
                   dict[bromureSentinel] != nil {
+            // No fake to write (creds cleared, or no plan) — drop a file we
+            // previously managed so a stale credential can't linger.
             try? fm.removeItem(at: dockerConfigURL)
         }
 
@@ -4089,13 +4093,20 @@ public final class ProfileStore {
     private func writeGHConfig(in home: URL,
                                creds: [GitHTTPSCredential],
                                tokenPlan: SessionTokenPlan? = nil) throws {
+        // Only creds with a FAKE go in the file — never the real token (see
+        // the .git-credentials writer). A cred without a plan entry is skipped.
         let ghHosts = creds.filter { isGitHubHost($0.host) }
-        guard !ghHosts.isEmpty else { return }
+        var ghBlocks: [(cred: GitHTTPSCredential, token: String)] = []
+        for cred in ghHosts {
+            guard let fake = tokenPlan?.fakeForGitHTTPS(host: cred.host,
+                                                        username: cred.username) else { continue }
+            ghBlocks.append((cred, fake))
+        }
+        guard !ghBlocks.isEmpty else { return }
         let dir = home.appendingPathComponent(".config/gh", isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         var yaml = "# Managed by Bromure Agentic Coding.\n"
-        for cred in ghHosts {
-            let token = tokenPlan?.fakeForGitHTTPS(host: cred.host, username: cred.username) ?? cred.token
+        for (cred, token) in ghBlocks {
             yaml += "\(cred.host):\n"
             yaml += "    user: \(cred.username)\n"
             yaml += "    oauth_token: \(token)\n"
@@ -4113,14 +4124,21 @@ public final class ProfileStore {
     private func writeGLabConfig(in home: URL,
                                  creds: [GitHTTPSCredential],
                                  tokenPlan: SessionTokenPlan? = nil) throws {
+        // Only creds with a FAKE go in the file — never the real token (see
+        // the .git-credentials writer). A cred without a plan entry is skipped.
         let glHosts = creds.filter { isGitLabHost($0.host) }
-        guard !glHosts.isEmpty else { return }
+        var glBlocks: [(cred: GitHTTPSCredential, token: String)] = []
+        for cred in glHosts {
+            guard let fake = tokenPlan?.fakeForGitHTTPS(host: cred.host,
+                                                        username: cred.username) else { continue }
+            glBlocks.append((cred, fake))
+        }
+        guard !glBlocks.isEmpty else { return }
         let dir = home.appendingPathComponent(".config/glab-cli", isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         var yaml = "# Managed by Bromure Agentic Coding.\n"
         yaml += "hosts:\n"
-        for cred in glHosts {
-            let token = tokenPlan?.fakeForGitHTTPS(host: cred.host, username: cred.username) ?? cred.token
+        for (cred, token) in glBlocks {
             yaml += "    \(cred.host):\n"
             yaml += "        token: \(token)\n"
             yaml += "        username: \(cred.username)\n"

@@ -299,11 +299,16 @@ struct HomeStorageTests {
         let store = ProfileStore(rootDir: root)
         var p = Profile(name: "ws", tool: .claude, authMode: .token)
         p.gitHTTPSCredentials = [
-            GitHTTPSCredential(host: "github.com", username: "u", token: "tok")
+            GitHTTPSCredential(host: "github.com", username: "u",
+                               token: "ghp_REALrealREALrealREALrealREALreal12")
         ]
+        // A token plan is required for a credential to be staged at all — the
+        // seed writes only the FAKE, never the real token (C1). The cold-boot
+        // seed path always passes one; this mirrors it.
+        let plan = p.makeTokenPlan(salt: Data("seed-salt-32-bytes-of-entropy!!".utf8))
         let seedDir = root.appendingPathComponent("seed")
         try store.writeHomeSeedFiles(for: p, into: seedDir,
-                                     terminalDefaults: .fallback)
+                                     terminalDefaults: .fallback, tokenPlan: plan)
         try store.finalizeHomeSeed(for: p, seedDir: seedDir)
 
         let lines = try manifest(in: seedDir)
@@ -311,6 +316,13 @@ struct HomeStorageTests {
         #expect(!lines.contains("d\t-\t.git-credentials"))
         #expect(lines.contains("o\t600\t.config/gh/hosts.yml"))
         #expect(lines.contains("o\t644\t.gitconfig"))
+
+        // The staged file carries the fake, never the real token.
+        let creds = try String(contentsOf: seedDir.appendingPathComponent("files")
+            .appendingPathComponent(".git-credentials"), encoding: .utf8)
+        let fake = try #require(plan.fakeForGitHTTPS(host: "github.com", username: "u"))
+        #expect(creds.contains(fake))
+        #expect(!creds.contains("ghp_REALrealREALrealREALrealREALreal12"))
     }
 
     @Test("Seed regeneration clears stale payloads in place")
