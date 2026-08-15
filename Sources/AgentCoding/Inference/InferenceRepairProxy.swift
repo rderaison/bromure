@@ -278,12 +278,10 @@ final class InferenceRepairProxy: @unchecked Sendable {
 
     /// Build the full HTTP response bytes for a request.
     static func respond(to req: Request, enginePort: Int) -> Data {
-        let base = "http://127.0.0.1:\(enginePort)"
-
         // Anything that isn't a repairable inference POST: transparent proxy.
         guard let api = API.of(path: req.path), req.method == "POST",
               var payload = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] else {
-            return passthrough(req, base: base)
+            return passthrough(req, enginePort: enginePort)
         }
 
         // Identify the calling VM from its per-VM key (nil for admin/internal).
@@ -302,7 +300,12 @@ final class InferenceRepairProxy: @unchecked Sendable {
         // Force non-streaming upstream so we can inspect + repair the message.
         payload["stream"] = false
         let upstreamBody = (try? JSONSerialization.data(withJSONObject: payload)) ?? req.body
-        guard let url = URL(string: base + req.path) else { return passthrough(req, base: base) }
+        // API.of already guaranteed an origin-form `/v1/...` path, but build
+        // the upstream URL through the same guarded path as passthrough so the
+        // engine host+port can never be smuggled (see engineUpstreamURL).
+        guard let url = Self.engineUpstreamURL(path: req.path, enginePort: enginePort) else {
+            return rejectedTarget(req.path)
+        }
         var ur = URLRequest(url: url)
         ur.httpMethod = "POST"
         ur.httpBody = upstreamBody
@@ -468,9 +471,41 @@ final class InferenceRepairProxy: @unchecked Sendable {
         } else { try? line.write(toFile: "/tmp/bromure-repair.log", atomically: true, encoding: .utf8) }
     }
 
-    private static func passthrough(_ req: Request, base: String) -> Data {
-        guard let url = URL(string: base + req.path) else {
-            return httpResponse(status: 502, headers: [], body: Data("bad path".utf8))
+    /// Build the upstream URL to the local engine, or nil when the guest's
+    /// request-target isn't origin-form or resolves anywhere but the engine's
+    /// own loopback host+port. Reuses the MITM proxy's audited builder
+    /// (origin-form guard + host assertion, with its ported test corpus) and
+    /// adds a port pin: every loopback service shares host 127.0.0.1, so it's
+    /// the PORT that separates the engine from the automation API, IDE
+    /// backends, etc. `enginePort` is a dynamically-allocated high port, never
+    /// 80, so the `?? 80` default never masks a legitimate request.
+    static func engineUpstreamURL(path: String, enginePort: Int) -> URL? {
+        guard let url = try? mitmUpstreamURL(scheme: "http", host: "127.0.0.1",
+                                             port: enginePort, path: path),
+              (url.port ?? 80) == enginePort else { return nil }
+        return url
+    }
+
+    /// The response for a rejected (non-origin-form / off-engine) target —
+    /// logged so a probe is visible, and never forwarded anywhere.
+    private static func rejectedTarget(_ path: String) -> Data {
+        appendRepairLog("[repair] !! rejected upstream target \(path.debugDescription)\n")
+        return httpResponse(status: 400, headers: [("Content-Type", "text/plain")],
+                            body: Data("bad request target".utf8))
+    }
+
+    private static func passthrough(_ req: Request, enginePort: Int) -> Data {
+        // Guest→host SSRF guard. Any guest can open vsock 8446 and speak raw
+        // HTTP to this proxy, and `req.path` is the unmodified request-target.
+        // A non-origin-form target like `@127.0.0.1:9223/sessions` would make
+        // `http://127.0.0.1:<engine>` + path parse to a DIFFERENT loopback
+        // service (the automation API, an IDE backend, …). engineUpstreamURL
+        // rejects anything that isn't origin-form and resolving to the
+        // engine's own host+port. Same bug class the MITM proxy already
+        // closed via mitmUpstreamURL — the host half is shared here (both are
+        // 127.0.0.1), so the port pin is what stops the smuggle.
+        guard let url = Self.engineUpstreamURL(path: req.path, enginePort: enginePort) else {
+            return rejectedTarget(req.path)
         }
         var ur = URLRequest(url: url)
         ur.httpMethod = req.method
