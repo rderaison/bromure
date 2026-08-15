@@ -1837,6 +1837,69 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return UInt16(port)
     }
 
+    /// Open a guest-relayed URL (from the VM's `bromure-open` outbox) in the
+    /// user's REAL browser — unless its host is local/private. A compromised
+    /// guest must not be able to point the host browser at loopback / LAN
+    /// services (H2 "local drive-by"): the browser would fetch them carrying
+    /// the user's cookies + session. The legitimate in-VM OAuth flow only ever
+    /// opens a PUBLIC authorize URL here; the browser then follows the
+    /// `127.0.0.1:<port>` redirect to the loopback forwarder ITSELF, so
+    /// blocking local hosts at this hand-off costs the real flow nothing.
+    static func openGuestRelayedURL(_ url: URL) {
+        guard opensInRealBrowser(url) else {
+            FileHandle.standardError.write(Data(
+                "[ac] refused to open guest URL with local/private host: \(url.host ?? "?")\n".utf8))
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Whether `url` may be handed to the user's real browser: it must have a
+    /// PUBLIC host. Empty / local / private / link-local / ULA / `.local`
+    /// hosts are refused.
+    nonisolated static func opensInRealBrowser(_ url: URL) -> Bool {
+        guard let host = url.host, !host.isEmpty else { return false }
+        return !hostIsLocalOrPrivate(host)
+    }
+
+    /// Classify a URL host as local/private (loopback, RFC1918, CGNAT,
+    /// link-local, IPv6 loopback/ULA/link-local, or an mDNS `.local` /
+    /// `localhost` name). A plain public DNS name returns false. Pure — no
+    /// actor state — so callers on any executor (and tests) can use it.
+    nonisolated static func hostIsLocalOrPrivate(_ rawHost: String) -> Bool {
+        var host = rawHost.lowercased()
+        if host.hasPrefix("["), host.hasSuffix("]") {
+            host = String(host.dropFirst().dropLast())   // IPv6 literal brackets
+        }
+        // Named loopback / mDNS.
+        if host == "localhost" || host.hasSuffix(".localhost") { return true }
+        if host == "local" || host.hasSuffix(".local") { return true }
+        // IPv4 literal.
+        var v4 = in_addr()
+        if inet_pton(AF_INET, host, &v4) == 1 {
+            let o = withUnsafeBytes(of: v4.s_addr) { Array($0) }   // network order
+            switch (o[0], o[1]) {
+            case (0, _), (127, _), (10, _): return true            // unspecified / loopback / RFC1918
+            case (172, 16...31): return true                       // 172.16/12
+            case (192, 168): return true                           // 192.168/16
+            case (169, 254): return true                           // link-local
+            case (100, 64...127): return true                      // CGNAT 100.64/10
+            default: return false
+            }
+        }
+        // IPv6 literal.
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, host, &v6) == 1 {
+            let b = withUnsafeBytes(of: v6) { Array($0) }
+            if b.allSatisfy({ $0 == 0 }) { return true }                       // ::
+            if b.prefix(15).allSatisfy({ $0 == 0 }), b[15] == 1 { return true }// ::1
+            if b[0] == 0xFE, (b[1] & 0xC0) == 0x80 { return true }             // fe80::/10 link-local
+            if (b[0] & 0xFE) == 0xFC { return true }                           // fc00::/7 ULA
+            return false
+        }
+        return false   // a normal public DNS name
+    }
+
     /// Per-profile shell bridges (vsock 5800), created for every session —
     /// including the registration scratch VM, whose native terminal attaches
     /// through it. Consumed by the AutomationServer's `onGetShellConnection`
@@ -9375,7 +9438,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     FileHandle.standardError.write(Data(
                         "[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
                 }
-                NSWorkspace.shared.open(url)
+                Self.openGuestRelayedURL(url)
             }
         }
         sandbox.onTabList = { [weak self] tabs in

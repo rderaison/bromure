@@ -18,8 +18,12 @@ import Virtualization
 final class LoopbackCallbackForwarder {
     /// Must match VSOCK_PORT in loopback-relay-agent.py.
     private static let relayVsockPort: UInt32 = 5010
-    /// Auto-tear-down so we never sit on a host loopback port indefinitely.
-    private static let lifetimeSeconds = 300.0
+    /// Backstop tear-down for a login the user never completes. The primary
+    /// tear-down is one-shot (see `relayFinished`): the listener drops the
+    /// instant the single OAuth callback has been relayed, so the guest-chosen
+    /// host port isn't held — and can't be squatted (H2) — past the one
+    /// request it exists for. This timer only covers an abandoned flow.
+    private static let lifetimeSeconds = 180.0
 
     let port: UInt16
     private weak var socketDevice: VZVirtioSocketDevice?
@@ -88,6 +92,17 @@ final class LoopbackCallbackForwarder {
         // Cancel handlers close the listen fds.
         for l in listeners { l.source.cancel() }
         listeners = []
+    }
+
+    /// One OAuth callback exchange finished. A loopback callback is single-use,
+    /// so tear the listener down now instead of waiting out `lifetimeSeconds` —
+    /// the host port is released the moment login completes, shrinking the
+    /// port-squat window to the callback itself. Any in-flight splice keeps its
+    /// own already-accepted fds and is unaffected by `stop()`; registration's
+    /// teardown still waits on `activeRelays` hitting zero.
+    private func relayFinished() {
+        activeRelays -= 1
+        stop()
     }
 
     // MARK: - Listener
@@ -215,12 +230,12 @@ final class LoopbackCallbackForwarder {
                             Self.log("relay connected; answering browser directly on 127.0.0.1:\(target)")
                             Self.respondAndDrain(browser: cfd, guest: vfd, response: response) {
                                 [weak self] in
-                                DispatchQueue.main.async { self?.activeRelays -= 1 }
+                                DispatchQueue.main.async { self?.relayFinished() }
                             }
                         } else {
                             Self.log("relay connected; splicing to guest 127.0.0.1:\(target)")
                             Self.splice(cfd, vfd) { [weak self] in
-                                DispatchQueue.main.async { self?.activeRelays -= 1 }
+                                DispatchQueue.main.async { self?.relayFinished() }
                             }
                         }
                     case .failure(let err):

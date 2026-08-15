@@ -335,7 +335,7 @@ extension ACAppDelegate {
                     self.loopbackForwarders.removeAll { !$0.isRunning }
                     self.loopbackForwarders.append(fwd)
                 }
-                NSWorkspace.shared.open(url)
+                ACAppDelegate.openGuestRelayedURL(url)
             }
         }
     }
