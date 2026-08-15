@@ -890,36 +890,67 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// without one — no firewall, no interception, native path (they also lack
     /// the Bromure CA, so MiTM would break them).
     private func handleEgress(_ srcPortID: Int, _ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
-        // IPv6: the firewall only matches IPv4 rules, so a v4 `deny` could be
-        // trivially bypassed by the guest's IPv6 fallback. When any policy is
-        // active, drop global-unicast v6 egress (the guest then falls back to
-        // the filtered IPv4). Link-local / multicast (ND / RA / DHCPv6) pass, so
-        // v6 autoconfig still works. Ports with no active policy pass v6 through.
-        if Self.u16(buf, 12) == 0x86DD {
-            lock.lock()
-            let pid = portProfileID[srcPortID]
-            let active = pid != nil && (portEgressPolicy[srcPortID]?.isActive ?? false)
-            lock.unlock()
-            guard active, let pid, Self.isGlobalUnicastV6Dst(buf, n) else { return false }
+        let ethertype = Self.u16(buf, 12)
+
+        // ---- IPv6 ----
+        // The firewall + MiTM are IPv4-only, so routable IPv6 egress is an
+        // uninspected, unfilterable bypass. Drop global-unicast v6 on an
+        // INSPECTED VM (transparent proxy on, or an egress policy set); the
+        // guest falls back to the filtered IPv4. Link-local / multicast
+        // (ND / RA / DHCPv6) pass so v6 autoconfig still works; a non-inspected
+        // VM (Bromure Web, or an opted-out workspace) keeps native v6.
+        if ethertype == 0x86DD {
+            guard Self.isGlobalUnicastV6Dst(buf, n) else { return false }
+            let g = portGovernance(srcPortID)
+            guard let pid = g.pid, g.inspected else { return false }
             fireEgress(portID: srcPortID, profileID: pid, dstIP: 0, hostnames: [],
                        proto: 41, port: 0, denied: true)
             return true      // drop
         }
 
-        guard let (proto, dstIP, dport) = Self.offSubnetL4(buf, n),
-              (dstIP & subnetMask) != (gatewayIP & subnetMask) else { return false }
+        // ---- IPv4 ----
+        // Resolve the destination first (independent of protocol/fragment) so
+        // on/off-subnet can be decided even for frames we won't parse further.
+        guard ethertype == 0x0800, n >= 14 + 20 else { return false }
+        let ihl = Int(buf[14] & 0x0F) * 4
+        guard ihl >= 20, n >= 14 + ihl else { return false }
+        let dstIP = Self.u32(buf, 14 + 16)
+        // On-subnet (gateway / peer VMs): native path. Peer isolation is a
+        // separate control (bridgePeers), not this firewall.
+        guard (dstIP & subnetMask) != (gatewayIP & subnetMask) else { return false }
 
-        lock.lock()
-        guard let pid = portProfileID[srcPortID] else { lock.unlock(); return false }  // non-session → native
-        let policy = portEgressPolicy[srcPortID]
-        let intercept = interceptor
-        let canIntercept = intercept != nil && proto == 6 && interceptPorts.contains(dport)
-            && !portInterceptDisabled.contains(srcPortID)
-        lock.unlock()
+        let g = portGovernance(srcPortID)
+        guard let pid = g.pid else { return false }          // non-session → native
 
         let hostnames = dnsCache.names(for: dstIP)
+        let ipProto = buf[14 + 9]
+        // An IP fragment (MF set, or a non-zero fragment offset) can't be
+        // filtered or inspected as a whole.
+        let fragmented = (Self.u16(buf, 14 + 6) & 0x3FFF) != 0
+        // The L4 header (ports) is only readable on a non-fragmented TCP/UDP
+        // frame; offSubnetL4 also rejects non-first fragments.
+        let l4 = fragmented ? nil : Self.offSubnetL4(buf, n)
+        let dport = l4?.2 ?? 0
+
+        // Close the transports that would skip the firewall + MiTM on an
+        // inspected VM: any IP fragment, and QUIC / HTTP-3 (UDP :443, which the
+        // TCP-only MiTM can't see). The guest re-sends over TCP, which the
+        // proxy inspects. Other UDP (DNS :53, NTP, WireGuard/IKE, …) is
+        // unaffected.
+        if g.inspected,
+           Self.isEgressBypassTransport(fragmented: fragmented, ipProto: ipProto, dport: dport) {
+            fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
+                       proto: ipProto, port: dport, denied: true)
+            return true      // drop QUIC / fragment
+        }
+
+        // Non-TCP/UDP protocols (ICMP / GRE / SCTP / 6in4) can't be filtered by
+        // the L4 rules or MiTM'd; they stay on the native path (out of scope
+        // for this pass).
+        guard let (proto, _, _) = l4 else { return false }
+
         let ep: EgressPolicy.Proto = proto == 6 ? .tcp : .udp
-        let verdict = policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport) ?? .allow
+        let verdict = g.policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport) ?? .allow
 
         if verdict == .deny {
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
@@ -935,12 +966,43 @@ public final class VMNetSwitch: @unchecked Sendable {
 
         // Allowed: divert intercepted TCP into the MiTM (the SNI layer re-checks
         // the host + `web` rules); otherwise let the native switch forward it.
-        if canIntercept, let intercept {
+        if let intercept = g.interceptor, proto == 6, g.interceptPorts.contains(dport) {
             let ipPacket = [UInt8](UnsafeBufferPointer(start: buf + 14, count: n - 14))
             intercept.handleDivertedPacket(portID: srcPortID, profileID: pid, ipPacket: ipPacket)
             return true
         }
         return false
+    }
+
+    /// Whether an off-subnet frame from an inspected session VM uses a
+    /// transport that would skip the host firewall + MiTM and must therefore be
+    /// dropped:
+    ///  - any IP fragment (`fragmented`) — a fragmented datagram can't be
+    ///    inspected or reliably filtered as a whole; the guest re-sends it
+    ///    unfragmented;
+    ///  - QUIC / HTTP-3 (UDP :443) — the TCP-only MiTM can't see it, so the
+    ///    guest falls back to TCP, which the proxy inspects.
+    /// IPv6 global unicast is handled by the caller (the frame isn't IPv4 here).
+    static func isEgressBypassTransport(fragmented: Bool, ipProto: UInt8, dport: UInt16) -> Bool {
+        if fragmented { return true }
+        if ipProto == 17, dport == 443 { return true }   // QUIC / HTTP-3
+        return false
+    }
+
+    /// A port's egress governance, snapshotted under the lock. `interceptor` is
+    /// nil when the port opted out of transparent interception. `inspected` is
+    /// the gate for the bypass drops: the user expects host-side control on
+    /// this VM because it's being MiTM-intercepted OR carries an active egress
+    /// policy. A VM with neither keeps the plain native path.
+    private func portGovernance(_ srcPortID: Int)
+        -> (pid: UUID?, policy: EgressPolicy?, interceptor: VMNetTCPInterceptor?,
+            interceptPorts: Set<UInt16>, inspected: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        let pid = portProfileID[srcPortID]
+        let policy = portEgressPolicy[srcPortID]
+        let interceptor = portInterceptDisabled.contains(srcPortID) ? nil : self.interceptor
+        let inspected = pid != nil && (interceptor != nil || (policy?.isActive ?? false))
+        return (pid, policy, interceptor, interceptPorts, inspected)
     }
 
     /// Fire the observer for a new flow, deduped per (port, dstIP, port, proto),
