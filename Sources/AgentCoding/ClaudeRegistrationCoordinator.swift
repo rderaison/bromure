@@ -147,16 +147,19 @@ extension ACAppDelegate {
     func beginSubscriptionRegistration(provider: SubscriptionProvider,
                                        scope: SubscriptionRegistrationScope,
                                        remoteInitiated: Bool = false) {
-        // One at a time — bring an in-flight registration forward instead.
+        // One at a time — bring an in-flight registration forward instead
+        // (only locally; a remote-initiated flow has no window to show here).
         if let existing = claudeRegistration {
-            existing.window?.makeKeyAndOrderFront(nil)
+            if !remoteInitiated { existing.window?.makeKeyAndOrderFront(nil) }
             return
         }
         guard let engine = mitmEngine else {
-            registrationAlert(title: NSLocalizedString("Proxy unavailable", comment: ""),
-                              text: NSLocalizedString(
-                                "The Bromure proxy isn't running, so registration can't capture your tokens.",
-                                comment: ""))
+            if !remoteInitiated {
+                registrationAlert(title: NSLocalizedString("Proxy unavailable", comment: ""),
+                                  text: NSLocalizedString(
+                                    "The Bromure proxy isn't running, so registration can't capture your tokens.",
+                                    comment: ""))
+            }
             return
         }
 
@@ -220,7 +223,13 @@ extension ACAppDelegate {
         // the claudeRegistration check (teardownClaudeRegistration destroys the
         // scratch VM), so it never reaches the session detach/stop path.
         win.center()
-        win.makeKeyAndOrderFront(nil)
+        // Remote-initiated (fat client): keep the throwaway VM headless on the
+        // server. Nobody is sitting here to see it, and showing it pops a window
+        // on the wrong machine. The VM still boots and the login agent runs; the
+        // sign-in page opens on the CLIENT via RemoteRegistrationBroker.
+        if !remoteInitiated {
+            win.makeKeyAndOrderFront(nil)
+        }
         win.isReleasedWhenClosed = false
         state.window = win
         win.model.tabs = [TabsModel.Tab(label: "shell")]
@@ -239,8 +248,10 @@ extension ACAppDelegate {
                 try sandbox.prepare()
                 try await sandbox.start()
             } catch {
-                self.showError(error, message: NSLocalizedString(
-                    "Couldn't start the registration VM.", comment: ""))
+                if !remoteInitiated {
+                    self.showError(error, message: NSLocalizedString(
+                        "Couldn't start the registration VM.", comment: ""))
+                }
                 self.teardownClaudeRegistration(reason: .failure)
                 return
             }
@@ -415,11 +426,18 @@ extension ACAppDelegate {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
             if Task.isCancelled { return }
-            self.registrationAlert(
-                title: NSLocalizedString("Registration timed out", comment: ""),
-                text: String(format: NSLocalizedString(
-                    "Bromure didn't receive a %@ sign-in in time. You can try again.",
-                    comment: ""), state.provider.displayName))
+            // Never wedge the server with a blocking modal for a fat-client
+            // flow — nobody is at this Mac to dismiss it, and `runModal` would
+            // freeze the control loop until it's answered. Teardown clears the
+            // relay so the client learns the sign-in didn't land. Only show the
+            // alert when a local user started the registration.
+            if RemoteRegistrationBroker.shared.pending == nil {
+                self.registrationAlert(
+                    title: NSLocalizedString("Registration timed out", comment: ""),
+                    text: String(format: NSLocalizedString(
+                        "Bromure didn't receive a %@ sign-in in time. You can try again.",
+                        comment: ""), state.provider.displayName))
+            }
             self.teardownClaudeRegistration(reason: .timeout)
         }
     }
@@ -516,15 +534,24 @@ extension ACAppDelegate {
         var sharedEverywhere = true
         var overrideProfile: UUID? = nil
         if case .askPerSession(let pid) = state.scope {
-            let ask = NSAlert()
-            ask.messageText = NSLocalizedString("Share with every workspace?", comment: "")
-            ask.informativeText = String(format: NSLocalizedString(
-                "Use this %@ sign-in for every Bromure workspace, or only for this one?",
-                comment: ""), state.provider.displayName)
-            ask.addButton(withTitle: NSLocalizedString("Every workspace", comment: ""))
-            ask.addButton(withTitle: NSLocalizedString("Just this workspace", comment: ""))
-            sharedEverywhere = (ask.runModal() == .alertFirstButtonReturn)
-            if !sharedEverywhere { overrideProfile = pid }
+            if RemoteRegistrationBroker.shared.pending != nil {
+                // Remote flow: nobody is at the server to answer, and runModal
+                // would wedge the control loop. Default to the conservative
+                // choice — scope the sign-in to the workspace the client
+                // registered from, rather than silently sharing it everywhere.
+                sharedEverywhere = false
+                overrideProfile = pid
+            } else {
+                let ask = NSAlert()
+                ask.messageText = NSLocalizedString("Share with every workspace?", comment: "")
+                ask.informativeText = String(format: NSLocalizedString(
+                    "Use this %@ sign-in for every Bromure workspace, or only for this one?",
+                    comment: ""), state.provider.displayName)
+                ask.addButton(withTitle: NSLocalizedString("Every workspace", comment: ""))
+                ask.addButton(withTitle: NSLocalizedString("Just this workspace", comment: ""))
+                sharedEverywhere = (ask.runModal() == .alertFirstButtonReturn)
+                if !sharedEverywhere { overrideProfile = pid }
+            }
         }
 
         do {
@@ -561,8 +588,13 @@ extension ACAppDelegate {
                 else { try engine.grokSubscriptionStore.setShared(rec) }
             }
         } catch {
-            showError(error, message: NSLocalizedString(
-                "Couldn't save the captured credentials.", comment: ""))
+            if RemoteRegistrationBroker.shared.pending == nil {
+                showError(error, message: NSLocalizedString(
+                    "Couldn't save the captured credentials.", comment: ""))
+            } else {
+                FileHandle.standardError.write(Data(
+                    "[registration] couldn't save captured credentials: \(error)\n".utf8))
+            }
         }
 
         let providerName = state.provider.displayName
@@ -576,6 +608,8 @@ extension ACAppDelegate {
         // abruptly". Wait for in-flight relays to drain (bounded), plus a
         // short linger for the TCP close to propagate, then tear down.
         Task { @MainActor in
+            // Capture before teardown clears the relay below.
+            let wasRemote = RemoteRegistrationBroker.shared.pending != nil
             let deadline = Date().addingTimeInterval(5)
             while Date() < deadline,
                   self.loopbackForwarders.contains(where: { $0.activeRelays > 0 }) {
@@ -584,6 +618,10 @@ extension ACAppDelegate {
             try? await Task.sleep(nanoseconds: 300_000_000)
             self.teardownClaudeRegistration(reason: .success)
 
+            // Remote flow: the client already sees success (the subscription
+            // store change flips its editor's Register → Re-register via /state).
+            // Don't block the headless server with a completion modal.
+            guard !wasRemote else { return }
             let done = NSAlert()
             done.messageText = String(format: NSLocalizedString("Registered with %@", comment: ""), providerName)
             done.informativeText = sharedEverywhere
@@ -599,6 +637,12 @@ extension ACAppDelegate {
     func teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason) {
         guard let state = claudeRegistration, !state.finished else { return }
         state.finished = true
+
+        // Clear the remote-registration relay so a fat client's /state stops
+        // advertising this flow and tears down its sign-in page + callback
+        // tunnel. No-op for a local flow (no pending). (Previously never called,
+        // so the relay lingered after every remote registration.)
+        RemoteRegistrationBroker.shared.finish()
 
         state.pollTask?.cancel()
         state.claudeBridge?.stop()
@@ -647,6 +691,13 @@ extension ACAppDelegate {
     }
 
     private func registrationAlert(title: String, text: String) {
+        // Defense in depth: callers already skip this on the remote-initiated
+        // path, but an informational alert must never wedge a server a fat
+        // client is mirroring. When someone's watching remotely, log it instead.
+        if PendingPromptBroker.hasLiveListener() {
+            FileHandle.standardError.write(Data("[ac/registration] \(title) — \(text)\n".utf8))
+            return
+        }
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = text

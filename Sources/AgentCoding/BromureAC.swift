@@ -23,6 +23,14 @@ let acResourceBundle: Bundle = {
     return Bundle.module
 }()
 
+/// Makes Sparkle's scheduled update checks non-intrusive — a gentle reminder
+/// instead of a focus-stealing modal that blocks the app (and, on a fat-client
+/// server, its control loop) until answered. The user can still trigger the
+/// full update prompt via the "Check for Updates…" menu item.
+final class SparkleGentleUpdaterDelegate: NSObject, SPUStandardUserDriverDelegate {
+    var supportsGentleScheduledUpdateReminders: Bool { true }
+}
+
 @main
 struct BromureAC: ParsableCommand {
     /// Built from the invocation name (argv[0]). Invoked as `bromure-cli` we
@@ -2009,6 +2017,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// applicationDidFinishLaunching. Silently no-ops on dev builds where
     /// SUPublicEDKey isn't populated.
     private var updaterController: SPUStandardUpdaterController?
+    /// Makes scheduled update checks non-intrusive. Sparkle (weakly) holds the
+    /// user-driver delegate, so keep a strong ref here.
+    private let sparkleDriverDelegate = SparkleGentleUpdaterDelegate()
 
 
     /// When true the app launches as a background agent: no picker window, just
@@ -2171,7 +2182,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
-            userDriverDelegate: nil
+            // Gentle scheduled reminders: a found update no longer steals focus
+            // or throws up a modal that wedges the app (and, on a fat-client
+            // server, its control loop) until the user answers. The "Check for
+            // Updates…" menu item still opens the full prompt on demand.
+            userDriverDelegate: sparkleDriverDelegate
         )
         // Re-install the main menu now that updaterController is alive
         // so the menu item built in `makeMainMenu` (called via the Run
@@ -4337,16 +4352,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @MainActor private func promptCloseAction(forName name: String) -> Profile.CloseAction? {
-        let alert = NSAlert()
-        alert.messageText = String(
+        let title = String(
             format: NSLocalizedString("Close “%@”?", comment: ""), name)
-        alert.informativeText = NSLocalizedString(
+        let message = NSLocalizedString(
             "Run in the background keeps the VM running so you can reattach later. Suspend saves its state to disk. Shut down powers it off.",
             comment: "")
-        alert.addButton(withTitle: NSLocalizedString("Run in the Background", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Suspend", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Shut Down", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        let buttons = [
+            NSLocalizedString("Run in the Background", comment: ""),
+            NSLocalizedString("Suspend", comment: ""),
+            NSLocalizedString("Shut Down", comment: ""),
+            NSLocalizedString("Cancel", comment: ""),
+        ]
+
+        // This is reachable from the control socket (a fat client's destroy-
+        // session request lands here when the profile's close action is "ask").
+        // Relay the choice instead of opening a modal that would freeze the
+        // server. No listener → fall back to Suspend: it closes the session but
+        // preserves its state on disk, the least-surprising non-destructive
+        // outcome for a close request.
+        guard canPresentBlockingModal else {
+            switch PendingPromptBroker.shared.ask(
+                profileID: nil, title: title, message: message,
+                buttons: buttons, fallback: 1) {
+            case 0:  return .background
+            case 1:  return .suspend
+            case 2:  return .shutdown
+            default: return nil
+            }
+        }
+
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        for button in buttons { alert.addButton(withTitle: button) }
         switch alert.runModal() {
         case .alertFirstButtonReturn:  return .background
         case .alertSecondButtonReturn: return .suspend
@@ -4394,9 +4432,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Surface a first-resolution failure of a 1Password `op://` reference:
     /// install instructions when the CLI is missing, otherwise the op error.
-    /// GUI-only — a headless/remote host just logs (the modal would block).
+    /// GUI-only — a headless agent or a server a fat client is mirroring just
+    /// logs (the modal would block the control server on the launch path).
     @MainActor func presentOnePasswordError(_ error: OnePasswordCLI.OpError, profileName: String) {
-        guard !headless else {
+        guard canPresentBlockingModal else {
             FileHandle.standardError.write(Data(
                 "[1password] \(error.errorDescription ?? "\(error)") — workspace \(profileName)\n".utf8))
             return
@@ -9058,6 +9097,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// investigation bundle. Returns nil if the user cancels.
     @MainActor
     private func askForInvestigationDestination(profileName: String) -> URL? {
+        // A file picker can't be relayed to a fat client and would wedge a
+        // headless/mirrored server. The compromise prompt already withholds the
+        // "Save for Investigation" button in that case, so this is a backstop:
+        // skip the export (nil) rather than block. The VM is still shut down.
+        guard canPresentBlockingModal else { return nil }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -9158,21 +9202,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor
     private func presentCompromiseAlert(event: CompromiseEvent,
                                          profileName: String) -> CompromiseAction {
-        let alert = NSAlert()
-        alert.alertStyle = .critical
-        // NSAlert.critical paints a tiny yellow caution badge over the
-        // app icon by default, which doesn't read as "stop everything"
-        // at a glance. Replace the icon with a 64-pt red
-        // exclamationmark.octagon (the macOS "danger" symbol) so the
-        // alert visually screams the way the situation deserves.
-        if let symbol = NSImage(
-            systemSymbolName: "exclamationmark.octagon.fill",
-            accessibilityDescription: "VM compromise warning") {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 64, weight: .bold)
-                .applying(.init(paletteColors: [.systemRed]))
-            alert.icon = symbol.withSymbolConfiguration(cfg)
-        }
-        alert.messageText = NSLocalizedString(
+        let title = NSLocalizedString(
             "This environment may have been compromised",
             comment: "Compromise alert title")
         var info = String(
@@ -9192,6 +9222,40 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 leak.declaredHost,
                 leak.observedHost)
         }
+
+        // Headless or mirrored by a fat client: never wedge the control server
+        // with a modal nobody here can dismiss. Relay a two-way choice — the
+        // "Save for Investigation" flow needs a local folder picker, so it's
+        // local-GUI only. With no client listening the broker returns the
+        // fallback at once: contain the breach by shutting the VM down.
+        guard canPresentBlockingModal else {
+            let choice = PendingPromptBroker.shared.ask(
+                profileID: event.profileID,
+                title: title,
+                message: info + "\n" + NSLocalizedString(
+                    "Shutting the VM down is the safest choice.",
+                    comment: "Compromise remote-prompt guidance"),
+                buttons: [NSLocalizedString("Shut down", comment: ""),
+                          NSLocalizedString("Continue", comment: "")],
+                fallback: 0)
+            return choice == 1 ? .continueAnyway : .shutdown
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        // NSAlert.critical paints a tiny yellow caution badge over the
+        // app icon by default, which doesn't read as "stop everything"
+        // at a glance. Replace the icon with a 64-pt red
+        // exclamationmark.octagon (the macOS "danger" symbol) so the
+        // alert visually screams the way the situation deserves.
+        if let symbol = NSImage(
+            systemSymbolName: "exclamationmark.octagon.fill",
+            accessibilityDescription: "VM compromise warning") {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 64, weight: .bold)
+                .applying(.init(paletteColors: [.systemRed]))
+            alert.icon = symbol.withSymbolConfiguration(cfg)
+        }
+        alert.messageText = title
         info += "\n" + NSLocalizedString(
             "Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the workspace is marked compromised.",
             comment: "")
@@ -10263,7 +10327,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Helpers
 
+    /// A blocking modal runs a nested run loop on the main thread. On a headless
+    /// agent nobody is here to dismiss it, and on a server being mirrored by a
+    /// fat client the modal wedges the control server for every other request
+    /// until it's cleared locally — which never happens. It's only safe to open
+    /// one when a local GUI user is present AND no remote client is watching.
+    /// Everywhere else, relay the choice through `PendingPromptBroker` (which
+    /// returns the fallback immediately when no one is listening) or take a safe
+    /// default instead.
+    var canPresentBlockingModal: Bool {
+        !headless && !PendingPromptBroker.hasLiveListener()
+    }
+
     func showError(_ error: Error, message: String) {
+        // Never wedge a headless agent or a mirrored server with a modal nobody
+        // here can dismiss — log it instead. A local GUI user (no remote watcher)
+        // still gets the alert.
+        guard canPresentBlockingModal else {
+            FileHandle.standardError.write(Data(
+                "[ac/error] \(message) — \(error.localizedDescription)\n".utf8))
+            return
+        }
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = error.localizedDescription
