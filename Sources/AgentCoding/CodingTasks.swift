@@ -275,6 +275,141 @@ final class CodingTaskStore {
     }
 }
 
+// MARK: - Session-store locator (all platforms)
+
+/// Builds the guest-shell block that finds the newest session transcript a
+/// coding agent wrote for a working directory — one fragment per tool's
+/// on-disk store. Shared by the macOS engine and the fat client's iOS shim
+/// (both tail live transcripts over their respective transports).
+enum AgentSessionLocator {
+    /// The cwd as it may be spliced between single quotes in a shell line:
+    /// trailing slashes stripped, nil when it has characters we won't quote.
+    nonisolated static func sanitized(guestCwd: String) -> String? {
+        var path = guestCwd
+        while path.count > 1 && path.hasSuffix("/") { path = String(path.dropLast()) }
+        let allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            + "0123456789-_./+ "
+        guard !path.isEmpty, path.allSatisfy({ allowed.contains($0) }) else { return nil }
+        return path
+    }
+
+    /// The block that sets `$d` (logical cwd) / `$r` (resolved cwd) and
+    /// leaves the newest matching session file in `$f` (empty when none).
+    /// `agent` is a canonical `BromureIcons` agent kind; nil (or a tool
+    /// without a known store) probes every store and takes the newest
+    /// match — a session's directory belongs to whichever tool ran there,
+    /// so at most one store matches in practice, and if several do
+    /// (claude yesterday, codex today) the newest write is the live one.
+    /// Every store keys off BOTH paths: the CLIs resolve symlinks (a
+    /// folder share is a symlink into /mnt/bromure-share-N), while the
+    /// caller's tab knows the logical path.
+    nonisolated static func locateBlock(path: String, since: Int,
+                                        agent: String?) -> String {
+        var cmd = "d='\(path)'; r=$(readlink -f \"$d\" 2>/dev/null || printf %s \"$d\"); "
+        switch agent {
+        case "claude": cmd += claudeFragment(path: path, since: since, into: "f")
+        case "codex": cmd += codexFragment(since: since, into: "f")
+        case "grok": cmd += grokFragment(path: path, since: since, into: "f")
+        case "kimi": cmd += kimiFragment(since: since, into: "f")
+        default:
+            cmd += claudeFragment(path: path, since: since, into: "tc")
+            cmd += codexFragment(since: since, into: "tx")
+            cmd += grokFragment(path: path, since: since, into: "tg")
+            cmd += kimiFragment(since: since, into: "tk")
+            cmd += "set --; for c in \"$tc\" \"$tx\" \"$tg\" \"$tk\"; do "
+                + "[ -n \"$c\" ] && set -- \"$@\" \"$c\"; done; "
+                + "f=\"\"; [ $# -gt 0 ] && f=$(ls -t \"$@\" 2>/dev/null | head -1); "
+        }
+        return cmd
+    }
+
+    /// Each fragment assumes `$d`/`$r` are set and leaves its best
+    /// candidate (newest matching file, mtime-filtered by `since`) in the
+    /// shell variable `varName`. All failures are silenced: a missing
+    /// store is simply no candidate.
+
+    /// Claude Code: ~/.claude/projects/<encoded-cwd>/<session>.jsonl, the
+    /// dir encoded by flattening EVERY non-alphanumeric to '-'. The
+    /// host-side '/'- and './'-only encodings are kept so transcripts of
+    /// older sessions stay findable.
+    nonisolated static func claudeFragment(path: String, since: Int,
+                                           into varName: String) -> String {
+        let enc1 = path.replacingOccurrences(of: "/", with: "-")
+        let enc2 = path.replacingOccurrences(of: ".", with: "-")
+            .replacingOccurrences(of: "/", with: "-")
+        let legacy = (enc1 == enc2 ? [enc1] : [enc1, enc2])
+            .map { "\"$HOME/.claude/projects/\($0)\"" }.joined(separator: " ")
+        return "e1=$(printf %s \"$d\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "e2=$(printf %s \"$r\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "\(varName)=$(find \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
+            + "\(legacy) -maxdepth 1 -name '*.jsonl' -newermt @\(since) "
+            + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
+    }
+
+    /// Codex CLI: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl, date-keyed
+    /// rather than cwd-keyed — but line 1 (session_meta) records the cwd,
+    /// so grep the newest files' heads for it. The candidate cap keeps the
+    /// probe cheap; beyond ~2 dozen rollouts the one we want is stale
+    /// anyway (`since` already floors the search).
+    nonisolated static func codexFragment(since: Int, into varName: String) -> String {
+        "\(varName)=\"\"; for c in $(find \"$HOME/.codex/sessions\" "
+            + "-name 'rollout-*.jsonl' -newermt @\(since) 2>/dev/null "
+            + "| xargs -r ls -t 2>/dev/null | head -24); do "
+            + "head -c 8192 \"$c\" 2>/dev/null "
+            + "| grep -qF -e \"\\\"cwd\\\":\\\"$d\\\"\" -e \"\\\"cwd\\\":\\\"$r\\\"\" "
+            + "&& { \(varName)=\"$c\"; break; }; done; "
+    }
+
+    /// Grok CLI: ~/.grok/sessions/<pct-encoded-cwd>/<uuid>/updates.jsonl.
+    /// The logical path is encoded host-side (the rule is RFC 3986 with an
+    /// empty safe set); the resolved path can only be encoded guest-side —
+    /// python3 is guaranteed in the guest (bromure-agentd runs on it).
+    nonisolated static func grokFragment(path: String, since: Int,
+                                         into varName: String) -> String {
+        "g1=\"$HOME/.grok/sessions/\(grokPercentEncode(path))\"; g2=\"\"; "
+            + "if [ \"$r\" != \"$d\" ]; then "
+            + "ge=$(python3 -c 'import urllib.parse,sys;"
+            + "print(urllib.parse.quote(sys.argv[1],safe=\"\"))' \"$r\" 2>/dev/null); "
+            + "[ -n \"$ge\" ] && g2=\"$HOME/.grok/sessions/$ge\"; fi; "
+            + "\(varName)=$(find \"$g1\" ${g2:+\"$g2\"} -maxdepth 2 -name updates.jsonl "
+            + "-newermt @\(since) 2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null "
+            + "| head -1); "
+    }
+
+    /// Kimi Code: ~/.kimi-code/sessions/wd_<slug>_<hash12>/session_*/
+    /// agents/main/wire.jsonl — slug is the lowercased basename with runs
+    /// of anything outside [a-z0-9._-] collapsed to '-' (trimmed, first 40
+    /// chars), hash the first 12 hex of SHA-256 of the full path. Both are
+    /// recomputed guest-side; a slug-only glob backstops hash-rule drift.
+    /// Main-agent journals only — subagent files (agents/agent-N) would
+    /// otherwise win the mtime race while subagents work. The bare
+    /// `wire.jsonl` alternative covers v1-engine sessions (journal at the
+    /// session root).
+    nonisolated static func kimiFragment(since: Int, into varName: String) -> String {
+        "kb=$(basename \"$d\" | tr 'A-Z' 'a-z' "
+            + "| sed -E 's/[^a-z0-9._-]+/-/g;s/^-+//;s/-+$//' "
+            + "| cut -c1-40 | sed -E 's/-+$//'); "
+            + "case \"$kb\" in ''|.|..) kb=workspace;; esac; "
+            + "kh=$(printf %s \"$d\" | sha256sum | cut -c1-12); "
+            + "kr=$(printf %s \"$r\" | sha256sum | cut -c1-12); "
+            + "\(varName)=$(find \"$HOME/.kimi-code/sessions/wd_${kb}_$kh\" "
+            + "\"$HOME/.kimi-code/sessions/wd_${kb}_$kr\" "
+            + "\"$HOME/.kimi-code/sessions/wd_${kb}_\"* "
+            + "\\( -path '*/agents/main/wire.jsonl' "
+            + "-o \\( -name wire.jsonl ! -path '*/agents/*' \\) \\) "
+            + "-newermt @\(since) 2>/dev/null | sort -u "
+            + "| xargs -r ls -t 2>/dev/null | head -1); "
+    }
+
+    /// RFC 3986 percent-encoding with an empty safe set ('/' included) —
+    /// the rule Grok uses to name a cwd's session folder.
+    nonisolated static func grokPercentEncode(_ s: String) -> String {
+        let unreserved = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return s.addingPercentEncoding(withAllowedCharacters: unreserved) ?? s
+    }
+}
+
 // MARK: - Engine
 
 /// Drives the coding board's transitions that touch the guest: starting a
@@ -1101,80 +1236,143 @@ final class CodingTaskEngine {
             + "tmux send-keys -t bromure:\(tabIndex) Enter"
     }
 
-    /// The guest command that tails a plan session's live Claude transcript.
-    /// The planner runs IN the task's configured directory, so the project
-    /// dir is derived from that path the way Claude encodes it ("/" and "."
-    /// become "-"); `since` (epoch seconds) skips transcripts of earlier
-    /// sessions in the same directory. Output is capped so a long session
-    /// stays cheap to poll. Nil when the path has characters we won't quote.
-    nonisolated static func planTranscriptCommand(guestCwd: String, since: Int) -> String? {
-        var path = guestCwd
-        while path.count > 1 && path.hasSuffix("/") { path = String(path.dropLast()) }
-        let allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            + "0123456789-_./+ "
-        guard !path.isEmpty, path.allSatisfy({ allowed.contains($0) }) else { return nil }
-        let enc1 = path.replacingOccurrences(of: "/", with: "-")
-        let enc2 = path.replacingOccurrences(of: ".", with: "-")
-            .replacingOccurrences(of: "/", with: "-")
-        let legacy = (enc1 == enc2 ? [enc1] : [enc1, enc2])
-            .map { "\"$HOME/.claude/projects/\($0)\"" }.joined(separator: " ")
-        // The pq file is a PreToolUse hook's dump of a PENDING
-        // AskUserQuestion (see the guest agent's _seed_question_hooks):
-        // Claude Code doesn't write the assistant turn to the transcript
-        // until the question is answered, so this is the only way the
-        // window can show the question while it's actually being asked.
-        // tr strips newlines so a pretty-printed dump still parses as one
-        // transcript line. The pq name stays LOGICAL-path-encoded — the
-        // hook derives it from $(pwd), which keeps the symlink.
-        let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
-        // Claude keys the project dir off the PHYSICAL cwd (node resolves
-        // symlinks — a folder share is a symlink into /mnt/bromure-share-N)
-        // and flattens EVERY non-alphanumeric to '-', not just '/' and '.'.
-        // Derive candidates guest-side from both the logical and resolved
-        // paths with the real rule; keep the old host-side encodings so
-        // transcripts of older sessions stay findable. iconv -c drops the
-        // orphan bytes a byte-cap cut can leave mid UTF-8 sequence — a
-        // strict decode downstream used to collapse the whole response.
-        return "d='\(path)'; r=$(readlink -f \"$d\" 2>/dev/null || printf %s \"$d\"); "
-            + "e1=$(printf %s \"$d\" | tr -c 'a-zA-Z0-9' '-'); "
-            + "e2=$(printf %s \"$r\" | tr -c 'a-zA-Z0-9' '-'); "
-            + "f=$(find \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
-            + "\(legacy) -maxdepth 1 -name '*.jsonl' -newermt @\(since) "
-            + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
-            + "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
-            + "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
-            + "then echo; tr -d '\\n' < \(pq); echo; fi"
+    /// The guest command that tails a plan session's live agent transcript.
+    /// The agent runs IN the task's configured directory, so the session
+    /// store entry is derived from that path the way each tool encodes it;
+    /// `since` (epoch seconds) skips transcripts of earlier sessions in the
+    /// same directory. Output is capped so a long session stays cheap to
+    /// poll. `agent` is a canonical `BromureIcons` agent kind — nil (or a
+    /// tool without a known store) searches every store and takes the
+    /// newest match, so a tab whose label hasn't resolved yet still reads.
+    /// Nil return when the path has characters we won't quote.
+    nonisolated static func planTranscriptCommand(guestCwd: String, since: Int,
+                                                  agent: String? = nil) -> String? {
+        guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
+        else { return nil }
+        var cmd = AgentSessionLocator.locateBlock(path: path, since: since,
+                                                  agent: agent)
+        // iconv -c drops the orphan bytes a byte-cap cut can leave mid
+        // UTF-8 sequence — a strict decode downstream used to collapse the
+        // whole response.
+        cmd += "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
+        if agent == nil || agent == "claude" {
+            // The pq file is a PreToolUse hook's dump of a PENDING
+            // AskUserQuestion (see the guest agent's _seed_question_hooks):
+            // Claude Code doesn't write the assistant turn to the transcript
+            // until the question is answered, so this is the only way the
+            // window can show the question while it's actually being asked.
+            // tr strips newlines so a pretty-printed dump still parses as one
+            // transcript line. The pq name stays LOGICAL-path-encoded — the
+            // hook derives it from $(pwd), which keeps the symlink.
+            let enc2 = path.replacingOccurrences(of: ".", with: "-")
+                .replacingOccurrences(of: "/", with: "-")
+            let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
+            cmd += "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
+                + "then echo; tr -d '\\n' < \(pq); echo; fi"
+        }
+        return cmd
     }
 
     /// The guest command that dumps a task session's FULL transcript —
-    /// project dir by worktree-slug glob (transcripts live under
-    /// ~/.claude/projects, so this works long after the worktree itself
-    /// was merged away), with the plain-tab marker fallback. The home is
-    /// a persistent ext4 image, so this is readable for as long as the
-    /// workspace exists — the board's Done cards read it on demand.
-    nonisolated static func taskTranscriptCommand(branch: String) -> String? {
+    /// session store keyed by worktree slug where the tool allows it
+    /// (transcripts live in per-tool stores under the home, so this works
+    /// long after the worktree itself was merged away), with the plain-tab
+    /// marker fallback through the tab's cwd. The home is a persistent
+    /// ext4 image, so this is readable for as long as the workspace exists
+    /// — the board's Done cards read it on demand. `agent` picks the
+    /// store; each task records the tool it ran.
+    nonisolated static func taskTranscriptCommand(
+        branch: String, agent: Profile.Tool = .claude) -> String? {
         guard branch.hasPrefix("wt/") else { return nil }
         let slug = String(branch.dropFirst(3))
         guard !slug.isEmpty,
               slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" })
         else { return nil }
-        return "d=$(ls -td ~/.claude/projects/*-\(slug) 2>/dev/null | head -1); "
-            + "if [ -z \"$d\" ]; then "
-            + "cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
+        // The tab's cwd through the wt/ marker — how every store copes
+        // with a NON-REPO run (plain tab at the automation's own path,
+        // where nothing is named after the slug). Only works while the
+        // tab still exists.
+        let markerCwd =
+            "cwd=$(tmux list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
             + "2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); "
-            + "if [ -n \"$cwd\" ]; then "
-            // Claude's real project-dir rule (flatten every non-alnum, keyed
-            // off the PHYSICAL path) first; the old two encodings after, for
-            // transcripts of older sessions.
-            + "rc=$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\"); "
-            + "e1=$(printf %s \"$cwd\" | tr -c 'a-zA-Z0-9' '-'); "
-            + "e2=$(printf %s \"$rc\" | tr -c 'a-zA-Z0-9' '-'); "
-            + "e3=$(printf %s \"$cwd\" | tr / -); e4=$(printf %s \"$cwd\" | tr ./ --); "
-            + "d=$(ls -td \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
-            + "\"$HOME/.claude/projects/$e3\" \"$HOME/.claude/projects/$e4\" "
-            + "2>/dev/null | head -1); fi; fi; "
-            + "f=$(ls -t \"$d\"/*.jsonl 2>/dev/null | head -1); "
-            + "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi"
+        let emit = "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" "
+            + "| iconv -f UTF-8 -t UTF-8 -c; fi"
+        switch agent {
+        case .claude:
+            return "d=$(ls -td ~/.claude/projects/*-\(slug) 2>/dev/null | head -1); "
+                + "if [ -z \"$d\" ]; then "
+                + markerCwd
+                + "if [ -n \"$cwd\" ]; then "
+                // Claude's real project-dir rule (flatten every non-alnum, keyed
+                // off the PHYSICAL path) first; the old two encodings after, for
+                // transcripts of older sessions.
+                + "rc=$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\"); "
+                + "e1=$(printf %s \"$cwd\" | tr -c 'a-zA-Z0-9' '-'); "
+                + "e2=$(printf %s \"$rc\" | tr -c 'a-zA-Z0-9' '-'); "
+                + "e3=$(printf %s \"$cwd\" | tr / -); e4=$(printf %s \"$cwd\" | tr ./ --); "
+                + "d=$(ls -td \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
+                + "\"$HOME/.claude/projects/$e3\" \"$HOME/.claude/projects/$e4\" "
+                + "2>/dev/null | head -1); fi; fi; "
+                + "f=$(ls -t \"$d\"/*.jsonl 2>/dev/null | head -1); "
+                + emit
+        case .kimi:
+            // Workspace bucket by slug glob (a worktree's basename IS the
+            // slug, "-N" when the guest deduped it); the cwd-derived
+            // slug+hash covers non-repo runs. Main-agent journal only,
+            // newest session wins.
+            return "d=$(ls -td ~/.kimi-code/sessions/wd_\(slug)_* "
+                + "~/.kimi-code/sessions/wd_\(slug)-[0-9]*_* 2>/dev/null | head -1); "
+                + "if [ -z \"$d\" ]; then "
+                + markerCwd
+                + "if [ -n \"$cwd\" ]; then "
+                + "kb=$(basename \"$cwd\" | tr 'A-Z' 'a-z' "
+                + "| sed -E 's/[^a-z0-9._-]+/-/g;s/^-+//;s/-+$//' "
+                + "| cut -c1-40 | sed -E 's/-+$//'); "
+                + "case \"$kb\" in ''|.|..) kb=workspace;; esac; "
+                + "kh=$(printf %s \"$cwd\" | sha256sum | cut -c1-12); "
+                + "kr=$(printf %s \"$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\")\" "
+                + "| sha256sum | cut -c1-12); "
+                + "d=$(ls -td \"$HOME/.kimi-code/sessions/wd_${kb}_$kh\" "
+                + "\"$HOME/.kimi-code/sessions/wd_${kb}_$kr\" 2>/dev/null | head -1); fi; fi; "
+                + "f=$(find \"$d\" \\( -path '*/agents/main/wire.jsonl' "
+                + "-o \\( -name wire.jsonl ! -path '*/agents/*' \\) \\) 2>/dev/null "
+                + "| xargs -r ls -t 2>/dev/null | head -1); "
+                + emit
+        case .codex:
+            // Rollouts are date-keyed; match by the session_meta cwd — the
+            // tab's exact cwd when the tab still exists, a "/<slug>" path
+            // suffix afterwards (the worktree's basename is the slug).
+            return markerCwd
+                + "rc=$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\"); f=\"\"; "
+                + "for c in $(find \"$HOME/.codex/sessions\" -name 'rollout-*.jsonl' "
+                + "2>/dev/null | xargs -r ls -t 2>/dev/null | head -48); do "
+                + "if [ -n \"$cwd\" ]; then head -c 8192 \"$c\" 2>/dev/null "
+                + "| grep -qF -e \"\\\"cwd\\\":\\\"$cwd\\\"\" -e \"\\\"cwd\\\":\\\"$rc\\\"\" "
+                + "&& { f=\"$c\"; break; }; "
+                + "else head -c 8192 \"$c\" 2>/dev/null "
+                + "| grep -qE '\"cwd\":\"[^\"]*/\(slug)(-[0-9]+)?\"' "
+                + "&& { f=\"$c\"; break; }; fi; done; "
+                + emit
+        case .grok:
+            // Per-cwd store: exact percent-encoded cwd while the tab
+            // exists; the encoded name ends in "%2F<slug>" afterwards.
+            return markerCwd
+                + "f=\"\"; if [ -n \"$cwd\" ]; then "
+                + "eg=$(python3 -c 'import urllib.parse,sys;"
+                + "print(urllib.parse.quote(sys.argv[1],safe=\"\"))' \"$cwd\" 2>/dev/null); "
+                + "er=$(python3 -c 'import urllib.parse,sys;"
+                + "print(urllib.parse.quote(sys.argv[1],safe=\"\"))' "
+                + "\"$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\")\" 2>/dev/null); "
+                + "[ -n \"$eg$er\" ] && f=$(find ${eg:+\"$HOME/.grok/sessions/$eg\"} "
+                + "${er:+\"$HOME/.grok/sessions/$er\"} -maxdepth 2 -name updates.jsonl "
+                + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); fi; "
+                + "if [ -z \"$f\" ]; then "
+                + "d=$(ls -td \"$HOME/.grok/sessions/\"*%2F\(slug) "
+                + "\"$HOME/.grok/sessions/\"*%2F\(slug)-[0-9]* 2>/dev/null | head -1); "
+                + "[ -n \"$d\" ] && f=$(find \"$d\" -maxdepth 2 -name updates.jsonl "
+                + "2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); fi; "
+                + emit
+        }
     }
 
     /// The guest command that prints the age (seconds) of the newest write
@@ -1799,43 +1997,40 @@ enum CodingTaskEngine {
             + "tmux send-keys -t bromure:\(tabIndex) Enter"
     }
 
-    /// The guest command that tails a plan session's live Claude transcript.
-    /// The planner runs IN the task's configured directory, so the project
-    /// dir is derived from that path the way Claude encodes it ("/" and "."
-    /// become "-"); `since` (epoch seconds) skips transcripts of earlier
-    /// sessions in the same directory. Output is capped so a long session
-    /// stays cheap to poll. Nil when the path has characters we won't quote.
+    /// The guest command that tails a plan session's live agent transcript.
+    /// The agent runs IN the task's configured directory, so the session
+    /// store entry is derived from that path the way each tool encodes it
+    /// (`AgentSessionLocator`); `since` (epoch seconds) skips transcripts
+    /// of earlier sessions in the same directory. Output is capped so a
+    /// long session stays cheap to poll. Nil when the path has characters
+    /// we won't quote.
     /// Mirrors the macOS engine's copy, with one fat-client-only twist: the
     /// pending-question (pq) file is keyed by the guest's LOGICAL `$(pwd)`, but
     /// the reader only knows tmux's PHYSICAL path, so for a symlinked workspace
     /// the exact name misses. We fall back to the freshest pq written in the
     /// last few minutes (one plan runs at a time per VM), so a live planning
     /// question still surfaces.
-    nonisolated static func planTranscriptCommand(guestCwd: String, since: Int) -> String? {
-        var path = guestCwd
-        while path.count > 1 && path.hasSuffix("/") { path = String(path.dropLast()) }
-        let allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            + "0123456789-_./+ "
-        guard !path.isEmpty, path.allSatisfy({ allowed.contains($0) }) else { return nil }
-        let enc1 = path.replacingOccurrences(of: "/", with: "-")
-        let enc2 = path.replacingOccurrences(of: ".", with: "-")
-            .replacingOccurrences(of: "/", with: "-")
-        let legacy = (enc1 == enc2 ? [enc1] : [enc1, enc2])
-            .map { "\"$HOME/.claude/projects/\($0)\"" }.joined(separator: " ")
-        let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
-        return "d='\(path)'; r=$(readlink -f \"$d\" 2>/dev/null || printf %s \"$d\"); "
-            + "e1=$(printf %s \"$d\" | tr -c 'a-zA-Z0-9' '-'); "
-            + "e2=$(printf %s \"$r\" | tr -c 'a-zA-Z0-9' '-'); "
-            + "f=$(find \"$HOME/.claude/projects/$e1\" \"$HOME/.claude/projects/$e2\" "
-            + "\(legacy) -maxdepth 1 -name '*.jsonl' -newermt @\(since) "
-            + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
-            + "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
-            + "q=\(pq); "
-            + "if [ ! -f \"$q\" ]; then n=$(date +%s); "
-            + "q=$(find \"$HOME/.bromure\" -maxdepth 1 -name 'pq-*.json' "
-            + "-newermt @$((n-300)) 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); fi; "
-            + "if [ -n \"$q\" ] && [ -n \"$(find \"$q\" -newermt @\(since) 2>/dev/null)\" ]; "
-            + "then echo; tr -d '\\n' < \"$q\"; echo; fi"
+    nonisolated static func planTranscriptCommand(guestCwd: String, since: Int,
+                                                  agent: String? = nil) -> String? {
+        guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
+        else { return nil }
+        var cmd = AgentSessionLocator.locateBlock(path: path, since: since,
+                                                  agent: agent)
+        cmd += "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
+        if agent == nil || agent == "claude" {
+            // The pq dump is Claude's pending AskUserQuestion — no other
+            // tool writes one.
+            let enc2 = path.replacingOccurrences(of: ".", with: "-")
+                .replacingOccurrences(of: "/", with: "-")
+            let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
+            cmd += "q=\(pq); "
+                + "if [ ! -f \"$q\" ]; then n=$(date +%s); "
+                + "q=$(find \"$HOME/.bromure\" -maxdepth 1 -name 'pq-*.json' "
+                + "-newermt @$((n-300)) 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); fi; "
+                + "if [ -n \"$q\" ] && [ -n \"$(find \"$q\" -newermt @\(since) 2>/dev/null)\" ]; "
+                + "then echo; tr -d '\\n' < \"$q\"; echo; fi"
+        }
+        return cmd
     }
 
     /// The guest command that answers a live AskUserQuestion picker by typing

@@ -40,6 +40,19 @@ enum BACEnrollmentStore {
     static func loadInstallToken() -> String? { nil }
 }
 
+/// The egress firewall model lives in SandboxEngine (macOS-only), and the
+/// shared Profile / guardrails files reference it. The fat client never
+/// ENFORCES egress rules — the host does — so the stand-in only has to
+/// carry the field through the mirrored profile: parsing always yields
+/// the allow-all placeholder.
+public struct EgressPolicy: Sendable, Equatable, Codable {
+    public static let allowAll = EgressPolicy()
+    public static func parse(_ rules: String) throws -> EgressPolicy { allowAll }
+    public var isActive: Bool { false }
+    public func permitsMethod(hostnames: [String], port: UInt16,
+                              method: String) -> Bool { true }
+}
+
 /// The host-side config-file scanner (ConfigScan.swift) walks the Mac's
 /// dotfiles and is macOS-only. The mirrored editor needs exactly one helper
 /// from it — the "N setting(s)" subtitle count for imported config files —

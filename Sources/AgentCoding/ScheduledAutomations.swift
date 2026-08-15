@@ -1576,6 +1576,7 @@ final class ScheduledAutomationEngine {
         let cloneID = run.runProfileID
         let runID = run.id
         let automationID = automation.id
+        let tool = automation.tool
         Task { [weak self] in
             // A done with background subagents still running isn't done —
             // settle on transcript quiescence before stamping, chaining,
@@ -1604,7 +1605,7 @@ final class ScheduledAutomationEngine {
             // worktree (with the guest-side transcript in it), and a
             // clone-first run's whole VM is destroyed moments later.
             await delegate.pullAutomationTranscript(
-                profileID: profileID, branch: branch, runID: runID)
+                profileID: profileID, branch: branch, runID: runID, tool: tool)
             guard closeWhenDone else { return }
             _ = delegate.automationWorktreeCommand(
                 profileNameOrID: profileID.uuidString, action: "finish", args: [branch])

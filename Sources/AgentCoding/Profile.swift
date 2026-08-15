@@ -1,5 +1,10 @@
 import Foundation
+// The iOS fat client compiles this file without SandboxEngine (macOS-only:
+// Virtualization et al.) — PlatformStubs.swift supplies the EgressPolicy
+// stand-in there.
+#if canImport(SandboxEngine)
 import SandboxEngine
+#endif
 
 /// Preset accent colors for visual identification in the profile picker.
 public enum ProfileColor: String, Codable, CaseIterable, Equatable, Sendable {

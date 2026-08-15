@@ -3250,7 +3250,13 @@ struct ProfileEditorView: View {
                 }
 
                 Divider().padding(.vertical, 4)
+                // The pf-rules table editor needs the real EgressPolicy
+                // model (SandboxEngine, macOS-only). The fat client
+                // mirrors profiles but neither edits nor enforces egress
+                // rules, so the pane simply omits the table there.
+                #if os(macOS)
                 EgressRulesEditor(pfText: $draft.egressRules)
+                #endif
 
                 VStack(alignment: .leading, spacing: 2) {
                     Toggle("Disable transparent interception", isOn: $draft.disableTransparentProxy)

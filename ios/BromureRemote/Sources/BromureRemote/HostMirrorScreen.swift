@@ -398,7 +398,8 @@ struct CodingBoardScreen: View {
             TranscriptScreen(
                 title: controller.taskStore.task(t.id)?.title ?? "Task",
                 subtitle: nil,
-                fetch: { await controller.fetchTaskTranscript(t.id) })
+                fetch: { await controller.fetchTaskTranscript(t.id) },
+                agent: controller.taskStore.task(t.id)?.tool.rawValue)
         }
     }
 }
@@ -413,6 +414,9 @@ struct TranscriptScreen: View {
     let title: String
     let subtitle: String?
     let fetch: () async -> Data?
+    /// Canonical agent kind of the tool that wrote the transcript (the
+    /// task's / automation's tool); nil sniffs the format from the lines.
+    var agent: String? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var items: [TranscriptItem]?
     @State private var failed = false
@@ -451,7 +455,7 @@ struct TranscriptScreen: View {
         }
         .task {
             if let data = await fetch(), !data.isEmpty {
-                items = ClaudeTranscriptParser.parse(data)
+                items = AgentTranscript.parse(data, agent: agent)
             } else {
                 failed = true
             }
@@ -500,7 +504,8 @@ struct AutomationsBoardScreen: View {
             TranscriptScreen(
                 title: controller.automationStore.automation(run.automationID)?.name ?? "Automation Run",
                 subtitle: run.detail,
-                fetch: { await controller.fetchRunTranscript(run.id) })
+                fetch: { await controller.fetchRunTranscript(run.id) },
+                agent: controller.automationStore.automation(run.automationID)?.tool.rawValue)
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {

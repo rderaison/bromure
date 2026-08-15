@@ -43,7 +43,8 @@ final class TaskTranscriptWindowManager {
                 guard let self, let t = self.context.store()?.task(taskID)
                 else { return nil }
                 return await self.context.fetch(t)
-            })
+            },
+            agent: task.tool.rawValue)
 
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 640),
@@ -76,6 +77,9 @@ struct TaskTranscriptView: View {
     let workspaceName: String
     let accentHex: String
     let fetch: () async -> String?
+    /// Canonical agent kind of the tool that wrote the transcript
+    /// (task.tool); nil sniffs the format.
+    var agent: String? = nil
 
     private enum State {
         case loading
@@ -139,8 +143,8 @@ struct TaskTranscriptView: View {
                 state = .unavailable
                 return
             }
-            let parsed = await Task.detached(priority: .userInitiated) {
-                ClaudeTranscriptParser.parse(Data(raw.utf8))
+            let parsed = await Task.detached(priority: .userInitiated) { [agent] in
+                AgentTranscript.parse(Data(raw.utf8), agent: agent)
             }.value
             state = parsed.isEmpty ? .unavailable : .loaded(parsed)
         }

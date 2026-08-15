@@ -427,6 +427,14 @@ private struct TerminalsPane: View {
         return BromureIcons.agentKind(forLabel: tab.shownLabel) != nil
     }
 
+    /// WHICH agent this tab runs ("claude" / "codex" / "grok" / "kimi" / …) —
+    /// the reader's locator + parser hint. nil (plain shell, or a worktree
+    /// whose label hasn't resolved yet) makes the locator search every
+    /// store and the parser sniff the format, so the reader still works.
+    @MainActor private func agentKind(_ tab: TabsModel.Tab?) -> String? {
+        tab.flatMap { BromureIcons.agentKind(forLabel: $0.shownLabel) }
+    }
+
     /// Non-agent tabs are always the raw terminal (and get no toggle). An agent
     /// tab defaults to the reader ONLY once a transcript actually exists — a
     /// freshly-typed `claude` sitting on its "Claude can make mistakes…" splash
@@ -499,10 +507,11 @@ private struct TerminalsPane: View {
                         GeometryReader { geo in
                             TranscriptReaderView(controller: controller, profileID: profileID,
                                                  window: win, guestCwd: guestCwd(for: win),
+                                                 agent: agentKind(currentTab),
                                                  since: transcriptSince, store: transcripts,
                                                  bottomInset: keyboardOverlap(with: geo.frame(in: .global)))
                         }
-                        .id("reader-\(profileID)-\(win)")
+                        .id("reader-\(profileID)-\(win)-\(agentKind(currentTab) ?? "?")")
                         .ignoresSafeArea(.keyboard, edges: .bottom)
                     }
                 }
@@ -619,18 +628,24 @@ private struct TerminalsPane: View {
 
     private var presencePollKey: String {
         let win = effectiveWindow ?? -1
-        return "\(win)-\(isAgentic(currentTab))-\(effectiveWindow.flatMap { guestCwd(for: $0) } ?? "")"
+        // The agent kind re-keys the poll: a label that resolves after the
+        // fact ("claude" → "Fix the tests (codex)") must rebuild the store
+        // locator, or the poll keeps watching the wrong session store.
+        return "\(win)-\(isAgentic(currentTab))-\(agentKind(currentTab) ?? "?")-"
+            + "\(effectiveWindow.flatMap { guestCwd(for: $0) } ?? "")"
     }
 
     private func pollTranscriptPresence() async {
+        let agent = agentKind(currentTab)
         guard let win = effectiveWindow, isAgentic(currentTab),
               !transcriptPresent.contains(win),
               let cwd = guestCwd(for: win), !cwd.isEmpty,
-              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: transcriptSince)
+              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: transcriptSince,
+                                                               agent: agent)
         else { return }
         while !Task.isCancelled {
             if let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15) {
-                let parsed = ClaudeTranscriptParser.parse(Data(raw.utf8))
+                let parsed = AgentTranscript.parse(Data(raw.utf8), agent: agent)
                 if !parsed.isEmpty {
                     transcripts.items[win] = parsed          // seed the reader's cache
                     transcripts.everLoaded.insert(win)
@@ -787,6 +802,9 @@ private struct TranscriptReaderView: View {
     /// sent, so the conversation lands in the right agent tab.
     let window: Int
     let guestCwd: String?
+    /// Canonical agent kind of the tool this tab runs — locator + parser
+    /// hint; nil searches every session store and sniffs the format.
+    let agent: String?
     /// Epoch floor (this workspace's boot time) so a pre-reboot pending-question
     /// dump or an older session's transcript isn't tailed as if it were live —
     /// see TerminalsPane.transcriptSince.
@@ -832,7 +850,10 @@ private struct TranscriptReaderView: View {
         // Re-key on `since` as well as the cwd: a reboot bumps the boot-time
         // floor, and the poll must rebuild its command to stop tailing the
         // pre-reboot pending-question dump (poll() captures `since` once).
-        .task(id: "\(guestCwd ?? "")\u{1f}\(since)") { await poll() }
+        // The agent kind re-keys it too — the call site remounts on a kind
+        // change anyway (its .id carries the kind), so this is belt and
+        // braces for a future caller that doesn't.
+        .task(id: "\(guestCwd ?? "")\u{1f}\(since)\u{1f}\(agent ?? "?")") { await poll() }
     }
 
     // MARK: Composer + image attach
@@ -923,13 +944,13 @@ private struct TranscriptReaderView: View {
     @ViewBuilder private var transcript: some View {
         if guestCwd?.isEmpty ?? true {
             unavailable("Not a project folder",
-                        "This terminal isn't running in a folder with a Claude session.")
+                        "This terminal isn't running in a folder with an agent session.")
         } else if !loaded {
             ProgressView("Loading transcript…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if items.isEmpty {
             unavailable("No transcript",
-                        "No Claude session was found for this terminal yet — send a message to get started.")
+                        "No agent session was found for this terminal yet — send a message to get started.")
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -1109,9 +1130,11 @@ private struct TranscriptReaderView: View {
     }
 
     private func poll() async {
-        FatClientLog.log("reader win=\(window) poll start cwd=\(guestCwd ?? "nil")")
+        FatClientLog.log("reader win=\(window) poll start cwd=\(guestCwd ?? "nil") "
+            + "agent=\(agent ?? "?")")
         guard let cwd = guestCwd, !cwd.isEmpty,
-              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since)
+              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since,
+                                                               agent: agent)
         else {
             FatClientLog.log("reader win=\(window) no cwd/cmd → loaded")
             loaded = true; store.everLoaded.insert(window); return
@@ -1124,7 +1147,7 @@ private struct TranscriptReaderView: View {
                 FatClientLog.log("reader win=\(window) guestExec \(raw == nil ? "FAILED/timeout" : "OK \(raw!.count) chars")")
             }
             if let raw {
-                let parsed = ClaudeTranscriptParser.parse(Data(raw.utf8))
+                let parsed = AgentTranscript.parse(Data(raw.utf8), agent: agent)
                 items = parsed
                 store.items[window] = parsed          // survive a reader remount
             }
@@ -1141,10 +1164,11 @@ private struct TranscriptReaderView: View {
     /// forced this same fresh read).
     private func refreshNow() async {
         guard let cwd = guestCwd, !cwd.isEmpty,
-              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since),
+              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since,
+                                                               agent: agent),
               let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15)
         else { return }
-        let parsed = ClaudeTranscriptParser.parse(Data(raw.utf8))
+        let parsed = AgentTranscript.parse(Data(raw.utf8), agent: agent)
         await MainActor.run { items = parsed; store.items[window] = parsed }
     }
 }

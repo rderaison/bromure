@@ -1,5 +1,9 @@
 import Foundation
+// The iOS fat client compiles this file without SandboxEngine (macOS-only) —
+// PlatformStubs.swift supplies the EgressPolicy stand-in there.
+#if canImport(SandboxEngine)
 import SandboxEngine
+#endif
 
 /// Guardrails: strips destructive operations from the protocols the agent
 /// speaks, enforced **host-side in the MITM** so a misbehaving (or compromised)

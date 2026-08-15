@@ -177,7 +177,9 @@ final class PlanSessionWindowManager {
         }
         if let raw = await context.fetchTranscript(task) {
             let parsed = await Task.detached(priority: .userInitiated) {
-                ClaudeTranscriptParser.parse(Data(raw.utf8))
+                // Sniffed: planning is Claude-driven today, but the format
+                // check is free and archived shapes vary.
+                AgentTranscript.parse(Data(raw.utf8))
             }.value
             // Compare CONTENT, not count: mid-turn, an answered question
             // round and the next round both exist only as the pq hook dump,

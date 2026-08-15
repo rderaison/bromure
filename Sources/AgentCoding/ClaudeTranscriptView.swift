@@ -161,7 +161,8 @@ enum ClaudeTranscriptParser {
 
     /// The one-liner shown on a collapsed tool call — the command for shells,
     /// the path for file tools, the first primitive value otherwise.
-    private static func toolSummary(name: String, input: [String: Any]) -> String {
+    /// (fileprivate: the Codex/Grok/Kimi parsers below reuse it.)
+    fileprivate static func toolSummary(name: String, input: [String: Any]) -> String {
         for key in ["command", "file_path", "path", "pattern", "query", "url",
                     "prompt", "description"] {
             if let v = input[key] as? String, !v.isEmpty {
@@ -173,18 +174,543 @@ enum ClaudeTranscriptParser {
     }
 
     /// tool_result content: bare string, or an array of text blocks.
-    private static func resultText(_ content: Any?) -> String {
+    fileprivate static func resultText(_ content: Any?) -> String {
         if let s = content as? String { return s }
         guard let blocks = content as? [[String: Any]] else { return "" }
         return blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")
     }
 
-    private static func prettyJSON(_ obj: [String: Any]) -> String {
+    fileprivate static func prettyJSON(_ obj: [String: Any]) -> String {
         guard JSONSerialization.isValidJSONObject(obj),
               let data = try? JSONSerialization.data(
                 withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
               let s = String(data: data, encoding: .utf8) else { return "" }
         return s
+    }
+}
+
+// MARK: - Multi-agent dispatch
+
+/// Entry point for every transcript render: picks the parser matching the
+/// agent that wrote the file. `agent` is a canonical `BromureIcons` agent
+/// kind ("claude" / "codex" / "grok" / "kimi") when the caller knows it —
+/// a tab label, a task's tool — and nil (or an agent without a reader)
+/// sniffs the format from the lines themselves, so archived transcripts
+/// keep rendering after the caller lost track of which tool wrote them.
+enum AgentTranscript {
+    static func parse(_ data: Data, agent: String? = nil) -> [TranscriptItem] {
+        let kind: String
+        if let agent, ["claude", "codex", "grok", "kimi"].contains(agent) {
+            kind = agent
+        } else {
+            kind = sniff(data)
+        }
+        switch kind {
+        case "codex": return CodexTranscriptParser.parse(data)
+        case "grok": return GrokTranscriptParser.parse(data)
+        case "kimi": return KimiTranscriptParser.parse(data)
+        default: return ClaudeTranscriptParser.parse(data)
+        }
+    }
+
+    /// Which agent wrote this file, from line shapes alone. Scans until a
+    /// line is decisive; Claude is the default (it was the only format for
+    /// a long time, so undecidable files are overwhelmingly Claude's).
+    /// A tail-cut read may start mid-line — unparseable lines are skipped,
+    /// exactly as the parsers themselves do.
+    static func sniff(_ data: Data) -> String {
+        guard let text = String(data: data, encoding: .utf8) else { return "claude" }
+        for line in text.split(whereSeparator: \.isNewline).prefix(200) {
+            guard let obj = try? JSONSerialization.jsonObject(
+                with: Data(line.utf8)) as? [String: Any] else { continue }
+            // Grok: persisted ACP notifications — {"method":"session/update",
+            // "params":{"update":{...}}} (or the "_x.ai/…" extension form).
+            if let method = obj["method"] as? String,
+               method.hasSuffix("session/update") { return "grok" }
+            if let params = obj["params"] as? [String: Any],
+               params["update"] is [String: Any] { return "grok" }
+            let type = obj["type"] as? String ?? ""
+            // Kimi: wire-journal op types are dotted ("turn.prompt",
+            // "context.append_message"); line 1 is a protocol_version stamp.
+            if type.contains(".") { return "kimi" }
+            if type == "metadata", obj["protocol_version"] != nil { return "kimi" }
+            // Codex: {timestamp, type, payload} rollout envelope.
+            if obj["payload"] is [String: Any],
+               ["session_meta", "response_item", "event_msg", "turn_context",
+                "compacted"].contains(type) { return "codex" }
+            // Claude: {type: user|assistant, message: {...}}.
+            if type == "user" || type == "assistant", obj["message"] != nil {
+                return "claude"
+            }
+            // Pre-envelope Codex rollouts: bare ResponseItem objects.
+            if type == "message", obj["role"] is String, obj["message"] == nil {
+                return "codex"
+            }
+        }
+        return "claude"
+    }
+}
+
+// MARK: - Codex parser
+
+/// Tolerant reader for Codex CLI rollout files
+/// (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`). Lines are
+/// `{timestamp, type, payload}` envelopes; the conversation lives in
+/// `response_item` payloads. `event_msg` lines mirror the same turns for
+/// the UI — parsing both would duplicate every message, so they're kept
+/// only as a fallback for files that carry no response_item conversation
+/// (newer "paginated" history mode). Unknown types are skipped, not fatal.
+enum CodexTranscriptParser {
+    static func parse(_ data: Data) -> [TranscriptItem] {
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        var primary: [TranscriptItem.Kind] = []
+        var fallback: [TranscriptItem.Kind] = []
+        var stamps: [Date?] = []
+        var fallbackStamps: [Date?] = []
+        var toolNames: [String: String] = [:]
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let obj = try? JSONSerialization.jsonObject(
+                with: Data(line.utf8)) as? [String: Any] else { continue }
+            let stamp = (obj["timestamp"] as? String).flatMap {
+                iso.date(from: $0) ?? isoPlain.date(from: $0)
+            }
+            switch obj["type"] as? String ?? "" {
+            case "response_item":
+                guard let payload = obj["payload"] as? [String: Any] else { continue }
+                for kind in responseItemKinds(payload, toolNames: &toolNames) {
+                    primary.append(kind)
+                    stamps.append(stamp)
+                }
+            case "event_msg":
+                guard let payload = obj["payload"] as? [String: Any] else { continue }
+                for kind in eventKinds(payload) {
+                    fallback.append(kind)
+                    fallbackStamps.append(stamp)
+                }
+            case "message", "reasoning", "function_call", "function_call_output",
+                 "local_shell_call", "custom_tool_call", "custom_tool_call_output",
+                 "web_search_call":
+                // Early-2025 rollouts: bare ResponseItems, no envelope.
+                guard obj["payload"] == nil else { continue }
+                for kind in responseItemKinds(obj, toolNames: &toolNames) {
+                    primary.append(kind)
+                    stamps.append(stamp)
+                }
+            default:
+                continue
+            }
+        }
+        let hasConversation = primary.contains {
+            if case .userText = $0 { return true }
+            if case .assistantText = $0 { return true }
+            return false
+        }
+        let (kinds, dates) = hasConversation || fallback.isEmpty
+            ? (primary, stamps) : (fallback, fallbackStamps)
+        return kinds.enumerated().map {
+            TranscriptItem(id: $0.offset, kind: $0.element, timestamp: dates[$0.offset])
+        }
+    }
+
+    private static func responseItemKinds(
+        _ payload: [String: Any],
+        toolNames: inout [String: String]) -> [TranscriptItem.Kind] {
+        switch payload["type"] as? String ?? "" {
+        case "message":
+            let role = payload["role"] as? String ?? ""
+            guard role == "user" || role == "assistant" else { return [] }
+            let text = (payload["content"] as? [[String: Any]] ?? [])
+                .compactMap { block -> String? in
+                    guard ["input_text", "output_text", "text"]
+                        .contains(block["type"] as? String ?? "") else { return nil }
+                    return block["text"] as? String
+                }
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Codex injects instructions and an environment dump as
+            // synthetic user turns — plumbing, not conversation.
+            guard !text.isEmpty, !text.hasPrefix("<user_instructions>"),
+                  !text.hasPrefix("<environment_context>") else { return [] }
+            return [role == "user" ? .userText(text) : .assistantText(text)]
+        case "reasoning":
+            // Readable thinking is the summary; raw CoT is usually only an
+            // opaque encrypted_content blob (plaintext content[] appears
+            // for providers that return it — take it when present).
+            var parts = (payload["summary"] as? [[String: Any]] ?? [])
+                .compactMap { $0["text"] as? String }
+            parts += (payload["content"] as? [[String: Any]] ?? [])
+                .compactMap { $0["text"] as? String }
+            let text = parts.joined(separator: "\n\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? [] : [.thinking(text)]
+        case "function_call":
+            let name = payload["name"] as? String ?? "tool"
+            if let id = payload["call_id"] as? String { toolNames[id] = name }
+            let argsString = payload["arguments"] as? String ?? ""
+            let args = (try? JSONSerialization.jsonObject(
+                with: Data(argsString.utf8))) as? [String: Any]
+            let summary = args.flatMap { shellSummary($0["command"]) }
+                ?? args.map { ClaudeTranscriptParser.toolSummary(name: name, input: $0) }
+                ?? String(argsString.prefix(200))
+            let detail = args.map { ClaudeTranscriptParser.prettyJSON($0) } ?? argsString
+            return [.toolUse(name: name, summary: summary, detail: detail)]
+        case "local_shell_call":
+            if let id = payload["call_id"] as? String { toolNames[id] = "shell" }
+            let action = payload["action"] as? [String: Any] ?? [:]
+            return [.toolUse(name: "shell",
+                             summary: shellSummary(action["command"]) ?? "",
+                             detail: ClaudeTranscriptParser.prettyJSON(action))]
+        case "custom_tool_call":
+            let name = payload["name"] as? String ?? "tool"
+            if let id = payload["call_id"] as? String { toolNames[id] = name }
+            let input = payload["input"] as? String ?? ""
+            return [.toolUse(name: name, summary: String(input.prefix(200)),
+                             detail: input)]
+        case "function_call_output", "custom_tool_call_output":
+            let tool = (payload["call_id"] as? String)
+                .flatMap { toolNames[$0] } ?? "tool"
+            let (content, isError) = outputText(payload["output"])
+            return [.toolResult(tool: tool, content: content, isError: isError)]
+        case "web_search_call":
+            let action = payload["action"] as? [String: Any] ?? [:]
+            return [.toolUse(name: "web_search",
+                             summary: action["query"] as? String ?? "",
+                             detail: "")]
+        default:
+            return []
+        }
+    }
+
+    /// The legacy-mode UI mirror of the same conversation (fallback only).
+    private static func eventKinds(_ payload: [String: Any]) -> [TranscriptItem.Kind] {
+        switch payload["type"] as? String ?? "" {
+        case "user_message":
+            // kind "user_instructions"/"environment_context" mark the same
+            // synthetic turns the response_item path filters by prefix.
+            let kind = payload["kind"] as? String ?? "plain"
+            guard kind == "plain" else { return [] }
+            let text = (payload["message"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? [] : [.userText(text)]
+        case "agent_message":
+            let text = (payload["message"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? [] : [.assistantText(text)]
+        case "agent_reasoning":
+            let text = (payload["text"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? [] : [.thinking(text)]
+        default:
+            return []
+        }
+    }
+
+    /// Codex shell commands are argv arrays, usually ["bash","-lc","…"] —
+    /// show the actual command line, not the wrapper.
+    private static func shellSummary(_ command: Any?) -> String? {
+        guard let argv = (command as? [Any])?.compactMap({ $0 as? String }),
+              !argv.isEmpty else { return nil }
+        let line: String
+        if argv.count >= 3, ["bash", "sh", "zsh"].contains(argv[0]),
+           ["-lc", "-c"].contains(argv[1]) {
+            line = argv[2...].joined(separator: " ")
+        } else {
+            line = argv.joined(separator: " ")
+        }
+        return line.count > 200 ? String(line.prefix(200)) + "…" : line
+    }
+
+    /// function_call_output "output": a plain string, an array of content
+    /// blocks, or a JSON-encoded {"output": …, "metadata": {exit_code}}.
+    private static func outputText(_ output: Any?) -> (String, Bool) {
+        if let blocks = output as? [[String: Any]] {
+            return (blocks.compactMap { $0["text"] as? String }
+                .joined(separator: "\n"), false)
+        }
+        guard let s = output as? String else { return ("", false) }
+        if let obj = (try? JSONSerialization.jsonObject(
+                with: Data(s.utf8))) as? [String: Any],
+           let inner = obj["output"] as? String {
+            let exit = (obj["metadata"] as? [String: Any])?["exit_code"] as? Int
+            return (inner, (exit ?? 0) != 0)
+        }
+        return (s, false)
+    }
+}
+
+// MARK: - Grok parser
+
+/// Tolerant reader for Grok CLI session files
+/// (`~/.grok/sessions/<pct-encoded-cwd>/<uuid>/updates.jsonl`) — a persisted
+/// ACP `session/update` stream. Message text arrives in chunks; consecutive
+/// chunks of the same kind are one message and get concatenated raw (chunk
+/// boundaries can fall mid-word). Unknown update kinds are skipped.
+enum GrokTranscriptParser {
+    static func parse(_ data: Data) -> [TranscriptItem] {
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        var items: [TranscriptItem] = []
+        var toolNames: [String: String] = [:]
+
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let obj = try? JSONSerialization.jsonObject(
+                    with: Data(line.utf8)) as? [String: Any],
+                  let params = obj["params"] as? [String: Any],
+                  let update = params["update"] as? [String: Any],
+                  let kind = update["sessionUpdate"] as? String else { continue }
+            let stamp = (obj["timestamp"] as? Double)
+                .map { Date(timeIntervalSince1970: $0) }
+
+            func add(_ kind: TranscriptItem.Kind) {
+                items.append(TranscriptItem(id: items.count, kind: kind,
+                                            timestamp: stamp))
+            }
+
+            switch kind {
+            case "user_message_chunk", "agent_message_chunk", "agent_thought_chunk":
+                guard let chunk = chunkText(update["content"]), !chunk.isEmpty
+                else { continue }
+                if let last = items.last,
+                   let merged = mergedKind(last.kind, chunkKind: kind, text: chunk) {
+                    items[items.count - 1].kind = merged
+                } else if kind == "user_message_chunk" {
+                    add(.userText(chunk))
+                } else if kind == "agent_message_chunk" {
+                    add(.assistantText(chunk))
+                } else {
+                    add(.thinking(chunk))
+                }
+            case "tool_call":
+                let name = update["title"] as? String
+                    ?? update["kind"] as? String ?? "tool"
+                if let id = update["toolCallId"] as? String { toolNames[id] = name }
+                let input = update["rawInput"] as? [String: Any]
+                add(.toolUse(
+                    name: name,
+                    summary: input.map {
+                        ClaudeTranscriptParser.toolSummary(name: name, input: $0)
+                    } ?? "",
+                    detail: input.map { ClaudeTranscriptParser.prettyJSON($0) } ?? ""))
+            case "tool_call_update":
+                // Streams keep updating a call until it settles; only the
+                // terminal status carries a result worth showing.
+                let status = update["status"] as? String ?? ""
+                guard status == "completed" || status == "failed" else { continue }
+                let tool = (update["toolCallId"] as? String)
+                    .flatMap { toolNames[$0] } ?? "tool"
+                var content = (update["content"] as? [[String: Any]] ?? [])
+                    .compactMap { item -> String? in
+                        switch item["type"] as? String ?? "" {
+                        case "content":
+                            return (item["content"] as? [String: Any])?["text"] as? String
+                        case "diff":
+                            return (item["path"] as? String).map { "diff: \($0)" }
+                        default:
+                            return nil
+                        }
+                    }
+                    .joined(separator: "\n")
+                if content.isEmpty {
+                    if let raw = update["rawOutput"] as? String {
+                        content = raw
+                    } else if let raw = update["rawOutput"] as? [String: Any] {
+                        content = ClaudeTranscriptParser.prettyJSON(raw)
+                    }
+                }
+                add(.toolResult(tool: tool, content: content,
+                                isError: status == "failed"))
+            default:
+                continue    // plan, turn_completed, hook_execution, retry_state, …
+            }
+        }
+        return trimmedTextItems(items)
+    }
+
+    /// ACP message chunks wrap text as {"type":"text","text":…}.
+    private static func chunkText(_ content: Any?) -> String? {
+        guard let block = content as? [String: Any],
+              block["type"] as? String == "text" else { return nil }
+        return block["text"] as? String
+    }
+
+    /// The continuation of the immediately-preceding item, or nil when the
+    /// chunk starts a new message.
+    private static func mergedKind(_ last: TranscriptItem.Kind, chunkKind: String,
+                                   text: String) -> TranscriptItem.Kind? {
+        switch (last, chunkKind) {
+        case (.userText(let s), "user_message_chunk"): return .userText(s + text)
+        case (.assistantText(let s), "agent_message_chunk"): return .assistantText(s + text)
+        case (.thinking(let s), "agent_thought_chunk"): return .thinking(s + text)
+        default: return nil
+        }
+    }
+
+    /// Chunked accumulation can leave stray edge whitespace — trim the text
+    /// kinds once assembled (mid-message whitespace is untouched).
+    fileprivate static func trimmedTextItems(_ items: [TranscriptItem]) -> [TranscriptItem] {
+        var out = items
+        var i = 0
+        while i < out.count {
+            switch out[i].kind {
+            case .userText(let s):
+                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if t.isEmpty { out.remove(at: i); continue }
+                out[i].kind = .userText(t)
+            case .assistantText(let s):
+                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if t.isEmpty { out.remove(at: i); continue }
+                out[i].kind = .assistantText(t)
+            case .thinking(let s):
+                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if t.isEmpty { out.remove(at: i); continue }
+                out[i].kind = .thinking(t)
+            default:
+                break
+            }
+            i += 1
+        }
+        return out.enumerated().map {
+            TranscriptItem(id: $0.offset, kind: $0.element.kind,
+                           timestamp: $0.element.timestamp)
+        }
+    }
+}
+
+// MARK: - Kimi parser
+
+/// Tolerant reader for Kimi Code wire journals
+/// (`~/.kimi-code/sessions/wd_*/session_*/agents/main/wire.jsonl`). The file
+/// is an op journal, not a message list: user turns arrive as whole
+/// `context.append_message` records, assistant output as streamed
+/// `context.append_loop_event` content parts and tool calls. Everything
+/// else (llm.request, usage.record, permission.*, …) is plumbing.
+enum KimiTranscriptParser {
+    static func parse(_ data: Data) -> [TranscriptItem] {
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        var items: [TranscriptItem] = []
+        var toolNames: [String: String] = [:]
+        /// tool.result events already shown, so a folded duplicate in a
+        /// later append_message (role "tool") isn't shown twice.
+        var seenResults: Set<String> = []
+        /// The step whose content parts the last text/thinking item is
+        /// accumulating — parts of the same step and type concatenate.
+        var lastPartStep: String?
+
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let obj = try? JSONSerialization.jsonObject(
+                with: Data(line.utf8)) as? [String: Any] else { continue }
+            let stamp = (obj["time"] as? Double)
+                .map { Date(timeIntervalSince1970: $0 / 1000) }
+
+            func add(_ kind: TranscriptItem.Kind) {
+                items.append(TranscriptItem(id: items.count, kind: kind,
+                                            timestamp: stamp))
+            }
+
+            switch obj["type"] as? String ?? "" {
+            case "context.append_message":
+                lastPartStep = nil
+                guard let message = obj["message"] as? [String: Any] else { continue }
+                let parts = message["content"] as? [[String: Any]] ?? []
+                switch message["role"] as? String ?? "" {
+                case "user":
+                    // Injections (system reminders, hook notices, compaction
+                    // summaries) share the user role; origin tells them apart.
+                    let origin = (message["origin"] as? [String: Any])?["kind"] as? String
+                    guard origin == nil || origin == "user" else { continue }
+                    let text = parts
+                        .compactMap { $0["text"] as? String }
+                        .joined(separator: "\n")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty, !text.hasPrefix("<system-reminder>")
+                    else { continue }
+                    add(.userText(text))
+                case "assistant":
+                    // Normally reconstructed from loop events, but tolerate
+                    // whole appended assistant messages (compacted files).
+                    for part in parts {
+                        if let think = part["think"] as? String, !think.isEmpty {
+                            add(.thinking(think))
+                        } else if let text = part["text"] as? String, !text.isEmpty {
+                            add(.assistantText(text))
+                        }
+                    }
+                    for call in message["toolCalls"] as? [[String: Any]] ?? [] {
+                        let name = call["name"] as? String ?? "tool"
+                        if let id = call["id"] as? String { toolNames[id] = name }
+                        let args = call["arguments"] as? String ?? ""
+                        add(.toolUse(name: name, summary: String(args.prefix(200)),
+                                     detail: args))
+                    }
+                case "tool":
+                    guard let id = message["toolCallId"] as? String,
+                          !seenResults.contains(id) else { continue }
+                    seenResults.insert(id)
+                    let text = parts.compactMap { $0["text"] as? String }
+                        .joined(separator: "\n")
+                    add(.toolResult(tool: toolNames[id] ?? "tool", content: text,
+                                    isError: message["isError"] as? Bool ?? false))
+                default:
+                    continue
+                }
+            case "context.append_loop_event":
+                guard let event = obj["event"] as? [String: Any] else { continue }
+                switch event["type"] as? String ?? "" {
+                case "content.part":
+                    guard let part = event["part"] as? [String: Any] else { continue }
+                    let step = event["stepUuid"] as? String
+                    if let think = part["think"] as? String, !think.isEmpty {
+                        if step != nil, step == lastPartStep,
+                           case .thinking(let s) = items.last?.kind {
+                            items[items.count - 1].kind = .thinking(s + think)
+                        } else {
+                            add(.thinking(think))
+                        }
+                    } else if let text = part["text"] as? String, !text.isEmpty {
+                        if step != nil, step == lastPartStep,
+                           case .assistantText(let s) = items.last?.kind {
+                            items[items.count - 1].kind = .assistantText(s + text)
+                        } else {
+                            add(.assistantText(text))
+                        }
+                    } else {
+                        continue    // image/audio parts — nothing to show
+                    }
+                    lastPartStep = step
+                case "tool.call":
+                    lastPartStep = nil
+                    let name = event["name"] as? String ?? "tool"
+                    if let id = event["toolCallId"] as? String { toolNames[id] = name }
+                    let args = event["args"] as? [String: Any]
+                    add(.toolUse(
+                        name: name,
+                        summary: args.map {
+                            ClaudeTranscriptParser.toolSummary(name: name, input: $0)
+                        } ?? "",
+                        detail: args.map { ClaudeTranscriptParser.prettyJSON($0) } ?? ""))
+                case "tool.result":
+                    lastPartStep = nil
+                    let result = event["result"] as? [String: Any] ?? [:]
+                    let id = event["toolCallId"] as? String
+                    if let id { seenResults.insert(id) }
+                    add(.toolResult(
+                        tool: id.flatMap { toolNames[$0] } ?? "tool",
+                        content: ClaudeTranscriptParser.resultText(result["output"]),
+                        isError: result["isError"] as? Bool ?? false))
+                default:
+                    continue    // step.begin / step.end / …
+                }
+            default:
+                // metadata, profile.bind, llm.*, usage.record, turn.*, … —
+                // plumbing. turn.prompt duplicates the user append_message.
+                lastPartStep = nil
+                continue
+            }
+        }
+        return GrokTranscriptParser.trimmedTextItems(items)
     }
 }
 
@@ -225,7 +751,9 @@ struct ClaudeTranscriptPane: View {
             let target = url
             let parsed = await Task.detached(priority: .userInitiated) { () -> [TranscriptItem]? in
                 guard let data = try? Data(contentsOf: target) else { return nil }
-                return ClaudeTranscriptParser.parse(data)
+                // Sniffed, not assumed: archived runs may have been driven
+                // by any of the supported agents.
+                return AgentTranscript.parse(data)
             }.value
             if let parsed { items = parsed } else { failed = true }
         }
