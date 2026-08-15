@@ -142,20 +142,28 @@ final class RemoteHostController {
             return
         }
         guard let urlString = reg["url"] as? String,
-              let port = reg["callbackPort"] as? Int, port > 0,
-              let ip = reg["vmIP"] as? String, !ip.isEmpty,
               let url = URL(string: urlString) else { return }
-        if registrationCallback?.port != port || registrationCallback?.vmIP != ip {
-            registrationCallback?.stop()
-            registrationCallback = RegistrationCallbackTunnel(
-                host: host, vmIP: ip, port: port)
-            registrationCallback?.start()
+        // Loopback-callback flows (Claude/Codex sign in via a localhost redirect)
+        // need a tunnel from our 127.0.0.1:port to the VM's port so the browser's
+        // callback reaches the CLI in the VM. Device-code flows (Grok's
+        // accounts.x.ai/oauth2/device, Kimi) have no callback — the CLI polls the
+        // provider for the token — so callbackPort is 0 and no tunnel is wanted.
+        // Either way we must OPEN the URL; only the tunnel is conditional.
+        if let port = reg["callbackPort"] as? Int, port > 0,
+           let ip = reg["vmIP"] as? String, !ip.isEmpty {
+            if registrationCallback?.port != port || registrationCallback?.vmIP != ip {
+                registrationCallback?.stop()
+                registrationCallback = RegistrationCallbackTunnel(
+                    host: host, vmIP: ip, port: port)
+                registrationCallback?.start()
+            }
         }
         // Open once per URL: /state repeats it every poll until sign-in lands.
         guard !openedRegistrationURLs.contains(urlString) else { return }
         openedRegistrationURLs.insert(urlString)
-        FatClientLog.log("remote registration: opening sign-in page locally, "
-            + "callback 127.0.0.1:\(port) -> \(ip):\(port)")
+        let tunnel = registrationCallback.map { "callback 127.0.0.1:\($0.port) -> \($0.vmIP):\($0.port)" }
+            ?? "device-code (no callback)"
+        FatClientLog.log("remote registration: opening sign-in page locally — \(tunnel)")
 #if os(macOS)
         NSWorkspace.shared.open(url)
 #else
