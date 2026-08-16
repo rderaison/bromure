@@ -37,6 +37,11 @@ final class RulesFileScanner: @unchecked Sendable {
         let severity: Severity
         let signal: String
         let detail: String
+        /// Where in the scanned text the signal was found, when known — used to
+        /// show just the offending section (with a little context) instead of
+        /// the whole file. Valid only against the exact string it was scanned
+        /// from; nil for aggregate signals.
+        var range: Range<String.Index>? = nil
     }
 
     private let lock = NSLock()
@@ -92,17 +97,33 @@ final class RulesFileScanner: @unchecked Sendable {
     /// No dedup/logging — the caller decides what to do.
     func detect(systemPrompt: String?) -> (source: String, preview: String)? {
         guard let systemPrompt, !systemPrompt.isEmpty else { return nil }
-        if !Self.scanHiddenUnicode(systemPrompt).isEmpty {
-            return ("the system prompt", Self.previewText(systemPrompt))
+        if let f = Self.scanHiddenUnicode(systemPrompt).first(where: { $0.severity == .high }) {
+            return ("the system prompt", Self.preview(systemPrompt, finding: f))
         }
         for span in Self.extractInstructionSpans(systemPrompt) {
             var findings = Self.scanHiddenUnicode(span.content)
             findings += Self.scanInstructionContent(span.content)
-            if findings.contains(where: { $0.severity == .high }) {
-                return (span.source, Self.previewText(span.content))
+            if let f = findings.first(where: { $0.severity == .high }) {
+                return (span.source, Self.preview(span.content, finding: f))
             }
         }
         return nil
+    }
+
+    /// The offending section of `content` — a window around the finding's
+    /// match (when located), rather than the whole file, so the ask/block
+    /// message points straight at what tripped the scanner.
+    private static func preview(_ content: String, finding: Finding) -> String {
+        guard let range = finding.range else { return previewText(content) }
+        let ctx = 300   // characters of surrounding context on each side
+        let lo = content.index(range.lowerBound, offsetBy: -ctx, limitedBy: content.startIndex)
+            ?? content.startIndex
+        let hi = content.index(range.upperBound, offsetBy: ctx, limitedBy: content.endIndex)
+            ?? content.endIndex
+        var s = String(content[lo..<hi])
+        if lo > content.startIndex { s = "…" + s }
+        if hi < content.endIndex { s += "…" }
+        return s
     }
 
     private static func previewText(_ s: String) -> String {
@@ -226,7 +247,14 @@ final class RulesFileScanner: @unchecked Sendable {
     /// don't carry zero-width joiners, bidi overrides, or Unicode tags.
     static func scanHiddenUnicode(_ text: String) -> [Finding] {
         var zeroWidth = 0, bidi = 0, tags = 0, otherFmt = 0
-        for scalar in text.unicodeScalars {
+        // Anchor the preview at the FIRST hidden char so the snippet shows the
+        // surrounding (visible) text where the payload is buried.
+        var firstHidden: String.Index?
+        let scalars = text.unicodeScalars
+        var i = scalars.startIndex
+        while i < scalars.endIndex {
+            let scalar = scalars[i]
+            var hidden = true
             switch scalar.value {
             case 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD:
                 zeroWidth += 1
@@ -238,27 +266,34 @@ final class RulesFileScanner: @unchecked Sendable {
                 // Other Unicode "format" (Cf) characters, excluding the
                 // ones already counted. These are the invisible-payload
                 // carriers; ordinary text has none.
-                if scalar.properties.generalCategory == .format {
-                    otherFmt += 1
-                }
+                if scalar.properties.generalCategory == .format { otherFmt += 1 }
+                else { hidden = false }
             }
+            if hidden, firstHidden == nil { firstHidden = i }
+            i = scalars.index(after: i)
+        }
+        let at: Range<String.Index>? = firstHidden.map {
+            $0 ..< (text.index($0, offsetBy: 1, limitedBy: text.endIndex) ?? text.endIndex)
         }
         var out: [Finding] = []
         if tags > 0 {
             out.append(Finding(severity: .high, signal: "unicode_tag_chars",
-                               detail: "\(tags) U+E00xx tag char(s) — invisible instruction payload"))
+                               detail: "\(tags) U+E00xx tag char(s) — invisible instruction payload",
+                               range: at))
         }
         if bidi > 0 {
             out.append(Finding(severity: .high, signal: "bidi_override",
-                               detail: "\(bidi) bidirectional control char(s) — text-direction obfuscation"))
+                               detail: "\(bidi) bidirectional control char(s) — text-direction obfuscation",
+                               range: at))
         }
         if zeroWidth > 0 {
             out.append(Finding(severity: .high, signal: "zero_width",
-                               detail: "\(zeroWidth) zero-width / soft-hyphen char(s) — hidden text"))
+                               detail: "\(zeroWidth) zero-width / soft-hyphen char(s) — hidden text",
+                               range: at))
         }
         if otherFmt > 0 {
             out.append(Finding(severity: .medium, signal: "format_chars",
-                               detail: "\(otherFmt) other invisible format char(s)"))
+                               detail: "\(otherFmt) other invisible format char(s)", range: at))
         }
         return out
     }
@@ -273,8 +308,11 @@ final class RulesFileScanner: @unchecked Sendable {
         // config has no legitimate reason to tell the agent to override
         // or hide things from the user. High confidence in a rules file.
         for (pat, label) in metaPatterns where lower.range(of: pat, options: .regularExpression) != nil {
+            // Detection stays on `lower` (unchanged); locate the same match in
+            // the ORIGINAL text so the preview can point at it.
+            let r = text.range(of: pat, options: [.regularExpression, .caseInsensitive])
             out.append(Finding(severity: .high, signal: "meta_instruction",
-                               detail: label))
+                               detail: label, range: r))
             break   // one is enough; don't spam the same class
         }
 

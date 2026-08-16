@@ -56,6 +56,12 @@ actor PromptInjectionClassifier {
         let injectionScore: Double
         /// Decision at the configured threshold.
         let isInjection: Bool
+        /// The single highest-scoring window's text — the section that most
+        /// looks like an injection. Lets the block/ask message show just that
+        /// part instead of the whole (possibly multi-page) span. Set only when
+        /// `isInjection`; nil otherwise, so benign verdicts stay small in the
+        /// cache.
+        let flaggedText: String?
     }
 
     /// Optional `bromure-injection.json`. Every field has a sensible
@@ -195,8 +201,14 @@ actor PromptInjectionClassifier {
         guard !spans.isEmpty, let loaded = await loaded() else { return nil }
         for span in spans {
             if let v = cachedClassify(span.content, loaded: loaded), v.isInjection {
-                return span.content.count > 4000
-                    ? String(span.content.prefix(4000)) + "\n…(truncated)" : span.content
+                // Surface only the section that tripped the detector — the
+                // single highest-scoring window — instead of the whole span,
+                // which can be pages long and bury the offending part. Fall
+                // back to the span only if the flagged window is somehow
+                // missing.
+                let flagged = v.flaggedText ?? span.content
+                return flagged.count > 4000
+                    ? String(flagged.prefix(4000)) + "\n…(truncated)" : flagged
             }
         }
         return nil
@@ -299,6 +311,7 @@ actor PromptInjectionClassifier {
             ? String(text.prefix(Self.maxScanChars)) : text
         let chars = Array(scoped)
         var best = 0.0
+        var bestWindow: String?
         var ran = false
         var start = 0
         var windows = 0
@@ -311,14 +324,18 @@ actor PromptInjectionClassifier {
                 ids = Array(ids.prefix(loaded.maxLength))
             }
             if !ids.isEmpty, let p = runWindow(ids: ids, loaded: loaded) {
-                best = max(best, p)
                 ran = true
+                // Track the window that carries the max score so callers can
+                // show only that section, not the whole span.
+                if bestWindow == nil || p > best { best = p; bestWindow = window }
             }
             start = end
             windows += 1
         }
         guard ran else { return nil }
-        return Verdict(injectionScore: best, isInjection: best >= loaded.threshold)
+        let injection = best >= loaded.threshold
+        return Verdict(injectionScore: best, isInjection: injection,
+                       flaggedText: injection ? bestWindow : nil)
     }
 
     private func runWindow(ids: [Int], loaded: Loaded) -> Double? {
