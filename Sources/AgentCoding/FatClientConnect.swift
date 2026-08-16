@@ -287,6 +287,18 @@ final class RemoteConnectModel {
     /// the empty state renders a spinner instead of a premature "No servers".
     private(set) var directoryLoading = false
 
+    /// Set once the directory has loaded successfully for the CURRENT identity
+    /// (reset on every identity change). It's the discriminator for a 401 on
+    /// `/v1/devices`: after a successful load, a 401 is a genuine server-side
+    /// revocation → sign out; BEFORE the first load (the fetch right after a
+    /// fresh sign-in) a 401 is a device that isn't queryable yet — propagation
+    /// lag — or simply an account with no servers, which must NOT sign the user
+    /// out (that bounced a brand-new user straight back to the login screen).
+    private var directoryEverLoaded = false
+    /// Fast retries for that first-load 401 (propagation), before we settle
+    /// into the normal empty state. The 10 s poll is the longer backstop.
+    private var firstLoad401Retries = 0
+
     /// Load the identity and, if present, refresh the server directory. Also
     /// starts observing identity changes so a sign-in completed while the window
     /// is open refreshes the list.
@@ -298,6 +310,10 @@ final class RemoteConnectModel {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.p2pServers = []
+                    // A new identity (sign in / out / switch): its directory has
+                    // never loaded, so a first 401 is not a revocation.
+                    self.directoryEverLoaded = false
+                    self.firstLoad401Retries = 0
                     if self.account.signedIn { Task { await self.loadDirectory() } }
                     self.startDirectoryRefresh()
                 }
@@ -326,11 +342,30 @@ final class RemoteConnectModel {
             // The directory is already scoped to this user's own servers; just
             // drop our own row (you don't mirror yourself).
             p2pServers = devices.filter { !$0.isSelf && !$0.revoked }
-        } catch ControlPlaneError.http(401, _) {
+            directoryEverLoaded = true
+            firstLoad401Retries = 0
+        } catch ControlPlaneError.http(401, _) where directoryEverLoaded {
+            // The directory loaded before, so a 401 now is a genuine
+            // server-side revocation of this device — sign out.
             stopDirectoryRefresh()
             account.signOut()
             p2pServers = []
             directoryError = "This Mac's bromure.io device was revoked. Sign in again."
+        } catch ControlPlaneError.http(401, _) {
+            // First load after a fresh sign-in. A 401 here is a device that
+            // isn't queryable yet (enrollment still propagating) or an account
+            // with no servers — NOT a revocation. Keep the user signed in and
+            // retry a few times; then the normal empty state ("No servers in
+            // your workspace yet") takes over. Signing out here is what bounced
+            // a brand-new user back to the login screen.
+            p2pServers = []
+            if firstLoad401Retries < 3 {
+                firstLoad401Retries += 1
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    await self?.loadDirectory(silent: true)
+                }
+            }
         } catch {
             if !silent {
                 directoryError = "Couldn't load your servers."
