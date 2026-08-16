@@ -129,6 +129,13 @@ struct WorkspaceScreen: View {
                 guard let controller else { throw ACAppDelegate.GuestExecError.vmNotRunning }
                 return try await controller.guestExec(id, command: command, timeout: timeout)
             }
+            // Reading the workspace clears any "an agent needs your input"
+            // notification for it — the user has now seen the state, so the OS
+            // banner is redundant (the in-app tab badges still show what's
+            // pending). The server-side event stays open until answered.
+            PushManager.shared.markWorkspaceRead(
+                server: controller.host.peerDeviceID,
+                profile: profileID.uuidString)
         }
         .toolbar {
             // Constant item count (iOS 26 leaves ghost buttons behind removed

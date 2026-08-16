@@ -98,6 +98,29 @@ final class PushManager {
             }
         }
     }
+
+    /// The user just opened a workspace's mirror — they've now READ the state a
+    /// "needs input" notification was pointing at, so withdraw its card even if
+    /// they haven't answered yet. The alert's job (get you into the app) is done
+    /// once you're looking at the workspace; leaving it in Notification Center
+    /// after that is just noise. Server-side the event stays pending until the
+    /// question is actually answered — this only clears the local OS banner.
+    /// No-op for a direct (non-P2P) host, which has no account install id.
+    func markWorkspaceRead(server: String?, profile: String) {
+        guard let server, !server.isEmpty else { return }
+        let profileLower = profile.lowercased()
+        Task {
+            let delivered = await UNUserNotificationCenter.current().deliveredNotifications()
+            let ids = delivered.filter { n in
+                let ui = n.request.content.userInfo
+                return (ui["server"] as? String) == server
+                    && (ui["profile"] as? String)?.lowercased() == profileLower
+            }.map(\.request.identifier)
+            if !ids.isEmpty {
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
+            }
+        }
+    }
 }
 
 // MARK: - App delegate (APNs plumbing)
