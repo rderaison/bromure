@@ -94,7 +94,7 @@ enum FatClientNIOSSH {
                 }
             }
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
-            .connectTimeout(.seconds(10))
+            .connectTimeout(.seconds(30))
 
         let channel: Channel
         do {
@@ -108,7 +108,12 @@ enum FatClientNIOSSH {
         // resolve(.ok) once we've authenticated AND flushed the request (the key
         // is added server-side even if the response never arrives — POST
         // /remote/keys restarts the SSH listener, dropping us before the 200).
-        let timeout = el.scheduleTask(in: .seconds(20)) { resolver.resolve(.incomplete) }
+        // Generous budget: this one-shot pairing does a full handshake + auth +
+        // enroll, and it's the first thing a user does on a new device — often
+        // on whatever network they happen to be on. (The enroll's special
+        // drop-before-200 semantics make the adaptive stall watchdog a poor fit
+        // here, so it stays a fixed but roomy bound.)
+        let timeout = el.scheduleTask(in: .seconds(60)) { resolver.resolve(.incomplete) }
         // Backstop: a drop before we flush means the handshake/bridge didn't
         // finish — reachable but incomplete, NOT a rejected password.
         channel.closeFuture.whenComplete { _ in resolver.resolve(.incomplete) }

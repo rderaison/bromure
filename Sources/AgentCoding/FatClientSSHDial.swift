@@ -290,14 +290,16 @@ final class SSHDialer: @unchecked Sendable {
                 }
             }
             .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
-            .connectTimeout(.seconds(8))
+            .connectTimeout(.seconds(30))
         guard let channel = try? bootstrap.connect(host: address, port: port).wait() else { return nil }
         // The validation failure tears the connection down; wait for that —
         // but bound it. A TCP-connected-but-silent endpoint (the remote's SSH
         // front door down, or a P2P relay that spliced but delivers no bytes)
-        // would otherwise hang here forever. `ssh-keyscan` uses `-T 8`; we
-        // schedule a close on the event loop after the same budget.
-        let timeout = channel.eventLoop.scheduleTask(in: .seconds(8)) {
+        // would otherwise hang here forever. This is only reached on a FIRST
+        // connect (host-key TOFU) and grabs the key in one KEX round trip, so a
+        // generous fixed budget is fine — a high-latency link just needs the
+        // room (the steady-state auth path uses the adaptive stall watchdog).
+        let timeout = channel.eventLoop.scheduleTask(in: .seconds(30)) {
             channel.close(promise: nil)
         }
         _ = try? channel.closeFuture.wait()
@@ -318,11 +320,73 @@ private final class CapturedKeyBox: @unchecked Sendable {
     func get() -> NIOSSHPublicKey? { lock.lock(); defer { lock.unlock() }; return key }
 }
 
+/// Head-of-pipeline watchdog that aborts a handshake only when it *stalls* —
+/// no inbound bytes for `idle` — rather than on a fixed wall-clock deadline.
+/// It sits ahead of `NIOSSHHandler`, so it sees every inbound packet (plaintext
+/// version exchange, then the encrypted KEX / auth traffic), and each read
+/// reschedules the idle timer. A slow-but-progressing link therefore keeps
+/// resetting the timer and survives up to the caller's global envelope; only a
+/// genuinely silent endpoint is cut. This is the RTT-adaptive part: it keys off
+/// progress, not a guess at how long a good handshake "should" take — which is
+/// what makes it safe on a terrible link (a plane, a congested relay) where a
+/// fixed 12 s deadline would drop a connection that was still working.
+///
+/// Handshake-only: the caller removes it once auth completes, so ordinary idle
+/// time on the live connection is never mistaken for a stall.
+final class HandshakeStallWatchdog: ChannelInboundHandler, RemovableChannelHandler {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+
+    private let idle: TimeAmount
+    private let label: String
+    private var task: Scheduled<Void>?
+
+    init(idle: TimeAmount, label: String) { self.idle = idle; self.label = label }
+
+    private func arm(_ context: ChannelHandlerContext) {
+        task?.cancel()
+        let channel = context.channel
+        let secs = idle.nanoseconds / 1_000_000_000
+        let label = self.label
+        task = context.eventLoop.scheduleTask(in: idle) {
+            FatClientLog.log("nio-conn: handshake stalled (no data for \(secs)s) \(label) — closing")
+            channel.close(promise: nil)
+        }
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        if context.channel.isActive { arm(context) }
+    }
+    func channelActive(context: ChannelHandlerContext) {
+        arm(context); context.fireChannelActive()
+    }
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        arm(context)                       // progress — push the deadline out
+        context.fireChannelRead(data)
+    }
+    func channelInactive(context: ChannelHandlerContext) {
+        task?.cancel(); task = nil; context.fireChannelInactive()
+    }
+    func handlerRemoved(context: ChannelHandlerContext) {
+        task?.cancel(); task = nil
+    }
+}
+
 // MARK: - One SSH connection
 
 /// A single authenticated SSH connection; `openVerbChannel` multiplexes exec
 /// channels over it.
 final class SSHConnection: @unchecked Sendable {
+    /// Abort the handshake only after this long with NO inbound bytes — a
+    /// stall, not a slow-but-alive link. Reset on every inbound packet, so a
+    /// bad connection that keeps making progress is never dropped on a fixed
+    /// timer. (See `HandshakeStallWatchdog`.)
+    static let handshakeIdle: TimeAmount = .seconds(20)
+    /// Hard backstop on the whole handshake+auth, for the pathological case of
+    /// data trickling in forever without the session ever coming up.
+    static let handshakeEnvelope: TimeAmount = .minutes(5)
+    static let watchdogName = "bromure-handshake-watchdog"
+
     let channel: Channel
     private let host: RemoteHost
     var isAlive: Bool { channel.isActive }
@@ -343,9 +407,16 @@ final class SSHConnection: @unchecked Sendable {
                                                   strict: strictHostKey) {
             outcome.flag(.hostKeyChanged)
         }
+        let connLabel = host.connectLabel
         let bootstrap = ClientBootstrap(group: group)
             .channelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
+                    // Stall watchdog FIRST (head of the pipeline) so it sees
+                    // every inbound packet during KEX/auth and only aborts on a
+                    // genuine silence, not a slow link.
+                    try channel.pipeline.syncOperations.addHandler(
+                        HandshakeStallWatchdog(idle: Self.handshakeIdle, label: connLabel),
+                        name: Self.watchdogName)
                     try channel.pipeline.syncOperations.addHandler(
                         NIOSSHHandler(
                             role: .client(SSHClientConfiguration(
@@ -357,7 +428,7 @@ final class SSHConnection: @unchecked Sendable {
             }
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_KEEPALIVE), value: 1)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
-            .connectTimeout(.seconds(10))
+            .connectTimeout(.seconds(30))
 
         do {
             channel = try bootstrap.connect(host: host.address, port: host.port).wait()
@@ -373,10 +444,14 @@ final class SSHConnection: @unchecked Sendable {
         do {
             let ch = channel   // local, so the loop closures don't capture self
             let probe = ch.eventLoop.makePromise(of: Channel.self)
-            // Bound the handshake+auth: if the far side never completes it (a
-            // silent endpoint / dead relay), closing the channel fails the
-            // pending probe so we throw `.unreachable` instead of blocking.
-            let timeout = ch.eventLoop.scheduleTask(in: .seconds(12)) {
+            // Bound the handshake+auth. The primary guard is the stall
+            // watchdog installed at the head of the pipeline: it aborts only
+            // after `handshakeIdle` of NO inbound bytes (a silent endpoint /
+            // dead relay), so a slow-but-progressing link — a bad plane or
+            // satellite connection — keeps resetting it and is NOT dropped on
+            // an arbitrary deadline. This `envelope` is only a hard backstop
+            // against data trickling in forever without the session coming up.
+            let envelope = ch.eventLoop.scheduleTask(in: Self.handshakeEnvelope) {
                 ch.close(promise: nil)
             }
             // `syncOperations` MUST run on the event loop — look the handler up
@@ -393,7 +468,11 @@ final class SSHConnection: @unchecked Sendable {
                 }
             }
             let child = try probe.futureResult.wait()
-            timeout.cancel()
+            envelope.cancel()
+            // Handshake done: drop the stall watchdog so ordinary idle time on
+            // the live connection isn't mistaken for a stall (it fires on
+            // inbound silence, which is normal once connected).
+            _ = ch.pipeline.removeHandler(name: Self.watchdogName)
             FatClientLog.log("nio-conn: handshake+auth OK \(host.connectLabel)")
             child.close(promise: nil)
         } catch {
@@ -446,7 +525,7 @@ final class SSHConnection: @unchecked Sendable {
         // Bound the channel open: on timeout, EOF the app side (the request fails
         // like any dropped connection) and tear the connection down so the NEXT
         // request re-establishes a fresh one instead of reusing the corpse.
-        let timeout = ch.eventLoop.scheduleTask(in: .seconds(6)) { [weak self] in
+        let timeout = ch.eventLoop.scheduleTask(in: .seconds(15)) { [weak self] in
             FatClientLog.log("nio-dial: channel open timed out — dropping wedged connection")
             closePump()
             self?.close()

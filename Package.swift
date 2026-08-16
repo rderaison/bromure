@@ -155,7 +155,11 @@ let package = Package(
             // GhosttyKit repeated here: SPM doesn't propagate a binaryTarget
             // through an executable-target dependency into the test bundle's
             // link, so the tests need it (and its frameworks) directly.
-            dependencies: ["bromure-ac", "GhosttyKit"],
+            dependencies: [
+                "bromure-ac", "GhosttyKit",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+            ],
             path: "Tests/AgentCodingTests",
             linkerSettings: [
                 .linkedFramework("Carbon"),
