@@ -36,7 +36,7 @@ By default the VM joins Bromure's shared NAT switch: every workspace VM (and the
 
 ### The boot screen
 
-While the VM boots, an animated "dive" overlay covers the terminal area — the workspace name over a scanning progress bar, with an optional status line. It only appears if boot takes more than 0.4 seconds, and it fades out the moment the guest reports its first tab roster. During a home-storage migration the overlay shows determinate progress instead (for example "MOVING HOME — 42% OF 7.9 GB").
+While the VM boots, an animated "dive" overlay covers the terminal area — the workspace name over a scanning progress bar, with an optional status line. It only appears if boot takes more than 0.4 seconds, and it fades out the moment the guest reports its first tab roster. A workspace still on the legacy shared-folder home is moved to the private ext4 image automatically on its next launch — a one-time migration that copies the home into the image and keeps your previous home as a backup; during it the overlay shows determinate progress instead (for example "MOVING HOME — 42% OF 7.9 GB").
 
 If no terminal appears within 30 seconds, the overlay flips to a **DIVE FAILED** panel — "«name» never returned a terminal after 30 seconds. The VM may be stuck, or the base image may be damaged." — with two buttons:
 
@@ -53,7 +53,6 @@ A launch can be preceded by one of these prompts:
 | --- | --- | --- |
 | Base-image drift | The shared base image was rebuilt since this workspace's disk was cloned | **Reset and launch** (re-clone from the new base; home untouched) / **Launch as-is** / **Cancel** |
 | Compromised workspace | A previous session was flagged for credential exfiltration | Confirm a wipe of the disk, home, RAM snapshot, and per-launch shares before boot; settings, tokens, and SSH keys are kept. See [Credentials](08-credentials.mdx). |
-| Home storage upgrade | The workspace still uses the legacy shared-folder home | **Upgrade Now** (migrate to an ext4 home image during this boot) / **Not Now** (asked again next start) |
 | Model still downloading | A required local model has not finished downloading | Launch is refused with an explanation. See [Local models](13-local-models.mdx). |
 | Disk full | The host volume has less than 1 GB free | Launch is refused with a clear error instead of wedging mid-session. |
 

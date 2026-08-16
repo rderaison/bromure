@@ -29,7 +29,11 @@ The board's model is deliberately asymmetric: an **automation card never leaves 
 | **Needs Attention** | Failed and blocked runs, parked until you **Dismiss** them (or **Run Again**). The column only exists while it has cards, so a healthy board never shows it. |
 | **Done** | Everything over: completed runs, skipped fires, ended sessions, and acknowledged failures. **Load older runs…** pages in the archive — nothing is ever deleted. |
 
-Clicking a run card opens its **run window**: while the agent is still working you get a live, read-only view of its session (a second attach to the same terminal); once it finishes, the same window shows the run's saved transcript rendered natively — prompt, the agent's narration, every tool call and result — long after the worktree and tab are gone. Failed runs state their reason in place.
+Clicking a run card opens its **run window**: while the agent is still working you get a live, read-only view of its session (a second attach to the same terminal); once it finishes, the same window shows the run's saved transcript rendered natively — prompt, the agent's narration, every tool call and result — long after the worktree and tab are gone. Failed runs state their reason in place. The native rendering understands every supported agent's session format — Claude, Codex, Grok, and Kimi alike — so whichever agent ran, its transcript reads as a clean conversation rather than raw terminal output. The same reader backs the coding board's finished tasks and the [rich client](14-remote-access.mdx), so a run reads the same on your Mac, another Mac, or the iOS app.
+
+<p align="center">
+  <img src="images/run-transcript.en.jpg" width="720" alt="A finished run's window showing the native transcript reader: the prompt in a tinted bubble, collapsible Thinking and shell tool-call rows, and the agent's closing summary rendered as markdown with a bulleted list of version bumps." />
+</p>
 
 ## Creating an automation
 
