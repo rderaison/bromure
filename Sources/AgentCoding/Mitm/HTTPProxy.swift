@@ -263,8 +263,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 profileID: profileID) {
                 FileHandle.standardError.write(Data(
                     "[mitm] Guardrails blocked \(reqMethod) \(host)\(reqPath) — \(denial.reason)\n".utf8))
-                // Surface the block in the Security Log window too (✗ colors it red).
-                SupplyChainLog.shared.record("[firewall] ✗ 403 \(reqMethod) \(host)\(reqPath) — \(denial.reason)")
+                // Structured event → the Security Timeline window.
+                BACEventEmitter.shared.emitDetached(
+                    profileID: profileID, eventType: "guardrails.block",
+                    eventData: [
+                        "host": .string(host),
+                        "method": .string(reqMethod),
+                        "path": .string(reqPath),
+                        "reason": .string(denial.reason),
+                    ])
                 var resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: \(denial.contentType)\r\n"
                 if let t = denial.amzErrorType { resp += "x-amzn-ErrorType: \(t)\r\n" }
                 resp += "Content-Length: \(denial.body.utf8.count)\r\nConnection: close\r\n\r\n\(denial.body)"
