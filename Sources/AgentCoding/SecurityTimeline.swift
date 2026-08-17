@@ -126,6 +126,20 @@ public final class SecurityTimeline {
             let decision = str(d, "reason").map { "blocked — \($0)" } ?? "blocked"
             return row("Guardrails", cond, decision, .blocked)
 
+        case "agent.message":
+            let from = str(d, "from") ?? "agent"
+            let room = str(d, "room").flatMap { $0.isEmpty ? nil : " in “\($0)”" } ?? ""
+            let to = str(d, "to").flatMap { $0.isEmpty ? nil : " → \($0)" } ?? ""
+            let text = (str(d, "text") ?? "")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+            let shortText = text.count > 80 ? String(text.prefix(80)) + "…" : text
+            let verdict = str(d, "verdict") ?? "clean"
+            let cond = "\(from)\(room)\(to): \(shortText)"
+            let kind: Decision = (verdict == "clean") ? .info : .blocked
+            let decision = (verdict == "clean") ? "delivered" : verdict
+            return row("Agent messaging", cond, decision, kind)
+
         case "prompt_injection.detection":
             let action = (str(d, "action") ?? "detected").lowercased()
             let detector = str(d, "detector") ?? "prompt injection"

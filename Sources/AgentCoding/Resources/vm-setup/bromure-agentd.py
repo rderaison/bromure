@@ -1916,6 +1916,7 @@ def _pretrust(tool, *dirs):
 
 
 _TASK_MCP_SHIM = "/mnt/bromure-meta/bromure-task-mcp.py"
+_COMMS_MCP_SHIM = "/mnt/bromure-meta/bromure-comms-mcp.py"
 
 
 def _task_mcp_setup(branch, tool, workdir):
@@ -1938,17 +1939,33 @@ def _task_mcp_setup(branch, tool, workdir):
     Returns the extra CLI flags for BROMURE_AC_WT_FLAGS (may be "" — grok
     and kimi are wired purely through their settings files). Flag strings
     word-split in the tab launcher, so every token must be space-free."""
-    if not os.path.exists(_TASK_MCP_SHIM):
+    board = os.path.exists(_TASK_MCP_SHIM)
+    comms = os.path.exists(_COMMS_MCP_SHIM)
+    if not board and not comms:
         return ""
+
+    # Both MCP servers share one config; the host binds each connection to this
+    # branch via the shim's "bromure-hello <branch>". bromure-board is the
+    # coding-board tools; bromure-comms is inter-agent messaging (gated by the
+    # host's rooms). Harmless when unused — the host answers "not bound" / "no
+    # room" rather than erroring.
+    def _servers_config():
+        s = {}
+        if board:
+            s["bromure-board"] = {"command": "python3",
+                                  "args": [_TASK_MCP_SHIM, branch]}
+        if comms:
+            s["bromure-comms"] = {"command": "python3",
+                                  "args": [_COMMS_MCP_SHIM, branch]}
+        return {"mcpServers": s}
+
     if tool == "claude":
         cfg_dir = os.path.join(HOME, ".bromure")
         cfg = os.path.join(cfg_dir, "task-mcp-%s.json" % branch.replace("/", "-"))
         try:
             os.makedirs(cfg_dir, exist_ok=True)
             with open(cfg, "w") as f:
-                json.dump({"mcpServers": {"bromure-board": {
-                    "command": "python3",
-                    "args": [_TASK_MCP_SHIM, branch]}}}, f, indent=2)
+                json.dump(_servers_config(), f, indent=2)
         except OSError as e:
             log("worktree", "task-mcp config write failed:", e)
             return ""
@@ -1958,9 +1975,16 @@ def _task_mcp_setup(branch, tool, workdir):
         # json.dumps with no-space separators emits a valid, token-safe
         # TOML array; the quoted values survive word splitting because the
         # launcher never re-parses quotes.
-        args = json.dumps([_TASK_MCP_SHIM, branch], separators=(",", ":"))
-        return (' -c mcp_servers.bromure_board.command="python3"'
-                ' -c mcp_servers.bromure_board.args=' + args)
+        flags = ""
+        if board:
+            a = json.dumps([_TASK_MCP_SHIM, branch], separators=(",", ":"))
+            flags += (' -c mcp_servers.bromure_board.command="python3"'
+                      ' -c mcp_servers.bromure_board.args=' + a)
+        if comms:
+            a = json.dumps([_COMMS_MCP_SHIM, branch], separators=(",", ":"))
+            flags += (' -c mcp_servers.bromure_comms.command="python3"'
+                      ' -c mcp_servers.bromure_comms.args=' + a)
+        return flags
     if tool in ("grok", "kimi"):
         subdir, fname = ((".grok", "settings.json") if tool == "grok"
                          else (".kimi-code", "mcp.json"))
@@ -1968,9 +1992,7 @@ def _task_mcp_setup(branch, tool, workdir):
             d = os.path.join(workdir, subdir)
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, fname), "w") as f:
-                json.dump({"mcpServers": {"bromure-board": {
-                    "command": "python3",
-                    "args": [_TASK_MCP_SHIM, branch]}}}, f, indent=2)
+                json.dump(_servers_config(), f, indent=2)
             ex = _capture(["git", "-C", workdir, "rev-parse",
                            "--git-path", "info/exclude"]).strip()
             if ex:

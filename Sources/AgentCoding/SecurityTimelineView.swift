@@ -136,6 +136,7 @@ struct SecurityTimelineView: View {
         case "Firewall":             return "network"
         case "Supply chain":         return "shippingbox"
         case "Prompt injection":     return "exclamationmark.shield"
+        case "Agent messaging":      return "bubble.left.and.bubble.right"
         default:                     return "shield"
         }
     }

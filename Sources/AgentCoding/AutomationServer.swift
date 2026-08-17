@@ -94,6 +94,11 @@ final class ACAutomationServer {
     /// A finished task's raw session transcript (vsock or ext4) — nil when
     /// none exists.
     var onTaskTranscript: ((_ id: UUID) async -> String?)?
+    /// Inter-agent comms control plane (fat client + cross-host federation).
+    /// `subpath` is the path after "/comms/" (e.g. "rooms", "rooms/<id>/post",
+    /// "workspaces", "inject"); returns a JSON-able result ("error" key on
+    /// failure, optional "status" for a non-400 error code).
+    var onComms: ((_ method: String, _ subpath: String, _ body: [String: Any]) -> [String: Any])?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -562,6 +567,17 @@ final class ACAutomationServer {
             let choice = (bodyJSON["choice"] as? Int) ?? -1
             let ok = DispatchQueue.main.sync { self.onAnswerPrompt?(id, choice) ?? false }
             sendResponse(fd: fd, status: ok ? 200 : 404, body: ["ok": ok])
+
+        // Inter-agent comms control plane. Rooms CRUD + transcript + human post
+        // for the fat-client Rooms window, and /comms/inject for cross-host
+        // federation (a peer host relays a message here). Trusted (control
+        // socket) only. Sub-routing lives in the delegate's onComms handler.
+        case (let m, let p) where p.hasPrefix("/comms/"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let sub = String(p.dropFirst("/comms/".count))
+            let r = DispatchQueue.main.sync { self.onComms?(m, sub, bodyJSON) ?? ["error": "no handler"] }
+            let status = (r["error"] != nil) ? ((r["status"] as? Int) ?? 400) : 200
+            sendResponse(fd: fd, status: status, body: r)
 
         case (_, let p) where p == "/debug/ui-shot" || p.hasPrefix("/debug/ui-shot?"):
             guard debugEnabled || isTrustedLocal else {

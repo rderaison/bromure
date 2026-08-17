@@ -791,6 +791,13 @@ public final class SessionDisk {
             to: tmp.appendingPathComponent("bromure-task-mcp.py"),
             atomically: true, encoding: .utf8)
 
+        // Inter-agent comms MCP shim — staged unconditionally, same as the task
+        // shim. agentd wires it into every tab's MCP config so agents can talk;
+        // the host's AgentCommsBroker enforces which workspaces may (rooms).
+        try Self.commsMCPShimScript.write(
+            to: tmp.appendingPathComponent("bromure-comms-mcp.py"),
+            atomically: true, encoding: .utf8)
+
         // Plan-stream driver assets — staged unconditionally, like the task
         // MCP shim. bromure-plan-driver.py adapts codex/grok (and bridges
         // the node claude driver) to the plan-stream v1 NDJSON protocol on
@@ -962,6 +969,11 @@ public final class SessionDisk {
     /// review). Sibling of the browser MCP, one port over.
     public static let taskBoardMCPVsockPort: UInt32 = 5831
     static let taskMCPShimGuestPath = "/mnt/bromure-meta/bromure-task-mcp.py"
+    /// Host vsock port for the inter-agent messaging MCP (AgentCommsMCPServer):
+    /// the tools agents use to talk to each other across the user's rooms.
+    /// Sibling of the task-board MCP, one port over.
+    public static let agentCommsMCPVsockPort: UInt32 = 5833
+    static let commsMCPShimGuestPath = "/mnt/bromure-meta/bromure-comms-mcp.py"
     /// Host vsock port for the plan-stream channel (plan-stream protocol
     /// v1): guest plan drivers connect here and exchange NDJSON events/
     /// commands with the host's planning UI. One port over from the board
@@ -1131,6 +1143,100 @@ public final class SessionDisk {
                     if not reported:
                         reported = True
                         sys.stderr.write("bromure-task-mcp: host not reachable yet (%s) — retrying\\n" % e)
+                    time.sleep(delay)
+                    delay = min(delay * 2, 5.0)
+            return None
+    def stdin_to_sock():
+        global stdin_open
+        while True:
+            line = sys.stdin.buffer.readline()
+            if not line:
+                break
+            while True:
+                s = current() or ensure_conn()
+                if s is None:
+                    return
+                try:
+                    s.sendall(line)
+                    break
+                except OSError:
+                    drop(s)
+        stdin_open = False
+        s = current()
+        if s is not None:
+            try:
+                s.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+    threading.Thread(target=stdin_to_sock, daemon=True).start()
+    while True:
+        s = current() or ensure_conn()
+        if s is None:
+            break
+        try:
+            chunk = s.recv(65536)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            drop(s)
+            if not stdin_open:
+                break
+            time.sleep(0.2)
+            continue
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+
+    """
+
+    /// The inter-agent messaging twin of `taskMCPShimScript`: byte-for-byte the
+    /// same reconnecting stdio↔vsock bridge, only the port and log label differ.
+    /// The branch (this tab's identity) arrives as argv[1], wired in by agentd's
+    /// per-tab MCP setup, and is announced with "bromure-hello <branch>".
+    static let commsMCPShimScript = """
+    #!/usr/bin/env python3
+    # Bromure AC — inter-agent comms MCP stdio↔vsock shim. Generated; do not edit.
+    # Sibling of bromure-task-mcp.py (see SessionDisk.commsMCPShimScript).
+    import socket, sys, threading, time
+    HOST_CID = socket.VMADDR_CID_HOST if hasattr(socket, "VMADDR_CID_HOST") else 2
+    PORT = \(agentCommsMCPVsockPort)
+    HELLO = sys.argv[1] if len(sys.argv) > 1 else ""
+    state_lock = threading.Lock()
+    conn_lock = threading.Lock()
+    sock = None
+    stdin_open = True
+    reported = False
+    def current():
+        with state_lock:
+            return sock
+    def drop(s):
+        global sock
+        with state_lock:
+            if sock is s:
+                sock = None
+        try:
+            s.close()
+        except OSError:
+            pass
+    def ensure_conn():
+        global sock, reported
+        with conn_lock:
+            existing = current()
+            if existing is not None:
+                return existing
+            delay = 0.2
+            while stdin_open:
+                try:
+                    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+                    s.connect((HOST_CID, PORT))
+                    if HELLO:
+                        s.sendall(("bromure-hello %s\\n" % HELLO).encode())
+                    with state_lock:
+                        sock = s
+                    return s
+                except OSError as e:
+                    if not reported:
+                        reported = True
+                        sys.stderr.write("bromure-comms-mcp: host not reachable yet (%s) — retrying\\n" % e)
                     time.sleep(delay)
                     delay = min(delay * 2, 5.0)
             return None
