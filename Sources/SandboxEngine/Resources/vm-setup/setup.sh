@@ -364,7 +364,12 @@ Pin-Priority: 500
 EOP
 retry apt-get update -y -qq
 log "apt-get install chromium"
-retry apt-get install -y -q --no-install-recommends chromium
+# xdg-utils: not needed by Chromium, but Google Chrome (151+) Depends on
+# it and the catalog's Chrome postinstall step resolves against Google's
+# repo list ONLY. Baking it here keeps that step on its cheap scoped
+# `apt-get update` instead of falling back to a full ports.ubuntu.com
+# refresh just to fetch this one package.
+retry apt-get install -y -q --no-install-recommends chromium xdg-utils
 apt-get install -y -q --no-install-recommends chromium-l10n || true
 
 # Compat shim: every Bromure script and agent launches `chromium-browser`

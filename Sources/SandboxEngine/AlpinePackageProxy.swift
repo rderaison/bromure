@@ -357,38 +357,103 @@ public final class AlpinePackageProxy: @unchecked Sendable {
         }
     }
 
-    /// Open a TCP socket to `host:port`. Uses `getaddrinfo` so it
-    /// works for both IPv4 and IPv6 upstreams. Returns the fd on
-    /// success; closes + returns nil on failure.
+    /// Open a TCP socket to `host:port`. Returns the (blocking) fd on
+    /// success; nil after logging on failure.
+    ///
+    /// Happy-Eyeballs-lite: start a NON-BLOCKING connect to every address
+    /// `getaddrinfo` returns (v6 and v4 together) and take the first that
+    /// completes. The previous sequential BLOCKING connect() honoured
+    /// getaddrinfo's RFC 6724 ordering, which puts AAAA first whenever
+    /// the host has a global IPv6 address — and on a network whose IPv6
+    /// is black-holed (address + default route, no upstream) each dead
+    /// v6 attempt sits in the kernel's ~75 s SYN timeout before the v4
+    /// fallback is even tried. That is exactly what broke both image
+    /// bakes: apt reaches its HTTPS repos (deb.nodesource.com,
+    /// dl.google.com — both dual-stack CDNs) via CONNECT through us,
+    /// its proxy-read timeout is 120 s, and two AAAA records already
+    /// cost 150 s → "Reading from proxy failed", the repo is silently
+    /// dropped and the wrong (or no) package gets installed. The GET
+    /// path never suffered because URLSession races the families
+    /// itself. Same remedy as Mitm/HTTPProxy.connectTCP.
+    private static let connectDeadline: TimeInterval = 15
+
     private static func openTCP(host: String, port: UInt16) -> Int32? {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
         hints.ai_socktype = SOCK_STREAM
+        hints.ai_protocol = IPPROTO_TCP
         var res: UnsafeMutablePointer<addrinfo>?
         let rc = getaddrinfo(host, String(port), &hints, &res)
         guard rc == 0, let info = res else {
-            log("getaddrinfo(\(host)) failed: \(rc)")
+            log("getaddrinfo(\(host)) failed: \(String(cString: gai_strerror(rc)))")
             return nil
         }
         defer { freeaddrinfo(info) }
+
+        /// Winner bookkeeping: put the fd back in blocking mode (the
+        /// splice pump does plain read/write) and drop every other
+        /// in-flight attempt.
+        func finish(_ winner: Int32, flags: Int32, losers: [Int32]) -> Int32 {
+            _ = fcntl(winner, F_SETFL, flags)
+            losers.forEach { Darwin.close($0) }
+            return winner
+        }
+
+        var pending: [Int32] = []
+        var savedFlags: [Int32: Int32] = [:]
         var ai: UnsafeMutablePointer<addrinfo>? = info
         while let cur = ai {
+            ai = cur.pointee.ai_next
             let fd = socket(cur.pointee.ai_family,
                             cur.pointee.ai_socktype,
                             cur.pointee.ai_protocol)
-            if fd >= 0 {
-                var yes: Int32 = 1
-                setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
-                           &yes, socklen_t(MemoryLayout<Int32>.size))
-                if Darwin.connect(fd, cur.pointee.ai_addr,
-                                  cur.pointee.ai_addrlen) == 0 {
-                    return fd
-                }
+            guard fd >= 0 else { continue }
+            var yes: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
+                       &yes, socklen_t(MemoryLayout<Int32>.size))
+            let flags = fcntl(fd, F_GETFL, 0)
+            savedFlags[fd] = flags
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+            if Darwin.connect(fd, cur.pointee.ai_addr,
+                              cur.pointee.ai_addrlen) == 0 {
+                // Immediate success (loopback / already-open path).
+                return finish(fd, flags: flags, losers: pending)
+            }
+            if errno == EINPROGRESS {
+                pending.append(fd)
+            } else {
                 Darwin.close(fd)
             }
-            ai = cur.pointee.ai_next
         }
-        log("could not connect to \(host):\(port)")
+        guard !pending.isEmpty else {
+            log("could not connect to \(host):\(port) (no address accepted a connect)")
+            return nil
+        }
+
+        let start = Date()
+        while Date().timeIntervalSince(start) < connectDeadline, !pending.isEmpty {
+            var pfds = pending.map {
+                pollfd(fd: $0, events: Int16(POLLOUT), revents: 0)
+            }
+            let pr = poll(&pfds, UInt32(pfds.count), 1000)
+            if pr < 0 {
+                if errno == EINTR { continue }
+                break
+            }
+            for p in pfds where p.revents != 0 {
+                var soErr: Int32 = 0
+                var len = socklen_t(MemoryLayout<Int32>.size)
+                getsockopt(p.fd, SOL_SOCKET, SO_ERROR, &soErr, &len)
+                pending.removeAll { $0 == p.fd }
+                if soErr == 0 && (p.revents & Int16(POLLOUT)) != 0 {
+                    return finish(p.fd, flags: savedFlags[p.fd] ?? 0, losers: pending)
+                }
+                Darwin.close(p.fd)
+            }
+        }
+        pending.forEach { Darwin.close($0) }
+        log("could not connect to \(host):\(port) within \(Int(connectDeadline))s "
+            + "(all \(savedFlags.count) resolved address(es) failed or timed out)")
         return nil
     }
 
