@@ -14,7 +14,7 @@ struct Bromure: ParsableCommand {
         commandName: "bromure",
         abstract: "Run a browser in an isolated, ephemeral VM.",
         subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self, ListEnrollments.self,
-                      InitFossImage.self, VerifyImage.self],
+                      InitFossImage.self, VerifyImage.self, VerifyBrowsers.self],
         defaultSubcommand: Launch.self
     )
 
@@ -4434,6 +4434,298 @@ struct VerifyImage: ParsableCommand {
         }
         try result!.get()
         print("Image boot verification passed: \(diskURL.path)")
+    }
+}
+
+// MARK: - CLI: verify-browsers (publish pipeline)
+
+/// Publish-pipeline gate that goes past "it boots". The incident this exists
+/// for shipped an image whose serial prompt came up fine while Chrome's
+/// postinstall failed and Chromium never started — `verify-image` can't see
+/// either. Working on a DISPOSABLE copy of the built artifacts (`--dir`
+/// holds linux-base.img + vmlinuz + initrd; postinstall and the session
+/// boots write into it, the publish script keeps the pristine originals):
+///
+///   1. Apply the bundled browser-img-catalog postinstall steps (WARP +
+///      Google Chrome) with the exact code end-user installs run — the
+///      published catalog carries these same steps.
+///   2. Boot a real session (VMPool → claim, the same path a browser window
+///      takes) with a default profile on Chromium, then again on Chrome.
+///      Each must bring its browser up: the guest DevTools endpoint
+///      (127.0.0.1:9222, always on) has to answer, be served by the expected
+///      binary, and list at least one page target — i.e. a window with a
+///      tab exists — within `--browser-timeout`.
+struct VerifyBrowsers: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "verify-browsers",
+        abstract: "Publish gate: postinstall Chrome onto a disposable copy of a browser image, then boot a Chromium session and a Chrome session and require each browser to come up."
+    )
+
+    @Option(name: .long,
+            help: "Directory holding linux-base.img, vmlinuz and initrd — a DISPOSABLE copy (postinstall and the session boots write into it).")
+    var dir: String
+
+    @Option(name: .long, help: "Seconds to wait for each browser to come up once its session is claimed.")
+    var browserTimeout: Int = 180
+
+    @Flag(name: .long, help: "Skip the catalog postinstall (the image already carries Chrome).")
+    var skipPostinstall = false
+
+    @Option(name: .long, parsing: .upToNextOption,
+            help: "Browsers to check: chromium, chrome. Default: both.")
+    var browsers: [String] = ["chromium", "chrome"]
+
+    func run() throws {
+        let dirURL = URL(fileURLWithPath: dir, isDirectory: true)
+        let manager = LinuxImageManager(storageDir: dirURL)
+        guard manager.hasBootFiles else {
+            throw ValidationError("\(dirURL.path) must contain linux-base.img, vmlinuz and initrd")
+        }
+        // VMPool insists on the version stamp; the artifacts come from this
+        // very build, so a missing stamp just means the caller copied only
+        // the three boot files.
+        if !FileManager.default.fileExists(atPath: manager.imageVersionURL.path) {
+            try LinuxImageManager.imageVersion.write(
+                to: manager.imageVersionURL, atomically: true, encoding: .utf8)
+        }
+        let choices = try browsers.map { name -> BrowserChoice in
+            guard let c = BrowserChoice(rawValue: name) else {
+                throw ValidationError("unknown browser '\(name)' (expected chromium or chrome)")
+            }
+            return c
+        }
+
+        var result: Result<Void, Error>?
+        Task { @MainActor in
+            do {
+                if !skipPostinstall {
+                    try await Self.applyCatalogPostinstall(manager: manager)
+                } else {
+                    Self.log("skipping catalog postinstall (--skip-postinstall)")
+                }
+                for choice in choices {
+                    try await Self.checkBrowserBoots(
+                        choice, storageDir: dirURL, timeout: TimeInterval(browserTimeout))
+                }
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
+        while result == nil {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+        }
+        try result!.get()
+        print("Browser verification passed: \(choices.map(\.displayName).joined(separator: ", "))")
+    }
+
+    private static func log(_ msg: String) {
+        FileHandle.standardError.write(Data("[verify-browsers] \(msg)\n".utf8))
+    }
+
+    /// Step 1 — the catalog postinstall (WARP + Google Chrome), applied with
+    /// `applyPostinstallSteps` — the same routine a running install uses
+    /// when the published catalog gains a step. A failing step (e.g. Chrome's
+    /// apt fetch) throws and fails the gate here, before anything is uploaded.
+    @MainActor
+    private static func applyCatalogPostinstall(manager: LinuxImageManager) async throws {
+        let steps = ImageDistribution.browser.loadBaseline().sortedSteps
+        guard !steps.isEmpty else {
+            throw SandboxError.diskCreationFailed(
+                "bundled browser-img-catalog.json has no postinstall steps — nothing would install Chrome")
+        }
+        log("applying \(steps.count) catalog postinstall step(s): "
+            + steps.map(\.description).joined(separator: "; "))
+        // Keep the guest console so a failing step (an apt error inside the
+        // chroot, say) surfaces in the pipeline log instead of just
+        // "postinstall failed". Full console goes to stderr with
+        // BROMURE_DEBUG=1 (runProvisioner does that itself).
+        let console = SerialLineCollector()
+        do {
+            try await manager.applyPostinstallSteps(steps) { event in
+                switch event {
+                case .message(let m), .stepStart(let m), .stepDone(let m):
+                    log(m)
+                case .consoleOutput(let text):
+                    console.feed(text)
+                default:
+                    break
+                }
+            }
+        } catch {
+            log("catalog postinstall FAILED: \(error.localizedDescription)\n"
+                + "--- last guest console lines ---\n\(console.recentSerial(lines: 60))\n---")
+            throw error
+        }
+        log("catalog postinstall applied")
+    }
+
+    /// Step 2 — boot a session with `browser` selected and require the
+    /// browser to come up. Probed from the guest's root serial shell (the
+    /// same channel VMPool drives config through), so no host bridge has to
+    /// be wired: poll DevTools on 127.0.0.1:9222 until it answers, then
+    /// report the serving binary, its product string, and how many page
+    /// targets exist. `${M}` keeps the marker out of the echoed command line
+    /// so only the guest's own output can match.
+    @MainActor
+    private static func checkBrowserBoots(_ browser: BrowserChoice, storageDir: URL,
+                                          timeout: TimeInterval) async throws {
+        var config = VMConfig()
+        config.browser = browser
+        // Publish gate → deterministic, hardware-independent defaults.
+        config.enableGPU = false
+        config.enableWebGL = false
+        config.enableAudio = false
+
+        log("=== \(browser.displayName): booting a session (VMPool warmUp + claim) ===")
+        let pool = VMPool(config: config, storageDir: storageDir)
+        try await pool.warmUp()
+        guard let warm = await pool.claim(config: config) else {
+            throw SandboxError.vmStartFailed("\(browser.displayName): VMPool.claim returned no VM")
+        }
+        do {
+            try await probeBrowser(browser, warm: warm, timeout: timeout)
+        } catch {
+            await pool.retire(warm)
+            throw error
+        }
+        await pool.retire(warm)
+        log("\(browser.displayName): OK")
+    }
+
+    @MainActor
+    private static func probeBrowser(_ browser: BrowserChoice, warm: VMPool.WarmVM,
+                                     timeout: TimeInterval) async throws {
+        let collector = SerialLineCollector()
+        warm.serialWaiter.observer = { collector.feed($0) }
+        defer { warm.serialWaiter.observer = nil }
+
+        // Guest-side probe, typed into the root shell on hvc0. One line so
+        // the serial echo can't split it; `${M}` so the echoed input never
+        // contains the literal marker; --noproxy so a proxy env can't
+        // divert the loopback fetch.
+        let loops = max(1, Int(timeout))
+        let probe = #"M=BROMURE_VERIFY_BROWSER; for i in $(seq 1 \#(loops)); do J=$(curl -s -m 2 --noproxy '*' http://127.0.0.1:9222/json/version 2>/dev/null); if [ -n "$J" ]; then P=$(pgrep -o -f -- --remote-debugging-port=9222); N=$(curl -s -m 2 --noproxy '*' http://127.0.0.1:9222/json/list 2>/dev/null | grep -c '"type": *"page"'); echo "${M} exe=$(readlink -f /proc/$P/exe) pid=$P pages=$N product=$(printf '%s' "$J" | tr -d '\r\n' | sed -n 's/.*"Browser": *"\([^"]*\)".*/\1/p')"; break; fi; sleep 1; done; echo "${M}_END""# + "\n"
+        warm.serialInput.fileHandleForWriting.write(Data(probe.utf8))
+
+        // Wait for the guest's report — or its END sentinel, the host
+        // deadline, or the guest powering itself off (xinitrc ends the
+        // session when the browser exits, so a browser that dies on launch
+        // shows up as a shutdown seconds after claim, not as a timeout).
+        let deadline = Date().addingTimeInterval(timeout + 15)
+        var report: SerialLineCollector.BrowserReport?
+        var poweredOff = false
+        while Date() < deadline {
+            if let r = collector.browserReport { report = r; break }
+            if collector.sawEnd { break }
+            if warm.vm.state == .stopped || collector.sawPoweroff { poweredOff = true; break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+
+        guard let report else {
+            let why = poweredOff
+                ? "the session VM powered itself off — the browser exited right after launch "
+                  + "(missing binary, crash on start, or X never came up)"
+                : "browser did not come up within \(Int(timeout))s (DevTools on 127.0.0.1:9222 never answered)"
+            let interesting = collector.interestingLines(limit: 40)
+            let tail = collector.recentSerial(lines: 25)
+            throw SandboxError.vmStartFailed(
+                "\(browser.displayName): \(why).\n"
+                + "--- guest lines mentioning xinitrc/X/browser/errors ---\n\(interesting)\n"
+                + "--- last serial lines ---\n\(tail)")
+        }
+        log("\(browser.displayName): DevTools up — exe=\(report.exe) pid=\(report.pid) "
+            + "pages=\(report.pages) product=\(report.product)")
+
+        let expectedNeedle: String
+        switch browser {
+        case .chrome:   expectedNeedle = "/opt/google/chrome/"
+        case .chromium: expectedNeedle = "chromium"
+        }
+        guard report.exe.contains(expectedNeedle) else {
+            throw SandboxError.vmStartFailed(
+                "\(browser.displayName): DevTools is served by \(report.exe), expected a binary under "
+                + "\(expectedNeedle) — the profile's browser choice did not take effect")
+        }
+        guard report.pages >= 1 else {
+            throw SandboxError.vmStartFailed(
+                "\(browser.displayName): browser process is up (\(report.exe)) but has no page target — "
+                + "no window/tab was created")
+        }
+    }
+}
+
+/// Serial-console line collector for `verify-browsers`: keeps the recent
+/// output for diagnostics and extracts the guest probe's report line.
+private final class SerialLineCollector: @unchecked Sendable {
+    struct BrowserReport { let exe: String; let pid: String; let pages: Int; let product: String }
+
+    private let lock = NSLock()
+    private var buffer = ""
+    private var lines: [String] = []
+    private var partial = ""
+
+    private static let reportRegex = try! NSRegularExpression(
+        pattern: #"BROMURE_VERIFY_BROWSER exe=(/\S+) pid=(\d+) pages=(\d+) product=(\S*)"#)
+
+    func feed(_ text: String) {
+        lock.lock(); defer { lock.unlock() }
+        partial += text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        while let nl = partial.firstIndex(of: "\n") {
+            lines.append(String(partial[partial.startIndex..<nl]))
+            partial = String(partial[partial.index(after: nl)...])
+        }
+        if lines.count > 2000 { lines.removeFirst(lines.count - 2000) }
+    }
+
+    /// The probe's report, once the guest printed it. Requires `exe=/…` so
+    /// the echoed command line (`exe=$(readlink …`) can never match.
+    var browserReport: BrowserReport? {
+        lock.lock(); defer { lock.unlock() }
+        for line in lines.reversed() {
+            let range = NSRange(line.startIndex..., in: line)
+            guard let m = Self.reportRegex.firstMatch(in: line, range: range),
+                  let exe = Range(m.range(at: 1), in: line),
+                  let pid = Range(m.range(at: 2), in: line),
+                  let pages = Range(m.range(at: 3), in: line),
+                  let product = Range(m.range(at: 4), in: line) else { continue }
+            return BrowserReport(exe: String(line[exe]), pid: String(line[pid]),
+                                 pages: Int(line[pages]) ?? 0, product: String(line[product]))
+        }
+        return nil
+    }
+
+    /// The probe printed its END sentinel (guest-side loop exhausted).
+    var sawEnd: Bool {
+        lock.lock(); defer { lock.unlock() }
+        // The echoed command line contains `${M}_END`, never the expansion.
+        return lines.contains { $0.hasPrefix("BROMURE_VERIFY_BROWSER_END") || $0.contains(" BROMURE_VERIFY_BROWSER_END") }
+    }
+
+    /// The guest began powering off (systemd's poweroff target / the
+    /// kernel's final line) — the session ended before the probe finished.
+    var sawPoweroff: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return lines.contains { $0.contains("reboot: Power down") || $0.contains("Reached target") && $0.contains("poweroff.target") }
+    }
+
+    private static let interestingRegex = try! NSRegularExpression(
+        pattern: #"(?i)xinitrc|xinit|xorg|chrom|google-chrome|not found|no such file|error|fatal|segfault|traceback|permission denied|killed"#)
+
+    /// Guest lines that usually explain a browser that never came up.
+    func interestingLines(limit: Int) -> String {
+        lock.lock(); defer { lock.unlock() }
+        let hits = lines.filter { line in
+            !line.contains("BROMURE_VERIFY_BROWSER") &&
+            Self.interestingRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil
+        }
+        return hits.suffix(limit).joined(separator: "\n")
+    }
+
+    func recentSerial(lines n: Int) -> String {
+        lock.lock(); defer { lock.unlock() }
+        return lines.suffix(n).joined(separator: "\n")
     }
 }
 

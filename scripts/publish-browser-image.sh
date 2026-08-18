@@ -28,9 +28,12 @@
 # Sequence (mirrors scripts/publish-image.sh):
 #   1. Build the image with the latest Ubuntu packages
 #      (bromure init-foss-image — strict: missing kernel modules FAIL).
-#   2. Boot-check an APFS CLONE of the disk (bromure verify-image): the
-#      image must reach the root serial prompt, but the published
-#      artifact stays pristine — booting writes logs/state.
+#   2. Verify it (scripts/verify-browser-image.sh, on disposable APFS
+#      clones — the published artifacts stay pristine):
+#        boot      — bromure verify-image: reaches the root serial prompt.
+#        browsers  — bromure verify-browsers: catalog postinstall (Google
+#                    Chrome) applies, then a Chromium session and a Chrome
+#                    session each bring their browser up.
 #   3. Compress + upload the three artifacts under browser-images/<uuid>/.
 #   4. Download the previous img-catalog.json (for the retired uuid).
 #   5. Generate the new img-catalog.json (browser payload magic + boot files).
@@ -54,6 +57,11 @@
 # Optional:
 #   DRY_RUN        (1 = build + verify + compress, but skip every upload/delete)
 #   KEEP_PREVIOUS  (1 = don't delete the previous image after publishing)
+#   PREBUILT_IMAGE_DIR  (use this init-foss-image output dir instead of
+#                       building — Jenkinsfile.browser-image builds in its
+#                       own stage and passes the dir in)
+#   SKIP_VERIFY    (1 = don't run the verify gates here — the caller already
+#                   ran scripts/verify-browser-image.sh, e.g. as Jenkins stages)
 set -euo pipefail
 
 # Resolve the binary argument to an absolute path BEFORE cd'ing to the
@@ -108,9 +116,14 @@ gz_compress() {  # src dest
 sha256_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 
 # --- 1. Build the free-software image -----------------------------------
-echo "=== Building free-software browser image (latest Ubuntu packages) ==="
-IMAGE_DIR="$STAGING/image"
-"$BROMURE" init-foss-image --output "$IMAGE_DIR"
+if [ -n "${PREBUILT_IMAGE_DIR:-}" ]; then
+    IMAGE_DIR="$(cd "$PREBUILT_IMAGE_DIR" && pwd)"
+    echo "=== Using prebuilt image from $IMAGE_DIR ==="
+else
+    echo "=== Building free-software browser image (latest Ubuntu packages) ==="
+    IMAGE_DIR="$STAGING/image"
+    "$BROMURE" init-foss-image --output "$IMAGE_DIR"
+fi
 
 BASE_IMG="$IMAGE_DIR/linux-base.img"
 KERNEL="$IMAGE_DIR/vmlinuz"
@@ -120,15 +133,15 @@ for f in "$BASE_IMG" "$KERNEL" "$INITRD" "$BUILD_INFO"; do
     [ -f "$f" ] || { echo "ERROR: $f missing after build"; exit 1; }
 done
 
-# --- 2. Boot-check a clone -----------------------------------------------
-# `cp -c` = clonefile(2): instant APFS copy-on-write. The boot dirties the
-# clone (logs, state); the original stays byte-identical to what gets
-# checksummed + uploaded below. The kernel/initrd are read-only inputs.
-echo "=== Boot-checking the image (on a disposable clone) ==="
-VERIFY_IMG="$STAGING/verify.img"
-cp -c "$BASE_IMG" "$VERIFY_IMG"
-"$BROMURE" verify-image --disk "$VERIFY_IMG" --kernel "$KERNEL" --initrd "$INITRD" --timeout 300
-rm -f "$VERIFY_IMG"
+# --- 2. Verify (boot + browsers) on disposable clones ---------------------
+# scripts/verify-browser-image.sh owns both gates so Jenkins can run them
+# as separate stages; here they run back to back unless the caller
+# already did (SKIP_VERIFY=1).
+if enabled "${SKIP_VERIFY:-0}"; then
+    echo "=== SKIP_VERIFY set — image verification already done by the caller ==="
+else
+    ./scripts/verify-browser-image.sh "$BROMURE" "$IMAGE_DIR" all
+fi
 
 # --- 3. Compress + upload the artifacts -----------------------------------
 echo "=== Compressing artifacts ==="

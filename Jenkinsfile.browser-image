@@ -26,9 +26,12 @@
 // from the user's own Mac during postinstall, never shipped.
 //
 // The freshly built image is boot-checked on an APFS clone
-// (bromure verify-image) before anything is uploaded, and the newly
-// published catalog + artifacts are smoke-tested from the CDN before the
-// previous build's objects are deleted.
+// (bromure verify-image) and then browser-checked on a disposable copy
+// (bromure verify-browsers: catalog postinstall → Google Chrome, then a
+// Chromium session and a Chrome session must each bring their browser
+// up) before anything is uploaded, and the newly published catalog +
+// artifacts are smoke-tested from the CDN before the previous build's
+// objects are deleted.
 pipeline {
     agent { label 'macosx-builder' }
 
@@ -40,7 +43,8 @@ pipeline {
     }
 
     options {
-        // A full run is build (~10 min) + boot check + gzip + multi-GB
+        // A full run is build (~15 min) + boot check + browser check
+        // (postinstall ~1 min + two session boots) + gzip + multi-GB
         // upload + up to 1h of CDN-propagation polling (the smoke-test
         // waits for the edge to serve the new catalog before the old
         // build is deleted); anything past 3h is wedged.
@@ -52,7 +56,7 @@ pipeline {
         booleanParam(
             name: 'DRY_RUN',
             defaultValue: false,
-            description: 'Build, boot-check, and compress the image but skip every upload/delete.'
+            description: 'Build, verify (boot + browsers), and compress the image but skip every upload/delete.'
         )
         booleanParam(
             name: 'KEEP_PREVIOUS',
@@ -132,7 +136,57 @@ pipeline {
             }
         }
 
-        stage('Build image + Verify + Publish') {
+        // The image build and its two verification gates are separate
+        // stages so a failure is attributable at a glance in the pipeline
+        // view: "Build image" red = init-foss-image itself broke; "Verify
+        // boot" red = kernel/initramfs/rootfs; "Verify browsers" red = the
+        // Chrome postinstall or one of the browsers didn't come up. The
+        // artifacts live in the workspace (image-staging/) between stages
+        // and are removed in `post` — they're multi-GB.
+        stage('Build image') {
+            steps {
+                sh '''
+                    set -euo pipefail
+                    rm -rf image-staging
+                    ".build/arm64-apple-macosx/release/Bromure.app/Contents/MacOS/bromure" \
+                        init-foss-image --output image-staging/image
+                '''
+            }
+        }
+
+        stage('Verify boot') {
+            steps {
+                // bromure verify-image on an APFS clone: the disk must
+                // reach the root serial prompt.
+                sh '''
+                    set -euo pipefail
+                    ./scripts/verify-browser-image.sh \
+                        ".build/arm64-apple-macosx/release/Bromure.app/Contents/MacOS/bromure" \
+                        image-staging/image boot
+                '''
+            }
+        }
+
+        stage('Verify browsers') {
+            steps {
+                // bromure verify-browsers on a disposable copy: apply the
+                // catalog postinstall (Google Chrome, WARP) exactly as
+                // end-user installs do, then boot a Chromium session and a
+                // Chrome session through the real VMPool path and require
+                // each browser to come up (DevTools answering from the
+                // expected binary, with a page open). We once shipped an
+                // image that passed the boot check while Chrome wouldn't
+                // install and Chromium wouldn't start — this is that gate.
+                sh '''
+                    set -euo pipefail
+                    ./scripts/verify-browser-image.sh \
+                        ".build/arm64-apple-macosx/release/Bromure.app/Contents/MacOS/bromure" \
+                        image-staging/image browsers
+                '''
+            }
+        }
+
+        stage('Publish') {
             steps {
                 withCredentials([
                     string(credentialsId: 'DO_SPACES_KEY',        variable: 'DO_SPACES_KEY'),
@@ -145,15 +199,28 @@ pipeline {
                     // catalog can't be replayed here.
                     string(credentialsId: 'SPARKLE_PRIVATE_KEY',  variable: 'SPARKLE_PRIVATE_KEY')
                 ]) {
+                    // PREBUILT_IMAGE_DIR: publish the artifacts the stages
+                    // above built and verified; SKIP_VERIFY: don't rerun the
+                    // gates inside the script.
                     sh '''
                         set -euo pipefail
                         export DRY_RUN="${DRY_RUN}"
                         export KEEP_PREVIOUS="${KEEP_PREVIOUS}"
+                        export PREBUILT_IMAGE_DIR="image-staging/image"
+                        export SKIP_VERIFY=1
                         ./scripts/publish-browser-image.sh \
                             ".build/arm64-apple-macosx/release/Bromure.app/Contents/MacOS/bromure"
                     '''
                 }
             }
+        }
+    }
+
+    post {
+        always {
+            // The staged image set is ~5 GB logical; don't leave it in the
+            // workspace between weekly runs.
+            sh 'rm -rf image-staging'
         }
     }
 }
