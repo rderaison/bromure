@@ -29,9 +29,19 @@ protocol MitmServerStream: AnyObject {
 /// handshake is a no-op and no forged cert is needed.
 final class PlaintextServerStream: MitmServerStream, @unchecked Sendable {
     private let fd: Int32
-    init(fd: Int32) { self.fd = fd }
+    /// Bytes already read off the socket (by the proxy's CONNECT/first-line
+    /// parse) that must be handed back before we recv() again — e.g. the
+    /// forward-proxy plain-HTTP request line `drive()` consumed to classify
+    /// it. Drained first-come; empty for the transparent path.
+    private var prefix: Data
+    init(fd: Int32, prefix: Data = Data()) { self.fd = fd; self.prefix = prefix }
     func handshake() throws {}
     func read(maxBytes: Int) throws -> Data {
+        if !prefix.isEmpty {
+            let take = prefix.prefix(maxBytes)
+            prefix.removeFirst(take.count)
+            return Data(take)
+        }
         var buf = [UInt8](repeating: 0, count: maxBytes)
         let n = buf.withUnsafeMutableBytes { p in Darwin.recv(fd, p.baseAddress, maxBytes, 0) }
         if n < 0 { throw MitmError.tlsReadFailed(errno) }

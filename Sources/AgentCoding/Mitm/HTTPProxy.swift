@@ -140,9 +140,46 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         let firstLine = asString[..<lineEnd.lowerBound]
         let parts = firstLine.split(separator: " ")
-        guard parts.count >= 2, parts[0] == "CONNECT" else {
-            throw MitmError.malformedHTTPRequest
+        guard parts.count >= 2 else { throw MitmError.malformedHTTPRequest }
+
+        // Two proxy request shapes arrive here:
+        //   CONNECT host:port                     — TLS tunnel (https_proxy).
+        //   METHOD http://host[:port]/path ...    — forward-proxy plain HTTP
+        //                                           (http_proxy). No CONNECT,
+        //                                           no TLS: the response goes
+        //                                           back on this same socket in
+        //                                           the clear.
+        // Without the second case, anything a client sends via http_proxy for
+        // an http:// URL (apt's InRelease, curl, pip, docker) was rejected as
+        // malformed — the transparent :80 interceptor handled direct http, but
+        // the cooperative proxy path didn't.
+        if parts[0] != "CONNECT" {
+            let target = String(parts[1])
+            guard let scheme = target.range(of: "://"), target[..<scheme.lowerBound] == "http" else {
+                // Not CONNECT and not an http:// absolute target — we don't
+                // proxy this (an https:// forward without CONNECT, or garbage).
+                throw MitmError.malformedHTTPRequest
+            }
+            let afterScheme = target[scheme.upperBound...]
+            let authority = String(afterScheme.prefix { $0 != "/" })
+            let (host, port) = parseHTTPHostPort(authority)   // default 80
+            let originPath = String(afterScheme.dropFirst(authority.count))
+            let path = originPath.isEmpty ? "/" : originPath
+
+            // Rewrite the request-line target to origin-form so the shared
+            // relay chain (mitmUpstreamURL requires "/…") accepts it; the rest
+            // of the request (headers + body) is untouched.
+            guard let reqLineEnd = connectReq.range(of: Data("\r\n".utf8)) else {
+                throw MitmError.malformedHTTPRequest
+            }
+            let rewrittenLine = "\(parts[0]) \(path) \(parts.count >= 3 ? String(parts[2]) : "HTTP/1.1")"
+            var rewritten = Data(rewrittenLine.utf8)
+            rewritten.append(connectReq.subdata(in: reqLineEnd.lowerBound..<connectReq.count))
+
+            try await driveTLS(host: host, port: port, t0: t0, cleartext: true, prefix: rewritten)
+            return
         }
+
         let target = String(parts[1])
         let (host, port) = parseHostPort(target)
 
@@ -189,14 +226,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// destination identity the chain (and the `mitmUpstreamURL` invariant) keys
     /// off, so anchoring it to the SNI keeps that invariant intact.
     @available(macOS, deprecated: 10.15, message: "creates TLSServerStream which wraps SecureTransport")
-    private func driveTLS(host: String, port: Int, t0: Date, cleartext: Bool = false) async throws {
+    private func driveTLS(host: String, port: Int, t0: Date, cleartext: Bool = false,
+                          prefix: Data = Data()) async throws {
         // 3. Terminate the client side. HTTPS: forge a leaf for `host` and run
-        //    server-side TLS. Plain HTTP (:80, transparent): no TLS — read and
-        //    write the socket directly. Everything downstream is identical; only
+        //    server-side TLS. Plain HTTP (:80, transparent, or a forward-proxy
+        //    absolute-form request): no TLS — read and write the socket
+        //    directly. `prefix` replays request bytes the caller already read
+        //    (the forward-proxy path). Everything downstream is identical; only
         //    the upstream scheme differs (http vs https).
         let tls: MitmServerStream
         if cleartext {
-            tls = PlaintextServerStream(fd: fd)
+            tls = PlaintextServerStream(fd: fd, prefix: prefix)
         } else {
             let identity = try certCache.identity(for: host)
             let stream = try TLSServerStream(fd: fd, identity: identity)
@@ -2235,6 +2275,16 @@ private func parseHostPort(_ s: String) -> (String, Int) {
     return (s, 443)
 }
 
+/// Parse the authority of an `http://` forward-proxy target → (host, port).
+/// Defaults to 80 (the http scheme's default) when no explicit port is given.
+private func parseHTTPHostPort(_ s: String) -> (String, Int) {
+    if let colon = s.lastIndex(of: ":"),
+       let port = Int(s[s.index(after: colon)...]) {
+        return (String(s[..<colon]), port)
+    }
+    return (s, 80)
+}
+
 /// Lowercase, strip IPv6 brackets and trailing root dots so a host
 /// string and a URL-parsed host compare on equal footing.
 private func mitmNormalizeHost(_ s: String) -> String {
@@ -2852,9 +2902,21 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
     var truncatedForTrace = false
     let reqStart = Date()
     var ttft: Double? = nil
+    // Frame the body with Transfer-Encoding: chunked when a body is allowed.
+    // We stripped the upstream's Content-Length (URLSession may have
+    // decompressed the body, changing its length) and don't know the final
+    // length up front, so the alternative is bare `Connection: close`
+    // read-until-EOF framing. curl tolerates that, but apt's http method
+    // truncates a length-less close-framed body (breaking `apt-get update`
+    // through the proxy) — chunked gives every HTTP/1.1 client an explicit
+    // end-of-body marker. HEAD / 204 / 304 carry no body, so they stay
+    // header-only (chunked framing on them is invalid).
+    var useChunked = false
+    let isHeadRequest = method.uppercased() == "HEAD"
     for try await event in events {
         switch event {
         case .head(let http):
+            useChunked = !isHeadRequest && http.statusCode != 204 && http.statusCode != 304
             var head = "HTTP/1.1 \(http.statusCode) "
             head += HTTPURLResponse.localizedString(forStatusCode: http.statusCode).capitalized
             head += "\r\n"
@@ -2863,6 +2925,7 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
                 if stripped.contains(key.lowercased()) { continue }
                 head += "\(key): \(val)\r\n"
             }
+            if useChunked { head += "Transfer-Encoding: chunked\r\n" }
             head += "Connection: close\r\n"
             head += "\r\n"
             let headData = Data(head.utf8)
@@ -2873,8 +2936,18 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
             responseBuffer.append(headData)
         case .chunk(let chunk):
             if ttft == nil { ttft = Date().timeIntervalSince(reqStart) }
-            try tls.write(chunk)
-            totalWireBytes += chunk.count
+            if useChunked {
+                if !chunk.isEmpty {
+                    var frame = Data(String(format: "%x\r\n", chunk.count).utf8)
+                    frame.append(chunk)
+                    frame.append(Data("\r\n".utf8))
+                    try tls.write(frame)
+                    totalWireBytes += frame.count
+                }
+            } else {
+                try tls.write(chunk)
+                totalWireBytes += chunk.count
+            }
             if responseBuffer.count + chunk.count <= bodyBufferCap {
                 responseBuffer.append(chunk)
             } else if responseBuffer.count < bodyBufferCap {
@@ -2889,6 +2962,13 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
                 truncatedForTrace = true
             }
         }
+    }
+    // Terminating zero-length chunk — the end-of-body marker the client
+    // dechunks on. Only when we actually framed the body as chunked.
+    if useChunked {
+        let terminator = Data("0\r\n\r\n".utf8)
+        try? tls.write(terminator)
+        totalWireBytes += terminator.count
     }
     return RelayResponse(buffer: responseBuffer,
                          wireBytes: totalWireBytes,
