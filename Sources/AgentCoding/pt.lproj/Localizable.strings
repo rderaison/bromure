@@ -1558,3 +1558,8 @@
 "Enroll with code" = "Inscrever com código";
 "six-word-enrollment-code" = "código-de-inscrição-de-seis-palavras";
 "Open Window → Log in to bromure.io… to connect this Mac to your workspace." = "Abra «Janela → Entrar no bromure.io…» para conectar este Mac ao seu espaço de trabalho.";
+
+/* omp (Oh My Pi) */
+"OpenAI-compatible base URL (https://…/v1)" = "URL base compatível com OpenAI (https://…/v1)";
+"Model (optional — e.g. opus, gpt-5.2)" = "Modelo (opcional — ex.: opus, gpt-5.2)";
+"omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "O omp funciona com mais de 60 provedores. Escolha um e cole a chave de API dele abaixo, ou selecione **Modelo local** acima para executar neste Mac. Troque quando quiser.";

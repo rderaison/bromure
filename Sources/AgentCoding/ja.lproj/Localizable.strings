@@ -1558,3 +1558,8 @@
 "Enroll with code" = "コードで登録";
 "six-word-enrollment-code" = "6 語の登録コード";
 "Open Window → Log in to bromure.io… to connect this Mac to your workspace." = "「ウインドウ →『bromure.io にログイン…』」を開いて、この Mac をワークスペースに接続します。";
+
+/* omp (Oh My Pi) */
+"OpenAI-compatible base URL (https://…/v1)" = "OpenAI 互換のベース URL (https://…/v1)";
+"Model (optional — e.g. opus, gpt-5.2)" = "モデル（任意 — 例: opus、gpt-5.2）";
+"omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "omp は 60 以上のプロバイダーに対応しています。1 つ選んで下の欄に API キーを貼り付けるか、上の **ローカルモデル** を選ぶとこの Mac で実行できます。いつでも切り替えられます。";

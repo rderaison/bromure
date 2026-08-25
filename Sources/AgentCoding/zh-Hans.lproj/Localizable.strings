@@ -1558,3 +1558,8 @@
 "Enroll with code" = "使用注册码注册";
 "six-word-enrollment-code" = "六个单词的注册码";
 "Open Window → Log in to bromure.io… to connect this Mac to your workspace." = "打开“窗口 → 登录 bromure.io…”以将此 Mac 连接到您的工作区。";
+
+/* omp (Oh My Pi) */
+"OpenAI-compatible base URL (https://…/v1)" = "OpenAI 兼容的基础 URL (https://…/v1)";
+"Model (optional — e.g. opus, gpt-5.2)" = "模型（可选 — 例如 opus、gpt-5.2）";
+"omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "omp 支持 60 多个提供商。选择一个并在下方粘贴其 API 密钥，或在上方选择 **本地模型** 以在此 Mac 上运行。可随时切换。";
