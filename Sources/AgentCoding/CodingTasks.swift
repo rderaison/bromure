@@ -1372,6 +1372,20 @@ final class CodingTaskEngine {
                 + "[ -n \"$d\" ] && f=$(find \"$d\" -maxdepth 2 -name updates.jsonl "
                 + "2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); fi; "
                 + emit
+        case .omp:
+            // omp names each session dir after the run's cwd with '/' → '-'
+            // (e.g. /home/ubuntu/wt-foo → -home-ubuntu-wt-foo); the transcript
+            // is the newest `*.jsonl` inside. Prefer the marker cwd's dir (exact
+            // + readlink-resolved), else newest session overall.
+            return markerCwd
+                + "base=\"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/sessions\"; d=\"\"; "
+                + "if [ -n \"$cwd\" ]; then "
+                + "s1=$(printf %s \"$cwd\" | tr / -); "
+                + "s2=$(printf %s \"$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\")\" | tr / -); "
+                + "d=$(ls -td \"$base/$s1\" \"$base/$s2\" 2>/dev/null | head -1); fi; "
+                + "f=$(find \"${d:-$base}\" -name '*.jsonl' 2>/dev/null "
+                + "| xargs -r ls -t 2>/dev/null | head -1); "
+                + emit
         }
     }
 

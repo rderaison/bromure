@@ -200,7 +200,7 @@ enum ClaudeTranscriptParser {
 enum AgentTranscript {
     static func parse(_ data: Data, agent: String? = nil) -> [TranscriptItem] {
         let kind: String
-        if let agent, ["claude", "codex", "grok", "kimi"].contains(agent) {
+        if let agent, ["claude", "codex", "grok", "kimi", "omp"].contains(agent) {
             kind = agent
         } else {
             kind = sniff(data)
@@ -209,6 +209,7 @@ enum AgentTranscript {
         case "codex": return CodexTranscriptParser.parse(data)
         case "grok": return GrokTranscriptParser.parse(data)
         case "kimi": return KimiTranscriptParser.parse(data)
+        case "omp": return OmpTranscriptParser.parse(data)
         default: return ClaudeTranscriptParser.parse(data)
         }
     }
@@ -230,6 +231,14 @@ enum AgentTranscript {
             if let params = obj["params"] as? [String: Any],
                params["update"] is [String: Any] { return "grok" }
             let type = obj["type"] as? String ?? ""
+            // omp: session-log lines are typed ("session"/"model_change"/
+            // "message"). Decisive shapes: a `session` line carrying `cwd` +
+            // `version`, a `model_change` line, or a `message` line whose
+            // `message` object holds the role (Claude puts the role in `type`).
+            if type == "session", obj["cwd"] != nil, obj["version"] != nil { return "omp" }
+            if type == "model_change", obj["model"] != nil { return "omp" }
+            if type == "message", let m = obj["message"] as? [String: Any],
+               m["role"] is String { return "omp" }
             // Kimi: wire-journal op types are dotted ("turn.prompt",
             // "context.append_message"); line 1 is a protocol_version stamp.
             if type.contains(".") { return "kimi" }
@@ -248,6 +257,86 @@ enum AgentTranscript {
             }
         }
         return "claude"
+    }
+}
+
+// MARK: - omp parser
+
+/// Tolerant reader for Oh My Pi (`omp`) session files
+/// (`~/.omp/agent/sessions/<slug>/<timestamp>_<uuid>.jsonl`). Each line is a
+/// typed record; the conversation lives in `{"type":"message","message":{...}}`
+/// lines whose `message` is an Anthropic-messages object (`role` +
+/// `content` blocks) — the same block shapes Claude uses — so this reuses
+/// `ClaudeTranscriptParser`'s block helpers. `session`/`model_change`/
+/// `thinking_level_change`/`title`/`custom` lines are metadata and skipped.
+/// Tool calls are read from the assistant `content` blocks (not the parallel
+/// `custom` tool entries) to avoid double-counting. Unknown lines are skipped.
+enum OmpTranscriptParser {
+    static func parse(_ data: Data) -> [TranscriptItem] {
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        var items: [TranscriptItem] = []
+        var toolNames: [String: String] = [:]
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let obj = try? JSONSerialization.jsonObject(
+                with: Data(line.utf8)) as? [String: Any] else { continue }
+            guard obj["type"] as? String == "message",
+                  let message = obj["message"] as? [String: Any],
+                  let role = message["role"] as? String,
+                  role == "user" || role == "assistant" else { continue }
+            let isUser = role == "user"
+            let stamp = (obj["timestamp"] as? String).flatMap {
+                iso.date(from: $0) ?? isoPlain.date(from: $0)
+            }
+            func add(_ kind: TranscriptItem.Kind) {
+                items.append(TranscriptItem(id: items.count, kind: kind, timestamp: stamp))
+            }
+
+            // content: a bare string or an array of Anthropic-style blocks.
+            if let s = message["content"] as? String {
+                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty { add(isUser ? .userText(t) : .assistantText(t)) }
+                continue
+            }
+            guard let blocks = message["content"] as? [[String: Any]] else { continue }
+            for block in blocks {
+                switch block["type"] as? String {
+                case "text":
+                    let s = (block["text"] as? String ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !s.isEmpty { add(isUser ? .userText(s) : .assistantText(s)) }
+                case "thinking":
+                    let s = (block["thinking"] as? String ?? block["text"] as? String ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !s.isEmpty { add(.thinking(s)) }
+                case "tool_use":
+                    let name = block["name"] as? String ?? "tool"
+                    if let id = block["id"] as? String { toolNames[id] = name }
+                    let input = block["input"] as? [String: Any] ?? [:]
+                    let questions = name == "AskUserQuestion"
+                        ? TranscriptQuestion.parse(input) : []
+                    if !questions.isEmpty {
+                        questions.forEach { add(.question($0)) }
+                    } else {
+                        add(.toolUse(name: name,
+                                     summary: ClaudeTranscriptParser.toolSummary(name: name, input: input),
+                                     detail: ClaudeTranscriptParser.prettyJSON(input)))
+                    }
+                case "tool_result":
+                    let tool = (block["tool_use_id"] as? String)
+                        .flatMap { toolNames[$0] } ?? "tool"
+                    add(.toolResult(tool: tool,
+                                    content: ClaudeTranscriptParser.resultText(block["content"]),
+                                    isError: block["is_error"] as? Bool ?? false))
+                default:
+                    continue
+                }
+            }
+        }
+        return items
     }
 }
 

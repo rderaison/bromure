@@ -23,7 +23,7 @@ enum BromureIcons {
     }
 
     nonisolated static let knownAgents: [String] = [
-        "claude", "codex", "grok", "kimi", "aider", "goose", "amp",
+        "claude", "codex", "grok", "kimi", "omp", "aider", "goose", "amp",
         "opencode", "gemini", "cursor",
     ]
 

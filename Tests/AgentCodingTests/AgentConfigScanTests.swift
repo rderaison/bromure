@@ -144,6 +144,7 @@ struct AgentConfigScanTests {
         for s in AgentConfigScan.sources {
             let denies = s.deny.contains("auth.json") || s.deny.contains("credentials")
                 || s.deny.contains(".credentials.json")
+                || s.deny.contains("agent.db")   // omp keeps auth in a SQLite db
             #expect(denies, "\(s.tool) must deny its credential store")
         }
     }

@@ -1811,6 +1811,9 @@ def _restore_worktrees(repo_root, repo_name):
 _YOLO_FLAGS = {
     "claude": "--dangerously-skip-permissions",
     "codex": "--dangerously-bypass-approvals-and-sandbox",
+    # omp: --auto-approve skips every tool-approval prompt (verified accepted
+    # alongside its positional message; also has --approval-mode yolo).
+    "omp": "--auto-approve",
 }
 
 
@@ -1985,6 +1988,39 @@ def _task_mcp_setup(branch, tool, workdir):
                         f.write("\n" + subdir + "/\n")
         except OSError as e:
             log("worktree", "%s task-mcp setup failed: %s" % (tool, e))
+        return ""
+    if tool == "omp":
+        # omp reads a project-root `.mcp.json` (Claude-Code-compatible
+        # `mcpServers`). Merge (don't clobber a user's file) and git-exclude it.
+        try:
+            path = os.path.join(workdir, ".mcp.json")
+            existing = {}
+            if os.path.exists(path):
+                try:
+                    with open(path) as f:
+                        existing = json.load(f)
+                except (OSError, ValueError):
+                    existing = {}
+            servers = existing.get("mcpServers", {}) or {}
+            servers["bromure-board"] = {
+                "command": "python3", "args": [_TASK_MCP_SHIM, branch]}
+            existing["mcpServers"] = servers
+            with open(path, "w") as f:
+                json.dump(existing, f, indent=2)
+            ex = _capture(["git", "-C", workdir, "rev-parse",
+                           "--git-path", "info/exclude"]).strip()
+            if ex:
+                p = ex if os.path.isabs(ex) else os.path.join(workdir, ex)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                cur = ""
+                if os.path.exists(p):
+                    with open(p) as f:
+                        cur = f.read()
+                if ".mcp.json" not in cur:
+                    with open(p, "a") as f:
+                        f.write("\n.mcp.json\n")
+        except OSError as e:
+            log("worktree", "omp task-mcp setup failed: %s" % e)
         return ""
     return ""
 
@@ -2763,7 +2799,7 @@ def _agent_title(pane_title, agent):
 # Mirrors the shell case: node|node[0-9]*|deno|bun|python|python[0-9.]*|ruby|uv|tsx
 _INTERP_RE = re.compile(
     r"^(node|node[0-9].*|deno|bun|python|python[0-9.].*|ruby|uv|tsx)$")
-_AGENTS = ("claude", "codex", "grok", "kimi", "kimi-code", "kimi-co",
+_AGENTS = ("claude", "codex", "grok", "kimi", "kimi-code", "kimi-co", "omp",
            "aider", "goose", "amp", "opencode",
            "gemini", "cursor")
 _AGENTS_SET = frozenset(_AGENTS)

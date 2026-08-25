@@ -32,6 +32,7 @@ extension Profile.Tool {
         case .codex:  "terminal.fill"
         case .grok:   "bolt.fill"
         case .kimi:   "moon.stars.fill"
+        case .omp:    "option"   // ⌥ — Oh My Pi's brand mark
         }
     }
 }
@@ -1027,6 +1028,8 @@ struct ProfileEditorView: View {
                               onRegisterGrok, onForgetGrok)
         case .kimi:   return (kimiAccountSavedAt?(), kimiReauthRequiredAt?(),
                               onRegisterKimi, onForgetKimi)
+        // omp is API-key only (no OAuth subscription) — nothing to register.
+        case .omp:    return (nil, nil, nil, nil)
         }
     }
 
@@ -1104,6 +1107,7 @@ struct ProfileEditorView: View {
         case .codex:  return NSLocalizedString("Codex (OpenAI)", comment: "Fusion cloud leg label")
         case .grok:   return NSLocalizedString("Grok (xAI)", comment: "Fusion cloud leg label")
         case .kimi:   return NSLocalizedString("Kimi Code (Moonshot AI)", comment: "Fusion cloud leg label")
+        case .omp:    return NSLocalizedString("Oh My Pi", comment: "Fusion cloud leg label")
         }
     }
 
@@ -1234,7 +1238,10 @@ struct ProfileEditorView: View {
                         authMode: self.draft.authMode,
                         apiKey: self.draft.apiKey,
                         localModelID: self.draft.activeModelID,
-                        requireApproval: self.draft.apiKeyRequiresApproval)
+                        requireApproval: self.draft.apiKeyRequiresApproval,
+                        ompProvider: self.draft.ompProvider,
+                        ompBaseURL: self.draft.ompBaseURL,
+                        ompModel: self.draft.ompModel)
                 }
                 if let s = self.draft.additionalTools.first(where: { $0.tool == t }) {
                     return s
@@ -1247,6 +1254,9 @@ struct ProfileEditorView: View {
                     self.draft.apiKey   = newValue.apiKey
                     self.draft.activeModelID = newValue.localModelID
                     self.draft.apiKeyRequiresApproval = newValue.requireApproval
+                    self.draft.ompProvider = newValue.ompProvider
+                    self.draft.ompBaseURL  = newValue.ompBaseURL
+                    self.draft.ompModel    = newValue.ompModel
                 } else if let i = self.draft.additionalTools.firstIndex(where: { $0.tool == t }) {
                     self.draft.additionalTools[i] = newValue
                 }
@@ -4878,6 +4888,35 @@ private struct ToolConfigCard: View {
     let onRegisterSubscription: (() -> Void)?
     let onForgetSubscription: (() -> Void)?
 
+    /// omp is provider-agnostic: a provider picker (+ optional custom base URL
+    /// and model override) so switching provider or going local is one click.
+    @ViewBuilder private var ompProviderControls: some View {
+        Picker(NSLocalizedString("Provider", comment: "omp upstream provider"),
+               selection: Binding(get: { spec.effectiveOmpProvider },
+                                  set: { spec.ompProvider = $0 })) {
+            ForEach(Profile.OmpProvider.allCases, id: \.self) { p in
+                Text(p.displayName).tag(p)
+            }
+        }
+        if spec.effectiveOmpProvider == .custom {
+            TextField(NSLocalizedString("OpenAI-compatible base URL (https://…/v1)",
+                                        comment: "omp custom provider base URL"),
+                      text: Binding(get: { spec.ompBaseURL ?? "" },
+                                    set: { spec.ompBaseURL = $0 }))
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+        }
+        TextField(NSLocalizedString("Model (optional — e.g. opus, gpt-5.2)",
+                                    comment: "omp --model override"),
+                  text: Binding(get: { spec.ompModel ?? "" },
+                                set: { spec.ompModel = $0 }))
+            .textFieldStyle(.roundedBorder)
+            .disableAutocorrection(true)
+        Text(NSLocalizedString("omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime.",
+                               comment: "omp provider help"))
+            .font(.caption).foregroundStyle(.secondary)
+    }
+
     /// The base-URL env var this tool reads, for the explanatory caption.
     private var localBaseURLEnvName: String {
         switch tool {
@@ -4888,6 +4927,7 @@ private struct ToolConfigCard: View {
         // override) is config-driven; KIMI_MODEL_BASE_URL is the closest
         // equivalent and is what the local-mode exports set.
         case .kimi:   return "KIMI_MODEL_BASE_URL"
+        case .omp:    return "ANTHROPIC_BASE_URL"
         }
     }
 
@@ -4925,6 +4965,9 @@ private struct ToolConfigCard: View {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Profile.AuthMode.allCases, id: \.self) { m in
                         if m == .bedrock && tool != .claude {
+                            EmptyView()
+                        } else if m == .subscription && tool == .omp {
+                            // omp is API-key only (no OAuth subscription).
                             EmptyView()
                         } else {
                             let localDisabled = (m == .local && localModels.isEmpty)
@@ -4977,6 +5020,7 @@ private struct ToolConfigCard: View {
 
                 switch spec.authMode {
                 case .token:
+                    if tool == .omp { ompProviderControls }
                     SecureField(
                         envVarPlaceholder,
                         text: Binding(
@@ -5030,6 +5074,9 @@ private struct ToolConfigCard: View {
         case .codex:  return "OpenAI API key"
         case .grok:   return "xAI API key"
         case .kimi:   return "Moonshot API key"
+        // Provider-agnostic; the adjacent provider selector clarifies which
+        // key this is. Neutral placeholder avoids implying a specific vendor.
+        case .omp:    return "API key"
         }
     }
 }

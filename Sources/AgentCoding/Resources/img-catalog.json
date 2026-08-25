@@ -27,6 +27,12 @@
       "command": "npx --yes @socketsecurity/cli npm install -g --silent @moonshot-ai/kimi-code\ncommand -v kimi >/dev/null 2>&1 || echo 'WARNING: kimi not on PATH after install'"
     },
     {
+      "uuid": "8252d02e-bac1-4702-9d5f-7a9a3d01928a",
+      "seq": 37,
+      "description": "Oh My Pi CLI (omp) + bun runtime",
+      "command": "export BUN_INSTALL=/opt/bun\ncurl -fsSL https://bun.sh/install | bash\nif [ -x /opt/bun/bin/bun ]; then\n    chmod -R a+rX /opt/bun\n    ln -sf /opt/bun/bin/bun /usr/local/bin/bun\nfi\ncommand -v bun >/dev/null 2>&1 || echo 'WARNING: bun not on PATH after install (omp needs it)'\nnpx --yes @socketsecurity/cli npm install -g --silent @oh-my-pi/pi-coding-agent || npm install -g --silent @oh-my-pi/pi-coding-agent\ncommand -v omp >/dev/null 2>&1 || echo 'WARNING: omp not on PATH after install'"
+    },
+    {
       "uuid": "9d3e5f7a-1b2c-4d6e-b8f9-3a4b5c6d7e8f",
       "seq": 40,
       "description": "Google Cloud SDK (gcloud)",

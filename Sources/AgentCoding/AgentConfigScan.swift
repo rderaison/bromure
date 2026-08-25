@@ -57,6 +57,13 @@ enum AgentConfigScan {
         Source(tool: .kimi, dir: ".kimi-code", deny: [
             "credentials", "sessions", "history.jsonl", "history", "log", "logs", "cache",
         ]),
+        // omp keeps its config under ~/.omp/agent (config.yml / models.yml);
+        // auth + usage live in a SQLite agent.db, and sessions/logs/caches are
+        // data — deny all of those so a scan carries only the config files.
+        Source(tool: .omp, dir: ".omp", deny: [
+            "agent.db", "agent.db-wal", "agent.db-shm", "models.db",
+            "sessions", "logs", "log", "run", "cache", "gpu_cache.json",
+        ]),
     ]
 
     /// Extensions worth carrying. Everything an agent treats as configuration

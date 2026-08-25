@@ -282,6 +282,15 @@ struct ImageDownloadPlumbingTests {
         }
     }
 
+    @Test("Bundled baseline carries the omp install step (bun + omp)")
+    func baselineHasOmpStep() throws {
+        let steps = ImageCatalog.baseline.postinstall
+        let step = try #require(steps.first { $0.command.contains("@oh-my-pi/pi-coding-agent") })
+        #expect(step.command.contains("bun.sh/install"))
+        let uuids = steps.map(\.uuid)
+        #expect(Set(uuids).count == uuids.count)  // still unique after insertion
+    }
+
     @Test("expandGzipSparse rejects corrupt input")
     func expandCorruptInput() throws {
         let dir = try makeTempDir()

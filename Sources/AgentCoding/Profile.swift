@@ -852,12 +852,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case codex
         case grok
         case kimi
+        case omp
         public var displayName: String {
             switch self {
             case .claude: return "Claude Code"
             case .codex:  return "Codex"
             case .grok:   return "Grok Build"
             case .kimi:   return "Kimi Code"
+            case .omp:    return "Oh My Pi"
             }
         }
         /// True when this tool reports run completion through its own
@@ -873,18 +875,27 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         public var hasReliableDoneSignal: Bool {
             switch self {
             case .claude, .kimi: return true
-            case .codex, .grok:  return false
+            // omp: poll-based for now (no confirmed session-stop hook wired);
+            // can move to the hook-driven side once its `--hook` stop event
+            // is plumbed into agent-status.sh.
+            case .codex, .grok, .omp:  return false
             }
         }
 
         /// Env-var name the in-VM init script writes the API key to when
         /// auth mode is .token.
+        ///
+        /// omp is provider-agnostic; this returns its DEFAULT provider's env
+        /// var (Anthropic). When a profile pins a different `ompProvider`,
+        /// callers with the `ToolSpec` in scope use
+        /// `ToolSpec.effectiveOmpProvider.apiKeyEnvVar` instead.
         public var apiKeyEnvVar: String {
             switch self {
             case .claude: return "ANTHROPIC_API_KEY"
             case .codex:  return "OPENAI_API_KEY"
             case .grok:   return "XAI_API_KEY"
             case .kimi:   return "MOONSHOT_API_KEY"
+            case .omp:    return "ANTHROPIC_API_KEY"
             }
         }
 
@@ -957,8 +968,85 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                     ("KIMI_CODE_NO_AUTO_UPDATE", "1"),
                     ("KIMI_DISABLE_TELEMETRY", "1"),
                 ]
+            case .omp:
+                // Local omp is wired through a models.yml OpenAI-compatible
+                // provider (`bromure`) that SessionDisk stages, pointing at the
+                // on-host engine via the MITM sentinel host. That provider's
+                // `apiKeyEnv` is OPENAI_API_KEY, so we export the dummy key
+                // here (the engine ignores it). The base URL + model live in
+                // models.yml; the `--model` at launch matches its entry.
+                _ = (model, base)
+                return [
+                    ("OPENAI_API_KEY", key),
+                ]
             }
         }
+    }
+
+    /// The upstream provider an `omp` workspace talks to. omp is
+    /// provider-agnostic (60+ providers); Bromure ties each into one path so
+    /// the API-key field, the MITM swap host, and the default `--model` are
+    /// well-defined. Anthropic's ToS forbid using a Claude *subscription*
+    /// outside Claude Code, so omp is API-key only here (no OAuth). `.custom`
+    /// is any OpenAI-compatible endpoint (base URL supplied by the user);
+    /// local on-device inference is the profile's `authMode == .local`, not a
+    /// provider here.
+    public enum OmpProvider: String, Codable, CaseIterable, Sendable {
+        case anthropic
+        case openai
+        case xai
+        case zai
+        case custom
+
+        public static let `default`: OmpProvider = .anthropic
+
+        public var displayName: String {
+            switch self {
+            case .anthropic: return "Anthropic (Claude)"
+            case .openai:    return "OpenAI"
+            case .xai:       return "xAI (Grok)"
+            case .zai:       return "z.ai (GLM)"
+            case .custom:    return "Custom (OpenAI-compatible)"
+            }
+        }
+
+        /// Env var omp reads the API key from for this provider.
+        public var apiKeyEnvVar: String {
+            switch self {
+            case .anthropic:        return "ANTHROPIC_API_KEY"
+            case .openai, .custom:  return "OPENAI_API_KEY"
+            case .xai:              return "XAI_API_KEY"
+            case .zai:              return "ZAI_API_KEY"
+            }
+        }
+
+        /// The upstream API host the MITM scopes the fake→real key swap to.
+        /// Empty for `.custom` (host is derived from the user's base URL).
+        public var apiHost: String {
+            switch self {
+            case .anthropic: return "api.anthropic.com"
+            case .openai:    return "api.openai.com"
+            case .xai:       return "api.x.ai"
+            case .zai:       return "api.z.ai"
+            case .custom:    return ""
+            }
+        }
+
+        /// A fuzzy `--model` default omp will resolve (or nil to let omp pick
+        /// its own default for the provider).
+        public var defaultModel: String? {
+            switch self {
+            case .anthropic: return "sonnet"
+            case .openai:    return "gpt-5.2"
+            case .xai:       return "grok"
+            case .zai:       return "glm"
+            case .custom:    return nil
+            }
+        }
+
+        /// `.custom` needs a user-supplied OpenAI-compatible base URL staged
+        /// into `~/.omp/agent/models.yml`.
+        public var needsBaseURL: Bool { self == .custom }
     }
 
     public enum AuthMode: String, Codable, CaseIterable, Sendable {
@@ -992,21 +1080,43 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         /// When true, every fake→real swap of this tool's API key
         /// prompts on the host. See `ConsentBroker`.
         public var requireApproval: Bool
+        /// Upstream provider for an `omp` tool (nil ⇒ the default, Anthropic).
+        /// Ignored for every other tool and when `authMode == .local`.
+        public var ompProvider: OmpProvider?
+        /// OpenAI-compatible base URL for `ompProvider == .custom`.
+        public var ompBaseURL: String?
+        /// Optional `--model` override for omp (fuzzy, e.g. "opus", "gpt-5.2").
+        /// nil ⇒ the provider's default model (or the local sentinel in local
+        /// mode).
+        public var ompModel: String?
 
         public var id: Tool { tool }
 
+        /// The effective omp provider (default Anthropic). Only meaningful
+        /// when `tool == .omp`.
+        public var effectiveOmpProvider: OmpProvider {
+            ompProvider ?? .default
+        }
+
         public init(tool: Tool, authMode: AuthMode = .token,
                     apiKey: String? = nil, localModelID: String? = nil,
-                    requireApproval: Bool = false) {
+                    requireApproval: Bool = false,
+                    ompProvider: OmpProvider? = nil,
+                    ompBaseURL: String? = nil,
+                    ompModel: String? = nil) {
             self.tool = tool
             self.authMode = authMode
             self.apiKey = apiKey
             self.localModelID = localModelID
             self.requireApproval = requireApproval
+            self.ompProvider = ompProvider
+            self.ompBaseURL = ompBaseURL
+            self.ompModel = ompModel
         }
 
         private enum CodingKeys: String, CodingKey {
             case tool, authMode, apiKey, localModelID, requireApproval
+            case ompProvider, ompBaseURL, ompModel
         }
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -1015,6 +1125,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             apiKey          = try c.decodeIfPresent(String.self, forKey: .apiKey)
             localModelID    = try c.decodeIfPresent(String.self, forKey: .localModelID)
             requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+            ompProvider     = try c.decodeIfPresent(OmpProvider.self, forKey: .ompProvider)
+            ompBaseURL      = try c.decodeIfPresent(String.self, forKey: .ompBaseURL)
+            ompModel        = try c.decodeIfPresent(String.self, forKey: .ompModel)
         }
         public func encode(to encoder: Encoder) throws {
             var c = encoder.container(keyedBy: CodingKeys.self)
@@ -1023,6 +1136,22 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             try c.encodeIfPresent(apiKey, forKey: .apiKey)
             try c.encodeIfPresent(localModelID, forKey: .localModelID)
             if requireApproval { try c.encode(true, forKey: .requireApproval) }
+            try c.encodeIfPresent(ompProvider, forKey: .ompProvider)
+            try c.encodeIfPresent(ompBaseURL, forKey: .ompBaseURL)
+            try c.encodeIfPresent(ompModel, forKey: .ompModel)
+        }
+
+        /// The `--model` value omp launches with (nil ⇒ let omp use its
+        /// provider default). Local mode uses the engine sentinel.
+        public func resolvedOmpModel(localSentinel: String) -> String? {
+            guard tool == .omp else { return nil }
+            if let m = ompModel?.trimmingCharacters(in: .whitespaces), !m.isEmpty {
+                return m
+            }
+            if authMode == .local {
+                return localModelID?.isEmpty == false ? localModelID : localSentinel
+            }
+            return effectiveOmpProvider.defaultModel
         }
     }
 
@@ -1038,6 +1167,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// ProfileSecrets), not in the keychain — the agentic-coding base image is
     /// the only consumer and it lives on the same Mac.
     public var apiKey: String?
+
+    /// PRIMARY-tool omp settings (mirrors `ToolSpec.omp*` for additional
+    /// tools). Only meaningful when `tool == .omp`; nil ⇒ the default provider.
+    public var ompProvider: OmpProvider?
+    public var ompBaseURL: String?
+    public var ompModel: String?
 
     /// Other coding agents the user wants available in this profile.
     /// Each gets its env var exported (token mode) and its `<tool>
@@ -1664,6 +1799,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Default-tolerant decoder so old JSON files (missing newer fields) load.
     enum CodingKeys: String, CodingKey {
         case id, name, tool, authMode, apiKey, sshPublicKey
+        case ompProvider, ompBaseURL, ompModel
         case folderPath  // legacy: single folder, migrated to folderPaths
         case folderPaths
         case createdAt, lastUsedAt, baseImageVersionAtClone, color, comments
@@ -1727,6 +1863,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         tool            = try c.decode(Tool.self, forKey: .tool)
         authMode        = try c.decode(AuthMode.self, forKey: .authMode)
         apiKey          = try c.decodeIfPresent(String.self, forKey: .apiKey)
+        ompProvider     = try c.decodeIfPresent(OmpProvider.self, forKey: .ompProvider)
+        ompBaseURL      = try c.decodeIfPresent(String.self, forKey: .ompBaseURL)
+        ompModel        = try c.decodeIfPresent(String.self, forKey: .ompModel)
         // Migration: old profiles had a single `folderPath`; promote to
         // a one-element folderPaths array.
         if let many = try c.decodeIfPresent([String].self, forKey: .folderPaths) {
@@ -1839,6 +1978,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
         try c.encode(tool, forKey: .tool)
+        try c.encodeIfPresent(ompProvider, forKey: .ompProvider)
+        try c.encodeIfPresent(ompBaseURL, forKey: .ompBaseURL)
+        try c.encodeIfPresent(ompModel, forKey: .ompModel)
         try c.encode(authMode, forKey: .authMode)
         try c.encodeIfPresent(apiKey, forKey: .apiKey)
         try c.encode(folderPaths, forKey: .folderPaths)
@@ -2003,9 +2145,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// agent (e.g. SessionDisk's api_key.env writer, the welcome message)
     /// can iterate this without caring which one is "primary".
     public var allToolSpecs: [ToolSpec] {
-        // The primary tool's local model is the profile-level activeModelID.
+        // The primary tool's local model is the profile-level activeModelID;
+        // its omp provider/base-URL/model come from the profile-level mirrors.
         var specs = [ToolSpec(tool: tool, authMode: authMode, apiKey: apiKey,
-                              localModelID: activeModelID)]
+                              localModelID: activeModelID,
+                              ompProvider: ompProvider, ompBaseURL: ompBaseURL,
+                              ompModel: ompModel)]
         // Defensive: filter out any duplicate of the primary in case the
         // editor's invariant slipped (or a JSON edit bypassed the decoder).
         for s in additionalTools where s.tool != tool {
@@ -2099,6 +2244,17 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .codex:  hosts.formUnion(["openai.com", "chatgpt.com"])
             case .grok:   hosts.formUnion(["x.ai", "grok.com"])
             case .kimi:   hosts.formUnion(["moonshot.ai", "kimi.com", "kimi.ai"])
+            case .omp:
+                switch spec.effectiveOmpProvider {
+                case .anthropic: hosts.insert("anthropic.com")
+                case .openai:    hosts.formUnion(["openai.com", "chatgpt.com"])
+                case .xai:       hosts.formUnion(["x.ai", "grok.com"])
+                case .zai:       hosts.insert("z.ai")
+                case .custom:
+                    if let h = spec.ompBaseURL.flatMap({ URL(string: $0)?.host }) {
+                        hosts.insert(h)
+                    }
+                }
             }
         }
         return hosts
@@ -2744,7 +2900,12 @@ public final class ProfileStore {
         p.id = UUID()
         p.name = name
         if let tool { p.tool = tool }
-        if let authMode { p.authMode = authMode }
+        if let authMode {
+            p.authMode = authMode
+        } else if p.tool == .omp, p.authMode == .subscription {
+            // omp has no OAuth subscription — default it to API-key mode.
+            p.authMode = .token
+        }
         p.createdAt = Date()
         p.lastUsedAt = nil
         p.baseImageVersionAtClone = nil
@@ -4175,8 +4336,8 @@ public final class ProfileStore {
     HISTFILESIZE=20000
 
     # User-level installs land in ~/.npm-global/bin, ~/.cargo/bin,
-    # or ~/.local/bin.
-    export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:$PATH"
+    # ~/.local/bin, or ~/.bun/bin (omp's `bun` runtime).
+    export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
 
     # MITM proxy env (HTTPS_PROXY + per-language CA bundles + ssh-agent
     # socket). Sourced before api_key.env so the fake API keys are
@@ -4355,6 +4516,17 @@ public final class ProfileStore {
                 rm -f "$HOME/.codex/config.toml.tmp.$$"
             fi
         fi
+        # omp reads user-scope MCP servers from ~/.claude.json (written above),
+        # so the browser/user servers are inherited automatically; the
+        # board MCP is a project-root .mcp.json written per-worktree by agentd.
+    fi
+
+    # omp custom / local provider: install the staged models.yml so omp knows
+    # the OpenAI-compatible endpoint + model. (The default Anthropic provider
+    # needs none — it uses ANTHROPIC_API_KEY directly.)
+    if [ -r /mnt/bromure-meta/omp-models.yml ]; then
+        mkdir -p "$HOME/.omp/agent"
+        cp /mnt/bromure-meta/omp-models.yml "$HOME/.omp/agent/models.yml"
     fi
 
     # Stay in $HOME (~ubuntu) on shell start. Shared folders are
@@ -4396,6 +4568,23 @@ public final class ProfileStore {
                 if npx --yes @socketsecurity/cli npm install -g --silent @moonshot-ai/kimi-code \\
                         >>/tmp/bromure-tool-install.log 2>&1; then
                     echo "[bromure-ac] installed @moonshot-ai/kimi-code"
+                    return 0
+                fi
+                echo "[bromure-ac] install failed (see /tmp/bromure-tool-install.log)"
+                return 1
+                ;;
+            omp)
+                # Oh My Pi ships via npm as @oh-my-pi/pi-coding-agent, but its
+                # CLI runs under `bun` (not node), so install bun first if it's
+                # missing. npm wrapped through socket.dev per project policy.
+                echo "[bromure-ac] omp not found — installing bun + @oh-my-pi/pi-coding-agent…"
+                if ! command -v bun >/dev/null 2>&1; then
+                    curl -fsSL https://bun.sh/install | bash >>/tmp/bromure-tool-install.log 2>&1 || true
+                    [ -d "$HOME/.bun/bin" ] && export PATH="$HOME/.bun/bin:$PATH"
+                fi
+                if npx --yes @socketsecurity/cli npm install -g --silent @oh-my-pi/pi-coding-agent \\
+                        >>/tmp/bromure-tool-install.log 2>&1; then
+                    echo "[bromure-ac] installed @oh-my-pi/pi-coding-agent"
                     return 0
                 fi
                 echo "[bromure-ac] install failed (see /tmp/bromure-tool-install.log)"
@@ -4479,6 +4668,22 @@ public final class ProfileStore {
                     # shell. Point the way back in — the session is still there.
                     [ "$_wt_rc" -eq 0 ] && printf \\
                         '\\033[2m[bromure-ac] run finished — `kimi -c` resumes it interactively\\033[0m\\n'
+                elif [ "$_wt_tool" = "omp" ]; then
+                    # omp needs an explicit --model to run non-interactively;
+                    # the host stages the resolved model (provider default or
+                    # local model) in the meta share. --auto-approve (in
+                    # $_wt_flags) skips tool prompts; the TUI runs the seeded
+                    # message and auto-approves. "--" ends option parsing so a
+                    # prompt starting with "-" is the positional message.
+                    _omp_model=""
+                    [ -r /mnt/bromure-meta/omp-model ] \\
+                        && _omp_model=$(cat /mnt/bromure-meta/omp-model 2>/dev/null)
+                    if [ -n "$_omp_model" ]; then
+                        "$_wt_tool" $_wt_flags --model "$_omp_model" -- "$_wt_prompt"
+                    else
+                        "$_wt_tool" $_wt_flags -- "$_wt_prompt"
+                    fi
+                    _wt_rc=$?
                 else
                     # "--" ends option parsing, so the prompt is unambiguously the
                     # positional argument. Without it a prompt whose first character
@@ -4915,6 +5120,12 @@ public extension Profile {
             case .codex:  return ["openai.com"]
             case .grok:   return ["x.ai"]
             case .kimi:   return ["moonshot.ai", "kimi.com"]
+            // omp is multi-provider and this accessor only sees the Tool, not
+            // the profile's `ompProvider` — return every supported provider
+            // host so the credential stays valid whichever the user picks.
+            // The precise per-request swap host comes from SessionTokenPlan,
+            // which has the ToolSpec.
+            case .omp:    return ["anthropic.com", "openai.com", "x.ai", "z.ai"]
             }
         }
         switch ref {

@@ -8602,7 +8602,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let nameField = NSTextField(frame: NSRect(x: 0, y: 68, width: 320, height: 24))
         nameField.placeholderString = NSLocalizedString("Task name (e.g. Website refactoring)", comment: "")
         let toolPopup = NSPopUpButton(frame: NSRect(x: 0, y: 36, width: 320, height: 24))
-        let tools = ["claude", "codex", "grok", "kimi"]
+        let tools = ["claude", "codex", "grok", "kimi", "omp"]
         toolPopup.addItems(withTitles: tools)
         toolPopup.selectItem(withTitle: tools.contains(defaultTool) ? defaultTool : "claude")
         let promptField = NSTextField(frame: NSRect(x: 0, y: 4, width: 320, height: 24))

@@ -41,6 +41,12 @@ public struct SessionTokenPlan: Sendable {
         /// kimi.toml block writes — Kimi Code (open-platform auth) sends it
         /// as `Authorization: Bearer` to api.moonshot.ai.
         case moonshotAPIKey
+        /// omp's provider API key. omp is provider-agnostic, so the swap host
+        /// is carried on the purpose (the selected `ompProvider`'s host, or a
+        /// `custom` OpenAI-compatible base URL's host). Distinct from the
+        /// single-provider purposes so `fakeForOmp()` is unambiguous even when
+        /// a Claude/OpenAI/… tool is also configured in the same profile.
+        case ompAPIKey(host: String)
         /// HTTPS git credential. Materialized in ~/.git-credentials and
         /// the gh / glab configs.
         case gitHTTPS(host: String, username: String)
@@ -157,6 +163,13 @@ public struct SessionTokenPlan: Sendable {
         return nil
     }
 
+    public func fakeForOmp() -> String? {
+        for e in entries {
+            if case .ompAPIKey = e.purpose { return e.fakeValue }
+        }
+        return nil
+    }
+
     /// Fake to embed into ~/.git-credentials for the matching host.
     public func fakeForGitHTTPS(host: String, username: String) -> String? {
         for e in entries {
@@ -174,6 +187,7 @@ public struct SessionTokenPlan: Sendable {
         case .openaiAPIKey:           return "openai.com"
         case .xaiAPIKey:              return "x.ai"
         case .moonshotAPIKey:         return "moonshot.ai"
+        case .ompAPIKey(let host):    return host.isEmpty ? nil : host
         case .gitHTTPS(let host, _):  return host
         case .manual(_, _, let host): return host.isEmpty ? nil : host
         case .digitalOcean:           return "digitalocean.com"
@@ -349,6 +363,32 @@ public extension Profile {
                     fakeValue: SessionTokenPlan.deriveFake(prefix: "sk-kimi-brm-",
                                                            real: real, salt: salt),
                     purpose: .moonshotAPIKey,
+                    consentCredentialID: consentID,
+                    consentDisplayName: displayName))
+            case .omp:
+                // omp reads the key from its provider's env var and sends it to
+                // that provider's host; the fake is swapped for the real one on
+                // that host only. Fake prefix mimics the provider's key shape so
+                // omp accepts it.
+                let prov = spec.effectiveOmpProvider
+                let host = prov == .custom
+                    ? (URL(string: spec.ompBaseURL ?? "")?.host ?? "")
+                    : prov.apiHost
+                // `custom` without a base URL can't be host-scoped — skip the
+                // swap (the real key falls through to the env). The UI requires
+                // a base URL for `custom`, so this is a misconfiguration guard.
+                guard !host.isEmpty else { continue }
+                let prefix: String
+                switch prov {
+                case .anthropic:        prefix = "sk-ant-api03-brm-"
+                case .xai:              prefix = "xai-brm-"
+                case .openai, .zai, .custom: prefix = "sk-brm-"
+                }
+                entries.append(.init(
+                    realValue: real,
+                    fakeValue: SessionTokenPlan.deriveFake(prefix: prefix,
+                                                           real: real, salt: salt),
+                    purpose: .ompAPIKey(host: host),
                     consentCredentialID: consentID,
                     consentDisplayName: displayName))
             }
