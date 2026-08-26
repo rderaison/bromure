@@ -60,6 +60,16 @@ struct OmpAgentTests {
         #expect(rc.contains("$HOME/.omp/agent/models.yml"))
     }
 
+    @Test("bashrc merges the browser/user MCP into omp's user config folder")
+    func bashrcWiresBrowserMCP() throws {
+        // omp reads user-scope MCP from ~/.omp/agent/mcp.json (NOT ~/.claude.json),
+        // so the built-in `browser` server (staged in mcp/claude.json) must be
+        // merged there — otherwise omp launches without the embedded-browser MCP.
+        let rc = try renderBashrc(tool: .omp)
+        #expect(rc.contains("/mnt/bromure-meta/mcp/claude.json"))
+        #expect(rc.contains(".omp/agent/mcp.json"))
+    }
+
     @Test("Status reporter ships for omp too")
     func statusScriptSeeded() throws {
         let root = try tempDir()
