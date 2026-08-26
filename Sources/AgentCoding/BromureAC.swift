@@ -3251,6 +3251,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onSecurityTimeline = {
             MainActor.assumeIsolated { SecurityTimeline.shared.mirrorRows() }
         }
+        // Fat-client Local Models: the server owns the engine + the downloads,
+        // so it reports its OWN unified memory (the RAM-fit gate), which models
+        // are installed here, and any in-flight download state.
+        server.onLocalModels = {
+            MainActor.assumeIsolated {
+                let mgr = ModelDownloadManager.shared
+                var models: [String: Any] = [:]
+                for m in CatalogStore.shared.effective().models {
+                    var d: [String: Any] = ["installed": CatalogStore.shared.isInstalled(repo: m.repo)]
+                    if let st = mgr.state(repo: m.repo) { for (k, v) in st.wireDict { d[k] = v } }
+                    models[m.repo] = d
+                }
+                return ["unifiedMemGB": HostMemory.unifiedMemoryGB(), "models": models]
+            }
+        }
+        server.onModelAction = { action, repo, totalBytes in
+            MainActor.assumeIsolated {
+                switch action {
+                case "download": ModelDownloadManager.shared.start(repo: repo, totalBytes: totalBytes)
+                case "cancel":   ModelDownloadManager.shared.cancel(repo: repo)
+                case "discard":  ModelDownloadManager.shared.discard(repo: repo)
+                case "remove":   try? CatalogStore.shared.removeInstalled(repo: repo)
+                default:         return ["ok": false, "error": "unknown action"]
+                }
+                return ["ok": true]
+            }
+        }
         server.onUpsertTask = { [weak self] doc in
             MainActor.assumeIsolated {
                 guard let self,
@@ -3392,12 +3419,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onPendingRegistration = { [weak self] in
             MainActor.assumeIsolated {
                 guard var d = RemoteRegistrationBroker.shared.stateDict() else { return nil }
-                // Resolve the throwaway VM's IP live: it is discovered a beat
-                // after boot, so a one-shot publish at URL time can miss it.
-                if d["vmIP"] == nil, let self,
-                   let pid = self.claudeRegistration?.scratchProfile.id,
-                   let ip = self.runningSessions[pid]?.lastIP {
-                    d["vmIP"] = ip
+                // The throwaway login VM's session id, so the fat client can
+                // attach a terminal to it and SHOW the login (some providers —
+                // Codex/ChatGPT — don't feed their sign-in URL through the
+                // guest URL-open outbox, so the URL-only flow dead-ends; seeing
+                // the VM's terminal lets the user complete it). The scratch VM
+                // is already a running session in /vms with a live shell bridge,
+                // so `__attach-window <id> 0` connects with no extra transport.
+                if let self, let pid = self.claudeRegistration?.scratchProfile.id {
+                    d["profileID"] = pid.uuidString
+                    // Resolve the VM's IP live: it is discovered a beat after
+                    // boot, so a one-shot publish at URL time can miss it.
+                    if d["vmIP"] == nil, let ip = self.runningSessions[pid]?.lastIP {
+                        d["vmIP"] = ip
+                    }
                 }
                 return d
             }

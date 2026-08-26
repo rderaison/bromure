@@ -466,6 +466,11 @@ struct ProfileEditorView: View {
     let kimiAccountSavedAt: (() -> Date?)?
     let onRegisterKimi: (() -> Void)?
     let onForgetKimi: (() -> Void)?
+    /// Fat client only: a `RemoteModelBackend` (macOS) routing the Local Models
+    /// pane to the remote server (RAM gate, downloads, installed state). Stored
+    /// type-erased because Swift forbids `#if` in an init parameter list and
+    /// `RemoteModelBackend` is macOS-only; the macOS pane casts it back.
+    let localModelsRemoteAny: Any?
 
     init(
         profile: Profile? = nil,
@@ -494,7 +499,8 @@ struct ProfileEditorView: View {
         kimiAccountSavedAt: (() -> Date?)? = nil,
         onRegisterKimi: (() -> Void)? = nil,
         onForgetKimi: (() -> Void)? = nil,
-        onFetchFusionModels: ((Profile.Tool, Profile.AuthMode, String?, @escaping ([String]) -> Void) -> Void)? = nil
+        onFetchFusionModels: ((Profile.Tool, Profile.AuthMode, String?, @escaping ([String]) -> Void) -> Void)? = nil,
+        localModelsRemoteAny: Any? = nil
     ) {
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
@@ -515,6 +521,7 @@ struct ProfileEditorView: View {
         self.onRegisterKimi = onRegisterKimi
         self.onForgetKimi = onForgetKimi
         self.onFetchFusionModels = onFetchFusionModels
+        self.localModelsRemoteAny = localModelsRemoteAny
         var p = profile ?? Profile(name: "", tool: .claude, authMode: .token)
         // New profiles: pre-fill custom appearance fields with Terminal.app
         // defaults so the editor opens with sensible, editable starting
@@ -858,7 +865,8 @@ struct ProfileEditorView: View {
         #if os(macOS)
         LocalModelsSettingsView(routing: $draft.modelRouting,
                                 activeModelID: $draft.activeModelID,
-                                selectedModelIDs: draft.distinctLocalModelIDs)
+                                selectedModelIDs: draft.distinctLocalModelIDs,
+                                remote: localModelsRemoteAny as? RemoteModelBackend)
         #else
         EmptyView()
         #endif
@@ -3867,15 +3875,50 @@ struct ProfileEditorView: View {
 /// so there's nothing to install. Downloads are immediate side effects
 /// (global, not per-profile); the routing mode + active-model selection
 /// persist on Save.
+/// Routes the Local Models pane to a REMOTE server (the fat client). When set,
+/// the RAM-fit gate, installed/download state and the download actions all
+/// target the machine the engine runs on, not this Mac. All reads are closures
+/// so they observe the mirrored controller live; nil = manage this machine.
+@MainActor
+struct RemoteModelBackend {
+    var unifiedMemGB: () -> Int
+    var state: (_ repo: String) -> ModelDownloadManager.State?
+    var isInstalled: (_ repo: String) -> Bool
+    var download: (_ model: CatalogModel) -> Void
+    var cancel: (_ repo: String) -> Void
+    var discard: (_ repo: String) -> Void
+    var remove: (_ model: CatalogModel) -> Void
+}
+
 struct LocalModelsSettingsView: View {
     @Binding var routing: Profile.Routing
     @Binding var activeModelID: String?
     /// Every distinct local model this profile would load at once — for the
     /// combined-memory warning (the engine can serve several in parallel).
     var selectedModelIDs: [String] = []
+    /// Non-nil on the fat client: manage the REMOTE server's models instead of
+    /// this machine's (RAM gate, downloads, installed state all go remote).
+    var remote: RemoteModelBackend? = nil
 
-    private let hostGB = HostMemory.unifiedMemoryGB()
+    private var hostGB: Int { remote?.unifiedMemGB() ?? HostMemory.unifiedMemoryGB() }
+    // The curated catalog is a static list, identical on host and client, so
+    // the rows come from here either way; only fit/installed/download differ.
     private let catalog = CatalogStore.shared.effective()
+
+    // Data access + actions, routed to the server when `remote` is set.
+    private func modelState(_ repo: String) -> ModelDownloadManager.State? {
+        remote?.state(repo) ?? downloads.state(repo: repo)
+    }
+    private func modelInstalled(_ repo: String) -> Bool {
+        _ = refreshTick   // local Remove bumps this to force a disk re-read
+        return remote?.isInstalled(repo) ?? CatalogStore.shared.isInstalled(repo: repo)
+    }
+    private func cancelDownload(_ repo: String) {
+        if let r = remote { r.cancel(repo) } else { downloads.cancel(repo: repo) }
+    }
+    private func discardDownload(_ repo: String) {
+        if let r = remote { r.discard(repo) } else { downloads.discard(repo: repo) }
+    }
 
     /// Combined memory of all distinct local models that would load at once.
     private var combinedMemGB: Int {
@@ -3978,10 +4021,10 @@ struct LocalModelsSettingsView: View {
         let fit = RAMFitGate.fit(model: model, hostUnifiedMemGB: hostGB)
         let wontFit = (fit == .wontFit)
         let isActive = (activeModelID == model.id)
-        let state = downloads.state(repo: model.repo)
+        let state = modelState(model.repo)
         // "Installed" only when fully downloaded — never while a pull is
-        // still running (CatalogStore.isInstalled checks completeness).
-        let installed = (state == nil) && CatalogStore.shared.isInstalled(repo: model.repo)
+        // still running (isInstalled checks completeness).
+        let installed = (state == nil) && modelInstalled(model.repo)
 
         HStack(spacing: 10) {
             // Active-model radio (only meaningful when it fits).
@@ -4025,7 +4068,7 @@ struct LocalModelsSettingsView: View {
                     Text(label).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                 }
                 Button {
-                    downloads.cancel(repo: model.repo)
+                    cancelDownload(model.repo)
                 } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
@@ -4045,7 +4088,7 @@ struct LocalModelsSettingsView: View {
                 }
                 Button("Resume") { startDownload(model) }.controlSize(.small)
                 Button {
-                    downloads.discard(repo: model.repo)
+                    discardDownload(model.repo)
                 } label: {
                     Image(systemName: "trash").foregroundStyle(.secondary)
                 }
@@ -4084,17 +4127,25 @@ struct LocalModelsSettingsView: View {
     // MARK: Actions (immediate side effects)
 
     private func startDownload(_ model: CatalogModel) {
-        downloads.start(repo: model.repo,
-                        totalBytes: Int64(model.downloadGB * 1_000_000_000))
+        if let r = remote {
+            r.download(model)
+        } else {
+            downloads.start(repo: model.repo,
+                            totalBytes: Int64(model.downloadGB * 1_000_000_000))
+        }
         if activeModelID == nil { activeModelID = model.id }
     }
 
     private func removeModel(_ model: CatalogModel) {
-        do {
-            try CatalogStore.shared.removeInstalled(repo: model.repo)
-        } catch {
-            FileHandle.standardError.write(Data(
-                "[models] remove \(model.repo) failed: \(error)\n".utf8))
+        if let r = remote {
+            r.remove(model)
+        } else {
+            do {
+                try CatalogStore.shared.removeInstalled(repo: model.repo)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[models] remove \(model.repo) failed: \(error)\n".utf8))
+            }
         }
         if activeModelID == model.id { activeModelID = nil }
         refreshTick += 1   // force the row to re-read isInstalled (see refreshTick)

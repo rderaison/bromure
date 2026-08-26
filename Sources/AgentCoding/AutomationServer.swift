@@ -162,6 +162,14 @@ final class ACAutomationServer {
     /// Recent Security Timeline rows for the fat-client mirror (the security
     /// engines run host-side, so the client can't build this itself).
     var onSecurityTimeline: (() -> [[String: Any]])?
+    /// Local-model management for the fat client: the SERVER's unified memory
+    /// (for the RAM-fit gate), which models are installed there, and any
+    /// in-flight download state — the engine + downloads run host-side, so the
+    /// client must gate/download against the server, not itself.
+    var onLocalModels: (() -> [String: Any])?
+    /// Drive a server-side model action (download/cancel/discard/remove) for a
+    /// HF repo. `totalBytes` is used by `download` only.
+    var onModelAction: ((_ action: String, _ repo: String, _ totalBytes: Int64) -> [String: Any])?
     /// The persisted grid (StageLayout): cells + focus/zoom.
     var onGetGridLayout: (() -> [String: Any])?
     /// Apply a whole grid layout (last-writer-wins).
@@ -512,6 +520,25 @@ final class ACAutomationServer {
         case ("GET", "/state"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             sendResponse(fd: fd, status: 200, body: buildStateSnapshot())
+
+        // Fat-client local-model management: download/cancel/discard/remove a
+        // model ON THE SERVER (that's where the engine + downloads live). The
+        // fat client's Local Models pane calls these instead of downloading
+        // to the client. Result state comes back via /state's `localModels`.
+        case ("POST", let p) where p.hasPrefix("/models/"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let action = String(p.dropFirst("/models/".count))
+            guard ["download", "cancel", "discard", "remove"].contains(action),
+                  let repo = bodyJSON["repo"] as? String, !repo.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "bad action or repo"]); return
+            }
+            let total = (bodyJSON["totalBytes"] as? NSNumber)?.int64Value
+                ?? Int64((bodyJSON["totalBytes"] as? Int) ?? 0)
+            let result = DispatchQueue.main.sync {
+                self.onModelAction?(action, repo, total) ?? ["ok": false, "error": "unavailable"]
+            }
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: result)
 
         // Start a subscription registration on this host for the calling
         // client. The throwaway VM + credential store stay here; the sign-in
@@ -1699,6 +1726,7 @@ final class ACAutomationServer {
                 "pendingPrompts": self.onListPendingPrompts?() ?? [],
                 "subscriptions": self.onSubscriptionStatus?(nil) ?? [:],
                 "securityTimeline": self.onSecurityTimeline?() ?? [],
+                "localModels": self.onLocalModels?() ?? [:],
             ]
             // Only present while a client-initiated registration is in flight.
             if let reg = self.onPendingRegistration?() { d["pendingRegistration"] = reg }

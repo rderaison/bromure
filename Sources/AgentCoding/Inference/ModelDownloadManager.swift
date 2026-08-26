@@ -17,6 +17,30 @@ public final class ModelDownloadManager {
         /// A pull interrupted by a crash/kill (sentinel left behind): bytes
         /// already on disk + the expected total, for a "Resume / Discard" row.
         case interrupted(bytesOnDisk: Int64, totalBytes: Int64)
+
+        /// JSON-ready form for the fat-client `/state` mirror. The engine and
+        /// its downloads live on the host, so the client sees this and drives
+        /// the server via `/models/*` rather than downloading locally.
+        public var wireDict: [String: Any] {
+            switch self {
+            case .downloading(let f, let l): return ["phase": "downloading", "frac": f, "label": l]
+            case .failed(let m):             return ["phase": "failed", "msg": m]
+            case .interrupted(let d, let t): return ["phase": "interrupted", "onDisk": d, "total": t]
+            }
+        }
+        public init?(wire d: [String: Any]) {
+            func i64(_ v: Any?) -> Int64 { (v as? NSNumber)?.int64Value ?? Int64((v as? Int) ?? 0) }
+            switch d["phase"] as? String {
+            case "downloading":
+                self = .downloading((d["frac"] as? Double) ?? 0, (d["label"] as? String) ?? "")
+            case "failed":
+                self = .failed((d["msg"] as? String) ?? "")
+            case "interrupted":
+                self = .interrupted(bytesOnDisk: i64(d["onDisk"]), totalBytes: i64(d["total"]))
+            default:
+                return nil
+            }
+        }
     }
 
     /// Keyed by HF repo.

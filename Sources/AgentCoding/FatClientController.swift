@@ -52,6 +52,12 @@ final class RemoteHostController {
     /// silently drifts to another window, so a stale surface (still cached
     /// under the dead index) would keep showing the wrong terminal.
     var onTabsApplied: ((Profile.ID, Set<Int>) -> Void)?
+    /// Fat client: show / hide a terminal attached to the remote subscription-
+    /// registration throwaway VM, so the user can watch (and complete) a login
+    /// whose sign-in URL the provider never surfaces (Codex/ChatGPT). The macOS
+    /// window opens a pop-out terminal; other platforms present their own.
+    var onRegistrationTerminal: ((_ sessionID: UUID, _ provider: String) -> Void)?
+    var onRegistrationTerminalClosed: (() -> Void)?
     /// Minimal mirrored profiles (id/name/color/tool) — the grid needs a
     /// `Profile` for appearance and the deleted-workspace check.
     private(set) var profilesByID: [Profile.ID: Profile] = [:]
@@ -111,6 +117,46 @@ final class RemoteHostController {
     private var registrationCallback: RegistrationCallbackTunnel?
     /// Sign-in URLs already opened, so a repeated poll doesn't reopen the page.
     private var openedRegistrationURLs: Set<String> = []
+    /// The scratch login session we've opened a terminal for (nil = none).
+    private var registrationTerminalID: UUID?
+
+#if os(macOS)
+    // MARK: Local models mirrored from the server
+    //
+    // The inference engine + model downloads live on the REMOTE host, so the
+    // Local Models pane must gate/download against the server, not this Mac.
+    // These mirror the server's `/state.localModels`.
+
+    /// The SERVER's unified memory in GB — the RAM-fit gate uses this so a big
+    /// model is judged against the machine it will actually run on.
+    private(set) var serverUnifiedMemGB = 0
+    /// In-flight download state on the server, keyed by HF repo.
+    private(set) var serverModelStates: [String: ModelDownloadManager.State] = [:]
+    /// Models fully installed on the server, by HF repo.
+    private(set) var serverInstalledModels: Set<String> = []
+
+    private func applyLocalModels(_ dict: [String: Any]?) {
+        guard let dict else { return }   // key absent → keep last good
+        serverUnifiedMemGB = (dict["unifiedMemGB"] as? NSNumber)?.intValue
+            ?? (dict["unifiedMemGB"] as? Int) ?? serverUnifiedMemGB
+        var states: [String: ModelDownloadManager.State] = [:]
+        var installed: Set<String> = []
+        for (repo, raw) in (dict["models"] as? [String: [String: Any]]) ?? [:] {
+            if (raw["installed"] as? Bool) == true { installed.insert(repo) }
+            if let st = ModelDownloadManager.State(wire: raw) { states[repo] = st }
+        }
+        if serverModelStates != states { serverModelStates = states }
+        if serverInstalledModels != installed { serverInstalledModels = installed }
+    }
+
+    /// Drive a server-side model action over the tunnel.
+    func downloadModel(repo: String, totalBytes: Int64) {
+        send("POST", "/models/download", body: ["repo": repo, "totalBytes": totalBytes])
+    }
+    func cancelModelDownload(repo: String) { send("POST", "/models/cancel", body: ["repo": repo]) }
+    func discardModelDownload(repo: String) { send("POST", "/models/discard", body: ["repo": repo]) }
+    func removeServerModel(repo: String) { send("POST", "/models/remove", body: ["repo": repo]) }
+#endif
 
     /// Ask the remote to start a registration; the URL arrives via /state.
     func beginRemoteRegistration(provider: String, profileID: UUID?) {
@@ -135,20 +181,32 @@ final class RemoteHostController {
     /// up as soon as we know the VM + port, then open the sign-in page here.
     private func applyPendingRegistration(_ reg: [String: Any]?) {
         guard let reg else {
-            // Flow ended (captured or cancelled) — drop the listener.
+            // Flow ended (captured or cancelled) — drop the listener + terminal.
             registrationCallback?.stop()
             registrationCallback = nil
             openedRegistrationURLs.removeAll()
+            if registrationTerminalID != nil {
+                registrationTerminalID = nil
+                onRegistrationTerminalClosed?()
+            }
             return
         }
-        guard let urlString = reg["url"] as? String,
-              let url = URL(string: urlString) else { return }
+        // Show the throwaway login VM's terminal as soon as we learn its session
+        // — BEFORE and INDEPENDENT of any sign-in URL. For providers whose URL
+        // never reaches us (Codex/ChatGPT don't feed it through the guest
+        // URL-open outbox), this is the only way the user can see the login
+        // prompt / device code and complete it. The scratch VM is already a
+        // running session in /vms with a live shell bridge, so attach is free.
+        if let idStr = reg["profileID"] as? String, let sid = UUID(uuidString: idStr),
+           registrationTerminalID != sid {
+            registrationTerminalID = sid
+            onRegistrationTerminal?(sid, (reg["provider"] as? String) ?? "")
+        }
         // Loopback-callback flows (Claude/Codex sign in via a localhost redirect)
         // need a tunnel from our 127.0.0.1:port to the VM's port so the browser's
         // callback reaches the CLI in the VM. Device-code flows (Grok's
         // accounts.x.ai/oauth2/device, Kimi) have no callback — the CLI polls the
         // provider for the token — so callbackPort is 0 and no tunnel is wanted.
-        // Either way we must OPEN the URL; only the tunnel is conditional.
         if let port = reg["callbackPort"] as? Int, port > 0,
            let ip = reg["vmIP"] as? String, !ip.isEmpty {
             if registrationCallback?.port != port || registrationCallback?.vmIP != ip {
@@ -158,8 +216,12 @@ final class RemoteHostController {
                 registrationCallback?.start()
             }
         }
-        // Open once per URL: /state repeats it every poll until sign-in lands.
-        guard !openedRegistrationURLs.contains(urlString) else { return }
+        // If a sign-in URL was published (Claude's flow), open it once — /state
+        // repeats it every poll until sign-in lands. Codex has none; the user
+        // reads its URL from the VM terminal shown above instead.
+        guard let urlString = reg["url"] as? String,
+              let url = URL(string: urlString),
+              !openedRegistrationURLs.contains(urlString) else { return }
         openedRegistrationURLs.insert(urlString)
         let tunnel = registrationCallback.map { "callback 127.0.0.1:\($0.port) -> \($0.vmIP):\($0.port)" }
             ?? "device-code (no callback)"
@@ -482,6 +544,7 @@ final class RemoteHostController {
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
 #if os(macOS)
+        applyLocalModels(snapshot["localModels"] as? [String: Any])
         // Mirror the host's security-engine decisions so the Security Timeline
         // window works on a fat client too — the engines (credential broker,
         // firewall, guardrails, MiTM) run on the remote host, so the local
@@ -1547,6 +1610,10 @@ final class RemoteHostWindow: NSWindow {
     /// of the mirrored terminal; each owns its own attach controller.
     private var popOutWindows: [Profile.ID: NSWindow] = [:]
     private var popOutControllers: [Profile.ID: TerminalSessionController] = [:]
+    /// The registration-login terminal window (the remote throwaway VM), and
+    /// its attach controller. Only one registration runs at a time.
+    private var registrationTerminalWindow: NSWindow?
+    private var registrationTerminalController: TerminalSessionController?
 
     // Browser pane (fat-client): a local Chromium VM per remote workspace whose
     // page traffic is tunneled to the remote subnet via the SOCKS forwarder.
@@ -1592,6 +1659,12 @@ final class RemoteHostWindow: NSWindow {
         showGrid()
         controller.onTabsApplied = { [weak self] id, live in
             self?.reconcileSurfaces(for: id, liveWindows: live)
+        }
+        controller.onRegistrationTerminal = { [weak self] sid, provider in
+            self?.showRegistrationTerminal(sessionID: sid, provider: provider)
+        }
+        controller.onRegistrationTerminalClosed = { [weak self] in
+            self?.closeRegistrationTerminal()
         }
         controller.start()
         let t = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
@@ -2065,6 +2138,21 @@ final class RemoteHostWindow: NSWindow {
             win.title = "\(profile.name) — \(hostName)"
             win.center()
             win.isReleasedWhenClosed = false
+            // Route the Local Models pane to the REMOTE server: the engine and
+            // its downloads live there, so the RAM-fit gate must use the
+            // server's memory and downloads must run server-side (not fill this
+            // Mac's disk). Reads observe the mirrored controller live.
+            let ctrl = self.controller
+            let modelBackend = RemoteModelBackend(
+                unifiedMemGB: { [weak ctrl] in ctrl?.serverUnifiedMemGB ?? 0 },
+                state: { [weak ctrl] repo in ctrl?.serverModelStates[repo] },
+                isInstalled: { [weak ctrl] repo in ctrl?.serverInstalledModels.contains(repo) ?? false },
+                download: { [weak ctrl] model in
+                    ctrl?.downloadModel(repo: model.repo,
+                                        totalBytes: Int64(model.downloadGB * 1_000_000_000)) },
+                cancel: { [weak ctrl] repo in ctrl?.cancelModelDownload(repo: repo) },
+                discard: { [weak ctrl] repo in ctrl?.discardModelDownload(repo: repo) },
+                remove: { [weak ctrl] model in ctrl?.removeServerModel(repo: model.repo) })
             win.contentView = NSHostingView(rootView: ProfileEditorView(
                 profile: profile,
                 isNew: false,
@@ -2091,7 +2179,8 @@ final class RemoteHostWindow: NSWindow {
                 grokAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["grok"]?.registeredAt },
                 onRegisterGrok: { [weak self] in self?.beginRemoteRegistration(.grok, id) },
                 kimiAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["kimi"]?.registeredAt },
-                onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, id) }))
+                onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, id) },
+                localModelsRemoteAny: modelBackend))
             win.makeKeyAndOrderFront(nil)
             self.settingsWindows[id] = win
         }
@@ -2976,6 +3065,62 @@ final class RemoteHostWindow: NSWindow {
         popOutWindows[id] = nil
         popOutControllers[id]?.retireAll()
         popOutControllers[id] = nil
+    }
+
+    // MARK: Registration-login terminal (remote throwaway VM)
+
+    /// Show a terminal attached to the remote subscription-registration
+    /// throwaway VM so the user can watch and complete a provider login. Like
+    /// `popOutWorkspace`, but the scratch VM isn't in the mirrored workspace
+    /// list — so build a synthetic `Profile` carrying its session id (the
+    /// terminal controller only needs `id.uuidString` as the vmID) and skip the
+    /// run-state guard. Attach connects immediately: the scratch VM is already
+    /// a running session in `/vms` with a live shell bridge.
+    private func showRegistrationTerminal(sessionID: UUID, provider: String) {
+        if let win = registrationTerminalWindow { win.makeKeyAndOrderFront(nil); return }
+        var scratch = Profile(name: provider.isEmpty ? "Sign in" : "Sign in to \(provider)",
+                              tool: .codex, authMode: .subscription)
+        scratch.id = sessionID
+        let ctl = TerminalSessionController(profile: scratch, remoteHost: controller.host.id)
+        guard let view = ctl.view(forWindow: 0) else { return }
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 940, height: 640),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false)
+        win.title = "\(scratch.name) — \(controller.host.name)"
+        win.center()
+        win.isReleasedWhenClosed = false
+        let content = NSView()
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor.black.cgColor
+        view.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            view.topAnchor.constraint(equalTo: content.topAnchor),
+            view.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+        win.contentView = content
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: win, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.reapRegistrationTerminal() }
+        }
+        win.makeKeyAndOrderFront(nil)
+        FatClientLog.log("remote registration: showing login VM terminal (\(sessionID))")
+        registrationTerminalWindow = win
+        registrationTerminalController = ctl
+    }
+
+    /// Flow ended → close the window (triggers `reapRegistrationTerminal`).
+    private func closeRegistrationTerminal() { registrationTerminalWindow?.close() }
+
+    /// Window gone (user closed it, or the flow closed it) → clean up.
+    private func reapRegistrationTerminal() {
+        registrationTerminalController?.retireAll()
+        registrationTerminalController = nil
+        registrationTerminalWindow = nil
     }
 
     // MARK: Trace Inspector (MITM proxy logs, fetched over the tunnel)
