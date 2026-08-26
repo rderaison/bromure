@@ -245,8 +245,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         let upstreamScheme = cleartext ? "http" : "https"
 
-        // 4. Read the wrapped HTTP request through TLS.
-        let request = try readRawHTTPRequest(via: tls, maxBytes: 8 * 1024 * 1024)
+        // 4. Read the wrapped HTTP request through TLS. A body bigger than the
+        //    inline cap (e.g. a docker layer blob) is spooled to a temp file so
+        //    it's neither truncated nor buffered in RAM; `bodyFile` then holds
+        //    the whole body and `request` carries the header + a bounded prefix.
+        let (request, bodyFile) = try readRequestSpooling(
+            via: tls, inlineCap: 8 * 1024 * 1024)
 
         // 4a. Block OAuth/OIDC discovery for MCP hosts that have a
         // broker token. Claude Code probes multiple .well-known paths;
@@ -681,6 +685,29 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // `finishTasksAndInvalidate` lets the in-flight request
         // complete normally, then breaks the retain cycle.
         defer { session.finishTasksAndInvalidate() }
+
+        // 5z. Large streaming upload (spooled body — e.g. a docker layer PUT).
+        //     Forward with the body streamed from disk so it isn't truncated
+        //     (the bug that corrupted docker pushes) or buffered in RAM. The
+        //     header pipeline (swap/guardrails/AWS resign) already ran, so
+        //     forward `toForward` (post-resign — matters for ECR blob PUTs);
+        //     the binary body carries no tokens, so it passes through
+        //     untouched. Skips the LLM/supply-chain response transforms below —
+        //     they apply to API responses, not blob uploads.
+        if let bodyFile {
+            defer { try? FileManager.default.removeItem(at: bodyFile) }
+            let relay = try await relayUpstream(
+                rawRequest: toForward, host: host, port: port,
+                session: session, tls: tls,
+                upstreamScheme: upstreamScheme, bodyFile: bodyFile)
+            let elapsed = Date().timeIntervalSince(t0) * 1000
+            await emitTrace(host: host, port: port, preSwapRequest: request,
+                            upstreamResponse: relay.buffer,
+                            upstreamWireBytes: relay.wireBytes,
+                            responseTruncated: relay.truncatedForTrace,
+                            swaps: swap.swaps, leaks: leaks, latencyMs: elapsed)
+            return
+        }
 
         // Supply-chain interception + enterprise fetch telemetry.
         // Shares the same per-request URLSession the rest of the proxy
@@ -2349,6 +2376,166 @@ private func readRawHTTPRequest(via tls: MitmServerStream, maxBytes: Int) throws
     }
 }
 
+/// Read a full HTTP request, spilling a large body to a temp file instead of
+/// buffering it in RAM or truncating it. The old fixed 8 MB read cap corrupted
+/// any upload bigger than that — a docker `PUT` of a layer blob got only its
+/// first 8 MB forwarded, so the registry's computed digest didn't match and the
+/// push failed ("content does not match digest" / EOF). Bodies at or under
+/// `inlineCap` stay fully in memory (the previous behaviour, unchanged); a body
+/// whose `Content-Length` exceeds it is streamed to a temp file (the whole
+/// body) while only the header + a bounded prefix is returned for the header
+/// pipeline (token swap etc.) to run over. `Transfer-Encoding: chunked` bodies
+/// (a `fetch()` streamed ReadableStream, some gRPC-over-HTTP) carry no
+/// Content-Length; they're de-chunked with the same inline/spool split.
+/// `Expect: 100-continue` is answered with an interim `100 Continue` so strict
+/// clients send the body. Returns `(request, bodyFile)`; `bodyFile` is non-nil
+/// only for the spooled case and the caller must delete it and pass it to
+/// `relayUpstream(bodyFile:)`.
+/// (internal, not private, so `RequestSpoolingTests` can drive it with a
+/// scripted `MitmServerStream`.)
+@available(macOS, deprecated: 10.15)
+func readRequestSpooling(via tls: MitmServerStream,
+                         inlineCap: Int) throws -> (request: Data, bodyFile: URL?) {
+    let chunk = 64 * 1024
+
+    // Spool an arbitrary body (already read in `initial`, more pulled via
+    // `pull`) to a temp file, whole. Shared by the Content-Length and de-chunk
+    // paths. Returns the temp URL; the header pipeline runs over `header` only.
+    func spillFile() -> (url: URL, fh: FileHandle)? {
+        let t = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bromure-upload-\(UUID().uuidString).bin")
+        FileManager.default.createFile(atPath: t.path, contents: nil)
+        guard let f = try? FileHandle(forWritingTo: t) else { return nil }
+        return (t, f)
+    }
+
+    // De-chunk a `Transfer-Encoding: chunked` request body. `header` is the
+    // full header block (through the blank line); `initial` is any body bytes
+    // already buffered (the start of the chunked stream). Decodes into RAM up
+    // to `inlineCap`, then spills the rest to a temp file — so relayUpstream
+    // forwards a body with a real Content-Length (it drops Transfer-Encoding).
+    func dechunk(header: Data, initial: Data) throws -> (request: Data, bodyFile: URL?) {
+        var stream = initial
+        var decoded = Data()
+        var fh: FileHandle? = nil
+        var tmpURL: URL? = nil
+        defer { try? fh?.close() }
+
+        func more() throws -> Bool {
+            let got = try tls.read(maxBytes: chunk)
+            if got.isEmpty { return false }
+            stream.append(got); return true
+        }
+        func crlf() throws -> Int? {   // index of next CRLF, reading as needed
+            while true {
+                if let r = stream.range(of: Data("\r\n".utf8)) { return r.lowerBound }
+                if !(try more()) { return nil }
+            }
+        }
+        func drop(_ n: Int) { stream = stream.subdata(in: n..<stream.count) }
+        func emit(_ d: Data) throws {                 // append decoded bytes, spilling past the cap
+            if let f = fh { try f.write(contentsOf: d); return }
+            decoded.append(d)
+            if decoded.count > inlineCap, let s = spillFile() {
+                try s.fh.write(contentsOf: decoded)
+                decoded = Data(); fh = s.fh; tmpURL = s.url
+            }
+        }
+
+        parse: while true {
+            guard let sizeAt = try crlf() else { break }      // EOF → forward what we have
+            let hex = (String(data: stream.subdata(in: 0..<sizeAt), encoding: .isoLatin1) ?? "")
+                .split(separator: ";").first.map(String.init)?    // strip chunk extensions
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            drop(sizeAt + 2)
+            guard let size = Int(hex, radix: 16) else { throw MitmError.malformedHTTPRequest }
+            if size == 0 {                                    // last chunk: skip trailers to the blank line
+                while let e = try crlf() { let end = e == 0; drop(e + 2); if end { break } }
+                break parse
+            }
+            var remaining = size                              // stream the chunk in slices (huge chunks don't blow RAM)
+            while remaining > 0 {
+                if stream.isEmpty, !(try more()) { break parse }
+                let take = min(remaining, stream.count)
+                try emit(stream.subdata(in: 0..<take))
+                drop(take); remaining -= take
+            }
+            while stream.count < 2, try more() {}             // consume the chunk's trailing CRLF
+            if stream.count >= 2 { drop(2) }
+        }
+
+        if let t = tmpURL { try? fh?.close(); fh = nil; return (header, t) }
+        return (header + decoded, nil)                        // small body → inline, de-chunked
+    }
+
+    var buffer = Data()
+    var headerEnd: Int? = nil
+    var contentLength: Int? = nil
+    var chunked = false
+
+    while true {
+        if headerEnd == nil, let r = buffer.range(of: Data("\r\n\r\n".utf8)) {
+            headerEnd = r.upperBound
+            let he = headerEnd!
+            let headerStr = String(data: buffer.prefix(r.lowerBound), encoding: .isoLatin1) ?? ""
+            for line in headerStr.split(separator: "\r\n") {
+                let l = line.lowercased()
+                if l.hasPrefix("content-length:") {
+                    contentLength = Int(l.dropFirst("content-length:".count)
+                        .trimmingCharacters(in: .whitespaces))
+                } else if l.hasPrefix("transfer-encoding:"), l.contains("chunked") {
+                    chunked = true
+                }
+            }
+            // Answer Expect: 100-continue so the client releases the body.
+            if headerStr.lowercased().contains("expect:"),
+               headerStr.lowercased().contains("100-continue") {
+                try? tls.write(Data("HTTP/1.1 100 Continue\r\n\r\n".utf8))
+            }
+            // Chunked takes precedence over Content-Length (RFC 7230 §3.3.3).
+            if chunked {
+                return try dechunk(header: buffer.subdata(in: 0..<he),
+                                   initial: buffer.subdata(in: he..<buffer.count))
+            }
+            // Large fixed-length body → spool the whole thing to a temp file.
+            if let cl = contentLength, cl > inlineCap, let s = spillFile() {
+                var written = 0
+                if buffer.count > he {
+                    let already = buffer.subdata(in: he..<buffer.count)
+                    try s.fh.write(contentsOf: already)
+                    written = already.count
+                }
+                while written < cl {
+                    let got = try tls.read(maxBytes: min(chunk, cl - written))
+                    if got.isEmpty { break }   // client EOF: forward what we have
+                    try s.fh.write(contentsOf: got)
+                    written += got.count
+                }
+                try? s.fh.close()
+                // The pipeline runs over header + a bounded body prefix only;
+                // the binary body carries no tokens to swap.
+                let prefixEnd = min(buffer.count, he + 64 * 1024)
+                return (buffer.subdata(in: 0..<prefixEnd), s.url)
+            }
+        }
+        if let he = headerEnd {
+            if let cl = contentLength {
+                if buffer.count - he >= cl { return (buffer, nil) }
+            } else {
+                return (buffer, nil)   // no Content-Length, not chunked → no body
+            }
+        } else if buffer.count >= inlineCap {
+            throw MitmError.malformedHTTPRequest   // header alone blew the cap
+        }
+        let got = try tls.read(maxBytes: chunk)
+        if got.isEmpty {
+            if headerEnd == nil { throw MitmError.unexpectedTermination }
+            return (buffer, nil)   // client closed early; forward what we have
+        }
+        buffer.append(got)
+    }
+}
+
 private func readUntilCompleteHTTP(maxBytes: Int,
                                    reader: (Int) throws -> Data) throws -> Data {
     var buffer = Data()
@@ -2775,12 +2962,17 @@ private func emitSupplyChainFetch(profileID: UUID,
 private func relayUpstream(rawRequest: Data, host: String, port: Int,
                            session: URLSession,
                            tls: MitmServerStream,
-                           upstreamScheme: String = "https") async throws -> RelayResponse {
+                           upstreamScheme: String = "https",
+                           bodyFile: URL? = nil) async throws -> RelayResponse {
     guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
         throw MitmError.malformedHTTPRequest
     }
     let headerData = rawRequest.subdata(in: 0..<endRange.lowerBound)
-    let body       = rawRequest.subdata(in: endRange.upperBound..<rawRequest.count)
+    // When `bodyFile` is set the real body is streamed from disk (a large
+    // upload spooled by `readRequestSpooling`); `rawRequest` then carries only
+    // the header + a bounded prefix, so ignore its body bytes here.
+    let body = bodyFile != nil ? Data()
+        : rawRequest.subdata(in: endRange.upperBound..<rawRequest.count)
     guard let headerStr = String(data: headerData, encoding: .ascii) else {
         throw MitmError.malformedHTTPRequest
     }
@@ -2806,7 +2998,9 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
 
     var req = URLRequest(url: url)
     req.httpMethod = method
-    if !body.isEmpty { req.httpBody = body }
+    // With `bodyFile`, the body streams from disk via an upload task (below);
+    // otherwise it's the small in-memory body.
+    if bodyFile == nil, !body.isEmpty { req.httpBody = body }
 
     // When re-routed to the local engine, the request still carries the
     // guest's cloud auth (a swapped fake key). The engine authenticates with
@@ -2864,7 +3058,8 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
                 else { continuation.finish() }
             }
         )
-        let task = session.dataTask(with: req)
+        let task: URLSessionDataTask = bodyFile.map { session.uploadTask(with: req, fromFile: $0) }
+            ?? session.dataTask(with: req)
         task.delegate = delegate
         // Retain the delegate for the task's lifetime — URLSessionTask
         // only weakly references its delegate. Storing on the task
