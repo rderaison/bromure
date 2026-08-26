@@ -699,7 +699,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
             let relay = try await relayUpstream(
                 rawRequest: toForward, host: host, port: port,
                 session: session, tls: tls,
-                upstreamScheme: upstreamScheme, bodyFile: bodyFile)
+                upstreamScheme: upstreamScheme, bodyFile: bodyFile,
+                profileID: profileID)
             let elapsed = Date().timeIntervalSince(t0) * 1000
             await emitTrace(host: host, port: port, preSwapRequest: request,
                             upstreamResponse: relay.buffer,
@@ -1341,7 +1342,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                             host: upstreamHost, port: upstreamPort,
                                             session: relaySession,
                                             tls: tls,
-                                            upstreamScheme: (cleartext || routedBackend == .local) ? "http" : "https")
+                                            upstreamScheme: (cleartext || routedBackend == .local) ? "http" : "https",
+                                            profileID: profileID)
         }
 
         // Feed the hybrid policy engine from this cloud turn (§4.3). The
@@ -2959,11 +2961,68 @@ private func emitSupplyChainFetch(profileID: UUID,
 }
 
 @available(macOS, deprecated: 10.15)
+/// Map a URLSession upstream failure to a diagnosis the guest can act on.
+/// `isTrust` marks the cases that mean "the host running Bromure AC did not
+/// trust / accept the upstream's certificate" — the one class an operator fixes
+/// by installing a CA on the host, and the one we record on the Security
+/// Timeline. `body` is a plain-text explanation surfaced to the guest tool.
+// internal (not private) so `UpstreamErrorTests` can exercise the mapping.
+func describeUpstreamError(_ error: Error, host: String)
+    -> (isTrust: Bool, reason: String, body: String) {
+    let ns = error as NSError
+    var isTrust = false
+    var reason: String
+    if ns.domain == NSURLErrorDomain {
+        switch ns.code {
+        case NSURLErrorServerCertificateUntrusted,
+             NSURLErrorServerCertificateHasUnknownRoot:
+            isTrust = true
+            reason = "the TLS certificate for \(host) is signed by a CA the host running Bromure AC does not trust"
+        case NSURLErrorServerCertificateHasBadDate,
+             NSURLErrorServerCertificateNotYetValid:
+            isTrust = true
+            reason = "the TLS certificate for \(host) is expired or not yet valid on the host running Bromure AC"
+        case NSURLErrorSecureConnectionFailed:
+            isTrust = true
+            reason = "the TLS handshake with \(host) failed on the host running Bromure AC (untrusted or incompatible certificate)"
+        case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+            reason = "the host running Bromure AC could not resolve \(host)"
+        case NSURLErrorCannotConnectToHost:
+            reason = "the host running Bromure AC could not connect to \(host)"
+        case NSURLErrorTimedOut:
+            reason = "the connection to \(host) timed out"
+        case NSURLErrorNetworkConnectionLost:
+            reason = "the connection to \(host) was lost"
+        default:
+            reason = "the host running Bromure AC could not reach \(host): \(ns.localizedDescription)"
+        }
+    } else {
+        reason = "the upstream request to \(host) failed: \(error.localizedDescription)"
+    }
+    var body = """
+    Bromure Agentic Coding could not complete this request.
+
+    Reason: \(reason).
+
+    """
+    if isTrust {
+        body += """
+        Bromure proxies every request through the host and validates the \
+        upstream certificate against the HOST's trust store, not the VM's. \
+        To allow this connection, trust \(host)'s CA certificate on the machine \
+        running Bromure AC — add it to the login or System keychain and mark it \
+        "Always Trust" — then retry.
+        """
+    }
+    return (isTrust, reason, body)
+}
+
 private func relayUpstream(rawRequest: Data, host: String, port: Int,
                            session: URLSession,
                            tls: MitmServerStream,
                            upstreamScheme: String = "https",
-                           bodyFile: URL? = nil) async throws -> RelayResponse {
+                           bodyFile: URL? = nil,
+                           profileID: UUID) async throws -> RelayResponse {
     guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
         throw MitmError.malformedHTTPRequest
     }
@@ -3108,9 +3167,12 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
     // header-only (chunked framing on them is invalid).
     var useChunked = false
     let isHeadRequest = method.uppercased() == "HEAD"
+    var responseStarted = false     // any response byte written to the client yet?
+    do {
     for try await event in events {
         switch event {
         case .head(let http):
+            responseStarted = true
             useChunked = !isHeadRequest && http.statusCode != 204 && http.statusCode != 304
             var head = "HTTP/1.1 \(http.statusCode) "
             head += HTTPURLResponse.localizedString(forStatusCode: http.statusCode).capitalized
@@ -3157,6 +3219,39 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
                 truncatedForTrace = true
             }
         }
+    }
+    } catch {
+        // The upstream request failed. If it died before we forwarded any
+        // response byte (the common case: a TLS handshake the HOST rejected,
+        // a DNS/connect failure, a timeout), turn it into a plain-English HTTP
+        // error the guest can read instead of the bare connection close that
+        // shows up as a cryptic `EOF` in docker/curl/git. Once we've already
+        // streamed a status line + body we can't inject a new status, so
+        // rethrow and let the connection close.
+        if responseStarted { throw error }
+        let d = describeUpstreamError(error, host: host)
+        var resp = "HTTP/1.1 502 Bad Gateway\r\n"
+        resp += "Content-Type: text/plain; charset=utf-8\r\n"
+        resp += "Content-Length: \(d.body.utf8.count)\r\n"
+        resp += "X-Bromure-Upstream-Error: \(d.reason)\r\n"
+        resp += "Connection: close\r\n\r\n"
+        resp += d.body
+        let respData = Data(resp.utf8)
+        try? tls.write(respData)
+        FileHandle.standardError.write(Data(
+            "[mitm] upstream unreachable \(host): \(d.reason)\n".utf8))
+        // Untrusted / invalid upstream certs are a security-engine decision —
+        // record them on the Security Timeline so an operator can diagnose a
+        // failing push/pull without spelunking stderr.
+        if d.isTrust {
+            BACEventEmitter.shared.emitDetached(
+                profileID: profileID, eventType: "tls.upstream_untrusted",
+                eventData: ["host": .string(host),
+                            "reason": .string(d.reason),
+                            "code": .int((error as NSError).code)])
+        }
+        return RelayResponse(buffer: respData, wireBytes: respData.count,
+                             truncatedForTrace: false, ttftSeconds: ttft)
     }
     // Terminating zero-length chunk — the end-of-body marker the client
     // dechunks on. Only when we actually framed the body as chunked.

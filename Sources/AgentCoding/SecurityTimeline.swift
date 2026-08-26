@@ -126,6 +126,11 @@ public final class SecurityTimeline {
             let decision = str(d, "reason").map { "blocked — \($0)" } ?? "blocked"
             return row("Guardrails", cond, decision, .blocked)
 
+        case "tls.upstream_untrusted":
+            let host = str(d, "host") ?? "?"
+            let reason = str(d, "reason") ?? "certificate not trusted by the host"
+            return row("Upstream TLS", host, "blocked — \(reason)", .blocked)
+
         case "prompt_injection.detection":
             let action = (str(d, "action") ?? "detected").lowercased()
             let detector = str(d, "detector") ?? "prompt injection"
