@@ -159,6 +159,9 @@ final class ACAutomationServer {
     // Fat-client mirror (a remote bromure-ac reflecting this one 1:1).
     /// All workspaces (running or not) as sidebar rows.
     var onListWorkspaces: (() -> [[String: Any]])?
+    /// Recent Security Timeline rows for the fat-client mirror (the security
+    /// engines run host-side, so the client can't build this itself).
+    var onSecurityTimeline: (() -> [[String: Any]])?
     /// The persisted grid (StageLayout): cells + focus/zoom.
     var onGetGridLayout: (() -> [String: Any])?
     /// Apply a whole grid layout (last-writer-wins).
@@ -1695,6 +1698,7 @@ final class ACAutomationServer {
                 "tasks": self.onListTasks?() ?? ["tasks": []],
                 "pendingPrompts": self.onListPendingPrompts?() ?? [],
                 "subscriptions": self.onSubscriptionStatus?(nil) ?? [:],
+                "securityTimeline": self.onSecurityTimeline?() ?? [],
             ]
             // Only present while a client-initiated registration is in flight.
             if let reg = self.onPendingRegistration?() { d["pendingRegistration"] = reg }

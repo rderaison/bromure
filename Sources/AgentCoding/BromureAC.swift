@@ -3248,6 +3248,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ["tasks": self?.codingTaskStore.tasks.compactMap(Self.codableToDict) ?? []]
             }
         }
+        server.onSecurityTimeline = {
+            MainActor.assumeIsolated { SecurityTimeline.shared.mirrorRows() }
+        }
         server.onUpsertTask = { [weak self] doc in
             MainActor.assumeIsolated {
                 guard let self,

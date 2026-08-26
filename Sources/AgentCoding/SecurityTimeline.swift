@@ -16,10 +16,26 @@ public final class SecurityTimeline {
     public static let shared = SecurityTimeline()
 
     /// How a decision reads at a glance — drives the row's colour.
-    public enum Decision: Sendable {
+    public enum Decision: Sendable, Equatable {
         case allowed    // let through / signed / passed (green)
         case blocked    // denied / rejected / stripped  (red)
         case info       // a transformation, neither pass nor block (blue)
+
+        /// Stable string used on the fat-client mirror wire.
+        var wire: String {
+            switch self {
+            case .allowed: return "allowed"
+            case .blocked: return "blocked"
+            case .info:    return "info"
+            }
+        }
+        init(wire: String) {
+            switch wire {
+            case "blocked": self = .blocked
+            case "allowed": self = .allowed
+            default:        self = .info
+            }
+        }
     }
 
     public struct Event: Identifiable, Sendable {
@@ -56,6 +72,45 @@ public final class SecurityTimeline {
     }
 
     public func clear() { events.removeAll() }
+
+    // MARK: - Fat-client mirror
+
+    /// The security engines (credential broker, firewall, guardrails, MiTM)
+    /// run on the HOST, so the host owns the live timeline. A fat client mirrors
+    /// a remote host and runs no engines of its own — its local store would
+    /// stay empty and the Security Timeline window blank. These two methods
+    /// ship the host's recent decisions over `/state` and rebuild them on the
+    /// client so the window works there too.
+
+    /// Serialize the most recent events for the `/state` snapshot. Bounded —
+    /// the window is a "what just happened" view, not the full 5000-cap history.
+    public func mirrorRows(limit: Int = 750) -> [[String: Any]] {
+        events.suffix(limit).map { e in
+            [
+                "t": e.time.timeIntervalSince1970,
+                "engine": e.engine,
+                "condition": e.condition,
+                "decision": e.decision,
+                "kind": e.kind.wire,
+                "profileID": e.profileID.uuidString,
+            ]
+        }
+    }
+
+    /// Rebuild the timeline from a host mirror snapshot (fat client). The host
+    /// is authoritative, so this replaces wholesale.
+    public func applyMirror(_ rows: [[String: Any]]) {
+        events = rows.compactMap { r in
+            guard let engine = r["engine"] as? String,
+                  let condition = r["condition"] as? String,
+                  let decision = r["decision"] as? String else { return nil }
+            let t = (r["t"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? Date()
+            let pid = (r["profileID"] as? String).flatMap(UUID.init) ?? UUID()
+            return Event(time: t, engine: engine, condition: condition,
+                         decision: decision, kind: Decision(wire: r["kind"] as? String ?? ""),
+                         profileID: pid)
+        }
+    }
 
     // MARK: - Mapping
 

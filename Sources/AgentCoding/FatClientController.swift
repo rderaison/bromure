@@ -481,6 +481,16 @@ final class RemoteHostController {
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
+#if os(macOS)
+        // Mirror the host's security-engine decisions so the Security Timeline
+        // window works on a fat client too — the engines (credential broker,
+        // firewall, guardrails, MiTM) run on the remote host, so the local
+        // store is otherwise empty. Only rebuild when the key is present: a
+        // partial/truncated snapshot must not wipe the last good timeline.
+        if let rows = snapshot["securityTimeline"] as? [[String: Any]] {
+            SecurityTimeline.shared.applyMirror(rows)
+        }
+#endif
         revision &+= 1
         if revision == 1 {
             FatClientLog.log("apply: \(workspaces.count) workspaces, \(vms.count) running, "
