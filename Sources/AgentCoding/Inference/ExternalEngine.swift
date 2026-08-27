@@ -312,4 +312,59 @@ enum ExternalEngine {
         }
         return list.compactMap { $0["id"] as? String }.sorted()
     }
+
+    // MARK: - Model metadata (context window)
+
+    /// The server-reported context length for `model`, or nil when the server
+    /// exposes none. Two shapes probed, cheapest first:
+    ///   - vLLM: `/v1/models` entries carry `max_model_len`.
+    ///   - Ollama: `POST /api/show` → an explicit `num_ctx` parameter wins
+    ///     (the operator capped/raised the runtime window), else the
+    ///     architecture's `<arch>.context_length` from `model_info`.
+    /// Agents size compaction and truncation off this number — a wrong
+    /// default (128k for a 256k model) wastes half the window, and an
+    /// optimistic one overflows the server.
+    static func contextLength(base: URL, apiKey: String?, model: String,
+                              timeout: TimeInterval = 10) async -> Int? {
+        var req = URLRequest(url: base.appendingPathComponent("v1/models"))
+        req.timeoutInterval = timeout
+        if let apiKey, !apiKey.isEmpty {
+            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        if let (data, resp) = try? await URLSession.shared.data(for: req),
+           (resp as? HTTPURLResponse)?.statusCode == 200,
+           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let entry = (obj["data"] as? [[String: Any]])?.first(where: { $0["id"] as? String == model }),
+           let len = entry["max_model_len"] as? Int, len > 0 {
+            return len
+        }
+
+        var show = URLRequest(url: base.appendingPathComponent("api/show"))
+        show.timeoutInterval = timeout
+        show.httpMethod = "POST"
+        show.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey, !apiKey.isEmpty {
+            show.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        show.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model])
+        guard let (data, resp) = try? await URLSession.shared.data(for: show),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        if let params = obj["parameters"] as? String {
+            for line in params.split(separator: "\n") {
+                let toks = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+                if toks.count >= 2, toks[0] == "num_ctx", let n = Int(toks[1]), n > 0 {
+                    return n
+                }
+            }
+        }
+        if let info = obj["model_info"] as? [String: Any] {
+            for (k, v) in info where k.hasSuffix(".context_length") {
+                if let n = v as? Int, n > 0 { return n }
+            }
+        }
+        return nil
+    }
 }

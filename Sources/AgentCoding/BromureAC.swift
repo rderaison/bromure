@@ -1726,6 +1726,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 pid, ExternalEngine.Config(base: base, apiKey: apiKey))
             if let activeID = profile.activeModelID, !activeID.isEmpty {
                 InferenceRepairProxy.shared.setActiveModel(pid, repo: activeID)
+                // Refresh the cached context window (async): staging reads
+                // the cache, so the next restage/boot carries the server's
+                // real number instead of the 128k default.
+                EngineModelMeta.refresh(base: base, apiKey: apiKey, model: activeID)
             }
             InferenceRepairProxy.shared.startIfNeeded()
             let label = profile.activeModelID ?? base.host ?? "external engine"
