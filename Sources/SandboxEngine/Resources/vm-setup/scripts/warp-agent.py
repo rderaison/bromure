@@ -252,10 +252,20 @@ def ensure_warp_svc():
         log("waiting 1s for dbus registration...")
         time.sleep(1)
 
-    # Register if needed
+    # Register if needed. config-agent pre-starts warp-svc at claim time,
+    # so the process check above passes while the daemon's IPC socket is
+    # still seconds away — every warp-cli call then fails with "Unable to
+    # connect to the CloudflareWARP daemon" and boot setup gave up for
+    # good. Poll status until the daemon actually answers.
     log("checking warp-cli status...")
-    rc, out, err = run(f"{WARP_CLI} --accept-tos status", env=WARP_ENV)
-    combined = (out + " " + err).lower()
+    for _ in range(30):
+        rc, out, err = run(f"{WARP_CLI} --accept-tos status", env=WARP_ENV)
+        combined = (out + " " + err).lower()
+        if "unable to connect" not in combined:
+            break
+        time.sleep(1)
+    else:
+        return False, "warp-svc IPC did not come up (30s)"
 
     if "registration" in combined and "missing" in combined:
         log("registration missing, registering...")
