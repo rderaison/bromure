@@ -1589,6 +1589,12 @@ final class RemoteHostWindow: NSWindow {
     private static let sidebarMaxWidth: CGFloat = 520
     private static let sidebarDefaultWidth: CGFloat = 240
     private static let sidebarWidthKey = "ac.remote.sidebarWidth"
+    // Collapse-to-rail (mirrors the local window): dragging the handle below
+    // `sidebarMinWidth` snaps to a hierarchy-less icon rail; dragging back past
+    // the minimum expands to `expandedSidebarWidth`.
+    private var sidebarCollapsed = false
+    private var expandedSidebarWidth: CGFloat = 240
+    private static let sidebarRailWidth: CGFloat = 44
     /// Per-workspace settings editors (the pill's gearshape) — same
     /// `ProfileEditorView` as local, saving over the tunnel.
     private var settingsWindows: [Profile.ID: NSWindow] = [:]
@@ -1892,19 +1898,27 @@ final class RemoteHostWindow: NSWindow {
             self.expandedBrowserWidth = self.browserWidthConstraint.constant
         }
         // 8pt drag strip over the sidebar's trailing edge (sidebar↔terminal
-        // boundary), like the local window's sidebar resizeHandle. No collapse-
-        // to-rail here — just a clamped resize.
+        // boundary), like the local window's sidebar resizeHandle. Dragging
+        // under the minimum snaps to the icon rail (the drag handle IS the
+        // collapse control), exactly like the local window.
         let sidebarHandle = SidebarResizeHandle()
         sidebarHandle.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(sidebarHandle)
         sidebarResizeHandle = sidebarHandle
         sidebarHandle.onResize = { [weak self] x in
             guard let self else { return }
-            self.sidebarWidthConstraint.constant =
-                max(Self.sidebarMinWidth, min(Self.sidebarMaxWidth, x))
+            if x < Self.sidebarMinWidth {
+                self.setSidebarCollapsed(true, animated: true)
+            } else {
+                self.setSidebarCollapsed(false, animated: false)
+                self.sidebarWidthConstraint.constant = min(Self.sidebarMaxWidth, x)
+            }
         }
         sidebarHandle.onResizeEnd = { [weak self] in
-            guard let self else { return }
+            // Persist only the expanded width — never the transient widths on
+            // the way to a collapse.
+            guard let self, !self.sidebarCollapsed else { return }
+            self.expandedSidebarWidth = self.sidebarWidthConstraint.constant
             UserDefaults.standard.set(
                 self.sidebarWidthConstraint.constant, forKey: Self.sidebarWidthKey)
         }
@@ -1922,6 +1936,7 @@ final class RemoteHostWindow: NSWindow {
         let storedSidebar = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
         let sidebarInitial = storedSidebar >= Self.sidebarMinWidth
             ? min(storedSidebar, Self.sidebarMaxWidth) : Self.sidebarDefaultWidth
+        expandedSidebarWidth = sidebarInitial
         sidebarWidthConstraint = sidebarHost.widthAnchor.constraint(equalToConstant: sidebarInitial)
         NSLayoutConstraint.activate([
             sidebarHost.leadingAnchor.constraint(equalTo: content.leadingAnchor),
@@ -3333,6 +3348,27 @@ final class RemoteHostWindow: NSWindow {
         browserControllers[prev]?.setVisible(false, teardownWhenHidden: false)
         shownBrowser = nil
         setBrowserWidth(0)
+    }
+
+    /// Collapse the sidebar to the hierarchy-less icon rail, or expand it back
+    /// — the fat-client counterpart of the local window's `setSidebarCollapsed`.
+    /// `controller.listModel.sidebarCollapsed` drives the shared `SessionSidebar`
+    /// to swap to the rail; the width constraint animates to match.
+    private func setSidebarCollapsed(_ collapsed: Bool, animated: Bool) {
+        guard collapsed != sidebarCollapsed else { return }
+        sidebarCollapsed = collapsed
+        controller.listModel.sidebarCollapsed = collapsed
+        let target = collapsed ? Self.sidebarRailWidth : expandedSidebarWidth
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.allowsImplicitAnimation = true
+                sidebarWidthConstraint.animator().constant = target
+                contentView?.layoutSubtreeIfNeeded()
+            }
+        } else {
+            sidebarWidthConstraint.constant = target
+        }
     }
 
     private func makeSidebar() -> SessionSidebar {
