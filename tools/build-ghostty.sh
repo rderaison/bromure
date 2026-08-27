@@ -25,7 +25,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 COMMIT="$(cat "$REPO_ROOT/tools/ghostty.commit")"
 CACHE="${BROMURE_GHOSTTY_CACHE:-$HOME/.cache/bromure-ghostty}"
-ZIG_VERSION="0.15.2"
+ZIG_VERSION="0.16.0"
 ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-macos-${ZIG_VERSION}.tar.xz"
 
 VENDOR="$REPO_ROOT/vendor"
@@ -39,7 +39,7 @@ fi
 mkdir -p "$CACHE"
 
 # --- zig toolchain -----------------------------------------------------------
-if [ ! -x "$CACHE/zig/zig" ]; then
+if [ ! -x "$CACHE/zig/zig" ] || [ "$("$CACHE/zig/zig" version)" != "$ZIG_VERSION" ]; then
     echo "Downloading zig ${ZIG_VERSION}…"
     curl -fsSL "$ZIG_URL" -o "$CACHE/zig.tar.xz"
     tar xf "$CACHE/zig.tar.xz" -C "$CACHE"
@@ -210,7 +210,8 @@ cp -Rc "$CACHE/src/zig-out/share/ghostty" "$VENDOR/ghostty-resources/ghostty"
 # TOC regardless of what zig's cache reinstalled (a stale __.SYMDEF member
 # from a pre-wrapper merge shadows the symbol table and makes the archive
 # look empty to nm/ld; in-place ranlib can no-op on freshly-copied files).
-STAGED="$VENDOR/GhosttyKit.xcframework/macos-arm64/libghostty-fat.a"
+# libghostty-fat.a before the upstream libghostty-internal rebranding.
+STAGED="$(ls "$VENDOR/GhosttyKit.xcframework/macos-arm64/"libghostty-*.a)"
 chmod u+w "$STAGED"
 /usr/bin/libtool -static -o "$STAGED.toc" "$STAGED" 2>/dev/null
 mv "$STAGED.toc" "$STAGED"
@@ -221,7 +222,7 @@ mv "$STAGED.toc" "$STAGED"
 # NB: grep -c, not -q — under pipefail, -q's early exit SIGPIPEs nm and
 # turns a *successful* match into a failed pipeline.
 if [ "$(nm "$STAGED" 2>/dev/null | grep -c 'T _ghostty_init$')" -eq 0 ]; then
-    echo "ERROR: staged libghostty-fat.a does not export ghostty_init" >&2
+    echo "ERROR: staged $(basename "$STAGED") does not export ghostty_init" >&2
     exit 1
 fi
 

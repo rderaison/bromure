@@ -113,37 +113,66 @@ final class GhosttyRuntime: @unchecked Sendable {
         runtime.action_cb = { app, target, action in
             GhosttyRuntime.handleAction(app: app, target: target, action: action)
         }
-        runtime.read_clipboard_cb = { userdata, location, state in
+        runtime.read_clipboard_cb = { userdata, location, state, mimes, mimesLen, list in
             // `userdata` is the requesting surface's userdata (the view);
-            // completion must happen for libghostty to unblock the requester.
+            // STARTED means we completed the request ourselves, while
+            // UNAVAILABLE/UNSUPPORTED make the core unblock the requester
+            // with an empty (successful) or failed read.
             guard location == GHOSTTY_CLIPBOARD_STANDARD,
                   let userdata, let state,
                   let view = GhosttyRuntime.surfaceView(for: userdata),
-                  let surface = view.surface else { return false }
+                  let surface = view.surface else {
+                return GHOSTTY_CLIPBOARD_READ_UNSUPPORTED
+            }
             // An image on the clipboard pastes as a *guest file path*: the
-            // request completes empty right away (libghostty is blocked on
-            // it) and the path arrives as its own paste once the transfer
-            // into the guest lands.
+            // read completes unavailable right away (nothing pastes) and
+            // the path arrives as its own paste once the transfer into the
+            // guest lands.
             if TerminalImagePaste.beginImagePaste(surfaceUserdata: userdata) {
-                "".withCString {
-                    ghostty_surface_complete_clipboard_request(surface, $0, state, false)
+                return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE
+            }
+            // We only ever serve plain text, under whichever requested
+            // text/* representations the requester asked for.
+            guard let text = NSPasteboard.general.string(forType: .string) else {
+                return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE
+            }
+            var requested: [String] = []
+            for i in 0..<mimesLen {
+                guard let ptr = mimes?[i] else { continue }
+                let mime = String(cString: ptr)
+                if mime.hasPrefix("text/"), !requested.contains(mime) {
+                    requested.append(mime)
                 }
-                return true
             }
-            let text = NSPasteboard.general.string(forType: .string) ?? ""
-            text.withCString {
-                ghostty_surface_complete_clipboard_request(surface, $0, state, false)
+            guard !requested.isEmpty || list else {
+                return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE
             }
-            return true
+            GhosttyRuntime.completeClipboardRequest(
+                surface, text: text, mimes: requested, listed: list, state: state)
+            return GHOSTTY_CLIPBOARD_READ_STARTED
         }
-        runtime.confirm_read_clipboard_cb = { userdata, text, state, _ in
+        runtime.confirm_read_clipboard_cb = { userdata, confirm, state, _ in
             // Paste protection is disabled in our generated config; if a
             // confirmation still arrives, approve it — the "guest" is the
-            // user's own tmux session, not an untrusted remote.
+            // user's own tmux session, not an untrusted remote. The confirm
+            // payload's pointers stay owned by libghostty and are only
+            // re-borrowed for this synchronous completion call.
             guard let userdata, let state,
                   let view = GhosttyRuntime.surfaceView(for: userdata),
                   let surface = view.surface else { return }
-            ghostty_surface_complete_clipboard_request(surface, text, state, true)
+            guard let confirm else {
+                ghostty_surface_deny_clipboard_request(surface, state)
+                return
+            }
+            let c = confirm.pointee
+            var complete = ghostty_clipboard_complete_s(
+                contents: c.contents,
+                contents_len: c.contents_len,
+                available: c.available,
+                available_len: c.available_len,
+                confirmed: true,
+                remember: false)
+            ghostty_surface_complete_clipboard_request(surface, &complete, state)
         }
         runtime.write_clipboard_cb = { _, location, contents, count, _ in
             guard location == GHOSTTY_CLIPBOARD_STANDARD,
@@ -155,7 +184,9 @@ final class GhosttyRuntime: @unchecked Sendable {
                 guard let data = entry.data else { continue }
                 let mime = entry.mime.map { String(cString: $0) } ?? "text/plain"
                 guard mime.hasPrefix("text/") else { continue }
-                let text = String(cString: data)
+                // Binary-safe with an explicit length — not NUL-terminated.
+                let bytes = UnsafeRawBufferPointer(start: data, count: entry.len)
+                let text = String(decoding: bytes, as: UTF8.self)
                 DispatchQueue.main.async {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
@@ -192,6 +223,55 @@ final class GhosttyRuntime: @unchecked Sendable {
             ghostty_app_set_focus(app, false)
         }
         return true
+    }
+
+    // MARK: Clipboard
+
+    /// Complete a pending clipboard read with the pasteboard's plain text
+    /// under each requested text/* mime (plus the "available" listing when
+    /// the requester asked for one). Every pointer is borrowed for the
+    /// duration of the call only — libghostty copies what it keeps before
+    /// returning.
+    private static func completeClipboardRequest(
+        _ surface: ghostty_surface_t,
+        text: String,
+        mimes: [String],
+        listed: Bool,
+        state: UnsafeMutableRawPointer
+    ) {
+        var cStrings: [UnsafeMutablePointer<CChar>] = []
+        defer { cStrings.forEach { free($0) } }
+
+        // Trailing NUL keeps the buffer non-empty for empty strings and
+        // stays defensive for C-string readers; len excludes it.
+        let data = Array(text.utf8) + [0]
+        data.withUnsafeBytes { raw in
+            let dataPtr = raw.bindMemory(to: CChar.self).baseAddress
+            var contents: [ghostty_clipboard_content_s] = []
+            for mime in mimes {
+                guard let m = strdup(mime) else { continue }
+                cStrings.append(m)
+                contents.append(ghostty_clipboard_content_s(
+                    mime: m, data: dataPtr, len: data.count - 1))
+            }
+            var available: [UnsafePointer<CChar>?] = []
+            if listed, let m = strdup("text/plain") {
+                cStrings.append(m)
+                available.append(UnsafePointer(m))
+            }
+            contents.withUnsafeBufferPointer { contentsBuf in
+                available.withUnsafeBufferPointer { availBuf in
+                    var complete = ghostty_clipboard_complete_s(
+                        contents: contentsBuf.baseAddress,
+                        contents_len: contentsBuf.count,
+                        available: availBuf.baseAddress,
+                        available_len: availBuf.count,
+                        confirmed: false,
+                        remember: false)
+                    ghostty_surface_complete_clipboard_request(surface, &complete, state)
+                }
+            }
+        }
     }
 
     // MARK: Actions

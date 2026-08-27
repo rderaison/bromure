@@ -180,9 +180,9 @@ enum TerminalImagePaste {
     /// Returns false when this isn't an image paste — the caller then
     /// completes the request with the string flavor as usual. Returns
     /// true when the image transfer was kicked off; the caller must
-    /// complete the pending clipboard request (empty) so libghostty
-    /// isn't left waiting on the transfer, and the guest path arrives
-    /// later as its own paste.
+    /// answer the read as unavailable so libghostty isn't left waiting
+    /// on the transfer, and the guest path arrives later as its own
+    /// paste.
     static func beginImagePaste(surfaceUserdata ptr: UnsafeMutableRawPointer,
                                 pasteboard: NSPasteboard = .general) -> Bool {
         guard let view = GhosttyRuntime.surfaceView(for: ptr),

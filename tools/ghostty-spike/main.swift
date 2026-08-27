@@ -19,7 +19,7 @@ func makeRuntime() -> ghostty_runtime_config_s {
         DispatchQueue.main.async { if let a = appHandle { ghostty_app_tick(a) } }
     }
     rt.action_cb = { _, _, _ in false }
-    rt.read_clipboard_cb = { _, _, _ in false }
+    rt.read_clipboard_cb = { _, _, _, _, _, _ in GHOSTTY_CLIPBOARD_READ_UNSUPPORTED }
     rt.confirm_read_clipboard_cb = { _, _, _, _ in }
     rt.write_clipboard_cb = { _, _, _, _, _ in }
     rt.close_surface_cb = { _, _ in }

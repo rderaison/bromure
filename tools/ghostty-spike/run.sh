@@ -9,7 +9,7 @@ XCFW="$ROOT/vendor/GhosttyKit.xcframework/macos-arm64"
 OUT="${TMPDIR:-/tmp}/bromure-ghostty-spike"
 swiftc "$ROOT/tools/ghostty-spike/main.swift" \
     -I "$XCFW/Headers" \
-    "$XCFW/libghostty-fat.a" \
+    "$XCFW"/libghostty-*.a \
     -framework AppKit -framework Metal -framework MetalKit \
     -framework QuartzCore -framework CoreText -framework Carbon \
     -framework CoreVideo -framework IOSurface -framework UniformTypeIdentifiers \
