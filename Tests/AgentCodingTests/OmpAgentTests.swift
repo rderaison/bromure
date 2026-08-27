@@ -105,18 +105,18 @@ struct OmpAgentTests {
         #expect(p.authMode == .token)
     }
 
-    @Test("resolvedOmpModel: provider default, explicit override, local sentinel")
+    @Test("resolvedOmpModel: provider default, explicit override, local fallback")
     func modelResolution() {
         let anth = Profile.ToolSpec(tool: .omp, authMode: .token, apiKey: "k")
-        #expect(anth.resolvedOmpModel(localSentinel: "L") == "sonnet")
+        #expect(anth.resolvedOmpModel(localFallback: "L") == "sonnet")
         let oai = Profile.ToolSpec(tool: .omp, authMode: .token, apiKey: "k",
                                    ompProvider: .openai)
-        #expect(oai.resolvedOmpModel(localSentinel: "L") == "gpt-5.2")
+        #expect(oai.resolvedOmpModel(localFallback: "L") == "gpt-5.2")
         let override = Profile.ToolSpec(tool: .omp, authMode: .token, apiKey: "k",
                                         ompModel: "opus")
-        #expect(override.resolvedOmpModel(localSentinel: "L") == "opus")
+        #expect(override.resolvedOmpModel(localFallback: "L") == "opus")
         let local = Profile.ToolSpec(tool: .omp, authMode: .local, localModelID: "")
-        #expect(local.resolvedOmpModel(localSentinel: "L") == "L")
+        #expect(local.resolvedOmpModel(localFallback: "L") == "L")
     }
 
     @Test("Token plan mints an omp fake shaped for the selected provider")

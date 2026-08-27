@@ -642,13 +642,17 @@ public final class SessionDisk {
             // is handled separately by the MITM engine, not here.)
             // Every "Local model" agent serves the profile's single active
             // model (chosen in Local Models) — agents no longer pick their own.
-            if let activeID = profile.activeModelID, !activeID.isEmpty {
-                // Pin agents to the stable sentinel, not the concrete repo: the
-                // repair proxy maps it to this workspace's active model, so
-                // switching the model is a host-side remap with no agent restart.
+            if let localModel = profile.localAgentModelName {
+                // Agents get the REAL model name (the repo the engine serves /
+                // the custom server's id), not the old `bromure-local`
+                // sentinel: agents key capability lookups, context sizing, and
+                // their UI off the name, so opacity here made them misbehave.
+                // Switching the model live still works — the refresh restages
+                // these files, and the repair proxy remaps the RETIRED name
+                // for the still-running agent (its env is frozen at exec).
                 let key = EngineKey.perVM(profileID: profile.id)
                 for spec in profile.allToolSpecs where spec.authMode == .local {
-                    for export in spec.tool.localEnvExports(model: InferenceService.localModelSentinel, key: key) {
+                    for export in spec.tool.localEnvExports(model: localModel, key: key) {
                         proxyLines.append("export \(export.name)=\(shellQuote(export.value))")
                     }
                 }
@@ -827,13 +831,16 @@ public final class SessionDisk {
         // loopback (the guest init lays this down before the MCP block so the
         // top-level keys stay valid TOML).
         if profile.allToolSpecs.contains(where: { $0.tool == .codex && $0.authMode == .local }),
-           let id = profile.activeModelID, !id.isEmpty {
-            // Send the bromure-local sentinel (the proxy resolves it to this
-            // workspace's active model), so switching the model needs no codex
-            // restart — same as Claude/Grok. Carry the active model's context
-            // window from the catalog so Codex has real metadata.
+           let id = profile.activeModelID, !id.isEmpty,
+           let localModel = profile.localAgentModelName {
+            // Send the real served model id (not the old sentinel) so Codex
+            // knows what it's talking to; a model switch restages this file
+            // and the proxy remaps the retired name for the running agent.
+            // Carry the active model's context window from the catalog so
+            // Codex has real metadata (external-server ids aren't in the
+            // catalog and keep the 128k default).
             let ctx = CatalogStore.shared.resolve(id)?.context ?? 128_000
-            try Self.codexLocalProviderTOML(model: InferenceService.localModelSentinel,
+            try Self.codexLocalProviderTOML(model: localModel,
                                             contextWindow: ctx).write(
                 to: tmp.appendingPathComponent("codex-local.toml"),
                 atomically: true, encoding: .utf8)
@@ -844,10 +851,11 @@ public final class SessionDisk {
         // "grok-build" — which the engine 404s. A [model.grok-build] override
         // in config.toml rewrites that to the served repo (guest init appends).
         if profile.allToolSpecs.contains(where: { $0.tool == .grok && $0.authMode == .local }),
-           let id = profile.activeModelID, !id.isEmpty {
-            // Map grok-build → the bromure-local sentinel (proxy-resolved per
-            // workspace), so switching the model needs no grok restart.
-            try Self.grokLocalModelMapTOML(model: InferenceService.localModelSentinel).write(
+           let localModel = profile.localAgentModelName {
+            // Map grok-build → the real served model id (not the old
+            // sentinel); a model switch restages this file and the proxy
+            // remaps the retired name for the running agent.
+            try Self.grokLocalModelMapTOML(model: localModel).write(
                 to: tmp.appendingPathComponent("grok-local.toml"),
                 atomically: true, encoding: .utf8)
         }
@@ -873,8 +881,11 @@ public final class SessionDisk {
         // models.yml so omp knows the endpoint + model. The default Anthropic
         // path needs neither — omp uses ANTHROPIC_API_KEY + a provider model.
         if let ompSpec = profile.allToolSpecs.first(where: { $0.tool == .omp }) {
-            if let model = ompSpec.resolvedOmpModel(
-                localSentinel: InferenceService.localModelSentinel) {
+            // Local fallback is the REAL served model id (not the old
+            // `bromure-local` sentinel) — omp keys its provider entry and
+            // token accounting off the name.
+            let localFallback = profile.localAgentModelName
+            if let model = ompSpec.resolvedOmpModel(localFallback: localFallback) {
                 try (model + "\n").write(to: tmp.appendingPathComponent("omp-model"),
                                          atomically: true, encoding: .utf8)
             }
@@ -882,8 +893,8 @@ public final class SessionDisk {
             // entry pointing omp at the user's base URL (custom) or the on-host
             // engine through the MITM sentinel host (local).
             let prov = ompSpec.effectiveOmpProvider
-            let modelName = ompSpec.resolvedOmpModel(
-                localSentinel: InferenceService.localModelSentinel) ?? "bromure-local"
+            let modelName = ompSpec.resolvedOmpModel(localFallback: localFallback)
+                ?? localFallback ?? "default"
             var yaml: String? = nil
             if ompSpec.authMode == .local {
                 yaml = Self.ompModelsYAML(

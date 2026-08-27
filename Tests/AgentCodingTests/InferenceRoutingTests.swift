@@ -622,3 +622,34 @@ struct ProfileRoutingPersistenceTests {
         #expect(!json.contains("hybridCloudTokenBudget"))
     }
 }
+
+// MARK: - Local model remap (real names + retired-name net)
+
+@Suite("Local model remap")
+struct LocalModelRemapTests {
+    @Test("Sentinel and retired names remap to active; current/foreign names pass through")
+    func remapNet() {
+        let proxy = InferenceRepairProxy.shared
+        let pid = UUID()
+        defer { proxy.clearActiveModel(pid) }
+
+        proxy.setActiveModel(pid, repo: "mlx/qwen-7b")
+        #expect(proxy.remappedLocalModel(for: "bromure-local", profileID: pid) == "mlx/qwen-7b")
+        #expect(proxy.remappedLocalModel(for: "mlx/qwen-7b", profileID: pid) == nil)
+        #expect(proxy.remappedLocalModel(for: "claude-sonnet-4-6", profileID: pid) == nil)
+
+        // A model switch retires the old name so a running agent's stale
+        // env keeps resolving.
+        proxy.setActiveModel(pid, repo: "mlx/llama-8b")
+        #expect(proxy.remappedLocalModel(for: "mlx/qwen-7b", profileID: pid) == "mlx/llama-8b")
+        #expect(proxy.remappedLocalModel(for: "mlx/llama-8b", profileID: pid) == nil)
+
+        // Switching back un-retires the reselected model.
+        proxy.setActiveModel(pid, repo: "mlx/qwen-7b")
+        #expect(proxy.remappedLocalModel(for: "mlx/qwen-7b", profileID: pid) == nil)
+        #expect(proxy.remappedLocalModel(for: "mlx/llama-8b", profileID: pid) == "mlx/qwen-7b")
+
+        // Unknown workspace: nothing remaps.
+        #expect(proxy.remappedLocalModel(for: "bromure-local", profileID: UUID()) == nil)
+    }
+}

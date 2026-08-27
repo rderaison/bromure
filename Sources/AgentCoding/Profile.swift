@@ -1142,14 +1142,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
 
         /// The `--model` value omp launches with (nil ⇒ let omp use its
-        /// provider default). Local mode uses the engine sentinel.
-        public func resolvedOmpModel(localSentinel: String) -> String? {
+        /// provider default). Local mode falls back to the served model id.
+        public func resolvedOmpModel(localFallback: String?) -> String? {
             guard tool == .omp else { return nil }
             if let m = ompModel?.trimmingCharacters(in: .whitespaces), !m.isEmpty {
                 return m
             }
             if authMode == .local {
-                return localModelID?.isEmpty == false ? localModelID : localSentinel
+                return localModelID?.isEmpty == false ? localModelID : localFallback
             }
             return effectiveOmpProvider.defaultModel
         }
@@ -1326,6 +1326,18 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// `localEngineURL` normalized to a server-root base URL, or nil when the
     /// built-in engine serves this profile.
     public var localEngineBaseURL: URL? { Profile.normalizedEngineBase(localEngineURL) }
+
+    /// The concrete model id `.local` agents are configured with — what the
+    /// engine actually serves: the catalog entry's repo for the built-in
+    /// engine (it registers models under their repo), or the custom server's
+    /// own id verbatim. Agents see this real name (their capability lookups,
+    /// context sizing, and UI all key off the model name); the repair proxy
+    /// only steps in to remap retired names after a host-side model switch.
+    public var localAgentModelName: String? {
+        guard let id = activeModelID, !id.isEmpty else { return nil }
+        if localEngineBaseURL != nil { return id }
+        return CatalogStore.shared.resolve(id)?.repo ?? id
+    }
 
     /// Normalize a user-typed engine URL to a server-root base: defaults the
     /// scheme to http (loopback engines rarely have TLS) and strips a pasted

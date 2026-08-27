@@ -32,20 +32,48 @@ final class InferenceRepairProxy: @unchecked Sendable {
     /// while the (possibly long) generation is in flight.
     var onLocalActivity: ((_ profileID: UUID) -> Void)?
 
-    /// profile id → the repo the `bromure-local` sentinel resolves to for that
-    /// workspace. The guest's agents are pinned to the sentinel; switching the
-    /// workspace's model just updates this map, so no agent restart is needed.
+    /// profile id → the model that workspace's `.local` agents currently
+    /// serve. Guests are configured with the REAL model name; this map (plus
+    /// the retired-name history below) lets a host-side model switch keep a
+    /// running agent working: its process env is frozen at exec, so it keeps
+    /// sending the OLD name, which we remap to the current one.
     private let modelMapLock = NSLock()
     private var activeModelByProfile: [UUID: String] = [:]
+    /// Model names a workspace previously served (superseded by a switch).
+    /// Only these — plus the legacy `bromure-local` sentinel — are remapped;
+    /// any other explicit model passes through untouched.
+    private var retiredModelsByProfile: [UUID: Set<String>] = [:]
 
     func setActiveModel(_ profileID: UUID, repo: String) {
-        modelMapLock.lock(); activeModelByProfile[profileID] = repo; modelMapLock.unlock()
+        modelMapLock.lock()
+        if let old = activeModelByProfile[profileID], old != repo {
+            retiredModelsByProfile[profileID, default: []].insert(old)
+        }
+        // Reselecting a previously-active model makes it current again.
+        retiredModelsByProfile[profileID]?.remove(repo)
+        activeModelByProfile[profileID] = repo
+        modelMapLock.unlock()
     }
     func clearActiveModel(_ profileID: UUID) {
-        modelMapLock.lock(); activeModelByProfile[profileID] = nil; modelMapLock.unlock()
+        modelMapLock.lock()
+        activeModelByProfile[profileID] = nil
+        retiredModelsByProfile[profileID] = nil
+        modelMapLock.unlock()
     }
     func activeModel(for profileID: UUID) -> String? {
         modelMapLock.lock(); defer { modelMapLock.unlock() }; return activeModelByProfile[profileID]
+    }
+
+    /// The model to actually send upstream for a guest's `payloadModel`:
+    /// the current model when the guest names the legacy sentinel or a
+    /// retired name (stale env after a live model switch), else nil (leave
+    /// the request untouched).
+    func remappedLocalModel(for payloadModel: String, profileID: UUID) -> String? {
+        modelMapLock.lock(); defer { modelMapLock.unlock() }
+        guard let active = activeModelByProfile[profileID], payloadModel != active else { return nil }
+        if payloadModel == InferenceService.localModelSentinel { return active }
+        if retiredModelsByProfile[profileID]?.contains(payloadModel) == true { return active }
+        return nil
     }
 
     /// profile id → the user-supplied external engine (vLLM/Ollama/…) serving
@@ -314,12 +342,13 @@ final class InferenceRepairProxy: @unchecked Sendable {
         // Identify the calling VM from its per-VM key (nil for admin/internal).
         let pid = profileID(in: req)
 
-        // Resolve the local-model sentinel: the guest always sends
-        // "bromure-local"; map it to this workspace's currently-active repo so
-        // switching the model is a host-side remap (no agent restart). Any
-        // explicit model is left untouched.
-        if let pid, (payload["model"] as? String) == InferenceService.localModelSentinel,
-           let repo = shared.activeModel(for: pid) {
+        // Guests are configured with the real model name. Remap only the
+        // legacy `bromure-local` sentinel (old guests) and RETIRED names — a
+        // running agent's env is frozen at exec, so after a live model switch
+        // it keeps sending the old name until restarted. Anything else passes
+        // through untouched.
+        if let pid, let m = payload["model"] as? String,
+           let repo = shared.remappedLocalModel(for: m, profileID: pid) {
             payload["model"] = repo
         }
 
