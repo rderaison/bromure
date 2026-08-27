@@ -376,6 +376,11 @@ struct ProfileEditorView: View {
     /// Live model list for the Fusion judge picker (fetched per provider).
     @State private var fusionJudgeModels: [String] = []
     @State private var fusionJudgeModelsLoading = false
+    /// Model ids served by the workspace's custom engine (vLLM/Ollama …),
+    /// probed when the Fusion pane appears so its local pickers can offer
+    /// the server's models. Empty until probed / when unreachable — the
+    /// pickers degrade to a free-typed id field.
+    @State private var externalEngineModels: [String] = []
 
     /// Sheet state for the SSH-key import flow.
     @State private var importSheet: ImportSheetState?
@@ -887,6 +892,68 @@ struct ProfileEditorView: View {
         #endif
     }
 
+    /// Whether a user-supplied engine (vLLM/Ollama, the Local Models
+    /// "Custom server" option) serves this workspace's local models. Its
+    /// model ids live on the server, so local affordances must not gate on
+    /// the on-disk catalog being empty.
+    private var usesExternalEngine: Bool { draft.localEngineBaseURL != nil }
+
+    /// Ask the custom engine for its /v1/models ids (macOS only — the iOS
+    /// editor keeps the free-typed field; ExternalEngine isn't in its
+    /// shared subset). On the fat client this probes from the CLIENT Mac,
+    /// so a server-loopback URL can fail here yet work at launch — the
+    /// typed-id fallback covers that.
+    private func probeExternalEngineModels() {
+        #if os(macOS)
+        guard let base = draft.localEngineBaseURL else { return }
+        let key = draft.localEngineAPIKey
+        Task {
+            if let models = try? await ExternalEngine.listModels(base: base, apiKey: key),
+               !models.isEmpty {
+                await MainActor.run { externalEngineModels = models }
+            }
+        }
+        #endif
+    }
+
+    /// Model chooser for a Fusion local slot. Catalog installs → picker of
+    /// installed models; custom engine → picker of the server's probed ids
+    /// (keeping a hand-typed/stale id selectable), or a plain id field when
+    /// the probe returned nothing. An empty `label` hides the picker label.
+    @ViewBuilder
+    private func fusionLocalModelChooser(_ label: String,
+                                         localModels: [CatalogModel],
+                                         selection: Binding<String?>) -> some View {
+        if usesExternalEngine {
+            if externalEngineModels.isEmpty {
+                TextField(label.isEmpty ? NSLocalizedString("Model id", comment: "fusion external model field") : label,
+                          text: Binding(get: { selection.wrappedValue ?? "" },
+                                        set: { selection.wrappedValue = $0 }),
+                          prompt: Text(verbatim: "qwen3-coder:30b"))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+            } else {
+                Picker(label, selection: Binding(
+                    get: { selection.wrappedValue ?? externalEngineModels.first ?? "" },
+                    set: { selection.wrappedValue = $0 })) {
+                    ForEach(externalEngineModels, id: \.self) { Text($0).tag($0) }
+                    if let cur = selection.wrappedValue, !cur.isEmpty,
+                       !externalEngineModels.contains(cur) {
+                        Text(cur).tag(cur)
+                    }
+                }
+                .labelsHidden(label.isEmpty)
+            }
+        } else {
+            Picker(label, selection: Binding(
+                get: { selection.wrappedValue ?? localModels.first?.id ?? "" },
+                set: { selection.wrappedValue = $0 })) {
+                ForEach(localModels) { Text($0.displayName).tag($0.id) }
+            }
+            .labelsHidden(label.isEmpty)
+        }
+    }
+
     @ViewBuilder
     private var generalSection: some View {
         // macOS: every row goes through Form's two-column labeled pattern
@@ -987,13 +1054,20 @@ struct ProfileEditorView: View {
 
             // Local models the user can pin a tool to — the installed ones
             // (download more in the Local Models section). Empty → the
-            // "Local model" auth option is greyed out.
+            // "Local model" auth option is greyed out, UNLESS a custom
+            // engine (vLLM/Ollama/…) serves this workspace: its models live
+            // on the server, not in the on-disk catalog.
             let localModels = installedLocalModels
+            let externalEngineHost = draft.localEngineBaseURL
+                .map { $0.host ?? $0.absoluteString }
             // The single model every "Local model" agent uses — the one
             // selected in the Local Models pane. Agents no longer pick
-            // their own; this is shown read-only on each card.
+            // their own; this is shown read-only on each card. On a custom
+            // engine the id is the server's own (no catalog entry), shown
+            // verbatim.
             let activeLocalModelName = localModels
                 .first(where: { $0.id == draft.activeModelID })?.displayName
+                ?? (externalEngineHost != nil ? draft.activeModelID : nil)
 
             ForEach(Profile.Tool.allCases, id: \.self) { t in
                 let sub = subscriptionInfo(for: t)
@@ -1003,6 +1077,7 @@ struct ProfileEditorView: View {
                     isEnabled: isToolEnabled(t),
                     spec: bindingForTool(t),
                     localModels: localModels,
+                    externalEngineHost: externalEngineHost,
                     activeLocalModelName: activeLocalModelName,
                     bedrockModelID: $draft.bedrockModelID,
                     onToggleEnabled: { setToolEnabled(t, enabled: $0) },
@@ -1107,7 +1182,12 @@ struct ProfileEditorView: View {
                 .font(.caption).foregroundStyle(.secondary)
             fusionJudgePickers(usable: usable, localModels: localModels)
         }
-        .onAppear { ensureFusionJudgeDefaults(usable: usable) }
+        .onAppear {
+            ensureFusionJudgeDefaults(usable: usable)
+            if usesExternalEngine, externalEngineModels.isEmpty {
+                probeExternalEngineModels()
+            }
+        }
     }
 
     /// Backend-flavoured label for a cloud leg.
@@ -1122,10 +1202,12 @@ struct ProfileEditorView: View {
     }
 
     /// The "Local model" fuse-leg row: a checkbox + model picker. Greyed out
-    /// when no local model is installed.
+    /// when no local model is installed AND no custom engine is configured;
+    /// on a custom engine the model is one the SERVER serves (probed list,
+    /// or a hand-typed id when the probe found nothing).
     @ViewBuilder
     private func fusionLocalLegRow(localModels: [CatalogModel]) -> some View {
-        if localModels.isEmpty {
+        if localModels.isEmpty && !usesExternalEngine {
             HStack(spacing: 6) {
                 Image(systemName: "cpu").foregroundStyle(.secondary)
                 Text("Local model").foregroundStyle(.secondary)
@@ -1136,9 +1218,15 @@ struct ProfileEditorView: View {
         } else {
             HStack(spacing: 8) {
                 Toggle(isOn: Binding(
-                    get: { (draft.fusionLocalLeg?.isEmpty == false) },
+                    // != nil, not !isEmpty: on a custom engine the default can
+                    // be "" (probe pending, nothing typed yet) and the box
+                    // must stay latched while the user types the id.
+                    get: { draft.fusionLocalLeg != nil },
                     set: { on in
-                        draft.fusionLocalLeg = on ? (draft.fusionLocalLeg ?? localModels.first?.id) : nil
+                        draft.fusionLocalLeg = on
+                            ? (draft.fusionLocalLeg ?? localModels.first?.id
+                               ?? draft.activeModelID ?? externalEngineModels.first ?? "")
+                            : nil
                     })) {
                     HStack(spacing: 6) {
                         Image(systemName: "cpu").foregroundStyle(.mint)
@@ -1146,21 +1234,19 @@ struct ProfileEditorView: View {
                     }
                 }
                 .platformCheckboxToggle()
-                if draft.fusionLocalLeg?.isEmpty == false {
-                    Picker("", selection: Binding(
-                        get: { draft.fusionLocalLeg ?? localModels.first?.id ?? "" },
-                        set: { draft.fusionLocalLeg = $0 })) {
-                        ForEach(localModels) { Text($0.displayName).tag($0.id) }
-                    }
-                    .labelsHidden().frame(maxWidth: 220)
+                if draft.fusionLocalLeg != nil {
+                    fusionLocalModelChooser("", localModels: localModels,
+                                            selection: $draft.fusionLocalLeg)
+                        .frame(maxWidth: 220)
                 }
             }
         }
     }
 
     /// Provider + model pickers for the judge. Backends are the usable cloud
-    /// providers plus "Local" (when a local model is installed); cloud model
-    /// lists are fetched live, local lists come from the installed catalog.
+    /// providers plus "Local" (when a local model is installed or a custom
+    /// engine is configured); cloud model lists are fetched live, local lists
+    /// come from the installed catalog or the custom engine's /v1/models.
     @ViewBuilder
     private func fusionJudgePickers(usable: [Profile.Tool], localModels: [CatalogModel]) -> some View {
         HStack(spacing: 8) {
@@ -1172,6 +1258,7 @@ struct ProfileEditorView: View {
                         draft.fusionJudgeLocal = true
                         if draft.fusionJudgeModel == nil {
                             draft.fusionJudgeModel = draft.fusionLocalLeg ?? localModels.first?.id
+                                ?? draft.activeModelID ?? externalEngineModels.first
                         }
                     } else {
                         draft.fusionJudgeLocal = false
@@ -1182,16 +1269,14 @@ struct ProfileEditorView: View {
                     }
                 })) {
                 ForEach(usable, id: \.self) { Text(fusionBackendLabel($0)).tag($0.rawValue) }
-                if !localModels.isEmpty { Text("Local").tag("local") }
+                if !localModels.isEmpty || usesExternalEngine { Text("Local").tag("local") }
             }
             .frame(maxWidth: 200)
 
             if draft.fusionJudgeLocal {
-                Picker("Model", selection: Binding(
-                    get: { draft.fusionJudgeModel ?? localModels.first?.id ?? "" },
-                    set: { draft.fusionJudgeModel = $0 })) {
-                    ForEach(localModels) { Text($0.name).tag($0.id) }
-                }
+                fusionLocalModelChooser(NSLocalizedString("Model", comment: "fusion judge model"),
+                                        localModels: localModels,
+                                        selection: $draft.fusionJudgeModel)
             } else {
                 if fusionJudgeModelsLoading { ProgressView().controlSize(.small) }
                 Picker("Model", selection: Binding(
@@ -1205,7 +1290,7 @@ struct ProfileEditorView: View {
                 }
             }
         }
-        .disabled(usable.isEmpty && localModels.isEmpty)
+        .disabled(usable.isEmpty && localModels.isEmpty && !usesExternalEngine)
     }
 
     private func ensureFusionJudgeDefaults(usable: [Profile.Tool]) {
@@ -5054,6 +5139,11 @@ private struct ToolConfigCard: View {
     /// Installed local models. Empty → the "Local model" option is greyed
     /// out. Used only to gate the radio; agents don't pick from this list.
     let localModels: [CatalogModel]
+    /// Host of the workspace's user-supplied inference server (the Local
+    /// Models "Custom server" engine — vLLM, Ollama, …). Non-nil keeps
+    /// "Local model" selectable with an empty catalog: the models live on
+    /// that server, nothing needs downloading on this Mac.
+    let externalEngineHost: String?
     /// Display name of the profile's active local model (chosen in the
     /// Local Models pane). Every agent in `.local` mode runs on it.
     let activeLocalModelName: String?
@@ -5153,7 +5243,8 @@ private struct ToolConfigCard: View {
                             // omp is API-key only (no OAuth subscription).
                             EmptyView()
                         } else {
-                            let localDisabled = (m == .local && localModels.isEmpty)
+                            let localDisabled = (m == .local && localModels.isEmpty
+                                                 && externalEngineHost == nil)
                             HStack(spacing: 8) {
                                 Button { spec.authMode = m } label: {
                                     HStack(spacing: 6) {
@@ -5228,7 +5319,10 @@ private struct ToolConfigCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 case .local:
-                    if localModels.isEmpty {
+                    if let host = externalEngineHost {
+                        Text("Runs on your inference server at \(host) — \(tool.displayName) is pointed at it through \(localBaseURLEnvName). The model is the one selected in **Local Models**\(activeLocalModelName.map { ": \($0)" } ?? " — pick one there.")")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else if localModels.isEmpty {
                         Text("No local models installed yet. Enable and download one in the Local Models section.")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {

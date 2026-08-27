@@ -159,6 +159,13 @@ extension View {
         #endif
     }
 
+    /// Conditional `.labelsHidden()` — SwiftUI's own takes no flag, which
+    /// forces callers that sometimes want a visible label into duplicated
+    /// view code.
+    @ViewBuilder func labelsHidden(_ hide: Bool) -> some View {
+        if hide { self.labelsHidden() } else { self }
+    }
+
     /// `.menuStyle(.borderlessButton)` is macOS-only; iOS keeps the default.
     @ViewBuilder func platformBorderlessMenuStyle() -> some View {
         #if os(macOS)
