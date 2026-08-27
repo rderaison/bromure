@@ -62,6 +62,18 @@ Tradeoffs to accept: younger community project (two near-identical forks:
 `waybarrios`, `raullenchai`), Python-based (vendor a venv or require install),
 batching edge only matters under concurrency.
 
+**Custom engine (SHIPPED):** the pluggable-engine fallback landed as a
+per-workspace **custom server** option in the Local Models pane
+(`Profile.localEngineURL` + optional API key): point it at any
+OpenAI-compatible server — vLLM (incl. `vllm-metal`), Ollama, LM Studio,
+`llama-server`, local or on another machine — and the repair proxy
+(`ExternalEngine.swift`) translates each guest wire (Anthropic messages /
+OpenAI chat / Responses) to `/v1/chat/completions` and back, native tool
+calls preserved. Nothing is spawned or downloaded host-side; the catalog,
+RAM gate, and the in-process MLX engine stay the zero-install default.
+This is the escape hatch for models whose architecture `mlx-swift-lm`
+doesn't implement yet (GLM-5.2's `glm_moe_dsa`, Qwen3.8's GDN).
+
 **Fallback engine:** keep the engine *pluggable* and offer **Ollama** as the
 "I just want to pull any model, easiest UX" path (GGUF/Metal, broadest coverage).
 `mlx-lm` (Apple-official, OpenAI-only) and a bundled `llama-server` (Metal, not MLX)

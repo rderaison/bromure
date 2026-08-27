@@ -108,6 +108,11 @@ enum Fusion {
         /// When true, the judge runs on the local engine (`judgeModel` is the
         /// served repo) rather than `judgeProvider`'s cloud API.
         var judgeLocal: Bool
+        /// Base URL (+ optional bearer) of the profile's user-supplied
+        /// external engine when one serves its local models; nil → the
+        /// built-in on-host engine (loopback, admin key).
+        var localEngineBase: String? = nil
+        var localEngineKey: String? = nil
     }
 
     /// A resolved credential for one upstream leg/judge call.
@@ -120,7 +125,7 @@ enum Fusion {
         case grokSubscription(String)    // cli-chat-proxy.grok.com Bearer (best-effort)
         case kimiKey(String)             // api.moonshot.ai Bearer (OpenAI-compatible)
         case kimiSubscription(String)    // api.kimi.com/coding Bearer (OpenAI-compatible)
-        case local(base: String)         // on-host vllm-mlx engine, OpenAI-compatible
+        case local(base: String, key: String)  // local engine (built-in or user-supplied), OpenAI-compatible
     }
 
     /// Engine-default judge model when the profile hasn't picked one.
@@ -174,7 +179,8 @@ enum Fusion {
     /// (subscription mode, via the proxy's static providers). Returns nil when
     /// no credential is available — the caller drops that leg.
     static func resolveCred(tool: Profile.Tool, authMode: Profile.AuthMode,
-                            swapper: TokenSwapper, profileID: UUID) async -> Cred? {
+                            swapper: TokenSwapper, profileID: UUID,
+                            localBase: String? = nil, localKey: String? = nil) async -> Cred? {
         switch (tool, authMode) {
         case (.claude, .subscription):
             guard let (_, r) = HTTPMitmConnection.claudeSubscriptionProvider?(),
@@ -203,9 +209,11 @@ enum Fusion {
                   let tok = try? await r.accessToken(for: profileID) else { return nil }
             return .kimiSubscription(tok)
         case (_, .local):
-            // Any tool in local mode → the on-host engine (loopback). No
-            // real credential needed; the engine ignores the dummy key.
-            return .local(base: InferenceService.engineBaseURL)
+            // Any tool in local mode → the engine serving this profile's local
+            // models: the user's external server when configured, otherwise
+            // the built-in on-host engine (loopback, admin key).
+            return .local(base: localBase ?? InferenceService.engineBaseURL,
+                          key: localKey ?? InferenceService.apiKey)
         default:
             return nil
         }
@@ -271,11 +279,12 @@ enum Fusion {
                                          model: model, system: system, question: question, token: tok,
                                          extraHeaders: ["x-grok-client-version": grokClientVersion],
                                          session: session, callLog: callLog)
-        case .local(let base):
-            // vllm-mlx serves the OpenAI chat API on the host loopback.
+        case .local(let base, let key):
+            // The engine serving local models — the built-in loopback child or
+            // a user-supplied server — is OpenAI-compatible either way.
             return await askOpenAIChat(base: base, model: model, system: system,
                                        question: question, maxTokens: maxTokens,
-                                       token: InferenceService.apiKey,
+                                       token: key,
                                        session: session, callLog: callLog)
         }
     }
@@ -581,7 +590,7 @@ enum Fusion {
             case .grokSubscription(let t): return ("https://cli-chat-proxy.grok.com", ("Authorization", "Bearer \(t)"))
             case .kimiKey(let k):         return ("https://api.moonshot.ai", ("Authorization", "Bearer \(k)"))
             case .kimiSubscription(let t): return ("https://api.kimi.com/coding", ("Authorization", "Bearer \(t)"))
-            case .local(let base):        return (base, ("Authorization", "Bearer \(InferenceService.apiKey)"))
+            case .local(let base, let key): return (base, ("Authorization", "Bearer \(key)"))
             }
         }()
         guard let url = URL(string: "\(base)/v1/models") else { return [] }
@@ -701,7 +710,9 @@ enum Fusion {
             }
             guard let mode = config.authModes[leg],
                   let cred = await resolveCred(tool: leg, authMode: mode,
-                                               swapper: swapper, profileID: profileID) else {
+                                               swapper: swapper, profileID: profileID,
+                                               localBase: config.localEngineBase,
+                                               localKey: config.localEngineKey) else {
                 log("leg \(leg.rawValue): no usable credential — dropping")
                 continue
             }
@@ -721,7 +732,8 @@ enum Fusion {
         // Local leg — a model served by the on-host engine, fused alongside
         // the cloud legs. OpenAI-compatible call to the loopback engine.
         if let localModel = config.localLegModel, !localModel.isEmpty {
-            if let txt = await askModel(cred: .local(base: InferenceService.engineBaseURL),
+            if let txt = await askModel(cred: .local(base: config.localEngineBase ?? InferenceService.engineBaseURL,
+                                                     key: config.localEngineKey ?? InferenceService.apiKey),
                                         model: localModel,
                                         system: guestSystem.isEmpty ? legSystem : guestSystem,
                                         question: transcript.isEmpty ? question : transcript,
@@ -747,10 +759,13 @@ enum Fusion {
         // otherwise resolve the chosen cloud provider's credential.
         let judgeCred: Cred?
         if config.judgeLocal {
-            judgeCred = .local(base: InferenceService.engineBaseURL)
+            judgeCred = .local(base: config.localEngineBase ?? InferenceService.engineBaseURL,
+                               key: config.localEngineKey ?? InferenceService.apiKey)
         } else if let judgeMode = config.authModes[config.judgeProvider] {
             judgeCred = await resolveCred(tool: config.judgeProvider, authMode: judgeMode,
-                                          swapper: swapper, profileID: profileID)
+                                          swapper: swapper, profileID: profileID,
+                                          localBase: config.localEngineBase,
+                                          localKey: config.localEngineKey)
         } else {
             judgeCred = nil
         }

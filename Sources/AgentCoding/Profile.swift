@@ -1314,6 +1314,32 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// no model selected yet.
     public var activeModelID: String?
 
+    /// Base URL of a user-supplied OpenAI-compatible inference server (vLLM,
+    /// Ollama, LM Studio, llama-server, …) that serves this profile's local
+    /// model instead of the built-in in-process MLX engine. nil/empty →
+    /// built-in engine. When set, `activeModelID` names a model by the id
+    /// THAT server knows (e.g. `qwen3:32b` on Ollama), not a catalog id.
+    public var localEngineURL: String?
+    /// Optional bearer token `localEngineURL` requires (vLLM `--api-key`).
+    public var localEngineAPIKey: String?
+
+    /// `localEngineURL` normalized to a server-root base URL, or nil when the
+    /// built-in engine serves this profile.
+    public var localEngineBaseURL: URL? { Profile.normalizedEngineBase(localEngineURL) }
+
+    /// Normalize a user-typed engine URL to a server-root base: defaults the
+    /// scheme to http (loopback engines rarely have TLS) and strips a pasted
+    /// OpenAI-style `/v1` suffix — endpoints are joined as `{base}/v1/...`.
+    public static func normalizedEngineBase(_ raw: String?) -> URL? {
+        guard var s = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !s.isEmpty else { return nil }
+        if !s.contains("://") { s = "http://" + s }
+        while s.hasSuffix("/") { s.removeLast() }
+        if s.lowercased().hasSuffix("/v1") { s.removeLast(3) }
+        while s.hasSuffix("/") { s.removeLast() }
+        return URL(string: s)
+    }
+
     /// Hybrid-only policy knobs (ignored unless `modelRouting == .hybrid`).
     /// Cloud token budget over a rolling 24 h wall-clock window; `0` =
     /// unlimited. Once exceeded, new sessions route local until the
@@ -1665,6 +1691,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         fusionJudgeLocal: Bool = false,
         modelRouting: Routing = .cloud,
         activeModelID: String? = nil,
+        localEngineURL: String? = nil,
+        localEngineAPIKey: String? = nil,
         hybridCloudTokenBudget: Int = 0,
         hybridSoftTTFTSeconds: Double = 5,
         hybridLocalSplitPercent: Int = 0,
@@ -1744,6 +1772,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.fusionJudgeLocal = fusionJudgeLocal
         self.modelRouting = modelRouting
         self.activeModelID = activeModelID
+        self.localEngineURL = localEngineURL
+        self.localEngineAPIKey = localEngineAPIKey
         self.hybridCloudTokenBudget = hybridCloudTokenBudget
         self.hybridSoftTTFTSeconds = hybridSoftTTFTSeconds
         self.hybridLocalSplitPercent = hybridLocalSplitPercent
@@ -1829,6 +1859,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case fusionJudgeLocal
         case modelRouting
         case activeModelID
+        case localEngineURL
+        case localEngineAPIKey
         case hybridCloudTokenBudget
         case hybridSoftTTFTSeconds
         case hybridLocalSplitPercent
@@ -1939,6 +1971,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         fusionJudgeLocal = try c.decodeIfPresent(Bool.self, forKey: .fusionJudgeLocal) ?? false
         modelRouting = try c.decodeIfPresent(Routing.self, forKey: .modelRouting) ?? .cloud
         activeModelID = try c.decodeIfPresent(String.self, forKey: .activeModelID)
+        localEngineURL = try c.decodeIfPresent(String.self, forKey: .localEngineURL)
+        localEngineAPIKey = try c.decodeIfPresent(String.self, forKey: .localEngineAPIKey)
         hybridCloudTokenBudget = try c.decodeIfPresent(Int.self, forKey: .hybridCloudTokenBudget) ?? 0
         hybridSoftTTFTSeconds = try c.decodeIfPresent(Double.self, forKey: .hybridSoftTTFTSeconds) ?? 5
         hybridLocalSplitPercent = try c.decodeIfPresent(Int.self, forKey: .hybridLocalSplitPercent) ?? 0
@@ -2065,6 +2099,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if let activeModelID, !activeModelID.isEmpty {
             try c.encode(activeModelID, forKey: .activeModelID)
+        }
+        if let localEngineURL, !localEngineURL.isEmpty {
+            try c.encode(localEngineURL, forKey: .localEngineURL)
+        }
+        if let localEngineAPIKey, !localEngineAPIKey.isEmpty {
+            try c.encode(localEngineAPIKey, forKey: .localEngineAPIKey)
         }
         if hybridCloudTokenBudget != 0 {
             try c.encode(hybridCloudTokenBudget, forKey: .hybridCloudTokenBudget)

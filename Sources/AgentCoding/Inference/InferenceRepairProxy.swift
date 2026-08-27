@@ -48,6 +48,17 @@ final class InferenceRepairProxy: @unchecked Sendable {
         modelMapLock.lock(); defer { modelMapLock.unlock() }; return activeModelByProfile[profileID]
     }
 
+    /// profile id → the user-supplied external engine (vLLM/Ollama/…) serving
+    /// that workspace's local models. Absent → the built-in in-process engine.
+    private var externalEngineByProfile: [UUID: ExternalEngine.Config] = [:]
+
+    func setExternalEngine(_ profileID: UUID, _ config: ExternalEngine.Config?) {
+        modelMapLock.lock(); externalEngineByProfile[profileID] = config; modelMapLock.unlock()
+    }
+    func externalEngine(for profileID: UUID) -> ExternalEngine.Config? {
+        modelMapLock.lock(); defer { modelMapLock.unlock() }; return externalEngineByProfile[profileID]
+    }
+
     /// Start the accept loop if not already running. Idempotent.
     func startIfNeeded(enginePort: Int = InferenceService.enginePort) {
         lock.lock(); defer { lock.unlock() }
@@ -175,6 +186,15 @@ final class InferenceRepairProxy: @unchecked Sendable {
             default: return nil
             }
         }
+
+        /// The `Wire` this endpoint speaks — for the external-engine translation.
+        var wire: Wire {
+            switch self {
+            case .messages: return .messages
+            case .chat: return .chat
+            case .responses: return .responses
+            }
+        }
         /// A wire-native error body so the agent surfaces the reason instead of
         /// a blank response. Anthropic needs `{"type":"error","error":{…}}`; the
         /// OpenAI surfaces use `{"error":{…}}`. Mirrors `Wire.errorJSON`.
@@ -281,12 +301,18 @@ final class InferenceRepairProxy: @unchecked Sendable {
         // Anything that isn't a repairable inference POST: transparent proxy.
         guard let api = API.of(path: req.path), req.method == "POST",
               var payload = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] else {
+            // A workspace on an external engine asks IT for the model list;
+            // all other passthrough traffic still targets the built-in engine.
+            if req.method == "GET",
+               req.path.split(separator: "?").first.map(String.init) == "/v1/models",
+               let pid = profileID(in: req), let ext = shared.externalEngine(for: pid) {
+                return externalModels(ext)
+            }
             return passthrough(req, enginePort: enginePort)
         }
 
         // Identify the calling VM from its per-VM key (nil for admin/internal).
-        let rawAuth = req.headerValue("authorization") ?? ""
-        let pid = EngineKey.profileID(forKey: rawAuth.hasPrefix("Bearer ") ? String(rawAuth.dropFirst(7)) : rawAuth)
+        let pid = profileID(in: req)
 
         // Resolve the local-model sentinel: the guest always sends
         // "bromure-local"; map it to this workspace's currently-active repo so
@@ -299,20 +325,36 @@ final class InferenceRepairProxy: @unchecked Sendable {
 
         // Force non-streaming upstream so we can inspect + repair the message.
         payload["stream"] = false
-        let upstreamBody = (try? JSONSerialization.data(withJSONObject: payload)) ?? req.body
-        // API.of already guaranteed an origin-form `/v1/...` path, but build
-        // the upstream URL through the same guarded path as passthrough so the
-        // engine host+port can never be smuggled (see engineUpstreamURL).
-        guard let url = Self.engineUpstreamURL(path: req.path, enginePort: enginePort) else {
-            return rejectedTarget(req.path)
+
+        // Upstream send, shared by the main call and the stuck-preamble
+        // continuations. Built-in: POST the wire payload to the loopback
+        // engine child. External (a user-supplied vLLM/Ollama/…): translate it
+        // to the OpenAI chat body that server understands and its reply back
+        // into this wire's native message — everything downstream (rescue,
+        // continuation, SSE, tracing) is engine-agnostic.
+        let sendUpstream: ([String: Any]) -> (Data?, Int)
+        if let pid, let ext = shared.externalEngine(for: pid) {
+            let wire = api.wire
+            sendUpstream = { p in externalSend(p, wire: wire, config: ext) }
+        } else {
+            // API.of already guaranteed an origin-form `/v1/...` path, but build
+            // the upstream URL through the same guarded path as passthrough so the
+            // engine host+port can never be smuggled (see engineUpstreamURL).
+            guard let url = Self.engineUpstreamURL(path: req.path, enginePort: enginePort) else {
+                return rejectedTarget(req.path)
+            }
+            var ur = URLRequest(url: url)
+            ur.httpMethod = "POST"
+            for (k, v) in req.headers where !["host", "content-length", "connection", "accept-encoding"].contains(k.lowercased()) {
+                ur.setValue(v, forHTTPHeaderField: k)
+            }
+            ur.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            sendUpstream = { p in
+                var r = ur
+                r.httpBody = (try? JSONSerialization.data(withJSONObject: p)) ?? Data()
+                return syncData(r)
+            }
         }
-        var ur = URLRequest(url: url)
-        ur.httpMethod = "POST"
-        ur.httpBody = upstreamBody
-        for (k, v) in req.headers where !["host", "content-length", "connection", "accept-encoding"].contains(k.lowercased()) {
-            ur.setValue(v, forHTTPHeaderField: k)
-        }
-        ur.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         // Drive the "thinking" indicator for the whole generation: fire now and
         // keep re-firing (a single local call can outlast the indicator's clear
@@ -334,7 +376,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
             appendRepairLog("[repair] -> \(req.path) model=\(payload["model"] as? String ?? "?") msgs=\((payload["messages"] as? [Any])?.count ?? (payload["input"] as? [Any])?.count ?? -1)\n")
         }
         let t0 = Date()
-        let (data, status) = syncData(ur)
+        let (data, status) = sendUpstream(payload)
         ticker?.cancel()
         // Trace this call back to the parent, tagged with the calling VM.
         shipTrace(profileID: pid,
@@ -385,10 +427,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
                 var cont = api.continuationPayload(payload, preamble: preamble, attempt: attempt)
                 cont["stream"] = false
                 if attempt > 0 { cont["temperature"] = 0.7 }
-                guard let body = try? JSONSerialization.data(withJSONObject: cont) else { break }
-                var cur = ur
-                cur.httpBody = body
-                let (d2, s2) = syncData(cur)
+                let (d2, s2) = sendUpstream(cont)
                 guard s2 == 200, let d2,
                       let m2 = (try? JSONSerialization.jsonObject(with: d2)) as? [String: Any] else {
                     if dbg { appendRepairLog("[repair] ~~ \(req.path) attempt \(attempt + 1): engine status \(s2)\n") }
@@ -484,6 +523,55 @@ final class InferenceRepairProxy: @unchecked Sendable {
                                              port: enginePort, path: path),
               (url.port ?? 80) == enginePort else { return nil }
         return url
+    }
+
+    /// The calling VM's profile id, recovered from the request's per-VM bearer
+    /// key (nil for the admin key / internal probes).
+    private static func profileID(in req: Request) -> UUID? {
+        let rawAuth = req.headerValue("authorization") ?? ""
+        return EngineKey.profileID(forKey: rawAuth.hasPrefix("Bearer ")
+                                   ? String(rawAuth.dropFirst(7)) : rawAuth)
+    }
+
+    /// POST one wire payload to the external engine as an OpenAI chat call and
+    /// return the reply re-shaped for `wire`. Always returns a body: errors
+    /// come back wire-enveloped so the agent surfaces the server's reason.
+    private static func externalSend(_ payload: [String: Any], wire: Wire,
+                                     config: ExternalEngine.Config) -> (Data?, Int) {
+        var r = URLRequest(url: config.base.appendingPathComponent("v1/chat/completions"))
+        r.httpMethod = "POST"
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let k = config.apiKey, !k.isEmpty {
+            r.setValue("Bearer \(k)", forHTTPHeaderField: "Authorization")
+        }
+        r.httpBody = (try? JSONSerialization.data(
+            withJSONObject: ExternalEngine.chatRequest(from: payload, wire: wire))) ?? Data()
+        let (data, status) = syncData(r)
+        guard status == 200, let data, !data.isEmpty,
+              let chat = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            let host = config.base.host ?? "?"
+            let reason = (data?.isEmpty == false)
+                ? ExternalEngine.errorReason(from: data!)
+                : "connection failed (server down, or the URL/port is wrong)"
+            let body = wire.errorJSON(message: "External engine \(host): \(reason)",
+                                      type: "api_error")
+            return ((try? JSONSerialization.data(withJSONObject: body)),
+                    status == 200 ? 502 : status)
+        }
+        let out = ExternalEngine.wireResponse(from: chat, wire: wire)
+        return ((try? JSONSerialization.data(withJSONObject: out)), 200)
+    }
+
+    /// Relay `GET /v1/models` to a workspace's external engine (readiness
+    /// probes / model listings from the guest).
+    private static func externalModels(_ config: ExternalEngine.Config) -> Data {
+        var r = URLRequest(url: config.base.appendingPathComponent("v1/models"))
+        if let k = config.apiKey, !k.isEmpty {
+            r.setValue("Bearer \(k)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, status) = syncData(r)
+        return httpResponse(status: status, headers: [("Content-Type", "application/json")],
+                            body: data ?? Data())
     }
 
     /// The response for a rejected (non-origin-form / off-engine) target —

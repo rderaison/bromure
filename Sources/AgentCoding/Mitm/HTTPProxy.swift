@@ -3096,7 +3096,11 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         }
     }
     if local && !keepGuestKey {
-        req.setValue("Bearer \(InferenceService.apiKey)", forHTTPHeaderField: "Authorization")
+        // Swap in this VM's own engine key, not the admin key: the engine
+        // accepts either, but only the per-VM key lets the repair proxy
+        // identify the workspace — which routes the turn to a profile's
+        // external engine (vLLM/Ollama) and records it in the per-VM trace.
+        req.setValue("Bearer \(EngineKey.perVM(profileID: profileID))", forHTTPHeaderField: "Authorization")
     }
 
     // Bridge URLSession's delegate callbacks (head / data chunks /

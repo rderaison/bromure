@@ -865,6 +865,8 @@ struct ProfileEditorView: View {
         #if os(macOS)
         LocalModelsSettingsView(routing: $draft.modelRouting,
                                 activeModelID: $draft.activeModelID,
+                                engineURL: $draft.localEngineURL,
+                                engineKey: $draft.localEngineAPIKey,
                                 selectedModelIDs: draft.distinctLocalModelIDs,
                                 remote: localModelsRemoteAny as? RemoteModelBackend)
         #else
@@ -3893,6 +3895,10 @@ struct RemoteModelBackend {
 struct LocalModelsSettingsView: View {
     @Binding var routing: Profile.Routing
     @Binding var activeModelID: String?
+    /// User-supplied OpenAI-compatible engine (vLLM/Ollama/…) serving this
+    /// profile's local models. nil/empty → the built-in in-process engine.
+    @Binding var engineURL: String?
+    @Binding var engineKey: String?
     /// Every distinct local model this profile would load at once — for the
     /// combined-memory warning (the engine can serve several in parallel).
     var selectedModelIDs: [String] = []
@@ -3953,6 +3959,124 @@ struct LocalModelsSettingsView: View {
                 set: { routing = $0 })
     }
 
+    // MARK: Custom engine (bring your own vLLM / Ollama)
+
+    /// Sticky picker selection; nil until touched → derived from whether a
+    /// URL is saved. What persists is the URL itself: choosing Built-in
+    /// clears it, and a custom selection with no URL falls back to built-in
+    /// at launch.
+    @State private var customEngineSelected: Bool?
+    @State private var engineModels: [String] = []
+    @State private var engineProbe: EngineProbeState = .idle
+    private enum EngineProbeState: Equatable {
+        case idle, probing
+        case ok(Int)            // reachable; model count
+        case failed(String)
+    }
+
+    private var usesCustomEngine: Bool {
+        customEngineSelected ?? (engineURL?.isEmpty == false)
+    }
+
+    private var engineSelection: Binding<Bool> {
+        Binding(get: { usesCustomEngine },
+                set: { custom in
+                    customEngineSelected = custom
+                    if !custom {
+                        engineURL = nil
+                        engineKey = nil
+                        engineProbe = .idle
+                        engineModels = []
+                    }
+                })
+    }
+
+    private var normalizedEngineBase: URL? { Profile.normalizedEngineBase(engineURL) }
+
+    /// Optional-String binding → TextField binding ("" ↔ nil).
+    private func optionalText(_ b: Binding<String?>) -> Binding<String> {
+        Binding(get: { b.wrappedValue ?? "" },
+                set: { b.wrappedValue = $0.isEmpty ? nil : $0 })
+    }
+
+    /// One call does both jobs: reachability check + model list. On the fat
+    /// client this fetches from the CLIENT Mac, so a server-loopback URL can
+    /// fail here yet work at launch — the manual model-id field covers that.
+    private func probeEngine() {
+        guard let base = normalizedEngineBase else { return }
+        engineProbe = .probing
+        let key = engineKey
+        Task {
+            do {
+                let models = try await ExternalEngine.listModels(base: base, apiKey: key)
+                await MainActor.run { engineModels = models; engineProbe = .ok(models.count) }
+            } catch {
+                await MainActor.run { engineModels = []; engineProbe = .failed(error.localizedDescription) }
+            }
+        }
+    }
+
+    @ViewBuilder private var engineSection: some View {
+        Section {
+            Picker("Engine", selection: engineSelection) {
+                Text("Built-in — models run on this Mac").tag(false)
+                Text("Custom server — your own vLLM, Ollama, …").tag(true)
+            }
+            .pickerStyle(.radioGroup)
+            if usesCustomEngine {
+                TextField("Server URL", text: optionalText($engineURL),
+                          prompt: Text(verbatim: "http://127.0.0.1:11434"))
+                SecureField("API key (optional)", text: optionalText($engineKey))
+                HStack(spacing: 8) {
+                    Button("Test Connection") { probeEngine() }
+                        .disabled(normalizedEngineBase == nil || engineProbe == .probing)
+                    switch engineProbe {
+                    case .idle:
+                        EmptyView()
+                    case .probing:
+                        ProgressView().controlSize(.small)
+                    case .ok(let n):
+                        Label(String(format: NSLocalizedString("Connected — %d model(s) available", comment: "custom engine probe ok"), n),
+                              systemImage: "checkmark.circle.fill")
+                            .font(.caption).foregroundStyle(.green)
+                    case .failed(let why):
+                        Label(why, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.red)
+                            .lineLimit(2)
+                    }
+                }
+            }
+        } footer: {
+            Text(usesCustomEngine
+                 ? "Any OpenAI-compatible server works — vLLM, Ollama, LM Studio, llama-server, on this Mac or another machine. Agents keep speaking their native APIs; Bromure translates in between."
+                 : "The built-in engine runs MLX models in-process — nothing to install.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var customModelSection: some View {
+        Section {
+            TextField("Model id", text: optionalText($activeModelID),
+                      prompt: Text(verbatim: "qwen3-coder:30b"))
+            ForEach(engineModels, id: \.self) { id in
+                HStack(spacing: 10) {
+                    Image(systemName: activeModelID == id ? "largecircle.fill.circle" : "circle")
+                        .foregroundStyle(activeModelID == id ? Color.accentColor : Color.secondary)
+                    Text(id).font(.callout)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { activeModelID = id }
+            }
+        } header: {
+            Text("Model")
+        } footer: {
+            Text("The id the server reports at /v1/models — test the connection to list them, or type one. On Ollama, pull the model first.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .onAppear { if engineModels.isEmpty, engineProbe == .idle { probeEngine() } }
+    }
+
     var body: some View {
         // Establish a dependency on refreshTick so a Remove re-runs the rows'
         // `installed` lookup (CatalogStore.isInstalled is a non-observable disk read).
@@ -3981,7 +4105,13 @@ struct LocalModelsSettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 }
 
-                if combinedMemGB > 0, combinedMemGB > Int(Double(hostGB) * 0.85) {
+                engineSection
+
+                if usesCustomEngine {
+                    customModelSection
+                }
+
+                if !usesCustomEngine, combinedMemGB > 0, combinedMemGB > Int(Double(hostGB) * 0.85) {
                     Section {
                         Label {
                             VStack(alignment: .leading, spacing: 2) {
@@ -4000,15 +4130,17 @@ struct LocalModelsSettingsView: View {
                     }
                 }
 
-                Section {
-                    ForEach(catalog.sortedForDisplay) { model in
-                        modelRow(model)
+                if !usesCustomEngine {
+                    Section {
+                        ForEach(catalog.sortedForDisplay) { model in
+                            modelRow(model)
+                        }
+                    } header: {
+                        Text("Models  ·  \(hostGB) GB unified memory")
+                    } footer: {
+                        Text("Greyed-out models need more memory than this Mac has.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                } header: {
-                    Text("Models  ·  \(hostGB) GB unified memory")
-                } footer: {
-                    Text("Greyed-out models need more memory than this Mac has.")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }

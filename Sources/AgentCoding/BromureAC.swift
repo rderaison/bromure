@@ -1714,6 +1714,41 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func startLocalEngineIfNeeded(for profile: Profile) {
         let ids = profile.distinctLocalModelIDs
         guard !ids.isEmpty else { return }
+        // A user-supplied external engine (vLLM/Ollama/LM Studio/…): nothing
+        // to spawn, download, or RAM-gate on this Mac — register the endpoint
+        // + active model with the repair proxy (which translates the guest's
+        // wire formats to the server's OpenAI chat API) and probe it so the
+        // title-bar badge shows real reachability.
+        if let base = profile.localEngineBaseURL {
+            let pid = profile.id
+            let apiKey = profile.localEngineAPIKey
+            InferenceRepairProxy.shared.setExternalEngine(
+                pid, ExternalEngine.Config(base: base, apiKey: apiKey))
+            if let activeID = profile.activeModelID, !activeID.isEmpty {
+                InferenceRepairProxy.shared.setActiveModel(pid, repo: activeID)
+            }
+            InferenceRepairProxy.shared.startIfNeeded()
+            let label = profile.activeModelID ?? base.host ?? "external engine"
+            pane(for: pid)?.model.engineStatus = .starting("Checking \(base.host ?? "engine")…")
+            Task.detached(priority: .userInitiated) {
+                do {
+                    let served = try await ExternalEngine.listModels(base: base, apiKey: apiKey)
+                    await MainActor.run { self.pane(for: pid)?.model.engineStatus = .ready(label) }
+                    InferenceLog.shared.record(
+                        "[inference] external engine \(base.absoluteString) reachable — \(served.count) model(s), serving \(label)")
+                } catch {
+                    await MainActor.run {
+                        self.pane(for: pid)?.model.engineStatus = .failed(error.localizedDescription)
+                    }
+                    InferenceLog.shared.record(
+                        "[inference] external engine \(base.absoluteString) unreachable: \(error.localizedDescription)")
+                }
+            }
+            return
+        }
+        // Back on (or still on) the built-in engine: drop any stale external
+        // registration from a previous settings round-trip.
+        InferenceRepairProxy.shared.setExternalEngine(profile.id, nil)
         // Resolve each selected model to a registry entry (name = repo, so
         // existing model env/config keeps working). estMemGB = its weight
         // footprint for the engine's LRU budget.
@@ -1733,9 +1768,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Map the `bromure-local` sentinel → this workspace's active model so the
         // guest agents resolve to it without a restart. Set synchronously (before
         // the engine warms) so a request that races the load still routes right.
-        if let activeID = profile.activeModelID,
-           let activeRepo = CatalogStore.shared.resolve(activeID)?.repo {
-            InferenceRepairProxy.shared.setActiveModel(pid, repo: activeRepo)
+        if let activeID = profile.activeModelID, !activeID.isEmpty {
+            // Fall back to the raw id for the "paste any HF repo" escape
+            // hatch — the engine's model list is built the same way.
+            InferenceRepairProxy.shared.setActiveModel(
+                pid, repo: CatalogStore.shared.resolve(activeID)?.repo ?? activeID)
         }
         pane(for: pid)?.model.engineStatus = .starting("Starting local engine…")
         Task.detached(priority: .userInitiated) {
@@ -1789,7 +1826,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         return Fusion.Config(legs: legs, judgeProvider: judgeProvider,
                              judgeModel: judgeModel, authModes: authModes,
-                             legModels: [:], localLegModel: localLegModel, judgeLocal: judgeLocal)
+                             legModels: [:], localLegModel: localLegModel, judgeLocal: judgeLocal,
+                             localEngineBase: profile.localEngineBaseURL?.absoluteString,
+                             localEngineKey: profile.localEngineAPIKey)
     }
 
     static func makeGuardrailsConfig(for profile: Profile) -> GuardrailsConfig {
@@ -3611,11 +3650,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
             return ["ok": false, "error": "VM not found: \(idOrName)"]
         }
-        guard let model = CatalogStore.shared.resolve(modelID) else {
+        let resolved = CatalogStore.shared.resolve(modelID)
+        var profile = session.profile
+        // On an external engine the id namespace is that server's, not the
+        // catalog's — accept any id and let the engine reject unknowns.
+        if resolved == nil, profile.localEngineBaseURL == nil {
             return ["ok": false, "error": "Unknown model '\(modelID)'. Try `model catalog`."]
         }
-        var profile = session.profile
-        profile.activeModelID = model.id
+        profile.activeModelID = resolved?.id ?? modelID
         session.profile = profile
         try? store.save(profile)
         if let engine = mitmEngine { applyRouting(engine, for: profile) }
@@ -3623,7 +3665,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // keeps its env (ANTHROPIC_MODEL = bromure-local), so the switch takes
         // effect on the next request with no agent restart.
         startLocalEngineIfNeeded(for: profile)
-        return ["ok": true, "model": model.id, "repo": model.repo]
+        return ["ok": true, "model": resolved?.id ?? modelID, "repo": resolved?.repo ?? modelID]
     }
 
     /// Curated, secret-free view of a profile's settings for `profiles describe`.
@@ -9715,6 +9757,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // remain). The engine keeps serving the others.
         Task { await InferenceService.shared.clearWorkspace(profile.id) }
         InferenceRepairProxy.shared.clearActiveModel(profile.id)
+        InferenceRepairProxy.shared.setExternalEngine(profile.id, nil)
     }
 
     /// The VM for `profileID` stopped (guest poweroff, crash, or the tail of an
