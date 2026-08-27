@@ -130,3 +130,35 @@ struct PassthroughListTests {
         #expect(!list.matches("example"))
     }
 }
+
+@Suite("Implicit local-inference egress allowance")
+struct LocalMitmEgressTests {
+    @Test("default deny still permits bromure.llm at both layers, every verb")
+    func sentinelSurvivesDefaultDeny() {
+        var p = Profile(name: "ws", tool: .claude, authMode: .token)
+        p.egressRules = "allow tcp api.github.com:443\ndefault deny"
+        let policy = p.resolvedEgressPolicy
+        let host = [InferenceService.localMitmHost]
+        #expect(policy.verdict(ip: nil, hostnames: host, proto: .tcp, port: 443) != .deny)
+        #expect(policy.permitsMethod(hostnames: host, port: 443, method: "POST"))
+        #expect(policy.permitsMethod(hostnames: host, port: 443, method: "?"))
+        // The user's own rules still apply around it.
+        #expect(policy.verdict(ip: nil, hostnames: ["evil.example"], proto: .tcp, port: 443) == .deny)
+    }
+
+    @Test("a deny-any rule cannot shadow the sentinel (first-match wins)")
+    func sentinelBeatsDenyAny() {
+        var p = Profile(name: "ws", tool: .claude, authMode: .token)
+        p.egressRules = "deny any\ndefault deny"
+        let policy = p.resolvedEgressPolicy
+        let host = [InferenceService.localMitmHost]
+        #expect(policy.verdict(ip: nil, hostnames: host, proto: .tcp, port: 443) != .deny)
+        #expect(policy.permitsMethod(hostnames: host, port: 443, method: "DELETE"))
+    }
+
+    @Test("no rules configured stays allow-all with no synthetic rules")
+    func emptyRulesStayAllowAll() {
+        let p = Profile(name: "ws", tool: .claude, authMode: .token)
+        #expect(p.resolvedEgressPolicy == .allowAll)
+    }
+}

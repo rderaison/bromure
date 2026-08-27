@@ -1401,7 +1401,18 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// on a bad rule — the editor validates before save).
     public var resolvedEgressPolicy: EgressPolicy {
         guard !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .allowAll }
-        return (try? EgressPolicy.parse(egressRules)) ?? .allowAll
+        guard var policy = try? EgressPolicy.parse(egressRules) else { return .allowAll }
+        // The local-inference sentinel (guest → https://bromure.llm → on-host
+        // engine) never leaves this Mac, so no egress ruleset may cut agents
+        // off from Local Models — without this, `default deny` 403s every
+        // local-model call. Prepended: evaluation is first-match-wins, so no
+        // user rule can shadow it.
+        policy.rules.insert(
+            EgressPolicy.Rule(action: .allow, proto: .web,
+                              target: .host(domain: InferenceService.localMitmHost,
+                                            includeApex: true)),
+            at: 0)
+        return policy
     }
 
     /// Opt out of host-side transparent interception for this workspace. When

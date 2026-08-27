@@ -6787,6 +6787,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func sessionRefreshAffectingChange(from old: Profile, to new: Profile) -> Bool {
         old.environmentVariables != new.environmentVariables
             || old.guardrails != new.guardrails
+            // The egress firewall lives in its own text field, outside the
+            // `guardrails` struct — without this, removing/adding rules is
+            // silently ignored until app restart.
+            || old.egressRules != new.egressRules
             || old.supplyChain != new.supplyChain
             || old.promptInjection != new.promptInjection
             || old.httpDatabases != new.httpDatabases
@@ -6887,6 +6891,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // update it unconditionally so a mode change lands even when no
         // credential moved.
         mitmEngine?.setGuardrailsConfig(Self.makeGuardrailsConfig(for: new), for: new.id)
+        // The L4/switch layer keeps its own copy of the firewall (handed
+        // over at VM attach) — push that too, or connection-level rules
+        // stay stale until reboot even though the MITM layer just updated.
+        win.sandbox?.applyEgressPolicy(new.resolvedEgressPolicy)
         // Supply-chain policy follows the same live-update rule.
         mitmEngine?.setSupplyChainPolicy(new.supplyChain, for: new.id)
         // Prompt-injection detection policy — same live-update rule. Enabling

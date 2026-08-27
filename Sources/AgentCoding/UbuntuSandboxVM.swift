@@ -214,6 +214,15 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// VZVirtualMachineView for display.
     public private(set) var vm: VZVirtualMachine?
 
+    /// Push a new egress firewall to this VM's live switch port — the L4
+    /// counterpart of the MITM's `setGuardrailsConfig`, for profile edits
+    /// mid-session. No-op for VMs not attached to the shared switch
+    /// (bridged mode / Apple-NAT fallback), where no L4 firewall runs.
+    public func applyEgressPolicy(_ policy: EgressPolicy?) {
+        guard let switchPort else { return }
+        VMNetSwitch.shared.setEgressPolicy(policy, for: switchPort)
+    }
+
     private var outboxPollTask: Task<Void, Never>?
 
     /// CPU count for the runtime VM. RAM is per-profile (Profile.memoryGB).
