@@ -45,6 +45,12 @@ HOST_CID = 2
 
 WG_INTERFACE = "wg0"
 WG_CONFIG = "/etc/wireguard/wg0.conf"
+# wg-quick's DNS= handling shells out to `resolvconf`; Ubuntu's
+# wireguard-tools ships none (Alpine's pulled in openresolv) and
+# apply_vpn_dns() below does the real DNS work, so wg-quick gets a
+# private no-op shim (baked by setup.sh). PATH-prefixed per invocation —
+# never system-wide, where a stray resolvconf would divert dhclient.
+WG_QUICK = "PATH=/usr/local/libexec/bromure-noop-resolvconf:$PATH wg-quick"
 BOOT_SETUP_MARKER = "/tmp/bromure/wireguard-boot-setup"
 AUTO_CONNECT_MARKER = "/tmp/bromure/wireguard-auto-connect"
 
@@ -223,9 +229,9 @@ def do_enable():
     if not os.path.isfile(WG_CONFIG):
         return False, "WireGuard config not found"
     # Tear down first in case of stale state
-    run(f"wg-quick down {WG_INTERFACE}", quiet=True)
+    run(f"{WG_QUICK} down {WG_INTERFACE}", quiet=True)
     # Combine stderr into stdout so the caller sees the full wg-quick output
-    rc, out = run(f"wg-quick up {WG_INTERFACE} 2>&1")
+    rc, out = run(f"{WG_QUICK} up {WG_INTERFACE} 2>&1")
     if rc != 0:
         return False, f"wg-quick up failed: {out}"
     # Switch dnsmasq to the VPN's own DNS servers to prevent leaks
@@ -237,7 +243,7 @@ def do_disable():
     """Tear down the WireGuard tunnel."""
     if not wg_up():
         return True, None  # Already down — not an error
-    rc, out = run(f"wg-quick down {WG_INTERFACE}")
+    rc, out = run(f"{WG_QUICK} down {WG_INTERFACE}")
     if rc != 0:
         return False, f"wg-quick down failed: {out}"
     restore_dns()

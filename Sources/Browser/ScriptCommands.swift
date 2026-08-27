@@ -70,6 +70,8 @@ private func readSetting(_ s: ProfileSettings, key: String) -> String? {
     case "ikev2ProxyPort":      return String(s.ikev2ProxyPort)
     case "ikev2ProxyUsername":  return s.ikev2ProxyUsername
     case "ikev2ProxyPassword":  return s.ikev2ProxyPassword
+    case "wireGuardConfig":      return s.wireGuardConfig
+    case "wireGuardAutoConnect": return String(s.wireGuardAutoConnect)
     case "openvpnConfig":       return s.openVPNConfig
     case "openvpnUsername":      return s.openVPNUsername
     case "openvpnAutoConnect":   return String(s.openVPNAutoConnect)
@@ -135,6 +137,8 @@ private func writeSetting(_ s: inout ProfileSettings, key: String, value: String
     case "ikev2ProxyPort":      s.ikev2ProxyPort = Int(value) ?? s.ikev2ProxyPort
     case "ikev2ProxyUsername":  s.ikev2ProxyUsername = value
     case "ikev2ProxyPassword":  s.ikev2ProxyPassword = value
+    case "wireGuardConfig":      s.wireGuardConfig = value
+    case "wireGuardAutoConnect": s.wireGuardAutoConnect = b
     case "openvpnConfig":       s.openVPNConfig = value
     case "openvpnUsername":      s.openVPNUsername = value
     case "openvpnAutoConnect":   s.openVPNAutoConnect = b

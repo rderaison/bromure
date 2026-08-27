@@ -280,7 +280,7 @@ async function withSession(profileName, profileSettings, checkFn) {
     const vpnGated =
       profileSettings.warpAutoConnect === "true" ||
       profileSettings.ikev2AutoConnect === "true" ||
-      profileSettings.wireguardAutoConnect === "true";
+      profileSettings.wireGuardAutoConnect === "true";
     try {
       browser = await connectSession(sessionId, vpnGated ? 75 : 10);
     } catch (e) {
@@ -1251,6 +1251,42 @@ print('n/a')
         });
       });
     }
+
+    // WireGuard needs no live peer to verify tunnel bring-up: wg-quick
+    // fully configures wg0 before any handshake, so a dummy peer
+    // exercises the whole agent path — config write, wg-quick up, DNS
+    // swap. This is the test that catches wg-quick environment
+    // regressions (e.g. the Ubuntu image's missing-resolvconf abort).
+    await test("10.9 WireGuard — tunnel up with dummy peer (DNS= config)", async () => {
+      const wgConf = `[Interface]
+PrivateKey = 1BaXeHZN7AqsXgWlWyCZRfTKiOxHuQG6koF+mmnUmWo=
+Address = 10.99.0.2/32
+DNS = 10.99.0.1
+
+[Peer]
+PublicKey = xI5BSJS4BgkMc5a07wdgpRWpNFI/G59NEW+7bQaj9Ac=
+Endpoint = 192.0.2.1:51820
+AllowedIPs = 10.99.0.0/24
+`;
+      await withSession("E2E_WG_Up",
+        { vpnMode: "wireGuard", wireGuardConfig: wgConf, wireGuardAutoConnect: "true" },
+        async ({ sessionId }) => {
+          // wireguard-agent auto-connect retries up to 3×5s — poll the outcome
+          let status = "";
+          for (let i = 0; i < 25; i++) {
+            const r = await vmExec(sessionId, "head -1 /tmp/bromure/vpn-status 2>/dev/null");
+            status = r.stdout.trim();
+            if (status) break;
+            await sleep(1000);
+          }
+          assert(status === "ok", `vpn-status: '${status || "(missing)"}'`);
+          const wg = await vmExec(sessionId, "doas ip link show wg0 2>&1");
+          assertIncludes(wg.stdout, "wg0", "wg0 interface missing");
+          const dns = await vmExec(sessionId, "cat /etc/resolv.conf");
+          assertIncludes(dns.stdout, "10.99.0.1", "resolv.conf not switched to WG DNS");
+        }
+      );
+    });
   }
 
   // ======================================================================

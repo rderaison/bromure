@@ -444,6 +444,18 @@ systemctl enable networking >/dev/null 2>&1 || true
 # postinst enable doesn't always fire inside a debootstrap chroot.
 systemctl enable spice-vdagentd.socket spice-vdagentd.service >/dev/null 2>&1 || true
 
+# wg-quick aborts (rc=127) on configs with a DNS= line because Ubuntu's
+# wireguard-tools has no resolvconf (Alpine's pulled in openresolv),
+# tearing the tunnel down right after creating it. wireguard-agent owns
+# VPN DNS itself (resolv.conf + dnsmasq upstream swap), so give wg-quick
+# — and only wg-quick, via the PATH prefix wireguard-agent.py sets — a
+# no-op resolvconf. Deliberately NOT on the system PATH: dhclient and
+# charon probe for a resolvconf binary and must keep writing
+# /etc/resolv.conf directly.
+install -d /usr/local/libexec/bromure-noop-resolvconf
+printf '#!/bin/sh\nexit 0\n' > /usr/local/libexec/bromure-noop-resolvconf/resolvconf
+chmod 755 /usr/local/libexec/bromure-noop-resolvconf/resolvconf
+
 # Ubuntu builds spice-vdagentd with systemd-logind session tracking: on
 # agent connect it resolves the client's logind session and drops the
 # connection when there is none. This guest has no logind sessions at all
