@@ -4336,8 +4336,10 @@ public final class ProfileStore {
     HISTFILESIZE=20000
 
     # User-level installs land in ~/.npm-global/bin, ~/.cargo/bin,
-    # ~/.local/bin, or ~/.bun/bin (omp's `bun` runtime).
-    export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
+    # ~/.local/bin, ~/.bun/bin (omp's `bun` runtime), or ~/.grok/bin (where
+    # `grok update` installs — kept AHEAD of /usr/local/bin so a user update
+    # actually shadows the baked root grok).
+    export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.grok/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
 
     # MITM proxy env (HTTPS_PROXY + per-language CA bundles + ssh-agent
     # socket). Sourced before api_key.env so the fake API keys are
@@ -4613,6 +4615,38 @@ public final class ProfileStore {
             *)
                 return 1
                 ;;
+        esac
+    }
+
+    # Make `<agent> update` actually take effect — ON DEMAND only, so bandwidth
+    # is spent solely when the user updates (nothing is ever pre-fetched). The
+    # agents are baked as ROOT installs the workspace user can't update in place,
+    # but each one's own updater already writes to a user-owned, PATH-first dir
+    # (~/.npm-global, ~/.grok/bin — the latter added to PATH above) and works.
+    # Two need a small nudge; the rest (codex, omp) already do the right thing:
+    #
+    #  • claude: `claude update` updates the npm-global build in place and nags
+    #    about a "native vs npm-global" mismatch. Redirect it to a clean NATIVE
+    #    install in ~/.local/bin (first on PATH). Every other claude call passes
+    #    straight through, so this only downloads when the user runs an update.
+    claude() {
+        case "$1" in
+            update|upgrade)
+                command claude install stable
+                hash -r 2>/dev/null || true ;;
+            *) command claude "$@" ;;
+        esac
+    }
+    #  • kimi: `kimi update` refuses an npm layout ("unsupported package manager
+    #    or layout") and tells you to npm-install — do exactly that, into the
+    #    user-owned ~/.npm-global (first on PATH) so it takes effect. Wrapped
+    #    through socket.dev per project policy. Other kimi calls pass through.
+    kimi() {
+        case "$1" in
+            update|upgrade)
+                npx --yes @socketsecurity/cli npm install -g @moonshot-ai/kimi-code@latest
+                hash -r 2>/dev/null || true ;;
+            *) command kimi "$@" ;;
         esac
     }
 
