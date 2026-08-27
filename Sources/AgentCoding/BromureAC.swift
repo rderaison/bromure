@@ -1765,8 +1765,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let budget = max(8, HostMemory.unifiedMemoryGB() - 16)
         let pid = profile.id
         let label = models.first.map { CatalogStore.shared.resolve($0.repo)?.name ?? $0.repo } ?? ""
-        // Map the `bromure-local` sentinel → this workspace's active model so the
-        // guest agents resolve to it without a restart. Set synchronously (before
+        // Register the active model with the proxy: guests send the real name,
+        // and this map (plus its retired-name history) keeps running agents
+        // working across a live model switch — and resolves the legacy
+        // `bromure-local` sentinel from old guests. Set synchronously (before
         // the engine warms) so a request that races the load still routes right.
         if let activeID = profile.activeModelID, !activeID.isEmpty {
             // Fall back to the raw id for the "paste any HF repo" escape
@@ -6415,7 +6417,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // auto-launched tool, sshd/kube/SSO wiring) fall through to the
             // restart prompt below.
             applyLiveSessionRefresh(from: runningProfile, to: profile,
-                                    terminalDefaults: terminalDefaults, window: win)
+                                    terminalDefaults: terminalDefaults, window: win,
+                                    sandbox: win.sandbox)
             let restartItems = restartRequiringChanges(from: runningProfile, to: profile)
             if !restartItems.isEmpty {
                 promptRestartForChanges(items: restartItems, window: win)
@@ -6613,12 +6616,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // mounts) are only picked up on a fresh launch. Without this a
             // settings change made just before a reboot silently reverted on
             // relaunch — the pane's copy below only drives live/cosmetic refresh.
+            let priorRunning = runningSessions[toSave.id]?.profile
             runningSessions[toSave.id]?.profile = toSave
             if let win = pane(for: toSave.id) {
                 let runningProfile = win.profile
                 win.applyLiveProfileUpdates(toSave)
                 applyLiveSessionRefresh(from: runningProfile, to: toSave,
-                                        terminalDefaults: terminalDefaults, window: win)
+                                        terminalDefaults: terminalDefaults, window: win,
+                                        sandbox: win.sandbox)
+            } else if let session = runningSessions[toSave.id], let old = priorRunning {
+                // Detached (headless) session: no pane, but the engine-side
+                // configs + guest files still refresh — otherwise a CLI edit
+                // to a windowless VM (guardrails, credentials, model) was
+                // silently ignored until reboot.
+                applyLiveSessionRefresh(from: old, to: toSave,
+                                        terminalDefaults: terminalDefaults, window: nil,
+                                        sandbox: session.sandbox)
             }
         }
 
@@ -6808,6 +6821,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             || old.mcpServers != new.mcpServers
             || old.gitUserName != new.gitUserName
             || old.gitUserEmail != new.gitUserEmail
+            // `.local` agents carry the REAL model name in their env/config
+            // files, so a model or engine change must re-emit them (the proxy
+            // remaps the retired name for already-running agents).
+            || old.activeModelID != new.activeModelID
+            || old.modelRouting != new.modelRouting
+            || old.localEngineURL != new.localEngineURL
+            || old.localEngineAPIKey != new.localEngineAPIKey
             // Approval-gate toggles flip a credential's consentCredentialID in the
             // token map, so the live refresh must re-emit it.
             || old.apiKeyRequiresApproval != new.apiKeyRequiresApproval
@@ -6840,9 +6860,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// the AWS-SSO refresh loop, and the ssh-agent key load — is only done
     /// on cold boot. Those categories keep their restart prompt; env vars
     /// and the common file/header credentials do not.
+    /// `window` is nil for a detached (headless) session — engine-side and
+    /// guest-file refreshes still apply via `sandbox`; window-only state
+    /// (the fusion toggle) reconciles on the next attach.
     private func applyLiveSessionRefresh(from old: Profile, to new: Profile,
                                          terminalDefaults: TerminalAppDefaults,
-                                         window win: SessionPane) {
+                                         window win: SessionPane?,
+                                         sandbox: UbuntuSandboxVM?) {
         // Fusion config can change without tripping the session-refresh guard
         // below (e.g. editing legs/judge), so reconcile it first and
         // unconditionally. Engagement is the user's per-session choice via the
@@ -6850,10 +6874,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // profile is no longer configurable.
         _ = old
         let nowConfigurable = new.fusionConfigurable
-        win.model.fusionConfigurable = nowConfigurable
+        win?.model.fusionConfigurable = nowConfigurable
         mitmEngine?.setFusionConfig(makeFusionConfig(for: new), for: new.id)
         if !nowConfigurable {
-            win.model.fusionEngaged = false
+            win?.model.fusionEngaged = false
             mitmEngine?.setFusionEngaged(false, for: new.id)
         }
 
@@ -6894,7 +6918,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // The L4/switch layer keeps its own copy of the firewall (handed
         // over at VM attach) — push that too, or connection-level rules
         // stay stale until reboot even though the MITM layer just updated.
-        win.sandbox?.applyEgressPolicy(new.resolvedEgressPolicy)
+        sandbox?.applyEgressPolicy(new.resolvedEgressPolicy)
         // Supply-chain policy follows the same live-update rule.
         mitmEngine?.setSupplyChainPolicy(new.supplyChain, for: new.id)
         // Prompt-injection detection policy — same live-update rule. Enabling
@@ -6954,14 +6978,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // meta-share dir and bump env.generation for the guest's
         // PROMPT_COMMAND hook.
         do {
-            try win.sandbox?.sessionDisk?.refreshMetadataShare(
+            try sandbox?.sessionDisk?.refreshMetadataShare(
                 profile: profile, tokenPlan: plan)
         } catch {
             NSLog("[bromure-ac] live env refresh failed: \(error)")
         }
 
         if profile.homeModel == .ext4,
-           let session = win.sandbox?.sessionDisk,
+           let session = sandbox?.sessionDisk,
            let seedDir = session.homeSeedDirectory {
             do {
                 try store.writeHomeSeedFiles(for: profile, into: seedDir,

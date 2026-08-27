@@ -176,6 +176,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
             var rewritten = Data(rewrittenLine.utf8)
             rewritten.append(connectReq.subdata(in: reqLineEnd.lowerBound..<connectReq.count))
 
+            if deniedByEgressPolicy(host: host, port: port) {
+                try? writeAll(fd: fd, bytes: Array(
+                    "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".utf8))
+                return
+            }
             try await driveTLS(host: host, port: port, t0: t0, cleartext: true, prefix: rewritten)
             return
         }
@@ -183,10 +188,39 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let target = String(parts[1])
         let (host, port) = parseHostPort(target)
 
+        // Connection-layer egress verdict for the cooperative-proxy path. The
+        // transparent path enforces this in acceptTransparentFlow, but proxied
+        // flows arrive over vsock and never cross the switch — without this,
+        // `default deny` (and deny rules with no method list) never applied to
+        // CONNECT tunnels.
+        if deniedByEgressPolicy(host: host, port: port) {
+            try? writeAll(fd: fd, bytes: Array(
+                "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".utf8))
+            return
+        }
+
         // 2. Confirm the tunnel.
         try writeAll(fd: fd, bytes: Array("HTTP/1.1 200 Connection established\r\n\r\n".utf8))
 
         try await driveTLS(host: host, port: port, t0: t0)
+    }
+
+    /// Connection-layer egress check for proxied flows: true when the profile's
+    /// firewall denies this host/port outright (an explicit deny or the default
+    /// action) — the same `verdict` the switch/transparent layers apply, logged
+    /// with layer "proxy". Method-level `web` restrictions stay in the policy
+    /// chain, which sees the decrypted request.
+    private func deniedByEgressPolicy(host: String, port: Int) -> Bool {
+        guard let policy = guardrailsProvider()?.egressPolicy else { return false }
+        guard case .deny = policy.verdict(ip: nil, hostnames: [host], proto: .tcp,
+                                          port: UInt16(truncatingIfNeeded: port)) else { return false }
+        SupplyChainLog.shared.record(
+            "[firewall] ✗ deny tcp \(host):\(port) (\(profileID.uuidString.prefix(8)))")
+        BACEventEmitter.shared.emitDetached(
+            profileID: profileID, eventType: "egress.firewall",
+            eventData: ["action": .string("deny"), "proto": .string("tcp"),
+                        "host": .string(host), "port": .int(port), "layer": .string("proxy")])
+        return true
     }
 
     /// Transparent-interception entry point. The flow arrives already TCP-
