@@ -51,8 +51,14 @@ struct ControlClient {
 
     // MARK: Request
 
+    /// `recvTimeoutSeconds` bounds the response read; the 12s default suits
+    /// quick control calls. A call that legitimately runs long server-side
+    /// (`/exec` with a slow command) must pass its own budget — with the
+    /// default, the response lands after the client has already given up and
+    /// surfaces as "Invalid HTTP response from agent".
     @discardableResult
-    func request(_ method: String, _ path: String, body: [String: Any]? = nil) throws -> Response {
+    func request(_ method: String, _ path: String, body: [String: Any]? = nil,
+                 recvTimeoutSeconds: Int = 12) throws -> Response {
         guard let fd = dial() else { throw ClientError.agentNotRunning }
         defer { Darwin.close(fd) }
 
@@ -65,7 +71,7 @@ struct ControlClient {
         // the read returns -1, the response is incomplete, and this throws — the
         // poll then fails and the reconnect path takes over. Generous so a slow
         // but alive response over a WAN relay is never truncated.
-        var rcvTimeout = timeval(tv_sec: 12, tv_usec: 0)
+        var rcvTimeout = timeval(tv_sec: max(1, recvTimeoutSeconds), tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
 
         let bodyData = try body.map { try JSONSerialization.data(withJSONObject: $0) } ?? Data()

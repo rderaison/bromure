@@ -557,12 +557,30 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         # proxy.env for interactive shells (the `case $- in *i*) return` guard);
         # the shell subprocess.run() spawns below is non-interactive, so without
         # this prefix curl / pip / npm bypass the MITM proxy entirely.
-        wrapped = (
+        env_prefix = (
             "if [ -r /mnt/bromure-meta/proxy.env ]; then "
             "set -a; . /mnt/bromure-meta/proxy.env; set +a; "
             "fi; "
-            + cmd
         )
+        argv = req.get("argv")
+        if isinstance(argv, list) and len(argv) > 1:
+            # kubectl-style argument vector (`vm exec ws -- bash -c '…'`):
+            # execute it verbatim — the host used to join argv with spaces
+            # and re-parse through this shell, which silently dropped the
+            # caller's quoting (bash -c 'a; b' ran as `bash -c a` + `b`).
+            # proxy.env still applies via an sh trampoline that execs "$@".
+            runnable = ["/bin/sh", "-c", env_prefix + 'exec "$@"', "sh"] + [
+                str(a) for a in argv
+            ]
+            use_shell = False
+        else:
+            # A single token — or a legacy host that only sends "cmd" —
+            # keeps full shell semantics, so `vm exec ws -- 'ls | head'`
+            # stays a pipeline.
+            if isinstance(argv, list) and argv:
+                cmd = str(argv[0])
+            runnable = env_prefix + cmd
+            use_shell = True
 
         try:
             # errors="replace": byte-capped output (tail -c / head -c of a
@@ -570,7 +588,7 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
             # here and collapsed the WHOLE exec to exit -1, freezing every
             # host feature riding this channel for that poll.
             result = subprocess.run(
-                wrapped, shell=True, capture_output=True, text=True,
+                runnable, shell=use_shell, capture_output=True, text=True,
                 errors="replace", timeout=timeout, cwd=workdir
             )
             response = {

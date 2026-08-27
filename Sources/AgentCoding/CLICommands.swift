@@ -1244,8 +1244,15 @@ struct Exec: ParsableCommand {
         guard !cmd.isEmpty else {
             throw ValidationError("No command given (use -it for an interactive shell).")
         }
+        // Send the verbatim argv alongside the joined string: the guest
+        // executes the vector directly (quoting survives — `-- bash -c 'a; b'`
+        // used to run as `bash -c a` + `b`), while "command" keeps older
+        // agents working. The receive timeout must cover the command's own
+        // budget — the 12s default lost any exec slower than that.
         let resp = try client.request("POST", "/vms/\(ControlClient.encodeSegment(vm))/exec",
-                                      body: ["command": cmd, "timeout": timeout])
+                                      body: ["command": cmd, "argv": command,
+                                             "timeout": timeout],
+                                      recvTimeoutSeconds: timeout + 30)
         guard resp.status == 200 else {
             let msg = resp.json["error"] as? String ?? "exec failed (HTTP \(resp.status))"
             FileHandle.standardError.write(Data((msg + "\n").utf8))

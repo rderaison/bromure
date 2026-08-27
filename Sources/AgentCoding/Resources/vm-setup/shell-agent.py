@@ -270,17 +270,29 @@ def handle_connection(vsock_sock, replenish_fn):
         # proxy entirely. That's what the section-10 e2e tests
         # were hitting — the supply-chain branch in HTTPProxy.swift
         # never saw the test traffic.
-        wrapped = (
+        env_prefix = (
             "if [ -r /mnt/bromure-meta/proxy.env ]; then "
             "set -a; . /mnt/bromure-meta/proxy.env; set +a; "
             "fi; "
-            + cmd
         )
+        argv = req.get("argv")
+        if isinstance(argv, list) and len(argv) > 1:
+            # kubectl-style argument vector: execute verbatim so the caller's
+            # quoting survives (see bromure-agentd.py §3 for the rationale).
+            runnable = ["/bin/sh", "-c", env_prefix + 'exec "$@"', "sh"] + [
+                str(a) for a in argv
+            ]
+            use_shell = False
+        else:
+            if isinstance(argv, list) and argv:
+                cmd = str(argv[0])
+            runnable = env_prefix + cmd
+            use_shell = True
 
         # Execute command
         try:
             result = subprocess.run(
-                wrapped, shell=True, capture_output=True, text=True,
+                runnable, shell=use_shell, capture_output=True, text=True,
                 timeout=timeout, cwd=workdir
             )
             response = {

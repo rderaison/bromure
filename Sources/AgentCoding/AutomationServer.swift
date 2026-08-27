@@ -1275,6 +1275,9 @@ final class ACAutomationServer {
             sendResponse(fd: fd, status: 400, body: ["error": "Missing 'command' field"])
             return
         }
+        // Verbatim argument vector from the CLI (kubectl-style); forwarded so
+        // the guest can execute it without the quote-destroying join+re-parse.
+        let argv = bodyJSON["argv"] as? [String]
         let timeout = bodyJSON["timeout"] as? Int ?? 30
 
         // Wait up to 10s for a shell connection (matches the browser's behavior).
@@ -1298,7 +1301,8 @@ final class ACAutomationServer {
         // connection; a mid-stream failure is NOT retried (the command may have
         // executed).
         for attempt in 0..<4 {
-            switch Self.executeShellCommand(fd: conn.fd, command: command, timeout: timeout) {
+            switch Self.executeShellCommand(fd: conn.fd, command: command, argv: argv,
+                                            timeout: timeout) {
             case .success(let result):
                 sendResponse(fd: fd, status: 200, body: [
                     "stdout": result.stdout,
@@ -1636,8 +1640,14 @@ final class ACAutomationServer {
 
     /// Internal (not private): the file-explorer pane's guest exec reuses this
     /// exact framed exchange via `ACAppDelegate.guestExec`.
-    static func executeShellCommand(fd: Int32, command: String, timeout: Int) -> ShellExecOutcome {
-        switch exchangeJSON(fd: fd, request: ["cmd": command, "timeout": timeout]) {
+    /// `argv`, when present, is the caller's verbatim argument vector — the
+    /// guest agent executes it without a shell re-parse, so quoting survives
+    /// (the joined `command` remains for shell semantics and legacy agents).
+    static func executeShellCommand(fd: Int32, command: String, argv: [String]? = nil,
+                                    timeout: Int) -> ShellExecOutcome {
+        var request: [String: Any] = ["cmd": command, "timeout": timeout]
+        if let argv { request["argv"] = argv }
+        switch exchangeJSON(fd: fd, request: request) {
         case .deadConnection: return .deadConnection
         case .protocolFailure: return .protocolFailure
         case .success(let obj):
