@@ -311,12 +311,14 @@ enum AgentSessionLocator {
         case "codex": cmd += codexFragment(since: since, into: "f")
         case "grok": cmd += grokFragment(path: path, since: since, into: "f")
         case "kimi": cmd += kimiFragment(since: since, into: "f")
+        case "omp": cmd += ompFragment(since: since, into: "f")
         default:
             cmd += claudeFragment(path: path, since: since, into: "tc")
             cmd += codexFragment(since: since, into: "tx")
             cmd += grokFragment(path: path, since: since, into: "tg")
             cmd += kimiFragment(since: since, into: "tk")
-            cmd += "set --; for c in \"$tc\" \"$tx\" \"$tg\" \"$tk\"; do "
+            cmd += ompFragment(since: since, into: "to")
+            cmd += "set --; for c in \"$tc\" \"$tx\" \"$tg\" \"$tk\" \"$to\"; do "
                 + "[ -n \"$c\" ] && set -- \"$@\" \"$c\"; done; "
                 + "f=\"\"; [ $# -gt 0 ] && f=$(ls -t \"$@\" 2>/dev/null | head -1); "
         }
@@ -399,6 +401,19 @@ enum AgentSessionLocator {
             + "-o \\( -name wire.jsonl ! -path '*/agents/*' \\) \\) "
             + "-newermt @\(since) 2>/dev/null | sort -u "
             + "| xargs -r ls -t 2>/dev/null | head -1); "
+    }
+
+    /// omp (Oh My Pi): ${PI_CODING_AGENT_DIR:-~/.omp/agent}/sessions/<cwd>/…jsonl
+    /// where the session dir is the run's cwd with '/' flattened to '-'
+    /// (e.g. /home/ubuntu/wt-foo → -home-ubuntu-wt-foo). The transcript is the
+    /// newest `*.jsonl` directly inside it; the logical and readlink-resolved
+    /// paths are both tried (a worktree cwd may be a symlink).
+    nonisolated static func ompFragment(since: Int, into varName: String) -> String {
+        "ob=\"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/sessions\"; "
+            + "os1=$(printf %s \"$d\" | tr / -); os2=$(printf %s \"$r\" | tr / -); "
+            + "\(varName)=$(find \"$ob/$os1\" \"$ob/$os2\" -maxdepth 1 -name '*.jsonl' "
+            + "-newermt @\(since) 2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null "
+            + "| head -1); "
     }
 
     /// RFC 3986 percent-encoding with an empty safe set ('/' included) —
