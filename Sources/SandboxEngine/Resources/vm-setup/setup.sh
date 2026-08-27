@@ -444,6 +444,16 @@ systemctl enable networking >/dev/null 2>&1 || true
 # postinst enable doesn't always fire inside a debootstrap chroot.
 systemctl enable spice-vdagentd.socket spice-vdagentd.service >/dev/null 2>&1 || true
 
+# Ubuntu builds spice-vdagentd with systemd-logind session tracking: on
+# agent connect it resolves the client's logind session and drops the
+# connection when there is none. This guest has no logind sessions at all
+# (agetty autologin + startx, no libpam-systemd), so the per-session
+# spice-vdagent exited immediately and clipboard sync silently died.
+# Alpine's build had no session integration, which is why this only broke
+# with the Ubuntu move. -X disables the lookup; with a single X session
+# the one connecting agent is simply treated as active.
+echo 'SPICE_VDAGENTD_EXTRA_ARGS="-X"' > /etc/default/spice-vdagentd
+
 # Daemons the agents start BY HAND per-profile (squid -N, dnsmasq -C,
 # openvpn, charon) must not autostart as system services. Mask rather
 # than disable: masking is symlink-to-/dev/null and cannot be undone by

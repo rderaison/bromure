@@ -19,7 +19,7 @@ public final class LinuxImageManager {
     /// the xtradeb PPA as a native deb, and glibc means Cloudflare WARP
     /// (and soon official Google Chrome) install as normal debs — the
     /// gcompat/resolv-stub compat layer is gone.
-    public static let imageVersion = "400"
+    public static let imageVersion = "401"
 
     /// Human description of the image — surfaces in
     /// browser-img-catalog.json (via `bromure init-foss-image`'s

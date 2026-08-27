@@ -770,7 +770,7 @@ async function main() {
     await test("7.1 Clipboard ON — spice-vdagent running", async () => {
       await withSession("E2E_Clip_On", { clipboard: "true" },
         async ({ sessionId }) => {
-          const r = await vmExec(sessionId, "pgrep -f spice-vdagent | wc -l");
+          const r = await vmExec(sessionId, "pgrep -x spice-vdagent | wc -l");
           assert(parseInt(r.stdout.trim()) > 0, "spice-vdagent not running");
         }
       );
