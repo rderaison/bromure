@@ -286,7 +286,14 @@ struct ExternalEngineProxyTests {
             let done = DispatchSemaphore(value: 0)
         }
 
-        init?(responseJSON: [String: Any]) {
+        convenience init?(responseJSON: [String: Any]) {
+            self.init(rawBody: (try? JSONSerialization.data(withJSONObject: responseJSON)) ?? Data(),
+                      contentType: "application/json")
+        }
+
+        /// `rawBody`/`contentType` verbatim — an SSE stream for the
+        /// streaming-path tests.
+        init?(rawBody: Data, contentType: String) {
             let sock = socket(AF_INET, SOCK_STREAM, 0)
             guard sock >= 0 else { return nil }
             var yes: Int32 = 1
@@ -331,8 +338,8 @@ struct ExternalEngineProxyTests {
                     req.append(contentsOf: buf[0..<n])
                 }
                 box.captured = req
-                let body = (try? JSONSerialization.data(withJSONObject: responseJSON)) ?? Data()
-                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                let body = rawBody
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\n"
                     + "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n"
                 var out = Data(head.utf8); out.append(body)
                 out.withUnsafeBytes { raw in
@@ -392,7 +399,8 @@ struct ExternalEngineProxyTests {
 
         // enginePort 0: the built-in engine isn't running — the external
         // branch must never touch it.
-        let respBytes = InferenceRepairProxy.respond(to: req, enginePort: 0)
+        // No streamFD in tests → always the buffered path (never nil).
+        let respBytes = InferenceRepairProxy.respond(to: req, enginePort: 0) ?? Data()
         server.wait()
         let resp = String(data: respBytes, encoding: .utf8) ?? ""
 
@@ -413,5 +421,147 @@ struct ExternalEngineProxyTests {
         #expect(seen.contains("\"qwen3:8b\""))
         #expect(seen.contains("\"stream\":false"))
         #expect(seen.contains("\"role\":\"system\"") || seen.contains("be safe"))
+    }
+}
+
+// MARK: - Streaming path
+
+/// The streamed variant of the round trip: upstream replies with a chat SSE
+/// stream; the proxy must relay live text deltas on the client socket, hold
+/// back an end-of-text leaked tool call, and close the stream with the
+/// rescued tool_use block. Uses a socketpair as the guest connection.
+@Suite("ExternalEngine streaming through the repair proxy", .serialized)
+struct ExternalEngineStreamingTests {
+
+    private func sseBody(deltas: [String], finish: String) -> Data {
+        var out = "data: {\"id\":\"c1\",\"model\":\"qwen3:8b\",\"created\":1,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"
+        for d in deltas {
+            let obj: [String: Any] = ["choices": [["index": 0, "delta": ["content": d],
+                                                   "finish_reason": NSNull()]]]
+            let j = String(data: try! JSONSerialization.data(withJSONObject: obj), encoding: .utf8)!
+            out += "data: \(j)\n\n"
+        }
+        out += "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"\(finish)\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":7}}\n\n"
+        out += "data: [DONE]\n\n"
+        return Data(out.utf8)
+    }
+
+    @Test("Live deltas + end-of-text leak rescued into tool_use")
+    func streamedLeakRescue() throws {
+        // 400 chars of prose (released live), then a bare-JSON leaked call —
+        // inside the emitter's holdback tail, so the guest must never see it.
+        let prose = String(repeating: "Analyzing the build failure step by step. ", count: 10)
+        let leak = "\n{\"name\": \"Bash\", \"arguments\": {\"command\": \"uname\"}}"
+        let server = try #require(FakeSSEServerBox.make(
+            body: sseBody(deltas: [prose, leak], finish: "stop")))
+
+        let pid = UUID()
+        InferenceRepairProxy.shared.setExternalEngine(
+            pid, ExternalEngine.Config(base: URL(string: "http://127.0.0.1:\(server.port)")!,
+                                       apiKey: "sk-ext"))
+        InferenceRepairProxy.shared.setActiveModel(pid, repo: "qwen3:8b")
+        defer {
+            InferenceRepairProxy.shared.setExternalEngine(pid, nil)
+            InferenceRepairProxy.shared.clearActiveModel(pid)
+        }
+
+        let body: [String: Any] = [
+            "model": "qwen3:8b", "stream": true,
+            "messages": [["role": "user", "content": "why does it fail?"]],
+            "tools": [["name": "Bash", "description": "run",
+                       "input_schema": ["type": "object"]]],
+            "max_tokens": 512,
+        ]
+        let req = InferenceRepairProxy.Request(
+            method: "POST", path: "/v1/messages",
+            headers: [("Authorization", "Bearer \(EngineKey.perVM(profileID: pid))"),
+                      ("Content-Type", "application/json")],
+            body: try JSONSerialization.data(withJSONObject: body))
+
+        var sp = [Int32](repeating: 0, count: 2)
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0)
+        defer { close(sp[0]) }
+
+        let resp = InferenceRepairProxy.respond(to: req, enginePort: 0, streamFD: sp[1])
+        close(sp[1])
+        #expect(resp == nil, "a streamed conversation returns nil (written to the fd)")
+
+        var out = Data()
+        var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = read(sp[0], &buf, buf.count)
+            if n <= 0 { break }
+            out.append(contentsOf: buf[0..<n])
+        }
+        let text = String(decoding: out, as: UTF8.self)
+
+        #expect(text.contains("HTTP/1.1 200"))
+        #expect(text.contains("event: message_start"))
+        #expect(text.contains("text_delta"))
+        #expect(text.contains("Analyzing the build failure"))
+        // The leaked call was held back + rescued: never visible as text,
+        // present as a native block.
+        #expect(!text.contains("\\\"command\\\": \\\"uname\\\"")
+                || text.contains("input_json_delta"))
+        #expect(text.contains("\"tool_use\""))
+        #expect(text.contains("\"Bash\""))
+        #expect(text.contains("event: message_stop"))
+        // stop_reason reflects the rescued call.
+        #expect(text.contains("\"stop_reason\":\"tool_use\""))
+    }
+}
+
+/// Shim: reuse the private FakeOpenAIServer shape without widening its
+/// access — a one-shot SSE server for the streaming tests.
+private enum FakeSSEServerBox {
+    final class Server: @unchecked Sendable {
+        let port: Int
+        private let fd: Int32
+        init(fd: Int32, port: Int) { self.fd = fd; self.port = port }
+        deinit { close(fd) }
+    }
+
+    static func make(body: Data) -> Server? {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return nil }
+        var yes: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        _ = inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0, listen(sock, 4) == 0 else { close(sock); return nil }
+        var actual = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &actual) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(sock, $0, &len) }
+        }
+        let port = Int(UInt16(bigEndian: actual.sin_port))
+        Thread.detachNewThread {
+            let c = accept(sock, nil, nil)
+            guard c >= 0 else { return }
+            // Drain the request (best-effort: headers + body arrive fast).
+            var buf = [UInt8](repeating: 0, count: 64 * 1024)
+            _ = read(c, &buf, buf.count)
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                + "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+            var out = Data(head.utf8); out.append(body)
+            out.withUnsafeBytes { raw in
+                var off = 0
+                while off < out.count {
+                    let w = write(c, raw.baseAddress! + off, out.count - off)
+                    if w <= 0 { break }
+                    off += w
+                }
+            }
+            close(c)
+        }
+        return Server(fd: sock, port: port)
     }
 }

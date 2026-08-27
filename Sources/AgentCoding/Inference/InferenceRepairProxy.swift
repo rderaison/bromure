@@ -132,7 +132,10 @@ final class InferenceRepairProxy: @unchecked Sendable {
     private func handle(clientFD: Int32, enginePort: Int) {
         defer { close(clientFD) }
         while let req = Self.readRequest(fd: clientFD) {
-            let resp = Self.respond(to: req, enginePort: enginePort)
+            guard let resp = Self.respond(to: req, enginePort: enginePort,
+                                          streamFD: clientFD) else {
+                break   // streamed directly on the socket (Connection: close)
+            }
             if !Self.writeAll(clientFD, resp) { break }
             // Honour keep-alive; the read loop exits on EOF / next-request error.
             if req.headerValue("connection")?.lowercased() == "close" { break }
@@ -235,12 +238,22 @@ final class InferenceRepairProxy: @unchecked Sendable {
             }
         }
 
+        /// Rescue any leaked-as-text tool call into the wire's native blocks.
+        func repairedMessage(_ message: [String: Any], toolNames: Set<String>, gemma: Bool) -> [String: Any] {
+            switch self {
+            case .messages: return ToolCallRepair.repair(message: message, toolNames: toolNames, gemma: gemma)
+            case .chat: return ToolCallRepair.repairChat(message, toolNames: toolNames, gemma: gemma)
+            case .responses: return ToolCallRepair.repairResponses(message, toolNames: toolNames, gemma: gemma)
+            }
+        }
+
         /// Repair the buffered upstream message, then render it back as SSE.
         func repairedSSE(_ message: [String: Any], toolNames: Set<String>, gemma: Bool) -> Data {
+            let repaired = repairedMessage(message, toolNames: toolNames, gemma: gemma)
             switch self {
-            case .messages: return ToolCallRepair.sse(message: ToolCallRepair.repair(message: message, toolNames: toolNames, gemma: gemma))
-            case .chat: return ToolCallRepair.chatSSE(ToolCallRepair.repairChat(message, toolNames: toolNames, gemma: gemma))
-            case .responses: return ToolCallRepair.responsesSSE(ToolCallRepair.repairResponses(message, toolNames: toolNames, gemma: gemma))
+            case .messages: return ToolCallRepair.sse(message: repaired)
+            case .chat: return ToolCallRepair.chatSSE(repaired)
+            case .responses: return ToolCallRepair.responsesSSE(repaired)
             }
         }
 
@@ -324,8 +337,12 @@ final class InferenceRepairProxy: @unchecked Sendable {
         }
     }
 
-    /// Build the full HTTP response bytes for a request.
-    static func respond(to req: Request, enginePort: Int) -> Data {
+    /// Build the full HTTP response bytes for a request — or, when `streamFD`
+    /// is set and the call is an external-engine conversation, stream the SSE
+    /// response incrementally on that socket and return nil (the caller then
+    /// closes the connection).
+    static func respond(to req: Request, enginePort: Int,
+                        streamFD: Int32? = nil) -> Data? {
         // Anything that isn't a repairable inference POST: transparent proxy.
         guard let api = API.of(path: req.path), req.method == "POST",
               var payload = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] else {
@@ -404,6 +421,25 @@ final class InferenceRepairProxy: @unchecked Sendable {
             // from a turn that ended with no tool call (which logs a `<-`).
             appendRepairLog("[repair] -> \(req.path) model=\(payload["model"] as? String ?? "?") msgs=\((payload["messages"] as? [Any])?.count ?? (payload["input"] as? [Any])?.count ?? -1)\n")
         }
+        // Streaming (external engines): relay text deltas as the server
+        // produces them instead of buffering the whole generation — a slow
+        // local model otherwise leaves the agent silent for the entire turn.
+        // The repair pipeline is unchanged: the stream client assembles the
+        // exact buffered-equivalent message, the emitter holds back a tail so
+        // a leaked tool call can still be stripped before the guest sees it,
+        // and continuations run buffered (their outcome is only shown when
+        // they produce the missing call). BROMURE_LOCAL_STREAM=0 restores
+        // the buffered behavior.
+        if let streamFD, let pid, let ext = shared.externalEngine(for: pid),
+           ProcessInfo.processInfo.environment["BROMURE_LOCAL_STREAM"] != "0" {
+            let handled = streamConversation(req: req, payload: payload, api: api,
+                                             pid: pid, ext: ext, clientFD: streamFD)
+            ticker?.cancel()
+            if handled { return nil }
+            // Nothing reached the guest — fall through to the buffered path,
+            // which re-sends and shapes the error for the wire.
+        }
+
         let t0 = Date()
         let (data, status) = sendUpstream(payload)
         ticker?.cancel()
@@ -433,47 +469,9 @@ final class InferenceRepairProxy: @unchecked Sendable {
         // parser on the request's (already-resolved) model name.
         let gemma = (payload["model"] as? String)?.lowercased().contains("gemma") == true
 
-        // Auto-continue a "stuck preamble": a local model (notably Qwen3-Coder)
-        // often narrates the next step — "Now I'll create the server file:" — then
-        // emits its end-of-turn token WITHOUT the tool call (observed: 22 completion
-        // tokens, status=completed, no function_call). The agent shows that text and
-        // stops. When a turn announces an action but carries no tool call, re-prompt
-        // ONCE — quoting the preamble back — so the model emits the call it skipped.
-        // Bounded to a single retry; on failure we keep the original message (the
-        // turn just ends, exactly as before — no regression).
-        let finalMessage: [String: Any] = {
-            guard !toolNames.isEmpty, api.cleanStop(message),
-                  api.hasNoToolCall(message, toolNames: toolNames, gemma: gemma),
-                  looksLikeStuckPreamble(api.assistantText(message)) else { return message }
-            let preamble = api.assistantText(message)
-            let dbg = ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil
-            if dbg { appendRepairLog("[repair] ~~ \(req.path) stuck preamble detected; re-prompting\n") }
-            // Up to two re-prompts, escalating: the nudge gets blunter and the
-            // second adds temperature so a greedy model can't just re-emit the same
-            // preamble. The first attempt that yields a tool call wins; otherwise we
-            // keep the original message and the turn ends as before.
-            for attempt in 0..<2 {
-                var cont = api.continuationPayload(payload, preamble: preamble, attempt: attempt)
-                cont["stream"] = false
-                if attempt > 0 { cont["temperature"] = 0.7 }
-                let (d2, s2) = sendUpstream(cont)
-                guard s2 == 200, let d2,
-                      let m2 = (try? JSONSerialization.jsonObject(with: d2)) as? [String: Any] else {
-                    if dbg { appendRepairLog("[repair] ~~ \(req.path) attempt \(attempt + 1): engine status \(s2)\n") }
-                    continue
-                }
-                if !api.hasNoToolCall(m2, toolNames: toolNames, gemma: gemma) {
-                    if dbg { appendRepairLog("[repair] ~~ \(req.path) recovered a tool call on attempt \(attempt + 1)\n") }
-                    return m2
-                }
-                if dbg {
-                    let mt = api.assistantText(m2)
-                    let mtail = String(mt.suffix(180)).replacingOccurrences(of: "\n", with: "\\n")
-                    appendRepairLog("[repair] ~~ \(req.path) attempt \(attempt + 1): still no tool call (\(mt.count) chars) tail=\(mtail)\n")
-                }
-            }
-            return message
-        }()
+        let (finalMessage, _) = Self.resolveStuckPreamble(
+            message: message, payload: payload, api: api, path: req.path,
+            toolNames: toolNames, gemma: gemma, send: sendUpstream)
 
         if ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil {
             let txt = ((finalMessage["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined())
@@ -509,6 +507,101 @@ final class InferenceRepairProxy: @unchecked Sendable {
         return httpResponse(status: 200,
                             headers: [("Content-Type", "text/event-stream"), ("Cache-Control", "no-cache")],
                             body: api.repairedSSE(finalMessage, toolNames: toolNames, gemma: gemma))
+    }
+
+    /// Auto-continue a "stuck preamble": a local model (notably Qwen3-Coder)
+    /// often narrates the next step — "Now I'll create the server file:" — then
+    /// emits its end-of-turn token WITHOUT the tool call (observed: 22 completion
+    /// tokens, status=completed, no function_call). The agent shows that text and
+    /// stops. When a turn announces an action but carries no tool call, re-prompt
+    /// — quoting the preamble back — so the model emits the call it skipped.
+    /// Bounded retries; on failure the original message is kept (the turn just
+    /// ends, exactly as before — no regression). Returns the message to serve
+    /// and whether a continuation REPLACED the original (the streaming emitter
+    /// then appends its text after the already-released preamble).
+    private static func resolveStuckPreamble(
+        message: [String: Any], payload: [String: Any], api: API, path: String,
+        toolNames: Set<String>, gemma: Bool,
+        send: ([String: Any]) -> (Data?, Int)
+    ) -> ([String: Any], Bool) {
+        guard !toolNames.isEmpty, api.cleanStop(message),
+              api.hasNoToolCall(message, toolNames: toolNames, gemma: gemma),
+              looksLikeStuckPreamble(api.assistantText(message)) else { return (message, false) }
+        let preamble = api.assistantText(message)
+        let dbg = ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil
+        if dbg { appendRepairLog("[repair] ~~ \(path) stuck preamble detected; re-prompting\n") }
+        // Up to two re-prompts, escalating: the nudge gets blunter and the
+        // second adds temperature so a greedy model can't just re-emit the same
+        // preamble. The first attempt that yields a tool call wins; otherwise we
+        // keep the original message and the turn ends as before.
+        for attempt in 0..<2 {
+            var cont = api.continuationPayload(payload, preamble: preamble, attempt: attempt)
+            cont["stream"] = false
+            if attempt > 0 { cont["temperature"] = 0.7 }
+            let (d2, s2) = send(cont)
+            guard s2 == 200, let d2,
+                  let m2 = (try? JSONSerialization.jsonObject(with: d2)) as? [String: Any] else {
+                if dbg { appendRepairLog("[repair] ~~ \(path) attempt \(attempt + 1): engine status \(s2)\n") }
+                continue
+            }
+            if !api.hasNoToolCall(m2, toolNames: toolNames, gemma: gemma) {
+                if dbg { appendRepairLog("[repair] ~~ \(path) recovered a tool call on attempt \(attempt + 1)\n") }
+                return (m2, true)
+            }
+            if dbg {
+                let mt = api.assistantText(m2)
+                let mtail = String(mt.suffix(180)).replacingOccurrences(of: "\n", with: "\\n")
+                appendRepairLog("[repair] ~~ \(path) attempt \(attempt + 1): still no tool call (\(mt.count) chars) tail=\(mtail)\n")
+            }
+        }
+        return (message, false)
+    }
+
+    /// Stream one external-engine conversation on `clientFD`: text deltas
+    /// relay live (behind the emitter's holdback), then the repaired final
+    /// message closes the stream. Returns false ONLY when nothing was written
+    /// to the guest yet — the caller falls back to the buffered path, which
+    /// re-sends and shapes the error for the wire.
+    private static func streamConversation(req: Request, payload: [String: Any],
+                                           api: API, pid: UUID,
+                                           ext: ExternalEngine.Config,
+                                           clientFD: Int32) -> Bool {
+        let wire = api.wire
+        let dbg = ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil
+        let emitter = LocalStreamEmitter(fd: clientFD, wire: wire,
+                                         model: payload["model"] as? String ?? "")
+        let t0 = Date()
+        let (chat, status, raw) = ChatStreamClient.send(
+            chatBody: ExternalEngine.chatRequest(from: payload, wire: wire),
+            config: ext) { emitter.textDelta($0) }
+        guard status == 200, let chat else {
+            shipTrace(profileID: pid, model: payload["model"] as? String ?? "?",
+                      path: req.path, status: status,
+                      requestBytes: req.body.count, responseBytes: raw.count,
+                      latencyMs: Date().timeIntervalSince(t0) * 1000,
+                      requestBody: req.body, responseData: raw)
+            if dbg { appendRepairLog("[repair] <- \(req.path) STREAM upstream failed status=\(status) started=\(emitter.headerSent)\n") }
+            return emitter.headerSent   // started → nothing left but to close
+        }
+        let message = ExternalEngine.wireResponse(from: chat, wire: wire)
+        let toolNames = API.toolNames(in: payload)
+        let gemma = (payload["model"] as? String)?.lowercased().contains("gemma") == true
+        // Continuations run buffered — their text is only shown when the
+        // retry actually produced the missing call.
+        let (finalMessage, continued) = resolveStuckPreamble(
+            message: message, payload: payload, api: api, path: req.path,
+            toolNames: toolNames, gemma: gemma,
+            send: { p in externalSend(p, wire: wire, config: ext) })
+        let repaired = api.repairedMessage(finalMessage, toolNames: toolNames, gemma: gemma)
+        emitter.finish(final: repaired, continued: continued)
+        let responseData = (try? JSONSerialization.data(withJSONObject: repaired)) ?? Data()
+        shipTrace(profileID: pid, model: payload["model"] as? String ?? "?",
+                  path: req.path, status: 200,
+                  requestBytes: req.body.count, responseBytes: responseData.count,
+                  latencyMs: Date().timeIntervalSince(t0) * 1000,
+                  requestBody: req.body, responseData: responseData)
+        if dbg { appendRepairLog("[repair] <- \(req.path) STREAM done continued=\(continued)\n") }
+        return true
     }
 
     /// Heuristic: the assistant text ANNOUNCES an imminent action it then didn't
