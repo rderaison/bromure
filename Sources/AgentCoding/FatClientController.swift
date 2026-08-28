@@ -52,6 +52,14 @@ final class RemoteHostController {
     /// silently drifts to another window, so a stale surface (still cached
     /// under the dead index) would keep showing the wrong terminal.
     var onTabsApplied: ((Profile.ID, Set<Int>) -> Void)?
+    /// Fired after every applied /state snapshot — the window controller
+    /// re-attempts the browser-MCP relay dial here, because run-state
+    /// transitions (off → booting) happen between selections and the relay
+    /// must take the guest's browser stream over BEFORE the agent's first
+    /// browser tool call (otherwise the remote services it on its own app,
+    /// which may have no window — the "browser MCP fails until I click the
+    /// globe" report).
+    var onSnapshotApplied: (() -> Void)?
     /// Fat client: show / hide a terminal attached to the remote subscription-
     /// registration throwaway VM, so the user can watch (and complete) a login
     /// whose sign-in URL the provider never surfaces (Codex/ChatGPT). The macOS
@@ -451,7 +459,13 @@ final class RemoteHostController {
         let host = self.host
         pollQueue.async { [weak self] in
             let client = RemoteTransport.client(for: host)
-            let resp = try? client.request("GET", "/state")
+            // Console-presence: report how recently THIS client's user was
+            // active, so the server can route agent browser streams to the
+            // console used last (see ConsolePresence).
+            let resp = try? client.request(
+                "GET", "/state",
+                extraHeaders: [("X-Bromure-Console-Idle-Ms",
+                                String(ConsolePresence.shared.idleMillis()))])
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.polling = false
@@ -567,6 +581,7 @@ final class RemoteHostController {
         }
         // Upgrade to push once we learn the server supports it (idempotent).
         if snapshot["supportsPush"] as? Bool == true { startPushSubscription() }
+        onSnapshotApplied?()
     }
 
     private func applyWorkspaces(_ workspaces: [[String: Any]], vms: [[String: Any]]) {
@@ -1669,6 +1684,15 @@ final class RemoteHostWindow: NSWindow {
         buildLayout()
         buildToolbar()
         showGrid()
+        controller.onSnapshotApplied = { [weak self] in
+            guard let self else { return }
+            // Re-attempt the browser-MCP relay dial for the selected
+            // workspace and any with an open/remembered browser: the
+            // dial is guarded on a live VM, so a workspace selected
+            // while OFF never got its relay when it later booted.
+            if let sel = self.controller.listModel.selectedID { self.ensureBrowserRelay(sel) }
+            for id in self.browserOpen { self.ensureBrowserRelay(id) }
+        }
         controller.onTabsApplied = { [weak self] id, live in
             self?.reconcileSurfaces(for: id, liveWindows: live)
         }

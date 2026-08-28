@@ -47,12 +47,16 @@ final class BrowserMCPVsockBridge: NSObject {
         if let old = remoteFd { Darwin.close(old) }
         remoteFd = fd
         // Redirect existing agent connections to the fat client by dropping them
-        // so the guest shim reconnects and gets spliced (see `adopt`). But NEVER
-        // tear one down mid-handshake — the shim won't re-send initialize/
-        // tools_list, so the agent's browser tools would hang "connecting". A
-        // handshake-complete connection is dropped now (harmless — tools are
-        // already surfaced); one still handshaking self-cancels the instant it
-        // finishes. Cancelled connections remove themselves via onClose.
+        // so the guest shim reconnects and gets spliced (see `adopt`) — but only
+        // when the CLIENT's console was used last (ConsolePresence): a relay
+        // dialed by a background snapshot tick must not steal the browser from
+        // a user actively working at the server. And NEVER tear one down
+        // mid-handshake — the shim won't re-send initialize/tools_list, so the
+        // agent's browser tools would hang "connecting". A handshake-complete
+        // connection is dropped now (harmless — tools are already surfaced);
+        // one still handshaking self-cancels the instant it finishes.
+        // Cancelled connections remove themselves via onClose.
+        guard ConsolePresence.shared.remotePreferred else { return }
         for c in Array(connections.values) {
             if c.handshakeDone { c.cancel() }
             else { c.redirectWhenReady = true }
@@ -65,8 +69,20 @@ final class BrowserMCPVsockBridge: NSObject {
         remoteFd = nil
     }
 
+    /// The user changed seats (ConsolePresence flip): drop every routed
+    /// stream so the guest shims reconnect and re-arbitrate — the browser
+    /// follows the console that was used last, live.
+    func rerouteForConsoleFlip() {
+        for c in Array(connections.values) {
+            if c.handshakeDone { c.cancel() }
+            else { c.redirectWhenReady = true }
+        }
+        for (_, conn) in splicedConns { conn.close() }
+        splicedConns.removeAll()
+    }
+
     private func adopt(_ conn: VZVirtioSocketConnection) {
-        if let rfd = remoteFd {
+        if let rfd = remoteFd, ConsolePresence.shared.remotePreferred {
             // Self-heal: if the fat client's channel hung up (socketpair peer
             // closed) we won't have been told — drop the stale relay and fall
             // through to serving this agent locally again.

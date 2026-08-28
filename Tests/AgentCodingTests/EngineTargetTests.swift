@@ -80,3 +80,20 @@ struct EngineProxyStatsTests {
         #expect(stats.snapshot(engineID: "other") == nil)
     }
 }
+
+@Suite("Console presence arbitration")
+struct ConsolePresenceTests {
+    @Test("Last console used wins; monotonic remote reports; flip fires once")
+    func arbitration() {
+        let p = ConsolePresence()
+        #expect(!p.remotePreferred)          // untouched: local (server) default
+        p.noteRemote(idleMs: 0)              // client active now
+        #expect(p.remotePreferred)
+        p.noteLocal()                        // user back at the server
+        #expect(!p.remotePreferred)
+        p.noteRemote(idleMs: 60_000)         // stale client report (1 min ago)
+        #expect(!p.remotePreferred)          // must not beat fresher local
+        p.noteRemote(idleMs: 0)              // client touched again
+        #expect(p.remotePreferred)
+    }
+}

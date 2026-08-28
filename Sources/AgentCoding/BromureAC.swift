@@ -2165,6 +2165,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         profiles = store.loadAll()
+        // Console-presence arbitration: track local input so agent browser
+        // streams land on the console used last (server window vs a fat
+        // client), and re-route live streams the moment the user changes
+        // seats — the guest shims reconnect and re-arbitrate.
+        ConsolePresence.shared.installLocalMonitor()
+        ConsolePresence.shared.onFlip = { [weak self] in
+            guard let self else { return }
+            for (_, bridge) in self.browserMCPBridges { bridge.rerouteForConsoleFlip() }
+        }
         // Menu-bar item: the persistent surface for reattaching / stopping VMs
         // once all windows close and the app demotes to a background agent.
         setupStatusItem()

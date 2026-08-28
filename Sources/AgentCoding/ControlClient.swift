@@ -58,7 +58,8 @@ struct ControlClient {
     /// surfaces as "Invalid HTTP response from agent".
     @discardableResult
     func request(_ method: String, _ path: String, body: [String: Any]? = nil,
-                 recvTimeoutSeconds: Int = 12) throws -> Response {
+                 recvTimeoutSeconds: Int = 12,
+                 extraHeaders: [(String, String)] = []) throws -> Response {
         guard let fd = dial() else { throw ClientError.agentNotRunning }
         defer { Darwin.close(fd) }
 
@@ -80,6 +81,7 @@ struct ControlClient {
         head += "Content-Type: application/json\r\n"
         head += "Content-Length: \(bodyData.count)\r\n"
         head += "X-Bromure-Gzip: 1\r\n"   // we accept a zlib-compressed response body
+        for (k, v) in extraHeaders { head += "\(k): \(v)\r\n" }
         head += "Connection: close\r\n\r\n"
         var out = Data(head.utf8); out.append(bodyData)
         Self.writeAll(fd, out)

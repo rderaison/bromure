@@ -416,6 +416,15 @@ final class ACAutomationServer {
         // client omits it, so we only ever compress when it's present.
         let acceptGzip = headerBlock.range(of: "x-bromure-gzip: 1", options: .caseInsensitive) != nil
 
+        // Console-presence: a fat client stamps every /state poll with its
+        // user's idle time; the browser-MCP bridge routes agent browser
+        // streams to whichever console was used last.
+        if let r = headerBlock.lowercased().range(of: "x-bromure-console-idle-ms:") {
+            let ms = Int(headerBlock.lowercased()[r.upperBound...]
+                .drop(while: { $0 == " " }).prefix(while: { $0.isNumber })) ?? Int.max / 2
+            ConsolePresence.shared.noteRemote(idleMs: ms)
+        }
+
         var bodyJSON: [String: Any] = [:]
         let bodyBytes = data.count > start ? Array(data[start...]) : []
         if !bodyBytes.isEmpty,
