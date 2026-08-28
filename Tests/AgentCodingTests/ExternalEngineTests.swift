@@ -568,8 +568,13 @@ struct VisionTranslationTests {
                                              vision: true, reasoning: true)
         #expect(yaml.contains("input: [\"text\", \"image\"]"))
         #expect(yaml.contains("reasoning: true"))
+        // A bare `reasoning: true` leaves omp's effort list empty, which
+        // resolves the session thinking level to Off and HIDES the streamed
+        // thinking in the TUI — the thinking block is what unlocks display.
+        #expect(yaml.contains("        thinking:\n          mode: \"effort\"\n          efforts: [\"low\", \"medium\", \"high\"]"))
         let plain = SessionDisk.ompModelsYAML(base: "b", model: "q")
-        #expect(!plain.contains("input:") && !plain.contains("reasoning:"))
+        #expect(!plain.contains("input:") && !plain.contains("reasoning:")
+                && !plain.contains("thinking:"))
     }
 }
 
