@@ -51,9 +51,25 @@ enum ExternalEngine {
             out["tools"] = anthropicTools(payload["tools"])
             if let v = payload["max_tokens"] { out["max_tokens"] = v }
             if let v = payload["stop_sequences"] { out["stop"] = v }
+            // The agent's own thinking config controls upstream reasoning:
+            // Ollama's OpenAI-compat endpoint honors `reasoning_effort`
+            // ("none" disables it entirely — verified live; `think` is
+            // ignored there), and servers without support ignore the field.
+            if let think = payload["thinking"] as? [String: Any] {
+                if (think["type"] as? String) == "disabled" {
+                    out["reasoning_effort"] = "none"
+                } else if let budget = think["budget_tokens"] as? Int {
+                    out["reasoning_effort"] = budget < 4096 ? "low"
+                        : (budget < 16384 ? "medium" : "high")
+                }
+            }
         case .responses:
             if let instr = payload["instructions"] as? String, !instr.isEmpty {
                 msgs.append(["role": "system", "content": instr])
+            }
+            // Responses reasoning config → the same OpenAI-compat knob.
+            if let effort = (payload["reasoning"] as? [String: Any])?["effort"] as? String {
+                out["reasoning_effort"] = effort == "minimal" ? "low" : effort
             }
             if let s = payload["input"] as? String {
                 msgs.append(["role": "user", "content": s])
@@ -212,6 +228,14 @@ enum ExternalEngine {
             return chat   // handled above
         case .messages:
             var content: [[String: Any]] = []
+            // Upstream reasoning (Ollama/vLLM separate it into `reasoning` /
+            // `reasoning_content`) becomes a native thinking block — the
+            // agent renders it collapsed and the user toggles it on demand;
+            // agents never send thinking back, so transcripts don't bloat.
+            if let reasoning = (message["reasoning"] as? String)
+                ?? (message["reasoning_content"] as? String), !reasoning.isEmpty {
+                content.append(["type": "thinking", "thinking": reasoning, "signature": ""])
+            }
             if !text.isEmpty || toolCalls.isEmpty {
                 content.append(["type": "text", "text": text])
             }

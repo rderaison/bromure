@@ -128,6 +128,13 @@ enum ToolCallRepair {
                     "content_block": ["type": "text", "text": ""]])
                 ev("content_block_delta", ["type": "content_block_delta", "index": i,
                     "delta": ["type": "text_delta", "text": b["text"] as? String ?? ""]])
+            } else if type == "thinking" {
+                // Upstream reasoning mapped to a native thinking block — the
+                // agent renders it collapsed and toggles it on demand.
+                ev("content_block_start", ["type": "content_block_start", "index": i,
+                    "content_block": ["type": "thinking", "thinking": "", "signature": ""]])
+                ev("content_block_delta", ["type": "content_block_delta", "index": i,
+                    "delta": ["type": "thinking_delta", "thinking": b["thinking"] as? String ?? ""]])
             } else if type == "tool_use" {
                 ev("content_block_start", ["type": "content_block_start", "index": i,
                     "content_block": ["type": "tool_use", "id": b["id"] as? String ?? "",
