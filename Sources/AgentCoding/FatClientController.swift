@@ -2157,17 +2157,7 @@ final class RemoteHostWindow: NSWindow {
             // its downloads live there, so the RAM-fit gate must use the
             // server's memory and downloads must run server-side (not fill this
             // Mac's disk). Reads observe the mirrored controller live.
-            let ctrl = self.controller
-            let modelBackend = RemoteModelBackend(
-                unifiedMemGB: { [weak ctrl] in ctrl?.serverUnifiedMemGB ?? 0 },
-                state: { [weak ctrl] repo in ctrl?.serverModelStates[repo] },
-                isInstalled: { [weak ctrl] repo in ctrl?.serverInstalledModels.contains(repo) ?? false },
-                download: { [weak ctrl] model in
-                    ctrl?.downloadModel(repo: model.repo,
-                                        totalBytes: Int64(model.downloadGB * 1_000_000_000)) },
-                cancel: { [weak ctrl] repo in ctrl?.cancelModelDownload(repo: repo) },
-                discard: { [weak ctrl] repo in ctrl?.discardModelDownload(repo: repo) },
-                remove: { [weak ctrl] model in ctrl?.removeServerModel(repo: model.repo) })
+            let modelBackend = remoteModelBackend()
             win.contentView = NSHostingView(rootView: ProfileEditorView(
                 profile: profile,
                 isNew: false,
@@ -2358,6 +2348,25 @@ final class RemoteHostWindow: NSWindow {
         presentNewWorkspaceEditor(draft: draft)
     }
 
+    /// The Local Models pane's remote routing: the engine and its downloads
+    /// live on the SERVER, so the RAM-fit gate uses the server's memory and
+    /// installed/download state mirrors /state.localModels. Shared by the
+    /// edit and New Workspace editors — the latter shipping without it was
+    /// why a fresh workspace judged XL models against the CLIENT's RAM.
+    private func remoteModelBackend() -> RemoteModelBackend {
+        let ctrl = self.controller
+        return RemoteModelBackend(
+            unifiedMemGB: { [weak ctrl] in ctrl?.serverUnifiedMemGB ?? 0 },
+            state: { [weak ctrl] repo in ctrl?.serverModelStates[repo] },
+            isInstalled: { [weak ctrl] repo in ctrl?.serverInstalledModels.contains(repo) ?? false },
+            download: { [weak ctrl] model in
+                ctrl?.downloadModel(repo: model.repo,
+                                    totalBytes: Int64(model.downloadGB * 1_000_000_000)) },
+            cancel: { [weak ctrl] repo in ctrl?.cancelModelDownload(repo: repo) },
+            discard: { [weak ctrl] repo in ctrl?.discardModelDownload(repo: repo) },
+            remove: { [weak ctrl] model in ctrl?.removeServerModel(repo: model.repo) })
+    }
+
     private func presentNewWorkspaceEditor(draft: Profile) {
         if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }
         let win = NSWindow(
@@ -2379,7 +2388,8 @@ final class RemoteHostWindow: NSWindow {
                 self?.createWorkspaceFromEditor(edited, generateSSH: generateSSH)
             },
             onCancel: { [weak self] in self?.closeNewWorkspaceWindow() },
-            onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" }))
+            onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
+            localModelsRemoteAny: remoteModelBackend()))
         win.makeKeyAndOrderFront(nil)
         newWorkspaceWindow = win
     }

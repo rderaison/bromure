@@ -885,8 +885,13 @@ struct ProfileEditorView: View {
     /// nothing downloaded.
     private var installedLocalModels: [CatalogModel] {
         #if os(macOS)
-        return CatalogStore.shared.effective().models
-            .filter { CatalogStore.shared.isInstalled(repo: $0.repo) }
+        let models = CatalogStore.shared.effective().models
+        // Fat client: the engine and its models live on the SERVER — gate the
+        // Agents/Fusion local affordances on ITS installs, not this Mac's disk.
+        if let remote = localModelsRemoteAny as? RemoteModelBackend {
+            return models.filter { remote.isInstalled($0.repo) }
+        }
+        return models.filter { CatalogStore.shared.isInstalled(repo: $0.repo) }
         #else
         return []
         #endif
