@@ -110,6 +110,8 @@ One shared per-workspace response — the **When an injection is detected** radi
 
 In **Ask me what to do** mode, a critical dialog titled `Possible <detector> in "<workspace>"` presents the flagged text in a scrollable monospaced text area, with the body: "Bromure flagged content the agent is about to send to the model (from &lt;source&gt;). Review it below — allow it through, or block this request?" The buttons are **Block this request** and **Allow this request**.
 
+The text shown is **only the offending section**, not the whole scanned content: the source-code detector surfaces the single highest-scoring scan window, and the rules-file detector surfaces the region around the signal that fired (with a little context). A flagged `tool_result` or `CLAUDE.md` can run to many pages; showing just the section that tripped the detector puts the suspect instructions in front of you instead of burying them, capped at 4 KB either way.
+
 Your decision is remembered per workspace, source, and content for the rest of the app run, so the same flagged text is not re-prompted every turn — agents resend history constantly, and without this memory a single flagged file would interrupt every subsequent request. The memory is in-memory only; it does not survive an app restart.
 
 When the workspace is driven headless over SSH or the CLI, the same question is rendered as a text prompt inside the workspace's tmux. Only an explicit **Allow this request** lets it through — no answer means block. See [Remote Access](14-remote-access.mdx).
@@ -142,7 +144,7 @@ The window itself — an in-memory ring of roughly the last 5,000 lines, mirrore
 
 ## Guardrails
 
-Prompt-injection detection tries to catch the hijack; [Guardrails](18-glossary.mdx) limits what a hijacked (or merely overenthusiastic) agent can *do*. It is a per-workspace, host-enforced policy engine that classifies every API call the agent makes to a guarded protocol as a **read**, a **write**, or a **destructive** operation, and applies the workspace's mode for that resource. As the pane puts it: Guardrails strips destructive operations from the protocols this agent speaks; it is enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it, and blocked calls return a hard error the agent sees.
+Prompt-injection detection tries to catch the hijack; [Guardrails](18-glossary.mdx) limits what a hijacked (or merely overenthusiastic) agent can *do*. Guardrails has two layers. The **write policies** described in this section form a per-workspace, host-enforced policy engine that classifies every API call the agent makes to a guarded protocol as a **read**, a **write**, or a **destructive** operation, and applies the workspace's mode for that resource. Beneath them sits the **egress firewall** — an ordered, pf-style ruleset over every connection the VM opens (host, IP/CIDR, protocol, port, and per-HTTP-verb for web traffic), enforced both at the virtual switch and in the proxy, with the VM's port-80/443 flows transparently diverted into the proxy so nothing inside the guest can opt out. The firewall's table editor, rule syntax, and the transparent-interception escape hatch are documented in [Guardrails settings](07-settings/guardrails.mdx#the-egress-firewall). As the pane puts it: Guardrails strips destructive operations from the protocols this agent speaks; it is enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it, and blocked calls return a hard error the agent sees.
 
 <p align="center">
   <img src="images/editor-guardrails.en.jpg" width="600" alt="The Guardrails pane of the Edit workspace window, with per-resource mode pickers for Kubernetes, AWS, DigitalOcean, Docker registries, and GitHub, each set to Off with a caption describing its scope" />
@@ -225,5 +227,7 @@ Both systems are configured per workspace in the **Edit workspace** window:
 | **Detect rogue instructions in CLAUDE.md files and similar** | Prompt Injection | Toggle (model download on first enable, ~603 MB) | Off |
 | **When an injection is detected** | Prompt Injection | Radio: **Log but continue** / **Ask me what to do** / **Block unilaterally** (disabled until a detector is on) | Log but continue |
 | **Kubernetes**, **AWS**, **DigitalOcean**, **Docker registries**, **GitHub**, **GitLab**, **Bitbucket**, per-database rows | Guardrails | Picker: **Off** / **Prompt before write** / **Block destructive** / **Read-only** | Prompt before write (new workspaces); Off for pre-existing profiles |
+| **Outbound connections** (egress firewall) | Guardrails | Ordered allow/deny rule table + **Unmatched traffic** default | No rules; unmatched traffic allowed |
+| **Disable transparent interception** | Guardrails | Toggle | Off (interception on) |
 
 The full field-by-field references are [Prompt Injection settings](07-settings/prompt-injection.mdx) and [Guardrails settings](07-settings/guardrails.mdx). Every detection and enforcement outcome is auditable after the fact — see [Tracing & Audit](11-tracing.mdx).

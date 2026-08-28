@@ -1,12 +1,12 @@
 ---
 title: "Local Models"
-description: "Run a coding model on your Mac instead of the cloud: enable on-device inference, pick Local or Hybrid routing, and download MLX models."
+description: "Run a coding model on your Mac instead of the cloud — or on your own vLLM/Ollama server: enable local inference, pick the engine and routing, and download MLX models."
 order: 7.3
 ---
 
 # Local Models
 
-The **Local Models** pane runs a coding model on your Mac itself, so a workspace's agents can answer entirely on-device instead of calling a cloud provider — or fall back to a local model only when the cloud is unreachable. The weights are Apple [MLX](../18-glossary.mdx) builds; the inference engine is bundled with the app, so there is nothing to install beyond downloading a model.
+The **Local Models** pane runs a coding model on your Mac itself — or on an inference server of your own — so a workspace's agents can answer entirely off the cloud, or fall back to a local model only when the cloud is unreachable. With the built-in engine the weights are Apple [MLX](../18-glossary.mdx) builds and there is nothing to install beyond downloading a model; with a custom engine you point the workspace at any OpenAI-compatible server.
 
 Everything on this page has a companion deep-dive: the on-device engine, the tool-call repair layer, the hybrid fallback policy, and the `bromure-cli model` and `bromure-cli vm routing` commands are all in [Local Models](../13-local-models.mdx). This page documents the settings pane.
 
@@ -24,6 +24,15 @@ The master switch, captioned *Run a coding model on this Mac instead of the clou
 - **On** — routing switches to on-device inference and the mode picker and model list appear. Turning it on defaults the mode to **Local**.
 
 Because the workspace's agents run their LLM traffic through the local engine while this is on, enabling it pins every enabled agent's auth mode to **Local model**, and turning it back off restores each agent's previous mode. You do not have to touch the [Agents](agents.mdx) pane by hand.
+
+## Engine
+
+With local models enabled, an **Engine** radio decides where inference runs:
+
+- **Built-in — models run on this Mac.** The bundled in-process MLX engine, and the default. The model catalog below applies.
+- **Custom server — your own vLLM, Ollama, ….** Any OpenAI-compatible server, on this Mac or another machine. A **Server URL** field (e.g. `http://127.0.0.1:11434`) and an optional **API key** appear, plus a **Test Connection** button that probes the server and reports **Connected — N model(s) available** or the server's real error. As the pane's footer puts it: agents keep speaking their native APIs; Bromure translates in between.
+
+With a custom engine, the catalog is replaced by a **Model** section: a free-form **Model id** field (e.g. `qwen3-coder:30b`) plus the list of ids the server reports at `/v1/models` — test the connection to list them, and on Ollama pull the model first. The deep dive is [Using your own engine](../13-local-models.mdx#using-your-own-engine-vllm--ollama).
 
 ## Routing mode
 
@@ -66,7 +75,9 @@ The local models this workspace has selected — the active model, plus any agen
 
 | Setting | Description |
 |---|---|
-| **Enable local models** | Master switch for on-device inference. On sets routing to **Local**; off restores **Cloud**. Default: off (Cloud). |
+| **Enable local models** | Master switch for local inference. On sets routing to **Local**; off restores **Cloud**. Default: off (Cloud). |
+| **Engine** | Radio: **Built-in** (in-process MLX) / **Custom server** (OpenAI-compatible URL + optional API key, with **Test Connection**). Default: Built-in. |
+| **Model id** (custom engine) | The server's own model id, typed or picked from its `/v1/models` list. |
 | **Mode** | Radio: **Local — always on-device** / **Hybrid — cloud, fall back to local**. Default: **Local** when enabled. |
 | **Active model** | Radio dot per row; the one model the workspace serves. Default: none — the first model you download is selected automatically. |
 | **Download / Installed / Remove** | Per-model action. Immediate and global (shared across workspaces); not part of the **Save** transaction. |

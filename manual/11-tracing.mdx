@@ -143,6 +143,28 @@ On close, the proxy appends a chronological transcript after the upstream handsh
 
 Limits keep a chatty session bounded: 1 MB kept per message, 4,096 messages per session, a 64 MB maximum frame, and a 32 MB maximum inflated message; anything past a cap is marked `(truncated, total N bytes)`. Parse failures degrade only the transcript — the live tunnel pumps raw bytes and is never stalled or corrupted by tracing.
 
+## The Security Timeline window
+
+The Trace Inspector answers "what did the agent send?"; the **Security Timeline** (Window menu → **Security Timeline…**) answers "what did Bromure's security engines *decide*?". It is one chronological table — newest first — of every decision the engines made while your workspaces ran:
+
+<p align="center">
+  <img src="images/security-timeline.en.jpg" width="700" alt="The Security Timeline window: a chronological table of Firewall, Guardrails, Credential brokering, Prompt injection, Supply chain, and Credential used rows, each colour-coded green for allowed, red for blocked, or blue for informational" />
+</p>
+
+| Engine | Example rows |
+|---|---|
+| **Credential brokering** | `brm_a1b2… → api.openai.com — swapped in sk-oai_…` (blue); `blocked — exfiltration attempt, VM paused` (red) when a fake credential was caught leaving for a host it was never minted for. |
+| **Firewall** | `evil.example:443 tcp — blocked` — every egress-firewall verdict. |
+| **Supply chain** | `npm left-pad@1.3.0 — blocked — version is 2 days old` and allowed installs alike. |
+| **Guardrails** | `DELETE api.github.com/repos/… — blocked` write-policy enforcements. |
+| **Prompt injection** | Detector hits with the flagged snippet's preview and the action taken. |
+| **Credential used** | SSH signatures and AWS SigV4 signings performed by the host on the agent's behalf. |
+| **Upstream TLS** | Upstream certificates the host refused to trust. |
+
+Rows are colour-coded by outcome — green for allowed, red for blocked, blue for informational transformations — and the toolbar filters by engine or free text. The timeline is an in-memory "what just happened" view (capped at 5,000 rows), not an audit store: for durable evidence use the session traces, which outlive the app run and are encrypted at rest.
+
+The engines all run on the host, so when a [remote client](14-remote-access.mdx) mirrors this Mac the timeline mirrors too: the host ships its recent decisions inside the state stream and the client's Security Timeline window shows the same rows.
+
 ## The trace CLI
 
 The `bromure-cli trace` command group gives you the same trace data in the terminal. It is a thin client: it talks to the running app over the local [control socket](18-glossary.mdx), so the GUI app must be running (the [rich client](14-remote-access.mdx) tunnels the identical protocol over SSH to reach a remote instance).
@@ -189,6 +211,9 @@ On an enrolled Mac, sessions stream structured [cloud events](18-glossary.mdx) t
 - `command.run` — the shell command, capped at 500 characters.
 - `credential.token_swap` — one per on-wire swap, previews only.
 - `prompt_injection.detection` — forwarded when a detector fires, carrying the whole flagged snippet (capped at 20 KB), unlike the local Security Log's 160-character preview.
+- `egress.firewall` — one per firewall verdict: host, port, protocol, and the action taken.
+- `credential.exfiltration` — a fake credential was observed leaving the VM for a host outside its scope (previews and hosts only, never token bytes).
+- Detailed HTTP request logs — enrolled installs can additionally stream per-request HTTP metadata from the transparent interception layer, so an organization sees the workspace's outbound HTTP surface, not just its AI traffic.
 
 Only the newest assistant turn is walked, so resent history is never double-counted, and **raw prompts are never emitted** — the telemetry answers "what did the AI *do*", not "what did the user *ask*".
 

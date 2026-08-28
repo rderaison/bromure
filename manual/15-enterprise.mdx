@@ -21,20 +21,19 @@ Neither depends on the other. You can enroll without ever using the rich client,
 
 ## Enrolling with Bromure Enterprise Manager
 
-Enrollment is code-based. An administrator mints a single-use, six-word enrollment code on your user's detail page in bromure.io, scoped to the app `agentic-coding`. You paste that code into the app (or the CLI), and the Mac registers itself as an *install* of the workspace.
+Enrollment now leads with a browser sign-in. The enrollment sheet (**Bromure Agentic Coding** app-name menu → **Log in to bromure.io…**, directly under **Check for Updates…**) opens on a prominent **Log in to bromure.io** button: clicking it sends you to bromure.io in your browser, you sign in with your account, and the site hands the app its registration through a `bromure://enroll` deep link — no code to paste.
 
-### From the app
+The code-based path still exists for administrator-driven provisioning, collapsed beneath the sign-in button under "If your administrator gave you an enrollment code, enter it here":
 
-1. Get a six-word enrollment code from your administrator.
-2. Open **Bromure Agentic Coding** (the app-name menu) → **Enroll in bromure.io…** — the item sits directly under **Check for Updates…**. A window titled **bromure.io Enrollment** opens.
-3. Paste the code into the **Enrollment Code** field (placeholder: `six-word-enrollment-code`).
-4. Optionally edit **Device Name** (it defaults to this Mac's name; help text: "Shown to your administrator so they can recognize this Mac.").
-5. Optionally expand **Advanced** and set **Server URL (optional)** for a self-hosted or staging server.
-6. Click **Enroll** (Return) or **Cancel** (Esc).
+1. Get a single-use, six-word enrollment code from your administrator (minted on your user's detail page in bromure.io, scoped to the app `agentic-coding`).
+2. Expand the code section and paste it into the **Enrollment Code** field (placeholder: `six-word-enrollment-code`).
+3. Optionally edit **Device Name** (it defaults to this Mac's name; help text: "Shown to your administrator so they can recognize this Mac.").
+4. Optionally expand **Advanced** and set **Server URL (optional)** for a self-hosted or staging server.
+5. Click **Enroll with code**.
 
 The sheet states plainly what enrolling turns on: it "sends session metadata (tools, files, commands, token usage) to your workspace so admins can review activity. Workspaces in private mode never stream." On success the install appears on the administrator's `/agentic-coding/installs` page.
 
-> **Note:** Some in-app hint text still reads "Open Window → Enroll in bromure.io…", but the item actually lives in the application (app-name) menu — that is the authoritative location. A code minted for a different Bromure app is rejected with **Code was issued for app '…', expected 'agentic-coding'.**, and enrolling a second time fails with **Bromure Agentic Coding is already enrolled.**
+> **Note:** A code minted for a different Bromure app is rejected with **Code was issued for app '…', expected 'agentic-coding'.**, and enrolling a second time fails with **Bromure Agentic Coding is already enrolled.**
 
 ### From the CLI
 
@@ -94,6 +93,9 @@ Enrolled, non-private sessions stream structured [cloud events](18-glossary.mdx)
 | `supply_chain.fetch` | Ecosystem, package, version, request kind, outcome, and reason. |
 | `vm.disk_reset` | The reason and the base-image versions involved. |
 | `prompt_injection.detection` | Detector, method, action, host, source, score, signals, tool-use id, and the whole flagged snippet (up to 20,000 characters). |
+| `egress.firewall` | One event per [egress-firewall](07-settings/guardrails.mdx#the-egress-firewall) verdict: host, port, protocol, and the action taken. |
+| `credential.exfiltration` | The compromise detector caught a fake credential leaving the VM for a host outside its scope — credential name, declared and observed hosts, previews only. |
+| Detailed HTTP logs | Per-request metadata from the transparent interception layer (method, host, path, status, sizes), giving admins the workspace's outbound HTTP surface beyond its AI traffic. |
 
 Streaming state is visible in every session window and mirrored in the fleet reporting an admin sees.
 

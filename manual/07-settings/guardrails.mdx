@@ -1,6 +1,6 @@
 ---
 title: "Guardrails"
-description: "Per-resource policies that strip destructive operations from the agent's infrastructure traffic."
+description: "Per-resource policies that strip destructive operations from the agent's infrastructure traffic, plus the per-workspace egress firewall."
 order: 7.10
 ---
 
@@ -9,7 +9,7 @@ order: 7.10
 [Guardrails](../18-glossary.mdx) is Bromure Agentic Coding's host-side control over how a workspace's credentials may be used. As the pane itself puts it: Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent in the VM can't bypass it. Only credentials you've configured appear here.
 
 <p align="center">
-  <img src="../images/editor-guardrails.en.jpg" width="600" alt="The Guardrails pane of the workspace settings editor, showing one row per configured credential with an ask-before-use checkbox and, where applicable, an inline write-policy picker" />
+  <img src="../images/editor-guardrails.en.jpg" width="600" alt="The Guardrails pane of the workspace settings editor: a per-credential row with its ask-before-use checkbox, then the Outbound connections egress-firewall section with its Unmatched traffic Allow/Deny control, Add rule button, pf-format disclosure, and the Disable transparent interception toggle" />
 </p>
 
 The pane shows **one row per configured credential**, in the same order the [Credentials](credentials.mdx) pane lists them. Each row shows the credential's title and host(s) and carries two controls:
@@ -90,6 +90,43 @@ When the workspace is driven headless over SSH or the CLI, the same four choices
 
 > **Note:** Guardrails write-grants are not listed in any window. The **Credential Approvals** window (Window menu → **Credential Approvals…**) shows credential-consent decisions — the **Ask before use** grants — only; a write-policy grant expires on its own clock or at session teardown.
 
+## The egress firewall
+
+Below the credential rows, the pane hosts the workspace's **Outbound connections** firewall: an ordered rule table that governs which connections the VM may open at all — any protocol, any destination, not just the services Guardrails classifies. Rules are matched top to bottom, first match wins, and a segmented **Unmatched traffic** control picks the default for anything no rule matches: **Allow** (the default for new workspaces) or **Deny** for a locked-down, allow-list posture.
+
+Each rule has five parts:
+
+| Column | Values | Meaning |
+|---|---|---|
+| **Action** | `allow` / `deny` | What happens to a matching flow. |
+| **Proto** | `tcp` / `udp` / `web` / `any` | `web` is HTTP(S)-over-TCP — the one protocol whose rules can also restrict request methods. |
+| **Host / CIDR** | `any`, a hostname, or an IPv4 CIDR | Hostnames suffix-match: `example.com` covers the apex and every subdomain; `*.example.com` covers subdomains only. A bare IP is a /32. |
+| **Ports** | `any`, a port, a range (`8000-8999`), or a list | Empty means any port. |
+| **Methods** | HTTP verbs, `web` rules only | With `allow`, an allowlist (`GET,POST` — only those verbs pass); with `deny`, a blocklist (`PUT,DELETE` — those verbs are refused, everything else passes). `read-only` is shorthand for GET/HEAD/OPTIONS. |
+
+A disclosure at the bottom shows the same ruleset in its canonical **pf format** — one rule per line, ending in `default allow` or `default deny` — which is how the rules are stored and what the CLI and managed profiles carry:
+
+```
+allow tcp api.github.com:443
+allow web api.example.com GET,POST     # only these verbs reach the site
+deny  web api.internal PUT,DELETE      # block these verbs, allow the rest
+deny  udp any:53
+deny  any 10.0.0.0/8
+default deny
+```
+
+Enforcement is host-side and layered, so a compromised agent cannot route around it: the virtual network switch applies the rules to every flow by destination IP and DNS-snooped hostname (all protocols, including plain TCP and UDP), and the MiTM proxy applies them again by TLS server name and — for `web` rules — by individual HTTP method. The method dimension is what lets a workspace *read* an API it is not allowed to *write*: `allow web api.example.com GET,POST` gives the agent queries without mutations, at the wire, regardless of what tool inside the VM makes the request.
+
+Rule edits **apply to running sessions immediately** — saving the workspace refreshes the live policy without a reboot, including for headless sessions. Every verdict is recorded as a Firewall row in the [Security Timeline](../11-tracing.mdx) window, and on enrolled installs as an `egress.firewall` event in the organization's stream.
+
+> **Note:** Local inference is exempt by construction: an `allow` rule for the on-host inference endpoint (`bromure.llm`) is prepended ahead of your rules, so even `default deny` cannot cut agents off from [Local Models](local-models.mdx). That traffic never leaves your Mac.
+
+## Transparent interception
+
+The firewall would be advisory if the VM could simply ignore the proxy, so it no longer can: the virtual switch **transparently diverts the VM's port-80 and port-443 flows into the host proxy** — no environment variables required, nothing the guest can unset. Plain HTTP on port 80 is intercepted and inspected the same way HTTPS is. This is on by default for every workspace.
+
+The escape hatch is the **Disable transparent interception** toggle beneath the rule table. Turning it on stops the switch from diverting :80/:443, so Guardrails and the firewall's `web` rules only see traffic that cooperatively uses the proxy environment variables — use it only for a workspace that genuinely breaks under interception (for example, heavy certificate pinning not covered by the built-in passthrough list), and treat the firewall as advisory while it is on.
+
 ## What the agent sees when a call is blocked
 
 Blocked calls return a protocol-appropriate 403-style error body — a Kubernetes `Status` JSON, an AWS `AccessDeniedException`, a registry `DENIED` payload — whose message ends "blocked by Bromure Guardrails". The agent sees a clean, ordinary API failure it can report, rather than a hung connection. (Supply-chain blocks use HTTP 451 instead, precisely so the two are distinguishable at a glance — see [Supply Chain](supply-chain.mdx).)
@@ -98,4 +135,4 @@ Blocked calls return a protocol-appropriate 403-style error body — a Kubernete
 
 - **Git force-push** cannot be distinguished from a normal push on the wire, so **Block destructive** does not block it — only **Read-only** and **Prompt before write** gate pushes. Explicit deletions through the forge REST APIs are still caught.
 - Kubernetes and container-registry policies only apply to hosts derived from the workspace's kubeconfigs and configured registries; database policies need the endpoint's host set under Credentials. A guard with nothing to scope to filters nothing (the pane warns you inline).
-- Guardrails covers the services listed above. Arbitrary HTTPS traffic to other hosts is not classified — for package downloads see [Supply Chain](supply-chain.mdx), and for the agent's AI traffic see [Prompt Injection](prompt-injection.mdx).
+- The write policies cover the services listed above; traffic to other hosts is governed by the egress firewall's host/port/method rules rather than semantic classification. For package downloads see [Supply Chain](supply-chain.mdx), and for the agent's AI traffic see [Prompt Injection](prompt-injection.mdx).

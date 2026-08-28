@@ -75,12 +75,13 @@ The browser turns a stopped workspace's disk into something you can inspect and 
 
 ## Developer defaults
 
-Two low-level knobs are read from the app's UserDefaults domain, `io.bromure.agentic-coding`. Set them with `defaults write` while the app is not running, then relaunch:
+A few low-level knobs are read from the app's UserDefaults domain, `io.bromure.agentic-coding`. Set them with `defaults write` while the app is not running, then relaunch:
 
 | Key | Effect | Default |
 | --- | --- | --- |
 | `vm.homeImageGB` | Apparent (guest-visible) size, in GiB, of a **newly created** ext4 home image. The host file is sparse, so this costs nothing up front. Clamped to 8–1024. | `64` |
 | `vm.mtu` | MTU clamp for a workspace VM's primary NIC, written into the guest on each boot. The default of `1280` is VPN-safe (WireGuard, IKEv2, and corporate PMTU paths). | `1280` |
+| `terminal.allowGraphics` | Re-enables in-terminal image rendering (kitty graphics protocol) from the guest. Off by default because it means the host decoding guest-supplied image bytes — and the same channel could draw fake UI over the terminal. Turn it on only if you want agents to render images inline and accept that risk. | `NO` |
 
 For example, to make future workspaces' home images appear as 128 GiB:
 

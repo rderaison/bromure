@@ -86,6 +86,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 ## E
 
+**Egress firewall** — The per-workspace, ordered, pf-style ruleset over every connection the VM opens — by host, IP/CIDR, protocol, port, and (for `web` rules) HTTP method — enforced at the virtual switch and again in the proxy, with a default-allow or default-deny for unmatched traffic. See [Guardrails settings](07-settings/guardrails.mdx#the-egress-firewall).
+
 **Enrollment code** — A six-word code (for example `bromure-cli enroll --code acid-aloe-arson-bench-cat-drum`) that binds an install to an organization, issues its mTLS leaf certificate, and enables managed profiles and the cloud event stream. See [Enterprise](15-enterprise.mdx).
 
 **Enrollment health** — The server-side acceptance state of an install — OK, "token rejected" (re-enroll), or "revoked" (an admin killed it) — shown as a banner in the enrollment status panel. See [Enterprise](15-enterprise.mdx).
@@ -95,6 +97,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 **Fake token** — A structure-preserving stand-in (for example `brm_…`, `sk-ant-api03-brm-…`, `xai-brm-…`) written into the VM in place of a real credential. It is deterministically derived from the real value and a per-install salt, so it does not rotate between sessions, and it is useless anywhere except through the proxy. Also called a placeholder or decoy credential. See [Credentials](08-credentials.mdx).
 
 **File-explorer pane** — The read-only repository tree with diff and preview, fed by git commands run inside the guest. See [Sessions](06-sessions.mdx).
+
+**External engine** — A user-supplied OpenAI-compatible inference server (vLLM, Ollama, LM Studio, `llama-server`) that a workspace's Local Models can target instead of the built-in MLX engine. See [Local Models](13-local-models.mdx#using-your-own-engine-vllm--ollama).
 
 **Fusion** — The multi-model feature in which several models answer, a judge synthesizes a final answer, and the whole exchange is applied on the wire at the proxy boundary. See [Fusion](12-fusion.mdx).
 
@@ -186,6 +190,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **OSV** — The Open Source Vulnerabilities database (osv.dev), a free, no-key aggregation of the GitHub Advisory Database, PyPI advisories, Go's vulnerability database, RubySec, and others, queried per package version. See [Supply-Chain Protection](09-supply-chain.mdx).
 
+**Oh My Pi (omp)** — The fifth bundled coding agent: provider-agnostic (Anthropic by default; OpenAI, xAI, z.ai, or any OpenAI-compatible endpoint), API-key auth only. See [Agents settings](07-settings/agents.mdx).
+
 **Outbox** — The per-launch, writable virtiofs directory the guest drops one-shot event files into — a URL for the host to open, tab-closed events, and similar — separate from the read-only meta share. See [Concepts](04-concepts.mdx).
 
 ## P
@@ -250,6 +256,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Security Log** — The live viewer (Window → Security Log…) of every security event the proxy emits — supply-chain checks and blocks, prompt-injection detections, Delpi re-routes, and routing, Fusion, and remote events — kept in a roughly 5,000-line in-memory ring buffer and mirrored to stderr. See [Supply-Chain Protection](09-supply-chain.mdx).
 
+**Security Timeline** — The chronological, filterable table (Window → Security Timeline…) of every decision the security engines made — credential swaps, firewall verdicts, package checks, guardrail enforcements, prompt-injection scans, credential uses — colour-coded by outcome and mirrored to rich clients. See [Tracing](11-tracing.mdx#the-security-timeline-window).
+
 **Session** — One continuous run of a workspace's VM, from start or resume until it shuts down or suspends. Some state is deliberately session-scoped, such as credential approval grants and denials. See [Sessions](06-sessions.mdx).
 
 **SigV4** — AWS Signature Version 4 request signing, which Bromure re-computes host-side with the real credentials because AWS signatures cannot be swapped in a header. See [Credentials](08-credentials.mdx).
@@ -279,6 +287,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 ## T
 
 **Tab** — A tmux window inside the workspace VM's single tmux session. tmux is authoritative; the host mirrors its roster as the tab bar. See [Sessions](06-sessions.mdx).
+
+**Transparent interception** — The virtual switch diverting a VM's port-80/443 flows into the host proxy with no cooperation from the guest — on by default, so the firewall, guardrails, and scanning apply to all web traffic, not just traffic that honors proxy environment variables. See [Guardrails settings](07-settings/guardrails.mdx#transparent-interception).
 
 **Token swap** — The proxy operation that replaces a fake token in an outbound request's header (and, for opted-in entries, body) with the real value, scoped to the credential's destination host. See [Credentials](08-credentials.mdx).
 

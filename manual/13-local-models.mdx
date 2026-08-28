@@ -14,7 +14,7 @@ Local inference is a per-workspace choice, orthogonal to [Fusion](12-fusion.mdx)
 
 ## Where inference runs
 
-The engine is built into the app; there is nothing to install, no Python environment, and no external server such as Ollama, LM Studio, or a self-hosted vLLM instance to point at. When a session needs on-device inference, the app starts a private MLX engine and wires the guest agent to it.
+The engine is built into the app; there is nothing to install, no Python environment, and no external server to configure. When a session needs on-device inference, the app starts a private MLX engine and wires the guest agent to it. If you already run your own inference server — Ollama, vLLM, LM Studio, `llama-server`, or anything OpenAI-compatible, on this Mac or another machine — you can point a workspace at it instead of the built-in engine; see [Using your own engine](#using-your-own-engine-vllm--ollama) below. Everything in this chapter applies to both unless noted: the same wire boundary, the same repair pipeline, the same tracing.
 
 ### The engine child
 
@@ -28,7 +28,7 @@ While the engine is warming, session windows show a status pill reading **Starti
 
 In-VM agents never talk to the engine directly. They target the synthetic host `https://bromure.llm` — a name with no real DNS — and the host-side MITM proxy intercepts it, applies the same [prompt-injection scanning](10-prompt-injection.mdx) and [trace capture](11-tracing.mdx) it applies to cloud traffic, and forwards the request to the on-host engine. Local inference is therefore never a blind spot: it crosses the same wire boundary and lands in the same audit trail as a call to Anthropic.
 
-Agents are pinned to a sentinel model name, `bromure-local`, which the host remaps to the workspace's currently-active model. Switching the active model is a host-side remap with no agent restart — the agent keeps asking for `bromure-local` and simply gets a different model behind it.
+Agents are configured with the **real model id** the engine serves — the catalog repo for the built-in engine (say `mlx-community/Qwen3-8B-4bit-DWQ`), or your server's own id verbatim (say `qwen3:32b`) for an external engine. Agents key context sizing, capability lookups, and their UI off the model name, so they see the truth. Live model switching still needs no agent restart: a running agent's environment is frozen at launch, so the proxy keeps a per-workspace history of superseded model names and rewrites exactly those to the currently-active model until the agent restarts. (The old `bromure-local` sentinel from earlier releases is remapped the same way for old guests.)
 
 > **Note:** A model whose architecture the MLX engine does not yet support fails with a clear, permanent error — *"its architecture … isn't supported by the on-device engine yet — pick a different model"* — returned as a client error so the agent does not retry it in a loop.
 
@@ -162,9 +162,33 @@ Three knobs are exposed, and only through the command line against a running VM 
 
 The health-gate internals (the 8-second EWMA threshold, the failure window, and the recovery-probe count) are fixed and not user-tunable.
 
+## Using your own engine (vLLM / Ollama)
+
+The **Local Models** pane's **Engine** picker selects where local inference actually runs:
+
+- **Built-in** (the default) — the supervised in-process MLX engine described above.
+- **Custom server** — any OpenAI-compatible engine: vLLM, Ollama, LM Studio, `llama-server`, on this Mac or elsewhere on your network. Paste the server's base URL (the scheme defaults to `http://` and a pasted `/v1` suffix is stripped) and, if the server requires one, an API key.
+
+A custom engine is the escape hatch for models whose architecture the built-in MLX engine does not implement yet, and for teams that share one beefy inference box. With a custom engine selected:
+
+- The model list comes from the server's own `/v1/models`, and the workspace's active model id is the **server's id verbatim** (e.g. `qwen3:32b`) — no catalog download involved.
+- A status badge probes the server when you configure it — **Checking…**, then **Ready** or **Failed** with the server's real error message.
+- No engine child is spawned for the workspace; the host relays through the same repair proxy, translating each guest wire (Anthropic messages, OpenAI chat, OpenAI responses) to `/v1/chat/completions` and back into the wire's native shape, tool blocks included.
+- The model's context window, vision support, and reasoning support are probed from the server and advertised to the agents.
+
+Everything else — `bromure.llm` interception, prompt-injection scanning, tracing, the egress-firewall exemption, tool-call repair, Fusion legs and judge — behaves identically to the built-in engine.
+
+## Streaming, thinking, and vision
+
+Local turns **stream token by token** to the agent, for both engines: the proxy relays deltas as they are generated while still holding back just enough of the tail to strip a leaked tool call the agent should never see, then finishes the turn with the repaired result. On a slow model you watch the answer grow instead of staring at a silent prompt.
+
+Reasoning models stream their **thinking as native thinking blocks** on every wire — Claude-style agents render it as collapsible thinking, OpenAI-compatible agents receive `reasoning` deltas — so you can watch a local Qwen or DeepSeek reason in real time, exactly like a cloud reasoning model. The thinking never re-enters the transcript, so context is not bloated by it. And vision-capable local models (probed from the server, or flagged in the catalog) accept image input: the proxy translates image blocks between wire formats so screenshots and diagrams work with a local model the same way they do against the cloud.
+
+> **Note:** The first turn of a session pays the model's *prefill* of the agent's full prompt — often tens of thousands of tokens of system prompt and tool schemas — before the first token can stream. On an 8B model this can take a minute or more; later turns in the same session reuse the engine's KV cache and start almost immediately.
+
 ## Local models as an agent backend
 
-Routing is a workspace-wide axis, but you can also point a single agent at the local engine, leaving the rest of the workspace on the cloud. In the workspace's [Agents](07-settings/agents.mdx) tab, each agent — Claude Code, Codex, or Grok — has an auth-mode picker whose options include **Local model**. Choose it, pick an installed model, and that agent runs entirely against the on-device engine with dummy cloud keys the engine ignores; the MITM applies the same protections as it does to cloud traffic.
+Routing is a workspace-wide axis, but you can also point a single agent at the local engine, leaving the rest of the workspace on the cloud. In the workspace's [Agents](07-settings/agents.mdx) tab, each agent — Claude Code, Codex, Grok Build, Kimi Code, or Oh My Pi — has an auth-mode picker whose options include **Local model**. Choose it, pick an installed model, and that agent runs entirely against the on-device engine with dummy cloud keys the engine ignores; the MITM applies the same protections as it does to cloud traffic.
 
 This makes mixed workspaces possible — for example, Claude Code on a subscription alongside Codex on a local model. Profile-wide Local routing never hijacks a cloud agent's real traffic, and per-agent Local mode never leaks to the others. When you toggle local inference on or off in the **Local Models** pane, the app keeps each agent's auth mode in step automatically.
 
@@ -172,7 +196,7 @@ This makes mixed workspaces possible — for example, Claude Code on a subscript
 
 A local model is also a valid participant in [Fusion](12-fusion.mdx), the multi-model synthesis feature, and it can play either of two roles there:
 
-- **As a leg.** Tick **Local model** under *Models to fuse* and pick an installed model; its draft answer joins the panel alongside Claude, Codex, and Grok. Because it runs on your Mac, it is a capable extra leg at zero marginal cost.
+- **As a leg.** Tick **Local model** under *Models to fuse* and pick an installed model; its draft answer joins the panel alongside the cloud legs (Claude, Codex, Grok). Because it runs on your Mac, it is a capable extra leg at zero marginal cost.
 - **As the judge.** Choose **Local** as the Fusion judge provider to run the analysis-and-synthesis stage entirely on-device, keeping the whole judging step off the cloud.
 
 Both roles need at least one downloaded local model; until then, the corresponding rows in the Fusion pane are greyed out with a hint to download one here first. See [Fusion](12-fusion.mdx) for the full panel workflow.
@@ -203,9 +227,9 @@ Two windows under the **Window** menu let you watch on-device inference without 
 
 ### Inference Metrics
 
-**Window** → **Inference Metrics…** opens a live telemetry panel (window title **Inference Metrics**), headed with the label **Local inference** and the engine's loopback address. It parses the engine's Prometheus metrics into cards — **Decode tok/s**, **Prefill tok/s**, **Running**, **Waiting**, **In flight**, **Avg latency**, **Cache hit**, **Metal mem**, **Gen tokens**, and **Prompt tokens** — plus a **Loaded models** list and an **All metrics** disclosure with the raw table.
+**Window** → **Inference Metrics…** opens a live telemetry panel (window title **Inference Metrics**) with **one tab per engine in use** — the built-in engine plus every custom server your workspaces point at. The built-in tab is headed **Local inference** and the engine's loopback address. It parses the engine's Prometheus metrics into cards — **Decode tok/s**, **Prefill tok/s**, **Running**, **Waiting**, **In flight**, **Avg latency**, **Cache hit**, **Metal mem**, **Gen tokens**, and **Prompt tokens** — plus a **Loaded models** list and an **All metrics** disclosure with the raw table.
 
-The window polls every 5 seconds, and only while it is open. Decode and prefill rates are lifetime cumulative ratios by design, so they read as stable averages rather than jumpy per-second deltas. When the engine is down the panel shows *engine not reachable*, and during a long generation it may briefly show *engine busy (timed out)*.
+The window polls every 5 seconds, and only while it is open. Decode and prefill rates are lifetime cumulative ratios by design, so they read as stable averages rather than jumpy per-second deltas. When the engine is down the panel shows *engine not reachable*, and during a long generation it may briefly show *engine busy (timed out)*. External engines that expose no Prometheus endpoint (Ollama, for one) still get live cards: the proxy measures token counts, time-to-first-byte, and end-to-end latency from the traffic it relays.
 
 ### Inference Engine Log
 
@@ -230,7 +254,7 @@ bromure-cli model rm <catalog-id | org/repo>
 | `model catalog` | Lists curated models with fit and tool-calling badges and an installed checkmark, and prints your Mac's unified memory. It refreshes the live catalog first (non-fatal if that fails). `--all` includes models that won't fit this Mac; `--offline` skips the refresh and uses the bundled and cached catalog only. |
 | `model pull` | Downloads a model by catalog id or any Hugging Face MLX repo. It validates that the repo is MLX (rejecting GGUF), preflights disk space, then shows a progress bar driven by real bytes on disk. |
 | `model ls` | Lists installed models with their disk usage and repo. |
-| `model use` | Sets the active local model for a running VM's workspace — a host-side remap of the `bromure-local` sentinel, with no agent restart. |
+| `model use` | Sets the active local model for a running VM's workspace — a host-side remap of superseded model names, with no agent restart. |
 | `model rm` | Removes an installed model's weights from disk. |
 
 Routing and hybrid policy for a running VM:

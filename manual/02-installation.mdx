@@ -95,7 +95,7 @@ The preferred path downloads a prebuilt image published weekly to `https://dl.br
 
 ### Postinstall steps: the recommended packages
 
-The published image must be legally redistributable, so it contains strictly free software (Node.js, docker, kitty, gh, glab, kubectl, doctl, awscli, azure-cli, and more are baked in). Everything non-free is declared as signed [postinstall steps](18-glossary.mdx) in the catalog and installed on *your* machine, into *your* copy of the image. The baseline steps at version 4.3.0 are:
+The published image must be legally redistributable, so it contains strictly free software (Node.js, docker, kitty, gh, glab, kubectl, doctl, awscli, azure-cli, and more are baked in). Everything non-free is declared as signed [postinstall steps](18-glossary.mdx) in the catalog and installed on *your* machine, into *your* copy of the image. The baseline steps at version 4.6.0 are:
 
 | Seq | Step | Publisher | How it installs |
 |---|---|---|---|
@@ -185,7 +185,7 @@ The `bromure-cli info` command prints the installed image's version stamp, its l
 
 ### Version stamps and dot-revisions
 
-The installed image records its version in `base.version`. The *major* part comes from the version constant bundled in the app (`200` at version 4.3.0); any rebuild, re-download, or amendment at the same major appends a [dot-revision](18-glossary.mdx) (`200` → `200.1` → `200.2`). The sidecar `image-state.json` records where the image came from and which postinstall step UUIDs have been applied.
+The installed image records its version in `base.version`. The *major* part comes from the version constant bundled in the app (`200` at version 4.3.0, unchanged through 4.6.0); any rebuild, re-download, or amendment at the same major appends a [dot-revision](18-glossary.mdx) (`200` → `200.1` → `200.2`). The sidecar `image-state.json` records where the image came from and which postinstall step UUIDs have been applied.
 
 Two comparisons use these stamps:
 

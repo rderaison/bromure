@@ -32,10 +32,10 @@ Don't click **Create** yet — two panes are worth a visit first.
 
 ## Choose an agent and authentication
 
-3. Click **Agents** in the editor's category sidebar. The pane shows one card per supported agent — **Claude Code**, **Codex**, and **Grok Build** — each with an enable switch. Claude Code is enabled and carries the orange **Primary** pill out of the box: the primary agent is the one that auto-launches in the session's first tab. Other enabled agents are installed and authenticated too, but you start them yourself from a new tab.
+3. Click **Agents** in the editor's category sidebar. The pane shows one card per supported agent — **Claude Code**, **Codex**, **Grok Build**, **Kimi Code**, and **Oh My Pi** — each with an enable switch. Claude Code is enabled and carries the orange **Primary** pill out of the box: the primary agent is the one that auto-launches in the session's first tab. Other enabled agents are installed and authenticated too, but you start them yourself from a new tab.
 
 <p align="center">
-  <img src="images/editor-agents.en.jpg" width="600" alt="The Agents pane of the workspace editor, showing the Claude Code card with its Primary pill, the four authentication modes, the Anthropic API key field, and the disabled Codex and Grok Build cards" />
+  <img src="images/editor-agents.en.jpg" width="600" alt="The Agents pane of the workspace editor, showing the Claude Code card with its Primary pill, the four authentication modes, the Anthropic API key field, and the other agents' collapsed cards" />
 </p>
 
    Inside the Claude Code card you see four authentication modes: **API token**, **Subscription (interactive login)** with a **Register…** link, **Bedrock (AWS)**, and **Local model** (grayed out with "— download a model in Local Models" until a local model is installed). Pick one of the first two:
@@ -44,7 +44,7 @@ Don't click **Create** yet — two panes are worth a visit first.
 
 5. **If you have a Claude subscription:** select **Subscription (interactive login)** — the factory default — and click **Register…**. Bromure boots a temporary, throwaway VM with no access to your folders or credentials, runs the real Claude login inside it, and opens the provider's sign-in page in your Mac's default browser. Sign in there; you have a few minutes before the flow times out. On success the captured tokens are stored encrypted on the host, the throwaway VM is destroyed, and the app asks whether to share the registration with **Every workspace** or **Just this workspace**. Once registered, the card shows a green seal plus **Re-register…** and **Forget** controls. Your workspace VMs never perform OAuth themselves and never hold the real tokens — the host injects them on the wire and handles refresh.
 
-6. That is all the Agents pane needs for a first session. (Enabling **Codex** or **Grok Build** alongside works the same way — each card gets its own auth mode — but one agent is plenty today.)
+6. That is all the Agents pane needs for a first session. (Enabling **Codex**, **Grok Build**, **Kimi Code**, or **Oh My Pi** alongside works the same way — each card gets its own auth mode — but one agent is plenty today.)
 
 ## Share a project folder
 

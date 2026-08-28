@@ -6,9 +6,9 @@ order: 1
 
 # Introduction
 
-Bromure Agentic Coding is a macOS application that runs AI coding agents — Claude Code, Codex CLI, Grok CLI, and ordinary shell tooling — inside a hardware-virtualized Linux VM on your own Mac, built on Apple's Virtualization.framework. The agent gets a full, persistent Ubuntu development environment; your real credentials never enter it. Everything the agent sends to the outside world passes through a single host-side gateway where isolation, credential protection, supply-chain scanning, prompt-injection detection, and audit tracing are all enforced — a boundary the agent cannot reach around.
+Bromure Agentic Coding is a macOS application that runs AI coding agents — Claude Code, Codex CLI, Grok CLI, Kimi Code, Oh My Pi, and ordinary shell tooling — inside a hardware-virtualized Linux VM on your own Mac, built on Apple's Virtualization.framework. The agent gets a full, persistent Ubuntu development environment; your real credentials never enter it. Everything the agent sends to the outside world passes through a single host-side gateway where isolation, credential protection, supply-chain scanning, prompt-injection detection, and audit tracing are all enforced — a boundary the agent cannot reach around.
 
-This manual documents Bromure Agentic Coding 4.3.0. The executable is `bromure-cli`, the bundle ID is `io.bromure.agentic-coding`, and the app requires macOS 14 (Sonoma) or later on Apple Silicon. Full product details, screenshots, and downloads are published at [bromure.io](https://bromure.io).
+This manual documents Bromure Agentic Coding 4.6.0. The executable is `bromure-cli`, the bundle ID is `io.bromure.agentic-coding`, and the app requires macOS 14 (Sonoma) or later on Apple Silicon. Full product details, screenshots, and downloads are published at [bromure.io](https://bromure.io).
 
 ## What is Bromure Agentic Coding?
 
@@ -82,11 +82,11 @@ Package installs are the most common way hostile code enters a development envir
 
 ### Prompt-injection detection
 
-Content the agent reads from the outside world — web pages, API responses, files — can carry instructions aimed at the agent rather than at you. Bromure Agentic Coding scans untrusted content crossing the boundary with two local classifier models, PromptGuard and ModernBERT, running on your own hardware. Detections surface as a block/allow decision with the flagged text shown to you, not to the agent. See [Prompt-injection detection](10-prompt-injection.mdx).
+Content the agent reads from the outside world — web pages, API responses, files — can carry instructions aimed at the agent rather than at you. Bromure Agentic Coding scans untrusted content crossing the boundary with two local classifier models, PromptGuard and ModernBERT, running on your own hardware. Detections surface as a block/allow decision with the flagged section shown to you, not to the agent. Alongside the detectors, Guardrails now include a per-workspace **egress firewall**: the proxy transparently intercepts the VM's outbound traffic (ports 80 and 443 by default) and enforces pf-style allow/deny rules by host, port, protocol — down to individual HTTP verbs, so a workspace can read an API it is not allowed to write to. Rule edits apply to running sessions immediately. See [Prompt-injection detection](10-prompt-injection.mdx).
 
 ### Tracing and audit
 
-Every session can be recorded as an encrypted full-session trace: LLM calls (model, tokens, latency), tool calls, shell commands, file reads and writes, credential uses, and contacted domains. The local Trace Inspector lets you replay what an agent did and answer questions after the fact. On enterprise-enrolled installs, session metadata additionally streams to the organization's workspace over mutual TLS — never raw prompts or model responses, and never secret values. Individual (un-enrolled) installs stream nothing; a per-workspace **Private mode** toggle suppresses streaming entirely, and a visible indicator appears in the session window whenever streaming is active. See [Tracing](11-tracing.mdx).
+Every session can be recorded as an encrypted full-session trace: LLM calls (model, tokens, latency), tool calls, shell commands, file reads and writes, credential uses, and contacted domains. The local Trace Inspector lets you replay what an agent did and answer questions after the fact, and the **Security Timeline** window (Window menu) condenses every security-engine decision — credential swaps, firewall verdicts, package checks, prompt-injection scans, credential uses — into a single chronological, filterable table. On enterprise-enrolled installs, session metadata additionally streams to the organization's workspace over mutual TLS — never raw prompts or model responses, and never secret values. Individual (un-enrolled) installs stream nothing; a per-workspace **Private mode** toggle suppresses streaming entirely, and a visible indicator appears in the session window whenever streaming is active. See [Tracing](11-tracing.mdx).
 
 ### Fusion
 
@@ -94,11 +94,11 @@ Because every LLM call crosses the proxy, the proxy can do more than pass it thr
 
 ### Local and hybrid inference
 
-The same interception point lets you route model calls to inference running on your own Apple Silicon (via MLX), or run hybrid: cloud models normally, with local fallback when the cloud is unreachable. Local models also power the on-device classifiers used elsewhere in the product. See [Local models](13-local-models.mdx).
+The same interception point lets you route model calls to inference running on your own Apple Silicon (via MLX) — or to your own vLLM, Ollama, or other OpenAI-compatible server elsewhere on your network — or run hybrid: cloud models normally, with local fallback when the cloud is unreachable. Local turns stream token by token, reasoning models show their thinking live, and vision-capable models accept images. Local models also power the on-device classifiers used elsewhere in the product. See [Local models](13-local-models.mdx).
 
 ### Remote access
 
-Your sandbox is reachable from anywhere: through the app itself, from the command line, or over SSH. A second Mac running Bromure Agentic Coding can mirror a remote instance one-to-one — grid, workspaces, tabs, and automations — over an SSH tunnel (**Workspaces** menu → **Connect to Remote Bromure…**). Crucially, security does not weaken when you go remote: consent prompts for credential use, supply-chain bypasses, guardrail writes, and prompt-injection decisions are rendered on the host side of the connection, where a compromised guest can neither see nor forge them, and any timeout or dismissal is treated as a denial. See [Remote access](14-remote-access.mdx).
+Your sandbox is reachable from anywhere: through the app itself, from the command line, or over SSH. A second Mac running Bromure Agentic Coding — or an iPhone, iPad, or Apple Vision Pro running the Bromure Remote client — can mirror a remote instance one-to-one — grid, workspaces, tabs, and automations — over an SSH tunnel (**Workspaces** menu → **Connect to Remote Bromure…**). Crucially, security does not weaken when you go remote: consent prompts for credential use, supply-chain bypasses, guardrail writes, and prompt-injection decisions are rendered on the host side of the connection, where a compromised guest can neither see nor forge them, and any timeout or dismissal is treated as a denial. See [Remote access](14-remote-access.mdx).
 
 ### Enterprise management
 
@@ -127,7 +127,7 @@ Comparison data ages quickly. A more detailed and current matrix is maintained a
 | Hardware | Apple Silicon (M1 or newer). There is no Intel build — Virtualization.framework only supports ARM64 guests on Apple Silicon hosts. |
 | Disk | The Ubuntu base image is a 24 GB logical sparse disk, roughly 6–8 GB physically on disk; each workspace adds a copy-on-write clone that grows with use. |
 | Network | First launch downloads the prebuilt, ed25519-signed base image from `dl.bromure.io`. Offline, the app falls back to building the image locally (about 10 minutes). |
-| Proprietary agents | Claude Code, Codex CLI, Grok CLI, and Google Cloud SDK cannot ship inside the redistributable image; they are installed on your machine as signed catalog postinstall steps. Running first-time setup consents to the baseline steps; only steps published in a later update prompt you for approval afterward. |
+| Proprietary agents | Claude Code, Codex CLI, Grok CLI, Kimi Code, Oh My Pi, and Google Cloud SDK cannot ship inside the redistributable image; they are installed on your machine as signed catalog postinstall steps. Running first-time setup consents to the baseline steps; only steps published in a later update prompt you for approval afterward. |
 
 Step-by-step download and first-launch instructions are in [Installation](02-installation.mdx).
 
