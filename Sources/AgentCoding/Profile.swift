@@ -4581,15 +4581,26 @@ public final class ProfileStore {
                 rm -f "$HOME/.codex/config.toml.tmp.$$"
             fi
         fi
-        # omp — user-scope MCP lives in ~/.omp/agent/mcp.json. omp does NOT read
-        # ~/.claude.json for MCP (its schema covers only mcp.json / .mcp.json /
-        # .omp/mcp.json / ~/.omp/agent/mcp.json), so merge the browser + user
-        # servers there — otherwise every omp session launches without the
-        # embedded-browser MCP. The board MCP is still a project-root .mcp.json
-        # written per-worktree by agentd.
+        # omp — user-scope MCP lives in ~/.omp/agent/mcp.json ("agent" is
+        # omp's default --profile dir; verified against v18: Ar("user") =
+        # <configDir>/mcp.json). Two omp-specific traps (both verified live):
+        #   1. a server named "browser" collides with omp's built-in browser
+        #      tool and is silently dropped — so it merges as "bromure-web";
+        #   2. while the built-in browser tool is enabled (default), omp
+        #      FILTERS browser-automation MCP servers entirely
+        #      (isBrowserMCPServer/filterBrowser) — the omp() wrapper below
+        #      disables it via a --config overlay so the embedded-browser
+        #      MCP (the pane the user actually sees) wins.
+        # The board MCP is still a project-root .mcp.json written
+        # per-worktree by agentd.
         if [ -r /mnt/bromure-meta/mcp/claude.json ]; then
             mkdir -p "$HOME/.omp/agent"
-            python3 -c "import json,os,sys;p=os.path.expanduser('~/.omp/agent/mcp.json');e=(json.load(open(p)) if os.path.exists(p) else {});m=json.load(open(sys.argv[1]));e['mcpServers']={**e.get('mcpServers',{}),**m.get('mcpServers',{})};t=p+'.tmp.'+str(os.getpid());json.dump(e,open(t,'w'),indent=2);os.replace(t,p)" /mnt/bromure-meta/mcp/claude.json 2>/dev/null || true
+            python3 -c "import json,os,sys;p=os.path.expanduser('~/.omp/agent/mcp.json');e=(json.load(open(p)) if os.path.exists(p) else {});srv=e.get('mcpServers',{});_=(srv.pop('browser',None) if 'bromure-browser-mcp' in json.dumps(srv.get('browser') or {}) else None);m=json.load(open(sys.argv[1])).get('mcpServers',{});m=({**m,'bromure-web':m.pop('browser')} if 'browser' in m else m);e['mcpServers']={**srv,**m};t=p+'.tmp.'+str(os.getpid());json.dump(e,open(t,'w'),indent=2);os.replace(t,p)" /mnt/bromure-meta/mcp/claude.json 2>/dev/null || true
+        fi
+        # Wrapper: every omp launch (interactive or scripted) carries the
+        # staged settings overlay (browser.enabled: false — see above).
+        if [ -r /mnt/bromure-meta/omp-config.yml ]; then
+            omp() { command omp --config /mnt/bromure-meta/omp-config.yml "$@"; }
         fi
     fi
 
