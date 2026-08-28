@@ -120,10 +120,20 @@ final class InferenceRepairProxy: @unchecked Sendable {
     }
 
     private func acceptLoop(enginePort: Int) {
+        _ = enginePort   // superseded: resolved live per connection (below)
         while true {
             let c = accept(listenFD, nil, nil)
             if c < 0 { break }
-            Thread.detachNewThread { [weak self] in self?.handle(clientFD: c, enginePort: enginePort) }
+            // Engine port read LIVE per connection, never captured: the proxy
+            // often starts BEFORE the engine child exists (an external-engine
+            // workspace booting first calls startIfNeeded while
+            // InferenceService.enginePort is still 0). A captured value pinned
+            // 0 forever, sending every built-in request of a later MLX
+            // workspace to a dead port — the "one Ollama workspace breaks the
+            // MLX workspace" intertwine.
+            Thread.detachNewThread { [weak self] in
+                self?.handle(clientFD: c, enginePort: InferenceService.enginePort)
+            }
         }
     }
 
