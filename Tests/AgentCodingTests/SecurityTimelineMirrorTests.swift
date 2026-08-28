@@ -86,4 +86,27 @@ struct SecurityTimelineMirrorTests {
         #expect(tl.events.first?.kind == .info)
         tl.clear()
     }
+
+    @Test("credential.exfiltration maps to a blocked credential-brokering row")
+    func exfiltrationMapping() {
+        let pid = UUID()
+        let e = SecurityTimeline.map(
+            profileID: pid,
+            eventType: "credential.exfiltration",
+            eventData: [
+                "credential": .string("GitHub token"),
+                "fake_preview": .string("brm_a1b2…c3d4"),
+                "declared_host": .string("api.github.com"),
+                "observed_host": .string("evil.example"),
+            ],
+            now: Date(timeIntervalSince1970: 1_756_000_000))
+        #expect(e != nil)
+        #expect(e?.engine == "Credential brokering")
+        #expect(e?.kind == .blocked)
+        #expect(e?.condition.contains("brm_a1b2…c3d4") == true)
+        #expect(e?.condition.contains("api.github.com") == true)
+        #expect(e?.condition.contains("evil.example") == true)
+        #expect(e?.decision.contains("exfiltration") == true)
+        #expect(e?.profileID == pid)
+    }
 }

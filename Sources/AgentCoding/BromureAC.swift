@@ -961,13 +961,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func closeVMFromSidebar(_ id: Profile.ID) {
         guard let pane = panes[id] else { return }
         let pref = pane.profile.closeAction
-        let action: Profile.CloseAction
         if pref == .ask {
             guard let chosen = promptCloseAction(forName: pane.profile.name) else { return }
-            action = chosen
+            applyCloseAction(chosen, to: id)
         } else {
-            action = pref
+            applyCloseAction(pref, to: id)
         }
+    }
+
+    /// Apply a RESOLVED close action (never `.ask`) to an attached session.
+    func applyCloseAction(_ action: Profile.CloseAction, to id: Profile.ID) {
         switch action {
         case .background:
             detachSession(id)
@@ -4173,8 +4176,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @MainActor private func automationDestroySession(profileNameOrID: String) async -> Bool {
         guard let profile = profileByNameOrID(profileNameOrID) else { return false }
-        guard isAttached(profile.id) else { return false }
-        closeVMFromSidebar(profile.id)
+        guard let pane = panes[profile.id] else { return false }
+        // An `.ask` preference must resolve through the ASYNC prompt here:
+        // this runs inside a Task job off the control socket, where the sync
+        // prompt's run-loop pump can't service other main-queue work — it
+        // would wedge the automation server's main.sync snapshot build and
+        // freeze `/state` for the very client that has to render the prompt.
+        if pane.profile.closeAction == .ask {
+            guard let chosen = await promptCloseActionAsync(forName: pane.profile.name) else {
+                return false   // cancelled — keep the session attached
+            }
+            applyCloseAction(chosen, to: profile.id)
+        } else {
+            closeVMFromSidebar(profile.id)
+        }
         // Wait briefly for the close to take effect.
         for _ in 0..<50 {
             if !isAttached(profile.id) { return true }
@@ -4553,36 +4568,63 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         promptCloseAction(forName: session.profile.name)
     }
 
+    /// Sync variant, for run-loop callouts ONLY (window-close delegate, the
+    /// sidebar ×) — there the broker's run-loop pump still services the main
+    /// queue, so `/state` keeps flowing while a mirrored server waits for the
+    /// fat client's answer. Control-socket callers run inside a Task job (a
+    /// main-queue block) where that pump starves the main queue and wedges
+    /// `/state`; they must use `promptCloseActionAsync` instead.
     @MainActor private func promptCloseAction(forName name: String) -> Profile.CloseAction? {
-        let title = String(
-            format: NSLocalizedString("Close “%@”?", comment: ""), name)
-        let message = NSLocalizedString(
-            "Run in the background keeps the VM running so you can reattach later. Suspend saves its state to disk. Shut down powers it off.",
-            comment: "")
-        let buttons = [
-            NSLocalizedString("Run in the Background", comment: ""),
-            NSLocalizedString("Suspend", comment: ""),
-            NSLocalizedString("Shut Down", comment: ""),
-            NSLocalizedString("Cancel", comment: ""),
-        ]
-
-        // This is reachable from the control socket (a fat client's destroy-
-        // session request lands here when the profile's close action is "ask").
-        // Relay the choice instead of opening a modal that would freeze the
-        // server. No listener → fall back to Suspend: it closes the session but
-        // preserves its state on disk, the least-surprising non-destructive
-        // outcome for a close request.
+        let (title, message, buttons) = Self.closePromptParts(name: name)
+        // Mirrored or headless: relay the choice instead of opening a modal
+        // nobody here can dismiss. No listener → fall back to Suspend: it
+        // closes the session but preserves its state on disk, the least-
+        // surprising non-destructive outcome for a close request.
         guard canPresentBlockingModal else {
-            switch PendingPromptBroker.shared.ask(
+            return Self.closeAction(forChoice: PendingPromptBroker.shared.ask(
                 profileID: nil, title: title, message: message,
-                buttons: buttons, fallback: 1) {
-            case 0:  return .background
-            case 1:  return .suspend
-            case 2:  return .shutdown
-            default: return nil
-            }
+                buttons: buttons, fallback: 1))
         }
+        return presentCloseActionModal(title: title, message: message, buttons: buttons)
+    }
 
+    /// Async twin for control-socket callers (a fat client's destroy-session
+    /// request): suspends on the broker instead of pumping, so the automation
+    /// server's main.sync snapshot build keeps running and the client actually
+    /// receives the prompt it has to answer. Same fallback as the sync path.
+    @MainActor private func promptCloseActionAsync(forName name: String) async -> Profile.CloseAction? {
+        let (title, message, buttons) = Self.closePromptParts(name: name)
+        guard canPresentBlockingModal else {
+            return Self.closeAction(forChoice: await PendingPromptBroker.shared.askAsync(
+                profileID: nil, title: title, message: message,
+                buttons: buttons, fallback: 1))
+        }
+        return presentCloseActionModal(title: title, message: message, buttons: buttons)
+    }
+
+    private static func closePromptParts(name: String) -> (title: String, message: String, buttons: [String]) {
+        (String(format: NSLocalizedString("Close “%@”?", comment: ""), name),
+         NSLocalizedString(
+            "Run in the background keeps the VM running so you can reattach later. Suspend saves its state to disk. Shut down powers it off.",
+            comment: ""),
+         [NSLocalizedString("Run in the Background", comment: ""),
+          NSLocalizedString("Suspend", comment: ""),
+          NSLocalizedString("Shut Down", comment: ""),
+          NSLocalizedString("Cancel", comment: "")])
+    }
+
+    /// Button index (broker choice) → close action; Cancel/timeout-cancel = nil.
+    private static func closeAction(forChoice choice: Int) -> Profile.CloseAction? {
+        switch choice {
+        case 0:  return .background
+        case 1:  return .suspend
+        case 2:  return .shutdown
+        default: return nil
+        }
+    }
+
+    @MainActor private func presentCloseActionModal(
+        title: String, message: String, buttons: [String]) -> Profile.CloseAction? {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
@@ -9235,8 +9277,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // tint flash before the framebuffer stops.
             window.setSuspendedTint(true)
 
-            let action = self.presentCompromiseAlert(event: event,
-                                                      profileName: window.profile.name)
+            let action = await self.presentCompromiseAlert(event: event,
+                                                            profileName: window.profile.name)
             switch action {
             case .shutdown:
                 // No export, but the disk + home are still presumed
@@ -9400,7 +9442,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// the user's chosen action.
     @MainActor
     private func presentCompromiseAlert(event: CompromiseEvent,
-                                         profileName: String) -> CompromiseAction {
+                                         profileName: String) async -> CompromiseAction {
         let title = NSLocalizedString(
             "This environment may have been compromised",
             comment: "Compromise alert title")
@@ -9425,10 +9467,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Headless or mirrored by a fat client: never wedge the control server
         // with a modal nobody here can dismiss. Relay a two-way choice — the
         // "Save for Investigation" flow needs a local folder picker, so it's
-        // local-GUI only. With no client listening the broker returns the
-        // fallback at once: contain the breach by shutting the VM down.
+        // local-GUI only. Must be the ASYNC broker wait: this runs inside a
+        // Task job (a main-queue block), where the sync `ask`'s run-loop pump
+        // can't service other main-queue work — it would wedge the automation
+        // server's main.sync snapshot build and freeze `/state` for the very
+        // client that has to render this prompt. With no client listening the
+        // broker returns the fallback at once: contain the breach by shutting
+        // the VM down.
         guard canPresentBlockingModal else {
-            let choice = PendingPromptBroker.shared.ask(
+            let choice = await PendingPromptBroker.shared.askAsync(
                 profileID: event.profileID,
                 title: title,
                 message: info + "\n" + NSLocalizedString(
@@ -9436,7 +9483,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     comment: "Compromise remote-prompt guidance"),
                 buttons: [NSLocalizedString("Shut down", comment: ""),
                           NSLocalizedString("Continue", comment: "")],
-                fallback: 0)
+                fallback: 0, timeout: 180)
             return choice == 1 ? .continueAnyway : .shutdown
         }
 

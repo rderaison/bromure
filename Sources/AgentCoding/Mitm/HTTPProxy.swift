@@ -452,6 +452,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
             for c in compromise {
                 FileHandle.standardError.write(Data(
                     "[mitm] COMPROMISE \(c.fakeTokenPreview) (declared \(c.declaredHost)) → \(c.observedHost)\n".utf8))
+                // Audit trail: a red row in the Security Timeline (mirrored
+                // to fat clients over /state) + cloud telemetry for enrolled
+                // installs. Previews only — never the token bytes.
+                BACEventEmitter.shared.emitDetached(
+                    profileID: profileID,
+                    eventType: "credential.exfiltration",
+                    eventData: [
+                        "credential": .string(c.credentialDisplayName),
+                        "fake_preview": .string(c.fakeTokenPreview),
+                        "declared_host": .string(c.declaredHost),
+                        "observed_host": .string(c.observedHost),
+                    ])
             }
             // Reply to the in-VM client with a plain 451; the agent
             // sees a hard failure rather than a hung connection. We

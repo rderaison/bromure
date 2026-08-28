@@ -141,6 +141,15 @@ public final class SecurityTimeline {
             return row("Credential brokering", "\(fake) → \(host)",
                        "swapped in \(real)", .info)
 
+        case "credential.exfiltration":
+            let fake = str(d, "fake_preview") ?? "fake"
+            let cred = str(d, "credential") ?? "session token"
+            let declared = str(d, "declared_host") ?? "?"
+            let observed = str(d, "observed_host") ?? "?"
+            return row("Credential brokering",
+                       "\(fake) (\(cred), scoped to \(declared)) → \(observed)",
+                       "blocked — exfiltration attempt, VM paused", .blocked)
+
         case "supply_chain.fetch":
             let eco = str(d, "ecosystem") ?? ""
             let pkg = str(d, "package") ?? "?"
