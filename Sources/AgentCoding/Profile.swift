@@ -1340,7 +1340,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var localAgentModelName: String? {
         guard let id = activeModelID, !id.isEmpty else { return nil }
         if localEngineBaseURL != nil { return id }
+        #if canImport(SandboxEngine)
         return CatalogStore.shared.resolve(id)?.repo ?? id
+        #else
+        // Client mirror (iOS/visionOS): no local catalog — the server
+        // resolves catalog ids to repos; the raw id is display-only here.
+        return id
+        #endif
     }
 
     /// Normalize a user-typed engine URL to a server-root base: defaults the
@@ -1417,6 +1423,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// on a bad rule — the editor validates before save).
     public var resolvedEgressPolicy: EgressPolicy {
         guard !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .allowAll }
+        #if canImport(SandboxEngine)
         guard var policy = try? EgressPolicy.parse(egressRules) else { return .allowAll }
         // The local-inference sentinel (guest → https://bromure.llm → on-host
         // engine) never leaves this Mac, so no egress ruleset may cut agents
@@ -1429,6 +1436,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                                             includeApex: true)),
             at: 0)
         return policy
+        #else
+        // Client mirror (iOS/visionOS): the stub EgressPolicy carries no rule
+        // model and the client never enforces egress — the server does.
+        return (try? EgressPolicy.parse(egressRules)) ?? .allowAll
+        #endif
     }
 
     /// Opt out of host-side transparent interception for this workspace. When

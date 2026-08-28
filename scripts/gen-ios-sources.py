@@ -51,6 +51,7 @@ SHARED = [
     # Controller + connect flow (models; iOS provides the views)
     "FatClientController.swift",
     "FatClientConnect.swift",
+    "ConsolePresence.swift",  # console-seat arbitration; AppKit monitor #if'd out, iOS reports always-active
     # Workspace editor (ProfileEditorView) + its data-only helpers. The panes
     # that manage host-machine state (Local Models, Automation, browser image,
     # subnet) are #if os(macOS) inside the view; everything else is the same

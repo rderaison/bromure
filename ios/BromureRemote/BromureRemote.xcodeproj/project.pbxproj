@@ -33,6 +33,7 @@
 		B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */; };
 		31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */; };
 		269D8003F7F7851DBCFBBF57 /* CodingTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */; };
+		9812CE45C9409E65735954A9 /* ConsolePresence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5174CD6006782AF31EFAF494 /* ConsolePresence.swift */; };
 		F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */; };
 		B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDCC7578E83999395F752CAF /* ConversationView.swift */; };
 		483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */; };
@@ -161,6 +162,7 @@
 		A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeTranscriptView.swift"; path = "Sources/BromureRemote/_shared/ClaudeTranscriptView.swift"; sourceTree = "<group>"; };
 		543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingKanbanView.swift"; path = "Sources/BromureRemote/_shared/CodingKanbanView.swift"; sourceTree = "<group>"; };
 		395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingTasks.swift"; path = "Sources/BromureRemote/_shared/CodingTasks.swift"; sourceTree = "<group>"; };
+		5174CD6006782AF31EFAF494 /* ConsolePresence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConsolePresence.swift"; path = "Sources/BromureRemote/_shared/ConsolePresence.swift"; sourceTree = "<group>"; };
 		A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ControlClient.swift"; path = "Sources/BromureRemote/_shared/ControlClient.swift"; sourceTree = "<group>"; };
 		EDCC7578E83999395F752CAF /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConversationView.swift"; path = "Sources/BromureRemote/_shared/ConversationView.swift"; sourceTree = "<group>"; };
 		7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DockerDashboard.swift"; path = "Sources/BromureRemote/_shared/DockerDashboard.swift"; sourceTree = "<group>"; };
@@ -313,6 +315,7 @@
 				A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */,
 				543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */,
 				395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */,
+				5174CD6006782AF31EFAF494 /* ConsolePresence.swift */,
 				A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */,
 				EDCC7578E83999395F752CAF /* ConversationView.swift */,
 				7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */,
@@ -518,6 +521,7 @@
 				B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */,
 				31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */,
 				269D8003F7F7851DBCFBBF57 /* CodingTasks.swift in Sources */,
+				9812CE45C9409E65735954A9 /* ConsolePresence.swift in Sources */,
 				F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */,
 				B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */,
 				483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */,
