@@ -173,17 +173,57 @@ final class LocalStreamEmitter {
     }
 
     /// New accumulated upstream text; releases whatever the holdback allows.
+    /// A leak marker freezes release only while it sits in the trailing
+    /// `staleMarkerWindow` chars: a real leaked tool call ends the turn, so a
+    /// marker the text has long grown past is prose (a ```json doc block) —
+    /// freezing on it for the rest of a long answer turned live streaming
+    /// into one burst at finish. Rescue still sanitizes the final text.
     func textDelta(_ full: String) {
         raw = full
         var limit = max(0, full.count - holdback)
+        let staleMarkerWindow = 640
         for marker in Self.leakMarkers {
-            if let r = full.range(of: marker) {
-                limit = min(limit, full.distance(from: full.startIndex, to: r.lowerBound))
+            var search = full.startIndex..<full.endIndex
+            while let r = full.range(of: marker, range: search) {
+                let pos = full.distance(from: full.startIndex, to: r.lowerBound)
+                if full.count - pos <= staleMarkerWindow {
+                    limit = min(limit, pos)
+                    break
+                }
+                search = r.upperBound..<full.endIndex
             }
         }
         guard limit > releasedCount else { return }
         release(String(full.prefix(limit).dropFirst(releasedCount)))
         releasedCount = limit
+    }
+
+    /// SSE comment — a legal no-op for every SSE parser. Emitted while a
+    /// buffered continuation regenerates after the visible stream ended, so
+    /// the connection is demonstrably alive during the silence.
+    func comment(_ text: String) {
+        begin()
+        write(": \(text)\n\n")
+    }
+
+    /// Terminal events for a stream that started but whose upstream died —
+    /// closing the socket mid-stream leaves some clients waiting forever on
+    /// message_stop / [DONE] / response.completed.
+    func fail(message: String) {
+        begin()
+        switch wire {
+        case .messages:
+            event("error", ["type": "error",
+                            "error": ["type": "api_error", "message": message]])
+        case .chat:
+            event(nil, ["error": ["message": message, "type": "api_error"]])
+            write("data: [DONE]\n\n")
+        case .responses:
+            responsesEvent("response.failed", ["response": [
+                "id": "resp_bromure-\(turnID)", "object": "response",
+                "status": "failed", "output": [],
+                "error": ["code": "server_error", "message": message]]])
+        }
     }
 
     private func release(_ chunk: String) {

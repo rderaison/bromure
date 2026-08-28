@@ -638,6 +638,81 @@ struct ReasoningStreamingTests {
     }
 }
 
+/// End-of-stream behaviors: a stale early ```json must not freeze live
+/// release for the rest of a long answer, and a mid-stream engine death
+/// must close the wire with terminal events (not a bare socket close).
+@Suite("Streaming end-of-turn behaviors", .serialized)
+struct StreamingEndBehaviorTests {
+
+    @Test("An early ```json block doesn't freeze the rest of a long answer")
+    func staleMarkerReleases() throws {
+        let early = "Here is the config:\n```json\n{\"a\": 1}\n```\nNow, the explanation. "
+        let prose = String(repeating: "The setting controls the retry budget for the sync engine. ", count: 30)
+        var sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"created\":1,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"
+        for chunk in [early, prose] {
+            let obj: [String: Any] = ["choices": [["index": 0, "delta": ["content": chunk],
+                                                   "finish_reason": NSNull()]]]
+            sse += "data: \(String(data: try JSONSerialization.data(withJSONObject: obj), encoding: .utf8)!)\n\n"
+        }
+        sse += "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+        let server = try #require(FakeSSEServerBox.make(body: Data(sse.utf8)))
+
+        let pid = UUID()
+        InferenceRepairProxy.shared.setExternalEngine(
+            pid, ExternalEngine.Config(base: URL(string: "http://127.0.0.1:\(server.port)")!, apiKey: nil))
+        defer { InferenceRepairProxy.shared.setExternalEngine(pid, nil) }
+        let req = InferenceRepairProxy.Request(
+            method: "POST", path: "/v1/messages",
+            headers: [("Authorization", "Bearer \(EngineKey.perVM(profileID: pid))")],
+            body: try JSONSerialization.data(withJSONObject: [
+                "model": "m", "stream": true, "max_tokens": 64,
+                "messages": [["role": "user", "content": "explain"]]]))
+        var sp = [Int32](repeating: 0, count: 2)
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0)
+        defer { close(sp[0]) }
+        #expect(InferenceRepairProxy.respond(to: req, enginePort: 0, streamFD: sp[1]) == nil)
+        close(sp[1])
+        var out = Data(); var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        while true { let n = read(sp[0], &buf, buf.count); if n <= 0 { break }; out.append(contentsOf: buf[0..<n]) }
+        let text = String(decoding: out, as: UTF8.self)
+        // The prose after the (stale) fence streams — several deltas, and the
+        // fence text itself survives in the final message (it was never a call).
+        #expect(text.components(separatedBy: "text_delta").count > 2)
+        #expect(text.contains("retry budget"))
+        #expect(text.contains("event: message_stop"))
+    }
+
+    @Test("Mid-stream engine death closes the wire with an error event")
+    func midStreamFailure() throws {
+        // Builtin protocol: one delta long enough to start the guest stream,
+        // then an error frame — the guest must see terminal events.
+        let long = String(repeating: "streaming before the crash. ", count: 20)
+        var sse = "data: {\"d\": \"\(long)\"}\n\n"
+        sse += "data: {\"error\": {\"message\": \"boom\"}, \"status\": 500}\n\ndata: [DONE]\n\n"
+        let engine = try #require(FakeSSEServerBox.make(body: Data(sse.utf8)))
+
+        let pid = UUID()   // no external engine → builtin path
+        let req = InferenceRepairProxy.Request(
+            method: "POST", path: "/v1/messages",
+            headers: [("Authorization", "Bearer \(EngineKey.perVM(profileID: pid))")],
+            body: try JSONSerialization.data(withJSONObject: [
+                "model": "m", "stream": true, "max_tokens": 64,
+                "messages": [["role": "user", "content": "x"]]]))
+        var sp = [Int32](repeating: 0, count: 2)
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0)
+        defer { close(sp[0]) }
+        #expect(InferenceRepairProxy.respond(to: req, enginePort: engine.port, streamFD: sp[1]) == nil)
+        close(sp[1])
+        var out = Data(); var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        while true { let n = read(sp[0], &buf, buf.count); if n <= 0 { break }; out.append(contentsOf: buf[0..<n]) }
+        let text = String(decoding: out, as: UTF8.self)
+        #expect(text.contains("HTTP/1.1 200"))
+        #expect(text.contains("streaming before the crash"))
+        #expect(text.contains("event: error"))
+        #expect(text.contains("failed mid-stream"))
+    }
+}
+
 /// Shim: reuse the private FakeOpenAIServer shape without widening its
 /// access — a one-shot SSE server for the streaming tests.
 private enum FakeSSEServerBox {

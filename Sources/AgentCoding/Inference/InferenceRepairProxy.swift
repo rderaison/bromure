@@ -530,6 +530,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
     private static func resolveStuckPreamble(
         message: [String: Any], payload: [String: Any], api: API, path: String,
         toolNames: Set<String>, gemma: Bool,
+        onAttempt: ((Int) -> Void)? = nil,
         send: ([String: Any]) -> (Data?, Int)
     ) -> ([String: Any], Bool) {
         guard !toolNames.isEmpty, api.cleanStop(message),
@@ -543,6 +544,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
         // preamble. The first attempt that yields a tool call wins; otherwise we
         // keep the original message and the turn ends as before.
         for attempt in 0..<2 {
+            onAttempt?(attempt)
             var cont = api.continuationPayload(payload, preamble: preamble, attempt: attempt)
             cont["stream"] = false
             if attempt > 0 { cont["temperature"] = 0.7 }
@@ -596,7 +598,11 @@ final class InferenceRepairProxy: @unchecked Sendable {
                       latencyMs: Date().timeIntervalSince(t0) * 1000,
                       requestBody: req.body, responseData: raw)
             if dbg { appendRepairLog("[repair] <- \(req.path) STREAM upstream failed status=\(status) started=\(emitter.headerSent)\n") }
-            return emitter.headerSent   // started → nothing left but to close
+            guard emitter.headerSent else { return false }   // buffered fallback shapes the error
+            // Mid-stream death: close the wire PROPERLY — a bare socket close
+            // leaves clients waiting on the terminal event forever.
+            emitter.fail(message: "External engine failed mid-stream (status \(status)) — retry.")
+            return true
         }
         let message = ExternalEngine.wireResponse(from: chat, wire: wire)
         finishStreamedTurn(req: req, payload: payload, api: api, pid: pid,
@@ -643,7 +649,9 @@ final class InferenceRepairProxy: @unchecked Sendable {
                       latencyMs: Date().timeIntervalSince(t0) * 1000,
                       requestBody: req.body, responseData: raw)
             if dbg { appendRepairLog("[repair] <- \(req.path) STREAM(mlx) upstream failed status=\(status) started=\(emitter.headerSent)\n") }
-            return emitter.headerSent
+            guard emitter.headerSent else { return false }
+            emitter.fail(message: "Local engine failed mid-stream (status \(status)) — retry.")
+            return true
         }
         finishStreamedTurn(req: req, payload: payload, api: api, pid: pid,
                            message: message, emitter: emitter, t0: t0,
@@ -666,7 +674,12 @@ final class InferenceRepairProxy: @unchecked Sendable {
         // retry actually produced the missing call.
         let (finalMessage, continued) = resolveStuckPreamble(
             message: message, payload: payload, api: api, path: req.path,
-            toolNames: toolNames, gemma: gemma, send: contSend)
+            toolNames: toolNames, gemma: gemma,
+            // A continuation is a full silent regeneration AFTER the visible
+            // stream ended (the "hangs at the end" report) — keep the SSE
+            // stream demonstrably alive while it runs.
+            onAttempt: { emitter.comment("continuation attempt \($0 + 1) — re-prompting for the announced tool call") },
+            send: contSend)
         let repaired = api.repairedMessage(finalMessage, toolNames: toolNames, gemma: gemma)
         emitter.finish(final: repaired, continued: continued)
         let responseData = (try? JSONSerialization.data(withJSONObject: repaired)) ?? Data()
