@@ -5245,7 +5245,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             backing: .buffered, defer: false)
         win.title = NSLocalizedString("Inference Metrics", comment: "")
         win.center()
-        win.contentView = NSHostingView(rootView: InferenceMetricsView())
+        // One tab per distinct engine across the workspaces (built-in MLX +
+        // each external Ollama/vLLM base URL), enumerated at open time.
+        win.contentView = NSHostingView(
+            rootView: InferenceMetricsView(targets: EngineTarget.enumerate(profiles: profiles)))
         win.delegate = self
         win.isReleasedWhenClosed = false
         win.makeKeyAndOrderFront(nil)

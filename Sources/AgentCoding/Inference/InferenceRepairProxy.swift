@@ -579,11 +579,16 @@ final class InferenceRepairProxy: @unchecked Sendable {
         let emitter = LocalStreamEmitter(fd: clientFD, wire: wire,
                                          model: payload["model"] as? String ?? "")
         let t0 = Date()
+        // First-delta timestamp = this turn's TTFT, feeding the per-engine
+        // proxy stats (real tok/s for engines with no metrics endpoint).
+        final class FirstByte: @unchecked Sendable { var at: Date? }
+        let firstByte = FirstByte()
+        let mark = { if firstByte.at == nil { firstByte.at = Date() } }
         let (chat, status, raw) = ChatStreamClient.send(
             chatBody: ExternalEngine.chatRequest(from: payload, wire: wire),
             config: ext,
-            onText: { emitter.textDelta($0) },
-            onReasoning: { emitter.thinkingDelta($0) })
+            onText: { mark(); emitter.textDelta($0) },
+            onReasoning: { mark(); emitter.thinkingDelta($0) })
         guard status == 200, let chat else {
             shipTrace(profileID: pid, model: payload["model"] as? String ?? "?",
                       path: req.path, status: status,
@@ -596,6 +601,8 @@ final class InferenceRepairProxy: @unchecked Sendable {
         let message = ExternalEngine.wireResponse(from: chat, wire: wire)
         finishStreamedTurn(req: req, payload: payload, api: api, pid: pid,
                            message: message, emitter: emitter, t0: t0,
+                           engineID: ext.base.absoluteString.lowercased(),
+                           ttfbSeconds: firstByte.at.map { $0.timeIntervalSince(t0) },
                            contSend: { p in externalSend(p, wire: wire, config: ext) })
         return true
     }
@@ -650,6 +657,8 @@ final class InferenceRepairProxy: @unchecked Sendable {
                                            api: API, pid: UUID,
                                            message: [String: Any],
                                            emitter: LocalStreamEmitter, t0: Date,
+                                           engineID: String? = nil,
+                                           ttfbSeconds: Double? = nil,
                                            contSend: ([String: Any]) -> (Data?, Int)) {
         let toolNames = API.toolNames(in: payload)
         let gemma = (payload["model"] as? String)?.lowercased().contains("gemma") == true
@@ -666,6 +675,18 @@ final class InferenceRepairProxy: @unchecked Sendable {
                   requestBytes: req.body.count, responseBytes: responseData.count,
                   latencyMs: Date().timeIntervalSince(t0) * 1000,
                   requestBody: req.body, responseData: responseData)
+        if let engineID {
+            // All three wires carry usage at the top level of the message.
+            let u = repaired["usage"] as? [String: Any] ?? [:]
+            EngineProxyStats.shared.record(
+                engineID: engineID,
+                promptTokens: (u["input_tokens"] as? NSNumber)?.intValue
+                    ?? (u["prompt_tokens"] as? NSNumber)?.intValue ?? 0,
+                completionTokens: (u["output_tokens"] as? NSNumber)?.intValue
+                    ?? (u["completion_tokens"] as? NSNumber)?.intValue ?? 0,
+                e2eSeconds: Date().timeIntervalSince(t0),
+                ttfbSeconds: ttfbSeconds ?? 0)
+        }
         if ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil {
             appendRepairLog("[repair] <- \(req.path) STREAM done continued=\(continued)\n")
         }
