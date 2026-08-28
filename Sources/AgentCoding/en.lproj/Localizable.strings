@@ -47,7 +47,7 @@
 "Notes (optional)" = "Notes (optional)";
 
 /* Editor — Agent */
-"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab.";
+"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first tab; other enabled agents are installed and authenticated but you run them on demand from a new tab.";
 "Primary" = "Primary";
 "Make primary" = "Make primary";
 "Auth" = "Auth";
@@ -1565,3 +1565,43 @@
 "OpenAI-compatible base URL (https://…/v1)" = "OpenAI-compatible base URL (https://…/v1)";
 "Model (optional — e.g. opus, gpt-5.2)" = "Model (optional — e.g. opus, gpt-5.2)";
 "omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime.";
+
+/* Security Timeline + egress firewall + guardrails pane (added 4.6.0) */
+"Outbound connections" = "Outbound connections";
+"Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Log, and enforcement is host-side so a compromised agent can't bypass it." = "Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Log, and enforcement is host-side so a compromised agent can't bypass it.";
+"Unmatched traffic" = "Unmatched traffic";
+"Allow" = "Allow";
+"Deny" = "Deny";
+"Action" = "Action";
+"Proto" = "Proto";
+"Host / CIDR" = "Host / CIDR";
+"Methods" = "Methods";
+"Add rule" = "Add rule";
+"pf format" = "pf format";
+"Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here." = "Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here.";
+"No credentials to guard" = "No credentials to guard";
+"Add credentials in the Credentials pane. Each one appears here with an “ask before use” toggle and, where it applies, a write policy." = "Add credentials in the Credentials pane. Each one appears here with an “ask before use” toggle and, where it applies, a write policy.";
+"A write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy." = "A write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy.";
+"Disable transparent interception" = "Disable transparent interception";
+"Interception (on by default) diverts the VM's HTTP/HTTPS to Bromure so the rules above are enforced host-side even if the guest unsets HTTP(S)_PROXY. Turn this on to stop intercepting — the rules then only apply to traffic that uses the proxy, so the workspace can bypass them. Use only for a workspace that breaks under interception (e.g. strict certificate pinning)." = "Interception (on by default) diverts the VM's HTTP/HTTPS to Bromure so the rules above are enforced host-side even if the guest unsets HTTP(S)_PROXY. Turn this on to stop intercepting — the rules then only apply to traffic that uses the proxy, so the workspace can bypass them. Use only for a workspace that breaks under interception (e.g. strict certificate pinning).";
+"Security Timeline" = "Security Timeline";
+"Security Timeline…" = "Security Timeline…";
+"No security events yet" = "No security events yet";
+"No matching events" = "No matching events";
+"Credential swaps, firewall verdicts, package checks, prompt-injection scans, and credential use appear here as your workspaces run." = "Credential swaps, firewall verdicts, package checks, prompt-injection scans, and credential use appear here as your workspaces run.";
+"Filter events…" = "Filter events…";
+"All engines" = "All engines";
+"%d events" = "%d events";
+"Time" = "Time";
+"Engine" = "Engine";
+"Condition" = "Condition";
+"Decision" = "Decision";
+"Credential brokering" = "Credential brokering";
+"Supply chain" = "Supply chain";
+"Firewall" = "Firewall";
+"Credential used" = "Credential used";
+"Upstream TLS" = "Upstream TLS";
+"Prompt injection" = "Prompt injection";
+"swapped in %@" = "swapped in %@";
+"signed" = "signed";
+"blocked — exfiltration attempt, VM paused" = "blocked — exfiltration attempt, VM paused";

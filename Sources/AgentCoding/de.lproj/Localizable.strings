@@ -46,7 +46,7 @@
 "Notes (optional)" = "Notizen (optional)";
 
 /* Editor — Agent */
-"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Aktivieren Sie jeden Agenten, den Sie in diesem Arbeitsbereich benötigen. Der als **Primär** markierte startet automatisch im ersten kitty-Tab; andere aktivierte Agenten werden installiert und authentifiziert, aber Sie starten sie bei Bedarf in einem neuen Tab.";
+"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Aktivieren Sie jeden Agenten, den Sie in diesem Arbeitsbereich benötigen. Der als **Primär** markierte startet automatisch im ersten Tab; andere aktivierte Agenten werden installiert und authentifiziert, aber Sie starten sie bei Bedarf in einem neuen Tab.";
 "Primary" = "Primär";
 "Make primary" = "Als primär festlegen";
 "Auth" = "Authentifizierung";
@@ -1563,3 +1563,43 @@
 "OpenAI-compatible base URL (https://…/v1)" = "OpenAI-kompatible Basis-URL (https://…/v1)";
 "Model (optional — e.g. opus, gpt-5.2)" = "Modell (optional — z. B. opus, gpt-5.2)";
 "omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "omp funktioniert mit über 60 Anbietern. Wählen Sie einen aus und fügen Sie unten dessen API-Schlüssel ein — oder wählen Sie oben **Lokales Modell**, um auf diesem Mac zu laufen. Jederzeit umschaltbar.";
+
+/* Security Timeline + egress firewall + guardrails pane (added 4.6.0) */
+"Outbound connections" = "Ausgehende Verbindungen";
+"Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Log, and enforcement is host-side so a compromised agent can't bypass it." = "Verbindungen der VM nach Host, IP/CIDR, Protokoll und Port erlauben oder verweigern — von oben nach unten geprüft, der erste Treffer gewinnt. Mit dem Protokoll **web** lassen sich die HTTP-Methoden eines Hosts steuern: `allow web api.example.com GET,POST` erlaubt nur diese Verben, `deny web api.example.com PUT,DELETE` blockiert genau diese. Jede Entscheidung wird im Sicherheitsprotokoll aufgezeichnet, und die Durchsetzung erfolgt hostseitig — ein kompromittierter Agent kann sie nicht umgehen.";
+"Unmatched traffic" = "Nicht erfasster Verkehr";
+"Allow" = "Erlauben";
+"Deny" = "Verweigern";
+"Action" = "Aktion";
+"Proto" = "Proto";
+"Host / CIDR" = "Host / CIDR";
+"Methods" = "Methoden";
+"Add rule" = "Regel hinzufügen";
+"pf format" = "pf-Format";
+"Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here." = "Schutzmaßnahmen regeln, wie die konfigurierten Anmeldedaten dieses Arbeitsbereichs verwendet werden. **Vor Verwendung fragen** zeigt eine hostseitige Bestätigung, wenn Anmeldedaten in einer Sitzung zum ersten Mal verwendet werden. Eine **Schreibrichtlinie** entfernt oder blockiert destruktive Operationen direkt auf der Leitung — durchgesetzt im Proxy, sodass ein kompromittierter Agent sie nicht umgehen kann. Nur von Ihnen konfigurierte Anmeldedaten erscheinen hier.";
+"No credentials to guard" = "Keine Anmeldedaten zu schützen";
+"Add credentials in the Credentials pane. Each one appears here with an “ask before use” toggle and, where it applies, a write policy." = "Fügen Sie Anmeldedaten im Bereich „Anmeldedaten“ hinzu. Jeder Eintrag erscheint hier mit einem Schalter „Vor Verwendung fragen“ und, wo zutreffend, einer Schreibrichtlinie.";
+"A write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy." = "Eine Schreibrichtlinie gilt pro Dienst: Zwei Anmeldedaten für denselben Dienst (z. B. zwei GitHub-Token) teilen sich eine Richtlinie.";
+"Disable transparent interception" = "Transparentes Abfangen deaktivieren";
+"Interception (on by default) diverts the VM's HTTP/HTTPS to Bromure so the rules above are enforced host-side even if the guest unsets HTTP(S)_PROXY. Turn this on to stop intercepting — the rules then only apply to traffic that uses the proxy, so the workspace can bypass them. Use only for a workspace that breaks under interception (e.g. strict certificate pinning)." = "Das Abfangen (standardmäßig aktiv) leitet HTTP/HTTPS der VM zu Bromure um, sodass die obigen Regeln hostseitig durchgesetzt werden, selbst wenn der Gast HTTP(S)_PROXY entfernt. Aktivieren Sie diese Option, um das Abfangen zu beenden — die Regeln gelten dann nur noch für Verkehr über den Proxy, der Arbeitsbereich kann sie also umgehen. Nur für Arbeitsbereiche verwenden, die am Abfangen scheitern (z. B. striktes Certificate-Pinning).";
+"Security Timeline" = "Sicherheits-Zeitleiste";
+"Security Timeline…" = "Sicherheits-Zeitleiste…";
+"No security events yet" = "Noch keine Sicherheitsereignisse";
+"No matching events" = "Keine passenden Ereignisse";
+"Credential swaps, firewall verdicts, package checks, prompt-injection scans, and credential use appear here as your workspaces run." = "Token-Austausche, Firewall-Entscheidungen, Paketprüfungen, Prompt-Injection-Scans und Verwendungen von Anmeldedaten erscheinen hier, während Ihre Arbeitsbereiche laufen.";
+"Filter events…" = "Ereignisse filtern…";
+"All engines" = "Alle Engines";
+"%d events" = "%d Ereignisse";
+"Time" = "Zeit";
+"Engine" = "Engine";
+"Condition" = "Bedingung";
+"Decision" = "Entscheidung";
+"Credential brokering" = "Anmeldedaten-Vermittlung";
+"Supply chain" = "Lieferkette";
+"Firewall" = "Firewall";
+"Credential used" = "Anmeldedaten verwendet";
+"Upstream TLS" = "Upstream-TLS";
+"Prompt injection" = "Prompt-Injection";
+"swapped in %@" = "eingetauscht gegen %@";
+"signed" = "signiert";
+"blocked — exfiltration attempt, VM paused" = "blockiert — Exfiltrationsversuch, VM angehalten";

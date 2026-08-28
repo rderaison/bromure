@@ -138,17 +138,18 @@ public final class SecurityTimeline {
             let fake = str(d, "fake_preview") ?? "fake"
             let real = str(d, "real_preview") ?? "real"
             let host = str(d, "host") ?? "?"
-            return row("Credential brokering", "\(fake) → \(host)",
-                       "swapped in \(real)", .info)
+            return row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                       "\(fake) → \(host)",
+                       String(format: NSLocalizedString("swapped in %@", comment: "Security Timeline decision"), real), .info)
 
         case "credential.exfiltration":
             let fake = str(d, "fake_preview") ?? "fake"
             let cred = str(d, "credential") ?? "session token"
             let declared = str(d, "declared_host") ?? "?"
             let observed = str(d, "observed_host") ?? "?"
-            return row("Credential brokering",
+            return row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
                        "\(fake) (\(cred), scoped to \(declared)) → \(observed)",
-                       "blocked — exfiltration attempt, VM paused", .blocked)
+                       NSLocalizedString("blocked — exfiltration attempt, VM paused", comment: "Security Timeline decision"), .blocked)
 
         case "supply_chain.fetch":
             let eco = str(d, "ecosystem") ?? ""
@@ -159,7 +160,7 @@ public final class SecurityTimeline {
             let decision = str(d, "reason").map { "\(outcome) — \($0)" } ?? outcome
             let kind: Decision = (outcome == "allowed" || outcome == "passed")
                 ? .allowed : .blocked
-            return row("Supply chain", cond, decision, kind)
+            return row(NSLocalizedString("Supply chain", comment: "Security Timeline engine"), cond, decision, kind)
 
         case "egress.firewall":
             let host = str(d, "host") ?? str(d, "ip") ?? "?"
@@ -167,12 +168,13 @@ public final class SecurityTimeline {
             let proto = str(d, "proto").map { " \($0)" } ?? ""
             let action = (str(d, "action") ?? "allowed").lowercased()
             let kind: Decision = action.contains("allow") ? .allowed : .blocked
-            return row("Firewall", "\(host)\(port)\(proto)", action, kind)
+            return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"), "\(host)\(port)\(proto)", action, kind)
 
         case "credential.ssh_sign":
             let label = str(d, "key_label").flatMap { $0.isEmpty ? nil : $0 } ?? "SSH key"
             let knd = str(d, "key_kind").map { " (\($0))" } ?? ""
-            return row("Credential used", "SSH key “\(label)”\(knd)", "signed", .allowed)
+            return row(NSLocalizedString("Credential used", comment: "Security Timeline engine"), "SSH key “\(label)”\(knd)",
+                       NSLocalizedString("signed", comment: "Security Timeline decision"), .allowed)
 
         case "credential.aws_sign":
             let svc = str(d, "service") ?? "aws"
@@ -180,7 +182,8 @@ public final class SecurityTimeline {
             let host = str(d, "host") ?? ""
             let cond = "AWS \(svc) \(method) \(host)"
                 .trimmingCharacters(in: .whitespaces)
-            return row("Credential used", cond, "signed", .allowed)
+            return row(NSLocalizedString("Credential used", comment: "Security Timeline engine"), cond,
+                       NSLocalizedString("signed", comment: "Security Timeline decision"), .allowed)
 
         case "guardrails.block":
             let host = str(d, "host") ?? "?"
@@ -188,12 +191,12 @@ public final class SecurityTimeline {
             let path = str(d, "path") ?? ""
             let cond = "\(method) \(host)\(path)".trimmingCharacters(in: .whitespaces)
             let decision = str(d, "reason").map { "blocked — \($0)" } ?? "blocked"
-            return row("Guardrails", cond, decision, .blocked)
+            return row(NSLocalizedString("Guardrails", comment: "Security Timeline engine"), cond, decision, .blocked)
 
         case "tls.upstream_untrusted":
             let host = str(d, "host") ?? "?"
             let reason = str(d, "reason") ?? "certificate not trusted by the host"
-            return row("Upstream TLS", host, "blocked — \(reason)", .blocked)
+            return row(NSLocalizedString("Upstream TLS", comment: "Security Timeline engine"), host, "blocked — \(reason)", .blocked)
 
         case "prompt_injection.detection":
             let action = (str(d, "action") ?? "detected").lowercased()
@@ -205,7 +208,7 @@ public final class SecurityTimeline {
             let shortSnip = snippet.count > 90 ? String(snippet.prefix(90)) + "…" : snippet
             let cond = "\(detector)\(src): \(shortSnip)"
             let kind: Decision = (action == "blocked") ? .blocked : .allowed
-            return row("Prompt injection", cond, action, kind)
+            return row(NSLocalizedString("Prompt injection", comment: "Security Timeline engine"), cond, action, kind)
 
         default:
             return nil

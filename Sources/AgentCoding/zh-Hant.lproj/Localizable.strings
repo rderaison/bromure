@@ -46,7 +46,7 @@
 "Notes (optional)" = "備註 (選填)";
 
 /* Editor — Agent */
-"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "啟用您希望在此工作區中可用的每個代理程式。標記為 **主要** 的代理程式會在第一個 kitty 分頁自動啟動;其他已啟用的代理程式會安裝並完成驗證,但您需在新分頁中按需執行。";
+"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "啟用您希望在此工作區中可用的每個代理程式。標記為 **主要** 的代理程式會在第一個 分頁自動啟動;其他已啟用的代理程式會安裝並完成驗證,但您需在新分頁中按需執行。";
 "Primary" = "主要";
 "Make primary" = "設為主要";
 "Auth" = "驗證";
@@ -1566,3 +1566,43 @@
 "OpenAI-compatible base URL (https://…/v1)" = "OpenAI 相容的基礎 URL (https://…/v1)";
 "Model (optional — e.g. opus, gpt-5.2)" = "模型（選填 — 例如 opus、gpt-5.2）";
 "omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "omp 支援 60 多個供應商。選擇一個並在下方貼上其 API 金鑰，或在上方選擇 **本機模型** 以在此 Mac 上執行。可隨時切換。";
+
+/* Security Timeline + egress firewall + guardrails pane (added 4.6.0) */
+"Outbound connections" = "對外連線";
+"Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Log, and enforcement is host-side so a compromised agent can't bypass it." = "依主機、IP/CIDR、通訊協定與連接埠允許或拒絕虛擬機器的連線 — 由上而下比對,先命中者生效。使用 **web** 通訊協定可控制主機的 HTTP 方法:`allow web api.example.com GET,POST` 僅允許這些方法,`deny web api.example.com PUT,DELETE` 則封鎖它們。每項判定都會記錄到安全性紀錄,並在主機端強制執行,遭入侵的代理程式無法繞過。";
+"Unmatched traffic" = "未比對流量";
+"Allow" = "允許";
+"Deny" = "拒絕";
+"Action" = "動作";
+"Proto" = "協定";
+"Host / CIDR" = "主機 / CIDR";
+"Methods" = "方法";
+"Add rule" = "加入規則";
+"pf format" = "pf 格式";
+"Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here." = "防護欄管理此工作區已設定憑證的使用方式。**使用前詢問** 會在工作階段中首次使用憑證時顯示主機端確認。**寫入原則** 會在傳輸中剝離或封鎖破壞性操作 — 於代理伺服器強制執行,遭入侵的代理程式無法繞過。此處僅顯示您已設定的憑證。";
+"No credentials to guard" = "沒有需要保護的憑證";
+"Add credentials in the Credentials pane. Each one appears here with an “ask before use” toggle and, where it applies, a write policy." = "請在「憑證」面板加入憑證。每筆憑證都會顯示在這裡,附有「使用前詢問」開關,並在適用時附有寫入原則。";
+"A write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy." = "寫入原則以服務為單位:同一服務的兩筆憑證(例如兩個 GitHub 權杖)共用同一原則。";
+"Disable transparent interception" = "停用透明攔截";
+"Interception (on by default) diverts the VM's HTTP/HTTPS to Bromure so the rules above are enforced host-side even if the guest unsets HTTP(S)_PROXY. Turn this on to stop intercepting — the rules then only apply to traffic that uses the proxy, so the workspace can bypass them. Use only for a workspace that breaks under interception (e.g. strict certificate pinning)." = "攔截(預設開啟)會將虛擬機器的 HTTP/HTTPS 導向 Bromure,即使客體移除 HTTP(S)_PROXY,上述規則仍會在主機端強制執行。開啟此選項即停止攔截 — 規則屆時僅適用於經過代理伺服器的流量,工作區因此能繞過規則。僅在工作區無法於攔截下運作時使用(例如嚴格的憑證釘選)。";
+"Security Timeline" = "安全性時間軸";
+"Security Timeline…" = "安全性時間軸…";
+"No security events yet" = "尚無安全性事件";
+"No matching events" = "沒有相符的事件";
+"Credential swaps, firewall verdicts, package checks, prompt-injection scans, and credential use appear here as your workspaces run." = "憑證替換、防火牆判定、套件檢查、提示注入掃描與憑證使用會在工作區執行時顯示於此。";
+"Filter events…" = "篩選事件…";
+"All engines" = "所有引擎";
+"%d events" = "%d 個事件";
+"Time" = "時間";
+"Engine" = "引擎";
+"Condition" = "條件";
+"Decision" = "判定";
+"Credential brokering" = "憑證中介";
+"Supply chain" = "供應鏈";
+"Firewall" = "防火牆";
+"Credential used" = "憑證使用";
+"Upstream TLS" = "上游 TLS";
+"Prompt injection" = "提示注入";
+"swapped in %@" = "已替換為 %@";
+"signed" = "已簽署";
+"blocked — exfiltration attempt, VM paused" = "已封鎖 — 憑證外洩嘗試,虛擬機器已暫停";

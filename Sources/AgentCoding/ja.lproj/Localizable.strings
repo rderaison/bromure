@@ -46,7 +46,7 @@
 "Notes (optional)" = "メモ (任意)";
 
 /* Editor — Agent */
-"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "このワークスペースで使用したい各エージェントを有効にします。**プライマリ** に指定されたものは最初の kitty タブで自動起動し、他の有効化されたエージェントはインストールおよび認証されますが、新しいタブから必要に応じて実行します。";
+"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "このワークスペースで使用したい各エージェントを有効にします。**プライマリ** に指定されたものは最初の タブで自動起動し、他の有効化されたエージェントはインストールおよび認証されますが、新しいタブから必要に応じて実行します。";
 "Primary" = "プライマリ";
 "Make primary" = "プライマリに設定";
 "Auth" = "認証";
@@ -1563,3 +1563,43 @@
 "OpenAI-compatible base URL (https://…/v1)" = "OpenAI 互換のベース URL (https://…/v1)";
 "Model (optional — e.g. opus, gpt-5.2)" = "モデル（任意 — 例: opus、gpt-5.2）";
 "omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "omp は 60 以上のプロバイダーに対応しています。1 つ選んで下の欄に API キーを貼り付けるか、上の **ローカルモデル** を選ぶとこの Mac で実行できます。いつでも切り替えられます。";
+
+/* Security Timeline + egress firewall + guardrails pane (added 4.6.0) */
+"Outbound connections" = "外向き接続";
+"Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Log, and enforcement is host-side so a compromised agent can't bypass it." = "ホスト、IP/CIDR、プロトコル、ポートで VM の接続を許可または拒否します — 上から順に評価され、最初に一致したルールが適用されます。**web** プロトコルを使うとホストごとの HTTP メソッドを制御できます。`allow web api.example.com GET,POST` はこれらのメソッドのみ許可し、`deny web api.example.com PUT,DELETE` はこれらをブロックします。すべての判定はセキュリティ ログに記録され、ホスト側で強制されるため、侵害されたエージェントは回避できません。";
+"Unmatched traffic" = "未一致のトラフィック";
+"Allow" = "許可";
+"Deny" = "拒否";
+"Action" = "アクション";
+"Proto" = "プロトコル";
+"Host / CIDR" = "ホスト / CIDR";
+"Methods" = "メソッド";
+"Add rule" = "ルールを追加";
+"pf format" = "pf 形式";
+"Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here." = "ガードレールは、このワークスペースで設定された資格情報の使い方を管理します。**使用前に確認** は、セッション内で資格情報が初めて使われるときにホスト側の確認を表示します。**書き込みポリシー** は破壊的な操作を通信上で除去またはブロックします — プロキシで強制されるため、侵害されたエージェントは回避できません。ここには設定済みの資格情報のみが表示されます。";
+"No credentials to guard" = "保護する資格情報がありません";
+"Add credentials in the Credentials pane. Each one appears here with an “ask before use” toggle and, where it applies, a write policy." = "資格情報パネルで資格情報を追加してください。それぞれがここに「使用前に確認」のスイッチと、該当する場合は書き込みポリシー付きで表示されます。";
+"A write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy." = "書き込みポリシーはサービス単位です。同じサービスの 2 つの資格情報(例: 2 つの GitHub トークン)は 1 つのポリシーを共有します。";
+"Disable transparent interception" = "透過インターセプトを無効にする";
+"Interception (on by default) diverts the VM's HTTP/HTTPS to Bromure so the rules above are enforced host-side even if the guest unsets HTTP(S)_PROXY. Turn this on to stop intercepting — the rules then only apply to traffic that uses the proxy, so the workspace can bypass them. Use only for a workspace that breaks under interception (e.g. strict certificate pinning)." = "インターセプト(デフォルトで有効)は VM の HTTP/HTTPS を Bromure に迂回させ、ゲストが HTTP(S)_PROXY を解除しても上記のルールをホスト側で強制します。有効にするとインターセプトを停止します — ルールはプロキシ経由のトラフィックにのみ適用されるようになり、ワークスペースはルールを回避できます。インターセプトで動作しないワークスペース(例: 厳格な証明書ピン留め)にのみ使用してください。";
+"Security Timeline" = "セキュリティ タイムライン";
+"Security Timeline…" = "セキュリティ タイムライン…";
+"No security events yet" = "セキュリティ イベントはまだありません";
+"No matching events" = "一致するイベントがありません";
+"Credential swaps, firewall verdicts, package checks, prompt-injection scans, and credential use appear here as your workspaces run." = "資格情報の差し替え、ファイアウォールの判定、パッケージ検査、プロンプトインジェクション スキャン、資格情報の使用が、ワークスペースの実行中にここに表示されます。";
+"Filter events…" = "イベントをフィルタ…";
+"All engines" = "すべてのエンジン";
+"%d events" = "%d 件のイベント";
+"Time" = "時刻";
+"Engine" = "エンジン";
+"Condition" = "内容";
+"Decision" = "判定";
+"Credential brokering" = "資格情報ブローカー";
+"Supply chain" = "サプライチェーン";
+"Firewall" = "ファイアウォール";
+"Credential used" = "資格情報の使用";
+"Upstream TLS" = "上流 TLS";
+"Prompt injection" = "プロンプトインジェクション";
+"swapped in %@" = "%@ に差し替え";
+"signed" = "署名済み";
+"blocked — exfiltration attempt, VM paused" = "ブロック — 資格情報流出の試み、VM を一時停止";

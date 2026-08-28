@@ -46,7 +46,7 @@
 "Notes (optional)" = "Notes (facultatif)";
 
 /* Editor — Agent */
-"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first kitty tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Activez chaque agent que vous souhaitez avoir dans cet espace de travail. Celui marqué **Principal** se lance automatiquement dans le premier onglet kitty ; les autres agents activés sont installés et authentifiés mais vous les exécutez à la demande depuis un nouvel onglet.";
+"Enable each agent you want available in this workspace. The one marked **Primary** auto-launches in the first tab; other enabled agents are installed and authenticated but you run them on demand from a new tab." = "Activez chaque agent que vous souhaitez avoir dans cet espace de travail. Celui marqué **Principal** se lance automatiquement dans le premier onglet ; les autres agents activés sont installés et authentifiés mais vous les exécutez à la demande depuis un nouvel onglet.";
 "Primary" = "Principal";
 "Make primary" = "Définir comme principal";
 "Auth" = "Authentification";
@@ -1563,3 +1563,43 @@
 "OpenAI-compatible base URL (https://…/v1)" = "URL de base compatible OpenAI (https://…/v1)";
 "Model (optional — e.g. opus, gpt-5.2)" = "Modèle (facultatif — p. ex. opus, gpt-5.2)";
 "omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "omp fonctionne avec plus de 60 fournisseurs. Choisissez-en un et collez sa clé d’API ci-dessous, ou sélectionnez **Modèle local** ci-dessus pour l’exécuter sur ce Mac. Changez à tout moment.";
+
+/* Security Timeline + egress firewall + guardrails pane (added 4.6.0) */
+"Outbound connections" = "Connexions sortantes";
+"Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Log, and enforcement is host-side so a compromised agent can't bypass it." = "Autorisez ou refusez les connexions de la VM par hôte, IP/CIDR, protocole et port — évaluées de haut en bas, la première correspondance l’emporte. Le protocole **web** permet de contrôler les méthodes HTTP d’un hôte : `allow web api.example.com GET,POST` n’autorise que ces verbes, `deny web api.example.com PUT,DELETE` les bloque. Chaque décision est consignée dans le Journal de sécurité, et l’application se fait côté hôte — un agent compromis ne peut pas la contourner.";
+"Unmatched traffic" = "Trafic sans correspondance";
+"Allow" = "Autoriser";
+"Deny" = "Refuser";
+"Action" = "Action";
+"Proto" = "Proto";
+"Host / CIDR" = "Hôte / CIDR";
+"Methods" = "Méthodes";
+"Add rule" = "Ajouter une règle";
+"pf format" = "format pf";
+"Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here." = "Les garde-fous régissent l’utilisation des identifiants configurés de cet espace de travail. **Demander avant utilisation** affiche une confirmation côté hôte à la première utilisation d’un identifiant dans une session. Une **politique d’écriture** retire ou bloque les opérations destructrices sur le réseau — appliquée dans le proxy, un agent compromis ne peut donc pas la contourner. Seuls les identifiants que vous avez configurés apparaissent ici.";
+"No credentials to guard" = "Aucun identifiant à protéger";
+"Add credentials in the Credentials pane. Each one appears here with an “ask before use” toggle and, where it applies, a write policy." = "Ajoutez des identifiants dans le volet Identifiants. Chacun apparaît ici avec un réglage « demander avant utilisation » et, le cas échéant, une politique d’écriture.";
+"A write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy." = "Une politique d’écriture s’applique par service : deux identifiants du même service (p. ex. deux jetons GitHub) partagent la même politique.";
+"Disable transparent interception" = "Désactiver l’interception transparente";
+"Interception (on by default) diverts the VM's HTTP/HTTPS to Bromure so the rules above are enforced host-side even if the guest unsets HTTP(S)_PROXY. Turn this on to stop intercepting — the rules then only apply to traffic that uses the proxy, so the workspace can bypass them. Use only for a workspace that breaks under interception (e.g. strict certificate pinning)." = "L’interception (active par défaut) détourne le HTTP/HTTPS de la VM vers Bromure afin que les règles ci-dessus soient appliquées côté hôte, même si l’invité supprime HTTP(S)_PROXY. Activez cette option pour cesser d’intercepter — les règles ne s’appliquent alors qu’au trafic passant par le proxy, l’espace de travail peut donc les contourner. À n’utiliser que pour un espace de travail incompatible avec l’interception (p. ex. épinglage de certificat strict).";
+"Security Timeline" = "Chronologie de sécurité";
+"Security Timeline…" = "Chronologie de sécurité…";
+"No security events yet" = "Aucun événement de sécurité pour l’instant";
+"No matching events" = "Aucun événement correspondant";
+"Credential swaps, firewall verdicts, package checks, prompt-injection scans, and credential use appear here as your workspaces run." = "Les échanges de jetons, verdicts du pare-feu, contrôles de paquets, analyses d’injection de prompt et utilisations d’identifiants apparaissent ici pendant l’exécution de vos espaces de travail.";
+"Filter events…" = "Filtrer les événements…";
+"All engines" = "Tous les moteurs";
+"%d events" = "%d événements";
+"Time" = "Heure";
+"Engine" = "Moteur";
+"Condition" = "Condition";
+"Decision" = "Décision";
+"Credential brokering" = "Courtage d’identifiants";
+"Supply chain" = "Chaîne d’approvisionnement";
+"Firewall" = "Pare-feu";
+"Credential used" = "Identifiant utilisé";
+"Upstream TLS" = "TLS amont";
+"Prompt injection" = "Injection de prompt";
+"swapped in %@" = "échangé contre %@";
+"signed" = "signé";
+"blocked — exfiltration attempt, VM paused" = "bloqué — tentative d’exfiltration, VM suspendue";
