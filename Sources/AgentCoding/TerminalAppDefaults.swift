@@ -161,6 +161,7 @@ extension TerminalAppDefaults {
         clipboard-paste-protection = false
         clipboard-read = allow
         clipboard-write = allow
+        \(terminalGraphicsConfigLines())
         # macOS-like selection: a plain drag selects (tmux mouse is off, so
         # it's ghostty's own selection), selecting never copies on its own,
         # ⌘C copies and ⌘V pastes (bracketed).
@@ -176,6 +177,24 @@ extension TerminalAppDefaults {
         """
     }
 
+    /// Opt-in via `defaults write io.bromure.agentic-coding
+    /// terminal.allowGraphics -bool YES` (default OFF). Guest bytes must
+    /// never become host-rendered images unless the operator explicitly says
+    /// so: the pty carries an UNTRUSTED agent's output, so host-side image
+    /// decoding is attack surface, and a guest could draw fake UI/consent
+    /// chrome over the terminal. `image-storage-limit = 0` disables every
+    /// image protocol (kitty graphics et al.); SessionDisk stages the
+    /// matching guest marker that flips tmux allow-passthrough, so both
+    /// layers follow the one setting.
+    static func terminalGraphicsAllowed() -> Bool {
+        UserDefaults.standard.bool(forKey: "terminal.allowGraphics")
+    }
+
+    private static func terminalGraphicsConfigLines() -> String {
+        terminalGraphicsAllowed()
+            ? "# terminal.allowGraphics is set: guest image protocols render."
+            : "image-storage-limit = 0"
+    }
 }
 #endif
 

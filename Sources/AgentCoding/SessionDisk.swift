@@ -825,6 +825,19 @@ public final class SessionDisk {
         try "".write(to: tmp.appendingPathComponent("plan-stream-enabled"),
                      atomically: true, encoding: .utf8)
 
+        // terminal-graphics-enabled — opt-in marker (defaults write
+        // io.bromure.agentic-coding terminal.allowGraphics -bool YES): agentd
+        // flips tmux allow-passthrough on so kitty-graphics escapes reach the
+        // host surface, whose ghostty config likewise lifts its image-protocol
+        // block (see TerminalAppDefaults.terminalGraphicsAllowed). Absent (the
+        // default) = guest bytes can never render as host-side images.
+        let gfxMarker = tmp.appendingPathComponent("terminal-graphics-enabled")
+        if TerminalAppDefaults.terminalGraphicsAllowed() {
+            try "".write(to: gfxMarker, atomically: true, encoding: .utf8)
+        } else {
+            try? fm.removeItem(at: gfxMarker)
+        }
+
         // Codex local inference: Codex uses the Responses API via a config-file
         // provider, so env vars don't redirect it. Write a model_provider with
         // wire_api="responses" targeting the endpoint vllm-mlx serves on the

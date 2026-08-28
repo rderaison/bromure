@@ -292,6 +292,12 @@ def _set_winsize(fd, rows, cols):
         pass
 
 
+def _terminal_graphics_enabled():
+    """Host-staged opt-in marker: `defaults write io.bromure.agentic-coding
+    terminal.allowGraphics -bool YES` on the Mac. Absent = default deny."""
+    return os.path.exists("/mnt/bromure-meta/terminal-graphics-enabled")
+
+
 def _view_attach_command(view, window):
     """Build the tmux attach command for a host terminal view.
 
@@ -300,15 +306,20 @@ def _view_attach_command(view, window):
     one active window, which is exactly what a grid must not do.
     destroy-unattached reaps the view session when the host detaches; the
     grouped windows (the real tabs) are untouched. status goes off because the
-    host draws its own chrome; allow-passthrough lets kitty-graphics escape
-    tmux for hosts that render it.
+    host draws its own chrome. allow-passthrough follows the host's
+    terminal-graphics setting (default OFF): raw guest escapes — kitty
+    graphics above all — must not reach the host surface unless the operator
+    opted in, since guest-controlled bytes rendering host-side is attack
+    surface + UI spoofing. The host's ghostty config mirrors the same
+    setting with image-storage-limit = 0.
     """
     name = "view-" + re.sub(r"[^A-Za-z0-9-]", "", str(view))[:32]
     if name == "view-":
         name = "view-" + os.urandom(4).hex()
+    passthrough = "on" if _terminal_graphics_enabled() else "off"
     tmux = (
         "exec tmux"
-        " set-option -g allow-passthrough on \\;"
+        " set-option -g allow-passthrough " + passthrough + " \\;"
         # set-clipboard on is safe now that tmux mouse is off (no tmux-side
         # copy happens on selection) — it just lets a program's own OSC 52
         # copy reach the macOS clipboard.
@@ -3476,7 +3487,12 @@ def command_loop_service():
 def create_session():
     """Create the single tmux session the tabs live in (startup one-shot)."""
     _tmux_ok("new-session", "-d", "-s", TMUX_S, "-c", HOME)
-    _tmux_ok("set-option", "-g", "allow-passthrough", "on")
+    # allow-passthrough follows the host's terminal-graphics opt-in
+    # (default off): guest escapes must not reach the host surface raw —
+    # kitty graphics = host-side decoding of untrusted bytes + UI spoofing.
+    # Host ghostty mirrors the same setting via image-storage-limit.
+    _tmux_ok("set-option", "-g", "allow-passthrough",
+             "on" if _terminal_graphics_enabled() else "off")
     _tmux_ok("set-option", "-s", "set-clipboard", "on")
     # Wheel-scroll bridge. The attached client keeps the host surface in the
     # alternate screen, so ghostty has no scrollback of its own and would
