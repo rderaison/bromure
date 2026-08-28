@@ -3980,6 +3980,12 @@ struct RemoteModelBackend {
     var cancel: (_ repo: String) -> Void
     var discard: (_ repo: String) -> Void
     var remove: (_ model: CatalogModel) -> Void
+    /// Every repo installed on the server — including ones pulled outside
+    /// the curated catalog (`model pull <any HF repo>`), which the pane must
+    /// list or they're invisible and unselectable from the client.
+    var installedRepos: () -> [String]
+    var removeRepo: (_ repo: String) -> Void
+    var installedSizeGB: (_ repo: String) -> Double?
 }
 
 struct LocalModelsSettingsView: View {
@@ -4003,7 +4009,12 @@ struct LocalModelsSettingsView: View {
 
     // Data access + actions, routed to the server when `remote` is set.
     private func modelState(_ repo: String) -> ModelDownloadManager.State? {
-        remote?.state(repo) ?? downloads.state(repo: repo)
+        // No ?? fallthrough: with a remote backend, a repo with NO server
+        // state (download finished) must not fall back to THIS Mac's manager,
+        // whose launch-time interrupted-scan can surface a stale local
+        // partial ("interrupted at 5 GB" for a model that completed remotely).
+        if remote != nil { return remote?.state(repo) }
+        return downloads.state(repo: repo)
     }
     private func modelInstalled(_ repo: String) -> Bool {
         _ = refreshTick   // local Remove bumps this to force a disk re-read
@@ -4231,10 +4242,59 @@ struct LocalModelsSettingsView: View {
                         Text("Greyed-out models need more memory than this Mac has.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    let extras = extraInstalledRepos()
+                    if !extras.isEmpty {
+                        Section {
+                            ForEach(extras, id: \.self) { repo in
+                                extraRepoRow(repo)
+                            }
+                        } header: {
+                            Text("Installed outside the catalog")
+                        } footer: {
+                            Text("Pulled directly by repo (`model pull`) — fully usable, just not curated.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// Installed repos absent from the curated catalog — server-side on the
+    /// fat client, this machine's otherwise.
+    private func extraInstalledRepos() -> [String] {
+        _ = refreshTick
+        let curated = Set(catalog.models.map(\.repo))
+        let repos = remote?.installedRepos() ?? CatalogStore.shared.installedRepos()
+        return repos.filter { !curated.contains($0) }.sorted()
+    }
+
+    @ViewBuilder private func extraRepoRow(_ repo: String) -> some View {
+        let isActive = (activeModelID == repo)
+        HStack(spacing: 10) {
+            Image(systemName: isActive ? "largecircle.fill.circle" : "circle")
+                .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+                .onTapGesture { activeModelID = repo }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(repo).font(.callout)
+                let gb = remote != nil
+                    ? (remote?.installedSizeGB(repo) ?? 0)
+                    : Double(CatalogStore.shared.installedBytes(repo: repo)) / 1_000_000_000
+                if gb > 0.01 {
+                    Text(String(format: "%.1f GB on disk", gb))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Button(NSLocalizedString("Remove", comment: ""), role: .destructive) {
+                if let r = remote { r.removeRepo(repo) }
+                else { try? CatalogStore.shared.removeInstalled(repo: repo) }
+                if activeModelID == repo { activeModelID = nil }
+                refreshTick += 1
+            }
+            .buttonStyle(.borderless).controlSize(.small)
+        }
     }
 
     // MARK: Model row

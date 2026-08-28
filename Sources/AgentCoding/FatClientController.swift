@@ -134,6 +134,9 @@ final class RemoteHostController {
     private(set) var serverModelStates: [String: ModelDownloadManager.State] = [:]
     /// Models fully installed on the server, by HF repo.
     private(set) var serverInstalledModels: Set<String> = []
+    /// On-disk size (GB) for installed repos, when the server reported one
+    /// (today: the uncurated `model pull` repos).
+    private(set) var serverModelSizesGB: [String: Double] = [:]
 
     private func applyLocalModels(_ dict: [String: Any]?) {
         guard let dict else { return }   // key absent → keep last good
@@ -141,12 +144,15 @@ final class RemoteHostController {
             ?? (dict["unifiedMemGB"] as? Int) ?? serverUnifiedMemGB
         var states: [String: ModelDownloadManager.State] = [:]
         var installed: Set<String> = []
+        var sizes: [String: Double] = [:]
         for (repo, raw) in (dict["models"] as? [String: [String: Any]]) ?? [:] {
             if (raw["installed"] as? Bool) == true { installed.insert(repo) }
+            if let gb = (raw["sizeGB"] as? NSNumber)?.doubleValue { sizes[repo] = gb }
             if let st = ModelDownloadManager.State(wire: raw) { states[repo] = st }
         }
         if serverModelStates != states { serverModelStates = states }
         if serverInstalledModels != installed { serverInstalledModels = installed }
+        if serverModelSizesGB != sizes { serverModelSizesGB = sizes }
     }
 
     /// Drive a server-side model action over the tunnel.
@@ -2364,7 +2370,10 @@ final class RemoteHostWindow: NSWindow {
                                     totalBytes: Int64(model.downloadGB * 1_000_000_000)) },
             cancel: { [weak ctrl] repo in ctrl?.cancelModelDownload(repo: repo) },
             discard: { [weak ctrl] repo in ctrl?.discardModelDownload(repo: repo) },
-            remove: { [weak ctrl] model in ctrl?.removeServerModel(repo: model.repo) })
+            remove: { [weak ctrl] model in ctrl?.removeServerModel(repo: model.repo) },
+            installedRepos: { [weak ctrl] in Array(ctrl?.serverInstalledModels ?? []) },
+            removeRepo: { [weak ctrl] repo in ctrl?.removeServerModel(repo: repo) },
+            installedSizeGB: { [weak ctrl] repo in ctrl?.serverModelSizesGB[repo] })
     }
 
     private func presentNewWorkspaceEditor(draft: Profile) {

@@ -1731,6 +1731,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // real number instead of the 128k default.
                 EngineModelMeta.refresh(base: base, apiKey: apiKey, model: activeID)
             }
+            // A workspace that previously ran the BUILT-IN engine leaves its
+            // model registration behind when it switches to an external
+            // server — the engine keeps serving (and holding RAM for) models
+            // nobody local wants, and its LRU budget fights other workspaces'
+            // models. Drop it and reconcile.
+            Task { await InferenceService.shared.clearWorkspace(pid) }
             InferenceRepairProxy.shared.startIfNeeded()
             let label = profile.activeModelID ?? base.host ?? "external engine"
             pane(for: pid)?.model.engineStatus = .starting("Checking \(base.host ?? "engine")…")
@@ -3307,6 +3313,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     var d: [String: Any] = ["installed": CatalogStore.shared.isInstalled(repo: m.repo)]
                     if let st = mgr.state(repo: m.repo) { for (k, v) in st.wireDict { d[k] = v } }
                     models[m.repo] = d
+                }
+                // Installed-but-uncurated repos (`model pull <any HF repo>`):
+                // without these the fat client can neither see nor select
+                // what's actually on this machine.
+                for repo in CatalogStore.shared.installedRepos() where models[repo] == nil {
+                    models[repo] = ["installed": true,
+                                    "sizeGB": Double(CatalogStore.shared.installedBytes(repo: repo)) / 1_000_000_000]
                 }
                 return ["unifiedMemGB": HostMemory.unifiedMemoryGB(), "models": models]
             }
