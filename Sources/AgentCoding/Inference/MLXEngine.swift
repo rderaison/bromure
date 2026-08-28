@@ -237,6 +237,24 @@ actor MLXEngine {
     /// reasoning models even when `enable_thinking=false` is passed — without
     /// it the raw chain-of-thought leaks into the agent's visible output and
     /// gets re-sent verbatim in the next turn's transcript.
+    /// The counterpart of `stripThinking`: the CONTENT of the think spans,
+    /// concatenated (an unterminated span contributes its remainder).
+    static func extractThinking(_ s: String) -> String {
+        guard s.contains("<think>") else { return "" }
+        var out = ""
+        var rest = Substring(s)
+        while let open = rest.range(of: "<think>") {
+            if let close = rest.range(of: "</think>", range: open.upperBound..<rest.endIndex) {
+                out += rest[open.upperBound..<close.lowerBound]
+                rest = rest[close.upperBound...]
+            } else {
+                out += rest[open.upperBound...]
+                rest = ""
+            }
+        }
+        return out
+    }
+
     static func stripThinking(_ s: String) -> String {
         guard s.contains("<think>") else { return s }
         var out = ""
@@ -413,6 +431,11 @@ actor MLXEngine {
     /// Result of a completed generation.
     struct Completion: Sendable {
         var text: String
+        /// The `<think>…</think>` content, extracted (not discarded): the
+        /// wires surface it as native reasoning so agents can stream/show it
+        /// on demand — parity with the external-engine path. Never re-enters
+        /// a transcript (agents don't resend thinking).
+        var thinking: String = ""
         var promptTokens: Int
         /// Tokens actually prefilled this turn — the full prompt minus the
         /// leading KV-cache prefix that was reused. This (not `promptTokens`) is
@@ -579,11 +602,13 @@ actor MLXEngine {
                 FileHandle.standardError.write(Data(
                     "[mlx] slot=\(slotIndex)/\(sessions.slots.count) prompt=\(promptIds.count) reused=\(reusedCount) prefilled=\(suffix.count) gen=\(generatedIds.count) ttft=\(String(format: "%.2f", ttft))s \(String(format: "%.1f", tps)) tok/s\n".utf8))
             }
-            let visible = MLXEngine.isGemmaModel(repo)
+            let gemma = MLXEngine.isGemmaModel(repo)
+            let visible = gemma
                 ? MLXEngine.stripGemmaChannels(MLXEngine.stripThinking(text))
                 : MLXEngine.stripThinking(text)
             return Completion(
                 text: visible,
+                thinking: gemma ? "" : MLXEngine.extractThinking(text),
                 promptTokens: promptIds.count,
                 prefilledTokens: suffix.count,
                 completionTokens: generatedIds.count,

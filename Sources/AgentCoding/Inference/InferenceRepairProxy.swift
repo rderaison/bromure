@@ -651,7 +651,10 @@ final class InferenceRepairProxy: @unchecked Sendable {
         ur.httpBody = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
 
         let t0 = Date()
-        let (message, status, raw) = MLXStreamClient.send(request: ur) { emitter.textDelta($0) }
+        let (message, status, raw) = MLXStreamClient.send(
+            request: ur,
+            onText: { emitter.textDelta($0) },
+            onReasoning: { emitter.thinkingDelta($0) })
         guard status == 200, let message else {
             shipTrace(profileID: pid, model: payload["model"] as? String ?? "?",
                       path: req.path, status: status,

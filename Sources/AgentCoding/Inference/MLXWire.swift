@@ -16,12 +16,20 @@ enum Wire {
         let id = "bromure-\(UUID().uuidString.prefix(12))"
         switch self {
         case .messages:
+            // Reasoning first, as a native thinking block — the agent renders
+            // it collapsed and toggles it on demand (same as the external
+            // path); thinking is never resent, so transcripts don't bloat.
+            var content: [[String: Any]] = []
+            if !c.thinking.isEmpty {
+                content.append(["type": "thinking", "thinking": c.thinking, "signature": ""])
+            }
+            content.append(["type": "text", "text": c.text])
             return [
                 "id": "msg_\(id)",
                 "type": "message",
                 "role": "assistant",
                 "model": model,
-                "content": [["type": "text", "text": c.text]],
+                "content": content,
                 "stop_reason": c.finishReason == "length" ? "max_tokens" : "end_turn",
                 "stop_sequence": NSNull(),
                 "usage": ["input_tokens": c.promptTokens, "output_tokens": c.completionTokens],
@@ -34,7 +42,11 @@ enum Wire {
                 "model": model,
                 "choices": [[
                     "index": 0,
-                    "message": ["role": "assistant", "content": c.text],
+                    "message": {
+                        var m: [String: Any] = ["role": "assistant", "content": c.text]
+                        if !c.thinking.isEmpty { m["reasoning"] = c.thinking }
+                        return m
+                    }(),
                     "finish_reason": c.finishReason == "length" ? "length" : "stop",
                 ]],
                 "usage": [

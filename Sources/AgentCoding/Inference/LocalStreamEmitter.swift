@@ -402,8 +402,10 @@ final class LocalStreamEmitter {
 /// `{"error":…}` frame.
 enum MLXStreamClient {
     static func send(request: URLRequest,
-                     onText: @escaping (String) -> Void) -> (message: [String: Any]?, status: Int, raw: Data) {
+                     onText: @escaping (String) -> Void,
+                     onReasoning: @escaping (String) -> Void = { _ in }) -> (message: [String: Any]?, status: Int, raw: Data) {
         var text = ""
+        var thinking = ""
         var final: [String: Any]?
         var errorStatus: Int?
         var pending = ""
@@ -423,6 +425,10 @@ enum MLXStreamClient {
                 if let d = obj["d"] as? String, !d.isEmpty {
                     text += d
                     onText(text)
+                }
+                if let t = obj["t"] as? String, !t.isEmpty {
+                    thinking += t
+                    onReasoning(thinking)
                 }
                 if let f = obj["final"] as? [String: Any] { final = f }
                 if obj["error"] != nil { errorStatus = obj["status"] as? Int ?? 500 }

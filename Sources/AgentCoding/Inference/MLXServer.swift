@@ -360,12 +360,33 @@ final class MLXServer: @unchecked Sendable {
     private final class DeltaRelay {
         private let fd: Int32
         private var raw = ""
-        private var sentCount = 0          // chars of visible() already sent
+        private var sentCount = 0          // chars of visible text already sent
+        private var sentThinkCount = 0     // chars of thinking already sent
         private(set) var started = false
         private var alive = true
         private var appendCalls = 0        // BROMURE_STREAM_DEBUG logging only
 
         init(fd: Int32) { self.fd = fd }
+
+        /// The think-span CONTENT accumulated so far — streamed live as
+        /// `{"t":…}` frames so the agent shows the model's reasoning while
+        /// it happens (parity with the external-engine path). Grows
+        /// monotonically: an open span contributes its remainder.
+        private func thinkingSoFar() -> String {
+            guard raw.contains("<think>") else { return "" }
+            var out = ""
+            var rest = Substring(raw)
+            while let open = rest.range(of: "<think>") {
+                if let close = rest.range(of: "</think>", range: open.upperBound..<rest.endIndex) {
+                    out += rest[open.upperBound..<close.lowerBound]
+                    rest = rest[close.upperBound...]
+                } else {
+                    out += rest[open.upperBound...]
+                    rest = ""
+                }
+            }
+            return out
+        }
 
         /// `stripThinking` minus its final trim (only left-trimmed): the
         /// visible prefix must only ever grow as `raw` grows — a shrink would
@@ -408,6 +429,16 @@ final class MLXServer: @unchecked Sendable {
                     FileHandle.standardError.write(Data(
                         "[relay] append#\(appendCalls) raw=\(raw.count) vis=\(vis.count) release=\(release) sent=\(sentCount) alive=\(alive) head=\(head)\n".utf8))
                 }
+            }
+            // Reasoning channel first — the model thinks before it answers,
+            // and its spans stream while still open (12-char holdback covers
+            // a "</think>" split across deltas).
+            let think = thinkingSoFar()
+            let thinkRelease = max(0, think.count - 12)
+            if thinkRelease > sentThinkCount {
+                let chunk = String(think.prefix(thinkRelease).dropFirst(sentThinkCount))
+                sentThinkCount = thinkRelease
+                send(frame: ["t": chunk])
             }
             guard release > sentCount else { return alive }
             let chunk = String(vis.prefix(release).dropFirst(sentCount))

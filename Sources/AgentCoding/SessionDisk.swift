@@ -912,12 +912,19 @@ public final class SessionDisk {
                 // `reasoning`, so a vision-capable Ollama model is unusable
                 // for images without them.
                 let meta = Self.localModelMeta(profile: profile)
+                // Built-in MLX: thinking is on unless BROMURE_THINKING
+                // disables it (the engine child inherits this env), and its
+                // reasoning now streams as native thinking — advertise it so
+                // omp shows its effort UI. External: the server's capability.
+                let thinkEnv = ProcessInfo.processInfo.environment["BROMURE_THINKING"]
+                let builtinThinking = profile.localEngineBaseURL == nil
+                    && !(thinkEnv == "0" || thinkEnv?.lowercased() == "false")
                 yaml = Self.ompModelsYAML(
                     base: "https://\(InferenceService.localMitmHost)/v1",
                     model: modelName,
                     contextWindow: Self.localModelContext(profile: profile),
                     vision: meta?.vision == true,
-                    reasoning: meta?.thinking == true)
+                    reasoning: meta?.thinking == true || builtinThinking)
             } else if prov == .custom, let base = ompSpec.ompBaseURL,
                       !base.trimmingCharacters(in: .whitespaces).isEmpty {
                 yaml = Self.ompModelsYAML(base: base, model: modelName)

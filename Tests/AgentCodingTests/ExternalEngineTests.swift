@@ -713,6 +713,61 @@ struct StreamingEndBehaviorTests {
     }
 }
 
+/// Built-in reasoning: the engine child streams think-span content as
+/// {"t":…} frames and the final native message carries a thinking block —
+/// the guest must see thinking_delta events before the text block.
+@Suite("Built-in MLX reasoning streaming", .serialized)
+struct BuiltinReasoningStreamingTests {
+
+    @Test("t-frames become a thinking block streamed before the text")
+    func thinkingStreams() throws {
+        let reasoning = "The user wants the capital of France. Paris is the answer."
+        let answer = "The capital of France is Paris."
+        let finalMessage: [String: Any] = [
+            "id": "msg_n1", "type": "message", "role": "assistant", "model": "m",
+            "content": [["type": "thinking", "thinking": reasoning, "signature": ""],
+                        ["type": "text", "text": answer]],
+            "stop_reason": "end_turn",
+            "usage": ["input_tokens": 10, "output_tokens": 40],
+        ]
+        var sse = ""
+        let mid = reasoning.index(reasoning.startIndex, offsetBy: reasoning.count / 2)
+        for chunk in [String(reasoning[..<mid]), String(reasoning[mid...])] {
+            let f = try JSONSerialization.data(withJSONObject: ["t": chunk])
+            sse += "data: \(String(data: f, encoding: .utf8)!)\n\n"
+        }
+        let d = try JSONSerialization.data(withJSONObject: ["d": answer])
+        sse += "data: \(String(data: d, encoding: .utf8)!)\n\n"
+        let ff = try JSONSerialization.data(withJSONObject: ["final": finalMessage])
+        sse += "data: \(String(data: ff, encoding: .utf8)!)\n\ndata: [DONE]\n\n"
+        let engine = try #require(FakeSSEServerBox.make(body: Data(sse.utf8)))
+
+        let pid = UUID()
+        let req = InferenceRepairProxy.Request(
+            method: "POST", path: "/v1/messages",
+            headers: [("Authorization", "Bearer \(EngineKey.perVM(profileID: pid))")],
+            body: try JSONSerialization.data(withJSONObject: [
+                "model": "m", "stream": true, "max_tokens": 128,
+                "messages": [["role": "user", "content": "capital of France?"]]]))
+        var sp = [Int32](repeating: 0, count: 2)
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0)
+        defer { close(sp[0]) }
+        #expect(InferenceRepairProxy.respond(to: req, enginePort: engine.port, streamFD: sp[1]) == nil)
+        close(sp[1])
+        var out = Data(); var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        while true { let n = read(sp[0], &buf, buf.count); if n <= 0 { break }; out.append(contentsOf: buf[0..<n]) }
+        let text = String(decoding: out, as: UTF8.self)
+
+        #expect(text.contains("thinking_delta"))
+        #expect(text.contains("Paris is the answer"))
+        let think = text.range(of: "thinking_delta")
+        let td = text.range(of: "text_delta")
+        #expect(think != nil && td != nil && think!.lowerBound < td!.lowerBound)
+        #expect(text.contains("capital of France is Paris"))
+        #expect(text.contains("event: message_stop"))
+    }
+}
+
 /// Shim: reuse the private FakeOpenAIServer shape without widening its
 /// access — a one-shot SSE server for the streaming tests.
 private enum FakeSSEServerBox {
