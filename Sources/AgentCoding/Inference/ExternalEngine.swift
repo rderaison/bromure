@@ -119,21 +119,60 @@ enum ExternalEngine {
             return (text.isEmpty && calls.isEmpty) ? [] : [msg]
         }
         var out: [[String: Any]] = []
-        var text = ""
+        var parts: [[String: Any]] = []   // text + image_url, in block order
+        var hasImage = false
         for b in blocks {
             switch b["type"] as? String {
             case "text":
-                text += (b["text"] as? String ?? "")
+                parts.append(["type": "text", "text": b["text"] as? String ?? ""])
+            case "image":
+                // Anthropic image block → OpenAI image_url part (data: URI
+                // for base64 sources). Dropping these was why vision-capable
+                // local models never saw the agent's screenshots.
+                if let url = chatImageURL(anthropicSource: b["source"]) {
+                    parts.append(["type": "image_url", "image_url": ["url": url]])
+                    hasImage = true
+                }
             case "tool_result":
                 out.append(["role": "tool",
                             "tool_call_id": b["tool_use_id"] as? String ?? "call_x",
                             "content": WireRequest.flattenContent(b["content"])])
+                // OpenAI tool messages are text-only; a screenshot inside a
+                // tool_result (e.g. a browser capture) is lifted into the
+                // following user turn so the model still sees it.
+                for c in b["content"] as? [[String: Any]] ?? []
+                where (c["type"] as? String) == "image" {
+                    if let url = chatImageURL(anthropicSource: c["source"]) {
+                        parts.append(["type": "image_url", "image_url": ["url": url]])
+                        hasImage = true
+                    }
+                }
             default:
                 break
             }
         }
-        if !text.isEmpty { out.append(["role": role, "content": text]) }
+        if hasImage {
+            out.append(["role": role, "content": parts])
+        } else {
+            let text = parts.compactMap { $0["text"] as? String }.joined()
+            if !text.isEmpty { out.append(["role": role, "content": text]) }
+        }
         return out
+    }
+
+    /// Anthropic image `source` → an OpenAI-compatible image URL (data: URI
+    /// for base64 payloads, passthrough for URL sources).
+    private static func chatImageURL(anthropicSource raw: Any?) -> String? {
+        guard let src = raw as? [String: Any] else { return nil }
+        switch src["type"] as? String {
+        case "base64":
+            guard let data = src["data"] as? String, !data.isEmpty else { return nil }
+            return "data:\(src["media_type"] as? String ?? "image/png");base64,\(data)"
+        case "url":
+            return src["url"] as? String
+        default:
+            return nil
+        }
     }
 
     /// Responses input item → OpenAI chat messages (native tool_calls / tool
@@ -143,9 +182,26 @@ enum ExternalEngine {
         switch item["type"] as? String {
         case "message", nil:
             let role = (item["role"] as? String) ?? "user"
+            let mapped = role == "developer" ? "system" : role
+            var parts: [[String: Any]] = []
+            var hasImage = false
+            for c in item["content"] as? [[String: Any]] ?? [] {
+                if (c["type"] as? String) == "input_image" {
+                    // Responses input_image → image_url part; the url rides
+                    // either a bare string or an {url:} object.
+                    let url = (c["image_url"] as? String)
+                        ?? ((c["image_url"] as? [String: Any])?["url"] as? String)
+                    if let url {
+                        parts.append(["type": "image_url", "image_url": ["url": url]])
+                        hasImage = true
+                    }
+                } else if let t = c["text"] as? String {
+                    parts.append(["type": "text", "text": t])
+                }
+            }
+            if hasImage { return [["role": mapped, "content": parts]] }
             let text = WireRequest.flattenContent(item["content"])
-            return text.isEmpty ? [] : [["role": role == "developer" ? "system" : role,
-                                         "content": text]]
+            return text.isEmpty ? [] : [["role": mapped, "content": text]]
         case "function_call":
             let callID = (item["call_id"] as? String) ?? (item["id"] as? String) ?? "call_x"
             return [["role": "assistant", "content": "",
@@ -337,31 +393,25 @@ enum ExternalEngine {
         return list.compactMap { $0["id"] as? String }.sorted()
     }
 
-    // MARK: - Model metadata (context window)
+    // MARK: - Model metadata (context window + capabilities)
 
-    /// The server-reported context length for `model`, or nil when the server
-    /// exposes none. Two shapes probed, cheapest first:
-    ///   - vLLM: `/v1/models` entries carry `max_model_len`.
-    ///   - Ollama: `POST /api/show` → an explicit `num_ctx` parameter wins
-    ///     (the operator capped/raised the runtime window), else the
-    ///     architecture's `<arch>.context_length` from `model_info`.
-    /// Agents size compaction and truncation off this number — a wrong
-    /// default (128k for a 256k model) wastes half the window, and an
-    /// optimistic one overflows the server.
-    static func contextLength(base: URL, apiKey: String?, model: String,
-                              timeout: TimeInterval = 10) async -> Int? {
-        var req = URLRequest(url: base.appendingPathComponent("v1/models"))
-        req.timeoutInterval = timeout
-        if let apiKey, !apiKey.isEmpty {
-            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
-        if let (data, resp) = try? await URLSession.shared.data(for: req),
-           (resp as? HTTPURLResponse)?.statusCode == 200,
-           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-           let entry = (obj["data"] as? [[String: Any]])?.first(where: { $0["id"] as? String == model }),
-           let len = entry["max_model_len"] as? Int, len > 0 {
-            return len
-        }
+    /// Server-reported metadata for one model. `nil` fields mean the server
+    /// didn't say (vLLM exposes only `max_model_len`), never "no".
+    struct ModelMeta: Codable, Equatable, Sendable {
+        var context: Int?
+        var vision: Bool?
+        var thinking: Bool?
+    }
+
+    /// Probe `base` for `model`'s metadata. Ollama's `/api/show` is the rich
+    /// source — context (`num_ctx` parameter wins over the architecture's
+    /// `context_length`) plus the capability list (vision/thinking), which
+    /// omp's models.yml gates image input on: without it a vision-capable
+    /// model gets a client-side "not a vision model" refusal. vLLM lacks
+    /// `/api/show`; its `/v1/models` `max_model_len` fills the context in.
+    static func modelMeta(base: URL, apiKey: String?, model: String,
+                          timeout: TimeInterval = 10) async -> ModelMeta? {
+        var meta = ModelMeta()
 
         var show = URLRequest(url: base.appendingPathComponent("api/show"))
         show.timeoutInterval = timeout
@@ -371,24 +421,43 @@ enum ExternalEngine {
             show.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         show.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model])
-        guard let (data, resp) = try? await URLSession.shared.data(for: show),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            return nil
-        }
-        if let params = obj["parameters"] as? String {
-            for line in params.split(separator: "\n") {
-                let toks = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
-                if toks.count >= 2, toks[0] == "num_ctx", let n = Int(toks[1]), n > 0 {
-                    return n
+        if let (data, resp) = try? await URLSession.shared.data(for: show),
+           (resp as? HTTPURLResponse)?.statusCode == 200,
+           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            if let caps = obj["capabilities"] as? [String] {
+                meta.vision = caps.contains("vision")
+                meta.thinking = caps.contains("thinking")
+            }
+            if let params = obj["parameters"] as? String {
+                for line in params.split(separator: "\n") {
+                    let toks = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+                    if toks.count >= 2, toks[0] == "num_ctx", let n = Int(toks[1]), n > 0 {
+                        meta.context = n
+                    }
+                }
+            }
+            if meta.context == nil, let info = obj["model_info"] as? [String: Any] {
+                for (k, v) in info where k.hasSuffix(".context_length") {
+                    if let n = v as? Int, n > 0 { meta.context = n }
                 }
             }
         }
-        if let info = obj["model_info"] as? [String: Any] {
-            for (k, v) in info where k.hasSuffix(".context_length") {
-                if let n = v as? Int, n > 0 { return n }
+
+        if meta.context == nil {
+            var req = URLRequest(url: base.appendingPathComponent("v1/models"))
+            req.timeoutInterval = timeout
+            if let apiKey, !apiKey.isEmpty {
+                req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+            if let (data, resp) = try? await URLSession.shared.data(for: req),
+               (resp as? HTTPURLResponse)?.statusCode == 200,
+               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               let entry = (obj["data"] as? [[String: Any]])?.first(where: { $0["id"] as? String == model }),
+               let len = entry["max_model_len"] as? Int, len > 0 {
+                meta.context = len
             }
         }
-        return nil
+
+        return meta == ModelMeta() ? nil : meta
     }
 }

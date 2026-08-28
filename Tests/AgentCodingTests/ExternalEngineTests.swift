@@ -511,6 +511,68 @@ struct ExternalEngineStreamingTests {
     }
 }
 
+/// Vision: Anthropic image blocks (and screenshots inside tool_results)
+/// must survive translation to OpenAI image_url parts, and omp's models.yml
+/// must advertise image input for a vision-capable server model.
+@Suite("Vision translation + capability flags")
+struct VisionTranslationTests {
+
+    @Test("Anthropic image block → image_url part (data: URI)")
+    func imageBlockTranslates() {
+        let payload: [String: Any] = [
+            "model": "m",
+            "messages": [["role": "user", "content": [
+                ["type": "text", "text": "describe this"],
+                ["type": "image", "source": ["type": "base64",
+                                             "media_type": "image/png",
+                                             "data": "AAAA"]],
+            ]]],
+            "max_tokens": 64,
+        ]
+        let chat = ExternalEngine.chatRequest(from: payload, wire: .messages)
+        let msg = (chat["messages"] as? [[String: Any]])?.first
+        let parts = msg?["content"] as? [[String: Any]]
+        #expect(parts?.count == 2)
+        #expect((parts?[0]["type"] as? String) == "text")
+        let url = ((parts?[1]["image_url"] as? [String: Any])?["url"] as? String)
+        #expect(url == "data:image/png;base64,AAAA")
+    }
+
+    @Test("Screenshot inside a tool_result lifts into the user turn")
+    func toolResultImageLifts() {
+        let payload: [String: Any] = [
+            "model": "m",
+            "messages": [["role": "user", "content": [
+                ["type": "tool_result", "tool_use_id": "tu1", "content": [
+                    ["type": "text", "text": "screenshot taken"],
+                    ["type": "image", "source": ["type": "base64",
+                                                 "media_type": "image/jpeg",
+                                                 "data": "BBBB"]],
+                ]],
+            ]]],
+            "max_tokens": 64,
+        ]
+        let chat = ExternalEngine.chatRequest(from: payload, wire: .messages)
+        let msgs = chat["messages"] as? [[String: Any]] ?? []
+        #expect(msgs.count == 2)
+        #expect((msgs.first?["role"] as? String) == "tool")
+        let parts = msgs.last?["content"] as? [[String: Any]]
+        let url = ((parts?.last?["image_url"] as? [String: Any])?["url"] as? String)
+        #expect(url == "data:image/jpeg;base64,BBBB")
+    }
+
+    @Test("omp models.yml advertises vision + reasoning when the server does")
+    func ompCapabilityFlags() {
+        let yaml = SessionDisk.ompModelsYAML(base: "https://bromure.llm/v1",
+                                             model: "q", contextWindow: 262144,
+                                             vision: true, reasoning: true)
+        #expect(yaml.contains("input: [\"text\", \"image\"]"))
+        #expect(yaml.contains("reasoning: true"))
+        let plain = SessionDisk.ompModelsYAML(base: "b", model: "q")
+        #expect(!plain.contains("input:") && !plain.contains("reasoning:"))
+    }
+}
+
 /// Reasoning models: Ollama separates thinking into a `reasoning` field;
 /// the proxy must stream it as a native thinking block BEFORE the text
 /// block, so the agent can show/hide it on demand.
