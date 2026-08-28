@@ -6,12 +6,16 @@ import MLXLMCommon
 /// `InferenceService.enginePort` (loopback) and speaks the same OpenAI /
 /// Anthropic / Responses surface the guest agents expect.
 ///
-/// It returns *non-streaming* protocol JSON. Streaming + tool-call repair stay
-/// the job of ``InferenceRepairProxy``, which already buffers a non-streaming
-/// upstream message, rescues leaked tool calls, and re-emits SSE for all three
-/// wire formats — so the bridge wiring is unchanged: guest → vsock → repair
-/// proxy → this server. Both host ports are now kernel-assigned (dynamic) to
-/// avoid colliding with whatever else holds the old 11434 / 11500.
+/// Non-streaming requests return complete protocol JSON. `stream: true`
+/// switches to a *proxy-internal* SSE protocol (the repair proxy is this
+/// server's only client): thinking-stripped text deltas as they decode, then
+/// one final frame carrying the exact native message the buffered path would
+/// have returned — the proxy relays deltas to the guest live and still runs
+/// the full repair pipeline on the final (see ``DeltaRelay`` /
+/// `InferenceRepairProxy.streamBuiltinConversation`). Guest-wire SSE and
+/// tool-call repair remain the proxy's job either way: guest → vsock →
+/// repair proxy → this server. Both host ports are kernel-assigned (dynamic)
+/// to avoid colliding with whatever else holds the old 11434 / 11500.
 ///
 /// Same shape as the other small servers here: one accept loop, a thread per
 /// connection, raw HTTP/1.1.
@@ -127,13 +131,15 @@ final class MLXServer: @unchecked Sendable {
     private func handle(clientFD: Int32) {
         defer { close(clientFD) }
         while let req = InferenceRepairProxy.readRequest(fd: clientFD) {
-            let resp = respond(to: req)
+            guard let resp = respond(to: req, streamFD: clientFD) else {
+                break   // streamed directly on the socket (Connection: close)
+            }
             if !Self.writeAll(clientFD, resp) { break }
             if req.headerValue("connection")?.lowercased() == "close" { break }
         }
     }
 
-    private func respond(to req: Request) -> Data {
+    private func respond(to req: Request, streamFD: Int32? = nil) -> Data? {
         // Bearer auth: the parent's admin key (internal probes) or a valid
         // persistent per-VM key (a guest VM — also identifies which profile).
         let auth = req.headerValue("authorization") ?? ""
@@ -153,11 +159,11 @@ final class MLXServer: @unchecked Sendable {
         case ("POST", "/admin/serve"):
             return adminServe(req)
         case ("POST", "/v1/messages"):
-            return inference(req, wire: .messages)
+            return inference(req, wire: .messages, streamFD: streamFD)
         case ("POST", "/v1/chat/completions"):
-            return inference(req, wire: .chat)
+            return inference(req, wire: .chat, streamFD: streamFD)
         case ("POST", "/v1/responses"):
-            return inference(req, wire: .responses)
+            return inference(req, wire: .responses, streamFD: streamFD)
         default:
             return Self.json(status: 404, object: ["error": ["message": "not found"]])
         }
@@ -220,7 +226,7 @@ final class MLXServer: @unchecked Sendable {
 
     // MARK: - Inference
 
-    private func inference(_ req: Request, wire: Wire) -> Data {
+    private func inference(_ req: Request, wire: Wire, streamFD: Int32? = nil) -> Data? {
         guard let payload = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] else {
             return Self.json(status: 400, object: wire.errorJSON(message: "invalid JSON body",
                                                                  type: "invalid_request_error"))
@@ -230,6 +236,19 @@ final class MLXServer: @unchecked Sendable {
 
         EngineMetrics.shared.requestStarted()
         defer { EngineMetrics.shared.requestFinished() }
+
+        // Streaming (`stream: true` + a socket to write on): the repair proxy
+        // is the ONLY client of this server, so the stream is a proxy-internal
+        // protocol, not a wire format — raw text deltas as they decode, then
+        // ONE final frame carrying the exact native message the buffered path
+        // would have returned (so repair sees no difference):
+        //   data: {"d":"<delta>"}      (thinking-stripped, left-trimmed)
+        //   data: {"final": {…}}       (wire.nonStreamingJSON, verbatim)
+        //   data: [DONE]
+        // A failure before the first delta returns the plain buffered error
+        // (no SSE), so the proxy can fall back cleanly.
+        let relay: DeltaRelay? = (streamFD != nil && payload["stream"] as? Bool == true)
+            ? DeltaRelay(fd: streamFD!) : nil
 
         // Bridge the sync connection thread to the async engine actor.
         let sem = DispatchSemaphore(value: 0)
@@ -260,9 +279,17 @@ final class MLXServer: @unchecked Sendable {
                     kvBits: kvBits,
                     kvBitsStartAt: kvStart,
                     enableThinking: thinking)
+                if ProcessInfo.processInfo.environment["BROMURE_STREAM_DEBUG"] != nil {
+                    FileHandle.standardError.write(Data("[relay] inference stream=\(payload["stream"] as? Bool ?? false) relay=\(relay != nil)\n".utf8))
+                }
                 let completion = try await MLXEngine.shared.generate(
                     repo: repo, messages: parsed.messages, tools: parsed.tools,
-                    params: params, estMemGB: estMem[repo] ?? 0) { _ in true }
+                    params: params, estMemGB: estMem[repo] ?? 0) { delta in
+                    // Streaming: relay the delta (returning false on a dead
+                    // client cancels the generation instead of decoding into
+                    // the void). Buffered: keep generating.
+                    relay?.append(delta) ?? true
+                }
                 result = .success(completion)
             } catch {
                 result = .failure(error)
@@ -283,9 +310,16 @@ final class MLXServer: @unchecked Sendable {
             // model" (Bug#5). A model that can't load won't load on retry, so
             // use a 4xx the agent surfaces immediately rather than a 5xx it
             // retries.
-            return Self.json(status: 400,
-                             object: wire.errorJSON(message: err.localizedDescription,
-                                                    type: "invalid_request_error"))
+            let errObj = wire.errorJSON(message: err.localizedDescription,
+                                        type: "invalid_request_error")
+            if let relay, relay.started {
+                // Deltas already went out — close the stream with the error.
+                relay.finish(errorFrame: errObj, status: 400)
+                return nil
+            }
+            // Nothing streamed yet (load failures happen before the first
+            // token) → plain buffered error, so the proxy falls back cleanly.
+            return Self.json(status: 400, object: errObj)
         case .success(let c):
             EngineMetrics.shared.record(prompt: c.promptTokens, prefill: c.prefilledTokens,
                                   completion: c.completionTokens,
@@ -304,7 +338,107 @@ final class MLXServer: @unchecked Sendable {
             // Telemetry to bromure.io when enrolled (no-ops otherwise) is wired
             // in the InferenceService integration stage.
             let body = wire.nonStreamingJSON(model: repo, completion: c)
+            if let relay {
+                relay.finish(final: body)
+                return nil
+            }
             return Self.json(status: 200, object: body)
+        }
+    }
+
+    /// Streams generation deltas to the connected repair proxy. Thinking is
+    /// stripped incrementally (mirroring `MLXEngine.stripThinking`) and the
+    /// text is left-trimmed so the streamed prefix always matches the final
+    /// message's text; an 8-char holdback keeps a `<think>`/`</think>` tag
+    /// split across deltas from ever leaking. Writes happen from the engine
+    /// task while the connection thread is parked on the completion
+    /// semaphore, so writers never interleave.
+    private final class DeltaRelay {
+        private let fd: Int32
+        private var raw = ""
+        private var sentCount = 0          // chars of visible() already sent
+        private(set) var started = false
+        private var alive = true
+        private var appendCalls = 0        // BROMURE_STREAM_DEBUG logging only
+
+        init(fd: Int32) { self.fd = fd }
+
+        /// `stripThinking` minus its final trim (only left-trimmed): the
+        /// visible prefix must only ever grow as `raw` grows — a shrink would
+        /// mean unsending bytes.
+        private func visible() -> String {
+            var out = ""
+            var rest = Substring(raw)
+            while let open = rest.range(of: "<think>") {
+                out += rest[..<open.lowerBound]
+                if let close = rest.range(of: "</think>", range: open.upperBound..<rest.endIndex) {
+                    rest = rest[close.upperBound...]
+                } else {
+                    rest = ""   // unterminated think block → hold the remainder
+                }
+            }
+            out += rest
+            // Gemma-family reasoning rides a `<|channel>thought…` channel, not
+            // `<think>`; its stripping happens downstream of the completion.
+            // Hold everything from the first channel marker — those turns
+            // effectively arrive at finish, exactly like the buffered path.
+            if let ch = out.range(of: "<|channel") { out = String(out[..<ch.lowerBound]) }
+            return String(Substring(out).drop(while: { $0.isWhitespace }))
+        }
+
+        /// Returns false once the client is gone, cancelling the generation.
+        func append(_ delta: String) -> Bool {
+            guard alive else { return false }
+            if ProcessInfo.processInfo.environment["BROMURE_STREAM_DEBUG"] != nil, raw.isEmpty {
+                FileHandle.standardError.write(Data("[relay] first append len=\(delta.count)\n".utf8))
+            }
+            raw += delta
+            let vis = visible()
+            // 12 > every held marker ("</think>" = 8, "<|channel" = 9), so a
+            // tag split across deltas can never partially leak.
+            let release = max(0, vis.count - 12)
+            if ProcessInfo.processInfo.environment["BROMURE_STREAM_DEBUG"] != nil {
+                appendCalls += 1
+                if appendCalls <= 3 || appendCalls % 50 == 0 {
+                    let head = String(raw.prefix(70)).replacingOccurrences(of: "\n", with: "\\n")
+                    FileHandle.standardError.write(Data(
+                        "[relay] append#\(appendCalls) raw=\(raw.count) vis=\(vis.count) release=\(release) sent=\(sentCount) alive=\(alive) head=\(head)\n".utf8))
+                }
+            }
+            guard release > sentCount else { return alive }
+            let chunk = String(vis.prefix(release).dropFirst(sentCount))
+            sentCount = release
+            send(frame: ["d": chunk])
+            return alive
+        }
+
+        func finish(final: [String: Any]) {
+            send(frame: ["final": final])
+            write("data: [DONE]\n\n")
+        }
+
+        func finish(errorFrame: [String: Any], status: Int) {
+            send(frame: ["error": errorFrame, "status": status])
+            write("data: [DONE]\n\n")
+        }
+
+        private func begin() {
+            guard !started else { return }
+            started = true
+            write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                  + "Cache-Control: no-cache\r\nConnection: close\r\n\r\n")
+        }
+
+        private func send(frame: [String: Any]) {
+            begin()
+            let d = (try? JSONSerialization.data(withJSONObject: frame))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            write("data: \(d)\n\n")
+        }
+
+        private func write(_ s: String) {
+            guard alive else { return }
+            if !MLXServer.writeAll(fd, Data(s.utf8)) { alive = false }
         }
     }
 

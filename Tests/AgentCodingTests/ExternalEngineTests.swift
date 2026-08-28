@@ -511,6 +511,71 @@ struct ExternalEngineStreamingTests {
     }
 }
 
+/// Reasoning models: Ollama separates thinking into a `reasoning` field;
+/// the proxy must stream it as a native thinking block BEFORE the text
+/// block, so the agent can show/hide it on demand.
+@Suite("Reasoning streaming through the repair proxy", .serialized)
+struct ReasoningStreamingTests {
+
+    @Test("reasoning deltas → thinking block, then text at the next index")
+    func reasoningThenText() throws {
+        var sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"created\":1,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"
+        for frame in [["reasoning": "Let me think about tides. "],
+                      ["reasoning": "The moon pulls the ocean."],
+                      ["content": "Tides come from the moon's gravity acting on the ocean."]] {
+            let obj: [String: Any] = ["choices": [["index": 0, "delta": frame,
+                                                   "finish_reason": NSNull()]]]
+            let j = String(data: try JSONSerialization.data(withJSONObject: obj), encoding: .utf8)!
+            sse += "data: \(j)\n\n"
+        }
+        sse += "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+        let server = try #require(FakeSSEServerBox.make(body: Data(sse.utf8)))
+
+        let pid = UUID()
+        InferenceRepairProxy.shared.setExternalEngine(
+            pid, ExternalEngine.Config(base: URL(string: "http://127.0.0.1:\(server.port)")!,
+                                       apiKey: nil))
+        defer { InferenceRepairProxy.shared.setExternalEngine(pid, nil) }
+
+        let body: [String: Any] = [
+            "model": "m", "stream": true,
+            "messages": [["role": "user", "content": "why tides?"]],
+            "max_tokens": 128,
+        ]
+        let req = InferenceRepairProxy.Request(
+            method: "POST", path: "/v1/messages",
+            headers: [("Authorization", "Bearer \(EngineKey.perVM(profileID: pid))")],
+            body: try JSONSerialization.data(withJSONObject: body))
+
+        var sp = [Int32](repeating: 0, count: 2)
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0)
+        defer { close(sp[0]) }
+        let resp = InferenceRepairProxy.respond(to: req, enginePort: 0, streamFD: sp[1])
+        close(sp[1])
+        #expect(resp == nil)
+
+        var out = Data()
+        var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = read(sp[0], &buf, buf.count)
+            if n <= 0 { break }
+            out.append(contentsOf: buf[0..<n])
+        }
+        let text = String(decoding: out, as: UTF8.self)
+
+        #expect(text.contains("\"thinking\""))
+        #expect(text.contains("thinking_delta"))
+        #expect(text.contains("Let me think about tides"))
+        // The thinking block (index 0) precedes the text block (index 1).
+        let thinkStart = text.range(of: "\"thinking\"")
+        let textDelta = text.range(of: "text_delta")
+        #expect(thinkStart != nil && textDelta != nil
+                && thinkStart!.lowerBound < textDelta!.lowerBound)
+        #expect(text.contains("moon's gravity"))
+        #expect(text.contains("event: message_stop"))
+    }
+}
+
 /// Shim: reuse the private FakeOpenAIServer shape without widening its
 /// access — a one-shot SSE server for the streaming tests.
 private enum FakeSSEServerBox {
@@ -563,5 +628,78 @@ private enum FakeSSEServerBox {
             close(c)
         }
         return Server(fd: sock, port: port)
+    }
+}
+
+/// Built-in-engine streaming: a fake engine speaks the proxy-internal
+/// protocol ({"d":…} deltas + a {"final":…} native message); the proxy (no
+/// external engine registered) must relay live deltas and close with the
+/// final message's blocks — no wire translation anywhere.
+@Suite("Built-in MLX streaming through the repair proxy", .serialized)
+struct BuiltinStreamingTests {
+
+    @Test("Deltas relay live; the final native message closes the stream")
+    func builtinStreamRoundTrip() throws {
+        let prose = String(repeating: "Reading the failing test to see what it expects. ", count: 9)
+        let finalMessage: [String: Any] = [
+            "id": "msg_native1", "type": "message", "role": "assistant",
+            "model": "mlx-community/qwen-7b",
+            "content": [["type": "text", "text": prose.trimmingCharacters(in: .whitespaces)],
+                        ["type": "tool_use", "id": "tu_9", "name": "Read",
+                         "input": ["file_path": "/x/test.py"]]],
+            "stop_reason": "tool_use",
+            "usage": ["input_tokens": 33, "output_tokens": 44],
+        ]
+        var sse = ""
+        // Two delta frames splitting the prose, like the engine's DeltaRelay.
+        let mid = prose.index(prose.startIndex, offsetBy: prose.count / 2)
+        for chunk in [String(prose[..<mid]), String(prose[mid...])] {
+            let f = try JSONSerialization.data(withJSONObject: ["d": chunk])
+            sse += "data: \(String(data: f, encoding: .utf8)!)\n\n"
+        }
+        let ff = try JSONSerialization.data(withJSONObject: ["final": finalMessage])
+        sse += "data: \(String(data: ff, encoding: .utf8)!)\n\ndata: [DONE]\n\n"
+        let engine = try #require(FakeSSEServerBox.make(body: Data(sse.utf8)))
+
+        let pid = UUID()   // NO external engine registered → built-in path
+        let body: [String: Any] = [
+            "model": "mlx-community/qwen-7b", "stream": true,
+            "messages": [["role": "user", "content": "why does the test fail?"]],
+            "tools": [["name": "Read", "description": "read",
+                       "input_schema": ["type": "object"]]],
+            "max_tokens": 512,
+        ]
+        let req = InferenceRepairProxy.Request(
+            method: "POST", path: "/v1/messages",
+            headers: [("Authorization", "Bearer \(EngineKey.perVM(profileID: pid))"),
+                      ("Content-Type", "application/json")],
+            body: try JSONSerialization.data(withJSONObject: body))
+
+        var sp = [Int32](repeating: 0, count: 2)
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0)
+        defer { close(sp[0]) }
+
+        let resp = InferenceRepairProxy.respond(to: req, enginePort: engine.port,
+                                                streamFD: sp[1])
+        close(sp[1])
+        #expect(resp == nil, "a streamed conversation returns nil (written to the fd)")
+
+        var out = Data()
+        var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = read(sp[0], &buf, buf.count)
+            if n <= 0 { break }
+            out.append(contentsOf: buf[0..<n])
+        }
+        let text = String(decoding: out, as: UTF8.self)
+
+        #expect(text.contains("HTTP/1.1 200"))
+        #expect(text.contains("event: message_start"))
+        #expect(text.contains("text_delta"))
+        #expect(text.contains("Reading the failing test"))
+        #expect(text.contains("\"tool_use\""))
+        #expect(text.contains("\"Read\""))
+        #expect(text.contains("\"stop_reason\":\"tool_use\""))
+        #expect(text.contains("event: message_stop"))
     }
 }

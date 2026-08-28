@@ -430,10 +430,18 @@ final class InferenceRepairProxy: @unchecked Sendable {
         // and continuations run buffered (their outcome is only shown when
         // they produce the missing call). BROMURE_LOCAL_STREAM=0 restores
         // the buffered behavior.
-        if let streamFD, let pid, let ext = shared.externalEngine(for: pid),
+        if let streamFD, let pid,
            ProcessInfo.processInfo.environment["BROMURE_LOCAL_STREAM"] != "0" {
-            let handled = streamConversation(req: req, payload: payload, api: api,
+            let handled: Bool
+            if let ext = shared.externalEngine(for: pid) {
+                handled = streamConversation(req: req, payload: payload, api: api,
                                              pid: pid, ext: ext, clientFD: streamFD)
+            } else {
+                handled = streamBuiltinConversation(req: req, payload: payload, api: api,
+                                                    pid: pid, enginePort: enginePort,
+                                                    clientFD: streamFD,
+                                                    sendUpstream: sendUpstream)
+            }
             ticker?.cancel()
             if handled { return nil }
             // Nothing reached the guest — fall through to the buffered path,
@@ -573,7 +581,9 @@ final class InferenceRepairProxy: @unchecked Sendable {
         let t0 = Date()
         let (chat, status, raw) = ChatStreamClient.send(
             chatBody: ExternalEngine.chatRequest(from: payload, wire: wire),
-            config: ext) { emitter.textDelta($0) }
+            config: ext,
+            onText: { emitter.textDelta($0) },
+            onReasoning: { emitter.thinkingDelta($0) })
         guard status == 200, let chat else {
             shipTrace(profileID: pid, model: payload["model"] as? String ?? "?",
                       path: req.path, status: status,
@@ -584,14 +594,70 @@ final class InferenceRepairProxy: @unchecked Sendable {
             return emitter.headerSent   // started → nothing left but to close
         }
         let message = ExternalEngine.wireResponse(from: chat, wire: wire)
+        finishStreamedTurn(req: req, payload: payload, api: api, pid: pid,
+                           message: message, emitter: emitter, t0: t0,
+                           contSend: { p in externalSend(p, wire: wire, config: ext) })
+        return true
+    }
+
+    /// Built-in MLX engine variant of `streamConversation`: the native wire
+    /// request goes to the engine child with `stream: true`; it streams
+    /// thinking-stripped text deltas plus ONE final frame carrying the exact
+    /// buffered-equivalent native message (see MLXServer's DeltaRelay), so
+    /// there is no wire translation in this path at all. Same contract: false
+    /// only when nothing was written to the guest yet.
+    private static func streamBuiltinConversation(req: Request, payload: [String: Any],
+                                                  api: API, pid: UUID, enginePort: Int,
+                                                  clientFD: Int32,
+                                                  sendUpstream: ([String: Any]) -> (Data?, Int)) -> Bool {
+        guard let url = Self.engineUpstreamURL(path: req.path, enginePort: enginePort) else {
+            return false
+        }
+        let dbg = ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil
+        let emitter = LocalStreamEmitter(fd: clientFD, wire: api.wire,
+                                         model: payload["model"] as? String ?? "")
+        var ur = URLRequest(url: url)
+        ur.httpMethod = "POST"
+        ur.timeoutInterval = 600
+        for (k, v) in req.headers where !["host", "content-length", "connection", "accept-encoding"].contains(k.lowercased()) {
+            ur.setValue(v, forHTTPHeaderField: k)
+        }
+        ur.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body = payload
+        body["stream"] = true
+        ur.httpBody = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+
+        let t0 = Date()
+        let (message, status, raw) = MLXStreamClient.send(request: ur) { emitter.textDelta($0) }
+        guard status == 200, let message else {
+            shipTrace(profileID: pid, model: payload["model"] as? String ?? "?",
+                      path: req.path, status: status,
+                      requestBytes: req.body.count, responseBytes: raw.count,
+                      latencyMs: Date().timeIntervalSince(t0) * 1000,
+                      requestBody: req.body, responseData: raw)
+            if dbg { appendRepairLog("[repair] <- \(req.path) STREAM(mlx) upstream failed status=\(status) started=\(emitter.headerSent)\n") }
+            return emitter.headerSent
+        }
+        finishStreamedTurn(req: req, payload: payload, api: api, pid: pid,
+                           message: message, emitter: emitter, t0: t0,
+                           contSend: sendUpstream)
+        return true
+    }
+
+    /// Shared post-upstream half of the two streaming paths: continuation,
+    /// repair, the emitter's closing events, and the trace.
+    private static func finishStreamedTurn(req: Request, payload: [String: Any],
+                                           api: API, pid: UUID,
+                                           message: [String: Any],
+                                           emitter: LocalStreamEmitter, t0: Date,
+                                           contSend: ([String: Any]) -> (Data?, Int)) {
         let toolNames = API.toolNames(in: payload)
         let gemma = (payload["model"] as? String)?.lowercased().contains("gemma") == true
         // Continuations run buffered — their text is only shown when the
         // retry actually produced the missing call.
         let (finalMessage, continued) = resolveStuckPreamble(
             message: message, payload: payload, api: api, path: req.path,
-            toolNames: toolNames, gemma: gemma,
-            send: { p in externalSend(p, wire: wire, config: ext) })
+            toolNames: toolNames, gemma: gemma, send: contSend)
         let repaired = api.repairedMessage(finalMessage, toolNames: toolNames, gemma: gemma)
         emitter.finish(final: repaired, continued: continued)
         let responseData = (try? JSONSerialization.data(withJSONObject: repaired)) ?? Data()
@@ -600,8 +666,9 @@ final class InferenceRepairProxy: @unchecked Sendable {
                   requestBytes: req.body.count, responseBytes: responseData.count,
                   latencyMs: Date().timeIntervalSince(t0) * 1000,
                   requestBody: req.body, responseData: responseData)
-        if dbg { appendRepairLog("[repair] <- \(req.path) STREAM done continued=\(continued)\n") }
-        return true
+        if ProcessInfo.processInfo.environment["BROMURE_REPAIR_DEBUG"] != nil {
+            appendRepairLog("[repair] <- \(req.path) STREAM done continued=\(continued)\n")
+        }
     }
 
     /// Heuristic: the assistant text ANNOUNCES an imminent action it then didn't

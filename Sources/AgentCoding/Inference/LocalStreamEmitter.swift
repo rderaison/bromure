@@ -1,18 +1,21 @@
 import Foundation
 
-// Live token streaming for local inference (external engines).
+// Live token streaming for local inference (external engines + built-in MLX).
 //
 // The repair proxy historically forced `stream: false` upstream, ran the
 // repair pipeline on the complete message, and re-emitted the whole SSE
 // stream in one burst — correct, but on a slow local model the agent sits
-// silent for the entire generation. These two types let the proxy stream
-// text deltas to the guest AS THEY ARRIVE while preserving every repair
-// behavior:
+// silent for the entire generation. These types let the proxy stream text
+// deltas to the guest AS THEY ARRIVE while preserving every repair behavior:
 //
-//  - `ChatStreamClient` drives the upstream `/v1/chat/completions` call with
-//    `stream: true`, feeds each text snapshot to the caller, and assembles
-//    the exact non-streaming `chat.completion` object the buffered pipeline
-//    would have received — so repair/continuation/tracing see no difference.
+//  - `ChatStreamClient` (external vLLM/Ollama) drives the upstream
+//    `/v1/chat/completions` call with `stream: true`, feeds each text
+//    snapshot to the caller, and assembles the exact non-streaming
+//    `chat.completion` object the buffered pipeline would have received —
+//    so repair/continuation/tracing see no difference.
+//  - `MLXStreamClient` (built-in engine) consumes the engine child's
+//    proxy-internal protocol: `{"d":…}` text deltas plus one `{"final":…}`
+//    frame carrying the exact native wire message — no translation at all.
 //  - `LocalStreamEmitter` writes the guest-wire SSE incrementally. It holds
 //    back a small tail (and stops releasing at a leaked-tool-call marker) so
 //    ToolCallRepair can still strip a leaked call the guest never saw; the
@@ -31,6 +34,15 @@ final class LocalStreamEmitter {
     /// Full upstream text accumulated so far, and how much of it was released.
     private var raw = ""
     private var releasedCount = 0
+    /// Upstream reasoning (a reasoning model's separated thinking) and how
+    /// much of it was released. Streams freely — tool calls never leak there.
+    private var rawThinking = ""
+    private var thinkingReleasedCount = 0
+    /// messages-wire content-block bookkeeping: thinking (optional) precedes
+    /// text, tool blocks follow; indices are assigned as blocks open.
+    private var thinkingOpen = false
+    private var textOpen = false
+    private var currentIndex = 0
     /// Tail kept unreleased so an end-of-text leaked tool call can still be
     /// stripped before the guest sees it.
     private let holdback = 320
@@ -103,8 +115,8 @@ final class LocalStreamEmitter {
                 "model": model, "content": [],
                 "stop_reason": NSNull(), "stop_sequence": NSNull(),
                 "usage": ["input_tokens": 0, "output_tokens": 0]]])
-            event("content_block_start", ["type": "content_block_start", "index": 0,
-                "content_block": ["type": "text", "text": ""]])
+            // Content blocks open lazily: an optional thinking block first,
+            // then the text block (see thinkingDelta / release).
         case .chat:
             chatChunk(["role": "assistant"], NSNull())
         case .responses:
@@ -120,6 +132,44 @@ final class LocalStreamEmitter {
                 "output_index": 0, "content_index": 0,
                 "part": ["type": "output_text", "text": "", "annotations": []]])
         }
+    }
+
+    /// New accumulated upstream REASONING (the model's separated thinking).
+    /// messages wire: a native thinking block (the agent shows/hides it on
+    /// demand); chat wire: `reasoning` delta passthrough; responses wire:
+    /// dropped (codex reasoning items are out of scope). No holdback — tool
+    /// calls never leak into reasoning.
+    func thinkingDelta(_ full: String) {
+        rawThinking = full
+        let inc = String(full.dropFirst(thinkingReleasedCount))
+        guard !inc.isEmpty else { return }
+        switch wire {
+        case .messages:
+            guard !textOpen else { return }   // reasoning after text began — rare; drop
+            begin()
+            if !thinkingOpen {
+                event("content_block_start", ["type": "content_block_start", "index": currentIndex,
+                    "content_block": ["type": "thinking", "thinking": "", "signature": ""]])
+                thinkingOpen = true
+            }
+            thinkingReleasedCount = full.count
+            event("content_block_delta", ["type": "content_block_delta", "index": currentIndex,
+                "delta": ["type": "thinking_delta", "thinking": inc]])
+        case .chat:
+            begin()
+            thinkingReleasedCount = full.count
+            chatChunk(["reasoning": inc], NSNull())
+        case .responses:
+            break
+        }
+    }
+
+    /// Close the open thinking block (messages wire) before text begins.
+    private func closeThinkingIfOpen() {
+        guard thinkingOpen else { return }
+        event("content_block_stop", ["type": "content_block_stop", "index": currentIndex])
+        thinkingOpen = false
+        currentIndex += 1
     }
 
     /// New accumulated upstream text; releases whatever the holdback allows.
@@ -141,7 +191,13 @@ final class LocalStreamEmitter {
         begin()
         switch wire {
         case .messages:
-            event("content_block_delta", ["type": "content_block_delta", "index": 0,
+            closeThinkingIfOpen()
+            if !textOpen {
+                event("content_block_start", ["type": "content_block_start", "index": currentIndex,
+                    "content_block": ["type": "text", "text": ""]])
+                textOpen = true
+            }
+            event("content_block_delta", ["type": "content_block_delta", "index": currentIndex,
                 "delta": ["type": "text_delta", "text": chunk]])
         case .chat:
             chatChunk(["content": chunk], NSNull())
@@ -157,6 +213,27 @@ final class LocalStreamEmitter {
     /// being prefix-matched against it.
     func finish(final: [String: Any], continued: Bool) {
         begin()
+        // Reasoning remainder first — thinking precedes text on every wire
+        // that carries it. The final message's version wins when it extends
+        // what streamed; otherwise flush whatever upstream sent.
+        let finalThinking: String = {
+            switch wire {
+            case .messages:
+                return (final["content"] as? [[String: Any]] ?? [])
+                    .first { ($0["type"] as? String) == "thinking" }?["thinking"] as? String
+                    ?? rawThinking
+            case .chat:
+                let m = (final["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]
+                return (m?["reasoning"] as? String) ?? (m?["reasoning_content"] as? String)
+                    ?? rawThinking
+            case .responses:
+                return ""
+            }
+        }()
+        if !finalThinking.isEmpty || !rawThinking.isEmpty {
+            let releasedThinking = String(rawThinking.prefix(thinkingReleasedCount))
+            thinkingDelta(finalThinking.hasPrefix(releasedThinking) ? finalThinking : rawThinking)
+        }
         let finalText = Self.assistantText(of: final, wire: wire)
         let released = String(raw.prefix(releasedCount))
         var textOut = released
@@ -178,11 +255,18 @@ final class LocalStreamEmitter {
 
         switch wire {
         case .messages:
-            event("content_block_stop", ["type": "content_block_stop", "index": 0])
+            closeThinkingIfOpen()
+            if !textOpen {
+                event("content_block_start", ["type": "content_block_start", "index": currentIndex,
+                    "content_block": ["type": "text", "text": ""]])
+                textOpen = true
+            }
+            event("content_block_stop", ["type": "content_block_stop", "index": currentIndex])
             let blocks = (final["content"] as? [[String: Any]] ?? [])
                 .filter { ($0["type"] as? String) == "tool_use" }
-            for (i, b) in blocks.enumerated() {
-                let idx = i + 1
+            var idx = currentIndex
+            for b in blocks {
+                idx += 1
                 event("content_block_start", ["type": "content_block_start", "index": idx,
                     "content_block": ["type": "tool_use", "id": b["id"] as? String ?? "",
                                       "name": b["name"] as? String ?? "", "input": [:]]])
@@ -269,35 +353,85 @@ final class LocalStreamEmitter {
     }
 }
 
+/// Streaming client for the built-in MLX engine's proxy-internal protocol:
+/// `data: {"d": "<delta>"}` text frames, then ONE `data: {"final": {…}}`
+/// frame carrying the exact native wire message the buffered path would have
+/// returned (see MLXServer.DeltaRelay). Feeds accumulated-text snapshots to
+/// `onText`; returns the final message — nil on transport failure, a plain
+/// buffered error response (pre-first-token failures), or an in-stream
+/// `{"error":…}` frame.
+enum MLXStreamClient {
+    static func send(request: URLRequest,
+                     onText: @escaping (String) -> Void) -> (message: [String: Any]?, status: Int, raw: Data) {
+        var text = ""
+        var final: [String: Any]?
+        var errorStatus: Int?
+        var pending = ""
+        var raw = Data()
+
+        let delegate = StreamDelegate { data in
+            raw.append(data)
+            pending += String(decoding: data, as: UTF8.self)
+            while let nl = pending.range(of: "\n") {
+                let line = String(pending[..<nl.lowerBound]).trimmingCharacters(in: .whitespaces)
+                pending.removeSubrange(..<nl.upperBound)
+                guard line.hasPrefix("data:") else { continue }
+                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                guard payload != "[DONE]", !payload.isEmpty,
+                      let obj = (try? JSONSerialization.jsonObject(with: Data(payload.utf8))) as? [String: Any]
+                else { continue }
+                if let d = obj["d"] as? String, !d.isEmpty {
+                    text += d
+                    onText(text)
+                }
+                if let f = obj["final"] as? [String: Any] { final = f }
+                if obj["error"] != nil { errorStatus = obj["status"] as? Int ?? 500 }
+            }
+        }
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        session.dataTask(with: request).resume()
+        delegate.done.wait()
+
+        if let errorStatus { return (nil, errorStatus, raw) }
+        guard delegate.status == 200, let final else {
+            return (nil, delegate.status, raw)
+        }
+        return (final, 200, raw)
+    }
+}
+
+/// Shared incremental-body URLSession delegate for the two stream clients.
+final class StreamDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    let onChunk: (Data) -> Void
+    let done = DispatchSemaphore(value: 0)
+    var status = 0
+    init(onChunk: @escaping (Data) -> Void) { self.onChunk = onChunk }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        completionHandler(.allow)
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        onChunk(data)
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        done.signal()
+    }
+}
+
 /// Streaming upstream `/v1/chat/completions` client: drives the request with
 /// `stream: true`, feeds each accumulated-text snapshot to `onText`, and
 /// assembles the exact non-streaming `chat.completion` object the buffered
 /// pipeline expects.
 enum ChatStreamClient {
-    private final class Delegate: NSObject, URLSessionDataDelegate {
-        let onChunk: (Data) -> Void
-        let done = DispatchSemaphore(value: 0)
-        var status = 0
-        init(onChunk: @escaping (Data) -> Void) { self.onChunk = onChunk }
-        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
-                        didReceive response: URLResponse,
-                        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-            status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            completionHandler(.allow)
-        }
-        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-            onChunk(data)
-        }
-        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-            done.signal()
-        }
-    }
-
     /// Blocking send. Returns the assembled chat.completion (nil on transport
     /// failure / non-200 / unparseable stream) plus the HTTP status and the
     /// raw bytes received (error bodies ride the same channel).
     static func send(chatBody: [String: Any], config: ExternalEngine.Config,
-                     onText: @escaping (String) -> Void) -> (chat: [String: Any]?, status: Int, raw: Data) {
+                     onText: @escaping (String) -> Void,
+                     onReasoning: @escaping (String) -> Void = { _ in }) -> (chat: [String: Any]?, status: Int, raw: Data) {
         var body = chatBody
         body["stream"] = true
         // The final usage frame; servers without support just omit it.
@@ -314,6 +448,7 @@ enum ChatStreamClient {
 
         // Assembly state, mutated only from the session's delegate queue.
         var text = ""
+        var reasoning = ""
         var toolCalls: [Int: (id: String, name: String, args: String)] = [:]
         var finishReason: String?
         var usage: [String: Any]?
@@ -321,7 +456,7 @@ enum ChatStreamClient {
         var pending = ""
         var raw = Data()
 
-        let delegate = Delegate { data in
+        let delegate = StreamDelegate { data in
             raw.append(data)
             pending += String(decoding: data, as: UTF8.self)
             // SSE frames are newline-delimited `data: {...}` lines.
@@ -346,6 +481,11 @@ enum ChatStreamClient {
                     text += c
                     onText(text)
                 }
+                if let r = (delta["reasoning"] as? String)
+                    ?? (delta["reasoning_content"] as? String), !r.isEmpty {
+                    reasoning += r
+                    onReasoning(reasoning)
+                }
                 for tc in delta["tool_calls"] as? [[String: Any]] ?? [] {
                     let idx = tc["index"] as? Int ?? 0
                     var cur = toolCalls[idx] ?? (id: "call_\(idx)", name: "", args: "")
@@ -368,6 +508,7 @@ enum ChatStreamClient {
         }
         var message: [String: Any] = ["role": "assistant",
                                       "content": text.isEmpty ? NSNull() : text]
+        if !reasoning.isEmpty { message["reasoning"] = reasoning }
         if !toolCalls.isEmpty {
             message["tool_calls"] = toolCalls.sorted { $0.key < $1.key }.map { _, tc in
                 ["id": tc.id, "type": "function",
