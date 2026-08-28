@@ -1142,14 +1142,18 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
 
         /// The `--model` value omp launches with (nil ⇒ let omp use its
-        /// provider default). Local mode falls back to the served model id.
+        /// provider default). Local mode prefers `localFallback` — the
+        /// RESOLVED served name (catalog repo / server id) the caller
+        /// computed — over the raw `localModelID`, which stores the catalog
+        /// ID: staging the ID sent omp requests the engine 400s ("Model not
+        /// downloaded: qwen3-coder-next-mlx-mxfp4").
         public func resolvedOmpModel(localFallback: String?) -> String? {
             guard tool == .omp else { return nil }
             if let m = ompModel?.trimmingCharacters(in: .whitespaces), !m.isEmpty {
                 return m
             }
             if authMode == .local {
-                return localModelID?.isEmpty == false ? localModelID : localFallback
+                return localFallback ?? (localModelID?.isEmpty == false ? localModelID : nil)
             }
             return effectiveOmpProvider.defaultModel
         }

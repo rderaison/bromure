@@ -117,6 +117,14 @@ struct OmpAgentTests {
         #expect(override.resolvedOmpModel(localFallback: "L") == "opus")
         let local = Profile.ToolSpec(tool: .omp, authMode: .local, localModelID: "")
         #expect(local.resolvedOmpModel(localFallback: "L") == "L")
+        // The RESOLVED fallback must beat the raw catalog ID stored in
+        // localModelID — staging the ID made the engine 400 ("Model not
+        // downloaded: qwen3-coder-next-mlx-mxfp4").
+        let catalogID = Profile.ToolSpec(tool: .omp, authMode: .local,
+                                         localModelID: "qwen3-coder-next-mlx-mxfp4")
+        #expect(catalogID.resolvedOmpModel(localFallback: "mlx-community/Qwen3-Coder-Next-mxfp4")
+                == "mlx-community/Qwen3-Coder-Next-mxfp4")
+        #expect(catalogID.resolvedOmpModel(localFallback: nil) == "qwen3-coder-next-mlx-mxfp4")
     }
 
     @Test("Token plan mints an omp fake shaped for the selected provider")

@@ -232,7 +232,11 @@ final class MLXServer: @unchecked Sendable {
                                                                  type: "invalid_request_error"))
         }
         let parsed = WireRequest.parse(payload, wire: wire)
-        let repo = parsed.model
+        // Selector → repo: guests configured by an older build (or a stale
+        // meta share) can send the catalog ID; the engine stores weights by
+        // repo, so an unresolved ID 400s as "not downloaded" even when the
+        // model is right there. resolve() also synthesizes raw org/repo.
+        let repo = CatalogStore.shared.resolve(parsed.model)?.repo ?? parsed.model
 
         EngineMetrics.shared.requestStarted()
         defer { EngineMetrics.shared.requestFinished() }
