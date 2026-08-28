@@ -52,6 +52,10 @@ final class RemoteHostController {
     /// silently drifts to another window, so a stale surface (still cached
     /// under the dead index) would keep showing the wrong terminal.
     var onTabsApplied: ((Profile.ID, Set<Int>) -> Void)?
+    /// Fired when a mirrored workspace's terminal appearance overrides
+    /// (font/colors) change host-side, so the window can restyle its live
+    /// surfaces — the remote analog of the local editor's live apply.
+    var onAppearanceChanged: ((Profile) -> Void)?
     /// Fired after every applied /state snapshot — the window controller
     /// re-attempts the browser-MCP relay dial here, because run-state
     /// transitions (off → booting) happen between selections and the relay
@@ -617,7 +621,26 @@ final class RemoteHostController {
                 authMode: Profile.AuthMode(rawValue: w["authMode"] as? String ?? "") ?? .token)
             p.color = ProfileColor(rawValue: w["color"] as? String ?? "") ?? .gray
             p.memoryGB = spec.memoryGB
+            // Terminal appearance overrides, mirrored so the client's ghostty
+            // surfaces render the workspace's colors/fonts (absent = fall back
+            // to this device's own terminal defaults, like resolveStyle does).
+            p.customFontFamily = w["fontFamily"] as? String
+            p.customFontSize = w["fontSize"] as? Int
+            p.customBackgroundHex = w["backgroundHex"] as? String
+            p.customForegroundHex = w["foregroundHex"] as? String
             newProfiles[id] = p
+        }
+        // Restyle live terminal surfaces when a workspace's appearance changed
+        // on the host (the local editor applies saves live; the mirror should
+        // too). Fired only on actual change — snapshots arrive every ~0.5s.
+        for (id, p) in newProfiles {
+            guard let old = profilesByID[id] else { continue }
+            if old.customFontFamily != p.customFontFamily
+                || old.customFontSize != p.customFontSize
+                || old.customBackgroundHex != p.customBackgroundHex
+                || old.customForegroundHex != p.customForegroundHex {
+                onAppearanceChanged?(p)
+            }
         }
         profilesByID = newProfiles
         specs = newSpecs
@@ -1695,6 +1718,10 @@ final class RemoteHostWindow: NSWindow {
         }
         controller.onTabsApplied = { [weak self] id, live in
             self?.reconcileSurfaces(for: id, liveWindows: live)
+        }
+        controller.onAppearanceChanged = { [weak self] profile in
+            self?.termControllers[profile.id]?.applyProfile(profile)
+            self?.gridView?.applyAppearance(profile)
         }
         controller.onRegistrationTerminal = { [weak self] sid, provider in
             self?.showRegistrationTerminal(sessionID: sid, provider: provider)

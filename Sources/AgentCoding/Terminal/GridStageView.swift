@@ -82,6 +82,12 @@ final class GridStageView: NSView {
         }
     }
 
+    /// Restyle a workspace's live grid surfaces after its profile appearance
+    /// changed (fat-client mirror update, or a local editor save).
+    func applyAppearance(_ profile: Profile) {
+        controllers[profile.id]?.applyProfile(profile)
+    }
+
     /// Tear down every grid surface (grid hidden or window closing). The
     /// store (membership) is untouched — surfaces reattach on next show.
     func retireAll() {

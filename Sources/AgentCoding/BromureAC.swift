@@ -3886,6 +3886,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Wedged at boot on filesystem errors (the decision prompt rides
             // pendingPrompts; this lets clients badge the workspace row too).
             if let failure = activeBootFailures[p.id] { row["bootFailure"] = failure }
+            // Terminal appearance OVERRIDES only (nil = unset): the fat client
+            // mirrors them into its Profile so its ghostty surfaces render the
+            // workspace's colors/fonts; unset fields keep falling back to the
+            // CLIENT's own Terminal.app defaults, same per-field semantics as
+            // resolveStyle locally.
+            if let v = p.customFontFamily { row["fontFamily"] = v }
+            if let v = p.customFontSize { row["fontSize"] = v }
+            if let v = p.customBackgroundHex { row["backgroundHex"] = v }
+            if let v = p.customForegroundHex { row["foregroundHex"] = v }
             return row
         }
     }
