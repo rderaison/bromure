@@ -113,6 +113,16 @@ pipeline {
                         rm -f bromure-ac.provisionprofile
                         cp "$PROVISION_PROFILE" bromure-ac.provisionprofile
                         export CODESIGN_IDENTITY="$DEVELOPER_ID"
+
+                        # GhosttyKit at the pinned commit (stamp-cached no-op
+                        # when vendor/ is current) — an un-provisioned node
+                        # fails the build on libghostty API drift otherwise.
+                        if ! /usr/bin/xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+                            echo "Metal toolchain missing — installing"
+                            xcodebuild -downloadComponent MetalToolchain
+                        fi
+                        ./tools/build-ghostty.sh
+
                         ./build.sh bromure-ac
                     '''
                 }

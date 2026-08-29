@@ -36,6 +36,18 @@ pipeline {
                         set -o pipefail
                         rm -f bromure-ac.provisionprofile
                         cp "$PROVISION_PROFILE" bromure-ac.provisionprofile
+
+                        # GhosttyKit at the pinned commit. This job never
+                        # provisioned vendor/, so the node's copy went stale
+                        # when tools/ghostty.commit moved (clipboard API
+                        # rework) and the build died on missing symbols.
+                        # Stamp-cached — a no-op when vendor/ is current.
+                        if ! /usr/bin/xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+                            echo "Metal toolchain missing — installing"
+                            xcodebuild -downloadComponent MetalToolchain
+                        fi
+                        ./tools/build-ghostty.sh
+
                         if ! ./build.sh bromure-ac 2>&1 | tee build.log; then
                             # A swift-syntax bump (e.g. mlx-swift-lm 3.31.4) leaves
                             # stale macro-plugin artifacts in this persistent

@@ -31,6 +31,16 @@ pipeline {
                         set -o pipefail
                         rm -f bromure-ac.provisionprofile
                         cp "$PROVISION_PROFILE" bromure-ac.provisionprofile
+
+                        # GhosttyKit at the pinned commit (stamp-cached no-op
+                        # when vendor/ is current) — an un-provisioned node
+                        # fails the build on libghostty API drift otherwise.
+                        if ! /usr/bin/xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+                            echo "Metal toolchain missing — installing"
+                            xcodebuild -downloadComponent MetalToolchain
+                        fi
+                        ./tools/build-ghostty.sh
+
                         if ! ./build.sh bromure-ac 2>&1 | tee build.log; then
                             # A swift-syntax bump (e.g. mlx-swift-lm 3.31.4) leaves
                             # stale macro-plugin artifacts in this persistent
