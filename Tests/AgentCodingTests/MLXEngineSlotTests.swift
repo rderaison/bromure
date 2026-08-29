@@ -142,3 +142,43 @@ struct MLXEngineLedgerTests {
                                           allTrimmable: false) == .dropSlot)
     }
 }
+
+/// Chat-wire request parsing: assistant `tool_calls` must be rendered into
+/// the turn. Dropping them (content is typically null on those turns) fed the
+/// template an empty assistant message followed by an orphaned tool response —
+/// the model had no record of its own call and repeated the action forever
+/// (the rewrite-the-same-file loop under omp + local models).
+@Suite("Wire chat-request parsing")
+struct WireChatParsingTests {
+    @Test("assistant tool_calls survive into the rendered turn")
+    func toolCallsPreserved() {
+        let p: [String: Any] = ["model": "m", "messages": [
+            ["role": "user", "content": "create hello.txt"],
+            ["role": "assistant", "content": NSNull(),
+             "tool_calls": [["id": "call_1", "type": "function",
+                             "function": ["name": "write",
+                                          "arguments": "{\"path\":\"hello.txt\",\"content\":\"hi\"}"]]]],
+            ["role": "tool", "tool_call_id": "call_1", "content": "File created successfully"],
+            ["role": "user", "content": "continue"],
+        ]]
+        let req = WireRequest.parse(p, wire: .chat)
+        #expect(req.messages.count == 4)
+        let assistant = req.messages[1]
+        #expect(assistant.role == .assistant)
+        #expect(assistant.content.contains("<tool_call>{\"name\":\"write\""))
+        #expect(assistant.content.contains("hello.txt"))
+        let tool = req.messages[2]
+        #expect(tool.role == .tool)
+        #expect(tool.content == "File created successfully")
+    }
+
+    @Test("assistant turns without tool_calls are unchanged")
+    func plainAssistantUnchanged() {
+        let p: [String: Any] = ["model": "m", "messages": [
+            ["role": "assistant", "content": "just text"],
+        ]]
+        let req = WireRequest.parse(p, wire: .chat)
+        #expect(req.messages.count == 1)
+        #expect(req.messages[0].content == "just text")
+    }
+}

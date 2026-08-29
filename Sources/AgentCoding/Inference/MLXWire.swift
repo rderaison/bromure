@@ -125,9 +125,24 @@ struct WireRequest {
             }
 
         case .chat:
-            for m in (p["messages"] as? [[String: Any]] ?? []) {
+            for m in (p["messages"] as? [[String: Any]] ??  []) {
                 let role = (m["role"] as? String) ?? "user"
-                let content = flattenContent(m["content"])
+                var content = flattenContent(m["content"])
+                // Assistant tool calls ride a separate `tool_calls` array
+                // (content is often null). Render them into the turn like the
+                // anthropic/responses parsers do — the template must show the
+                // model its own prior calls, or it has no record the action
+                // happened and repeats it forever (the rewrite-the-same-file
+                // loop: an empty assistant turn followed by an orphaned tool
+                // response reads as "I never called the tool").
+                if role == "assistant", let calls = m["tool_calls"] as? [[String: Any]] {
+                    for c in calls {
+                        let fn = c["function"] as? [String: Any] ?? [:]
+                        let name = fn["name"] as? String ?? ""
+                        let args = fn["arguments"] as? String ?? "{}"
+                        content += "\n<tool_call>{\"name\":\"\(name)\",\"arguments\":\(args)}</tool_call>"
+                    }
+                }
                 messages.append(message(role: role, content: content))
             }
             tools = openAITools(p["tools"])
