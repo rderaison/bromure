@@ -88,3 +88,57 @@ struct MLXEngineSlotTests {
         #expect(MLXEngine.maxCacheSlots >= 1 && MLXEngine.maxCacheSlots <= 8)
     }
 }
+
+/// The post-generation ledger/cache reconcile — the guard that keeps a slot's
+/// token ledger provably equal to what its cache actually contains. Hybrid
+/// models (Qwen3-Next) carry MambaCache layers whose `offset` never advances;
+/// reading `.first` there once truncated the ledger to empty every turn while
+/// the cache kept the whole request's recurrent state, and the next request
+/// reused that poisoned slot with no reset — the "model only answers
+/// `<title/>`" bug (omp's title subrequest was the leftover state).
+@Suite("MLXEngine slot ledger reconcile")
+struct MLXEngineLedgerTests {
+
+    @Test("Aligned cache keeps the slot — hybrid offsets read via max()")
+    func hybridAligned() {
+        // Layer 0 is a MambaCache reporting 0; the full-attention layers
+        // report the true count. max() must be the reference, so the slot
+        // (and its prefix reuse) survives.
+        #expect(MLXEngine.reconcileLedger(tokenCount: 1_200,
+                                          maxOffset: 1_200,
+                                          allTrimmable: false) == .keep)
+    }
+
+    @Test("Lookahead overshoot on a trimmable cache rewinds the cache")
+    func standardOvershoot() {
+        #expect(MLXEngine.reconcileLedger(tokenCount: 1_200,
+                                          maxOffset: 1_201,
+                                          allTrimmable: true) == .trimCache(1))
+    }
+
+    @Test("Short cache on a trimmable model clamps the ledger")
+    func standardShort() {
+        #expect(MLXEngine.reconcileLedger(tokenCount: 1_200,
+                                          maxOffset: 1_150,
+                                          allTrimmable: true) == .clampLedger(1_150))
+    }
+
+    @Test("Overshoot on a non-rewindable (hybrid) cache drops the slot whole")
+    func hybridOvershootDrops() {
+        // The recurrent state already consumed the extra token and can't be
+        // rewound — keeping ANY of it would poison the next continuation.
+        #expect(MLXEngine.reconcileLedger(tokenCount: 1_200,
+                                          maxOffset: 1_201,
+                                          allTrimmable: false) == .dropSlot)
+    }
+
+    @Test("Pure-recurrent cache (offset never advances) drops rather than truncates")
+    func pureMambaDrops() {
+        // The old code clamped the ledger to 0 here and LEFT the cache — an
+        // empty-ledger slot chooseSlot then deems 'always acceptable'. It must
+        // drop the cache with the ledger.
+        #expect(MLXEngine.reconcileLedger(tokenCount: 1_200,
+                                          maxOffset: 0,
+                                          allTrimmable: false) == .dropSlot)
+    }
+}

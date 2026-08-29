@@ -142,6 +142,31 @@ actor MLXEngine {
         return .fresh
     }
 
+    /// How the post-generation slot ledger reconciles against the cache.
+    enum LedgerAction: Equatable {
+        case keep
+        /// Cache ran ahead of the counted tokens (EOS step / lookahead) —
+        /// rewind it by `n` so the next prefix match is sound.
+        case trimCache(Int)
+        /// Cache came up short — trust its offset and clamp the ledger to `n`.
+        case clampLedger(Int)
+        /// The two disagree and the cache can't be rewound (recurrent/hybrid
+        /// state) — the slot is unprovable and must be dropped whole.
+        case dropSlot
+    }
+
+    /// Decide the reconcile action from the counted tokens, the cache's true
+    /// offset (MAX across layer caches — hybrid models carry MambaCache layers
+    /// whose offset never advances, so `.first` is a lie there), and whether
+    /// every layer cache supports rewinding.
+    static func reconcileLedger(tokenCount: Int, maxOffset: Int,
+                                allTrimmable: Bool) -> LedgerAction {
+        if maxOffset == tokenCount { return .keep }
+        guard allTrimmable else { return .dropSlot }
+        return maxOffset > tokenCount ? .trimCache(maxOffset - tokenCount)
+                                      : .clampLedger(maxOffset)
+    }
+
     // MARK: - Generation serialization
     //
     // Generation mutates the per-repo prefix KV cache (trim + prefill + decode).
@@ -532,6 +557,17 @@ actor MLXEngine {
                 session.cache = context.model.newCache(parameters: gp)
                 session.tokens = []
             }
+            // A slot is only continuable when its cache demonstrably matches
+            // its ledger. A non-rewindable (recurrent/hybrid) cache that
+            // disagrees — e.g. a request that died before bookkeeping — must
+            // start over: continuing would prefill the new prompt on top of
+            // live leftover state, which is how a poisoned slot once made
+            // Qwen3-Next answer every turn with the title subrequest's tag.
+            if !session.cache.allSatisfy({ $0.isTrimmable }),
+               (session.cache.map(\.offset).max() ?? 0) != session.tokens.count {
+                session.cache = context.model.newCache(parameters: gp)
+                session.tokens = []
+            }
             var reuse = max(0, min(MLXEngine.commonPrefix(session.tokens, promptIds),
                                    promptIds.count - 1))
             let drop = session.tokens.count - reuse
@@ -583,13 +619,31 @@ actor MLXEngine {
             // may advance the cache past the tokens we counted (the EOS step / an
             // in-flight lookahead). Trim the excess so the next prefix match is
             // sound; clamp the ledger if the cache somehow came up short.
+            //
+            // The reference offset is the MAX across layer caches, not `.first`:
+            // hybrid models (Qwen3-Next) put a MambaCache at layer 0 whose
+            // offset never advances — reading it truncated the ledger to empty
+            // every turn while the cache kept the request's full recurrent
+            // state, and chooseSlot then reused that poisoned slot with no
+            // reset ("only answers <title/>"). The full-attention layers'
+            // KVCacheSimple offsets are truthful, so max() is the real count.
             session.tokens = promptIds + generatedIds
-            if let off = session.cache.first?.offset {
-                if off > session.tokens.count, session.cache.allSatisfy({ $0.isTrimmable }) {
-                    for c in session.cache { _ = c.trim(off - session.tokens.count) }
-                } else if off < session.tokens.count {
-                    session.tokens = Array(session.tokens.prefix(off))
-                }
+            switch MLXEngine.reconcileLedger(
+                tokenCount: session.tokens.count,
+                maxOffset: session.cache.map(\.offset).max() ?? session.tokens.count,
+                allTrimmable: session.cache.allSatisfy({ $0.isTrimmable })) {
+            case .keep:
+                break
+            case .trimCache(let n):
+                for c in session.cache { _ = c.trim(n) }
+            case .clampLedger(let n):
+                session.tokens = Array(session.tokens.prefix(n))
+            case .dropSlot:
+                // The state can't be rewound (recurrent/hybrid cache) and the
+                // ledger can't be proven to match it — poison-proof the slot.
+                // The next request builds a fresh cache and pays full prefill.
+                session.tokens = []
+                session.cache = []
             }
             session.lastUsed = Date()
 

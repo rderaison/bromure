@@ -912,12 +912,16 @@ public final class SessionDisk {
                 // `reasoning`, so a vision-capable Ollama model is unusable
                 // for images without them.
                 let meta = Self.localModelMeta(profile: profile)
-                // Built-in MLX: thinking is on unless BROMURE_THINKING
-                // disables it (the engine child inherits this env), and its
-                // reasoning now streams as native thinking — advertise it so
-                // omp shows its effort UI. External: the server's capability.
+                // Built-in MLX: advertise thinking only for models that
+                // actually reason — the catalog marks them with a
+                // `reasoning_parser` (Qwen3-8B yes; Qwen3-Coder-Next no).
+                // A blanket flag made omp treat coder models as reasoning
+                // models, showing an effort UI the model can't honor.
+                // BROMURE_THINKING=0 still disables it (the engine child
+                // inherits this env). External: the server's capability.
                 let thinkEnv = ProcessInfo.processInfo.environment["BROMURE_THINKING"]
                 let builtinThinking = profile.localEngineBaseURL == nil
+                    && profile.activeModelID.flatMap { CatalogStore.shared.resolve($0)?.reasoningParser } != nil
                     && !(thinkEnv == "0" || thinkEnv?.lowercased() == "false")
                 yaml = Self.ompModelsYAML(
                     base: "https://\(InferenceService.localMitmHost)/v1",
