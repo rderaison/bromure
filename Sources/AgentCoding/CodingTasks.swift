@@ -403,14 +403,34 @@ enum AgentSessionLocator {
             + "| xargs -r ls -t 2>/dev/null | head -1); "
     }
 
-    /// omp (Oh My Pi): ${PI_CODING_AGENT_DIR:-~/.omp/agent}/sessions/<cwd>/…jsonl
-    /// where the session dir is the run's cwd with '/' flattened to '-'
-    /// (e.g. /home/ubuntu/wt-foo → -home-ubuntu-wt-foo). The transcript is the
-    /// newest `*.jsonl` directly inside it; the logical and readlink-resolved
-    /// paths are both tried (a worktree cwd may be a symlink).
+    /// omp (Oh My Pi): ${PI_CODING_AGENT_DIR:-~/.omp/agent}/sessions/<dir>/…jsonl
+    /// where <dir> encodes the run's cwd with omp v18's scoped rules
+    /// (session-paths.ts `getDefaultSessionDirName`):
+    ///   • under $HOME:  "-" + the home-RELATIVE path flattened
+    ///     (~/proj → -proj, $HOME itself → -)
+    ///   • under /tmp:   "-tmp" + the tmp-relative path flattened
+    ///     (/tmp/x → -tmp-x)
+    ///   • elsewhere:    "--" + absolute path (leading / stripped) flattened + "--"
+    ///     (/mnt/share/x → --mnt-share-x--)
+    /// A full-path flatten (the old rule here) only coincided with the /tmp
+    /// form, so home-dir projects never matched — "No transcript" for every
+    /// real omp session. The transcript is the newest `*.jsonl` directly
+    /// inside the dir; the logical and readlink-resolved paths are both tried
+    /// (a worktree cwd may be a symlink).
     nonisolated static func ompFragment(since: Int, into varName: String) -> String {
-        "ob=\"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/sessions\"; "
-            + "os1=$(printf %s \"$d\" | tr / -); os2=$(printf %s \"$r\" | tr / -); "
+        // POSIX-sh encoder, inlined twice (fragments concatenate with other
+        // agents' probes, so no function definitions / reused temp names).
+        func enc(_ src: String, into v: String) -> String {
+            "if [ \"$\(src)\" = \"$HOME\" ]; then \(v)=-; "
+            + "elif [ \"${\(src)#$HOME/}\" != \"$\(src)\" ]; then "
+            + "\(v)=\"-$(printf %s \"${\(src)#$HOME/}\" | tr /: -)\"; "
+            + "elif [ \"$\(src)\" = /tmp ]; then \(v)=-tmp; "
+            + "elif [ \"${\(src)#/tmp/}\" != \"$\(src)\" ]; then "
+            + "\(v)=\"-tmp-$(printf %s \"${\(src)#/tmp/}\" | tr /: -)\"; "
+            + "else \(v)=\"--$(printf %s \"${\(src)#/}\" | tr /: -)--\"; fi; "
+        }
+        return "ob=\"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/sessions\"; "
+            + enc("d", into: "os1") + enc("r", into: "os2")
             + "\(varName)=$(find \"$ob/$os1\" \"$ob/$os2\" -maxdepth 1 -name '*.jsonl' "
             + "-newermt @\(since) 2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null "
             + "| head -1); "

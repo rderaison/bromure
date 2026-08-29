@@ -294,3 +294,69 @@ struct AgentTranscriptLocatorTests {
                                                        agent: .codex) == nil)
     }
 }
+
+/// The omp session-store locator, executed for real against fixture stores:
+/// omp v18 keys the session dir by SCOPE (session-paths.ts) — home-relative
+/// ("-proj"), tmp-relative ("-tmp-x"), or bracketed absolute ("--mnt-x--").
+/// The old full-path flatten only coincided with the /tmp form, so real
+/// (home-dir) projects always read "No transcript".
+@Suite("omp locator against fixture stores")
+struct OmpLocatorExecutionTests {
+
+    /// Run `cmd` under /bin/sh with HOME pointed at the fixture; returns stdout.
+    private func run(_ cmd: String, home: URL) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", cmd]
+        var env = ProcessInfo.processInfo.environment
+        env["HOME"] = home.path
+        env.removeValue(forKey: "PI_CODING_AGENT_DIR")
+        p.environment = env
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        try p.run()
+        p.waitUntilExit()
+        return String(data: out.fileHandleForReading.readDataToEndOfFile(),
+                      encoding: .utf8) ?? ""
+    }
+
+    private func makeStore(home: URL, dir: String, line: String) throws {
+        let d = home.appendingPathComponent(".omp/agent/sessions/\(dir)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        try (line + "\n").write(to: d.appendingPathComponent("a.jsonl"),
+                                 atomically: true, encoding: .utf8)
+    }
+
+    @Test("home-relative, /tmp, and bracketed-absolute cwds all locate their store")
+    func scopedEncodings() throws {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("omp-locator-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        // (guest cwd, omp's on-disk dir name for it)
+        let cases: [(cwd: String, dir: String)] = [
+            (home.path + "/proj", "-proj"),                    // home-relative
+            (home.path, "-"),                                  // $HOME itself
+            ("/tmp/omptest", "-tmp-omptest"),                  // tmp-relative
+            ("/mnt/share/x", "--mnt-share-x--"),               // absolute
+        ]
+        for (cwd, dir) in cases {
+            try makeStore(home: home, dir: dir, line: "{\"type\":\"session\",\"marker\":\"\(dir)\"}")
+            guard let cmd = CodingTaskEngine.planTranscriptCommand(
+                guestCwd: cwd, since: 7, agent: "omp") else {
+                Issue.record("no command for \(cwd)"); continue
+            }
+            // The find/xargs pipeline is shared with every other agent and
+            // guest-proven; two GNU-isms (`-newermt @epoch`, `xargs -r`) don't
+            // exist in macOS's BSD tools, so neutralize just those for the
+            // local execution — the encoder under test runs verbatim.
+            let localCmd = cmd
+                .replacingOccurrences(of: "-newermt @7 ", with: "")
+                .replacingOccurrences(of: "xargs -r", with: "xargs")
+            let out = try run(localCmd, home: home)
+            #expect(out.contains("\"marker\":\"\(dir)\""),
+                    "cwd \(cwd) did not locate store \(dir); got: \(out.prefix(120))")
+        }
+    }
+}
