@@ -230,6 +230,10 @@ struct VMAttachWindow: ParsableCommand {
     var windowIndex: Int
 
     @Option(name: .long,
+            help: "Stable guest view-session id (the app addresses this surface's tmux client through it for size-authority flags).")
+    var view: String?
+
+    @Option(name: .long,
             help: "Fat-client remote host id: attach to a workspace on a remote bromure-ac over SSH.")
     var remote: String?
 
@@ -311,9 +315,14 @@ struct VMAttachWindow: ParsableCommand {
                     // The native terminal surface (and the fat-client mirror
                     // terminal) is GUI-fronted: its consent prompts are NSAlerts,
                     // not tmux popups — so mark the attach accordingly.
+                    // sizePassive: the surface's tmux client attaches with
+                    // ignore-size; the app grants size authority only to the
+                    // surface the user is actively working in, so a background
+                    // side (native window vs fat client) can't resize the
+                    // shared tmux window out from under the active one.
                     try InteractiveExec.run(client: client, vm: vmID,
-                                            view: UUID().uuidString, window: windowIndex,
-                                            guiConsent: true)
+                                            view: view ?? UUID().uuidString, window: windowIndex,
+                                            guiConsent: true, sizePassive: true)
                     // A real attach runs until the tmux client exits. If it
                     // returned almost immediately AND we're still early in
                     // boot, the session probably wasn't ready — retry rather
@@ -1294,6 +1303,7 @@ enum InteractiveExec {
     /// so a headless user can still approve on their terminal.
     static func run(client: ControlClient, vm: String, command: String = "",
                     view: String? = nil, window: Int? = nil, guiConsent: Bool = false,
+                    sizePassive: Bool = false,
                     overlayTrigger: UInt8? = nil, onOverlay: (() -> [UInt8])? = nil) throws {
         var ws = winsize()
         _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws)
@@ -1305,6 +1315,7 @@ enum InteractiveExec {
         if let view { body["view"] = view }
         if let window { body["window"] = window }
         if guiConsent { body["guiConsent"] = true }
+        if sizePassive { body["sizePassive"] = true }
         let fd = try client.openStream(
             "POST", "/vms/\(ControlClient.encodeSegment(vm))/exec", body: body)
         defer { Darwin.close(fd) }

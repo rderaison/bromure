@@ -298,7 +298,7 @@ def _terminal_graphics_enabled():
     return os.path.exists("/mnt/bromure-meta/terminal-graphics-enabled")
 
 
-def _view_attach_command(view, window):
+def _view_attach_command(view, window, size_passive=False):
     """Build the tmux attach command for a host terminal view.
 
     Each view gets its own session *grouped* with `bromure` (shared windows,
@@ -325,7 +325,19 @@ def _view_attach_command(view, window):
         # copy reach the macOS clipboard.
         " set-option -s set-clipboard on \\;"
         " set-window-option -g aggressive-resize on \\;"
-        " new-session -t bromure -s " + name + " \\;"
+        # size_passive: attach with the ignore-size client flag, so this view
+        # cannot influence the shared window's size until the host grants it
+        # authority (refresh-client -f '!ignore-size' — done only for the
+        # surface the user is actively working in). Keeps a background side's
+        # relayouts/reattaches from resizing windows under the active side.
+        # tmux ignores the flag while NO unflagged client exists, so a lone
+        # attach behaves exactly as before.
+        # -A: view names are now stable across reattaches (the host derives
+        # them), so a quick respawn can race the dying client's
+        # destroy-unattached reap — attach to the leftover session instead of
+        # failing on "duplicate session".
+        " new-session -A -t bromure -s " + name
+        + (" -f ignore-size" if size_passive else "") + " \\;"
         " set-option destroy-unattached on \\;"
         " set-option status off \\;"
         # mouse OFF: tmux does not capture the mouse, so a plain drag is
@@ -354,7 +366,8 @@ def _run_interactive(vsock_sock, req):
     """Allocate a pty, run the command on it, and bridge it to the vsock."""
     cmd = req.get("cmd", "")
     if req.get("view"):
-        cmd = _view_attach_command(req["view"], req.get("window"))
+        cmd = _view_attach_command(req["view"], req.get("window"),
+                                   bool(req.get("sizePassive")))
     cols = int(req.get("cols", 80) or 80)
     rows = int(req.get("rows", 24) or 24)
 

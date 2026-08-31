@@ -24,6 +24,19 @@ final class TerminalSessionController {
     private var reattachDelays: [Int: TimeInterval] = [:]
     private var observers: [NSObjectProtocol] = []
 
+    /// Stable per-controller token: window `i`'s guest tmux view session is
+    /// named `view-v<token>w<i>`, the same across reattaches, so the
+    /// size-authority pass below can address each surface's tmux client
+    /// from the host.
+    private let viewToken = UUID().uuidString.prefix(8).lowercased()
+    private var authorityTimer: Timer?
+    private var authorityAssertScheduled = false
+    /// Last pushed authority vector + when — the grid/pane refresh loops call
+    /// `view(forWindow:)` every poll, so unchanged states are only re-pushed
+    /// by the (forced) periodic tick, not per poll.
+    private var lastAuthority: [Int: Bool] = [:]
+    private var lastAuthorityPush = Date.distantPast
+
     /// Called when a surface's title changes (window index, title) — the
     /// pane/grid chrome subscribes.
     var onTitleChange: ((Int, String) -> Void)?
@@ -65,10 +78,16 @@ final class TerminalSessionController {
     /// first use. Returns nil when libghostty is unavailable — callers show
     /// the framebuffer instead.
     func view(forWindow index: Int) -> TerminalSurfaceView? {
-        if let existing = views[index] { return existing }
+        startSizeAuthorityEngineIfNeeded()
+        if let existing = views[index] {
+            // A cached surface being (re)mounted — e.g. a tab switch moving it
+            // into the key window — generates no window/app notification, so
+            // re-evaluate size authority here.
+            scheduleSizeAuthorityAssert()
+            return existing
+        }
         guard GhosttyRuntime.shared.start() else { return nil }
-        guard let view = TerminalSurfaceView(command: Self.attachCommand(vmID: vmID, window: index,
-                                                                         remoteHost: remoteHost),
+        guard let view = TerminalSurfaceView(command: attachCommand(window: index),
                                              windowIndex: index,
                                              profileID: profile.id,
                                              remoteHost: remoteHost) else { return nil }
@@ -76,6 +95,14 @@ final class TerminalSessionController {
             GhosttyRuntime.shared.apply(profile: profile, to: surface)
         }
         views[index] = view
+        // The guest attach lands a beat later (vsock, or SSH for the fat
+        // client) — flag the fresh tmux client as soon as it exists; the
+        // periodic tick heals anything these one-shots miss.
+        for delay: TimeInterval in [1.5, 4, 10] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.assertSizeAuthority(force: true)
+            }
+        }
         return view
     }
 
@@ -97,6 +124,8 @@ final class TerminalSessionController {
         }
         views.removeAll()
         reattachDelays.removeAll()
+        authorityTimer?.invalidate()
+        authorityTimer = nil
     }
 
     /// Drop a single window's surface (tab closed in tmux).
@@ -163,12 +192,13 @@ final class TerminalSessionController {
     /// identity, live endpoint and login user ride the command line. Queried
     /// per spawn: a reattach after the path self-heals picks up the fresh
     /// shim port.
-    static func attachCommand(vmID: String, window: Int, remoteHost: UUID? = nil) -> String {
+    func attachCommand(window: Int) -> String {
         let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        let viewArg = " --view '\(viewName(forWindow: window))'"
         guard let remoteHost else {
-            return "'\(exe)' __attach-window '\(vmID)' \(window)"
+            return "'\(exe)' __attach-window\(viewArg) '\(vmID)' \(window)"
         }
-        var cmd = "'\(exe)' __attach-window --remote '\(remoteHost.uuidString)'"
+        var cmd = "'\(exe)' __attach-window --remote '\(remoteHost.uuidString)'" + viewArg
         if let host = RemoteHostController.liveHosts[remoteHost],
            let pid = host.peerDeviceID,
            let ep = P2PBroker.shared.cachedEndpoint(forPeer: pid) {
@@ -177,5 +207,129 @@ final class TerminalSessionController {
         }
         cmd += " '\(vmID)' \(window)"
         return cmd
+    }
+
+    // MARK: Size authority
+
+    // Only the surface the user is actually working in may drive the shared
+    // tmux window's size. Every native surface attaches its tmux client with
+    // the `ignore-size` flag (see `sizePassive` in __attach-window); this
+    // pass grants `!ignore-size` to views that are in the key window of the
+    // active app on a machine with recent local input, and re-flags the rest
+    // passive. tmux then sizes each shared window to the one unflagged
+    // client, so a relayout or reattach on the idle side (native window vs
+    // fat client) can never resize the window out from under the active one.
+    //
+    // Fail-safe by construction: when NO unflagged client exists (both sides
+    // idle, or the exec channel is down), tmux ignores the flag entirely
+    // (resize.c ignore_client_size) and behaves exactly as before. The pass
+    // is level-based — desired state is re-asserted every tick rather than
+    // edge-triggered — so missed grants and freshly reattached clients heal
+    // within one tick.
+
+    /// The guest tmux session name for a window's surface (matches the
+    /// sanitization in bromure-agentd's `_view_attach_command`).
+    private func viewName(forWindow index: Int) -> String { "v\(viewToken)w\(index)" }
+
+    private func startSizeAuthorityEngineIfNeeded() {
+        guard authorityTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            Task { @MainActor in self.assertSizeAuthority(force: true) }
+        }
+        timer.tolerance = 5
+        authorityTimer = timer
+        let center = NotificationCenter.default
+        for name: Notification.Name in [NSWindow.didBecomeKeyNotification,
+                                        NSWindow.didResignKeyNotification,
+                                        NSApplication.didBecomeActiveNotification,
+                                        NSApplication.didResignActiveNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) {
+                [weak self] _ in
+                Task { @MainActor in self?.scheduleSizeAuthorityAssert() }
+            })
+        }
+    }
+
+    /// Coalesce event bursts (key-window + app-active fire together) into one
+    /// pass shortly after things settle.
+    private func scheduleSizeAuthorityAssert() {
+        guard !authorityAssertScheduled else { return }
+        authorityAssertScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self else { return }
+            self.authorityAssertScheduled = false
+            self.assertSizeAuthority()
+        }
+    }
+
+    /// Seconds since any keyboard/mouse input on THIS Mac. An unattended
+    /// server keeps its session window key and its app active, so key-window
+    /// alone can't mean "actively used" — require a human to have touched the
+    /// machine recently.
+    private static func secondsSinceLocalInput() -> TimeInterval {
+        CGEventSource.secondsSinceLastEventType(.hidSystemState,
+                                                eventType: CGEventType(rawValue: ~0)!)
+    }
+
+    private func isActivelyUsed(_ view: TerminalSurfaceView) -> Bool {
+        guard NSApp.isActive, let win = view.window, win.isKeyWindow else { return false }
+        return Self.secondsSinceLocalInput() < 180
+    }
+
+    /// `force` (the periodic tick + post-attach one-shots) re-pushes even an
+    /// unchanged vector, healing reattached clients that came up with stale
+    /// flags; unforced calls are cheap no-ops unless the desired state moved.
+    private func assertSizeAuthority(force: Bool = false) {
+        guard !views.isEmpty else { return }
+        let desired = views.mapValues { isActivelyUsed($0) }
+        if !force, desired == lastAuthority,
+           Date().timeIntervalSince(lastAuthorityPush) < 15 { return }
+        lastAuthority = desired
+        lastAuthorityPush = Date()
+        var parts: [String] = []
+        for index in views.keys {
+            let session = "view-\(viewName(forWindow: index))"
+            if desired[index] == true {
+                // Grant, then a same-size `refresh-client -C`: setting client
+                // flags alone doesn't run tmux's recalculate_sizes, -C does —
+                // so the window snaps to this client without waiting for a
+                // real resize or keystroke.
+                parts.append(
+                    "set -- $(tmux list-clients -t '\(session)'"
+                    + " -F '#{client_tty} #{client_width} #{client_height}'"
+                    + " 2>/dev/null | head -1)"
+                    + "; [ -n \"$1\" ] && tmux refresh-client -t \"$1\" -f '!ignore-size'"
+                    + " && tmux refresh-client -t \"$1\" -C \"${2}x${3}\"")
+            } else {
+                parts.append(
+                    "set -- $(tmux list-clients -t '\(session)' -F '#{client_tty}'"
+                    + " 2>/dev/null | head -1)"
+                    + "; [ -n \"$1\" ] && tmux refresh-client -t \"$1\" -f ignore-size")
+            }
+        }
+        runInGuest(parts.joined(separator: "; ") + "; true")
+    }
+
+    /// Run a shell command in the workspace's guest over this side's own
+    /// channel: the vsock shell bridge locally, POST /vms/{id}/exec over the
+    /// tunnel for a fat-client mirror. Fire-and-forget — the level-based
+    /// re-assert makes lost commands harmless.
+    private func runInGuest(_ command: String) {
+        if let remoteHost {
+            let vmID = self.vmID
+            let live = RemoteHostController.liveHosts[remoteHost]
+            let hostID = remoteHost
+            Task.detached(priority: .utility) {
+                let client: ControlClient? = live.map { RemoteTransport.client(for: $0) }
+                    ?? RemoteTransport.client(hostID: hostID)
+                _ = try? client?.request(
+                    "POST", "/vms/\(ControlClient.encodeSegment(vmID))/exec",
+                    body: ["command": command, "timeout": 10])
+            }
+        } else if let delegate = NSApp.delegate as? ACAppDelegate {
+            let pid = profile.id
+            Task { _ = try? await delegate.guestExec(profileID: pid, command: command, timeout: 10) }
+        }
     }
 }

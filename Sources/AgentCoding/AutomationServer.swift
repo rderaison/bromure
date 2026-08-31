@@ -1528,6 +1528,10 @@ final class ACAutomationServer {
         var req: [String: Any] = ["cmd": command, "interactive": true, "cols": cols, "rows": rows]
         if let view = bodyJSON["view"] as? String { req["view"] = view }
         if let window = bodyJSON["window"] as? Int { req["window"] = window }
+        // Native surfaces attach with tmux's ignore-size client flag; the app
+        // grants size authority to the actively-used surface afterwards (see
+        // TerminalSessionController's size-authority pass).
+        if bodyJSON["sizePassive"] as? Bool == true { req["sizePassive"] = true }
         guard let reqData = try? JSONSerialization.data(withJSONObject: req) else {
             sendResponse(fd: clientFD, status: 500, body: ["error": "Failed to encode request"])
             return

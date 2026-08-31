@@ -20,12 +20,18 @@ struct NativeTerminalTests {
     @Test("Surface attach command quotes the executable and targets the window")
     @MainActor
     func attachCommand() {
-        let cmd = TerminalSessionController.attachCommand(vmID: "ABC-123", window: 4)
+        let profile = Profile(name: "t", tool: .claude, authMode: .subscription)
+        let ctl = TerminalSessionController(profile: profile)
+        let cmd = ctl.attachCommand(window: 4)
         #expect(cmd.contains("__attach-window"))
-        #expect(cmd.contains("'ABC-123'"))
+        #expect(cmd.contains("'\(profile.id.uuidString)'"))
         #expect(cmd.hasSuffix(" 4"))
         // The exe path is single-quoted (the bundle path contains spaces).
         #expect(cmd.hasPrefix("'"))
+        // Carries the app-chosen view id (size-authority addressing), pinned
+        // to the window index.
+        #expect(cmd.contains("--view 'v"))
+        #expect(cmd.contains("w4'"))
     }
 
     // MARK: Profile toggle
@@ -84,7 +90,9 @@ struct NativeTerminalTests {
     func viewAttachCommand() throws {
         let cmd = try runAgentSnippet(
             #"print(sa._view_attach_command("Deadbeef-1", 7))"#)
-        #expect(cmd.contains("new-session -t bromure -s view-Deadbeef-1"))
+        #expect(cmd.contains("new-session -A -t bromure -s view-Deadbeef-1"))
+        // Not passive by default: a plain attach may size the window.
+        #expect(!cmd.contains("ignore-size"))
         #expect(cmd.contains("destroy-unattached on"))
         #expect(cmd.contains("status off"))
         #expect(cmd.contains("aggressive-resize on"))
@@ -94,6 +102,13 @@ struct NativeTerminalTests {
         #expect(cmd.contains("select-window -t :7"))
         // Bootstraps the bromure session if it isn't up yet (boot race).
         #expect(cmd.contains("has-session -t bromure"))
+    }
+
+    @Test("Passive view attach carries the ignore-size client flag")
+    func viewAttachPassive() throws {
+        let cmd = try runAgentSnippet(
+            #"print(sa._view_attach_command("vabc123w0", 0, True))"#)
+        #expect(cmd.contains("new-session -A -t bromure -s view-vabc123w0 -f ignore-size"))
     }
 
     @Test("View attach sanitizes hostile ids and survives a missing window")

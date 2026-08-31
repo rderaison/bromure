@@ -84,7 +84,7 @@ def _set_winsize(fd, rows, cols):
         pass
 
 
-def _view_attach_command(view, window):
+def _view_attach_command(view, window, size_passive=False):
     """Build the tmux attach command for a host terminal view.
 
     Each view gets its own session *grouped* with `bromure` (shared windows,
@@ -103,7 +103,14 @@ def _view_attach_command(view, window):
         " set-option -g allow-passthrough on \\;"
         " set-option -s set-clipboard on \\;"
         " set-window-option -g aggressive-resize on \\;"
-        " new-session -t bromure -s " + name + " \\;"
+        # size_passive: see bromure-agentd — the view may not size the shared
+        # window until the host grants it '!ignore-size'.
+        # -A: view names are now stable across reattaches (the host derives
+        # them), so a quick respawn can race the dying client's
+        # destroy-unattached reap — attach to the leftover session instead of
+        # failing on "duplicate session".
+        " new-session -A -t bromure -s " + name
+        + (" -f ignore-size" if size_passive else "") + " \\;"
         " set-option destroy-unattached on \\;"
         " set-option status off \\;"
         # mouse OFF: tmux doesn't capture the mouse, so a plain drag is
@@ -130,7 +137,8 @@ def _run_interactive(vsock_sock, req):
     """Allocate a pty, run the command on it, and bridge it to the vsock."""
     cmd = req.get("cmd", "")
     if req.get("view"):
-        cmd = _view_attach_command(req["view"], req.get("window"))
+        cmd = _view_attach_command(req["view"], req.get("window"),
+                                   bool(req.get("sizePassive")))
     cols = int(req.get("cols", 80) or 80)
     rows = int(req.get("rows", 24) or 24)
 
