@@ -4015,6 +4015,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if runningSessions[id] != nil { up = true; break }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
+        // Reboot the workspace's local browser pane against the fresh network
+        // (see relaunchVM). The reboot path here is the one a remote fat client
+        // triggers; that client also reboots its own mirrored browser off the
+        // /state uptime reset — this covers a browser open on the host itself.
+        if up { unifiedWindow?.rebootBrowser(for: id) }
         return ["ok": up, "workspace": profile.name, "mode": mode == "hard" ? "hard" : "soft"]
     }
 
@@ -10506,6 +10511,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // down VM. The container's solid backing shows through cleanly until
         // the fresh roster re-mounts a surface for the active tab.
         win.retireNativeTerminals()
+        // Reboot the workspace's attached web browser too. The browser VM
+        // shares the workspace's vmnet subnet and reaches the workspace by IP;
+        // a reboot re-leases that network (new switch port / possibly new IP),
+        // so a browser left running keeps stale ARP / connections / tabs
+        // pointed at the old workspace. No-op if this workspace never opened a
+        // browser. (The fat client reboots its OWN mirrored browser when it
+        // sees the reboot in /state — this only covers the local pane.)
+        unifiedWindow?.rebootBrowser(for: profile.id)
         // Drop the old VM from the registry (and the window borrow) so it
         // deallocates (its deinit detaches the vmnet switch port). The fresh
         // sandbox is registered below once it's built.

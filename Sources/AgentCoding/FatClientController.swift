@@ -52,6 +52,19 @@ final class RemoteHostController {
     /// silently drifts to another window, so a stale surface (still cached
     /// under the dead index) would keep showing the wrong terminal.
     var onTabsApplied: ((Profile.ID, Set<Int>) -> Void)?
+    /// A workspace's VM rebooted (its /state uptime reset). The window rebuilds
+    /// that workspace's attached browser, whose network is now stale.
+    var onWorkspaceRebooted: ((Profile.ID) -> Void)?
+
+    /// A workspace's derived boot time jumping FORWARD past this floor means its
+    /// uptime reset — the VM rebooted. Uptime only ever grows during steady
+    /// running, so `newBoot ≈ prevBoot` (kept within the ±3s stable band); a
+    /// large forward jump can only come from `startedAt` moving forward, i.e. a
+    /// fresh boot. The floor clears poll jitter and clock-offset drift. Static +
+    /// internal so it's unit-testable without a live mirror.
+    nonisolated static func uptimeDidReset(prevBoot: Date, newBoot: Date) -> Bool {
+        newBoot.timeIntervalSince(prevBoot) > 20
+    }
     /// Fired when a mirrored workspace's terminal appearance overrides
     /// (font/colors) change host-side, so the window can restyle its live
     /// surfaces — the remote analog of the local editor's live apply.
@@ -649,6 +662,7 @@ final class RemoteHostController {
         // Running entries: one VMEntry per running VM, carrying a live TabsModel.
         var entries: [SessionListModel.VMEntry] = []
         var liveIDs = Set<Profile.ID>()
+        var rebootedIDs = Set<Profile.ID>()   // uptime reset since last poll → the VM rebooted
         for vm in vms {
             guard let idStr = vm["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
             liveIDs.insert(id)
@@ -666,12 +680,16 @@ final class RemoteHostController {
             model.vmDiskTotalKB = vm["diskTotalKB"] as? Int ?? 0
             if let up = vm["uptimeSeconds"] as? Int {
                 let derived = Date(timeIntervalSinceNow: TimeInterval(-up))
-                // Keep the previous value unless it drifted (poll jitter would
-                // otherwise make the dashboard's uptime wobble).
-                if let prev = bootTimes[id], abs(prev.timeIntervalSince(derived)) < 3 {
-                    // stable — keep prev
+                if let prev = bootTimes[id] {
+                    if Self.uptimeDidReset(prevBoot: prev, newBoot: derived) {
+                        rebootedIDs.insert(id)
+                        bootTimes[id] = derived
+                    } else if abs(prev.timeIntervalSince(derived)) >= 3 {
+                        bootTimes[id] = derived   // minor drift correction
+                    }
+                    // else stable — keep prev (dashboard uptime doesn't wobble)
                 } else {
-                    bootTimes[id] = derived
+                    bootTimes[id] = derived   // first sighting, never a reboot
                 }
             }
             mounts[id] = vm["mounts"] as? [String] ?? []
@@ -714,8 +732,17 @@ final class RemoteHostController {
                 accentHex: model.accentHex, model: model))
         }
         tabsModels = tabsModels.filter { liveIDs.contains($0.key) }
-        bootTimes = bootTimes.filter { liveIDs.contains($0.key) }
+        // Keep bootTimes across a brief running-absence (a reboot drops the VM
+        // from /state for a few polls), so the uptime-reset comparison still
+        // fires when it returns — only forget it when the workspace itself is
+        // gone. Filtering by liveIDs here would erase the pre-reboot boot time
+        // and the return would look like a first sighting (missed reboot).
+        bootTimes = bootTimes.filter { profilesByID[$0.key] != nil }
         mounts = mounts.filter { liveIDs.contains($0.key) }
+        // A rebooted workspace's browser is bound to the old boot's network
+        // (its IP inside the SOCKS-routed subnet); the window rebuilds it so the
+        // pane isn't left with dead connections / tabs on the previous boot.
+        for id in rebootedIDs { onWorkspaceRebooted?(id) }
         // Rebuild entries only when the id set changes (the shared TabsModels
         // update in place, so the sidebar tab rows still refresh live).
         if Set(listModel.entries.map(\.id)) != liveIDs {
@@ -1718,6 +1745,9 @@ final class RemoteHostWindow: NSWindow {
         }
         controller.onTabsApplied = { [weak self] id, live in
             self?.reconcileSurfaces(for: id, liveWindows: live)
+        }
+        controller.onWorkspaceRebooted = { [weak self] id in
+            self?.rebootBrowser(for: id)
         }
         controller.onAppearanceChanged = { [weak self] profile in
             self?.termControllers[profile.id]?.applyProfile(profile)
@@ -3341,7 +3371,13 @@ final class RemoteHostWindow: NSWindow {
         } else {
             browserOpen.remove(id)
             if shownBrowser == id { shownBrowser = nil }
-            browserControllers[id]?.setVisible(false, teardownWhenHidden: false)
+            // Pane CLOSED (not just switched away) → arm the idle teardown, so a
+            // hidden browser VM is suspended after 10s and torn down after
+            // ~5min, exactly like the native window. (Workspace-switch hides go
+            // through hideShownBrowser with teardownWhenHidden:false, which
+            // keeps the VM resumable.) Without this the fat client's browser
+            // lived forever once opened.
+            browserControllers[id]?.setVisible(false, teardownWhenHidden: true)
             // Detach the browser content so nothing inside it can resist the
             // width-0 close (a residual SwiftUI/framebuffer minimum was leaving
             // the pane "smaller but not gone"), then animate the collapse with a
@@ -3354,6 +3390,25 @@ final class RemoteHostWindow: NSWindow {
                 setBrowserWidth(0)
                 contentView?.layoutSubtreeIfNeeded()
             }
+        }
+    }
+
+    /// The workspace VM rebooted (uptime reset in /state), so its network is
+    /// fresh — rebuild the attached browser. Mirrors the native window's
+    /// `rebootBrowser`. A browser the user is looking at is torn down and
+    /// re-shown immediately; a hidden one is just discarded and recreates fresh
+    /// the next time it's shown. No-op if this workspace never opened a browser.
+    private func rebootBrowser(for id: Profile.ID) {
+        guard browserControllers[id] != nil else { return }
+        let wasShown = shownBrowser == id && controller.listModel.selectedID == id
+        browserControllers[id]?.stop()
+        browserControllers[id] = nil
+        browserRelays[id]?.stop()
+        browserRelays[id] = nil
+        FatClientLog.log("browser: workspace \(id.uuidString.prefix(8)) rebooted — rebuilding pane")
+        if wasShown {
+            shownBrowser = nil            // clear setBrowserOpen's already-shown guard
+            setBrowserOpen(id, true)      // recreate controller + relay, re-show
         }
     }
 
