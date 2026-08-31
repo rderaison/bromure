@@ -3429,8 +3429,15 @@ struct ProfileEditorView: View {
                 #endif
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Disable transparent interception", isOn: $draft.disableTransparentProxy)
-                    Text("Interception (on by default) diverts the VM's HTTP/HTTPS to Bromure so the rules above are enforced host-side even if the guest unsets HTTP(S)_PROXY. Turn this on to stop intercepting — the rules then only apply to traffic that uses the proxy, so the workspace can bypass them. Use only for a workspace that breaks under interception (e.g. strict certificate pinning).")
+                    Toggle("Disable interception (full passthrough)", isOn: $draft.disableTransparentProxy)
+                    Text("Interception (on by default) routes the VM's HTTP/HTTPS through Bromure so it can swap credentials, trace, and enforce the guardrails + firewall above. Turn this on for full passthrough: the guest's TLS reaches the internet untouched — no divert, and Bromure won't set HTTP(S)_PROXY either, so a certificate-pinned client (Signal and similar) sees the real upstream cert. The cost: NO credential swap, tracing, guardrails, or verb firewall on this workspace (the connection-level allow/deny rules above still apply). Needs a restart. Off by default; use only for a workspace that breaks under interception.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Toggle("Allow per-request insecure bypass (X-bromure-insecure)",
+                           isOn: $draft.guardrails.allowInsecureBypass)
+                        .padding(.top, 8)
+                    Text("A lighter escape hatch than full passthrough. When a request to a self-signed / private-CA host fails validation, the agent can retry it with the header `X-bromure-insecure: yes` to skip validating THAT upstream's certificate. Interception, tracing, and the leak guard stay on, and Bromure injects no real credential on such a request (only the guest's fakes go out). Every use is recorded in the Security Timeline. Off by default.")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

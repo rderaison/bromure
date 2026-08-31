@@ -479,9 +479,40 @@ final class HTTPMitmConnection: @unchecked Sendable {
             return
         }
 
+        // Insecure-upstream opt-out. When the profile allows it (Guardrails →
+        // "Allow X-bromure-insecure"), the guest can drop THIS request's
+        // upstream certificate validation by sending `X-bromure-insecure: yes`
+        // — the escape hatch for self-signed / private-CA endpoints the proxy
+        // otherwise can't reach. Because it relaxes a security control at the
+        // untrusted guest's request, we compensate: inject NO real credentials
+        // on such a request (skip the swap + the subscription / MCP / AWS auth
+        // below), so only the guest's own fakes ever reach the unvalidated
+        // upstream — a real secret can never leak to an active MITM. Every use
+        // is logged to the Security Timeline.
+        let insecureBypassAllowed = guardrailsProvider()?.allowInsecureBypass ?? false
+        let insecure: Bool = {
+            guard insecureBypassAllowed,
+                  let hdr = Self.rawHeaderSection(of: request),
+                  let v = Self.headerValue("x-bromure-insecure", inHeaderSection: hdr)?
+                    .trimmingCharacters(in: .whitespaces).lowercased()
+            else { return false }
+            return v == "yes" || v == "true" || v == "1"
+        }()
+        if insecure {
+            FileHandle.standardError.write(Data(
+                "[mitm] INSECURE bypass for \(host): skipping upstream cert validation + credential injection\n".utf8))
+            BACEventEmitter.shared.emitDetached(
+                profileID: profileID, eventType: "tls.insecure_bypass",
+                eventData: ["host": .string(host),
+                            "reason": .string("upstream certificate validation skipped at guest request (X-bromure-insecure); no real credentials injected")])
+        }
+
         // 5. Swap tokens. host param is the SNI name; entries that
-        //    don't match are no-ops.
-        var swap = await swapper.swap(rawRequest: request, host: host, profileID: profileID)
+        //    don't match are no-ops. Skipped entirely for an insecure request
+        //    (no fake→real substitution reaches the unvalidated upstream).
+        var swap = insecure
+            ? SwapResult(modified: request, swaps: [])
+            : await swapper.swap(rawRequest: request, host: host, profileID: profileID)
         if !swap.swaps.isEmpty {
             for s in swap.swaps {
                 FileHandle.standardError.write(Data(
@@ -499,7 +530,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // token as an Authorization header so the upstream server
         // accepts the request. Only fires when the request doesn't
         // already carry an Authorization header.
-        if let mcpReal = swapper.entries(for: profileID)
+        if !insecure, let mcpReal = swapper.entries(for: profileID)
             .first(where: { $0.host == host && $0.fake.hasPrefix("brm-mcp_") })?.real {
             if let hdr = Self.rawHeaderSection(of: swap.modified),
                Self.headerValue("authorization", inHeaderSection: hdr) == nil {
@@ -523,7 +554,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     `claudeSubStaleAccess` carries the injected token to the post-
         //     relay 401 self-heal below.
         var claudeSubStaleAccess: String? = nil
-        if host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
+        if !insecure,
+           host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
            let provider = Self.claudeSubscriptionProvider, let (store, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
            let apiKey = Self.headerValue("x-api-key", inHeaderSection: headerSection),
@@ -547,7 +579,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     refreshes. Distinct from the Claude path (x-api-key → Bearer):
         //     here the guest already sends a Bearer, so it's a value swap.
         var codexSubStaleAccess: String? = nil
-        if host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com",
+        if !insecure,
+           host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com",
            let provider = Self.codexSubscriptionProvider, let (store, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),
@@ -570,7 +603,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     the live real access token from the host store, which the host
         //     refreshes against auth.x.ai.
         var grokSubStaleAccess: String? = nil
-        if host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
+        if !insecure,
+           host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
             || host == "x.ai" || host.hasSuffix(".x.ai"),
            let provider = Self.grokSubscriptionProvider, let (store, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
@@ -595,7 +629,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     real access token from the host store, which the host refreshes
         //     against auth.kimi.com.
         var kimiSubStaleAccess: String? = nil
-        if host == "kimi.com" || host.hasSuffix(".kimi.com"),
+        if !insecure,
+           host == "kimi.com" || host.hasSuffix(".kimi.com"),
            let provider = Self.kimiSubscriptionProvider, let (store, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),
@@ -676,8 +711,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     the SDK gets a meaningful HTTP error rather than an
         //     opaque InvalidSignatureException after a round-trip.
         var toForward: Data
-        let resignOutcome = await awsResigner.resign(
-            rawRequest: swap.modified, host: host, profileID: profileID)
+        // Skip AWS SigV4 re-signing for an insecure request — resigning uses
+        // the real AWS secret, exactly the credential we won't put on an
+        // unvalidated upstream. (An AWS endpoint never presents an untrusted
+        // cert, so this path is moot in practice; kept for the invariant.)
+        let resignOutcome: AWSResigner.Outcome = insecure
+            ? .unchanged
+            : await awsResigner.resign(
+                rawRequest: swap.modified, host: host, profileID: profileID)
         switch resignOutcome {
         case .unchanged:
             toForward = swap.modified
@@ -721,7 +762,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     The session's delegate looks up the profile's per-host
         //     SecIdentity (Kubernetes API server et al.) when the
         //     upstream challenges for a client cert.
-        let session = upstreamSession(for: host)
+        let session = upstreamSession(for: host, insecure: insecure)
         // URLSession strong-refs its delegate until invalidated (per
         // Apple's docs). Without this `defer`, every MITM connection
         // leaks one URLSession + one ClientCertChallengeDelegate
@@ -746,6 +787,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 rawRequest: toForward, host: host, port: port,
                 session: session, tls: tls,
                 upstreamScheme: upstreamScheme, bodyFile: bodyFile,
+                insecureBypassAllowed: insecureBypassAllowed,
                 profileID: profileID)
             let elapsed = Date().timeIntervalSince(t0) * 1000
             await emitTrace(host: host, port: port, preSwapRequest: request,
@@ -1389,6 +1431,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                             session: relaySession,
                                             tls: tls,
                                             upstreamScheme: (cleartext || routedBackend == .local) ? "http" : "https",
+                                            insecureBypassAllowed: insecureBypassAllowed,
                                             profileID: profileID)
         }
 
@@ -2101,12 +2144,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// profile's identity registry. The session is single-use because
     /// URLSessionDelegate must be retained for the session's lifetime
     /// and we want the connection's identity binding to be tight.
-    private func upstreamSession(for host: String) -> URLSession {
+    private func upstreamSession(for host: String, insecure: Bool = false) -> URLSession {
         let delegate = ClientCertChallengeDelegate(
             identityRegistry: clientIdentities,
             caRegistry: clusterCAs,
             consent: consent,
-            profileID: profileID, host: host)
+            profileID: profileID, host: host, insecure: insecure)
         let cfg = URLSessionConfiguration.ephemeral
         return URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
     }
@@ -3013,7 +3056,7 @@ private func emitSupplyChainFetch(profileID: UUID,
 /// by installing a CA on the host, and the one we record on the Security
 /// Timeline. `body` is a plain-text explanation surfaced to the guest tool.
 // internal (not private) so `UpstreamErrorTests` can exercise the mapping.
-func describeUpstreamError(_ error: Error, host: String)
+func describeUpstreamError(_ error: Error, host: String, allowInsecureHint: Bool = false)
     -> (isTrust: Bool, reason: String, body: String) {
     let ns = error as NSError
     var isTrust = false
@@ -3059,6 +3102,15 @@ func describeUpstreamError(_ error: Error, host: String)
         running Bromure AC — add it to the login or System keychain and mark it \
         "Always Trust" — then retry.
         """
+        if allowInsecureHint {
+            body += """
+            \n
+            Or, to let THIS request through without validating \(host)'s \
+            certificate, resend it with the header `X-bromure-insecure: yes`. \
+            Bromure will not send any real credential on a request carrying \
+            that header.
+            """
+        }
     }
     return (isTrust, reason, body)
 }
@@ -3068,6 +3120,7 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
                            tls: MitmServerStream,
                            upstreamScheme: String = "https",
                            bodyFile: URL? = nil,
+                           insecureBypassAllowed: Bool = false,
                            profileID: UUID) async throws -> RelayResponse {
     guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
         throw MitmError.malformedHTTPRequest
@@ -3130,9 +3183,11 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         let name = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
         let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
         // Don't replay hop-by-hop / framing headers — URLSession sets these.
+        // `x-bromure-insecure` is our own control header — strip it so it never
+        // reaches the upstream (or shows up in logs there).
         switch name.lowercased() {
         case "host", "content-length", "connection", "transfer-encoding",
-             "proxy-connection", "keep-alive", "te", "upgrade":
+             "proxy-connection", "keep-alive", "te", "upgrade", "x-bromure-insecure":
             continue
         case "authorization", "x-api-key":
             if local && !keepGuestKey { continue }   // replaced below for the local engine
@@ -3279,7 +3334,7 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         // streamed a status line + body we can't inject a new status, so
         // rethrow and let the connection close.
         if responseStarted { throw error }
-        let d = describeUpstreamError(error, host: host)
+        let d = describeUpstreamError(error, host: host, allowInsecureHint: insecureBypassAllowed)
         var resp = "HTTP/1.1 502 Bad Gateway\r\n"
         resp += "Content-Type: text/plain; charset=utf-8\r\n"
         resp += "Content-Length: \(d.body.utf8.count)\r\n"
@@ -3387,16 +3442,21 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
     let consent: ConsentBroker
     let profileID: UUID
     let host: String
+    /// The guest asked (and the profile permitted) this request to skip
+    /// upstream cert validation — accept any server trust. See
+    /// `GuardrailsPolicy.allowInsecureBypass`.
+    let insecure: Bool
 
     init(identityRegistry: ClientIdentityRegistry,
          caRegistry: ClusterCATrustRegistry,
          consent: ConsentBroker,
-         profileID: UUID, host: String) {
+         profileID: UUID, host: String, insecure: Bool = false) {
         self.identityRegistry = identityRegistry
         self.caRegistry = caRegistry
         self.consent = consent
         self.profileID = profileID
         self.host = host
+        self.insecure = insecure
     }
 
     func urlSession(_ session: URLSession,
@@ -3447,6 +3507,15 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
             }
 
         case NSURLAuthenticationMethodServerTrust:
+            // Insecure bypass: the guest opted this request out of upstream
+            // validation (profile-gated) — accept whatever cert the upstream
+            // presents. No real credentials ride an insecure request (the
+            // proxy skipped the swap + auth injection), so an impostor here
+            // gets only the guest's fakes.
+            if insecure, let trust = challenge.protectionSpace.serverTrust {
+                completionHandler(.useCredential, URLCredential(trust: trust))
+                return
+            }
             guard let trust = challenge.protectionSpace.serverTrust,
                   let ca = caRegistry.ca(for: host, profileID: profileID) else {
                 completionHandler(.performDefaultHandling, nil)

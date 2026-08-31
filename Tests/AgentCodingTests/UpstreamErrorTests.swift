@@ -65,4 +65,26 @@ struct UpstreamErrorTests {
         #expect(!d.reason.isEmpty)
         #expect(d.body.contains("could not complete"))
     }
+
+    @Test("The insecure-bypass hint appears only for a trust failure when the profile allows it")
+    func insecureHintGating() {
+        // Trust failure + allowed → the hint (and header name) is offered.
+        let allowed = describeUpstreamError(
+            urlError(NSURLErrorServerCertificateUntrusted),
+            host: "self-signed.example", allowInsecureHint: true)
+        #expect(allowed.body.contains("X-bromure-insecure"))
+
+        // Trust failure but NOT allowed → never teach the bypass.
+        let notAllowed = describeUpstreamError(
+            urlError(NSURLErrorServerCertificateUntrusted),
+            host: "self-signed.example", allowInsecureHint: false)
+        #expect(!notAllowed.body.contains("X-bromure-insecure"))
+
+        // A non-trust failure never gets the hint even when allowed (the header
+        // wouldn't help a DNS/connect error).
+        let connErr = describeUpstreamError(
+            urlError(NSURLErrorCannotConnectToHost),
+            host: "self-signed.example", allowInsecureHint: true)
+        #expect(!connErr.body.contains("X-bromure-insecure"))
+    }
 }

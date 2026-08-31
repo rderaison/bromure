@@ -1876,7 +1876,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                 docker: g.docker, dockerHosts: dockerHosts,
                                 github: g.github, gitlab: g.gitlab, bitbucket: g.bitbucket,
                                 databases: databases,
-                                egressPolicy: profile.resolvedEgressPolicy)
+                                egressPolicy: profile.resolvedEgressPolicy,
+                                allowInsecureBypass: g.allowInsecureBypass)
     }
 
     static func loopbackCallbackPort(from url: URL) -> UInt16? {
@@ -6781,6 +6782,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case keyboardSettings
         case terminalAppearance
         case gitIdentity
+        case interception
     }
 
     private func restartLabel(for change: RestartChange) -> String {
@@ -6821,6 +6823,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return NSLocalizedString("Terminal font and colors", comment: "")
         case .gitIdentity:
             return NSLocalizedString("Git author identity", comment: "")
+        case .interception:
+            return NSLocalizedString("Transparent interception (full passthrough)", comment: "")
         }
     }
 
@@ -6862,6 +6866,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // set up on cold boot, even though their config files refresh live.
         if old.kubeconfigs != new.kubeconfigs { changes.append(.kubernetes) }
         if old.awsCredentials != new.awsCredentials { changes.append(.awsCredentials) }
+        // Interception on/off is read at VM attach (switch divert) and at
+        // session prepare (proxy.env) — both cold-boot only, so a change
+        // needs a restart to take effect.
+        if old.disableTransparentProxy != new.disableTransparentProxy { changes.append(.interception) }
         // Credential "ask before use" gates are applied LIVE — no reboot. The
         // api-key / DigitalOcean consent rides on the token swap map's
         // consentCredentialID (rebuilt by applyLiveSessionRefresh), and the

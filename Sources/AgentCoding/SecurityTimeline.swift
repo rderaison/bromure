@@ -198,6 +198,12 @@ public final class SecurityTimeline {
             let reason = str(d, "reason") ?? "certificate not trusted by the host"
             return row(NSLocalizedString("Upstream TLS", comment: "Security Timeline engine"), host, "blocked — \(reason)", .blocked)
 
+        case "tls.insecure_bypass":
+            let host = str(d, "host") ?? "?"
+            return row(NSLocalizedString("Upstream TLS", comment: "Security Timeline engine"), host,
+                       NSLocalizedString("allowed — certificate validation skipped (X-bromure-insecure); no credentials injected",
+                                         comment: "Security Timeline decision"), .allowed)
+
         case "prompt_injection.detection":
             let action = (str(d, "action") ?? "detected").lowercased()
             let detector = str(d, "detector") ?? "prompt injection"

@@ -318,3 +318,36 @@ struct GuardrailsDatabaseTests {
         #expect(cfg(.clickHouse, "ch.example.com", .readOnly).isActive)
     }
 }
+
+@Suite("GuardrailsPolicy insecure-bypass flag")
+struct GuardrailsInsecureBypassTests {
+    @Test("Defaults to off, round-trips through Codable, and old JSON decodes false")
+    func codableRoundTrip() throws {
+        // Default off.
+        #expect(!GuardrailsPolicy().allowInsecureBypass)
+        #expect(!GuardrailsPolicy.defaultForNewProfile().allowInsecureBypass)
+
+        // On → encodes → decodes back on.
+        var p = GuardrailsPolicy.defaultForNewProfile()
+        p.allowInsecureBypass = true
+        let data = try JSONEncoder().encode(p)
+        #expect(try JSONDecoder().decode(GuardrailsPolicy.self, from: data).allowInsecureBypass)
+
+        // Off → the key is omitted from the JSON (only non-defaults persist).
+        let offData = try JSONEncoder().encode(GuardrailsPolicy.defaultForNewProfile())
+        let obj = try #require(try JSONSerialization.jsonObject(with: offData) as? [String: Any])
+        #expect(obj["allowInsecureBypass"] == nil)
+
+        // Old JSON without the key decodes to false.
+        let old = Data(#"{"kubernetes":"readOnly"}"#.utf8)
+        #expect(!(try JSONDecoder().decode(GuardrailsPolicy.self, from: old).allowInsecureBypass))
+    }
+
+    @Test("The flag flows into the runtime GuardrailsConfig")
+    func flowsIntoConfig() {
+        let on = GuardrailsConfig(kubernetes: .off, kubeHosts: [], allowInsecureBypass: true)
+        #expect(on.allowInsecureBypass)
+        let off = GuardrailsConfig(kubernetes: .off, kubeHosts: [])
+        #expect(!off.allowInsecureBypass)   // defaults off
+    }
+}
