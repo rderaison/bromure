@@ -2990,6 +2990,21 @@ final class RemoteHostWindow: NSWindow {
             createWorkspace(withWizard: true)
             return ["ok": true]
 
+        case "new-workspace":
+            // The sidebar's plain "+": open the new-workspace editor window.
+            createWorkspace()
+            return ["ok": true, "editorOpen": newWorkspaceWindow != nil]
+
+        case "save-new-workspace":
+            // Drive the editor's Save closure exactly (POST /profiles + the
+            // error alert), without a synthetic click. Optional "name"
+            // overrides the draft name (e.g. a duplicate, to force the
+            // server's 400 path).
+            var draft = freshWorkspaceDraft()
+            if let name = p["name"] as? String, !name.isEmpty { draft.name = name }
+            createWorkspaceFromEditor(draft, generateSSH: p["generateSSH"] as? Bool ?? false)
+            return ["ok": true]
+
         case "automation-board":
             // Show the mirrored kanban board and report its column counts —
             // the FC-board E2E assertion surface. Optional "shot" writes an

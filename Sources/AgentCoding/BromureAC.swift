@@ -2518,7 +2518,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func remoteAccessConfig() -> RemoteAccessServer.Config {
         let d = UserDefaults.standard
         var c = RemoteAccessServer.Config()
-        let p = d.integer(forKey: "remoteAccess.port")
+        let p = ProcessInfo.processInfo.environment["BROMURE_AC_REMOTE_PORT"]
+            .flatMap(Int.init) ?? d.integer(forKey: "remoteAccess.port")
         if p > 0 { c.port = p }
         c.bindAddress = d.string(forKey: "remoteAccess.bindAddress") ?? "0.0.0.0"
         // `object(forKey:) == nil` → key never set → default on.
@@ -2767,11 +2768,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // until the user enables it (Bromure → Preferences → Automation,
         // or `defaults write io.bromure.agentic-coding automation.enabled
         // -bool true`). The e2e Jenkinsfile sets this before launching.
-        guard defaults.bool(forKey: "automation.enabled") else { return }
+        // BROMURE_AC_AUTOMATION_PORT: per-process override for a second,
+        // isolated instance (CFFIXED_USER_HOME relocates the support dir but
+        // NOT UserDefaults, so a defaults-based port would collide with the
+        // main instance's 9223 — a double-bind that round-robins its clients).
+        let envPort = ProcessInfo.processInfo.environment["BROMURE_AC_AUTOMATION_PORT"]
+            .flatMap { UInt16($0) }
+        guard defaults.bool(forKey: "automation.enabled") || envPort != nil else { return }
 
         if automationServer != nil { stopAutomationServer() }
 
-        let port = UInt16(defaults.integer(forKey: "automation.port"))
+        let port = envPort ?? UInt16(defaults.integer(forKey: "automation.port"))
         let bindAddr = defaults.string(forKey: "automation.bindAddress") ?? "127.0.0.1"
         let server = ACAutomationServer(port: port > 0 ? port : 9223, bindAddress: bindAddr)
         wireAutomationCallbacks(into: server)
@@ -7265,11 +7272,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// are routed to that client via `PendingPromptBroker` instead of a local
     /// NSAlert — the interface that interacted last gets the question.
     func launch(_ profile: Profile, detached: Bool = false,
-                freshBootFallback: Bool = true, remoteInitiated: Bool = false) {
+                freshBootFallback: Bool = true, remoteInitiated: Bool = false,
+                preflightResolved: Bool = false) {
         // Already shown → just focus + select it (unless we were asked to detach,
         // in which case drop the window and leave the VM running headless).
         if isAttached(profile.id) {
             if detached { detachSession(profile.id) } else { revealSession(profile.id) }
+            return
+        }
+        // Remote-initiated launches arrive on a main-queue callout (the control
+        // socket's Task job), where the sync prompt broker's run-loop pump
+        // can't drain the main queue — /state and the answer route wedge, so
+        // the client never even receives the question and the whole server
+        // control plane looks hung (the same trap promptCloseActionAsync
+        // documents on the close path). Resolve the compromise-wipe and
+        // drift-reset prompts by SUSPENDING first, then re-enter with
+        // `preflightResolved` so the gates below don't re-ask.
+        if remoteInitiated, !preflightResolved, launchNeedsPreflightPrompt(profile) {
+            Task { @MainActor [weak self] in
+                await self?.resolveRemoteLaunchPrompts(
+                    profile, detached: detached, freshBootFallback: freshBootFallback)
+            }
             return
         }
         // Running but detached (window was closed, VM kept alive). Asked to
@@ -7309,7 +7332,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // and may legitimately hold the user's source); the alert
         // surfaces this so the user knows where to look next.
         if SessionDisk.isCompromised(profile: profile, store: store) {
-            if !confirmWipeAndProceed(profile: profile, remoteInitiated: remoteInitiated) {
+            // Local NSAlert only: a remote-initiated launch resolved (and
+            // performed) the wipe in the async preflight, so this gate is
+            // already clear when it re-enters.
+            if !confirmWipeAndProceed(profile: profile) {
                 return
             }
             // Fall through — disk + home are gone, flag is cleared,
@@ -7320,36 +7346,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // profile's disk was cloned, prompt to reset.
         let currentBaseVersion = readCurrentBaseVersion()
         let diskExists = FileManager.default.fileExists(atPath: store.diskURL(for: profile).path)
-        if diskExists,
+        if !preflightResolved, diskExists,
            let recorded = profile.baseImageVersionAtClone,
            let current = currentBaseVersion,
            recorded != current {
-            let title = "Base image updated since this workspace was created."
-            let message = "This workspace is on base v\(recorded); the current base is v\(current). Reset the workspace disk to pick up the new base? (Resetting wipes anything you've installed inside the VM. Your project folder is untouched.)"
-            let choice: Int
-            if remoteInitiated {
-                choice = PendingPromptBroker.shared.ask(
-                    profileID: profile.id, title: title, message: message,
-                    buttons: ["Reset and launch", "Launch as-is", "Cancel"],
-                    fallback: 2)
-            } else {
-                let alert = NSAlert()
-                alert.messageText = title
-                alert.informativeText = message
-                alert.addButton(withTitle: "Reset and launch")
-                alert.addButton(withTitle: "Launch as-is")
-                alert.addButton(withTitle: "Cancel")
-                switch alert.runModal() {
-                case .alertFirstButtonReturn: choice = 0
-                case .alertThirdButtonReturn: choice = 2
-                default: choice = 1
-                }
-            }
-            switch choice {
-            case 0:
+            // Local NSAlert only: a remote-initiated launch resolved this in
+            // the async preflight above and re-entered with preflightResolved.
+            let (title, message) = Self.driftPromptParts(recorded: recorded, current: current)
+            let alert = NSAlert()
+            alert.messageText = title
+            alert.informativeText = message
+            alert.addButton(withTitle: "Reset and launch")
+            alert.addButton(withTitle: "Launch as-is")
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
                 try? store.resetDisk(for: profile)
                 emitDiskResetEvent(profile: profile, reason: "base_image_drift")
-            case 2:
+            case .alertThirdButtonReturn:
                 return
             default:
                 break
@@ -9172,7 +9186,61 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// On true, the caller proceeds with the regular launch path —
     /// the disk + home no longer exist, so it'll mint fresh ones.
     @MainActor
-    private func confirmWipeAndProceed(profile: Profile, remoteInitiated: Bool = false) -> Bool {
+    /// Title + body for the base-image drift prompt, shared by the local
+    /// NSAlert and the fat-client (broker) rendering.
+    private static func driftPromptParts(recorded: String, current: String)
+        -> (title: String, message: String) {
+        ("Base image updated since this workspace was created.",
+         "This workspace is on base v\(recorded); the current base is v\(current). Reset the workspace disk to pick up the new base? (Resetting wipes anything you've installed inside the VM. Your project folder is untouched.)")
+    }
+
+    /// True when `launch` would have to ask the user something before booting
+    /// (compromise wipe or base-image drift) — a remote-initiated launch
+    /// resolves these asynchronously before re-entering `launch`.
+    @MainActor private func launchNeedsPreflightPrompt(_ profile: Profile) -> Bool {
+        if SessionDisk.isCompromised(profile: profile, store: store) { return true }
+        if FileManager.default.fileExists(atPath: store.diskURL(for: profile).path),
+           let recorded = profile.baseImageVersionAtClone,
+           let current = readCurrentBaseVersion(),
+           recorded != current { return true }
+        return false
+    }
+
+    /// Async preflight for a REMOTE launch: run the compromise-wipe and
+    /// drift-reset prompts over the broker (suspending, so /state and the
+    /// answer route keep flowing to the fat client), apply the chosen
+    /// actions, then re-enter `launch` with `preflightResolved` so the sync
+    /// gates don't re-ask.
+    @MainActor private func resolveRemoteLaunchPrompts(
+        _ profile: Profile, detached: Bool, freshBootFallback: Bool) async {
+        if SessionDisk.isCompromised(profile: profile, store: store) {
+            guard await confirmWipeAndProceedAsync(profile: profile) else { return }
+        }
+        if FileManager.default.fileExists(atPath: store.diskURL(for: profile).path),
+           let recorded = profile.baseImageVersionAtClone,
+           let current = readCurrentBaseVersion(),
+           recorded != current {
+            let (title, message) = Self.driftPromptParts(recorded: recorded, current: current)
+            switch await PendingPromptBroker.shared.askAsync(
+                profileID: profile.id, title: title, message: message,
+                buttons: ["Reset and launch", "Launch as-is", "Cancel"],
+                fallback: 2) {
+            case 0:
+                try? store.resetDisk(for: profile)
+                emitDiskResetEvent(profile: profile, reason: "base_image_drift")
+            case 2:
+                return
+            default:
+                break
+            }
+        }
+        launch(profile, detached: detached, freshBootFallback: freshBootFallback,
+               remoteInitiated: true, preflightResolved: true)
+    }
+
+    /// Title + body for the compromise-wipe prompt, shared by the local
+    /// NSAlert and the fat-client (broker) rendering.
+    private static func compromisePromptParts(profile: Profile) -> (title: String, info: String) {
         let title = String(
             format: NSLocalizedString("⛔ “%@” is marked as compromised", comment: ""),
             profile.name)
@@ -9199,14 +9267,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "Inspect those folders before launching anything that re-uses them.",
                 comment: "")
         }
-        if remoteInitiated {
-            // Fallback (timeout / client gone) is Cancel — never auto-wipe.
-            guard PendingPromptBroker.shared.ask(
-                profileID: profile.id, title: title, message: info,
-                buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
-                          NSLocalizedString("Cancel", comment: "")],
-                fallback: 1) == 0 else { return false }
-        } else {
+        return (title, info)
+    }
+
+    /// The wipe a confirmed compromise prompt performs (disk + home, keep
+    /// tokens/settings), plus the bookkeeping that goes with it.
+    @MainActor private func wipeCompromised(profile: Profile) {
+        let session = SessionDisk(
+            profile: profile, store: store,
+            baseDiskURL: imageManager.baseDiskURL)
+        session.wipeForCompromise()
+        emitDiskResetEvent(profile: profile, reason: "compromised")
+        // Re-render so the badge disappears immediately. (`launch`
+        // continues right after this, but the picker behind the
+        // session window will reflect the change once focus returns.)
+        refreshSidebar()
+    }
+
+    private func confirmWipeAndProceed(profile: Profile) -> Bool {
+        let (title, info) = Self.compromisePromptParts(profile: profile)
+        do {
             let alert = NSAlert()
             alert.alertStyle = .critical
             if let symbol = NSImage(
@@ -9227,16 +9307,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             NSApp.activate(ignoringOtherApps: true)
             guard alert.runModal() == .alertFirstButtonReturn else { return false }
         }
+        wipeCompromised(profile: profile)
+        return true
+    }
 
-        let session = SessionDisk(
-            profile: profile, store: store,
-            baseDiskURL: imageManager.baseDiskURL)
-        session.wipeForCompromise()
-        emitDiskResetEvent(profile: profile, reason: "compromised")
-        // Re-render so the badge disappears immediately. (`launch`
-        // continues right after this, but the picker behind the
-        // session window will reflect the change once focus returns.)
-        refreshSidebar()
+    /// Async twin of `confirmWipeAndProceed` for remote-initiated launches:
+    /// suspends on the broker (the main queue keeps draining, so the fat
+    /// client actually receives and can answer the prompt) instead of pumping
+    /// the run loop from inside a control-socket callout.
+    @MainActor private func confirmWipeAndProceedAsync(profile: Profile) async -> Bool {
+        let (title, info) = Self.compromisePromptParts(profile: profile)
+        // Fallback (timeout / client gone) is Cancel — never auto-wipe.
+        guard await PendingPromptBroker.shared.askAsync(
+            profileID: profile.id, title: title, message: info,
+            buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
+                      NSLocalizedString("Cancel", comment: "")],
+            fallback: 1) == 0 else { return false }
+        wipeCompromised(profile: profile)
         return true
     }
 
