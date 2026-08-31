@@ -43,8 +43,11 @@ public struct TerminalAppDefaults: Sendable {
            let font = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSFont.self, from: fontData) {
             family = font.familyName ?? font.fontName
             // Round to nearest int — kitty's font_size accepts floats but
-            // most users picked round values in Terminal.
-            size = max(8, Int(font.pointSize.rounded()))
+            // most users picked round values in Terminal. Guard the Double→Int
+            // conversion: a corrupt archive can yield NaN/±inf/out-of-range
+            // pointSize, and `Int(_:)` on those TRAPS (silent process exit).
+            let pt = font.pointSize.rounded()
+            if pt.isFinite, pt >= 8, pt <= 512 { size = Int(pt) }
         }
 
         let bg = hex(from: profile["BackgroundColor"] as? Data) ?? fallback.backgroundHex
@@ -63,11 +66,21 @@ public struct TerminalAppDefaults: Sendable {
               let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) else {
             return nil
         }
-        let rgb = color.usingColorSpace(.sRGB) ?? color
-        let r = Int((rgb.redComponent * 255).rounded())
-        let g = Int((rgb.greenComponent * 255).rounded())
-        let b = Int((rgb.blueComponent * 255).rounded())
-        return String(format: "#%02X%02X%02X", r, g, b)
+        // `.redComponent` (and friends) THROW NSInvalidArgumentException on a
+        // color whose color space isn't a calibrated/device RGB one — pattern
+        // colors, catalog colors, gray/CMYK. The `?? color` fallback used to
+        // feed exactly such a color into those accessors, an uncaught
+        // exception that terminates the process with no crash report. Return
+        // nil (→ the shipped fallback hex) instead of reaching for components
+        // we can't read. This runs on every "New workspace" click via
+        // TerminalAppDefaults.load(), reading the user's live Terminal.app
+        // prefs, so a theme they picked after launch must never crash it.
+        guard let rgb = color.usingColorSpace(.sRGB) else { return nil }
+        func channel(_ v: CGFloat) -> Int { Int((min(max(v, 0), 1) * 255).rounded()) }
+        return String(format: "#%02X%02X%02X",
+                      channel(rgb.redComponent),
+                      channel(rgb.greenComponent),
+                      channel(rgb.blueComponent))
     }
 #else
     /// iOS: no Terminal.app to mirror — the shipped fallback IS the default

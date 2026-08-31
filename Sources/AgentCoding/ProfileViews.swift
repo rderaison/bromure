@@ -2013,10 +2013,17 @@ struct ProfileEditorView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 8)
             } else {
-                ForEach(Array(entries), id: \.element.id) { (idx, _) in
+                // Bind by credential ID, never by the enumerated index: two
+                // filtered subsections (GitHub + GitLab) render disjoint slices
+                // of the SAME array at once, so a `remove(at: idx)` in one left
+                // the other's live rows holding stale original indices — the
+                // next binding re-eval before the ForEach rebuilt subscripted
+                // past the end and trapped (a silent process exit). An
+                // id-keyed binding tolerates the array shifting under it.
+                ForEach(entries.map(\.element), id: \.id) { cred in
                     HTTPSCredentialRow(
-                        credential: $draft.gitHTTPSCredentials[idx],
-                        onRemove: { draft.gitHTTPSCredentials.remove(at: idx) },
+                        credential: gitCredentialBinding(id: cred.id),
+                        onRemove: { draft.gitHTTPSCredentials.removeAll { $0.id == cred.id } },
                         onOpenTokenPage: openTokenPage(for:)
                     )
                 }
@@ -2037,6 +2044,20 @@ struct ProfileEditorView: View {
             }
         }
     }
+    /// A stable, id-keyed binding into `gitHTTPSCredentials` — safe to hold
+    /// across array mutations (unlike an index binding). The getter returns a
+    /// harmless empty credential if the row was just removed, so a stale
+    /// closure re-eval can't trap.
+    private func gitCredentialBinding(id: GitHTTPSCredential.ID) -> Binding<GitHTTPSCredential> {
+        Binding(
+            get: { draft.gitHTTPSCredentials.first { $0.id == id } ?? GitHTTPSCredential() },
+            set: { v in
+                if let i = draft.gitHTTPSCredentials.firstIndex(where: { $0.id == id }) {
+                    draft.gitHTTPSCredentials[i] = v
+                }
+            })
+    }
+
     private func disclosureKey(for host: String) -> String {
         if isGitHub(host)    { return "github" }
         if isGitLab(host)    { return "gitlab" }
