@@ -291,6 +291,23 @@ extension ACAppDelegate {
         sandbox.onStopped = { [weak self] _ in
             Task { @MainActor in self?.teardownClaudeRegistration(reason: .windowClosed) }
         }
+        // Record the guest's vmnet IP (published to the outbox every ~5s).
+        // Normal sessions get this via wireSandboxCallbacks, which this flow
+        // deliberately skips — but lastIP feeds BOTH ends of the remote
+        // (fat-client) callback tunnel: the /state publish that tells the
+        // client where to point its 127.0.0.1 listener, and the forward
+        // resolver's session-by-IP lookup when the OAuth callback comes back.
+        // Without it the client never binds a listener and the provider's
+        // localhost redirect dies on connection refused.
+        sandbox.onIPUpdate = { [weak self] ip in
+            Task { @MainActor in
+                guard let self, let state = self.claudeRegistration else { return }
+                self.runningSessions[state.scratchProfile.id]?.lastIP = ip
+                if RemoteRegistrationBroker.shared.pending != nil {
+                    RemoteRegistrationBroker.shared.publish(vmIP: ip)
+                }
+            }
+        }
         // Roster → tab pills + native terminal mount (applyTabList calls
         // updateNativeTerminalMount). The registration pane isn't in the
         // shared pane registry, so target the window's pane directly. Once
