@@ -858,6 +858,10 @@ enum ConfigScan {
                         profile.awsCredentials.secretAccessKey = v.value
                     case .awsSessionToken:
                         profile.awsCredentials.sessionToken = v.value
+                    case .twilioSID:
+                        profile.twilioCredential.sid = v.value
+                    case .twilioSecret:
+                        profile.twilioCredential.secret = v.value
                     }
                     s.total += 1
                 }

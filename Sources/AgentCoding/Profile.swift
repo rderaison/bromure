@@ -647,6 +647,56 @@ public struct AWSCredentials: Codable, Equatable, Sendable {
     }
 }
 
+/// Twilio API credentials for the Twilio REST API inside the VM.
+///
+/// Twilio authenticates with HTTP Basic auth — `Authorization: Basic
+/// base64("<SID>:<secret>")` — where the pair is either an Account SID
+/// (`AC…`) + Auth Token, or an API Key SID (`SK…`) + its secret. The SID
+/// is identity (it appears in the request URL path, `/2010-04-01/Accounts/
+/// <AccountSID>/…`), so it stays in profile.json; the secret is the secret,
+/// stored in the encrypted vault.
+///
+/// This is a wire-swapped Bearer-equivalent (like Docker registry creds, NOT
+/// like AWS): the guest gets a FAKE secret, and the proxy swaps the Basic
+/// blob `base64("<SID>:<fake>")` → `base64("<SID>:<real>")` on requests to
+/// `twilio.com`. The naked-secret swap is registered too, so an SDK that
+/// sends the secret unencoded (e.g. as `TWILIO_AUTH_TOKEN`) is covered.
+public struct TwilioCredential: Codable, Equatable, Sendable {
+    /// Account SID (`AC…`) or API Key SID (`SK…`). Identity, not secret —
+    /// it rides in the request path, so it stays in profile.json.
+    public var sid: String
+    /// Auth Token / API Key secret. Stored encrypted in the secrets vault.
+    public var secret: String
+    /// When true, every host-side fake→real swap of the Basic blob prompts
+    /// for consent until a time-bounded grant covers it. See `ConsentBroker`.
+    public var requireApproval: Bool
+
+    public init(sid: String = "", secret: String = "", requireApproval: Bool = false) {
+        self.sid = sid
+        self.secret = secret
+        self.requireApproval = requireApproval
+    }
+
+    /// True when both halves are present — enough to attempt a swap.
+    public var isUsable: Bool {
+        !sid.trimmingCharacters(in: .whitespaces).isEmpty && !secret.isEmpty
+    }
+
+    private enum CodingKeys: String, CodingKey { case sid, secret, requireApproval }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sid             = try c.decodeIfPresent(String.self, forKey: .sid) ?? ""
+        secret          = try c.decodeIfPresent(String.self, forKey: .secret) ?? ""
+        requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        if !sid.isEmpty { try c.encode(sid, forKey: .sid) }
+        if !secret.isEmpty { try c.encode(secret, forKey: .secret) }
+        if requireApproval { try c.encode(true, forKey: .requireApproval) }
+    }
+}
+
 /// One user-defined environment variable exported into the VM at
 /// session prepare time. No proxy substitution — the value is written
 /// verbatim into `proxy.env` (which `.bashrc` sources), so anything
@@ -1475,6 +1525,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// mcp.linear.app). Empty = not configured.
     public var linearToken: String
 
+    /// Twilio API credentials (Account/API-key SID + secret). Injected as
+    /// TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN env in the VM with a FAKE
+    /// secret; the proxy swaps the Basic-auth blob to the real value on
+    /// api.twilio.com requests. Empty struct (`isUsable == false`) = not
+    /// configured. See `TwilioCredential`.
+    public var twilioCredential: TwilioCredential
+
     /// AWS credentials injected into ~/.aws/credentials + environment
     /// for the AWS CLI / SDKs. See `AWSCredentials` for the SigV4
     /// reasoning. Empty struct (`isUsable == false`) = not configured.
@@ -1745,6 +1802,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         promptInjection: PromptInjectionPolicy = PromptInjectionPolicy(),
         digitalOceanToken: String = "",
         linearToken: String = "",
+        twilioCredential: TwilioCredential = TwilioCredential(),
         awsCredentials: AWSCredentials = AWSCredentials(),
         bedrockEnabled: Bool = false,
         bedrockModelID: String = "",
@@ -1826,6 +1884,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.promptInjection = promptInjection
         self.digitalOceanToken = digitalOceanToken
         self.linearToken = linearToken
+        self.twilioCredential = twilioCredential
         self.awsCredentials = awsCredentials
         self.bedrockEnabled = bedrockEnabled
         self.bedrockModelID = bedrockModelID
@@ -1913,6 +1972,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case promptInjection
         case digitalOceanToken
         case linearToken
+        case twilioCredential
         case awsCredentials
         case bedrockEnabled, bedrockModelID
         case dockerRegistries
@@ -2027,6 +2087,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         linearToken = try c.decodeIfPresent(String.self, forKey: .linearToken) ?? ""
+        twilioCredential = try c.decodeIfPresent(TwilioCredential.self, forKey: .twilioCredential) ?? TwilioCredential()
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
         bedrockEnabled = try c.decodeIfPresent(Bool.self, forKey: .bedrockEnabled) ?? false
         bedrockModelID = try c.decodeIfPresent(String.self, forKey: .bedrockModelID) ?? ""
@@ -2185,6 +2246,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if !linearToken.isEmpty {
             try c.encode(linearToken, forKey: .linearToken)
+        }
+        if twilioCredential.isUsable || twilioCredential.requireApproval {
+            try c.encode(twilioCredential, forKey: .twilioCredential)
         }
         if awsCredentials.isUsable
             || !awsCredentials.region.isEmpty
@@ -2450,6 +2514,9 @@ struct ProfileSecrets: Codable {
     /// an AWS credential set — accessKeyID is identity-only).
     var awsSecretAccessKey: String?
     var awsSessionToken: String?
+    /// Twilio Auth Token / API Key secret (the SID is identity and stays in
+    /// profile.json). Optional so older `secrets.enc` blobs keep decoding.
+    var twilioSecret: String?
     /// Keyed by `DockerRegistryCredential.id.uuidString`. Holds the
     /// raw registry password / access token; the host + username live
     /// in profile.json since they're identity, not secret. Optional so
@@ -2491,6 +2558,7 @@ struct ProfileSecrets: Codable {
             && (linearToken?.isEmpty ?? true)
             && (awsSecretAccessKey?.isEmpty ?? true)
             && (awsSessionToken?.isEmpty ?? true)
+            && (twilioSecret?.isEmpty ?? true)
             && (dockerRegistryPasswords?.isEmpty ?? true)
             && defaultClaudeTokens == nil
             && defaultCodexTokens == nil
@@ -2554,6 +2622,10 @@ struct ProfileSecrets: Codable {
         if !profile.awsCredentials.sessionToken.isEmpty {
             s.awsSessionToken = profile.awsCredentials.sessionToken
             profile.awsCredentials.sessionToken = ""
+        }
+        if !profile.twilioCredential.secret.isEmpty {
+            s.twilioSecret = profile.twilioCredential.secret
+            profile.twilioCredential.secret = ""
         }
 
         for (i, reg) in profile.dockerRegistries.enumerated() {
@@ -2642,6 +2714,7 @@ struct ProfileSecrets: Codable {
         if let lin = linearToken { profile.linearToken = lin }
         if let sk = awsSecretAccessKey { profile.awsCredentials.secretAccessKey = sk }
         if let st = awsSessionToken { profile.awsCredentials.sessionToken = st }
+        if let tw = twilioSecret { profile.twilioCredential.secret = tw }
         if let map = dockerRegistryPasswords {
             for (i, reg) in profile.dockerRegistries.enumerated() {
                 if let p = map[reg.id.uuidString] {
@@ -2736,6 +2809,7 @@ struct ProfileSecrets: Codable {
         if let v = newer.linearToken { linearToken = v }
         if let v = newer.awsSecretAccessKey { awsSecretAccessKey = v }
         if let v = newer.awsSessionToken { awsSessionToken = v }
+        if let v = newer.twilioSecret { twilioSecret = v }
         if let m = newer.dockerRegistryPasswords {
             dockerRegistryPasswords = (dockerRegistryPasswords ?? [:]).merging(m) { _, n in n }
         }
@@ -5027,6 +5101,7 @@ public enum CredentialRef: Hashable, Sendable, Identifiable {
     case aws
     case digitalOcean
     case linear
+    case twilio
     case managedSSHKey
     case importedSSHKey(UUID)
 
@@ -5042,6 +5117,7 @@ public enum CredentialRef: Hashable, Sendable, Identifiable {
         case .aws:                   return "aws"
         case .digitalOcean:          return "do"
         case .linear:                return "linear"
+        case .twilio:                return "twilio"
         case .managedSSHKey:         return "ssh-managed"
         case .importedSSHKey(let u): return "ssh:\(u.uuidString)"
         }
@@ -5056,6 +5132,7 @@ public enum CredentialRef: Hashable, Sendable, Identifiable {
         case "aws":            self = .aws
         case "do":             self = .digitalOcean
         case "linear":         self = .linear
+        case "twilio":         self = .twilio
         case "ssh-managed":    self = .managedSSHKey
         default:
             let parts = wireID.split(separator: ":", maxSplits: 1).map(String.init)
@@ -5079,7 +5156,7 @@ public enum CredentialRef: Hashable, Sendable, Identifiable {
         switch self {
         case .primaryToolKey, .additionalTool:              return .agents
         case .git:                                          return .git
-        case .aws, .digitalOcean, .docker, .kube, .linear:  return .cloud
+        case .aws, .digitalOcean, .docker, .kube, .linear, .twilio:  return .cloud
         case .database:                                     return .databases
         case .managedSSHKey, .importedSSHKey:               return .ssh
         case .manual:                                       return .other
@@ -5097,6 +5174,7 @@ public enum CredentialRef: Hashable, Sendable, Identifiable {
         case .aws:                             return "server.rack"
         case .digitalOcean:                    return "cloud.fill"
         case .linear:                          return "line.diagonal"
+        case .twilio:                          return "phone.fill"
         case .managedSSHKey, .importedSSHKey:  return "key.fill"
         }
     }
@@ -5113,6 +5191,7 @@ public enum CredentialRef: Hashable, Sendable, Identifiable {
         case .aws:                             return .aws
         case .digitalOcean:                    return .digitalOcean
         case .linear:                          return .linear
+        case .twilio:                          return .twilio
         case .managedSSHKey, .importedSSHKey:  return .ssh
         }
     }
@@ -5121,7 +5200,7 @@ public enum CredentialRef: Hashable, Sendable, Identifiable {
 /// The distinct credential kinds the "Add credential" picker offers; also the
 /// editor page a Credentials-pane row opens.
 public enum CredentialEditorType: String, CaseIterable, Identifiable, Sendable {
-    case agents, git, ssh, aws, digitalOcean, linear, kubernetes, docker, database, manual
+    case agents, git, ssh, aws, digitalOcean, linear, twilio, kubernetes, docker, database, manual
     public var id: String { rawValue }
     public var title: String {
         switch self {
@@ -5131,6 +5210,7 @@ public enum CredentialEditorType: String, CaseIterable, Identifiable, Sendable {
         case .aws:          return "AWS credentials"
         case .digitalOcean: return "DigitalOcean token"
         case .linear:       return "Linear API key"
+        case .twilio:       return "Twilio API key"
         case .kubernetes:   return "Kubernetes"
         case .docker:       return "Container registry"
         case .database:     return "Database"
@@ -5145,6 +5225,7 @@ public enum CredentialEditorType: String, CaseIterable, Identifiable, Sendable {
         case .aws:          return "server.rack"
         case .digitalOcean: return "cloud.fill"
         case .linear:       return "line.diagonal"
+        case .twilio:       return "phone.fill"
         case .kubernetes:   return "shippingbox.fill"
         case .docker:       return "shippingbox.fill"
         case .database:     return "cylinder.split.1x2.fill"
@@ -5159,6 +5240,7 @@ public enum CredentialEditorType: String, CaseIterable, Identifiable, Sendable {
         case .aws:          return "Static IAM keys or SSO — SigV4-signed on the wire"
         case .digitalOcean: return "doctl / API personal access token"
         case .linear:       return "Linear personal API key"
+        case .twilio:       return "Account/API-key SID + secret — HTTP Basic on the wire"
         case .kubernetes:   return "A cluster context (token, client cert, or exec plugin)"
         case .docker:       return "Registry login for Docker Hub, ghcr.io, and others"
         case .database:     return "MongoDB Data API, ClickHouse, or Elasticsearch"
@@ -5184,6 +5266,7 @@ public extension Profile {
         if awsCredentials.isUsable { refs.append(.aws) }
         if !digitalOceanToken.isEmpty { refs.append(.digitalOcean) }
         if !linearToken.isEmpty { refs.append(.linear) }
+        if twilioCredential.isUsable { refs.append(.twilio) }
         for r in dockerRegistries where r.isUsable { refs.append(.docker(r.id)) }
         for k in kubeconfigs where k.isUsable { refs.append(.kube(k.id)) }
         // Databases
@@ -5237,6 +5320,7 @@ public extension Profile {
         case .aws:            return "AWS credentials"
         case .digitalOcean:   return "DigitalOcean token"
         case .linear:         return "Linear API key"
+        case .twilio:         return "Twilio API key"
         case .managedSSHKey:  return "Workspace SSH key"
         case .importedSSHKey(let u):
             return importedSSHKeys.first { $0.id == u }?.label ?? "SSH key"
@@ -5273,6 +5357,7 @@ public extension Profile {
         case .aws:          return ["amazonaws.com"]
         case .digitalOcean: return ["digitalocean.com"]
         case .linear:       return ["linear.app"]
+        case .twilio:       return ["twilio.com"]
         case .managedSSHKey, .importedSSHKey: return []
         }
     }

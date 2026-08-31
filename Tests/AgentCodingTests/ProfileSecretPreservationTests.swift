@@ -31,14 +31,17 @@ struct ProfileSecretPreservationTests {
         existing.digitalOceanToken = "do-REAL"
         existing.linearToken = "lin_api_REAL"
         existing.awsCredentials.secretAccessKey = "aws-REAL"
+        existing.twilioCredential = TwilioCredential(sid: "ACsid", secret: "twilio-REAL")
 
         // The edited document changed a non-secret field but left secrets blank
-        // (as describe/export hands them back).
+        // (as describe/export hands them back). The Twilio SID is identity, so
+        // it survives the round-trip; only the secret is blanked.
         var incoming = existing
         incoming.apiKey = nil
         incoming.digitalOceanToken = ""
         incoming.linearToken = ""
         incoming.awsCredentials.secretAccessKey = ""
+        incoming.twilioCredential.secret = ""
         incoming.memoryGB = 16   // the actual edit
 
         let out = merged(existing: existing, incoming: incoming)
@@ -46,6 +49,8 @@ struct ProfileSecretPreservationTests {
         #expect(out.digitalOceanToken == "do-REAL")
         #expect(out.linearToken == "lin_api_REAL")
         #expect(out.awsCredentials.secretAccessKey == "aws-REAL")
+        #expect(out.twilioCredential.sid == "ACsid")
+        #expect(out.twilioCredential.secret == "twilio-REAL")
         #expect(out.memoryGB == 16)
     }
 

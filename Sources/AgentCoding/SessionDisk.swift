@@ -577,6 +577,19 @@ public final class SessionDisk {
                 if let linFake = plan.fakeForLinear() {
                     ghEnv.append("export LINEAR_API_KEY=\(shellQuote(linFake))")
                 }
+                // Twilio: the Twilio helper libraries + CLI read
+                // TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN. The SID is identity
+                // (not a secret) so it's exported verbatim; the token is the
+                // FAKE — the proxy swaps the Basic blob to the real secret on
+                // api.twilio.com.
+                if let twFake = plan.fakeForTwilio() {
+                    let sid = profile.twilioCredential.sid
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !sid.isEmpty {
+                        ghEnv.append("export TWILIO_ACCOUNT_SID=\(shellQuote(sid))")
+                    }
+                    ghEnv.append("export TWILIO_AUTH_TOKEN=\(shellQuote(twFake))")
+                }
             }
             // AWS: secret stays on host. The SDK pulls credentials on
             // demand via the `credential_process` line in ~/.aws/config,

@@ -38,6 +38,9 @@ struct SessionTokenPlanScopingTests {
     @Test("docker registry → registry host") func docker() {
         #expect(host(.dockerRegistry(host: "registry.example.io", username: "u")) == "registry.example.io")
     }
+    @Test("twilio → twilio.com") func twilio() {
+        #expect(host(.twilio) == "twilio.com")
+    }
 
     @Test("manual with empty host filter → unscoped (nil)") func manualEmpty() {
         #expect(host(.manual(name: "n", envVarName: "E", hostFilter: "")) == nil)
@@ -190,6 +193,54 @@ struct SessionTokenPlanBogusKeyTests {
         var p = Profile(name: "ws", tool: .claude, authMode: .subscription)
         p.linearToken = "  \n"
         #expect(p.makeTokenPlan(salt: salt).fakeForLinear() == nil)
+    }
+
+    @Test("Twilio plans a naked-secret swap + a Basic-auth blob swap, both on twilio.com")
+    func twilioPlan() {
+        var p = Profile(name: "ws", tool: .claude, authMode: .subscription)
+        p.twilioCredential = TwilioCredential(
+            sid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            secret: "realREALrealREALrealREALrealRE12")   // 32-char Auth Token shape
+        let plan = p.makeTokenPlan(salt: salt)
+
+        // Naked-secret entry: exported as TWILIO_AUTH_TOKEN.
+        let fake = plan.fakeForTwilio()
+        #expect(fake != nil)
+        #expect(fake != p.twilioCredential.secret)
+        let nakedEntry = plan.tokenMap().entries.first { $0.fake == fake }
+        #expect(nakedEntry?.host == "twilio.com")
+        #expect(nakedEntry?.real == p.twilioCredential.secret)
+        #expect(nakedEntry?.consentCredentialID == nil)
+
+        // The SID (identity) never becomes a swap entry on its own.
+        #expect(!plan.tokenMap().entries.contains { $0.real == p.twilioCredential.sid })
+
+        // Basic-auth blob entry: base64("SID:fake") → base64("SID:real"), on twilio.com.
+        let realB64 = Data("\(p.twilioCredential.sid):\(p.twilioCredential.secret)".utf8).base64EncodedString()
+        let blob = plan.tokenMap().entries.first { $0.real == realB64 }
+        #expect(blob != nil)
+        #expect(blob?.host == "twilio.com")
+        let expectedFakeB64 = Data("\(p.twilioCredential.sid):\(fake!)".utf8).base64EncodedString()
+        #expect(blob?.fake == expectedFakeB64)
+
+        // Deterministic in (real, salt).
+        #expect(p.makeTokenPlan(salt: salt).fakeForTwilio() == fake)
+    }
+
+    @Test("Gated Twilio credential carries the twilio consent ID on both entries")
+    func twilioConsent() {
+        var p = Profile(name: "ws", tool: .claude, authMode: .subscription)
+        p.twilioCredential = TwilioCredential(sid: "ACabc", secret: "sekret", requireApproval: true)
+        let entries = p.makeTokenPlan(salt: salt).tokenMap().entries.filter { $0.host == "twilio.com" }
+        #expect(entries.count == 2)
+        #expect(entries.allSatisfy { $0.consentCredentialID == ConsentCredentialID.twilio() })
+    }
+
+    @Test("Twilio with only a SID (no secret) plans nothing") func twilioBlank() {
+        var p = Profile(name: "ws", tool: .claude, authMode: .subscription)
+        p.twilioCredential = TwilioCredential(sid: "ACabc", secret: "  \n")
+        #expect(p.makeTokenPlan(salt: salt).fakeForTwilio() == nil)
+        #expect(!p.makeTokenPlan(salt: salt).tokenMap().entries.contains { $0.host == "twilio.com" })
     }
 }
 

@@ -960,6 +960,8 @@ final class RemoteMenuApp {
             let aws = (doc["awsCredentials"] as? [String: Any]) ?? [:]
             let awsSet = !((aws["accessKeyID"] as? String ?? "").isEmpty)
                 || !((aws["ssoProfileName"] as? String ?? "").isEmpty)
+            let tw = (doc["twilioCredential"] as? [String: Any]) ?? [:]
+            let twSet = !((tw["sid"] as? String ?? "").isEmpty) && !((tw["secret"] as? String ?? "").isEmpty)
             // The same sections, in the same order, as the GUI Credentials pane.
             let rows = [
                 "Git Identity  \(gitName.isEmpty ? "—" : gitName)",
@@ -971,6 +973,7 @@ final class RemoteMenuApp {
                 "Kubernetes  (\(count("kubeconfigs")))",
                 "DigitalOcean  (\(doSet ? 1 : 0))",
                 "AWS  (\(awsSet ? 1 : 0))",
+                "Twilio  (\(twSet ? 1 : 0))",
                 "Container Registries  (\(count("dockerRegistries")))",
                 "MongoDB  (\(dbCount("mongoDataAPI")))",
                 "ClickHouse  (\(dbCount("clickHouse")))",
@@ -998,20 +1001,24 @@ final class RemoteMenuApp {
                         ("digitalOceanToken", "API token (dop_v1_…)", .text(secret: true)),
                         ("digitalOceanTokenRequiresApproval", "Require approval to use", .bool)]) { changed = true }
             case 8: if editAWS(&doc) { changed = true }
-            case 9: if editCredList(&doc, key: "dockerRegistries", title: "Container Registries",
+            case 9: if editNested(&doc, parent: "twilioCredential", title: "Twilio", fields: [
+                        ("sid", "Account/API-key SID (AC…/SK…)", .text(secret: false)),
+                        ("secret", "Auth token / API secret", .text(secret: true)),
+                        ("requireApproval", "Require approval to use", .bool)]) { changed = true }
+            case 10: if editCredList(&doc, key: "dockerRegistries", title: "Container Registries",
                                     summary: { "\($0["username"] as? String ?? "?")@\($0["host"] as? String ?? "?")" },
                                     blank: { ["id": UUID().uuidString, "host": "", "username": "", "password": "", "requireApproval": false] },
                                     fields: [("host", "Host", .text(secret: false)),
                                              ("username", "Username", .text(secret: false)),
                                              ("password", "Password", .text(secret: true)),
                                              ("requireApproval", "Require approval to use", .bool)]) { changed = true }
-            case 10: if editDatabaseSection(&doc, title: "MongoDB", engine: "mongoDataAPI",
+            case 11: if editDatabaseSection(&doc, title: "MongoDB", engine: "mongoDataAPI",
                                             defaultAuth: "apiKey") { changed = true }
-            case 11: if editDatabaseSection(&doc, title: "ClickHouse", engine: "clickHouse",
+            case 12: if editDatabaseSection(&doc, title: "ClickHouse", engine: "clickHouse",
                                             defaultAuth: "basic") { changed = true }
-            case 12: if editDatabaseSection(&doc, title: "Elasticsearch", engine: "elasticsearch",
+            case 13: if editDatabaseSection(&doc, title: "Elasticsearch", engine: "elasticsearch",
                                             defaultAuth: "basic") { changed = true }
-            case 13: if editCredList(&doc, key: "manualTokens", title: "Other API keys",
+            case 14: if editCredList(&doc, key: "manualTokens", title: "Other API keys",
                                     summary: { "\($0["name"] as? String ?? "?")  → $\($0["envVarName"] as? String ?? "")" },
                                     blank: { ["id": UUID().uuidString, "name": "", "realValue": "", "envVarName": "", "hostFilter": "", "requireApproval": false] },
                                     fields: [("name", "Name", .text(secret: false)),

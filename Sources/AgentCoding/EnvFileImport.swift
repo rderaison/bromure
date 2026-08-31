@@ -29,6 +29,8 @@ enum EnvFileImport {
         case awsAccessKeyID
         case awsSecretAccessKey
         case awsSessionToken
+        case twilioSID          // TWILIO_ACCOUNT_SID / TWILIO_API_KEY_SID
+        case twilioSecret       // TWILIO_AUTH_TOKEN / TWILIO_API_SECRET
     }
 
     /// The canonical recognizer: env-var NAME → slot. Consolidates the mappings
@@ -47,6 +49,8 @@ enum EnvFileImport {
         case "AWS_ACCESS_KEY_ID":                          return .awsAccessKeyID
         case "AWS_SECRET_ACCESS_KEY":                      return .awsSecretAccessKey
         case "AWS_SESSION_TOKEN":                          return .awsSessionToken
+        case "TWILIO_ACCOUNT_SID", "TWILIO_API_KEY_SID", "TWILIO_API_KEY":  return .twilioSID
+        case "TWILIO_AUTH_TOKEN", "TWILIO_API_SECRET", "TWILIO_API_KEY_SECRET": return .twilioSecret
         default:                                           return nil
         }
     }
@@ -69,6 +73,7 @@ enum EnvFileImport {
         case .digitalOcean:      return ["digitalocean.com"]
         case .linear:            return ["linear.app"]
         case .awsAccessKeyID, .awsSecretAccessKey, .awsSessionToken: return ["amazonaws.com"]
+        case .twilioSID, .twilioSecret: return ["twilio.com"]
         }
     }
 
@@ -82,6 +87,8 @@ enum EnvFileImport {
         case .awsAccessKeyID:    return "AWS access key ID"
         case .awsSecretAccessKey: return "AWS secret access key"
         case .awsSessionToken:   return "AWS session token"
+        case .twilioSID:         return "Twilio SID"
+        case .twilioSecret:      return "Twilio auth token"
         }
     }
 

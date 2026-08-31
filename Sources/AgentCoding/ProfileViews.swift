@@ -1644,6 +1644,7 @@ struct ProfileEditorView: View {
         case .aws:                 draft.awsCredentials = AWSCredentials()
         case .digitalOcean:        draft.digitalOceanToken = ""
         case .linear:              draft.linearToken = ""
+        case .twilio:              draft.twilioCredential = TwilioCredential()
         case .managedSSHKey:       draft.sshPublicKey = nil; generateSSH = false
         case .primaryToolKey, .additionalTool: break   // configured in the Agents pane
         }
@@ -1739,6 +1740,7 @@ struct ProfileEditorView: View {
         case .aws:          awsSubsection
         case .digitalOcean: digitalOceanSubsection
         case .linear:       linearSubsection
+        case .twilio:       twilioSubsection
         case .kubernetes:   kubernetesSubsection
         case .docker:       dockerRegistriesSubsection
         case .database:
@@ -1842,6 +1844,8 @@ struct ProfileEditorView: View {
         case .linear:       return !draft.linearToken.isEmpty
         case .awsAccessKeyID, .awsSecretAccessKey, .awsSessionToken:
             return draft.awsCredentials.isUsable
+        case .twilioSID, .twilioSecret:
+            return draft.twilioCredential.isUsable
         }
     }
 
@@ -1850,6 +1854,7 @@ struct ProfileEditorView: View {
     private func applyEnvImport() {
         let state = envImport
         var awsAccess = "", awsSecret = "", awsSession = "", awsAny = false
+        var twilioSID = "", twilioSecret = "", twilioAny = false
         for row in state.recognized where row.include {
             // A 1Password reference can't ride the typed-credential path (those
             // are never resolved host-side) — route it to a manual token, which
@@ -1884,6 +1889,8 @@ struct ProfileEditorView: View {
             case .awsAccessKeyID:    awsAccess = row.value; awsAny = true
             case .awsSecretAccessKey: awsSecret = row.value; awsAny = true
             case .awsSessionToken:   awsSession = row.value; awsAny = true
+            case .twilioSID:         twilioSID = row.value; twilioAny = true
+            case .twilioSecret:      twilioSecret = row.value; twilioAny = true
             }
         }
         if awsAny {
@@ -1891,6 +1898,10 @@ struct ProfileEditorView: View {
             if !awsAccess.isEmpty { draft.awsCredentials.accessKeyID = awsAccess }
             if !awsSecret.isEmpty { draft.awsCredentials.secretAccessKey = awsSecret }
             if !awsSession.isEmpty { draft.awsCredentials.sessionToken = awsSession }
+        }
+        if twilioAny {
+            if !twilioSID.isEmpty { draft.twilioCredential.sid = twilioSID }
+            if !twilioSecret.isEmpty { draft.twilioCredential.secret = twilioSecret }
         }
         for row in state.unrecognized where row.include {
             let hosts = row.hostsText
@@ -2165,6 +2176,34 @@ struct ProfileEditorView: View {
                 .buttonStyle(.borderless)
                 .help("Open Linear API settings in your browser")
             }
+        }
+    }
+
+    // MARK: - Twilio
+
+    @ViewBuilder
+    private var twilioSubsection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Account SID + Auth Token from console.twilio.com (or an API Key SID `SK…` + its secret). Injected into the VM as `TWILIO_ACCOUNT_SID` + `TWILIO_AUTH_TOKEN` env with a FAKE secret; the proxy swaps it to the real value on requests to twilio.com. The SID is identity (it rides in the request URL), so it isn't secret; the token is.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("Account SID (AC…) or API Key SID (SK…)", text: $draft.twilioCredential.sid)
+                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 6) {
+                SecureField("Auth Token / API Key secret", text: $draft.twilioCredential.secret)
+                    .textFieldStyle(.roundedBorder)
+                Button {
+                    if let url = URL(string: "https://console.twilio.com/") {
+                        platformOpenURL(url)
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.right.square")
+                }
+                .buttonStyle(.borderless)
+                .help("Open the Twilio Console in your browser")
+            }
+            requireApprovalToggle(isOn: $draft.twilioCredential.requireApproval)
         }
     }
 
@@ -3470,6 +3509,7 @@ struct ProfileEditorView: View {
         case .aws:                   return $draft.awsCredentials.requireApproval
         case .digitalOcean:          return $draft.digitalOceanTokenRequiresApproval
         case .linear:                return $draft.linearTokenRequiresApproval
+        case .twilio:                return $draft.twilioCredential.requireApproval
         case .managedSSHKey:         return $draft.sshKeyRequiresApproval
         }
     }

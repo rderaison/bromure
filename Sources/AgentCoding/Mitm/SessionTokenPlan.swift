@@ -61,6 +61,10 @@ public struct SessionTokenPlan: Sendable {
         /// the VM; swapped on requests to linear.app (the GraphQL API at
         /// api.linear.app and the MCP server at mcp.linear.app).
         case linear
+        /// Twilio API credential. The realValue / fakeValue are either the
+        /// naked secret (exported as TWILIO_AUTH_TOKEN) or the full
+        /// `base64("<SID>:<secret>")` Basic blob. Swapped on api.twilio.com.
+        case twilio
         /// Container-registry Basic auth. The realValue / fakeValue are
         /// the full `base64("<user>:<password>")` strings — that's what
         /// docker writes in `~/.docker/config.json` and sends as
@@ -192,6 +196,7 @@ public struct SessionTokenPlan: Sendable {
         case .manual(_, _, let host): return host.isEmpty ? nil : host
         case .digitalOcean:           return "digitalocean.com"
         case .linear:                 return "linear.app"
+        case .twilio:                 return "twilio.com"
         case .dockerRegistry(let host, _): return host
         case .mcpBearer(_, _, let host): return host.isEmpty ? nil : host
         case .httpDatabase(let host, _, _, _): return host.isEmpty ? nil : host
@@ -257,6 +262,16 @@ public struct SessionTokenPlan: Sendable {
     public func fakeForLinear() -> String? {
         for e in entries {
             if case .linear = e.purpose { return e.fakeValue }
+        }
+        return nil
+    }
+
+    /// Fake Twilio secret to export as TWILIO_AUTH_TOKEN. Returns the FIRST
+    /// twilio entry's fake, which is the naked-secret entry (appended before
+    /// the base64 blob below).
+    public func fakeForTwilio() -> String? {
+        for e in entries {
+            if case .twilio = e.purpose { return e.fakeValue }
         }
         return nil
     }
@@ -483,6 +498,43 @@ public extension Profile {
                 purpose: .linear,
                 consentCredentialID: linConsentID,
                 consentDisplayName: "Linear API key"))
+        }
+
+        // Twilio API credential (Account/API-key SID + secret). The SID is
+        // identity (it rides in the request URL path), so it never swaps; only
+        // the secret is faked. Twilio auth is HTTP Basic —
+        // `Authorization: Basic base64("<SID>:<secret>")` — so, like
+        // DigitalOcean, register BOTH the naked-secret swap (covers an SDK that
+        // sends TWILIO_AUTH_TOKEN unencoded) AND the pre-encoded base64 blob
+        // (the wire form the naked swap can't see through). The naked entry is
+        // appended first so `fakeForTwilio()` returns it for the env export.
+        if twilioCredential.isUsable {
+            let sid = twilioCredential.sid.trimmingCharacters(in: .whitespacesAndNewlines)
+            let realSecret = twilioCredential.secret.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !sid.isEmpty, !realSecret.isEmpty {
+                // Real Twilio Auth Tokens are 32 hex chars; API Key secrets are
+                // longer base64-ish. Match length so client validators accept.
+                let fakeSecret = SessionTokenPlan.deriveFake(
+                    prefix: "brm-twilio-", real: realSecret, salt: salt,
+                    targetLength: max(32, realSecret.count))
+                let twConsentID: String? = twilioCredential.requireApproval
+                    ? ConsentCredentialID.twilio() : nil
+                let twDisplay = "Twilio API key (\(sid))"
+                entries.append(.init(
+                    realValue: realSecret,
+                    fakeValue: fakeSecret,
+                    purpose: .twilio,
+                    consentCredentialID: twConsentID,
+                    consentDisplayName: twDisplay))
+                let realB64 = Data("\(sid):\(realSecret)".utf8).base64EncodedString()
+                let fakeB64 = Data("\(sid):\(fakeSecret)".utf8).base64EncodedString()
+                entries.append(.init(
+                    realValue: realB64,
+                    fakeValue: fakeB64,
+                    purpose: .twilio,
+                    consentCredentialID: twConsentID,
+                    consentDisplayName: twDisplay))
+            }
         }
 
         for reg in dockerRegistries where reg.isUsable {

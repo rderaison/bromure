@@ -30,6 +30,9 @@ struct HomeCredentialFakeTests {
             DockerRegistryCredential(host: "registry.example.com",
                                      username: "robot", password: "s3cr3t-REGISTRY-pw"),
         ]
+        p.twilioCredential = TwilioCredential(
+            sid: "ACtwilioSIDtwilioSIDtwilioSIDtwil",
+            secret: "TWILIOrealTWILIOrealTWILIOreal12")
         return p
     }
 
@@ -40,6 +43,10 @@ struct HomeCredentialFakeTests {
         "s3cr3t-REGISTRY-pw",
         // docker stores base64("user:password"); the real blob must be absent too.
         Data("robot:s3cr3t-REGISTRY-pw".utf8).base64EncodedString(),
+        // Twilio: the real Auth Token, and the base64("SID:secret") Basic blob.
+        "TWILIOrealTWILIOrealTWILIOreal12",
+        Data("ACtwilioSIDtwilioSIDtwilioSIDtwil:TWILIOrealTWILIOrealTWILIOreal12".utf8)
+            .base64EncodedString(),
     ]
 
     /// Every regular file under `home`, as one concatenated blob, so a test can

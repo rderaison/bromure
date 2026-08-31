@@ -6895,6 +6895,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             || old.gitHTTPSCredentials != new.gitHTTPSCredentials
             || old.digitalOceanToken != new.digitalOceanToken
             || old.linearToken != new.linearToken
+            || old.twilioCredential != new.twilioCredential
             || old.dockerRegistries != new.dockerRegistries
             || old.awsCredentials != new.awsCredentials
             || old.kubeconfigs != new.kubeconfigs
