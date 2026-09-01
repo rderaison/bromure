@@ -2151,6 +2151,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
             consent: consent,
             profileID: profileID, host: host, insecure: insecure)
         let cfg = URLSessionConfiguration.ephemeral
+        // `timeoutIntervalForRequest` is an IDLE timer — it fires when no byte
+        // arrives from upstream for this long, NOT a wall-clock cap on the
+        // request. The default is 60s, which silently kills any long-lived
+        // stream that goes quiet: a `multipart/x-mixed-replace` (MJPEG) camera
+        // feed during a low-motion / idle period, or an SSE response whose model
+        // pauses (extended thinking, a slow tool turn) for over a minute. The
+        // guest sees the connection reset mid-stream. A continuous feed never
+        // trips it, which is why it only shows up on sparse streams. Raise it
+        // well past any realistic inter-frame / inter-token gap; the 7-day
+        // `timeoutIntervalForResource` (unchanged) remains the hard backstop,
+        // and a closed guest is still detected promptly on the next write.
+        cfg.timeoutIntervalForRequest = 3600
         return URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
     }
 
