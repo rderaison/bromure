@@ -6930,6 +6930,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             || old.apiKeyRequiresApproval != new.apiKeyRequiresApproval
             || old.digitalOceanTokenRequiresApproval != new.digitalOceanTokenRequiresApproval
             || old.linearTokenRequiresApproval != new.linearTokenRequiresApproval
+            // Toggling transparent interception re-emits the meta-share so the
+            // guest re-sources a consistent proxy env for the new mode (see the
+            // applyInterceptDisabled call in applyLiveSessionRefresh).
+            || old.disableTransparentProxy != new.disableTransparentProxy
     }
 
     /// Apply env-var / credential / guardrail edits to a running session
@@ -7007,12 +7011,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         // Transparent (IP-stack) interception on/off is a live L3/L4 flip of
-        // the VM's switch port — no reboot, and deliberately BEFORE the guard
-        // (it doesn't move any credential/env, and must apply even when it's the
-        // only change). Turning it off pulls the port out of the MiTM divert so
-        // off-subnet TCP reaches the real network untouched; turning it back on
-        // re-arms the divert. Guest env / proxy.env are intentionally left
-        // alone — this toggle governs the IP stack, not the cooperative proxy.
+        // the VM's switch port — no reboot, and BEFORE the guard so it applies
+        // even when it's the only change. Turning it off pulls the port out of
+        // the MiTM divert so off-subnet TCP reaches the real network untouched;
+        // turning it back on re-arms the divert. proxy.env itself is unchanged
+        // by the flag now (HTTP_PROXY is always set), but the change IS listed
+        // in sessionRefreshAffectingChange so the meta-share re-emits below and
+        // the guest re-sources a consistent env — otherwise a proxy-aware client
+        // (kubectl, whose kubeconfig CA trusts the MiTM leaf) could be left
+        // pointed the wrong way and fail with "certificate signed by unknown
+        // authority".
         if old.disableTransparentProxy != new.disableTransparentProxy {
             sandbox?.applyInterceptDisabled(new.disableTransparentProxy)
         }

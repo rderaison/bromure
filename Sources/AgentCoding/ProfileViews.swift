@@ -3429,8 +3429,8 @@ struct ProfileEditorView: View {
                 #endif
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Disable interception (full passthrough)", isOn: $draft.disableTransparentProxy)
-                    Text("Interception (on by default) routes the VM's HTTP/HTTPS through Bromure so it can swap credentials, trace, and enforce the guardrails + firewall above. Turn this on for full passthrough: the guest's TLS reaches the internet untouched — no divert, and Bromure won't set HTTP(S)_PROXY either, so a certificate-pinned client (Signal and similar) sees the real upstream cert. The cost: NO credential swap, tracing, guardrails, or verb firewall on this workspace (the connection-level allow/deny rules above still apply). Needs a restart. Off by default; use only for a workspace that breaks under interception.")
+                    Toggle("Disable transparent interception", isOn: $draft.disableTransparentProxy)
+                    Text("Transparent interception (on by default) diverts the VM's HTTP/HTTPS into Bromure at the network layer, so the proxy sees the traffic even when a client doesn't use the proxy env vars. Turn it off and that forced divert stops: raw sockets and cert-pinned clients (Signal and similar) reach the real network — and the real upstream cert — directly. This does NOT disable the proxy itself: HTTP(S)_PROXY stays set, so proxy-aware tools (apt/git/pip/curl/node…) and the agent's own API calls still go through Bromure and keep credential/token swap, tracing, and guardrails. Applies live, no restart. Use for a workspace with a client that breaks under transparent interception.")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 

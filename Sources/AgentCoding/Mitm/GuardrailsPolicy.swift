@@ -88,10 +88,12 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
     /// header the guest must set), and it hands the — untrusted — guest a lever
     /// on a security control only when it asks, so the proxy compensates by
     /// injecting NO real credentials on such requests (only the guest's fakes
-    /// go out) and logging every use to the Security Timeline. Lighter and
-    /// safer than the full-passthrough escape hatch (`disableTransparentProxy`)
-    /// because interception, tracing, and the swap-scope leak guard stay on.
-    /// Turn it off to forbid the header outright.
+    /// go out) and logging every use to the Security Timeline. Narrower than
+    /// disabling transparent interception (`disableTransparentProxy`, which
+    /// drops the whole workspace's forced IP-stack divert): this skips cert
+    /// validation for a single request while interception, tracing, the
+    /// cooperative proxy, and the swap-scope leak guard all stay on. Turn it
+    /// off to forbid the header outright.
     public var allowInsecureBypass: Bool
 
     public init(kubernetes: Mode = .off, aws: Mode = .off,
