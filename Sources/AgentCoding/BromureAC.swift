@@ -6787,7 +6787,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case keyboardSettings
         case terminalAppearance
         case gitIdentity
-        case interception
     }
 
     private func restartLabel(for change: RestartChange) -> String {
@@ -6828,8 +6827,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return NSLocalizedString("Terminal font and colors", comment: "")
         case .gitIdentity:
             return NSLocalizedString("Git author identity", comment: "")
-        case .interception:
-            return NSLocalizedString("Transparent interception (full passthrough)", comment: "")
         }
     }
 
@@ -6871,10 +6868,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // set up on cold boot, even though their config files refresh live.
         if old.kubeconfigs != new.kubeconfigs { changes.append(.kubernetes) }
         if old.awsCredentials != new.awsCredentials { changes.append(.awsCredentials) }
-        // Interception on/off is read at VM attach (switch divert) and at
-        // session prepare (proxy.env) — both cold-boot only, so a change
-        // needs a restart to take effect.
-        if old.disableTransparentProxy != new.disableTransparentProxy { changes.append(.interception) }
+        // Transparent-interception on/off is NOT here: it's applied live to the
+        // running VM's switch port by applyLiveSessionRefresh (no reboot). A
+        // later reboot re-reads it from the persisted profile at attach anyway.
         // Credential "ask before use" gates are applied LIVE — no reboot. The
         // api-key / DigitalOcean consent rides on the token swap map's
         // consentCredentialID (rebuilt by applyLiveSessionRefresh), and the
@@ -7008,6 +7004,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // cold-boots for the seed load, via the importedSSHKeys restart diff.)
         if old.sshKeyRequiresApproval != new.sshKeyRequiresApproval, let engine = mitmEngine {
             engine.sshAgent.setKeys(loadAgentKeys(for: new), for: new.id)
+        }
+
+        // Transparent (IP-stack) interception on/off is a live L3/L4 flip of
+        // the VM's switch port — no reboot, and deliberately BEFORE the guard
+        // (it doesn't move any credential/env, and must apply even when it's the
+        // only change). Turning it off pulls the port out of the MiTM divert so
+        // off-subnet TCP reaches the real network untouched; turning it back on
+        // re-arms the divert. Guest env / proxy.env are intentionally left
+        // alone — this toggle governs the IP stack, not the cooperative proxy.
+        if old.disableTransparentProxy != new.disableTransparentProxy {
+            sandbox?.applyInterceptDisabled(new.disableTransparentProxy)
         }
 
         guard sessionRefreshAffectingChange(from: old, to: new) else { return }

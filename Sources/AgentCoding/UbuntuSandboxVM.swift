@@ -223,6 +223,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         VMNetSwitch.shared.setEgressPolicy(policy, for: switchPort)
     }
 
+    /// Toggle transparent (IP-stack) interception for this VM's switch port
+    /// mid-session — the live counterpart of the `interceptDisabled:` flag set
+    /// at `attachPort` on cold boot. When disabled, off-subnet TCP is never
+    /// diverted into the MiTM's userspace stack; it hits the native switch and
+    /// goes straight to the real network (so a SYN to a dead host actually
+    /// times out instead of being answered locally). No-op for VMs not on the
+    /// shared switch. Does not touch guest env / proxy.env — purely L3/L4.
+    public func applyInterceptDisabled(_ disabled: Bool) {
+        guard let switchPort else { return }
+        VMNetSwitch.shared.setInterceptDisabled(disabled, for: switchPort)
+    }
+
     private var outboxPollTask: Task<Void, Never>?
 
     /// CPU count for the runtime VM. RAM is per-profile (Profile.memoryGB).
