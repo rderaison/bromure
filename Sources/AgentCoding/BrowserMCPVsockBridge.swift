@@ -38,6 +38,15 @@ final class BrowserMCPVsockBridge: NSObject {
         socketDevice?.removeSocketListener(forPort: Self.vsockPort)
         for (_, c) in connections { c.cancel() }
         connections.removeAll()
+        // Close the fat-client relay fd + any live splices. Without this a
+        // rebooted workspace's OLD bridge keeps `remoteFd` (the socketpair to
+        // the client's `browser-mcp` SSH channel) open, so the client's relay
+        // never sees a drop, never redials, and stays bound to this dead bridge
+        // — the NEW bridge gets no `remoteFd` and the agent is served on the
+        // (headless) server instead, hanging its browser tools.
+        detachRemote()
+        for (_, conn) in splicedConns { conn.close() }
+        splicedConns.removeAll()
     }
 
     /// Route agent MCP connections to a fat client's `browser-mcp` channel (`fd`)

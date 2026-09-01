@@ -10658,6 +10658,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // connects here; we serve the browser tools, driving the
                 // unified window's embedded browser (opening it on demand).
                 let pid = profile.id
+                // Reboot reuses this pid: explicitly stop the OUTGOING bridge
+                // first (its listener is on the now-dead socket device, but its
+                // fat-client relay fd would otherwise leak) so a mirroring
+                // client's relay drops and redials onto this fresh bridge.
+                self.browserMCPBridges[pid]?.stop()
                 let mcpServer = BrowserMCPServer(
                     browser: { [weak self] in self?.unifiedWindow?.existingBrowserController(for: pid) },
                     ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })

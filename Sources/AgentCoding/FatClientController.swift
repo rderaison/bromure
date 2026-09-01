@@ -1745,6 +1745,13 @@ final class RemoteHostWindow: NSWindow {
         }
         controller.onTabsApplied = { [weak self] id, live in
             self?.reconcileSurfaces(for: id, liveWindows: live)
+            // A live roster means the workspace's agent is up. Make sure the
+            // browser-MCP relay is dialed NOW (idempotent), not only when the
+            // user opens the pane — otherwise an agent's first `browser_*` tool
+            // call has no relay to ride, so the server serves it against its own
+            // (headless) browser and the tool hangs. With the relay up, the
+            // request routes here and boots the local browser on demand.
+            self?.ensureBrowserRelay(id)
         }
         controller.onWorkspaceRebooted = { [weak self] id in
             self?.rebootBrowser(for: id)
