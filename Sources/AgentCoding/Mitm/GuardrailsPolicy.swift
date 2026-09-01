@@ -84,18 +84,20 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
     /// Let the guest opt a single request out of upstream certificate
     /// validation by sending `X-bromure-insecure: yes`. For self-signed /
     /// private-CA endpoints the proxy otherwise can't reach (its host-side
-    /// validation rejects them). Off by default: it hands the — untrusted —
-    /// guest a lever on a security control, so the proxy compensates by
+    /// validation rejects them). On by default: it's an opt-IN per request (a
+    /// header the guest must set), and it hands the — untrusted — guest a lever
+    /// on a security control only when it asks, so the proxy compensates by
     /// injecting NO real credentials on such requests (only the guest's fakes
     /// go out) and logging every use to the Security Timeline. Lighter and
     /// safer than the full-passthrough escape hatch (`disableTransparentProxy`)
     /// because interception, tracing, and the swap-scope leak guard stay on.
+    /// Turn it off to forbid the header outright.
     public var allowInsecureBypass: Bool
 
     public init(kubernetes: Mode = .off, aws: Mode = .off,
                 digitalOcean: Mode = .off, docker: Mode = .off,
                 github: Mode = .off, gitlab: Mode = .off, bitbucket: Mode = .off,
-                allowInsecureBypass: Bool = false) {
+                allowInsecureBypass: Bool = true) {
         self.kubernetes = kubernetes
         self.aws = aws
         self.digitalOcean = digitalOcean
@@ -147,7 +149,9 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         github       = try mode(.github)
         gitlab       = try mode(.gitlab)
         bitbucket    = try mode(.bitbucket)
-        allowInsecureBypass = try c.decodeIfPresent(Bool.self, forKey: .allowInsecureBypass) ?? false
+        // Default ON (the header is a per-request opt-in). Absent key ⇒ on;
+        // only the non-default OFF state is written (see encode()).
+        allowInsecureBypass = try c.decodeIfPresent(Bool.self, forKey: .allowInsecureBypass) ?? true
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -158,7 +162,11 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         if github       != .off { try c.encode(github,       forKey: .github) }
         if gitlab       != .off { try c.encode(gitlab,       forKey: .gitlab) }
         if bitbucket    != .off { try c.encode(bitbucket,    forKey: .bitbucket) }
-        if allowInsecureBypass { try c.encode(true, forKey: .allowInsecureBypass) }
+        // ON is the default, so persist only the non-default OFF. This is why
+        // Profile encodes the guardrails block unconditionally — otherwise an
+        // all-modes-off profile with the bypass turned OFF would serialize an
+        // empty block, get dropped, and reload as the ON default.
+        if !allowInsecureBypass { try c.encode(false, forKey: .allowInsecureBypass) }
     }
 }
 

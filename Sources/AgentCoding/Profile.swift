@@ -2224,9 +2224,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if !kubeconfigs.isEmpty {
             try c.encode(kubeconfigs, forKey: .kubeconfigs)
         }
-        if guardrails.isActive {
-            try c.encode(guardrails, forKey: .guardrails)
-        }
+        // Encode guardrails unconditionally (like supplyChain below): its inner
+        // encode() emits only non-default fields, so a default profile yields an
+        // empty `guardrails: {}`. This is required now that allowInsecureBypass
+        // defaults ON — an `isActive` gate would drop the block for a profile
+        // whose only non-default is the bypass turned OFF, silently reverting it
+        // to ON on reload.
+        try c.encode(guardrails, forKey: .guardrails)
         if !egressRules.isEmpty {
             try c.encode(egressRules, forKey: .egressRules)
         }

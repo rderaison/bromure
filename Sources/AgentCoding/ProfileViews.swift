@@ -3437,7 +3437,7 @@ struct ProfileEditorView: View {
                     Toggle("Allow per-request insecure bypass (X-bromure-insecure)",
                            isOn: $draft.guardrails.allowInsecureBypass)
                         .padding(.top, 8)
-                    Text("A lighter escape hatch than full passthrough. When a request to a self-signed / private-CA host fails validation, the agent can retry it with the header `X-bromure-insecure: yes` to skip validating THAT upstream's certificate. Interception, tracing, and the leak guard stay on, and Bromure injects no real credential on such a request (only the guest's fakes go out). Every use is recorded in the Security Timeline. Off by default.")
+                    Text("A lighter escape hatch than full passthrough. When a request to a self-signed / private-CA host fails validation, the agent can retry it with the header `X-bromure-insecure: yes` to skip validating THAT upstream's certificate. Interception, tracing, and the leak guard stay on, and Bromure injects no real credential on such a request (only the guest's fakes go out). Every use is recorded in the Security Timeline. On by default (it only acts when the guest explicitly sends the header); turn it off to forbid the header outright.")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
