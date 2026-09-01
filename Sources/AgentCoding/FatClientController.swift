@@ -1629,6 +1629,13 @@ final class RemoteHostWindow: NSWindow {
     private var mountedTermView: TerminalSurfaceView?
     private var shownWorkspace: Profile.ID?
     private var shownWindowIndex: Int?
+    /// Boot "dive screen" overlaid on the stage while the shown workspace's VM
+    /// boots and its tmux roster hasn't landed yet — the same cue the native
+    /// window shows, so a reboot/base-image reset over the fat client reads as
+    /// "working", not a stall. Removed the instant the roster arrives.
+    private let bootCueModel = BootOverlayModel()
+    private var bootCueHost: NSHostingView<BootAnimationView>?
+    private var bootCueWorkspace: Profile.ID?
 
     // Window chrome (fat-client counterparts of the local window's
     // decorations): toolbar (IP pill + controls), VM dashboard for
@@ -1745,6 +1752,9 @@ final class RemoteHostWindow: NSWindow {
         }
         controller.onTabsApplied = { [weak self] id, live in
             self?.reconcileSurfaces(for: id, liveWindows: live)
+            // The roster landed → the VM is up; drop the boot dive screen for
+            // the workspace on the stage.
+            if let self, self.bootCueWorkspace == id, !live.isEmpty { self.hideBootCue() }
             // A live roster means the workspace's agent is up. Make sure the
             // browser-MCP relay is dialed NOW (idempotent), not only when the
             // user opens the pane — otherwise an agent's first `browser_*` tool
@@ -1754,7 +1764,14 @@ final class RemoteHostWindow: NSWindow {
             self?.ensureBrowserRelay(id)
         }
         controller.onWorkspaceRebooted = { [weak self] id in
-            self?.rebootBrowser(for: id)
+            guard let self else { return }
+            self.rebootBrowser(for: id)
+            // If the user is looking at this workspace's terminal, the VM just
+            // went down and is booting again (e.g. a base-image reset/upgrade
+            // they just approved) — re-show the boot dive screen so the reboot
+            // reads as progress, not a frozen pane. Cleared when the fresh
+            // roster lands (onTabsApplied).
+            if self.shownWorkspace == id { self.showBootCue(for: id) }
         }
         controller.onAppearanceChanged = { [weak self] profile in
             self?.termControllers[profile.id]?.applyProfile(profile)
@@ -2992,6 +3009,7 @@ final class RemoteHostWindow: NSWindow {
                     ["id": $0.id.uuidString, "name": $0.name] as [String: Any]
                 },
                 "shownWorkspace": shownWorkspace?.uuidString ?? "",
+                "bootCue": bootCueWorkspace?.uuidString ?? "",
                 "selectedID": controller.listModel.selectedID?.uuidString ?? "",
                 "browserOpen": Array(browserOpen).map { $0.uuidString },
                 "shownBrowser": shownBrowser?.uuidString ?? "",
@@ -3840,9 +3858,55 @@ final class RemoteHostWindow: NSWindow {
         mountedTermView = view
         shownWorkspace = id
         shownWindowIndex = idx
+        // No tmux roster yet → the VM is still booting (a fresh boot or a
+        // post-reset/upgrade reboot): overlay the boot dive screen so the user
+        // sees progress instead of a blank pane. It clears when the roster
+        // lands (onTabsApplied → hideBootCue).
+        if controller.tabsModel(for: id)?.tabs.isEmpty ?? true {
+            showBootCue(for: id)
+        } else {
+            hideBootCue()
+        }
         // Selecting a terminal tab should focus it immediately — otherwise you
         // have to click into the pane before you can type.
         focusTerminalSoon(view)
+    }
+
+    /// Overlay the boot dive screen on the stage, above the (attaching)
+    /// terminal surface. Idempotent per workspace.
+    private func showBootCue(for id: Profile.ID) {
+        // Already up for this workspace AND still attached to the stage (a
+        // `mount(_:)` for the grid/dashboard would have detached it).
+        if bootCueWorkspace == id, bootCueHost?.superview === stage { return }
+        bootCueWorkspace = id
+        let profile = controller.profile(for: id)
+        bootCueModel.workspaceName = profile?.name ?? "Workspace"
+        bootCueModel.accentHex = profile?.color.hexInUI ?? "#38f9d7"
+        bootCueModel.failed = false
+        bootCueModel.statusText = nil
+        bootCueModel.progress = nil
+        let host = bootCueHost ?? NSHostingView(rootView: BootAnimationView(
+            model: bootCueModel, onReset: {}, onKeepWaiting: {}))
+        bootCueHost = host
+        host.translatesAutoresizingMaskIntoConstraints = false
+        // Added directly (not via `mount`, which clears siblings) so it sits
+        // ON TOP of the mounted terminal; the next `mount(_:)` removes it.
+        if host.superview !== stage {
+            host.removeFromSuperview()
+            stage.addSubview(host)   // last subview = topmost
+            NSLayoutConstraint.activate([
+                host.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
+                host.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+                host.topAnchor.constraint(equalTo: stage.topAnchor),
+                host.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            ])
+        }
+    }
+
+    private func hideBootCue() {
+        bootCueHost?.removeFromSuperview()
+        bootCueHost = nil
+        bootCueWorkspace = nil
     }
 
     /// Make the terminal surface first responder AFTER the current event (the
@@ -3857,6 +3921,7 @@ final class RemoteHostWindow: NSWindow {
     }
 
     private func unmountTerminal() {
+        hideBootCue()
         mountedTermView?.removeFromSuperview()
         mountedTermView = nil
         shownWorkspace = nil
