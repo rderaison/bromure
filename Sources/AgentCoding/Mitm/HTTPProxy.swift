@@ -3405,13 +3405,50 @@ private final class StreamingRelayDelegate: NSObject, URLSessionDataDelegate, @u
         self.onComplete = onComplete
     }
 
+    // URLSession has built-in `multipart/x-mixed-replace` handling (the MJPEG /
+    // server-push content type, e.g. a camera feed): it delivers the container
+    // response first, then PARSES each part — calling `didReceive response`
+    // again per part (with the part's own headers, e.g. image/jpeg) and
+    // `didReceive data` with the part body, having STRIPPED the `--boundary`
+    // framing. If we naively forwarded each `didReceive response` as an HTTP
+    // head we'd inject a second status line into the body (client aborts:
+    // "illegal chunked sequence"), and the boundary framing would be gone. So:
+    // send the head once (the container), remember its boundary, and rebuild
+    // the `--boundary` framing around each subsequent part.
+    private var responseCount = 0
+    private var multipartBoundary: String?
+
     func urlSession(_ session: URLSession,
                     dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        if let http = response as? HTTPURLResponse {
-            onHead(http)
+        responseCount += 1
+        guard let http = response as? HTTPURLResponse else {
+            completionHandler(.allow); return
         }
+        if responseCount == 1 {
+            onHead(http)
+            if let ct = http.value(forHTTPHeaderField: "Content-Type"),
+               ct.lowercased().contains("multipart/x-mixed-replace") {
+                multipartBoundary = Self.boundary(fromContentType: ct)
+            }
+        } else if let b = multipartBoundary {
+            // A parsed multipart part — re-emit the framing URLSession removed.
+            // The leading CRLF closes the previous part's body (skipped for the
+            // first part, which follows the header block's own CRLFCRLF).
+            var sep = responseCount == 2 ? "" : "\r\n"
+            sep += "--\(b)\r\n"
+            if let ct = http.value(forHTTPHeaderField: "Content-Type") {
+                sep += "Content-Type: \(ct)\r\n"
+            }
+            if let len = http.value(forHTTPHeaderField: "Content-Length") {
+                sep += "Content-Length: \(len)\r\n"
+            }
+            sep += "\r\n"
+            onChunk(Data(sep.utf8))
+        }
+        // A repeated head on a NON-multipart response would be unusual; ignore
+        // it rather than corrupt the body with a second status line.
         completionHandler(.allow)
     }
 
@@ -3419,6 +3456,20 @@ private final class StreamingRelayDelegate: NSObject, URLSessionDataDelegate, @u
                     dataTask: URLSessionDataTask,
                     didReceive data: Data) {
         onChunk(data)
+    }
+
+    /// Extract the `boundary=...` token from a multipart Content-Type value.
+    private static func boundary(fromContentType ct: String) -> String? {
+        for part in ct.split(separator: ";") {
+            let kv = part.split(separator: "=", maxSplits: 1)
+            guard kv.count == 2,
+                  kv[0].trimmingCharacters(in: .whitespaces).lowercased() == "boundary"
+            else { continue }
+            var v = kv[1].trimmingCharacters(in: .whitespaces)
+            if v.hasPrefix("\""), v.hasSuffix("\""), v.count >= 2 { v = String(v.dropFirst().dropLast()) }
+            return v.isEmpty ? nil : v
+        }
+        return nil
     }
 
     func urlSession(_ session: URLSession,
