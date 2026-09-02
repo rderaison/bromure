@@ -1678,32 +1678,34 @@ final class HTTPMitmConnection: @unchecked Sendable {
             ? WSTraceCollector(direction: .upstreamToClient, inflater: u2cInflater) : nil
         u2cCollector?.onMessage = onUpstreamMessage
 
+        // Switch both streams to non-blocking pump mode. The sequential
+        // handshake above is finished, so from here one task reads each stream
+        // while the OTHER writes it — concurrently. For a TLS stream that is
+        // concurrent SSLRead/SSLWrite on one non-thread-safe SSLContext, which
+        // double-frees SecureTransport's record queue (a real, intermittent
+        // heap-corruption crash). `readNB`/`writeNB` serialize each SSL call
+        // under the stream's own lock and never block while holding it — the
+        // `poll()`s in `pumpDirection` wait OUTSIDE the lock, so the two
+        // directions can't deadlock either.
+        serverTLS.setNonBlocking()
+        upstreamTLS.setNonBlocking()
+        let serverFD = serverTLS.pumpFD
+        // `upstreamFD` is the connect fd from above — same fd TLSClientStream wraps.
+
         await withTaskGroup(of: Void.self) { group in
             let server = serverTLS
             let upstream = upstreamTLS
-            group.addTask {
-                while true {
-                    let chunk: Data
-                    do { chunk = try server.read(maxBytes: 16 * 1024) }
-                    catch { return }
-                    if chunk.isEmpty { return }
-                    counters.addClient(chunk.count)
-                    c2uCollector?.feed(chunk)
-                    do { try upstream.write(chunk) }
-                    catch { return }
-                }
+            group.addTask {   // client → upstream
+                Self.pumpDirection(
+                    readFD: serverFD, readNB: { try server.readNB(maxBytes: 16 * 1024) },
+                    writeFD: upstreamFD, writeNB: { try upstream.writeNB($0) },
+                    onChunk: { counters.addClient($0.count); c2uCollector?.feed($0) })
             }
-            group.addTask {
-                while true {
-                    let chunk: Data
-                    do { chunk = try upstream.read(maxBytes: 16 * 1024) }
-                    catch { return }
-                    if chunk.isEmpty { return }
-                    counters.addUpstream(chunk.count)
-                    u2cCollector?.feed(chunk)
-                    do { try server.write(chunk) }
-                    catch { return }
-                }
+            group.addTask {   // upstream → client
+                Self.pumpDirection(
+                    readFD: upstreamFD, readNB: { try upstream.readNB(maxBytes: 16 * 1024) },
+                    writeFD: serverFD, writeNB: { try server.writeNB($0) },
+                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0) })
             }
             await group.next()
             group.cancelAll()
@@ -1723,6 +1725,48 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                clientBytes: clientBytes,
                                upstreamBytes: upstreamBytes,
                                statusCode: statusCode)
+    }
+
+    /// One direction of the non-blocking WebSocket relay. Drains everything
+    /// currently readable (SecureTransport may have buffered more than one
+    /// record, which `poll()` alone can't see), forwards it, then waits for the
+    /// next event with `poll()` — done OUTSIDE the stream lock so the opposite
+    /// direction always makes progress. A 250 ms tick lets a task notice it was
+    /// cancelled (the peer half-closed the other direction) and exit instead of
+    /// blocking forever.
+    private static func pumpDirection(
+        readFD: Int32, readNB: () throws -> StreamReadOutcome,
+        writeFD: Int32, writeNB: (Data) throws -> Int,
+        onChunk: (Data) -> Void) {
+        var pending = Data()
+        while true {
+            if Task.isCancelled { return }
+            // 1. Drain all readable bytes into `pending`.
+            var eof = false
+            drain: while true {
+                let outcome: StreamReadOutcome
+                do { outcome = try readNB() } catch { return }
+                switch outcome {
+                case .bytes(let d): onChunk(d); pending.append(d)
+                case .wouldBlock:   break drain
+                case .eof:          eof = true; break drain
+                }
+            }
+            // 2. Flush `pending` to the write side, waiting for writability if
+            //    the socket buffer is full (backpressure).
+            while !pending.isEmpty {
+                let n: Int
+                do { n = try writeNB(pending) } catch { return }
+                if n > 0 { pending.removeFirst(n); continue }
+                if Task.isCancelled { return }
+                var pfd = pollfd(fd: writeFD, events: Int16(POLLOUT), revents: 0)
+                if poll(&pfd, 1, 250) < 0 && errno != EINTR { return }
+            }
+            if eof { return }
+            // 3. Wait for the next readable event.
+            var pfd = pollfd(fd: readFD, events: Int16(POLLIN), revents: 0)
+            if poll(&pfd, 1, 250) < 0 && errno != EINTR { return }
+        }
     }
 
     /// Emit a TraceRecord for a finished WebSocket session. Builds a

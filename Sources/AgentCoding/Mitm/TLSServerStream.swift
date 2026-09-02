@@ -18,10 +18,50 @@ import Foundation
 /// writes. Implemented by `TLSServerStream` (HTTPS, :443) and
 /// `PlaintextServerStream` (plain HTTP, :80) so `driveTLS` handles both the
 /// same way — the only difference is TLS termination vs. raw socket I/O.
+/// Outcome of a non-blocking pump read.
+enum StreamReadOutcome {
+    case bytes(Data)   // decrypted/plain bytes available now
+    case wouldBlock    // nothing available yet — poll and retry
+    case eof           // peer closed cleanly
+}
+
 protocol MitmServerStream: AnyObject {
     func handshake() throws
     func read(maxBytes: Int) throws -> Data
     func write(_ data: Data) throws
+
+    // --- Concurrent-safe pump mode (the WebSocket relay) ---
+    // The blocking `read`/`write` above are fine for the sequential
+    // request→response path, but the WebSocket pump reads one direction while
+    // writing the other CONCURRENTLY on the same underlying stream. For a
+    // `TLSServerStream` that means concurrent `SSLRead`/`SSLWrite` on one
+    // (non-thread-safe) `SSLContext`, which double-frees its record queue. The
+    // pump therefore switches the fd non-blocking and uses these variants,
+    // which serialize each SSL call under a per-stream lock and never block
+    // while holding it (the caller `poll()`s outside the lock).
+    /// The raw socket fd, for `poll()`ing readability/writability.
+    var pumpFD: Int32 { get }
+    /// Switch the fd to non-blocking. Call once before entering the pump; the
+    /// sequential path above must have finished on this stream.
+    func setNonBlocking()
+    /// One non-blocking read. `SSLRead`/`recv` under the per-stream lock.
+    func readNB(maxBytes: Int) throws -> StreamReadOutcome
+    /// One non-blocking write. Returns bytes consumed (0 == would block).
+    func writeNB(_ data: Data) throws -> Int
+}
+
+extension MitmServerStream {
+    // Generic fallbacks for streams that don't do fd-backed pumping (e.g. test
+    // mocks). The real fd-backed streams override all of these. `readNB`/
+    // `writeNB` here just wrap the blocking calls, so a stream that is never
+    // actually pumped still satisfies the protocol without special-casing.
+    var pumpFD: Int32 { -1 }
+    func setNonBlocking() {}
+    func readNB(maxBytes: Int) throws -> StreamReadOutcome {
+        let d = try read(maxBytes: maxBytes)
+        return d.isEmpty ? .eof : .bytes(d)
+    }
+    func writeNB(_ data: Data) throws -> Int { try write(data); return data.count }
 }
 
 /// Cleartext client stream for transparent :80 interception. Same surface as
@@ -57,12 +97,39 @@ final class PlaintextServerStream: MitmServerStream, @unchecked Sendable {
             }
         }
     }
+
+    // Pump mode. A raw socket is already safe for concurrent read+write (the
+    // kernel serializes each direction), so no lock is needed here — these just
+    // surface EAGAIN as `.wouldBlock` so the shared pump loop works uniformly.
+    var pumpFD: Int32 { fd }
+    func setNonBlocking() { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
+    func readNB(maxBytes: Int) throws -> StreamReadOutcome {
+        if !prefix.isEmpty {
+            let take = prefix.prefix(maxBytes); prefix.removeFirst(take.count)
+            return .bytes(Data(take))
+        }
+        var buf = [UInt8](repeating: 0, count: maxBytes)
+        let n = buf.withUnsafeMutableBytes { Darwin.recv(fd, $0.baseAddress, maxBytes, 0) }
+        if n > 0 { return .bytes(Data(buf.prefix(n))) }
+        if n == 0 { return .eof }
+        if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return .wouldBlock }
+        throw MitmError.tlsReadFailed(errno)
+    }
+    func writeNB(_ data: Data) throws -> Int {
+        let n = data.withUnsafeBytes { Darwin.send(fd, $0.baseAddress, data.count, 0) }
+        if n >= 0 { return n }
+        if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return 0 }
+        throw MitmError.tlsWriteFailed(errno)
+    }
 }
 
 @available(macOS, deprecated: 10.15, message: "wraps SSLContext deliberately — Network.framework can't take a raw socket FD")
 final class TLSServerStream: MitmServerStream, @unchecked Sendable {
     private let fd: Int32
     private let ctx: SSLContext
+    /// Serializes every `SSLRead`/`SSLWrite` on `ctx` in pump mode so the two
+    /// WebSocket directions can't corrupt SecureTransport's record queue.
+    private let ioLock = NSLock()
 
     init(fd: Int32, identity: SecIdentity) throws {
         self.fd = fd
@@ -147,6 +214,39 @@ final class TLSServerStream: MitmServerStream, @unchecked Sendable {
             }
         }
     }
+
+    // Pump mode: non-blocking, lock-serialized single SSL calls.
+    var pumpFD: Int32 { fd }
+    func setNonBlocking() { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
+    func readNB(maxBytes: Int) throws -> StreamReadOutcome {
+        var buf = [UInt8](repeating: 0, count: maxBytes)
+        var got = 0
+        ioLock.lock()
+        let status = buf.withUnsafeMutableBufferPointer { SSLRead(ctx, $0.baseAddress!, maxBytes, &got) }
+        ioLock.unlock()
+        switch status {
+        case errSecSuccess, errSSLWouldBlock:
+            return got > 0 ? .bytes(Data(buf.prefix(got))) : .wouldBlock
+        case errSSLClosedGraceful, errSSLClosedNoNotify:
+            return .eof
+        default:
+            throw MitmError.tlsReadFailed(status)
+        }
+    }
+    func writeNB(_ data: Data) throws -> Int {
+        var consumed = 0
+        var thrown: OSStatus? = nil
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var written = 0
+            ioLock.lock()
+            let status = SSLWrite(ctx, raw.baseAddress!, data.count, &written)
+            ioLock.unlock()
+            if status == errSecSuccess || status == errSSLWouldBlock { consumed = written }
+            else { thrown = status }
+        }
+        if let s = thrown { throw MitmError.tlsWriteFailed(s) }
+        return consumed
+    }
 }
 
 /// Client-side TLS over an already-connected upstream socket FD.
@@ -168,6 +268,8 @@ final class TLSClientStream: @unchecked Sendable {
     private let ctx: SSLContext
     private let peerName: String
     private let pinnedCA: SecCertificate?
+    /// Serializes `SSLRead`/`SSLWrite` on `ctx` in pump mode (see TLSServerStream).
+    private let ioLock = NSLock()
 
     init(fd: Int32, peerName: String,
          clientIdentity: SecIdentity? = nil,
@@ -285,6 +387,39 @@ final class TLSClientStream: @unchecked Sendable {
                 throw MitmError.tlsWriteFailed(status)
             }
         }
+    }
+
+    // Pump mode: non-blocking, lock-serialized single SSL calls (see TLSServerStream).
+    var pumpFD: Int32 { fd }
+    func setNonBlocking() { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
+    func readNB(maxBytes: Int) throws -> StreamReadOutcome {
+        var buf = [UInt8](repeating: 0, count: maxBytes)
+        var got = 0
+        ioLock.lock()
+        let status = buf.withUnsafeMutableBufferPointer { SSLRead(ctx, $0.baseAddress!, maxBytes, &got) }
+        ioLock.unlock()
+        switch status {
+        case errSecSuccess, errSSLWouldBlock:
+            return got > 0 ? .bytes(Data(buf.prefix(got))) : .wouldBlock
+        case errSSLClosedGraceful, errSSLClosedNoNotify:
+            return .eof
+        default:
+            throw MitmError.tlsReadFailed(status)
+        }
+    }
+    func writeNB(_ data: Data) throws -> Int {
+        var consumed = 0
+        var thrown: OSStatus? = nil
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var written = 0
+            ioLock.lock()
+            let status = SSLWrite(ctx, raw.baseAddress!, data.count, &written)
+            ioLock.unlock()
+            if status == errSecSuccess || status == errSSLWouldBlock { consumed = written }
+            else { thrown = status }
+        }
+        if let s = thrown { throw MitmError.tlsWriteFailed(s) }
+        return consumed
     }
 }
 
