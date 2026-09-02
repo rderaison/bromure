@@ -28,12 +28,22 @@ private func keyParams(_ type: String, key: String, code: String, vk: Int) -> [S
 @MainActor
 final class BrowserCDP {
     private let bridge: CDPBridge
+    /// Persistent CDP WebSocket to the active page, reused across ops. The old
+    /// code opened a fresh connection (a `/json/list` GET + a full WebSocket
+    /// upgrade handshake + teardown) for EVERY call — three extra round-trips
+    /// per op, brutal over the fat-client SSH tunnel. A CDP page target
+    /// survives navigations, so one connection serves the whole session; we
+    /// only reconnect when it drops.
+    private var cachedWS: CDPWSConnection?
 
     init(socketDevice: VZVirtioSocketDevice) {
         bridge = CDPBridge(socketDevice: socketDevice)
     }
 
-    func stop() { bridge.stop() }
+    func stop() {
+        cachedWS?.disconnect(); cachedWS = nil
+        bridge.stop()
+    }
 
     enum CDPError: LocalizedError {
         case notReady           // guest cdp-agent hasn't connected yet
@@ -402,14 +412,35 @@ final class BrowserCDP {
 
     // MARK: - Target selection + connection
 
-    /// Open a CDP WebSocket to the active page target and run `body`.
+    /// Run `body` against the active page's CDP WebSocket, reusing the cached
+    /// connection when it's alive. (MCP requests are served serially per
+    /// connection, so these calls don't overlap.)
     private func withPage<T>(_ body: (CDPWSConnection) async throws -> T) async throws -> T {
+        let ws = try await activeConnection()
+        do {
+            return try await body(ws)
+        } catch {
+            // If the connection dropped mid-op, evict it so the next call
+            // reconnects instead of reusing a dead socket.
+            if !ws.isConnected {
+                if cachedWS === ws { cachedWS = nil }
+                ws.disconnect()
+            }
+            throw error
+        }
+    }
+
+    /// A live CDP WebSocket to the active page. Reuses the cached one; only when
+    /// it's missing/dropped does it pay the `/json/list` + upgrade handshake.
+    private func activeConnection() async throws -> CDPWSConnection {
+        if let ws = cachedWS, ws.isConnected { return ws }
+        cachedWS?.disconnect(); cachedWS = nil
         let path = try await activePageWSPath()
         guard let conn = dequeueConnection() else { throw CDPError.notReady }
         let ws = CDPWSConnection(connection: conn)
         try await ws.connect(path: path)
-        defer { ws.disconnect() }
-        return try await body(ws)
+        cachedWS = ws
+        return ws
     }
 
     private func dequeueConnection() -> VZVirtioSocketConnection? {
@@ -576,12 +607,21 @@ final class CDPWSConnection: @unchecked Sendable {
         var acc = Data()
         while isConnected && fd >= 0 {
             let n = Darwin.read(fd, &buf, buf.count)
-            if n <= 0 { break }
-            acc.append(contentsOf: buf[0..<n])
-            while let (payload, consumed) = Self.parseWSFrame(acc) {
-                acc = Data(acc.dropFirst(consumed))
-                handleMessage(payload)
+            if n > 0 {
+                acc.append(contentsOf: buf[0..<n])
+                while let (payload, consumed) = Self.parseWSFrame(acc) {
+                    acc = Data(acc.dropFirst(consumed))
+                    handleMessage(payload)
+                }
+                continue
             }
+            if n == 0 { break }                                  // peer closed the connection
+            // n < 0: the SO_RCVTIMEO read timeout (or an interrupt) fired during
+            // an idle gap. The connection is fine — keep it alive so the cached
+            // WebSocket survives quiet periods between ops instead of forcing a
+            // reconnect (and full handshake) on the next call.
+            if errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK { continue }
+            break                                                // a real socket error
         }
         isConnected = false
         lock.lock(); let p = pending; pending.removeAll(); lock.unlock()
