@@ -3120,16 +3120,20 @@ async function main() {
           // ignores the guest's HTTP(S)_PROXY, so the only thing that can
           // enforce is host-side interception. No `-f`: we want the 403 status
           // without curl bailing out. neverssl.com is guaranteed plain HTTP.
+          // Every curl is `--max-time 25`: an external upstream that connects
+          // slowly (e.g. a dual-stack host whose IPv6 route black-holes on the
+          // CI LAN) must fail THAT probe cleanly, not stall the whole exec past
+          // the HTTP client's budget and surface as an opaque `_status:0`.
           const r = await api("POST", `/sessions/${id}/exec`, {
             timeout: 90,
             command: `set +e
-ISSUER=$(curl --noproxy '*' -sSv https://bromure.io/ 2>&1 | grep -i 'issuer:' | head -1)
-GET443=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' https://bromure.io/en)
-POST443=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' -X POST https://bromure.io/en)
-BODY443=$(curl --noproxy '*' -sS -X POST https://bromure.io/en | head -c 200)
-GET80=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' http://neverssl.com/)
-POST80=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' -X POST http://neverssl.com/)
-BODY80=$(curl --noproxy '*' -sS -X POST http://neverssl.com/ | head -c 200)
+ISSUER=$(curl --noproxy '*' --max-time 25 -sSv https://bromure.io/ 2>&1 | grep -i 'issuer:' | head -1)
+GET443=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' https://bromure.io/en)
+POST443=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' -X POST https://bromure.io/en)
+BODY443=$(curl --noproxy '*' --max-time 25 -sS -X POST https://bromure.io/en | head -c 200)
+GET80=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' http://neverssl.com/)
+POST80=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' -X POST http://neverssl.com/)
+BODY80=$(curl --noproxy '*' --max-time 25 -sS -X POST http://neverssl.com/ | head -c 200)
 echo "ISSUER=$ISSUER"; echo "GET443=$GET443"; echo "POST443=$POST443"; echo "BODY443=$BODY443"
 echo "GET80=$GET80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
           });
@@ -3154,8 +3158,8 @@ echo "GET80=$GET80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
           const r = await api("POST", `/sessions/${id}/exec`, {
             timeout: 60,
             command: `set +e
-ISSUER=$(curl --noproxy '*' -sSv https://bromure.io/ 2>&1 | grep -i 'issuer:' | head -1)
-BODY=$(curl --noproxy '*' -sS -X POST https://bromure.io/en | head -c 200)
+ISSUER=$(curl --noproxy '*' --max-time 25 -sSv https://bromure.io/ 2>&1 | grep -i 'issuer:' | head -1)
+BODY=$(curl --noproxy '*' --max-time 25 -sS -X POST https://bromure.io/en | head -c 200)
 echo "ISSUER=$ISSUER"; echo "BODY=$BODY"`,
           });
           assertEq(r._status, 200);
@@ -3167,6 +3171,52 @@ echo "ISSUER=$ISSUER"; echo "BODY=$BODY"`,
             `interception should be OFF but 443 was still MiTM'd: ${grab(out, "ISSUER")}`);
           assert(!grab(out, "BODY").includes("Bromure Guardrails"),
             "POST should reach upstream (not be blocked) when interception is disabled");
+        });
+      });
+
+      // Interception can be toggled on a LIVE session (no reboot): the switch's
+      // per-port divert is flipped in place by applyLiveSessionRefresh. Prove
+      // the full cycle — enforcing → passthrough → enforcing again — all on one
+      // running VM. Uses bromure.io:443 only (reliably reachable + MiTM'd),
+      // capped, so it doesn't inherit 27.1's dual-stack flakiness.
+      await test("27.3 disableTransparentProxy toggles LIVE on a running session (no reboot)", async () => {
+        await withFWSession("ACE2E_FW_LiveToggle", null, async (id) => {
+          const probe = () => api("POST", `/sessions/${id}/exec`, {
+            timeout: 50,
+            command: `set +e
+ISSUER=$(curl --noproxy '*' --max-time 25 -sSv https://bromure.io/ 2>&1 | grep -i 'issuer:' | head -1)
+POST443=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' -X POST https://bromure.io/en)
+echo "ISSUER=$ISSUER"; echo "POST443=$POST443"`,
+          });
+          const flip = (v) => { const p = getProfileJSON(id); p.disableTransparentProxy = v; setProfileJSON(id, p); };
+
+          // (a) Default: interception ON — MiTM'd + POST blocked.
+          let r = await probe();
+          assertEq(r._status, 200);
+          let out = r.stdout || "";
+          assertIncludes(grab(out, "ISSUER"), "Bromure", "expected MiTM before any toggle");
+          assertEq(grab(out, "POST443"), "403", "expected POST blocked before any toggle");
+
+          // (b) Flip OFF live (no reboot) — the direct connection now reaches
+          //     the real upstream: real cert, and the POST is not our 403.
+          flip(true);
+          await sleep(1500);
+          r = await probe();
+          assertEq(r._status, 200);
+          out = r.stdout || "";
+          assert(!grab(out, "ISSUER").includes("Bromure"),
+            `interception should be OFF live but 443 still MiTM'd: ${grab(out, "ISSUER")}`);
+          assert(grab(out, "POST443") !== "403",
+            `POST should reach upstream after live opt-out, got ${grab(out, "POST443")}`);
+
+          // (c) Flip back ON live — enforcement re-arms without a reboot.
+          flip(false);
+          await sleep(1500);
+          r = await probe();
+          assertEq(r._status, 200);
+          out = r.stdout || "";
+          assertIncludes(grab(out, "ISSUER"), "Bromure", "MiTM should re-arm after toggling back on");
+          assertEq(grab(out, "POST443"), "403", "POST should be blocked again after toggling back on");
         });
       });
     }
