@@ -3440,6 +3440,13 @@ struct ProfileEditorView: View {
                     Text("A lighter escape hatch than full passthrough. When a request to a self-signed / private-CA host fails validation, the agent can retry it with the header `X-bromure-insecure: yes` to skip validating THAT upstream's certificate. Interception, tracing, and the leak guard stay on, and Bromure injects no real credential on such a request (only the guest's fakes go out). Every use is recorded in the Security Timeline. On by default (it only acts when the guest explicitly sends the header); turn it off to forbid the header outright.")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    Toggle("Don't alert on credential exfiltration",
+                           isOn: $draft.disableExfiltrationAlerts)
+                        .padding(.top, 8)
+                    Text("By default, when a session credential is seen heading to a host it wasn't minted for, Bromure pauses the VM and pops up a compromise alert. Turn this on to suppress that modal. The leak is STILL blocked and still recorded in the Security Timeline — only the interruption goes away. Applies live, no restart.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.top, 6)
             }

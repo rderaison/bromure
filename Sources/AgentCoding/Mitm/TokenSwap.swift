@@ -89,6 +89,13 @@ public final class TokenSwapper: @unchecked Sendable {
     /// headers AND body on every request and don't want to do
     /// `entries.count` substring searches per call.
     private var scanners: [UUID: AhoCorasick] = [:]
+    /// Hosts the user explicitly authorized as extra swap destinations for a
+    /// session, via the "Allow" button on the compromise alert. When a fake
+    /// token is seen heading to one of these, it's no longer flagged as a
+    /// leak AND the swap fires there (so the real credential actually reaches
+    /// the user-approved host). Session-scoped: cleared by `clearMap` on VM
+    /// teardown, exactly like the per-session consent grants.
+    private var sessionAllowedHosts: [UUID: Set<String>] = [:]
     private let lock = NSLock()
     private let consent: ConsentBroker
     /// Single host-side hook the proxy fires when a fake token is
@@ -117,6 +124,26 @@ public final class TokenSwapper: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         maps.removeValue(forKey: profileID)
         scanners.removeValue(forKey: profileID)
+        sessionAllowedHosts.removeValue(forKey: profileID)
+    }
+
+    /// Authorize `hosts` as extra swap destinations for this session (the
+    /// compromise alert's "Allow"). Stored lowercased; matched exact-or-
+    /// subdomain like every other host scope. Cleared on VM teardown.
+    public func allowSessionHosts(_ hosts: [String], for profileID: UUID) {
+        let cleaned = hosts.map { $0.lowercased().trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        sessionAllowedHosts[profileID, default: []].formUnion(cleaned)
+    }
+
+    /// Whether `host` is a session-allowed swap destination for this profile
+    /// (equal to, or a subdomain of, any host the user approved via "Allow").
+    private func sessionHostAllowed(_ host: String, profileID: UUID) -> Bool {
+        lock.lock(); let allowed = sessionAllowedHosts[profileID] ?? []; lock.unlock()
+        guard !allowed.isEmpty else { return false }
+        return allowed.contains { Self.hostMatchesScope(host: host, scope: $0) }
     }
 
     /// Append new entries to the profile's map without clobbering the
@@ -182,12 +209,16 @@ public final class TokenSwapper: @unchecked Sendable {
         var swaps: [SwapRecord] = []
         var newBody = bodyBytes
         var bodyDirty = false
+        // The user may have authorized this host as an extra destination via
+        // the compromise alert's "Allow" — if so, a scoped entry's fake is
+        // swapped here too, so the real credential reaches the approved host.
+        let sessionAllowed = sessionHostAllowed(host, profileID: profileID)
         for entry in map.entries {
             if let h = entry.host, !h.isEmpty {
                 let matched = entry.acceptSiblings
                     ? Self.hostMatchesScopeFamily(host: host, scope: h)
                     : Self.hostMatchesScope(host: host, scope: h)
-                if !matched { continue }
+                if !matched && !sessionAllowed { continue }
             }
 
             let inHeader = (headerStr.range(of: entry.fake) != nil)
@@ -403,6 +434,10 @@ public final class TokenSwapper: @unchecked Sendable {
 
         let matches = scanner.scan(rawRequest)
         if matches.isEmpty { return [] }
+
+        // The user authorized this host for the session via the alert's
+        // "Allow" — the fake is expected here now, not exfiltration.
+        if sessionHostAllowed(host, profileID: profileID) { return [] }
 
         var leaks: [CompromiseLeak] = []
         for idx in matches {

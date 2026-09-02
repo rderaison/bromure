@@ -1501,6 +1501,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// interception (e.g. heavy cert-pinning not covered by the passthrough list).
     public var disableTransparentProxy: Bool = false
 
+    /// Suppress the interruptive "environment may be compromised" alert when a
+    /// session credential is seen heading to a host it wasn't minted for. The
+    /// leak is STILL blocked (the proxy returns 451) and STILL recorded in the
+    /// Security Timeline — this only stops the modal + VM pause. Default false
+    /// (alerts on). For workspaces where the prompt is more noise than signal.
+    public var disableExfiltrationAlerts: Bool = false
+
     /// Supply-chain security policy — age-gate package installs,
     /// look up OSV / socket.dev for known-bad versions, strip
     /// install scripts. Enforced host-side in the MITM; the in-VM
@@ -1968,6 +1975,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case guardrails
         case egressRules
         case disableTransparentProxy
+        case disableExfiltrationAlerts
         case supplyChain
         case promptInjection
         case digitalOceanToken
@@ -2083,6 +2091,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         guardrails = try c.decodeIfPresent(GuardrailsPolicy.self, forKey: .guardrails) ?? GuardrailsPolicy()
         egressRules = try c.decodeIfPresent(String.self, forKey: .egressRules) ?? ""
         disableTransparentProxy = try c.decodeIfPresent(Bool.self, forKey: .disableTransparentProxy) ?? false
+        disableExfiltrationAlerts = try c.decodeIfPresent(Bool.self, forKey: .disableExfiltrationAlerts) ?? false
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
         promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
@@ -2233,6 +2242,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(guardrails, forKey: .guardrails)
         if !egressRules.isEmpty {
             try c.encode(egressRules, forKey: .egressRules)
+        }
+        if disableExfiltrationAlerts {
+            try c.encode(disableExfiltrationAlerts, forKey: .disableExfiltrationAlerts)
         }
         if disableTransparentProxy {
             try c.encode(disableTransparentProxy, forKey: .disableTransparentProxy)

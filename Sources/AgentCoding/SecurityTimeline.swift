@@ -151,6 +151,12 @@ public final class SecurityTimeline {
                        "\(fake) (\(cred), scoped to \(declared)) → \(observed)",
                        NSLocalizedString("blocked — exfiltration attempt, VM paused", comment: "Security Timeline decision"), .blocked)
 
+        case "credential.exfiltration_allowed":
+            let observed = str(d, "observed_host") ?? "?"
+            return row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                       observed,
+                       NSLocalizedString("allowed by user for this session", comment: "Security Timeline decision"), .allowed)
+
         case "supply_chain.fetch":
             let eco = str(d, "ecosystem") ?? ""
             let pkg = str(d, "package") ?? "?"

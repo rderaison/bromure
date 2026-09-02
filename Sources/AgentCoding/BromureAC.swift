@@ -9368,6 +9368,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor
     func handleCompromise(_ event: CompromiseEvent) {
         if compromiseAlertActive { return }
+        // Per-workspace opt-out. The proxy already blocked the leak (451) and
+        // recorded it in the Security Timeline; this flag only suppresses the
+        // interruptive modal + VM pause. Read live (pane, then session snapshot)
+        // so toggling it takes effect without a reboot.
+        let liveProfile = pane(for: event.profileID)?.profile
+            ?? runningSessions[event.profileID]?.profile
+        if liveProfile?.disableExfiltrationAlerts == true { return }
         // The VM may be detached (no pane, VM still running). A compromise must
         // still pause it and surface the alert, so force a reattach first — that
         // binds a view to the live VM so the user sees the frozen frame.
@@ -9442,11 +9449,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 vm.stop(completionHandler: { _ in })
                 self.detachSession(event.profileID)
 
-            case .continueAnyway:
-                // User accepted the risk. Resume the VM. The proxy
-                // already returned 451 for the leaking request — if
-                // the VM tries again, the detector fires again and
-                // the alert re-opens.
+            case .block:
+                // Block just this request and keep running. The proxy
+                // already returned 451 for the leaking request — if the
+                // VM tries again, the detector fires again and the alert
+                // re-opens. Nothing is added to the session allowlist.
+                window.setSuspendedTint(false)
+                if vm.state == .paused {
+                    do { try await vm.resume() }
+                    catch {
+                        FileHandle.standardError.write(Data(
+                            "[ac] compromise: resume failed (\(error))\n".utf8))
+                    }
+                }
+
+            case .allow:
+                // User vouches for this destination. Authorize the observed
+                // host(s) as extra swap destinations FOR THIS SESSION ONLY
+                // (cleared on VM teardown), so the retry both passes the
+                // compromise check and gets the real credential swapped in.
+                let hosts = Array(Set(event.leaks.map { $0.observedHost }))
+                self.mitmEngine?.swapper.allowSessionHosts(hosts, for: event.profileID)
+                for host in hosts {
+                    BACEventEmitter.shared.emitDetached(
+                        profileID: event.profileID,
+                        eventType: "credential.exfiltration_allowed",
+                        eventData: ["observed_host": .string(host),
+                                    "scope": .string("session")])
+                }
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
                     do { try await vm.resume() }
@@ -9604,12 +9634,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 profileID: event.profileID,
                 title: title,
                 message: info + "\n" + NSLocalizedString(
-                    "Shutting the VM down is the safest choice.",
+                    "Allow trusts this destination for the rest of this session (the credential will be sent there). Block stops just this request. Shutting the VM down is the safest choice.",
                     comment: "Compromise remote-prompt guidance"),
                 buttons: [NSLocalizedString("Shut down", comment: ""),
-                          NSLocalizedString("Continue", comment: "")],
+                          NSLocalizedString("Block", comment: ""),
+                          NSLocalizedString("Allow", comment: "")],
                 fallback: 0, timeout: 180)
-            return choice == 1 ? .continueAnyway : .shutdown
+            switch choice {
+            case 2:  return .allow
+            case 1:  return .block
+            default: return .shutdown
+            }
         }
 
         let alert = NSAlert()
@@ -9628,28 +9663,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         alert.messageText = title
         info += "\n" + NSLocalizedString(
-            "Save for Investigation lets you pick a folder where Bromure will copy the disk image and gzipped archives of the home directory and shared folders. The VM's RAM state is discarded. The VM is then shut down and the workspace is marked compromised.",
+            "Allow trusts this destination for the rest of this session only — the credential will be swapped in and sent there (and future requests to it won't be flagged). Block stops just this request and keeps the VM running. Save for Investigation copies the disk image and gzipped archives of the home directory and shared folders to a folder you pick; the VM's RAM state is discarded, the VM is shut down, and the workspace is marked compromised.",
             comment: "")
         alert.informativeText = info
-        // Order: dismissive default first would let an enter-press hide
-        // the warning. Make Shut Down the default — it's the safest.
+        // Order: the default (enter) button is the first one added; keep the
+        // safest action there. Allow is the dangerous one, so it never gets a
+        // key equivalent — it must be an explicit click.
         alert.addButton(withTitle: NSLocalizedString("Shut down", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Block", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Allow", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Save for Investigation", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
-        // Cmd-period / Esc maps to the third button (Continue) by
-        // default. Override so an accidental dismiss doesn't resume
-        // the compromised VM.
-        alert.buttons.last?.keyEquivalent = ""
+        // Strip key equivalents from Block/Allow/Save so no stray
+        // enter/esc/space press can resume or (worse) allow the leak.
+        for b in alert.buttons.dropFirst() { b.keyEquivalent = "" }
         NSApp.activate(ignoringOtherApps: true)
         switch alert.runModal() {
         case .alertFirstButtonReturn:  return .shutdown
-        case .alertSecondButtonReturn: return .saveForInvestigation
-        case .alertThirdButtonReturn:  return .continueAnyway
-        default:                        return .shutdown
+        case .alertSecondButtonReturn: return .block
+        case .alertThirdButtonReturn:  return .allow
+        default:                        return .saveForInvestigation  // 4th button
         }
     }
 
-    enum CompromiseAction { case shutdown, saveForInvestigation, continueAnyway }
+    enum CompromiseAction { case allow, block, shutdown, saveForInvestigation }
 
     /// Reboot dialog: soft (graceful guest halt via `poweroff` — NOT
     /// `reboot`, which restarts the VM in place without VZ ever firing
