@@ -143,10 +143,10 @@ public final class MitmEngine {
             } else if policy.packageFilter == .socketDev, !policy.socketAPIKey.isEmpty {
                 bits.append("socket.dev=key-set-but-no-toggle")
             }
-            if policy.delpiActive {
-                bits.append("delpi=npm→\(DelpiRegistry.host)")
-            } else if policy.packageFilter == .delpi {
-                bits.append("delpi=selected-but-no-key")
+            if policy.depiActive {
+                bits.append("depi=npm→\(DepiRegistry.host)")
+            } else if policy.packageFilter == .depi {
+                bits.append("depi=selected-but-no-key")
             }
             if policy.stripInstallScripts { bits.append("strip-scripts") }
             let summary = bits.isEmpty ? "off" : bits.joined(separator: " ")

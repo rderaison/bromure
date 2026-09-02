@@ -16,9 +16,9 @@ The sandbox already contains the agent: it cannot touch your Mac, and its creden
 
 - **Fresh-release hijacks.** A maintainer's account is compromised and a malicious version is published. These versions are typically detected and yanked within hours to days — which is why the [age gate](18-glossary.mdx) refuses versions younger than a cutoff.
 - **Known-vulnerable versions.** The agent resolves a dependency to a version with a published advisory. The [OSV](18-glossary.mdx) check catches these.
-- **Malware, typosquats, and rogue install scripts.** Packages built to be malicious from the start. The [socket.dev](18-glossary.mdx) and [Delpi](18-glossary.mdx) providers flag or filter these, and install-script stripping removes the most common execution vector outright.
+- **Malware, typosquats, and rogue install scripts.** Packages built to be malicious from the start. The [socket.dev](18-glossary.mdx) and [Depi](18-glossary.mdx) providers flag or filter these, and install-script stripping removes the most common execution vector outright.
 
-Enforcement is host-side by design. The proxy applies policy to the response before the agent sees it, so nothing running inside the VM — including a fully compromised agent — can loosen the rules. The in-VM `.npmrc` and `pip.conf` can only further restrict what the proxy already served, never widen it. Reputation-service API keys (socket.dev, Delpi) are held on the host only and are never exported into the VM.
+Enforcement is host-side by design. The proxy applies policy to the response before the agent sees it, so nothing running inside the VM — including a fully compromised agent — can loosen the rules. The in-VM `.npmrc` and `pip.conf` can only further restrict what the proxy already served, never widen it. Reputation-service API keys (socket.dev, Depi) are held on the host only and are never exported into the VM.
 
 ## How interception works
 
@@ -56,7 +56,7 @@ npm, pip, cargo, and the other package managers print that body verbatim in thei
 
 The proxy intercepts eight package ecosystems. Not every check supports every ecosystem:
 
-| Ecosystem | Intercepted hosts | Age gate | OSV | socket.dev | Delpi | Script strip |
+| Ecosystem | Intercepted hosts | Age gate | OSV | socket.dev | Depi | Script strip |
 |---|---|---|---|---|---|---|
 | npm | `registry.npmjs.org`, `*.npmjs.org` | Yes | Yes | Yes | Yes | Yes |
 | PyPI | `pypi.org`, `files.pythonhosted.org` | Yes | Yes | Yes | — | — |
@@ -106,9 +106,9 @@ In the **OSV vulnerability check** group:
 
 The check is off by default, and the severity threshold defaults to **High and above** — as the pane itself notes, a low-severity CVE in a transitive subpackage should not interrupt a workflow. Lookups run only on artifact downloads (not metadata fetches), results are cached in memory for the app run, at most 16 lookups run in parallel, and transient network errors are retried up to 5 times with backoff. If OSV cannot be reached at all, the package is held for your consent rather than silently allowed — see [Offline and degraded behavior](#offline-and-degraded-behavior).
 
-## Package filtering: socket.dev and Delpi
+## Package filtering: socket.dev and Depi
 
-The **Package filtering** group selects a reputation provider through a mutually exclusive radio: **None**, **socket.dev**, or **Delpi**. The two providers work in fundamentally different ways — socket.dev is a pre-flight lookup the proxy consults before letting a fetch through; Delpi replaces the npm registry outright. Only one can be active at a time by design (running both would double-filter every install), and selecting **None** disables both while keeping any stored keys. Whichever provider you choose, the other layers in this chapter — age gate, OSV, script stripping — still apply on top.
+The **Package filtering** group selects a reputation provider through a mutually exclusive radio: **None**, **socket.dev**, or **Depi**. The two providers work in fundamentally different ways — socket.dev is a pre-flight lookup the proxy consults before letting a fetch through; Depi replaces the npm registry outright. Only one can be active at a time by design (running both would double-filter every install), and selecting **None** disables both while keeping any stored keys. Whichever provider you choose, the other layers in this chapter — age gate, OSV, script stripping — still apply on top.
 
 The default is **None**. Workspaces created before the radio existed that already have a socket.dev key are automatically inferred as **socket.dev**.
 
@@ -127,22 +127,22 @@ Both blocks are off by default. Results are cached for the app run, at most 16 c
 
 > **Note:** If you enable OSV and socket.dev's CVE block together, both will check every artifact — that is allowed (they are different layers), just redundant for CVE coverage. Many users pair socket.dev's compromised-package block with the free OSV check instead.
 
-### Delpi
+### Depi
 
-[Delpi](18-glossary.mdx) is a drop-in secure npm registry by Lupin & Holmes (landh.tech) that serves pre-vetted packages. Instead of looking packages up, Bromure re-routes *every* npm registry request — metadata, tarballs, audit, anything addressed to `registry.npmjs.org` or `*.npmjs.org` — to Delpi's npm-compatible filtering registry at `depi-npm-proxy.landh.tech:443`, attaching your key as an `Authorization: Bearer` header and stripping any Authorization header the guest sent. Delpi rewrites tarball URLs in its packuments to point at itself, so those follow-up fetches get the key injected host-side too.
+[Depi](18-glossary.mdx) is a drop-in secure npm registry by Lupin & Holmes (landh.tech) that serves pre-vetted packages. Instead of looking packages up, Bromure re-routes *every* npm registry request — metadata, tarballs, audit, anything addressed to `registry.npmjs.org` or `*.npmjs.org` — to Depi's npm-compatible filtering registry at `depi-npm-proxy.landh.tech:443`, attaching your key as an `Authorization: Bearer` header and stripping any Authorization header the guest sent. Depi rewrites tarball URLs in its packuments to point at itself, so those follow-up fetches get the key injected host-side too.
 
-To enable it, select **Delpi** in the radio and paste your key into the **API key:** secure field (**Get an API key** opens landh.tech). While the field is empty, an orange warning reads **Enter an API key — Delpi stays off without one.** Each re-routed request is logged in the Security Log:
+To enable it, select **Depi** in the radio and paste your key into the **API key:** secure field (**Get an API key** opens landh.tech). While the field is empty, an orange warning reads **Enter an API key — Depi stays off without one.** Each re-routed request is logged in the Security Log:
 
 ```
-[delpi] GET registry.npmjs.org/… → https://depi-npm-proxy.landh.tech
+[depi] GET registry.npmjs.org/… → https://depi-npm-proxy.landh.tech
 ```
 
 Error handling is explicit rather than silent:
 
-- **401 (key rejected).** Bromure substitutes a clear plaintext error that npm prints ("Bromure: the Delpi registry rejected the configured API key…", with the header `X-Bromure-Block: delpi-auth`), logs it, and raises a one-shot GUI alert per workspace-and-key combination: "Delpi rejected your API key". Headless SSH/TUI sessions do not get the GUI alert; they rely on the log line and the rewritten npm error.
-- **403 (package blocked by Delpi, or key not authorized for it).** Logged and passed through unchanged, so npm reports Delpi's own refusal text.
+- **401 (key rejected).** Bromure substitutes a clear plaintext error that npm prints ("Bromure: the Depi registry rejected the configured API key…", with the header `X-Bromure-Block: depi-auth`), logs it, and raises a one-shot GUI alert per workspace-and-key combination: "Depi rejected your API key". Headless SSH/TUI sessions do not get the GUI alert; they rely on the log line and the rewritten npm error.
+- **403 (package blocked by Depi, or key not authorized for it).** Logged and passed through unchanged, so npm reports Depi's own refusal text.
 
-Delpi affects npm only — the other seven ecosystems are untouched by it. Delpi replaces socket.dev in the radio, not your local policy: the age gate, OSV check, and script stripping still run on what Delpi serves.
+Depi affects npm only — the other seven ecosystems are untouched by it. Depi replaces socket.dev in the radio, not your local policy: the age gate, OSV check, and script stripping still run on what Depi serves.
 
 ## Install-script stripping
 
@@ -188,7 +188,7 @@ Supply-chain policy is configured per workspace, in the **Supply Chain** pane of
 |---|---|
 | **Refuse packages younger than the cutoff** (age gate) | On, **Minimum age:** 2 days, no exemptions |
 | **Look up packages on api.osv.dev (free, no key required)** | Off; **Block at severity:** High and above |
-| **Package filtering** | **None** (no socket.dev or Delpi key) |
+| **Package filtering** | **None** (no socket.dev or Depi key) |
 | **Block compromised packages** / **Block packages with known CVEs** (socket.dev) | Off; **CVE block threshold:** High and above |
 | **Strip preinstall / install / postinstall / prepare from npm tarballs on the fly** | Off, empty allowlist |
 | **Prompt before passing lockfile-pinned tarballs through unmodified** | Off (silent pass-through) |
@@ -201,13 +201,13 @@ Three operational details:
   [supply-chain] policy engaged for 1a2b3c4d: age-gate=2d osv=high socket.dev=compromised+cve=high strip-scripts
   ```
 
-  Misconfigurations are called out right in that summary: `socket.dev=key-set-but-no-toggle` means a key is entered but neither block is enabled, and `delpi=selected-but-no-key` means Delpi is chosen but off for lack of a key.
-- **Where it is stored.** The policy lives in the workspace's `profile.json` under `~/Library/Application Support/BromureAC/profiles/<id>/` (only non-default fields are written). The socket.dev and Delpi API keys are stored there too — host-side only, shown as secure fields in the UI, and never copied into the VM. There are no supply-chain-specific environment variables or launch arguments.
+  Misconfigurations are called out right in that summary: `socket.dev=key-set-but-no-toggle` means a key is entered but neither block is enabled, and `depi=selected-but-no-key` means Depi is chosen but off for lack of a key.
+- **Where it is stored.** The policy lives in the workspace's `profile.json` under `~/Library/Application Support/BromureAC/profiles/<id>/` (only non-default fields are written). The socket.dev and Depi API keys are stored there too — host-side only, shown as secure fields in the UI, and never copied into the VM. There are no supply-chain-specific environment variables or launch arguments.
 - **Remote configuration.** The SSH/TUI remote menu exposes the same **Supply Chain** pane with the same fields, so a headless instance can be configured without the GUI. See [Remote Access](14-remote-access.mdx).
 
 ## The Security Log window
 
-Everything the supply-chain pipeline does is visible in the Security Log — open **Window** → **Security Log…**. It is a live tail of every security event the proxy emits: supply-chain lookups and verdicts, 451 blocks, script strips, policy-engaged confirmations, and Delpi re-routes, alongside prompt-injection detections, Fusion engage/disengage, LLM routing changes, remote-access events, and worktree lines. One window serves the whole app; choosing the menu item again brings it forward.
+Everything the supply-chain pipeline does is visible in the Security Log — open **Window** → **Security Log…**. It is a live tail of every security event the proxy emits: supply-chain lookups and verdicts, 451 blocks, script strips, policy-engaged confirmations, and Depi re-routes, alongside prompt-injection detections, Fusion engage/disengage, LLM routing changes, remote-access events, and worktree lines. One window serves the whole app; choosing the menu item again brings it forward.
 
 Rows are color-coded so you can read an install at a glance:
 
@@ -227,7 +227,7 @@ To see it in action: open the window, run any install inside a session (`npm ins
 
 ## Offline and degraded behavior
 
-The pipeline's reputation checks depend on outbound calls from your Mac (never from the VM): `api.osv.dev` for OSV, `api.socket.dev` for socket.dev, `pypi.org` for the PyPI publish-time backstop, and `depi-npm-proxy.landh.tech` for Delpi. When an enabled source cannot produce a verdict — network down after retries, HTTP error, rate-limiting, an auth failure, or an unsupported ecosystem — Bromure **fails closed** rather than silently allowing.
+The pipeline's reputation checks depend on outbound calls from your Mac (never from the VM): `api.osv.dev` for OSV, `api.socket.dev` for socket.dev, `pypi.org` for the PyPI publish-time backstop, and `depi-npm-proxy.landh.tech` for Depi. When an enabled source cannot produce a verdict — network down after retries, HTTP error, rate-limiting, an auth failure, or an unsupported ecosystem — Bromure **fails closed** rather than silently allowing.
 
 The download pauses and an [unverified-package hold](18-glossary.mdx) asks you, per package and version, with a system alert titled **Pass through an unverified package from workspace "…"?**: Bromure could not reach the source to vet the package, and installing it means accepting a package that was not checked against your configured reputation sources. The four standard consent decisions apply; denying (including when no GUI is available and the remote prompt times out) blocks with a 451. Holds are keyed per package@version, so one approval can never blanket the whole dependency graph.
 

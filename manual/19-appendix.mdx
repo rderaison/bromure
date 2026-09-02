@@ -53,7 +53,7 @@ Each workspace is a self-contained directory at `profiles/<uuid>/` under the sup
 
 | Path (under `profiles/<uuid>/`) | Holds |
 |---|---|
-| `profile.json` | Workspace definition, including the `supplyChain` policy block; socket.dev and Delpi API keys are stored here host-side and never copied into the VM. Only non-default fields are written. |
+| `profile.json` | Workspace definition, including the `supplyChain` policy block; socket.dev and Depi API keys are stored here host-side and never copied into the VM. Only non-default fields are written. |
 | `secrets.enc` | AES-GCM-encrypted workspace secrets (`chmod 600`). |
 | `disk.img` | System disk — an APFS copy-on-write clone of `base.img`. |
 | `home.img` | Sparse ext4 image holding `/home/ubuntu` (modern home model). |

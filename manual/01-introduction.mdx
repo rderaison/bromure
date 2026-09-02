@@ -78,7 +78,7 @@ Real credentials never enter the VM; the proxy swaps fakes for real values on th
 
 ### Supply-chain scanning
 
-Package installs are the most common way hostile code enters a development environment, so the proxy scans them as they are fetched. Four mechanisms combine: an age gate (brand-new package versions are held back), OSV vulnerability lookups, socket.dev behavioral analysis, and Delpi. Verdicts are enforced at the wire — a blocked package never reaches the VM — with a consented bypass when you know what you are doing. See [Supply-chain scanning](09-supply-chain.mdx).
+Package installs are the most common way hostile code enters a development environment, so the proxy scans them as they are fetched. Four mechanisms combine: an age gate (brand-new package versions are held back), OSV vulnerability lookups, socket.dev behavioral analysis, and Depi. Verdicts are enforced at the wire — a blocked package never reaches the VM — with a consented bypass when you know what you are doing. See [Supply-chain scanning](09-supply-chain.mdx).
 
 ### Prompt-injection detection
 

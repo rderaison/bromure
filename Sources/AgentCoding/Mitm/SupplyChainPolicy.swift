@@ -22,10 +22,10 @@ import Foundation
 ///   4. **socket.dev "known CVE" check** (same API key, distinct
 ///      filter on their `vulnerability` issue bucket). Default OFF
 ///      — same reasoning as OSV.
-///   4b. **Delpi secure registry re-route** (BYO API key, mutually
+///   4b. **Depi secure registry re-route** (BYO API key, mutually
 ///      exclusive with socket.dev via `packageFilter`). Instead of a
 ///      pre-flight lookup, the proxy redirects all npm registry
-///      traffic to Delpi's npm-compatible filtering registry with
+///      traffic to Depi's npm-compatible filtering registry with
 ///      the key as a Bearer token.
 ///   5. **Install-script stripping** — rewrites tarballs to remove
 ///      preinstall / install / postinstall / prepare hooks. Per-
@@ -91,18 +91,20 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
     /// Which package-filtering service is active. Mutually exclusive
     /// by design: socket.dev is a reputation *lookup* the proxy
     /// consults before forwarding to the public registry, while
-    /// Delpi is a filtering *registry* the proxy re-routes npm
+    /// Depi is a filtering *registry* the proxy re-routes npm
     /// traffic to — running both would double-filter every install.
     public enum PackageFilter: String, Codable, CaseIterable, Sendable {
         case none
         case socketDev = "socketdev"
-        case delpi
+        // On-disk value stays "delpi" (the pre-rename spelling) so existing
+        // profiles that selected this provider keep loading unchanged.
+        case depi = "delpi"
 
         public var displayName: String {
             switch self {
             case .none:      return NSLocalizedString("None", comment: "")
             case .socketDev: return "socket.dev"
-            case .delpi:     return "Delpi"
+            case .depi:     return "Depi"
             }
         }
     }
@@ -128,13 +130,13 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
     public var socketBlockCVE: Bool
     public var socketCVESeverity: Severity
 
-    // MARK: - Delpi
+    // MARK: - Depi
 
-    /// User's Delpi API key. Same handling as the socket.dev key:
+    /// User's Depi API key. Same handling as the socket.dev key:
     /// held host-side only, never exported into the VM. The MITM
     /// proxy attaches it as `Authorization: Bearer` when re-routing
-    /// npm registry traffic to Delpi's secure registry.
-    public var delpiAPIKey: String
+    /// npm registry traffic to Depi's secure registry.
+    public var depiAPIKey: String
 
     // MARK: - Install-script stripping
 
@@ -172,7 +174,7 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         socketBlockCompromised: Bool = false,
         socketBlockCVE: Bool = false,
         socketCVESeverity: Severity = .high,
-        delpiAPIKey: String = "",
+        depiAPIKey: String = "",
         stripInstallScripts: Bool = false,
         stripAllowlist: [String] = [],
         lockfilePrompt: Bool = false
@@ -191,7 +193,7 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         self.socketBlockCompromised = socketBlockCompromised
         self.socketBlockCVE = socketBlockCVE
         self.socketCVESeverity = socketCVESeverity
-        self.delpiAPIKey = delpiAPIKey
+        self.depiAPIKey = depiAPIKey
         self.stripInstallScripts = stripInstallScripts
         self.stripAllowlist = stripAllowlist
         self.lockfilePrompt = lockfilePrompt
@@ -199,9 +201,9 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
 
     /// True if any layer of the policy is doing something. The proxy
     /// short-circuits the registry-intercept hot path when nothing's
-    /// configured. (The Delpi re-route is deliberately NOT part of
+    /// configured. (The Depi re-route is deliberately NOT part of
     /// this: it's a routing decision the proxy applies on its own
-    /// `delpiActive` check, not a per-package enforcement layer.)
+    /// `depiActive` check, not a per-package enforcement layer.)
     public var isActive: Bool {
         ageGateEnabled
             || osvEnabled
@@ -219,10 +221,10 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
             && (socketBlockCompromised || socketBlockCVE)
     }
 
-    /// Whether npm registry traffic should be re-routed to Delpi
+    /// Whether npm registry traffic should be re-routed to Depi
     /// (selected as the provider and a key is entered).
-    public var delpiActive: Bool {
-        packageFilter == .delpi && !delpiAPIKey.isEmpty
+    public var depiActive: Bool {
+        packageFilter == .depi && !depiAPIKey.isEmpty
     }
 
     // MARK: - Allowlist helpers
@@ -258,7 +260,7 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         case osvEnabled, osvSeverity
         case packageFilter
         case socketAPIKey, socketBlockCompromised, socketBlockCVE, socketCVESeverity
-        case delpiAPIKey
+        case depiAPIKey = "delpiAPIKey"   // on-disk key unchanged (pre-rename spelling)
         case stripInstallScripts, stripAllowlist
         case lockfilePrompt
     }
@@ -273,7 +275,7 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         socketBlockCompromised = try c.decodeIfPresent(Bool.self, forKey: .socketBlockCompromised) ?? false
         socketBlockCVE        = try c.decodeIfPresent(Bool.self, forKey: .socketBlockCVE) ?? false
         socketCVESeverity     = try c.decodeIfPresent(Severity.self, forKey: .socketCVESeverity) ?? .high
-        delpiAPIKey           = try c.decodeIfPresent(String.self, forKey: .delpiAPIKey) ?? ""
+        depiAPIKey           = try c.decodeIfPresent(String.self, forKey: .depiAPIKey) ?? ""
         // Legacy profiles predate the provider radio: a stored
         // socket.dev key meant socket.dev was the (only possible)
         // selection. Decode as raw string so an unknown value from a
@@ -305,7 +307,7 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         let inferredFilter: PackageFilter = socketAPIKey.isEmpty ? .none : .socketDev
         if packageFilter != inferredFilter { try c.encode(packageFilter, forKey: .packageFilter) }
         if !socketAPIKey.isEmpty    { try c.encode(socketAPIKey, forKey: .socketAPIKey) }
-        if !delpiAPIKey.isEmpty     { try c.encode(delpiAPIKey, forKey: .delpiAPIKey) }
+        if !depiAPIKey.isEmpty     { try c.encode(depiAPIKey, forKey: .depiAPIKey) }
         if socketBlockCompromised != false { try c.encode(socketBlockCompromised, forKey: .socketBlockCompromised) }
         if socketBlockCVE != false  { try c.encode(socketBlockCVE, forKey: .socketBlockCVE) }
         if socketCVESeverity != .high { try c.encode(socketCVESeverity, forKey: .socketCVESeverity) }

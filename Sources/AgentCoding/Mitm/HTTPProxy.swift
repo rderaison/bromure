@@ -812,33 +812,43 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let scPolicy = supplyChainProvider()
 
         // Where the forward actually dials. Defaults to the SNI
-        // host; the Delpi re-route below and the local-inference
+        // host; the Depi re-route below and the local-inference
         // routing further down both override it. Classification and
         // trace records keep using the original `host`.
         var upstreamHost = host
         var upstreamPort = port
 
-        // Delpi secure-registry re-route. When the profile selects
-        // Delpi as its package filter, every npm registry request is
-        // redialled to Delpi's npm-compatible endpoint with the
+        // Depi secure-registry re-route. When the profile selects
+        // Depi as its package filter, every npm registry request is
+        // redialled to Depi's npm-compatible endpoint with the
         // user's API key as a Bearer token (replacing any guest
         // Authorization header — the key itself never enters the
-        // VM). Tarball fetches arrive addressed to the Delpi host
+        // VM). Tarball fetches arrive addressed to the Depi host
         // directly (its packuments point dist.tarball there); those
         // only need the key injected. All the other supply-chain
         // layers (age gate, OSV, script-strip) still apply on top —
-        // Delpi replaces socket.dev, not the local policy.
-        var delpiRouted = false
-        if let p = scPolicy, p.delpiActive, DelpiRegistry.shouldRoute(host: host) {
-            delpiRouted = true
-            upstreamHost = DelpiRegistry.host
-            upstreamPort = DelpiRegistry.port
-            toForward = DelpiRegistry.authorize(rawRequest: toForward,
-                                                apiKey: p.delpiAPIKey)
+        // Depi replaces socket.dev, not the local policy.
+        var depiRouted = false
+        if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host) {
+            depiRouted = true
+            upstreamHost = DepiRegistry.host
+            upstreamPort = DepiRegistry.port
+            toForward = DepiRegistry.authorize(rawRequest: toForward,
+                                                apiKey: p.depiAPIKey)
             SupplyChainLog.shared.record(
-                "[delpi] \(reqMethod) \(host)\(reqPath) → https://\(DelpiRegistry.host)")
+                "[depi] \(reqMethod) \(host)\(reqPath) → https://\(DepiRegistry.host)")
+        } else if DepiRegistry.shouldRoute(host: host),
+                  scPolicy?.packageFilter == .depi || !(scPolicy?.depiAPIKey ?? "").isEmpty {
+            // An npm-registry request that we did NOT re-route even though Depi
+            // is partly configured — surface why, so a "Depi isn't doing
+            // anything" report is diagnosable from the Security Log.
+            let why = scPolicy == nil ? "no supply-chain policy on this workspace"
+                : scPolicy?.packageFilter != .depi ? "package filter isn't set to Depi"
+                : "no Depi API key entered"
+            SupplyChainLog.shared.record(
+                "[depi] \(reqMethod) \(host)\(reqPath) NOT re-routed — \(why)")
         }
-        let delpiKey = scPolicy?.delpiAPIKey ?? ""
+        let depiKey = scPolicy?.depiAPIKey ?? ""
 
         let enforce = scPolicy?.isActive ?? false
         if (enforce || BACEventEmitter.shared.isStreamingEnabled),
@@ -889,9 +899,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     rawRequest: metaForward, host: upstreamHost, port: upstreamPort,
                     session: session, tls: tls, scheme: upstreamScheme,
                     rewrite: { raw in
-                        if delpiRouted,
-                           let substitute = Self.delpiResponseGate(
-                                raw: raw, apiKey: delpiKey,
+                        if depiRouted,
+                           let substitute = Self.depiResponseGate(
+                                raw: raw, apiKey: depiKey,
                                 profileID: self.profileID, path: reqPath) {
                             return substitute
                         }
@@ -1228,9 +1238,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         rawRequest: toForward, host: upstreamHost, port: upstreamPort,
                         session: session, tls: tls, scheme: upstreamScheme,
                         rewrite: { raw in
-                            if delpiRouted,
-                               let substitute = Self.delpiResponseGate(
-                                    raw: raw, apiKey: delpiKey,
+                            if depiRouted,
+                               let substitute = Self.depiResponseGate(
+                                    raw: raw, apiKey: depiKey,
                                     profileID: self.profileID, path: reqPath) {
                                 return substitute
                             }
@@ -1409,11 +1419,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         defer { if ownsRelaySession { relaySession.finishTasksAndInvalidate() } }
         let relay: RelayResponse
-        if delpiRouted {
-            // Delpi-routed npm traffic goes through the buffered
+        if depiRouted {
+            // Depi-routed npm traffic goes through the buffered
             // relay so a 401 can be swapped for a self-explanatory
             // error before any byte reaches the guest — the
-            // streaming relay would have already committed Delpi's
+            // streaming relay would have already committed Depi's
             // raw response. npm traffic gains nothing from
             // streaming; the script-strip path buffers the same
             // tarballs already.
@@ -1421,7 +1431,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 rawRequest: toForward, host: upstreamHost, port: upstreamPort,
                 session: relaySession, tls: tls, scheme: upstreamScheme,
                 rewrite: { raw in
-                    Self.delpiResponseGate(raw: raw, apiKey: delpiKey,
+                    Self.depiResponseGate(raw: raw, apiKey: depiKey,
                                            profileID: self.profileID,
                                            path: reqPath) ?? raw
                 })
@@ -2378,21 +2388,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return nil
     }
 
-    /// Inspect a Delpi-routed response before it reaches the guest.
+    /// Inspect a Depi-routed response before it reaches the guest.
     /// 401 = our API key was rejected: surface it host-side (Security
     /// Log + one-shot alert) and substitute a plaintext body npm
     /// prints verbatim, so both sides of the glass see the real
-    /// cause. 403 is logged but passed through — Delpi is a
+    /// cause. 403 is logged but passed through — Depi is a
     /// *filtering* registry, so a 403 may be it blocking a package,
     /// and its own body is the more accurate message. Returns nil
     /// when the response should pass through unchanged.
-    private static func delpiResponseGate(raw: Data, apiKey: String,
+    private static func depiResponseGate(raw: Data, apiKey: String,
                                           profileID: UUID, path: String) -> Data? {
         switch parseStatusCode(raw) {
         case 401:
-            DelpiRegistry.reportAuthFailure(status: 401, apiKey: apiKey,
+            DepiRegistry.reportAuthFailure(status: 401, apiKey: apiKey,
                                             profileID: profileID, path: path)
-            return DelpiRegistry.authFailureResponse(status: 401)
+            return DepiRegistry.authFailureResponse(status: 401)
         case 403:
             var preview = ""
             if let sep = raw.range(of: Data("\r\n\r\n".utf8)) {
@@ -2401,10 +2411,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                  encoding: .utf8) ?? ""
             }
             SupplyChainLog.shared.record(
-                "[delpi] ✗ HTTP 403 from \(DelpiRegistry.host)\(path) — " +
-                "package blocked by Delpi or key not authorized: \(preview)")
+                "[depi] ✗ HTTP 403 from \(DepiRegistry.host)\(path) — " +
+                "package blocked by Depi or key not authorized: \(preview)")
             return nil
         default:
+            // Depi served the request (didn't block). Log it so it's visible
+            // that Depi WAS consulted and chose to allow — e.g. a package the
+            // user expected to be flagged that Depi's policy permits.
+            SupplyChainLog.shared.record(
+                "[depi] \(parseStatusCode(raw)) from \(DepiRegistry.host)\(path) — served (Depi did not block)")
             return nil
         }
     }

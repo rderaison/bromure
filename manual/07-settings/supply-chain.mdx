@@ -16,7 +16,7 @@ The pane groups five independently toggled layers: **Age gate**, **OSV vulnerabi
 
 ## How enforcement works
 
-All checks run in the host-side proxy, never inside the VM. Reputation-service API keys (socket.dev, Delpi) are held on the host only and never exported into the VM. When a check fires, the proxy blocks the download with an HTTP [451](../18-glossary.mdx) response carrying a plaintext reason (for example, "npm package foo@1.2.3 published 4 hours ago — policy requires 2 days minimum"); `npm`, `pip`, and `cargo` print that text verbatim, so both the agent and you see exactly why an install failed. Blocked responses carry the header `X-Bromure-Block: supply-chain`; rewritten responses carry `X-Bromure-Rewritten: supply-chain`.
+All checks run in the host-side proxy, never inside the VM. Reputation-service API keys (socket.dev, Depi) are held on the host only and never exported into the VM. When a check fires, the proxy blocks the download with an HTTP [451](../18-glossary.mdx) response carrying a plaintext reason (for example, "npm package foo@1.2.3 published 4 hours ago — policy requires 2 days minimum"); `npm`, `pip`, and `cargo` print that text verbatim, so both the agent and you see exactly why an install failed. Blocked responses carry the header `X-Bromure-Block: supply-chain`; rewritten responses carry `X-Bromure-Rewritten: supply-chain`.
 
 Policy edits apply live: saving the workspace pushes the new policy to running sessions immediately — no VM restart — and each change is confirmed with a `[supply-chain] policy engaged` line in the Security Log (Window menu → **Security Log…**).
 
@@ -44,7 +44,7 @@ When **Look up packages on api.osv.dev (free, no key required)** is on, each dow
 
 ## Package filtering
 
-The **Package filtering** radio selects a reputation provider: **None**, **socket.dev**, or **Delpi**. The two providers work differently — socket.dev is a pre-flight lookup the proxy consults before letting a fetch through, while Delpi replaces the npm registry outright — so they are mutually exclusive. Stored API keys are kept when you switch, so flipping between providers is non-destructive.
+The **Package filtering** radio selects a reputation provider: **None**, **socket.dev**, or **Depi**. The two providers work differently — socket.dev is a pre-flight lookup the proxy consults before letting a fetch through, while Depi replaces the npm registry outright — so they are mutually exclusive. Stored API keys are kept when you switch, so flipping between providers is non-destructive.
 
 ### socket.dev
 
@@ -55,11 +55,11 @@ With **socket.dev** selected, paste an API token into **API key** (the **Get an 
 
 > **Note:** socket.dev has no Cargo support. With socket.dev filtering enabled, every crates.io artifact yields no verdict and triggers the unverified-package hold described below — effectively a prompt per crate version. Disable socket.dev for Rust-heavy workspaces, or expect to answer prompts.
 
-### Delpi
+### Depi
 
-With **Delpi** selected and an API key entered (the **Get an API key** link opens landh.tech), the proxy re-routes every npm registry request — metadata, tarballs, audit, everything addressed to `registry.npmjs.org` — to Delpi's npm-compatible secure registry at `depi-npm-proxy.landh.tech`, attaching your key as a host-injected Bearer token. Delpi serves pre-vetted packages, so instead of a per-package lookup, the whole registry is replaced. The other layers (age gate, OSV, script stripping) still apply on top: Delpi replaces socket.dev, not the local policy.
+With **Depi** selected and an API key entered (the **Get an API key** link opens landh.tech), the proxy re-routes every npm registry request — metadata, tarballs, audit, everything addressed to `registry.npmjs.org` — to Depi's npm-compatible secure registry at `depi-npm-proxy.landh.tech`, attaching your key as a host-injected Bearer token. Depi serves pre-vetted packages, so instead of a per-package lookup, the whole registry is replaced. The other layers (age gate, OSV, script stripping) still apply on top: Depi replaces socket.dev, not the local policy.
 
-While the key field is empty, an orange warning reads **Enter an API key — Delpi stays off without one.** If Delpi rejects the key, the npm install fails with a clear Bromure error, the rejection is recorded in the Security Log, and a one-shot alert is raised. Delpi affects npm only; other ecosystems are untouched.
+While the key field is empty, an orange warning reads **Enter an API key — Depi stays off without one.** If Depi rejects the key, the npm install fails with a clear Bromure error, the rejection is recorded in the Security Log, and a one-shot alert is raised. Depi affects npm only; other ecosystems are untouched.
 
 ## Install scripts
 
@@ -92,12 +92,12 @@ This is deliberate protection against an attacker inducing rate limits to sneak 
 | **Exempt packages** | List (`npm:axios` or `axios`) | Empty |
 | **Look up packages on api.osv.dev (free, no key required)** | Toggle | Off |
 | **Block at severity** (OSV) | Picker: Low / Medium / High and above, Critical only | **High and above** |
-| **Package filtering** | Radio: **None** / **socket.dev** / **Delpi** | **None** |
+| **Package filtering** | Radio: **None** / **socket.dev** / **Depi** | **None** |
 | **API key** (socket.dev) | Secure field | Empty |
 | **Block compromised packages** | Toggle (needs a socket.dev key) | Off |
 | **Block packages with known CVEs** | Toggle (needs a socket.dev key) | Off |
 | **CVE block threshold** | Picker (enabled with the CVE toggle) | **High and above** |
-| **API key** (Delpi) | Secure field | Empty (Delpi stays off without one) |
+| **API key** (Depi) | Secure field | Empty (Depi stays off without one) |
 | **Strip preinstall / install / postinstall / prepare from npm tarballs on the fly** | Toggle | Off |
 | **Allow install scripts for** | List (`npm:better-sqlite3`) | Empty |
 | **Prompt before passing lockfile-pinned tarballs through unmodified** | Toggle | Off |

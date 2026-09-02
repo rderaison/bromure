@@ -3726,7 +3726,7 @@ struct ProfileEditorView: View {
                     }
                     .platformRadioGroupPickerStyle()
                     .labelsHidden()
-                    Text(NSLocalizedString("One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Delpi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry.", comment: ""))
+                    Text(NSLocalizedString("One provider at a time: socket.dev vets each package against its reputation database before Bromure lets the fetch through; Depi replaces the npm registry outright — every npm fetch is re-routed to its filtering registry.", comment: ""))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -3766,11 +3766,11 @@ struct ProfileEditorView: View {
                         .frame(maxWidth: 280)
                     }
 
-                    if draft.supplyChain.packageFilter == .delpi {
+                    if draft.supplyChain.packageFilter == .depi {
                         Divider().padding(.vertical, 4)
                         HStack {
                             Text(NSLocalizedString("API key:", comment: ""))
-                            SecureField("", text: $draft.supplyChain.delpiAPIKey)
+                            SecureField("", text: $draft.supplyChain.depiAPIKey)
                                 .textFieldStyle(.roundedBorder)
                             Link(destination: URL(string: "https://www.landh.tech/")!) {
                                 HStack(spacing: 2) {
@@ -3780,12 +3780,12 @@ struct ProfileEditorView: View {
                                 .font(.caption)
                             }
                         }
-                        Text(NSLocalizedString("Every npm registry request from the VM is re-routed to Delpi's secure registry (depi-npm-proxy.landh.tech), authenticated host-side with this key — Bromure never exports it into the VM. If Delpi rejects the key, the install fails with a clear error and Bromure alerts you.", comment: ""))
+                        Text(NSLocalizedString("Every npm registry request from the VM is re-routed to Depi's secure registry (depi-npm-proxy.landh.tech), authenticated host-side with this key — Bromure never exports it into the VM. If Depi rejects the key, the install fails with a clear error and Bromure alerts you.", comment: ""))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        if draft.supplyChain.delpiAPIKey.isEmpty {
-                            Label(NSLocalizedString("Enter an API key — Delpi stays off without one.", comment: ""),
+                        if draft.supplyChain.depiAPIKey.isEmpty {
+                            Label(NSLocalizedString("Enter an API key — Depi stays off without one.", comment: ""),
                                   systemImage: "exclamationmark.triangle.fill")
                                 .font(.caption).foregroundStyle(.orange)
                                 .fixedSize(horizontal: false, vertical: true)

@@ -1,27 +1,27 @@
 import Foundation
 import AppKit
 
-/// Delpi secure npm registry (Lupin & Holmes / landh.tech). Unlike
+/// Depi secure npm registry (Lupin & Holmes / landh.tech). Unlike
 /// socket.dev — a reputation API the proxy *consults* before letting
-/// a fetch through — Delpi is a drop-in npm registry replacement
+/// a fetch through — Depi is a drop-in npm registry replacement
 /// that serves already-vetted packages. When the profile selects
-/// Delpi (`SupplyChainPolicy.delpiActive`), the MITM proxy re-routes
+/// Depi (`SupplyChainPolicy.depiActive`), the MITM proxy re-routes
 /// every registry.npmjs.org request to `host` and attaches the
 /// user's API key as `Authorization: Bearer`.
 ///
 /// Two request shapes reach the proxy:
 ///   - registry.npmjs.org/… — npm's default registry. Re-routed
 ///     wholesale (metadata, tarballs, audit, everything), same paths:
-///     Delpi mirrors the npm registry API at its root.
-///   - depi-npm-proxy.landh.tech/… — Delpi rewrites `dist.tarball`
+///     Depi mirrors the npm registry API at its root.
+///   - depi-npm-proxy.landh.tech/… — Depi rewrites `dist.tarball`
 ///     URLs in the packuments it serves to point at itself, so the
-///     guest's tarball fetches arrive addressed to Delpi directly.
+///     guest's tarball fetches arrive addressed to Depi directly.
 ///     Those get the Bearer key injected too (the key never enters
 ///     the VM, so the guest can't send it itself).
 ///
 /// The key is held host-side only — same rule as the socket.dev key.
-enum DelpiRegistry {
-    /// Delpi's npm-compatible registry endpoint.
+enum DepiRegistry {
+    /// Depi's npm-compatible registry endpoint.
     static let host = "depi-npm-proxy.landh.tech"
     static let port = 443
 
@@ -33,32 +33,32 @@ enum DelpiRegistry {
     }
 
     /// True when a request to `host` must be re-routed / authorized
-    /// for Delpi: npm's registry (re-route + key) or Delpi itself
+    /// for Depi: npm's registry (re-route + key) or Depi itself
     /// (key only — it's already the destination).
     static func shouldRoute(host h: String) -> Bool {
         isNpmRegistryHost(h) || h.lowercased() == host
     }
 
-    /// Attach the Delpi key as `Authorization: Bearer`, replacing any
+    /// Attach the Depi key as `Authorization: Bearer`, replacing any
     /// Authorization header the guest sent (a guest npm token means
-    /// nothing to Delpi and must not leak there).
+    /// nothing to Depi and must not leak there).
     static func authorize(rawRequest: Data, apiKey: String) -> Data {
         HTTPMitmConnection.replaceAuthorizationBearer(rawRequest: rawRequest, token: apiKey)
     }
 
-    /// Guest-facing response substituted when Delpi rejects our API
+    /// Guest-facing response substituted when Depi rejects our API
     /// key. Keeps the upstream status code (401/403) so npm still
     /// fails the install, but swaps the body for a message the
     /// package manager surfaces verbatim — pointing the user at the
     /// actual fix instead of a bare "401 Unauthorized".
     static func authFailureResponse(status: Int) -> Data {
-        let body = "Bromure: the Delpi registry rejected the configured API key " +
-            "(HTTP \(status)). npm installs are re-routed to Delpi for this " +
-            "workspace — fix or remove the Delpi API key in the workspace's " +
+        let body = "Bromure: the Depi registry rejected the configured API key " +
+            "(HTTP \(status)). npm installs are re-routed to Depi for this " +
+            "workspace — fix or remove the Depi API key in the workspace's " +
             "Supply Chain settings.\n"
         var resp = "HTTP/1.1 \(status) \(status == 401 ? "Unauthorized" : "Forbidden")\r\n"
         resp += "Content-Type: text/plain; charset=utf-8\r\n"
-        resp += "X-Bromure-Block: delpi-auth\r\n"
+        resp += "X-Bromure-Block: depi-auth\r\n"
         resp += "Content-Length: \(body.utf8.count)\r\n"
         resp += "Connection: close\r\n\r\n"
         resp += body
@@ -74,13 +74,13 @@ enum DelpiRegistry {
     /// re-arms the alert.
     nonisolated(unsafe) private static var alerted: Set<String> = []
 
-    /// Record a Delpi auth failure to the Security Log and raise a
+    /// Record a Depi auth failure to the Security Log and raise a
     /// one-shot alert (per profile + key) in the GUI so the user
     /// finds out even when they're not watching the agent's output.
     static func reportAuthFailure(status: Int, apiKey: String,
                                   profileID: UUID, path: String) {
         SupplyChainLog.shared.record(
-            "[delpi] ✗ HTTP \(status) from \(host)\(path) — API key rejected; " +
+            "[depi] ✗ HTTP \(status) from \(host)\(path) — API key rejected; " +
             "npm installs will fail until the key is fixed in Supply Chain settings")
 
         let dedupKey = "\(profileID.uuidString)|\(apiKey.hashValue)"
@@ -90,10 +90,10 @@ enum DelpiRegistry {
         guard firstTime else { return }
 
         let title = NSLocalizedString(
-            "Delpi rejected your API key", comment: "Delpi auth failure alert title")
+            "Depi rejected your API key", comment: "Depi auth failure alert title")
         let body = String(format: NSLocalizedString(
-            "The Delpi registry answered HTTP %d. npm installs in this workspace are routed through Delpi and will fail until the API key is corrected in Settings → Supply Chain.",
-            comment: "Delpi auth failure alert body"), status)
+            "The Depi registry answered HTTP %d. npm installs in this workspace are routed through Depi and will fail until the API key is corrected in Settings → Supply Chain.",
+            comment: "Depi auth failure alert body"), status)
 
         switch RemoteConsent.route(for: profileID) {
         case .localAlert:

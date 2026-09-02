@@ -107,14 +107,14 @@ public enum SupplyChainRegistry {
         let h = host.lowercased()
         let p = stripQuery(path)
 
-        // npm — registry.npmjs.org, plus Delpi's npm-compatible
+        // npm — registry.npmjs.org, plus Depi's npm-compatible
         // registry: it mirrors npm's paths at its root AND rewrites
         // packument tarball URLs to point at itself, so the guest's
-        // artifact fetches arrive addressed to the Delpi host.
+        // artifact fetches arrive addressed to the Depi host.
         //   GET /<scoped-or-unscoped-pkg>                  → metadata
         //   GET /<pkg>/-/<file>-<version>.tgz              → artifact
         if h == "registry.npmjs.org" || h.hasSuffix(".npmjs.org")
-            || h == DelpiRegistry.host {
+            || h == DepiRegistry.host {
             if let v = npmArtifact(path: p) {
                 return .artifact(ecosystem: .npm,
                                  packageName: v.pkg, version: v.version)

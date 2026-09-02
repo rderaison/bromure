@@ -78,7 +78,7 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 ## D
 
-**Delpi** — A drop-in secure npm registry by Lupin & Holmes that serves pre-vetted packages. Instead of a lookup, Bromure re-routes all npm registry traffic to it with your API key injected host-side. See [Supply-Chain Protection](09-supply-chain.mdx).
+**Depi** — A drop-in secure npm registry by Lupin & Holmes that serves pre-vetted packages. Instead of a lookup, Bromure re-routes all npm registry traffic to it with your API key injected host-side. See [Supply-Chain Protection](09-supply-chain.mdx).
 
 **Dive screen** — The animated boot overlay shown until the guest terminal is live; it flips to "DIVE FAILED" after 30 seconds without a terminal. See [Sessions](06-sessions.mdx).
 
@@ -254,7 +254,7 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Secrets vault master key** — The macOS Keychain-held AES-256 key that encrypts every at-rest secret and captured trace body; if the Keychain is unreachable it falls back to a `0600` key file. See [Credentials](08-credentials.mdx).
 
-**Security Log** — The live viewer (Window → Security Log…) of every security event the proxy emits — supply-chain checks and blocks, prompt-injection detections, Delpi re-routes, and routing, Fusion, and remote events — kept in a roughly 5,000-line in-memory ring buffer and mirrored to stderr. See [Supply-Chain Protection](09-supply-chain.mdx).
+**Security Log** — The live viewer (Window → Security Log…) of every security event the proxy emits — supply-chain checks and blocks, prompt-injection detections, Depi re-routes, and routing, Fusion, and remote events — kept in a roughly 5,000-line in-memory ring buffer and mirrored to stderr. See [Supply-Chain Protection](09-supply-chain.mdx).
 
 **Security Timeline** — The chronological, filterable table (Window → Security Timeline…) of every decision the security engines made — credential swaps, firewall verdicts, package checks, guardrail enforcements, prompt-injection scans, credential uses — colour-coded by outcome and mirrored to rich clients. See [Tracing](11-tracing.mdx#the-security-timeline-window).
 
@@ -342,4 +342,4 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 ## X
 
-**X-Bromure-Rewritten / X-Bromure-Block** — The response headers Bromure adds so wire rewrites and blocks are identifiable: `X-Bromure-Rewritten: supply-chain` on age-filtered or script-stripped responses, and `X-Bromure-Block: supply-chain` (or `delpi-auth`) on blocks. See [Supply-Chain Protection](09-supply-chain.mdx).
+**X-Bromure-Rewritten / X-Bromure-Block** — The response headers Bromure adds so wire rewrites and blocks are identifiable: `X-Bromure-Rewritten: supply-chain` on age-filtered or script-stripped responses, and `X-Bromure-Block: supply-chain` (or `depi-auth`) on blocks. See [Supply-Chain Protection](09-supply-chain.mdx).

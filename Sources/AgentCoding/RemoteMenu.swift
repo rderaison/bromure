@@ -476,7 +476,7 @@ final class RemoteMenuApp {
             "osvSeverity": p.supplyChain.osvSeverity.rawValue,
             "packageFilter": p.supplyChain.packageFilter.rawValue,
             "socketAPIKey": p.supplyChain.socketAPIKey,
-            "delpiAPIKey": p.supplyChain.delpiAPIKey,
+            "depiAPIKey": p.supplyChain.depiAPIKey,
             "socketBlockCompromised": p.supplyChain.socketBlockCompromised,
             "socketBlockCVE": p.supplyChain.socketBlockCVE,
             "socketCVESeverity": p.supplyChain.socketCVESeverity.rawValue,
@@ -730,12 +730,12 @@ final class RemoteMenuApp {
             ("osvEnabled", "Look up packages on api.osv.dev (free, no key required)", .bool),
             ("osvSeverity", "Block at severity", .pickLabeled(severity)),
             ("packageFilter", "Package filtering", .pickLabeled([
-                ("None", "none"), ("socket.dev", "socketdev"), ("Delpi", "delpi")])),
+                ("None", "none"), ("socket.dev", "socketdev"), ("Depi", "depi")])),
             ("socketAPIKey", "socket.dev API key", .text(secret: true)),
             ("socketBlockCompromised", "Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)", .bool),
             ("socketBlockCVE", "Block packages with known CVEs", .bool),
             ("socketCVESeverity", "CVE block threshold", .pickLabeled(severity)),
-            ("delpiAPIKey", "Delpi API key", .text(secret: true)),
+            ("depiAPIKey", "Depi API key", .text(secret: true)),
             ("stripInstallScripts", "Strip preinstall / install / postinstall / prepare from npm tarballs on the fly", .bool),
             ("lockfilePrompt", "Prompt before passing lockfile-pinned tarballs through unmodified (npm ci, pip --require-hashes)", .bool),
         ])
