@@ -874,13 +874,17 @@ struct ChatComposer: View {
     var disabled = false
     var busy = false
     var accent: Color = .accentColor
+    /// Allow sending with empty text (the beautified composer with pending
+    /// attachments: the paths ARE the message).
+    var canSendEmpty = false
     let onSend: () -> Void
 
     @FocusState private var focused: Bool
 
     private var sendable: Bool {
         !disabled && !busy
-            && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (canSendEmpty
+                || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
     var body: some View {
@@ -1261,12 +1265,7 @@ struct TranscriptItemView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         case .toolUse(let name, let summary, let detail):
-            CollapsibleRow(icon: "wrench.and.screwdriver",
-                           title: name, subtitle: summary, tint: .secondary) {
-                if !detail.isEmpty {
-                    codeBlock(detail)
-                }
-            }
+            ToolCallCard(name: name, summary: summary, detail: detail)
         case .toolResult(let tool, let content, let isError):
             CollapsibleRow(
                 icon: isError ? "exclamationmark.octagon" : "arrow.turn.down.right",
@@ -1314,6 +1313,288 @@ struct TranscriptItemView: View {
     private func firstLine(_ s: String) -> String {
         let line = s.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         return line.count > 160 ? String(line.prefix(160)) + "…" : line
+    }
+}
+
+/// A typed rendering of a tool call, so a beautified session reads like the
+/// native Claude Code / Codex desktop apps: Edit/Write → a green/red diff,
+/// Bash → a `$ command` card, Read/Grep/Glob → a path/query row, WebFetch/
+/// WebSearch → a url/query row. The full input JSON is already carried in
+/// `detail` (the parsers stash `prettyJSON(input)`), so the classification is
+/// pure presentation — anything unrecognized falls back to the generic
+/// collapsible with the raw JSON.
+struct ToolCallCard: View {
+    let name: String
+    let summary: String
+    let detail: String
+
+    private var input: [String: Any] {
+        guard let d = detail.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
+        else { return [:] }
+        return obj
+    }
+
+    var body: some View {
+        let n = name.lowercased()
+        if let (old, new, path) = editParts(n) {
+            DiffCard(title: name, path: path, oldText: old, newText: new)
+        } else if isBash(n), let cmd = firstString(["command"]) {
+            CommandCard(icon: "terminal", tool: name, command: cmd)
+        } else if isWeb(n), let u = firstString(["url", "query"]) {
+            FileCard(icon: "globe", tool: name, value: u)
+        } else if isFileTool(n), let p = firstString(["file_path", "path", "pattern", "query", "notebook_path"]) {
+            FileCard(icon: fileIcon(n), tool: name, value: p)
+        } else {
+            CollapsibleRow(icon: "wrench.and.screwdriver", title: name,
+                           subtitle: summary, tint: .secondary) {
+                if !detail.isEmpty { RawJSONBlock(detail) }
+            }
+        }
+    }
+
+    private func isBash(_ n: String) -> Bool {
+        ["bash", "shell", "run_command", "execute", "local_shell"].contains { n.contains($0) }
+    }
+    private func isWeb(_ n: String) -> Bool { n.contains("web") || n.contains("fetch") }
+    private func isFileTool(_ n: String) -> Bool {
+        ["read", "glob", "grep", "ls", "search", "notebook"].contains { n.contains($0) }
+    }
+    private func fileIcon(_ n: String) -> String {
+        if n.contains("read") || n.contains("notebook") { return "doc.text" }
+        if n.contains("grep") || n.contains("search") { return "magnifyingglass" }
+        if n.contains("glob") || n.contains("ls") { return "folder" }
+        return "doc"
+    }
+
+    /// Edit → (old, new, path); Write/create → ("", content, path) = all
+    /// additions; Codex apply_patch → the patch split into removed/added.
+    private func editParts(_ n: String) -> (String, String, String?)? {
+        let path = firstString(["file_path", "path", "notebook_path"])
+        if let old = input["old_string"] as? String, let new = input["new_string"] as? String {
+            return (old, new, path)
+        }
+        if (n.contains("write") || n.contains("create")), let content = input["content"] as? String {
+            return ("", content, path)
+        }
+        if n.contains("patch"), let patch = firstString(["patch", "input", "diff"]) {
+            return splitUnifiedPatch(patch, path: path)
+        }
+        return nil
+    }
+
+    private func firstString(_ keys: [String]) -> String? {
+        for k in keys { if let v = input[k] as? String, !v.isEmpty { return v } }
+        return nil
+    }
+
+    /// Best-effort: fold a unified patch into (removed, added) line blocks so it
+    /// renders in the same DiffCard. `+`/`-` lines split; everything else is
+    /// shared context; file/hunk headers are dropped.
+    private func splitUnifiedPatch(_ patch: String, path: String?) -> (String, String, String?) {
+        var oldLines: [String] = [], newLines: [String] = []
+        for raw in patch.components(separatedBy: "\n") {
+            if raw.hasPrefix("+++") || raw.hasPrefix("---") || raw.hasPrefix("@@")
+                || raw.hasPrefix("*** ") || raw.hasPrefix("diff ") || raw.hasPrefix("index ") { continue }
+            if raw.hasPrefix("+") { newLines.append(String(raw.dropFirst())) }
+            else if raw.hasPrefix("-") { oldLines.append(String(raw.dropFirst())) }
+            else {
+                let c = raw.hasPrefix(" ") ? String(raw.dropFirst()) : raw
+                oldLines.append(c); newLines.append(c)
+            }
+        }
+        return (oldLines.joined(separator: "\n"), newLines.joined(separator: "\n"), path)
+    }
+}
+
+/// Green/red line diff card for Edit/Write/apply_patch tool calls.
+private struct DiffCard: View {
+    let title: String
+    let path: String?
+    let oldText: String
+    let newText: String
+    @State private var expanded = true
+
+    private static let maxLines = 200
+
+    var body: some View {
+        let result = DiffLine.compute(old: oldText, new: newText, cap: Self.maxLines)
+        VStack(alignment: .leading, spacing: 0) {
+            Button { expanded.toggle() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "pencil").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(title).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.secondary)
+                    if let path {
+                        Text(path).font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer(minLength: 6)
+                    DiffStat(result: result)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9)).foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(Color.primary.opacity(0.05))
+            if expanded {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(result.lines.indices, id: \.self) { i in DiffRowView(row: result.lines[i]) }
+                    if result.truncatedBy > 0 {
+                        Text(String(format: NSLocalizedString("… %d more lines", comment: "diff"),
+                                    result.truncatedBy))
+                            .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                            .padding(.horizontal, 12).padding(.vertical, 4)
+                    }
+                }
+                .padding(.vertical, 3)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
+    }
+}
+
+private struct DiffStat: View {
+    let result: DiffLine.Result
+    var body: some View {
+        let adds = result.lines.filter { $0.kind == .add }.count
+        let dels = result.lines.filter { $0.kind == .remove }.count
+        HStack(spacing: 5) {
+            if adds > 0 { Text("+\(adds)").foregroundStyle(.green) }
+            if dels > 0 { Text("−\(dels)").foregroundStyle(.red) }
+        }
+        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+    }
+}
+
+private struct DiffRowView: View {
+    let row: DiffLine
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text(marker).font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(color).frame(width: 9, alignment: .center)
+            Text(row.text.isEmpty ? " " : row.text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(row.kind == .context ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 0.5)
+        .background(background)
+    }
+    private var marker: String { row.kind == .add ? "+" : row.kind == .remove ? "−" : "" }
+    private var color: Color { row.kind == .add ? .green : row.kind == .remove ? .red : .secondary }
+    private var background: Color {
+        switch row.kind {
+        case .add: return Color.green.opacity(0.12)
+        case .remove: return Color.red.opacity(0.12)
+        case .context: return .clear
+        }
+    }
+}
+
+/// A line-level diff (LCS). Falls back to remove-all-then-add-all when the
+/// inputs are large enough that the O(n·m) table would be costly.
+struct DiffLine {
+    enum Kind { case context, add, remove }
+    let kind: Kind
+    let text: String
+
+    struct Result { var lines: [DiffLine]; var truncatedBy: Int }
+
+    static func compute(old: String, new: String, cap: Int) -> Result {
+        let a = old.isEmpty ? [] : old.components(separatedBy: "\n")
+        let b = new.isEmpty ? [] : new.components(separatedBy: "\n")
+        var lines: [DiffLine]
+        if a.count * b.count > 250_000 || a.count + b.count > 4000 {
+            lines = a.map { DiffLine(kind: .remove, text: $0) }
+                  + b.map { DiffLine(kind: .add, text: $0) }
+        } else {
+            lines = lcs(a, b)
+        }
+        if lines.count > cap {
+            return Result(lines: Array(lines.prefix(cap)), truncatedBy: lines.count - cap)
+        }
+        return Result(lines: lines, truncatedBy: 0)
+    }
+
+    private static func lcs(_ a: [String], _ b: [String]) -> [DiffLine] {
+        let n = a.count, m = b.count
+        guard n > 0 else { return b.map { DiffLine(kind: .add, text: $0) } }
+        guard m > 0 else { return a.map { DiffLine(kind: .remove, text: $0) } }
+        var dp = Array(repeating: Array(repeating: 0, count: m + 1), count: n + 1)
+        for i in stride(from: n - 1, through: 0, by: -1) {
+            for j in stride(from: m - 1, through: 0, by: -1) {
+                dp[i][j] = a[i] == b[j] ? dp[i + 1][j + 1] + 1 : max(dp[i + 1][j], dp[i][j + 1])
+            }
+        }
+        var out: [DiffLine] = []
+        var i = 0, j = 0
+        while i < n && j < m {
+            if a[i] == b[j] { out.append(.init(kind: .context, text: a[i])); i += 1; j += 1 }
+            else if dp[i + 1][j] >= dp[i][j + 1] { out.append(.init(kind: .remove, text: a[i])); i += 1 }
+            else { out.append(.init(kind: .add, text: b[j])); j += 1 }
+        }
+        while i < n { out.append(.init(kind: .remove, text: a[i])); i += 1 }
+        while j < m { out.append(.init(kind: .add, text: b[j])); j += 1 }
+        return out
+    }
+}
+
+/// `$ command` card for Bash / shell tool calls.
+private struct CommandCard: View {
+    let icon: String
+    let tool: String
+    let command: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                Text(tool).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 3)
+            ScrollView(.horizontal) {
+                Text(command).font(.system(size: 11.5, design: .monospaced)).textSelection(.enabled)
+                    .padding(.horizontal, 10).padding(.bottom, 8)
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.10)))
+    }
+}
+
+/// A compact one-line row for Read/Grep/Glob/WebFetch/WebSearch tool calls.
+private struct FileCard: View {
+    let icon: String
+    let tool: String
+    let value: String
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 16)
+            Text(tool).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.primary)
+                .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08)))
+    }
+}
+
+private struct RawJSONBlock: View {
+    let text: String
+    init(_ t: String) { text = t }
+    var body: some View {
+        ScrollView(.horizontal) {
+            Text(text).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).padding(8)
+        }
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
     }
 }
 

@@ -1520,6 +1520,35 @@ struct RemoteConnectionStatusView: View {
 /// reboot, settings, pop-out, browser + file-pane toggles) so a mirrored VM
 /// looks and drives exactly like a local one, plus the remote-only network
 /// tunnel toggle. The Docker dashboard opens from the sidebar, like local.
+/// Feeds a beautified view from a mirrored REMOTE workspace: runs the same
+/// transcript-tail + type commands the local provider does, but over the SSH
+/// tunnel via `RemoteHostController.guestExec`. The active tab is read from the
+/// mirrored roster each call, so a remote tab switch is followed automatically.
+@MainActor
+final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
+    let accent: Color
+    private let controller: RemoteHostController
+    private let workspaceID: Profile.ID
+
+    init(controller: RemoteHostController, workspaceID: Profile.ID, accent: Color) {
+        self.controller = controller
+        self.workspaceID = workspaceID
+        self.accent = accent
+    }
+
+    func activeTabIndex() -> Int? {
+        controller.tabsModel(for: workspaceID)?.activeTab?.index
+    }
+
+    func execGuest(_ command: String, timeout: Int) async -> String? {
+        try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+    }
+
+    func isWorking() -> Bool {
+        controller.tabsModel(for: workspaceID)?.activeTab?.agentStatus == .working
+    }
+}
+
 struct RemoteToolbarBar: View {
     @Bindable var model: SessionListModel
     let controller: RemoteHostController
@@ -1532,6 +1561,7 @@ struct RemoteToolbarBar: View {
     let onToggleBrowser: () -> Void
     let onToggleFilePane: () -> Void
     let onToggleTunnel: () -> Void
+    let onToggleBeautified: (Profile.ID) -> Void
 
     private var entry: SessionListModel.VMEntry? {
         model.entries.first { $0.id == model.selectedID }
@@ -1560,6 +1590,9 @@ struct RemoteToolbarBar: View {
             if let entry {
                 if let ip = entry.model.ipAddress { ToolbarIP(ip: ip) }
                 FusionToggle(model: entry.model) { on in onToggleFusion(entry.id, on) }
+                HeaderIcon(system: "doc.richtext",
+                           help: "Switch between the terminal and the beautified transcript view",
+                           active: model.beautifiedActive) { onToggleBeautified(entry.id) }
                 HeaderIcon(system: "folder", help: "Browse files") { onFiles(entry.id) }
                 HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
                 HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
@@ -1629,6 +1662,14 @@ final class RemoteHostWindow: NSWindow {
     private var mountedTermView: TerminalSurfaceView?
     private var shownWorkspace: Profile.ID?
     private var shownWindowIndex: Int?
+    /// Beautified transcript view (the desktop-app look), optionally mounted in
+    /// place of the terminal for the shown workspace. Same feature as the local
+    /// window; fed over the tunnel via `RemoteTranscriptProvider`.
+    private var viewMode: SessionViewMode =
+        UserDefaults.standard.bool(forKey: "ui.beautifiedTranscript") ? .beautified : .terminal
+    private var mountedBeautifiedHost: NSHostingView<BeautifiedSessionView>?
+    private var beautifiedModel: BeautifiedSessionModel?
+    private var beautifiedWorkspace: Profile.ID?
     /// Boot "dive screen" overlaid on the stage while the shown workspace's VM
     /// boots and its tmux roster hasn't landed yet — the same cue the native
     /// window shows, so a reboot/base-image reset over the fat client reads as
@@ -2126,7 +2167,8 @@ final class RemoteHostWindow: NSWindow {
             onToggleTunnel: { [weak self] in
                 guard let c = self?.controller else { return }
                 c.setTunnelEnabled(c.tunnelState == "off" || c.tunnelState == "failed")
-            })
+            },
+            onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) })
         let delegate = RemoteToolbarDelegate(rootView: AnyView(bar))
         toolbarDelegate = delegate
         let tb = NSToolbar(identifier: "io.bromure.ac.remote")
@@ -3666,6 +3708,7 @@ final class RemoteHostWindow: NSWindow {
             unmountTerminal()
             showVMDashboard(id)
         }
+        controller.listModel.beautifiedActive = viewMode == .beautified
         followBrowserPane(for: id)
     }
 
@@ -3822,6 +3865,10 @@ final class RemoteHostWindow: NSWindow {
     }
 
     private func mountTerminal(for id: Profile.ID, window idx: Int) {
+        // Beautified mode replaces the terminal with a live transcript view for
+        // this workspace. The active tab is resolved per-poll by the provider,
+        // so tab switches need no remount.
+        if viewMode == .beautified { mountBeautified(for: id); return }
         guard let profile = controller.profile(for: id) else {
             unmountTerminal(); return
         }
@@ -3926,6 +3973,48 @@ final class RemoteHostWindow: NSWindow {
         mountedTermView = nil
         shownWorkspace = nil
         shownWindowIndex = nil
+        unmountBeautified()
+    }
+
+    /// Mount (or keep) the beautified transcript view for `id`, over the tunnel.
+    /// Idempotent — the live poll keeps a mounted view current across tab
+    /// switches, so only a workspace change rebuilds it.
+    private func mountBeautified(for id: Profile.ID) {
+        if beautifiedWorkspace == id, mountedBeautifiedHost != nil {
+            shownWorkspace = id; return
+        }
+        unmountBeautified()
+        mountedTermView?.removeFromSuperview(); mountedTermView = nil
+        let accent = controller.profile(for: id).map { Color(hex: $0.color.hexInUI) } ?? .accentColor
+        let provider = RemoteTranscriptProvider(controller: controller, workspaceID: id, accent: accent)
+        let m = BeautifiedSessionModel(provider: provider)
+        beautifiedModel = m
+        beautifiedWorkspace = id
+        m.start()
+        let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
+        host.translatesAutoresizingMaskIntoConstraints = false
+        mountedBeautifiedHost = host
+        mount(host)
+        shownWorkspace = id
+        shownWindowIndex = nil
+    }
+
+    private func unmountBeautified() {
+        beautifiedModel?.stop()
+        beautifiedModel = nil
+        beautifiedWorkspace = nil
+        mountedBeautifiedHost?.removeFromSuperview()
+        mountedBeautifiedHost = nil
+    }
+
+    /// Toolbar toggle: flip the shown workspace between the terminal mirror and
+    /// the beautified transcript view. Live; the choice is remembered app-
+    /// globally as the default for subsequent workspaces (same key as local).
+    func toggleBeautified(_ id: Profile.ID) {
+        viewMode = viewMode == .beautified ? .terminal : .beautified
+        UserDefaults.standard.set(viewMode == .beautified, forKey: "ui.beautifiedTranscript")
+        controller.listModel.beautifiedActive = viewMode == .beautified
+        showWorkspace(id)
     }
 
     private func mount(_ view: NSView) {

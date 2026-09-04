@@ -3,6 +3,10 @@ import SandboxEngine
 import SwiftUI
 @preconcurrency import Virtualization
 
+/// How a session pane presents the running agent: the raw libghostty terminal,
+/// or the beautified chat-style transcript (Claude Code / Codex desktop look).
+enum SessionViewMode { case terminal, beautified }
+
 // MARK: - Pane host
 
 /// The window currently displaying a `SessionPane`. A pane is host-agnostic —
@@ -291,8 +295,28 @@ final class SessionPane {
     /// The surface currently mounted (the active tab's).
     private var mountedTerminalView: TerminalSurfaceView?
 
+    /// Optional beautified transcript view (the "looks like Claude Code / Codex
+    /// desktop" mode). When active it replaces the terminal surface in the
+    /// container; the tmux session keeps running behind it, so flipping is
+    /// lossless. `beautifiedModel` drives the live poll + composer.
+    private(set) var viewMode: SessionViewMode =
+        UserDefaults.standard.bool(forKey: "ui.beautifiedTranscript") ? .beautified : .terminal
+    private var mountedBeautifiedHost: NSHostingView<BeautifiedSessionView>?
+    private var beautifiedModel: BeautifiedSessionModel?
+
     /// What a host should focus when this pane mounts.
-    var preferredFirstResponder: NSView { mountedTerminalView ?? containerView }
+    var preferredFirstResponder: NSView {
+        mountedBeautifiedHost ?? mountedTerminalView ?? containerView
+    }
+
+    /// Flip between the raw terminal and the beautified transcript view, live.
+    /// Remembers the choice app-globally as the default for subsequent panes.
+    func setViewMode(_ mode: SessionViewMode) {
+        guard mode != viewMode else { return }
+        viewMode = mode
+        UserDefaults.standard.set(mode == .beautified, forKey: "ui.beautifiedTranscript")
+        updateNativeTerminalMount()
+    }
 
     /// Mount (or swap to) the native surface for the active tab; unmount in
     /// framebuffer mode. The framebuffer keeps running *behind* the surface —
@@ -301,6 +325,10 @@ final class SessionPane {
     /// libghostty is unavailable.
     func updateNativeTerminalMount() {
         guard model.tabs.indices.contains(model.activeIndex) else { return }
+        if viewMode == .beautified { mountBeautified(); return }
+        unmountBeautified()
+        // Restore the profile's window translucency for the terminal.
+        containerView.layer?.opacity = Float(min(1.0, max(0.3, profile.windowOpacity)))
         let windowIndex = model.tabs[model.activeIndex].index
         if terminalController == nil {
             terminalController = TerminalSessionController(profile: profile)
@@ -326,8 +354,42 @@ final class SessionPane {
         mountedTerminalView = nil
         terminalController?.retireAll()
         terminalController = nil
+        unmountBeautified()
         // A stop mid-boot: drop the dive screen + its watchdog, don't leak them.
         endBootOverlay()
+    }
+
+    /// Mount (or keep) the beautified transcript view, unmounting the terminal
+    /// surface (tmux keeps running behind it). Idempotent — the live poll keeps
+    /// a mounted view current across tab switches.
+    private func mountBeautified() {
+        mountedTerminalView?.removeFromSuperview()
+        mountedTerminalView = nil
+        containerView.layer?.opacity = 1   // opaque chat surface, never dimmed
+        if beautifiedModel == nil {
+            let m = BeautifiedSessionModel(provider: LocalTranscriptProvider(pane: self))
+            beautifiedModel = m
+            m.start()
+        }
+        guard mountedBeautifiedHost == nil, let m = beautifiedModel else { return }
+        let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
+        host.translatesAutoresizingMaskIntoConstraints = false
+        mountedBeautifiedHost = host
+        containerView.addSubview(host, positioned: .below, relativeTo: suspendedTintView)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: containerView.topAnchor),
+            host.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            host.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+        ])
+        containerView.window?.makeFirstResponder(host)
+    }
+
+    private func unmountBeautified() {
+        beautifiedModel?.stop()
+        beautifiedModel = nil
+        mountedBeautifiedHost?.removeFromSuperview()
+        mountedBeautifiedHost = nil
     }
 
     /// Re-bind `profile` to a freshly-saved version and re-apply the pane-side
@@ -336,7 +398,9 @@ final class SessionPane {
     func applyLiveProfileUpdates(_ newProfile: Profile) {
         profile = newProfile
         model.accentHex = newProfile.color.hexInUI
-        let opacity = min(1.0, max(0.3, newProfile.windowOpacity))
+        // Beautified mode is always opaque (a chat surface); only the terminal
+        // honors the profile's window translucency.
+        let opacity = viewMode == .beautified ? 1.0 : min(1.0, max(0.3, newProfile.windowOpacity))
         containerView.layer?.opacity = Float(opacity)
         let bgHex = newProfile.resolveStyle(against: .load()).backgroundHex
         containerView.layer?.backgroundColor = NSColor(Color(hex: bgHex)).cgColor

@@ -355,6 +355,10 @@ final class SessionListModel {
     var filePaneOpen = false
     /// True when the agentic browser pane is open. Drives the toolbar tint.
     var browserPaneOpen = false
+    /// True when the SELECTED pane is showing the beautified transcript view
+    /// (desktop-app look) instead of the raw terminal. Per-pane state mirrored
+    /// here so the toolbar toggle can tint; updated on selection + flip.
+    var beautifiedActive = false
 }
 
 /// Right-click actions on a tab row. Handled by the window, which reads the

@@ -638,7 +638,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onDetach:    { [weak self] id in self?.acDelegate?.popOutVM(id) },
             onToggleFusion: { [weak self] id, on in if let p = self?.pane(id) { self?.acDelegate?.setFusionEngaged(on, for: p.profile) } },
             onToggleFilePane: { [weak self] in self?.toggleFilePane(nil) },
-            onToggleBrowser: { [weak self] in self?.toggleBrowserPane(nil) })
+            onToggleBrowser: { [weak self] in self?.toggleBrowserPane(nil) },
+            onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) })
         let tbDelegate = UnifiedToolbarDelegate(rootView: toolbarBar)
         self.toolbarDelegate = tbDelegate
         let bar = NSToolbar(identifier: "io.bromure.ac.unified")
@@ -1106,6 +1107,18 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         makeFirstResponder(pane.preferredFirstResponder)
         applyOpacityChrome(for: pane)
         updateEmptyState()
+        listModel.beautifiedActive = pane.viewMode == .beautified
+    }
+
+    /// Toolbar toggle: flip the selected pane between the raw terminal and the
+    /// beautified transcript view. Per-pane + live; the pane persists the choice
+    /// app-globally as the default for new panes.
+    private func toggleBeautified(_ id: Profile.ID) {
+        guard let pane = pane(id) else { return }
+        pane.setViewMode(pane.viewMode == .beautified ? .terminal : .beautified)
+        listModel.beautifiedActive = pane.viewMode == .beautified
+        applyOpacityChrome(for: pane)   // drop/restore the terminal translucency
+        makeFirstResponder(pane.preferredFirstResponder)
     }
 
     private func updateEmptyState() {
@@ -1497,7 +1510,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// framebuffer: the sidebar/divider/titlebar stay opaque. Opaque profiles
     /// keep the solid black stage (nice during boot).
     private func applyOpacityChrome(for pane: SessionPane?) {
-        let opacity = pane.map { min(1.0, max(0.3, $0.profile.windowOpacity)) } ?? 1.0
+        // The beautified transcript is a chat surface — always opaque, never the
+        // terminal's window translucency (which would show through as a scrim).
+        let beautified = pane?.viewMode == .beautified
+        let opacity = beautified ? 1.0 : (pane.map { min(1.0, max(0.3, $0.profile.windowOpacity)) } ?? 1.0)
         if opacity < 1.0 {
             isOpaque = false
             backgroundColor = .clear
@@ -2687,6 +2703,7 @@ struct UnifiedToolbarBar: View {
     let onToggleFusion: (Profile.ID, Bool) -> Void
     let onToggleFilePane: () -> Void
     let onToggleBrowser: () -> Void
+    let onToggleBeautified: (Profile.ID) -> Void
 
     private var entry: SessionListModel.VMEntry? {
         model.entries.first { $0.id == model.selectedID }
@@ -2700,6 +2717,9 @@ struct UnifiedToolbarBar: View {
                 if entry.model.streamingActive { StreamingDot() }
                 if let status = entry.model.engineStatus { EngineBadge(status: status) }
                 FusionToggle(model: entry.model) { on in onToggleFusion(entry.id, on) }
+                HeaderIcon(system: "doc.richtext",
+                           help: "Switch between the terminal and the beautified transcript view",
+                           active: model.beautifiedActive) { onToggleBeautified(entry.id) }
                 HeaderIcon(system: "folder", help: "Browse files") { onFiles(entry.id) }
                 HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
                 HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
