@@ -502,24 +502,10 @@ def write_chrome_env(cfg):
     if cfg.get("microphone"):
         disable_features.append("AudioServiceOutOfProcess")
 
-    # Always enable Chrome DevTools Protocol.
+    # Always enable Chrome DevTools Protocol on localhost — used by the CJK
+    # input agent for inline IME composition, and by the CDP automation bridge.
     extra_flags.append("--remote-debugging-port=9222")
-    # Bind loopback-only by DEFAULT: that is what every already-shipped client
-    # expects from this image (Bromure Web 4.0.0 tunnels CDP over vsock, whose
-    # guest-side cdp-agent dials 127.0.0.1), and it keeps DevTools off the LAN
-    # on hosts that have no filter in front of it.
-    #
-    # `cdpLanAccess` opts in (Bromure AC, and only on the vmnet switch): the
-    # host then reads CDP over TCP on the VM's LAN address, because reading the
-    # CDP vsock wedged the VZ main queue — which services vsock — and froze the
-    # whole app. VMNetSwitch drops peer VM → :9222, so the host stays the only
-    # machine that can connect. In-guest agents (CJK IME, tab-agent) keep using
-    # 127.0.0.1 either way, which 0.0.0.0 includes.
-    if cfg.get("cdpLanAccess"):
-        extra_flags.append("--remote-debugging-address=0.0.0.0")
-        # Chromium rejects DevTools WebSocket upgrades from a non-loopback
-        # client unless the allowed origins are declared.
-        extra_flags.append("--remote-allow-origins=*")
+    extra_flags.append("--remote-debugging-address=127.0.0.1")
 
     # Disable WebRTC when both webcam and microphone are off (skip for IKEv2
     # — these flags can interfere with private network access through the tunnel)

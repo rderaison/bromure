@@ -19,13 +19,7 @@ public final class LinuxImageManager {
     /// the xtradeb PPA as a native deb, and glibc means Cloudflare WARP
     /// (and soon official Google Chrome) install as normal debs — the
     /// gcompat/resolv-stub compat layer is gone.
-    // 402: config-agent understands `cdpLanAccess` — when the host asks for it
-    // (Bromure AC, switch/NAT only) Chromium binds CDP on 0.0.0.0 so the host
-    // can drive it over vmnet TCP instead of the main-queue-wedging vsock, with
-    // a VMNetSwitch ACL keeping :9222 host-only. Absent the flag the bind stays
-    // loopback-only, so this image behaves exactly like 401 for already-shipped
-    // clients (Bromure Web 4.0.0).
-    public static let imageVersion = "402"
+    public static let imageVersion = "401"
 
     /// Human description of the image — surfaces in
     /// browser-img-catalog.json (via `bromure init-foss-image`'s
