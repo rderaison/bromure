@@ -11,14 +11,14 @@ import Security
 // scoped to CDP-only capabilities, which is exactly the browser MCP surface
 // the in-VM agents want.
 //
-// Transport: the shared CDPBridge (vsock 5200) pool. The guest cdp-agent (run
-// by automation mode) opens connections to the host and bridges each to
-// Chromium's 127.0.0.1:9222, so a dequeued connection IS a byte pipe to
-// Chromium — no host-side TCP proxy (unlike Bromure Web's AutomationServer).
-// The WebSocket client below is ported from Bromure Web's CDPConnection,
-// adapted to run over a vsock fd instead of a TCP socket.
-//
-// Runtime-untested (no nested virt in the dev sandbox); build-verified only.
+// Transport: a plain TCP connection to the browser VM's Chromium over the
+// vmnet LAN (guest IP :9222, resolved from the VM's DHCP lease). This replaced
+// the old CDPBridge vsock pool, which did NOT work: continuously reading a
+// vsock connection from the host wedged the VZ main queue (VZ services vsock
+// there), permanently freezing the app. vmnet TCP is pumped on VMNetSwitch's
+// own threads + the kernel, never the main queue. Chromium binds 0.0.0.0:9222
+// with --remote-allow-origins=* (config-agent) so the host can reach it.
+// The WebSocket client below is Bromure Web's CDPConnection, over a TCP fd.
 
 /// Build Input.dispatchKeyEvent params for a named key.
 private func keyParams(_ type: String, key: String, code: String, vk: Int) -> [String: Any] {
@@ -27,7 +27,11 @@ private func keyParams(_ type: String, key: String, code: String, vk: Int) -> [S
 
 @MainActor
 final class BrowserCDP {
-    private let bridge: CDPBridge
+    /// The browser VM's MAC, resolved lazily to its vmnet LAN IP via the DHCP
+    /// lease (the lease may not exist the instant the view attaches).
+    private let vmMAC: String
+    /// Cached guest IP once its DHCP lease resolves.
+    private var cdpHost: String?
     /// Persistent CDP WebSocket to the active page, reused across ops. The old
     /// code opened a fresh connection (a `/json/list` GET + a full WebSocket
     /// upgrade handshake + teardown) for EVERY call — three extra round-trips
@@ -36,13 +40,21 @@ final class BrowserCDP {
     /// only reconnect when it drops.
     private var cachedWS: CDPWSConnection?
 
-    init(socketDevice: VZVirtioSocketDevice) {
-        bridge = CDPBridge(socketDevice: socketDevice)
+    /// Chromium's remote-debugging port. We speak CDP straight to it over the
+    /// vmnet LAN (TCP) instead of the old vsock pool: continuously reading a
+    /// vsock from the host wedges the VZ main queue (VZ services vsock there),
+    /// which permanently froze the app. TCP to the guest IP is pumped on
+    /// VMNetSwitch's own threads + the kernel, never the main queue. Chromium
+    /// binds 0.0.0.0:9222 with --remote-allow-origins=* (config-agent) so the
+    /// host can reach it from the LAN.
+    static let cdpPort: UInt16 = 9222
+
+    init(browserVMMAC: String) {
+        vmMAC = browserVMMAC
     }
 
     func stop() {
         cachedWS?.disconnect(); cachedWS = nil
-        bridge.stop()
     }
 
     enum CDPError: LocalizedError {
@@ -435,24 +447,37 @@ final class BrowserCDP {
     private func activeConnection() async throws -> CDPWSConnection {
         if let ws = cachedWS, ws.isConnected { return ws }
         cachedWS?.disconnect(); cachedWS = nil
-        let path = try await activePageWSPath()
-        guard let conn = dequeueConnection() else { throw CDPError.notReady }
-        let ws = CDPWSConnection(connection: conn)
+        let host = try await resolveHost()
+        let path = try await activePageWSPath(host: host)
+        let fd = try CDPWSConnection.connectTCP(host: host, port: Self.cdpPort)
+        let ws = CDPWSConnection(fd: fd, host: host)
         try await ws.connect(path: path)
         cachedWS = ws
         return ws
     }
 
-    private func dequeueConnection() -> VZVirtioSocketConnection? {
-        bridge.dequeueConnection()
+    /// Resolve (and cache) the browser VM's vmnet IP from its DHCP lease. The
+    /// lease is usually present by the first CDP op, but the VM can still be
+    /// DHCP-ing right after the view attaches — retry briefly before failing so
+    /// the first tool call after boot doesn't spuriously report "not ready".
+    private func resolveHost() async throws -> String {
+        if let cdpHost { return cdpHost }
+        for attempt in 0..<20 {
+            if let ip = VMNetSwitch.shared.leasedIP(forMAC: vmMAC) {
+                cdpHost = ip
+                return ip
+            }
+            if attempt < 19 { try? await Task.sleep(nanoseconds: 150_000_000) }
+        }
+        throw CDPError.notReady
     }
 
-    /// The active page target's devtools WS path (`/devtools/page/<id>`), via
-    /// an HTTP `GET /json/list` over a pooled connection.
-    private func activePageWSPath() async throws -> String {
-        guard let conn = dequeueConnection() else { throw CDPError.notReady }
-        defer { conn.close() }
-        let body = try await CDPWSConnection.httpGet(fd: conn.fileDescriptor, path: "/json/list")
+    /// The active page target's devtools WS path (`/devtools/page/<id>`), via an
+    /// HTTP `GET /json/list` on a fresh TCP connection to Chromium.
+    private func activePageWSPath(host: String) async throws -> String {
+        let fd = try CDPWSConnection.connectTCP(host: host, port: Self.cdpPort)
+        defer { Darwin.close(fd) }
+        let body = try await CDPWSConnection.httpGet(fd: fd, host: host, path: "/json/list")
         guard let targets = try? JSONSerialization.jsonObject(with: body) as? [[String: Any]] else {
             throw CDPError.failed("bad /json/list response")
         }
@@ -470,16 +495,42 @@ final class BrowserCDP {
 /// Bromure Web's CDPConnection; the only change is `connect(path:)` takes the
 /// already-open vsock connection instead of doing a TCP connect.
 final class CDPWSConnection: @unchecked Sendable {
-    private let connection: VZVirtioSocketConnection
     private var fd: Int32 = -1
+    private let host: String
     private var nextId = 1
     private let lock = NSLock()
     private var pending: [Int: CheckedContinuation<[String: Any], any Error>] = [:]
     private(set) var isConnected = false
 
-    init(connection: VZVirtioSocketConnection) {
-        self.connection = connection
-        self.fd = connection.fileDescriptor
+    init(fd: Int32, host: String) {
+        self.fd = fd
+        self.host = host
+    }
+
+    /// Blocking TCP connect to a vmnet guest `IP:port`, returning a connected fd
+    /// (or throwing). On the local vmnet a dead port RSTs immediately (fail
+    /// fast) and a live Chromium accepts sub-millisecond, so no non-blocking
+    /// dance is needed. Reads/writes on this fd run on background threads and
+    /// the kernel TCP stack — never the VZ main queue the vsock path wedged.
+    static func connectTCP(host: String, port: UInt16) throws -> Int32 {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw BrowserCDP.CDPError.failed("socket() failed") }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else {
+            Darwin.close(fd); throw BrowserCDP.CDPError.failed("bad guest IP \(host)")
+        }
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard rc == 0 else {
+            Darwin.close(fd)
+            throw BrowserCDP.CDPError.failed("connect \(host):\(port) failed (errno \(errno))")
+        }
+        return fd
     }
 
     /// Cap blocking reads so a stalled guest can't hang a tool call forever —
@@ -496,13 +547,14 @@ final class CDPWSConnection: @unchecked Sendable {
     /// WebSocket upgrade handshake on the vsock fd, then start the read loop.
     func connect(path: String) async throws {
         let fd = self.fd
+        let host = self.host
         Self.setReadTimeout(fd, seconds: 20)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 var keyBytes = [UInt8](repeating: 0, count: 16)
                 _ = SecRandomCopyBytes(kSecRandomDefault, 16, &keyBytes)
                 let wsKey = Data(keyBytes).base64EncodedString()
-                let req = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:9222\r\n"
+                let req = "GET \(path) HTTP/1.1\r\nHost: \(host):9222\r\n"
                     + "Upgrade: websocket\r\nConnection: Upgrade\r\n"
                     + "Sec-WebSocket-Key: \(wsKey)\r\nSec-WebSocket-Version: 13\r\n\r\n"
                 _ = req.withCString { Darwin.write(fd, $0, strlen($0)) }
@@ -522,7 +574,7 @@ final class CDPWSConnection: @unchecked Sendable {
 
     func disconnect() {
         isConnected = false
-        connection.close()
+        if fd >= 0 { Darwin.close(fd) }
         fd = -1
         lock.lock(); let p = pending; pending.removeAll(); lock.unlock()
         for (_, c) in p { c.resume(throwing: BrowserCDP.CDPError.failed("disconnected")) }
@@ -553,25 +605,45 @@ final class CDPWSConnection: @unchecked Sendable {
 
     // MARK: - HTTP GET over the fd (for /json/list)
 
-    /// Blocking HTTP/1.1 GET on `fd`, returning the response body. Reads until
-    /// the socket closes or a full Content-Length body has arrived. Chromium's
-    /// /json endpoints answer with `Connection: close`, so read-to-EOF is safe.
-    static func httpGet(fd: Int32, path: String) async throws -> Data {
+    /// Blocking HTTP/1.1 GET on `fd`, returning the response body. Returns the
+    /// moment a full Content-Length body has arrived — Chromium's `/json`
+    /// endpoints keep the connection open despite our `Connection: close`, so
+    /// the old read-to-EOF stalled for the whole receive timeout (20s) on EVERY
+    /// CDP reconnect. Falls back to read-to-EOF only when no Content-Length.
+    static func httpGet(fd: Int32, host: String, path: String) async throws -> Data {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, any Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
-                setReadTimeout(fd, seconds: 20)
-                let req = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:9222\r\nConnection: close\r\n\r\n"
+                setReadTimeout(fd, seconds: 5)
+                let req = "GET \(path) HTTP/1.1\r\nHost: \(host):9222\r\nConnection: close\r\n\r\n"
                 _ = req.withCString { Darwin.write(fd, $0, strlen($0)) }
                 var raw = Data()
                 var buf = [UInt8](repeating: 0, count: 65536)
+                var headerEnd: Range<Data.Index>?
+                var contentLength: Int?
                 while true {
+                    if headerEnd == nil, let sep = raw.range(of: Data("\r\n\r\n".utf8)) {
+                        headerEnd = sep
+                        let head = String(data: raw.subdata(in: raw.startIndex..<sep.lowerBound),
+                                          encoding: .utf8) ?? ""
+                        for line in head.components(separatedBy: "\r\n") {
+                            let parts = line.split(separator: ":", maxSplits: 1)
+                            if parts.count == 2, parts[0].lowercased() == "content-length" {
+                                contentLength = Int(String(parts[1]).trimmingCharacters(in: .whitespaces))
+                            }
+                        }
+                    }
+                    if let sep = headerEnd, let len = contentLength,
+                       raw.endIndex - sep.upperBound >= len {
+                        cont.resume(returning: raw.subdata(in: sep.upperBound..<(sep.upperBound + len)))
+                        return
+                    }
                     let n = Darwin.read(fd, &buf, buf.count)
                     if n <= 0 { break }
                     raw.append(contentsOf: buf[0..<n])
                     if raw.count > 8 * 1024 * 1024 { break }
                 }
-                // Split headers/body on the blank line.
-                guard let sep = raw.range(of: Data("\r\n\r\n".utf8)) else {
+                // EOF/timeout: return whatever body arrived (no-Content-Length case).
+                guard let sep = headerEnd ?? raw.range(of: Data("\r\n\r\n".utf8)) else {
                     cont.resume(throwing: BrowserCDP.CDPError.failed("malformed HTTP response"))
                     return
                 }

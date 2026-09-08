@@ -463,7 +463,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         // peer bridging is on (AC); with it off (Bromure Web) VMs can't even ARP
         // each other, so they stay mutually unreachable.
         if buf[0] & 0x01 != 0 {
-            if bridgePeers {
+            if bridgePeers, !Self.isChromiumCDPFrame(buf, n) {
                 for fd in peerPortFDs(except: srcPortID) { _ = Darwin.write(fd, buf, n) }
             }
             writeToVmnet(buf, n)
@@ -483,14 +483,17 @@ public final class VMNetSwitch: @unchecked Sendable {
             writeToVmnet(buf, n)
         case .some(let dstPort) where dstPort != srcPortID:
             // A frame addressed to a peer VM — deliver only when bridging peers,
-            // otherwise drop it to preserve inter-VM isolation.
-            if bridgePeers, let fd = portFD(dstPort) { _ = Darwin.write(fd, buf, n) }
+            // otherwise drop it to preserve inter-VM isolation. CDP (:9222) is
+            // never delivered peer→peer: it's unauthenticated control of that
+            // VM's browser, and the only legitimate client is the host (uplink).
+            if bridgePeers, !Self.isChromiumCDPFrame(buf, n),
+               let fd = portFD(dstPort) { _ = Darwin.write(fd, buf, n) }
         case .some:
             break  // destined back to itself — drop
         case nil:
             // Unknown unicast: always try the uplink; flood peers only when
-            // bridging is enabled.
-            if bridgePeers {
+            // bridging is enabled (never flooding CDP to peers, as above).
+            if bridgePeers, !Self.isChromiumCDPFrame(buf, n) {
                 for fd in peerPortFDs(except: srcPortID) { _ = Darwin.write(fd, buf, n) }
             }
             writeToVmnet(buf, n)
@@ -656,6 +659,27 @@ public final class VMNetSwitch: @unchecked Sendable {
         return u16(buf, 14 + ihl + 2) == 67                                  // dport 67
     }
 
+    /// Chromium's remote-debugging (CDP) port. Its DevTools protocol is
+    /// unauthenticated full control of the browser, so it must never be
+    /// reachable VM→VM on the shared switch (see `isChromiumCDPFrame`).
+    private static let chromiumCDPPort: UInt16 = 9222
+
+    /// True when `buf` is an IPv4 TCP segment whose destination port is the
+    /// Chromium CDP port. The browser VM binds CDP on 0.0.0.0 so the *host*
+    /// can drive it over the vmnet LAN (the vsock path wedged the main queue);
+    /// but the host's traffic arrives on the uplink (`handleFromVmnet`), never
+    /// through `handleFromVM`. So any VM-sourced frame to :9222 headed for a
+    /// peer is a peer trying to hijack another VM's browser — we drop it while
+    /// leaving all other peer traffic (e.g. the browser loading a workspace
+    /// VM's dev server) bridged as usual.
+    private static func isChromiumCDPFrame(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
+        guard n >= 14 + 20 + 4, u16(buf, 12) == 0x0800 else { return false }  // IPv4
+        let ihl = Int(buf[14] & 0x0F) * 4
+        guard ihl >= 20, n >= 14 + ihl + 4 else { return false }
+        guard buf[14 + 9] == 6 else { return false }                         // TCP
+        return u16(buf, 14 + ihl + 2) == chromiumCDPPort                     // dport 9222
+    }
+
     /// Parse a client DHCP request and write an OFFER/ACK straight back to the
     /// originating port. Never touches vmnet.
     private func handleDHCP(_ srcPortID: Int, _ buf: UnsafeMutablePointer<UInt8>, _ n: Int) {
@@ -817,6 +841,25 @@ public final class VMNetSwitch: @unchecked Sendable {
     }
     private static func ipString(_ v: UInt32) -> String {
         "\((v >> 24) & 0xFF).\((v >> 16) & 0xFF).\((v >> 8) & 0xFF).\(v & 0xFF)"
+    }
+
+    /// The dotted-quad IPv4 this switch handed a client MAC via DHCP, or nil if
+    /// that MAC hasn't leased yet. `mac` is the colon-separated form we assign
+    /// VMs (e.g. `02:ab:cd:ef:12:34`); it is packed big-endian the same way the
+    /// DHCP handler keys `dhcpLeases`. Lets a host-side driver reach a VM over
+    /// the vmnet LAN (e.g. CDP straight to the browser VM's Chromium) instead of
+    /// tunnelling through a main-queue-serviced vsock.
+    public func leasedIP(forMAC mac: String) -> String? {
+        let parts = mac.split(separator: ":")
+        guard parts.count == 6 else { return nil }
+        var packed: UInt64 = 0
+        for p in parts {
+            guard let b = UInt8(p, radix: 16) else { return nil }
+            packed = (packed << 8) | UInt64(b)
+        }
+        lock.lock(); defer { lock.unlock() }
+        guard let ip = dhcpLeases[packed] else { return nil }
+        return Self.ipString(ip)
     }
 
     /// Standard one's-complement checksum (IP header / UDP).

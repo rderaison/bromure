@@ -234,6 +234,19 @@ public struct VMConfig {
     /// nothing sits between Chromium and the network.
     public var directConnection: Bool
 
+    /// Let the host reach Chromium's DevTools port (9222) over the VM's LAN
+    /// address instead of guest-loopback only. Bromure AC's embedded browser
+    /// sets it true: the host drives CDP over vmnet TCP, because reading the
+    /// CDP vsock wedged the VZ main queue (which services vsock) and froze the
+    /// whole app. Default false keeps the historical loopback-only bind, so
+    /// this same image stays byte-compatible with already-shipped clients
+    /// (Bromure Web 4.0.0 tunnels CDP over vsock and never sets this).
+    ///
+    /// Honoured only on the vmnet switch ("nat"): VMNetSwitch drops peer→:9222
+    /// so only the host can connect. In bridged mode the VM sits on the user's
+    /// physical LAN with no such filter, so `VMPool` ignores this flag there.
+    public var exposeCDPOverLAN: Bool
+
     /// Custom HTTP proxy hostname (e.g. "proxy.example.com").
     public var proxyHost: String?
 
@@ -363,6 +376,7 @@ public struct VMConfig {
         allowedPorts: String? = nil,
         networkInterface: String? = nil,
         directConnection: Bool = false,
+        exposeCDPOverLAN: Bool = false,
         proxyHost: String? = nil,
         proxyPort: Int? = nil,
         proxyUsername: String? = nil,
@@ -449,6 +463,7 @@ public struct VMConfig {
         self.allowedPorts = allowedPorts
         self.networkInterface = networkInterface
         self.directConnection = directConnection
+        self.exposeCDPOverLAN = exposeCDPOverLAN
         self.proxyHost = proxyHost
         self.proxyPort = proxyPort
         self.proxyUsername = proxyUsername

@@ -309,6 +309,9 @@ final class WorkspaceBrowserController {
             enableWebcam: permissions.webcam,
             enableMicrophone: permissions.microphone,
             directConnection: pacB64 == nil,   // no proxy — Chromium connects straight out
+            // Let the host drive CDP over vmnet TCP (BrowserCDP). VMPool honours
+            // this only on the switch, where peer→:9222 is filtered.
+            exposeCDPOverLAN: true,
             proxyPacBase64: pacB64,
             // "Allow file downloads" off ⇒ block all downloads in the guest.
             blockDownloads: !permissions.allowDownloads,
@@ -353,8 +356,15 @@ final class WorkspaceBrowserController {
         // chrome drives it. Chromium already opens on the config home page.
         if let socketDevice = warm.vm.socketDevices.first as? VZVirtioSocketDevice {
             wireTabBridge(TabBridge(socketDevice: socketDevice))
-            // CDP driver shares the same vsock device (different port, 5200).
-            cdp = BrowserCDP(socketDevice: socketDevice)
+            // CDP driver talks straight to Chromium over the vmnet LAN (TCP
+            // 9222), resolved from the VM's DHCP lease — NOT vsock, whose
+            // continuous host-side reads wedged the VZ main queue and froze
+            // the app.
+            if let mac = warm.macAddress {
+                cdp = BrowserCDP(browserVMMAC: mac)
+            } else {
+                print("[browser] no MAC on warm VM — CDP tools disabled")
+            }
             // Network trace: the guest trace-agent (native-messaging → vsock
             // 5900) streams the request log into an in-memory SQLite store the
             // browser_network MCP tool queries. Ephemeral, like the VM.
