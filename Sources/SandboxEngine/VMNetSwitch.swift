@@ -819,6 +819,25 @@ public final class VMNetSwitch: @unchecked Sendable {
         "\((v >> 24) & 0xFF).\((v >> 16) & 0xFF).\((v >> 8) & 0xFF).\(v & 0xFF)"
     }
 
+    /// The dotted-quad IPv4 this switch handed a client MAC via DHCP, or nil if
+    /// that MAC hasn't leased yet. `mac` is the colon-separated form we assign
+    /// VMs (e.g. `02:ab:cd:ef:12:34`); it is packed big-endian the same way the
+    /// DHCP handler keys `dhcpLeases`. Lets the host learn a VM's LAN address so
+    /// the paired workspace VM can be told where to reach the browser VM's CDP
+    /// forwarder over vmnet (VM↔VM), keeping the host out of the CDP path.
+    public func leasedIP(forMAC mac: String) -> String? {
+        let parts = mac.split(separator: ":")
+        guard parts.count == 6 else { return nil }
+        var packed: UInt64 = 0
+        for p in parts {
+            guard let b = UInt8(p, radix: 16) else { return nil }
+            packed = (packed << 8) | UInt64(b)
+        }
+        lock.lock(); defer { lock.unlock() }
+        guard let ip = dhcpLeases[packed] else { return nil }
+        return Self.ipString(ip)
+    }
+
     /// Standard one's-complement checksum (IP header / UDP).
     private static func checksum(_ bytes: [UInt8]) -> UInt16 {
         var sum: UInt32 = 0

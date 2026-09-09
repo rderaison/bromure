@@ -1,6 +1,7 @@
 import AppKit
 import BrowserBridges
 import Foundation
+import Security
 @preconcurrency import SandboxEngine
 @preconcurrency import Virtualization
 
@@ -52,6 +53,14 @@ final class WorkspaceBrowserController {
     /// CDP driver (vsock 5200) for screenshot/eval/page-text — what TabBridge
     /// can't do. Exposed for the browser MCP server + devtools.
     private(set) var cdp: BrowserCDP?
+    /// LAN port the guest `cdp-lan-forwarder` listens on (→ Chromium loopback
+    /// 9222). The workspace VM's MCP drives CDP here over VM↔VM TCP so the host
+    /// stays out of the CDP path (host-driven CDP wedged the VZ main queue).
+    static let cdpLanPort = 9223
+    /// Per-boot handshake secret for the CDP LAN forwarder — generated when the
+    /// browser config is built, handed to config-agent (forwarder) and to the
+    /// workspace VM's MCP client via `cdpLANEndpoint()`. Never baked.
+    private var cdpLANSecret: String?
     /// Network trace (vsock 5900) — the guest trace extension's request log,
     /// backing browser_network. Nil until the VM attaches.
     private var trace: TraceBridge?
@@ -282,6 +291,10 @@ final class WorkspaceBrowserController {
     /// (needed by native-chrome tab state, and phases 3c-e) are available.
     private func browserConfig() -> VMConfig {
         let scale = VMConfig.resolvedDisplayScale()
+        // Fresh per-boot secret for the CDP LAN forwarder (VM↔VM CDP). Stored so
+        // `cdpLANEndpoint()` can hand the same value to the workspace VM's MCP.
+        let cdpSecret = Self.randomCDPSecret()
+        cdpLANSecret = cdpSecret
         // Fat-client mode: a PAC routes the remote workspace subnet through the
         // SOCKS forwarder (at the pinned gateway); DIRECT otherwise. Local mode
         // connects straight out (directConnection).
@@ -309,6 +322,12 @@ final class WorkspaceBrowserController {
             enableWebcam: permissions.webcam,
             enableMicrophone: permissions.microphone,
             directConnection: pacB64 == nil,   // no proxy — Chromium connects straight out
+            // Let the workspace VM drive CDP over vmnet TCP (VM↔VM), host out of
+            // the loop. VMPool honours this only on the switch (NAT), where a
+            // VMNetSwitch ACL restricts the forwarder port to the paired VM.
+            exposeCDPOverLAN: true,
+            cdpSecret: cdpSecret,
+            cdpLanPort: Self.cdpLanPort,
             proxyPacBase64: pacB64,
             // "Allow file downloads" off ⇒ block all downloads in the guest.
             blockDownloads: !permissions.allowDownloads,
@@ -321,6 +340,24 @@ final class WorkspaceBrowserController {
             // fight our own CDP connection over port 9222.
             traceLevel: .headers
         )
+    }
+
+    /// A fresh 256-bit hex token for the CDP LAN forwarder handshake.
+    private static func randomCDPSecret() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Where the workspace VM's MCP client reaches this browser VM's CDP over
+    /// the vmnet LAN (VM↔VM TCP): the browser VM's leased IP, the forwarder
+    /// port, and the per-boot secret. Nil until the VM has a DHCP lease and a
+    /// secret (i.e. it booted with CDP-over-LAN). The host is not in the data
+    /// path — this only tells the workspace VM where to connect.
+    func cdpLANEndpoint() -> (ip: String, port: Int, secret: String)? {
+        guard let mac = warm?.macAddress, let secret = cdpLANSecret,
+              let ip = VMNetSwitch.shared.leasedIP(forMAC: mac) else { return nil }
+        return (ip, Self.cdpLanPort, secret)
     }
 
     private func attach(_ warm: VMPool.WarmVM) {
@@ -703,6 +740,24 @@ final class WorkspaceBrowserController {
         }
         pool = nil
         state = .idle
+    }
+
+    /// True while this workspace still owns a booted browser VM. Quit consults
+    /// it: a browser VM alone must still take the `.terminateLater` path.
+    var hasLiveVM: Bool { warm != nil }
+
+    /// `stop()`, but *awaiting* the VM teardown instead of detaching it.
+    ///
+    /// `stop()` hands `tearDown` to a fire-and-forget `Task`, which is fine
+    /// mid-session but never runs when the process is on its way out — the same
+    /// trap `InferenceService.killIfRunning()` documents. Quitting that way
+    /// orphans a live VZ VM, so VZ's messenger finds the host gone and trips
+    /// `handle_unresponsive_connection`. Quit must await this instead.
+    func stopAndWait() async {
+        let live = warm
+        warm = nil          // so stop() doesn't also detach a teardown
+        stop()
+        if let live { await Self.tearDown(live) }
     }
 
     /// No image anywhere: show the consent card in the pane placeholder

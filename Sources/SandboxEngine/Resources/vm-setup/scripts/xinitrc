@@ -110,6 +110,9 @@ fi
 [ "$SWAP_CMD_CTRL" = "1" ] && setxkbmap -option ctrl:swap_lwin_lctl,ctrl:swap_rctl
 [ "$MICROPHONE" = "1" ] && pactl load-module module-alsa-source device=hw:0,1 source_name=virtio_mic source_properties=device.description=Microphone 2>/dev/null &
 [ "$AUTOMATION" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/cdp-agent.py &
+# CDP LAN forwarder: lets the workspace VM drive CDP over VM↔VM TCP (host stays
+# out of the loop → no main-queue wedge). No-ops unless CDP_LAN_ACCESS=1.
+[ "$AUTOMATION" = "1" ] && [ "$CDP_LAN_ACCESS" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/cdp-lan-forwarder.py &
 [ "$NATIVE_CHROME" = "1" ] && /usr/local/bin/resilient-launch.sh /usr/local/bin/tab-agent.py &
 # Native tabs: swap in the Openbox config that grabs browser-chrome chords
 # (⌘T/⌘W/⌘L/⌘R/⌘P/⌘[/⌘]) and bounces them to the host via bromure-hostkey ->

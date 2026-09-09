@@ -4413,10 +4413,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return .terminateCancel
         }
         let running = runningSessions.values.filter { $0.sandbox.vm?.state == .running }
-        if running.isEmpty { return .terminateNow }
+        // Browser VMs live outside `runningSessions` (the window owns them), so
+        // they need counting here too — otherwise a workspace with only its
+        // browser up took `.terminateNow` and we exited with a VZ VM still
+        // running, which is what left `handle_unresponsive_connection` crashes
+        // behind after quit.
+        let browsersRunning = unifiedWindow?.hasRunningBrowserVMs ?? false
+        if running.isEmpty && !browsersRunning { return .terminateNow }
 
         Task { @MainActor in
             await self.drainRunningVMs()
+            // Awaited, not detached: `applicationWillTerminate`'s teardown fires
+            // a Task that never runs this late, orphaning the browser VM.
+            await self.unifiedWindow?.teardownBrowserVMsAwaiting()
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
@@ -4439,6 +4448,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Quit", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        // Come forward first. Quit usually arrives as an Apple Event (menu,
+        // ⌘Q, Dock, `osascript`) while another app is frontmost, and a modal
+        // put up from that handler can end up unfocused and behind whatever
+        // the user is looking at — the app then just sits there, which reads
+        // as "quitting doesn't work". Activating makes the sheet the thing
+        // they're actually being asked about.
+        NSApp.activate(ignoringOtherApps: true)
         return alert.runModal() == .alertFirstButtonReturn
     }
 
@@ -4455,6 +4471,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         await drainRunningVMs()
+        await unifiedWindow?.teardownBrowserVMsAwaiting()
         NSApp.terminate(nil)
     }
 

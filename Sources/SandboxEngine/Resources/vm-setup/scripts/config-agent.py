@@ -504,8 +504,27 @@ def write_chrome_env(cfg):
 
     # Always enable Chrome DevTools Protocol on localhost — used by the CJK
     # input agent for inline IME composition, and by the CDP automation bridge.
+    # Chromium ALWAYS binds loopback (it ignores --remote-debugging-address).
+    # When the workspace VM needs to drive CDP over the LAN, cdp-lan-forwarder
+    # (gated by CDP_LAN_ACCESS below) binds a LAN port and pipes to this one.
     extra_flags.append("--remote-debugging-port=9222")
     extra_flags.append("--remote-debugging-address=127.0.0.1")
+
+    # CDP-over-LAN (VM↔VM): let the workspace VM drive CDP straight to this
+    # browser VM over vmnet TCP, so the host is entirely out of the CDP path
+    # (host-side CDP wedged the VZ main queue). cdp-lan-forwarder reads these
+    # from chrome-env; it only listens when CDP_LAN_ACCESS=1 with a secret.
+    # Fail-closed: emitted by the host only for AC in NAT mode (see VMPool);
+    # shipped Bromure Web never sends the key, so this stays loopback-only.
+    if cfg.get("cdpLanAccess") and cfg.get("cdpSecret"):
+        lines.append("CDP_LAN_ACCESS=1")
+        lines.append(f"CDP_SECRET={sh_escape(str(cfg.get('cdpSecret')))}")
+        cdp_port = cfg.get("cdpLanPort")
+        if isinstance(cdp_port, int) and 1 <= cdp_port <= 65535:
+            lines.append(f"CDP_LAN_PORT={cdp_port}")
+        allowed_ip = cfg.get("cdpAllowedIP")
+        if isinstance(allowed_ip, str) and re.match(r"^[0-9.]{7,15}$", allowed_ip):
+            lines.append(f"CDP_ALLOWED_IP={sh_escape(allowed_ip)}")
 
     # Disable WebRTC when both webcam and microphone are off (skip for IKEv2
     # — these flags can interfere with private network access through the tunnel)

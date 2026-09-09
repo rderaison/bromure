@@ -234,6 +234,31 @@ public struct VMConfig {
     /// nothing sits between Chromium and the network.
     public var directConnection: Bool
 
+    /// Let the paired workspace VM drive Chromium's DevTools (CDP) over the
+    /// vmnet LAN — VM↔VM TCP, host entirely out of the CDP path. Bromure AC's
+    /// embedded browser sets it true: host-driven CDP (vsock OR host→VM TCP)
+    /// wedged the VZ main queue (which services the browser VM's devices,
+    /// pinned to main by VZVirtualMachineView) under load and froze the app.
+    /// With the workspace VM as the client, only VMNetSwitch packet routing
+    /// (its own threads) touches the traffic. Default false keeps the
+    /// historical loopback-only bind, so this same image stays byte-compatible
+    /// with already-shipped clients (Bromure Web 4.0.0 never sets this).
+    ///
+    /// Honoured only on the vmnet switch ("nat"); a bridged VM sits on the
+    /// user's physical LAN with no switch ACL in the path, so `VMPool` ignores
+    /// it there. `cdp-lan-forwarder` (guest) additionally requires the secret.
+    public var exposeCDPOverLAN: Bool
+
+    /// Per-boot random token the guest `cdp-lan-forwarder` requires as a
+    /// handshake before proxying to Chromium, and that the workspace VM's MCP
+    /// client presents. Set by the browser controller alongside
+    /// `exposeCDPOverLAN`; nil elsewhere. Never baked — delivered at runtime.
+    public var cdpSecret: String?
+
+    /// LAN port the guest `cdp-lan-forwarder` listens on (forwarding to
+    /// Chromium's loopback 9222). Default 9223 when nil and CDP-over-LAN is on.
+    public var cdpLanPort: Int?
+
     /// Custom HTTP proxy hostname (e.g. "proxy.example.com").
     public var proxyHost: String?
 
@@ -363,6 +388,9 @@ public struct VMConfig {
         allowedPorts: String? = nil,
         networkInterface: String? = nil,
         directConnection: Bool = false,
+        exposeCDPOverLAN: Bool = false,
+        cdpSecret: String? = nil,
+        cdpLanPort: Int? = nil,
         proxyHost: String? = nil,
         proxyPort: Int? = nil,
         proxyUsername: String? = nil,
@@ -449,6 +477,9 @@ public struct VMConfig {
         self.allowedPorts = allowedPorts
         self.networkInterface = networkInterface
         self.directConnection = directConnection
+        self.exposeCDPOverLAN = exposeCDPOverLAN
+        self.cdpSecret = cdpSecret
+        self.cdpLanPort = cdpLanPort
         self.proxyHost = proxyHost
         self.proxyPort = proxyPort
         self.proxyUsername = proxyUsername

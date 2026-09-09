@@ -58,6 +58,26 @@ final class BrowserMCPServer {
             let args = params["arguments"] as? [String: Any] ?? [:]
             let result = await callTool(name: name, args: args)
             return respond(id: id, result: result)
+        case "bromure/cdpEndpoint":
+            // Internal: the workspace VM's MCP shim asks where to reach this
+            // browser VM's CDP over the vmnet LAN (VM↔VM TCP), so the host
+            // stays out of the CDP data path. Boots the browser if needed,
+            // then waits for its DHCP lease before returning the endpoint.
+            do {
+                let b = try await readyBrowser()
+                for _ in 0..<100 {   // ~10s for the lease to land
+                    if let ep = b.cdpLANEndpoint() {
+                        return respond(id: id, result: [
+                            "ip": ep.ip, "port": ep.port, "secret": ep.secret])
+                    }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                return respondError(id: id, code: -32000,
+                                    message: "CDP LAN endpoint not available")
+            } catch {
+                return respondError(id: id, code: -32000,
+                                    message: "browser not ready: \(error.localizedDescription)")
+            }
         default:
             guard id != nil else { return nil }
             return respondError(id: id, code: -32601, message: "Method not found: \(method)")

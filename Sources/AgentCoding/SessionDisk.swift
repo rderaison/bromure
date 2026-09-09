@@ -817,10 +817,21 @@ public final class SessionDisk {
                 to: mcpDir.appendingPathComponent("codex.toml"),
                 atomically: true, encoding: .utf8)
 
-            // Guest stdio↔vsock shim the browser MCP server launches.
-            try Self.browserMCPShimScript.write(
-                to: tmp.appendingPathComponent("bromure-browser-mcp.py"),
-                atomically: true, encoding: .utf8)
+            // Browser MCP server (runs in this workspace VM). Drives CDP-heavy
+            // tools directly over VM↔VM TCP (host out of the CDP path — see the
+            // file header) and forwards navigate/tabs/etc. to the host over
+            // vsock 5830. Shipped from the AC resource bundle (no image bake);
+            // falls back to the reconnecting stdio↔vsock shim if the resource
+            // is somehow missing.
+            let browserMCPDest = tmp.appendingPathComponent("bromure-browser-mcp.py")
+            try? fm.removeItem(at: browserMCPDest)
+            if let src = acResourceBundle.url(forResource: "vm-setup/bromure-browser-mcp",
+                                              withExtension: "py") {
+                try fm.copyItem(at: src, to: browserMCPDest)
+            } else {
+                try Self.browserMCPShimScript.write(
+                    to: browserMCPDest, atomically: true, encoding: .utf8)
+            }
         }
 
         // Task-board MCP shim — staged unconditionally (coding tasks can run

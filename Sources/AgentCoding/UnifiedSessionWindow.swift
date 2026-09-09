@@ -789,6 +789,41 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         shownBrowser = nil
     }
 
+    /// True while any workspace still owns a booted browser VM.
+    var hasRunningBrowserVMs: Bool {
+        browserControllers.values.contains { $0.hasLiveVM }
+    }
+
+    /// Awaited teardown of every workspace browser, for the quit path.
+    ///
+    /// `teardownBrowserVM()` detaches each VM's teardown, which never completes
+    /// once the process is exiting — leaving a live VZ VM behind. Quit awaits
+    /// this so every browser VM is actually stopped before we terminate.
+    func teardownBrowserVMsAwaiting() async {
+        let controllers = Array(browserControllers.values)
+        browserControllers.removeAll()
+        browserModels.removeAll()
+        browserPaneOpenWorkspaces.removeAll()
+        shownBrowser = nil
+        guard !controllers.isEmpty else { return }
+        // Bounded, like stopSession's suspend/shutdown watchdogs: `vm.stop()`
+        // can hang against a wedged guest, and quit is parked in
+        // `.terminateLater` until we return — an unbounded wait would trade the
+        // orphaned-VM bug for an app that never exits. Best effort, then go.
+        await withTaskGroup(of: Void.self) { race in
+            race.addTask { @MainActor in
+                await withTaskGroup(of: Void.self) { group in
+                    for c in controllers {
+                        group.addTask { @MainActor in await c.stopAndWait() }
+                    }
+                }
+            }
+            race.addTask { try? await Task.sleep(nanoseconds: 15_000_000_000) }
+            _ = await race.next()
+            race.cancelAll()
+        }
+    }
+
     /// Recreate a workspace's browser so changed settings (the
     /// stay-signed-in persistence toggle) take effect now: tear down the
     /// current VM/controller and — when this workspace is front and

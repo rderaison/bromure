@@ -485,6 +485,20 @@ public final class VMPool {
         if config.proxyHost == nil { cfg["useProxy"] = true }
         // Direct-connection mode (AC's embedded browser): no proxy flag at all.
         if config.directConnection { cfg["directConnection"] = true }
+        // CDP-over-LAN (VM↔VM): let the workspace VM drive Chromium's DevTools
+        // straight over vmnet TCP (host out of the CDP path — host-driven CDP
+        // wedged the VZ main queue). config-agent turns these into chrome-env
+        // vars that gate `cdp-lan-forwarder`. Only on the vmnet switch, where a
+        // VMNetSwitch ACL restricts :cdpLanPort to the paired workspace VM; a
+        // bridged VM sits on the physical LAN with no such filter, so we skip
+        // it there. Absent for every client that doesn't set the flag —
+        // including shipped Bromure Web — which keeps this image compatible.
+        if config.exposeCDPOverLAN, let secret = config.cdpSecret,
+           warm.bootedNetworkMode == "nat" {
+            cfg["cdpLanAccess"] = true
+            cfg["cdpSecret"] = secret
+            cfg["cdpLanPort"] = config.cdpLanPort ?? 9223
+        }
         // Fat-client browser pane: host-supplied PAC (routes the remote subnet
         // through the SOCKS forwarder). Takes precedence over the above in
         // config-agent, so the browser reaches the remote guest's dev server.
