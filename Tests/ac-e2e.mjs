@@ -3251,9 +3251,23 @@ echo "ISSUER=$ISSUER"; echo "POST443=$POST443"`,
     const HOME = process.env.HOME || "";
     const bootFiles = ["linux-base.img", "vmlinuz", "initrd"];
     const dirHasImage = (d) => bootFiles.every((f) => existsSync(`${d}/${f}`));
-    const browserImgPresent =
-      dirHasImage(`${HOME}/Library/Application Support/Bromure`) ||
-      dirHasImage(`${HOME}/Library/Application Support/BromureAC/browser`);
+    // Resolve the dir the browser VM actually boots from — shared Bromure dir
+    // first, else AC's own copy (WorkspaceBrowserController.resolveStorageDir).
+    const sharedDir = `${HOME}/Library/Application Support/Bromure`;
+    const acBrowserDir = `${HOME}/Library/Application Support/BromureAC/browser`;
+    const imageDir = dirHasImage(sharedDir) ? sharedDir
+      : dirHasImage(acBrowserDir) ? acBrowserDir : null;
+    // AC boots whatever image is in that dir (requireImageVersion:false) and
+    // never rebuilds it, so an image predating cdp-lan-forwarder can't serve
+    // these tests — it has no :9223 listener (Connection refused). Detect it by
+    // grepping the raw image for a forwarder marker; skip rather than fail.
+    const imageHasForwarder = imageDir != null && (() => {
+      try {
+        execSync(`grep -aq 'def read_handshake' ${JSON.stringify(`${imageDir}/linux-base.img`)}`,
+                 { stdio: "ignore", timeout: 120000 });
+        return true;
+      } catch { return false; }
+    })();
 
     // Can a workspace VM boot at all? (code base image present — same probe as §8)
     let canExec = true;
@@ -3269,8 +3283,10 @@ echo "ISSUER=$ISSUER"; echo "POST443=$POST443"`,
 
     if (!canExec) {
       console.log("  \x1b[33mSKIP\x1b[0m  browser-VM tests (no code base image — run `bromure-ac init`)");
-    } else if (!browserImgPresent) {
+    } else if (!imageDir) {
       console.log("  \x1b[33mSKIP\x1b[0m  browser-VM tests (no browser base image in ~/…/Bromure or …/BromureAC/browser)");
+    } else if (!imageHasForwarder) {
+      console.log("  \x1b[33mSKIP\x1b[0m  browser-VM tests (browser image predates cdp-lan-forwarder — rebuild/publish the browser image)");
     } else {
       const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
       const req = (id, name, args) =>
@@ -3333,47 +3349,50 @@ echo "ISSUER=$ISSUER"; echo "POST443=$POST443"`,
 
       await test("28.2 sustained CDP burst does not wedge the app's main queue (VM↔VM fix)", async () => {
         await withBrowserSession("ACE2E_BrowserBurst", async (id) => {
-          // (1) Boot + navigate first (blocks until the browser VM is ready), so
-          //     the burst below is pure CDP load, not boot latency.
-          const nav =
-            `echo '${req(1, "browser_navigate", { url: "about:blank" })}' ` +
-            `| timeout 100 python3 /mnt/bromure-meta/bromure-browser-mcp.py 2>&1`;
-          const rNav = await api("POST", `/sessions/${id}/exec`, { command: nav, timeout: 120 }, { timeoutMs: 150000 });
-          assertEq(rNav._status, 200, `browser boot/navigate failed: ${rNav._error || rNav.error}`);
-
-          // (2) Background burst: ~200 evaluates back-to-back over VM↔VM CDP.
-          const lines = [];
+          // ONE backgrounded driver: navigate (boots the browser VM, blocks
+          // until ready) then ~200 evaluates back-to-back, all in a SINGLE MCP
+          // process — so the browser can't idle-suspend between a separate
+          // navigate and the burst, and the whole burst is pure CDP load.
+          // navigate blocks until the browser VM's tab bridge is up, but
+          // Chromium's CDP endpoint (which the forwarder proxies to) lands a few
+          // seconds later — the same ~25s settle §28.1 uses before its evaluate.
+          const lines = [`echo '${req(1, "browser_navigate", { url: "about:blank" })}'`, "sleep 25"];
           for (let i = 100; i < 300; i++) {
             lines.push(`echo '${req(i, "browser_evaluate", { expression: `1+${i}` })}'`);
           }
-          const burst =
-            `{ ${lines.join("; ")}; sleep 20; } ` +
-            `| timeout 90 python3 /mnt/bromure-meta/bromure-browser-mcp.py > /tmp/ace2e_burst.out 2>&1`;
+          lines.push("sleep 20");
+          const driver =
+            `{ ${lines.join("; ")}; } ` +
+            `| timeout 150 python3 /mnt/bromure-meta/bromure-browser-mcp.py > /tmp/ace2e_burst.out 2>&1`;
           const started = await api("POST", `/sessions/${id}/exec`, {
-            command: `echo ${b64(burst)} | base64 -d > /tmp/ace2e_burst.sh; ` +
+            command: `echo ${b64(driver)} | base64 -d > /tmp/ace2e_burst.sh; ` +
                      `nohup bash /tmp/ace2e_burst.sh >/dev/null 2>&1 & echo started`,
             timeout: 20,
           });
           assertEq(started._status, 200, `burst launch failed: ${started._error || started.error}`);
 
-          // (3) Canary: /app/state does DispatchQueue.main.sync — the real
-          //     main-queue liveness probe. If servicing the browser VM's CDP
-          //     traffic wedged main, this hangs and the request times out. A
-          //     host-driven CDP client wedged here in ~8s; VM↔VM must not.
-          for (let i = 0; i < 10; i++) {
-            await sleep(3000);
+          // Canary across boot + burst: /app/state does DispatchQueue.main.sync
+          // — the real main-queue liveness probe. If servicing the browser VM's
+          // CDP traffic wedged main, this hangs and times out. A host-driven CDP
+          // client wedged here in ~8s; VM↔VM must not. Count SUCCESSFUL evaluates
+          // as the burst lands (an error reply carries "result" too, so exclude
+          // isError); stop once enough have completed.
+          const successes = async () => {
+            const rd = await api("POST", `/sessions/${id}/exec`, {
+              command: `awk '/"result"/{t++} /isError/{e++} END{print (t-e)+0}' /tmp/ace2e_burst.out 2>/dev/null || echo 0`,
+              timeout: 10,
+            });
+            return parseInt((rd.stdout || "0").trim(), 10) || 0;
+          };
+          let n = 0;
+          for (let i = 0; i < 22 && n < 150; i++) {
+            await sleep(4000);
             const s = await api("GET", "/app/state", undefined, { timeoutMs: 8000 });
             assertEq(s._status, 200,
-              `app main queue wedged under CDP burst at ~${(i + 1) * 3}s — VM↔VM CDP regression`);
+              `app main queue wedged under CDP burst at ~${(i + 1) * 4}s — VM↔VM CDP regression`);
+            n = await successes();
           }
-
-          // (4) Sanity: the burst actually produced CDP results (not all errors).
-          const rd = await api("POST", `/sessions/${id}/exec`, {
-            command: `grep -c '"result"' /tmp/ace2e_burst.out 2>/dev/null || echo 0`,
-            timeout: 15,
-          });
-          const n = parseInt((rd.stdout || "0").trim(), 10) || 0;
-          assert(n >= 100, `expected many successful CDP evaluates in the burst, got ${n}`);
+          assert(n >= 100, `expected many SUCCESSFUL (non-error) CDP evaluates in the burst, got ${n}`);
         });
       });
     }
