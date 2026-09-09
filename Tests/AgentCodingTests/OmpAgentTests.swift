@@ -201,6 +201,46 @@ struct OmpAgentTests {
         }
     }
 
+    @Test("omp todo calls consolidate into one live-ticking .todo item")
+    func todoConsolidation() {
+        // init (plan) + mid result (a in-progress) + done delta + final result
+        // (all [X]). The checklist must be ONE item reflecting the LATEST result
+        // status, with no leftover todo toolUse/toolResult cards.
+        let jsonl = """
+        {"type":"session","version":3,"id":"s","timestamp":"2026-09-09T19:47:01.000Z","cwd":"/tmp"}
+        {"type":"message","message":{"role":"user","content":[{"type":"text","text":"do it"}]}}
+        {"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"todo","intent":"Planning","arguments":{"i":"Planning","op":"init","list":[{"phase":"Proj","items":["write hello.py","write README.md","run the script"]}]}}]}}
+        {"type":"message","message":{"role":"toolResult","toolName":"todo","toolCallId":"c1","isError":false,"content":[{"type":"text","text":"Remaining items (3):\\n  - write hello.py [in_progress] (Proj)\\n  - write README.md [pending] (Proj)\\n  - run the script [pending] (Proj)\\nOverall: 0/3 done, 3 open."}]}}
+        {"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c2","name":"todo","intent":"done","arguments":{"i":"done","op":"done","phase":"Proj"}}]}}
+        {"type":"message","message":{"role":"toolResult","toolName":"todo","toolCallId":"c2","isError":false,"content":[{"type":"text","text":"Remaining items: none.\\nOverall: 3/3 done, 0 open.\\n  Proj:\\n    - [X] write hello.py\\n    - [X] write README.md\\n    - [X] run the script"}]}}
+        """
+        let items = AgentTranscript.parse(Data(jsonl.utf8), agent: "omp")
+        let todos = items.compactMap { item -> [TodoRowModel]? in
+            if case .todo(_, let rows) = item.kind { return rows }; return nil
+        }
+        #expect(todos.count == 1)          // one consolidated checklist
+        #expect(todos.first?.map(\.status) == [.done, .done, .done])   // latest result wins
+        // No raw todo cards leaked through.
+        for item in items {
+            if case .toolUse(let name, _, _) = item.kind { #expect(name != "todo") }
+            if case .toolResult(let tool, _, _) = item.kind { #expect(tool != "todo") }
+        }
+    }
+
+    @Test("omp mid-progress: checklist reflects in-progress/pending from the result")
+    func todoMidProgress() {
+        let jsonl = """
+        {"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"todo","arguments":{"op":"init","list":[{"phase":"Proj","items":["alpha step","beta step"]}]}}]}}
+        {"type":"message","message":{"role":"toolResult","toolName":"todo","toolCallId":"c1","isError":false,"content":[{"type":"text","text":"Remaining items (2):\\n  - alpha step [in_progress] (Proj)\\n  - beta step [pending] (Proj)\\nOverall: 0/2 done."}]}}
+        """
+        let items = AgentTranscript.parse(Data(jsonl.utf8), agent: "omp")
+        guard let rows = items.compactMap({ i -> [TodoRowModel]? in
+            if case .todo(_, let r) = i.kind { return r }; return nil }).first
+        else { Issue.record("no .todo item"); return }
+        #expect(rows.map(\.status) == [.active, .pending])
+        #expect(rows.map(\.text) == ["alpha step", "beta step"])
+    }
+
     @Test("sniff() recognizes omp session files without an explicit agent")
     func sniffOmp() {
         let jsonl = """

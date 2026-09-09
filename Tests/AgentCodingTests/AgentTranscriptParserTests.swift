@@ -412,4 +412,31 @@ struct TodoParseTests {
         #expect(rows[0].status == .done)
         #expect(rows[1].status == .active)
     }
+
+    @Test("merge: init list + latest result status (absent → done)")
+    func mergeStatus() {
+        let initRows = [TodoRowModel(text: "write hello.py", status: .pending, phase: "P"),
+                        TodoRowModel(text: "write README.md", status: .pending, phase: "P"),
+                        TodoRowModel(text: "run tests", status: .pending, phase: "P")]
+        // "remaining" form: README in-progress, run-tests pending; hello.py is
+        // ABSENT → it's completed.
+        let result = """
+        Remaining items (2):
+          - write README.md [in_progress] (P)
+          - run tests [pending] (P)
+        Overall: 1/3 done, 2 open.
+        """
+        #expect(TodoParse.merge(initRows: initRows, resultText: result).map(\.status)
+                == [.done, .active, .pending])
+    }
+
+    @Test("TranscriptItem .todo round-trips through the fat-client wire codec")
+    func todoWireRoundTrip() {
+        let rows = [TodoRowModel(text: "a", status: .done, phase: "P"),
+                    TodoRowModel(text: "b", status: .active, phase: "P"),
+                    TodoRowModel(text: "c", status: .pending, phase: nil)]
+        let item = TranscriptItem(id: 7, kind: .todo(title: "To-dos", rows: rows), timestamp: nil)
+        let decoded = TranscriptItemWire.decode(TranscriptItemWire.encode(item))
+        #expect(decoded?.kind == .todo(title: "To-dos", rows: rows))
+    }
 }

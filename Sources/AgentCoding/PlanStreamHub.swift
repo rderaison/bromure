@@ -184,6 +184,13 @@ enum TranscriptItemWire {
                              "options": q.options.map {
                                  ["label": $0.label, "description": $0.description]
                              }] as [String: Any]
+        case .todo(let title, let rows):
+            d["k"] = "todo"; d["title"] = title
+            d["rows"] = rows.map { r -> [String: Any] in
+                var e: [String: Any] = ["text": r.text, "status": r.status.wire]
+                if let p = r.phase { e["phase"] = p }
+                return e
+            }
         }
         return d
     }
@@ -211,6 +218,15 @@ enum TranscriptItemWire {
             guard let q = TranscriptQuestion.parse(["questions": [qd]]).first
             else { return nil }
             kind = .question(q)
+        case "todo":
+            let rows = (d["rows"] as? [[String: Any]] ?? []).compactMap { r -> TodoRowModel? in
+                guard let text = r["text"] as? String, !text.isEmpty else { return nil }
+                return TodoRowModel(text: text,
+                                    status: TodoStatus.parse(r["status"] as? String),
+                                    phase: r["phase"] as? String)
+            }
+            kind = .todo(title: d["title"] as? String ?? NSLocalizedString("To-dos", comment: "todo card"),
+                         rows: rows)
         default:
             return nil
         }

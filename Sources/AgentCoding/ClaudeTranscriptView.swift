@@ -17,6 +17,11 @@ struct TranscriptItem: Identifiable, Equatable {
         /// The agent asking the user (AskUserQuestion) — rendered as the
         /// question with its options, and answerable in a live session.
         case question(TranscriptQuestion)
+        /// A consolidated todo/plan checklist that updates IN PLACE as the agent
+        /// ticks items off (rather than one card per update). Emitted by the omp
+        /// parser, which merges the plan's items with the latest todo-tool
+        /// result (its authoritative per-item status).
+        case todo(title: String, rows: [TodoRowModel])
     }
     let id: Int
     var kind: Kind
@@ -283,6 +288,15 @@ enum OmpTranscriptParser {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
         var items: [TranscriptItem] = []
         var toolNames: [String: String] = [:]
+        // Consolidated todo checklist: omp emits one `todo` call per change and
+        // reports live per-item status in the tool RESULT (not the call), so we
+        // fold them into ONE .todo item that ticks in place instead of many
+        // cards. `todoInit` = the plan's full item list (from the init call),
+        // `todoResult` = the latest result text (current status), `todoAnchor` =
+        // where the .todo item sits in `items`.
+        var todoInit: [TodoRowModel] = []
+        var todoResult: String?
+        var todoAnchor: Int?
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoPlain = ISO8601DateFormatter()
@@ -309,8 +323,15 @@ enum OmpTranscriptParser {
                 let tool = message["toolName"] as? String
                     ?? (message["toolCallId"] as? String).flatMap { toolNames[$0] }
                     ?? "tool"
-                add(.toolResult(tool: tool,
-                                content: ClaudeTranscriptParser.resultText(message["content"]),
+                let content = ClaudeTranscriptParser.resultText(message["content"])
+                // The todo result is the authoritative per-item status — fold it
+                // into the consolidated checklist (once a plan is anchored)
+                // instead of rendering its verbose text.
+                if tool == "todo", todoAnchor != nil {
+                    todoResult = content
+                    continue
+                }
+                add(.toolResult(tool: tool, content: content,
                                 isError: message["isError"] as? Bool ?? false))
                 continue
             }
@@ -339,6 +360,18 @@ enum OmpTranscriptParser {
                     let name = block["name"] as? String ?? "tool"
                     if let id = block["id"] as? String { toolNames[id] = name }
                     let input = Self.toolInput(block)
+                    // omp's todo list → one consolidated, live-ticking .todo item
+                    // (its per-item status is folded in from the result above).
+                    if name == "todo" {
+                        let rows = TodoParse.rows(from: input)   // non-empty only for the `init` op
+                        if !rows.isEmpty { todoInit = rows }
+                        if !todoInit.isEmpty, todoAnchor == nil {
+                            todoAnchor = items.count
+                            add(.todo(title: NSLocalizedString("To-dos", comment: "todo card"),
+                                      rows: todoInit))
+                        }
+                        continue   // delta ops carry no list; the merge handles them
+                    }
                     let questions = name == "AskUserQuestion"
                         ? TranscriptQuestion.parse(input) : []
                     if !questions.isEmpty {
@@ -363,6 +396,12 @@ enum OmpTranscriptParser {
                     continue
                 }
             }
+        }
+        // Fold the latest todo result's status into the anchored checklist, so
+        // the items tick to done in place as omp reports progress.
+        if let a = todoAnchor {
+            items[a].kind = .todo(title: NSLocalizedString("To-dos", comment: "todo card"),
+                                  rows: TodoParse.merge(initRows: todoInit, resultText: todoResult))
         }
         return items
     }
@@ -1310,6 +1349,8 @@ struct TranscriptItemView: View {
             }
         case .toolUse(let name, let summary, let detail):
             ToolCallCard(name: name, summary: summary, detail: detail)
+        case .todo(let title, let rows):
+            TodoListView(title: title, rows: rows)
         case .toolResult(let tool, let content, let isError):
             CollapsibleRow(
                 icon: isError ? "exclamationmark.octagon" : "arrow.turn.down.right",
@@ -1469,13 +1510,24 @@ enum TodoStatus: Equatable { case pending, active, done, blocked
         default: return .pending
         }
     }
+    /// Canonical string for the fat-client wire codec (round-trips via `parse`).
+    var wire: String {
+        switch self {
+        case .pending: return "pending"
+        case .active:  return "in_progress"
+        case .done:    return "completed"
+        case .blocked: return "blocked"
+        }
+    }
 }
 
-struct TodoRowModel: Identifiable {
-    let id = UUID()
+struct TodoRowModel: Identifiable, Equatable {
     let text: String
     let status: TodoStatus
     let phase: String?
+    /// Stable across polls (content-derived), so an in-place todo update only
+    /// redraws changed rows and TranscriptItem equality works.
+    var id: String { (phase ?? "") + "\u{1}" + text }
 }
 
 /// Normalizes a todo/plan tool call's arguments into checklist rows. Kept
@@ -1509,28 +1561,92 @@ enum TodoParse {
         }
         return []
     }
+
+    /// Per-item status read from omp's todo-tool RESULT text — its authoritative
+    /// rendering (the call args don't carry live status, and its delta ops don't
+    /// reliably mutate state). The text lists remaining items with a `[status]`
+    /// tag, or all items as `- [X]`/`- [ ]`. An item ABSENT from the text is
+    /// done: the "remaining items" form omits completed ones.
+    static func statusFromResult(itemText: String, resultText: String) -> TodoStatus {
+        for line in resultText.split(whereSeparator: \.isNewline) {
+            guard line.contains(itemText) else { continue }
+            let l = line.lowercased()
+            if l.contains("[x]") { return .done }
+            if l.contains("[in_progress]") || l.contains("[in progress]") { return .active }
+            if l.contains("[blocked]") { return .blocked }
+            if l.contains("[ ]") || l.contains("[pending]") { return .pending }
+            return .pending                       // listed but untagged
+        }
+        return .done                              // absent → completed
+    }
+
+    /// The live checklist: the plan's full item list (from the `init` call) with
+    /// each item's status taken from the latest result text. Without a result yet
+    /// the plan shows as-is (all pending).
+    static func merge(initRows: [TodoRowModel], resultText: String?) -> [TodoRowModel] {
+        guard let resultText, !resultText.isEmpty else { return initRows }
+        return initRows.map {
+            TodoRowModel(text: $0.text,
+                         status: statusFromResult(itemText: $0.text, resultText: resultText),
+                         phase: $0.phase)
+        }
+    }
 }
 
-/// A checklist rendering of a todo/plan tool call, so a plan reads like the
-/// native agents' to-do panel instead of a raw JSON blob. Normalizes the three
-/// shapes seen in practice:
-///   • Claude `TodoWrite` — `todos:[{content,status,activeForm}]` (per-item status)
-///   • omp `todo` — `op` + `list:[{phase,items:[String]}]` (init carries the plan;
-///     delta ops like `done`/`unblock` carry just `op`+`task`/`phase`)
-///   • Codex `update_plan` — `plan:[{step,status}]`
-/// A delta op with no item list renders as a one-line status update.
+/// The checklist body — a header (title + done/total) and one row per item,
+/// grouped by phase. Shared by the consolidated `.todo` transcript item (omp,
+/// which ticks in place across polls) and the per-call `TodoCard`.
+struct TodoListView: View {
+    let title: String
+    let rows: [TodoRowModel]
+
+    private var showPhases: Bool { Set(rows.compactMap(\.phase)).count > 1 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "checklist").font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(title).font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 6)
+                if !rows.isEmpty {
+                    let done = rows.filter { $0.status == .done }.count
+                    Text("\(done)/\(rows.count)")
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(done == rows.count ? .green : .secondary)
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Color.primary.opacity(0.05))
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
+                    TodoRow(row: row, showPhase: showPhases,
+                            prevPhase: i > 0 ? rows[i - 1].phase : nil)
+                }
+            }
+            .padding(.vertical, 3)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
+    }
+}
+
+/// A per-call checklist card for agents whose todo tool carries full status in
+/// each call (Claude `TodoWrite` — `todos:[{content,status}]`; Codex
+/// `update_plan` — `plan:[{step,status}]`). omp instead flows through the
+/// consolidated `.todo` item (its status lives in the tool result, not the
+/// call), so it doesn't reach here. A delta call with no item list renders as a
+/// one-line status update.
 private struct TodoCard: View {
     let input: [String: Any]
     let intent: String
 
     private var rows: [TodoRowModel] { TodoParse.rows(from: input) }
-
     private var headerTitle: String {
         let t = intent.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? NSLocalizedString("To-dos", comment: "todo card") : t
     }
-
-    /// omp delta op (no item list) → "Completed: <phase/task>".
     private var deltaLine: String? {
         guard let op = input["op"] as? String else { return nil }
         let what = (input["task"] as? String) ?? (input["phase"] as? String) ?? ""
@@ -1545,44 +1661,21 @@ private struct TodoCard: View {
         return what.isEmpty ? verb : "\(verb): \(what)"
     }
 
-    private var showPhases: Bool { Set(rows.compactMap(\.phase)).count > 1 }
-
     var body: some View {
-        let rows = self.rows
-        VStack(alignment: .leading, spacing: 0) {
+        if rows.isEmpty {
             HStack(spacing: 6) {
                 Image(systemName: "checklist").font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text(headerTitle).font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
-                Spacer(minLength: 6)
-                if !rows.isEmpty {
-                    let done = rows.filter { $0.status == .done }.count
-                    Text("\(done)/\(rows.count)")
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
+                Text(deltaLine ?? headerTitle).font(.system(size: 12)).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
             .background(Color.primary.opacity(0.05))
-
-            if rows.isEmpty {
-                Text(deltaLine ?? headerTitle)
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-            } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
-                        TodoRow(row: row, showPhase: showPhases,
-                                prevPhase: i > 0 ? rows[i - 1].phase : nil)
-                    }
-                }
-                .padding(.vertical, 3)
-            }
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
+        } else {
+            TodoListView(title: headerTitle, rows: rows)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
     }
 }
 
