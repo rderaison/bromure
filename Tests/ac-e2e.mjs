@@ -2895,8 +2895,16 @@ async function main() {
             // Fabricate the Claude transcript the host pulls at completion —
             // the project dir just has to match the host's `*-<slug>` glob.
             const MARK = `{"type":"user","message":{"role":"user","content":"ace2e-transcript"}}`;
+            // Back-date the transcript so it reads as already "quiet": the
+            // automation-run completion holds in waitForSessionQuiet until the
+            // transcript has been untouched for ~20s (to let background subagents
+            // settle) before stamping completedAt. A freshly-written file forces
+            // that full 20s wall-clock, which on a loaded node overruns the poll
+            // below. This test exercises the completion PLUMBING (pull → stamp →
+            // serve), not the settle timer, so start it already-settled.
             await sh(id, `mkdir -p ~/.claude/projects/ace2e-${runRec.branchSlug} && ` +
-                         `echo '${MARK}' > ~/.claude/projects/ace2e-${runRec.branchSlug}/t.jsonl`);
+                         `echo '${MARK}' > ~/.claude/projects/ace2e-${runRec.branchSlug}/t.jsonl && ` +
+                         `touch -d '2 minutes ago' ~/.claude/projects/ace2e-${runRec.branchSlug}/t.jsonl`);
             await signalDone(id, branchName);
 
             // Completion: completedAt stamped, transcript archived on the host.
