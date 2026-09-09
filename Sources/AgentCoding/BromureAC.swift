@@ -1296,13 +1296,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// The MITM proxy saw a model *conversation* request for this VM. The proxy
     /// can't attribute traffic to a specific tab, so this is the per-VM fallback
-    /// for the agents WITHOUT per-tab hooks (Codex/Grok): flip their tabs to
-    /// .working and re-arm a timer to drop them back to .done. Claude and Kimi
-    /// tabs are left to their own per-window hooks (accurate per tab), so a
-    /// Claude call never flips a sibling Codex tab — and the 4s timer can't
-    /// mark a hook-driven tab .done mid-run.
-    /// Agents that report status through their own per-tab hooks, so the
-    /// per-VM proxy fallback must leave their tabs alone.
+    /// for the agents WITHOUT reliable per-tab hooks (Codex/Grok/omp): flip
+    /// their tabs to .working and re-arm a timer to drop them back to .done.
+    /// Claude and Kimi tabs are left to their own per-window hooks (accurate per
+    /// tab), so a Claude call never flips a sibling Codex tab — and the 4s timer
+    /// can't mark a hook-driven tab .done mid-run.
+    ///
+    /// omp is deliberately NOT listed: it ALSO ships a turn hook
+    /// (~/.omp/agent/hooks/agent-status.ts, loaded via `--hook`) that drives its
+    /// dot per-tab through agent-status.sh → setTabAgentStatus — but that path is
+    /// independent of this set. Keeping omp OFF the list preserves the MITM
+    /// fallback for MITM-visible providers (Ollama/Anthropic) as a backstop,
+    /// while the hook covers the provider-agnostic case (z.ai/custom) where the
+    /// traffic heuristic is blind. Both agree on working/done, so they cooperate.
     static let hookDrivenAgents: Set<String> = ["claude", "kimi"]
 
     func noteAgentActivity(_ id: Profile.ID) {

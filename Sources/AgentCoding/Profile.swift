@@ -925,9 +925,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         public var hasReliableDoneSignal: Bool {
             switch self {
             case .claude, .kimi: return true
-            // omp: poll-based for now (no confirmed session-stop hook wired);
-            // can move to the hook-driven side once its `--hook` stop event
-            // is plumbed into agent-status.sh.
+            // omp drives its per-tab sidebar dot via a turn hook (loaded with
+            // --hook; see Profile bashrc), but its "done" isn't yet trusted for
+            // automation teardown/chaining — automation uses the worktree-exit
+            // reporter fallback like Codex/Grok until the hook path is hardened.
             case .codex, .grok, .omp:  return false
             }
         }
@@ -4121,16 +4122,20 @@ public final class ProfileStore {
             let statusScript = #"""
             #!/bin/sh
             # Bromure Claude-hook status reporter → per-tab sidebar dot.
-            # $1 = working|done|needsInput. The hook runs inside the agent's tmux
-            # window, so $TMUX_PANE resolves this tab's window index — reported in
+            # $1 = working|done|needsInput.
+            # $2 = optional tmux pane. Claude/Kimi hooks run inside the tab's
+            # pane, so $TMUX_PANE is set and $2 is omitted; omp's hook passes
+            # $TMUX_PANE explicitly (its pi.exec may not inherit the env).
+            # Either way the pane resolves this tab's window index — reported in
             # the filename so each tab's dot is independent.
             d=/mnt/bromure-outbox
             [ -d "$d" ] || exit 0
-            # No TMUX_PANE → bail. An empty -t target resolves to the ACTIVE
-            # window, which stamps this signal onto whatever tab the user is
-            # looking at (a task's "done" once killed the plan interview).
-            [ -n "${TMUX_PANE:-}" ] || exit 0
-            idx=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
+            # No pane → bail. An empty -t target resolves to the ACTIVE window,
+            # which stamps this signal onto whatever tab the user is looking at
+            # (a task's "done" once killed the plan interview).
+            pane="${2:-${TMUX_PANE:-}}"
+            [ -n "$pane" ] || exit 0
+            idx=$(tmux display-message -p -t "$pane" '#{window_index}' 2>/dev/null)
             [ -n "$idx" ] || exit 0
             printf '%s' "${1:-}" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
               && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
@@ -4140,6 +4145,60 @@ public final class ProfileStore {
             try? statusScript.write(to: scriptURL, atomically: true, encoding: .utf8)
             try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)],
                                   ofItemAtPath: scriptURL.path)
+        }
+        do {
+            // omp (Oh My Pi) turn-status hook. omp is provider-agnostic, so the
+            // host's MITM traffic heuristic can't see its LLM calls (z.ai,
+            // Ollama, custom endpoints…) — its own turn hooks are the only
+            // reliable per-tab "thinking" signal. This module maps them to the
+            // same agent-status.sh reporter Claude/Kimi call. omp auto-discovers
+            // a bare `.ts` dropped in ~/.omp/agent/hooks/. Written for every
+            // profile (inert when omp never runs), like agent-status.sh above;
+            // seeded on the ext4 path too (any file under `home` lands in the
+            // seed via finalizeHomeSeed).
+            let ompHooksDir = home
+                .appendingPathComponent(".omp/agent/hooks", isDirectory: true)
+            try? fm.createDirectory(at: ompHooksDir, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: NSNumber(value: 0o755)])
+            let ompHook = #"""
+            // Bromure Agentic Coding — omp turn-status reporter (managed; do not edit).
+            //
+            // Maps omp's turn hooks to ~/.bromure/agent-status.sh so the sidebar
+            // shows a live "thinking" dot for omp on ANY provider — the MITM
+            // traffic heuristic can't, since omp may talk to z.ai/Ollama/custom
+            // (hosts it never sees). Loaded explicitly via `--hook` (verified:
+            // omp does NOT auto-discover ~/.omp/agent/hooks in this version).
+            //
+            // TMUX + TMUX_PANE are read from this hook's OWN process env (omp
+            // runs inside the tab's tmux pane, so both are set) and baked into
+            // the exec, so the reporter resolves THIS tab AND can reach the tmux
+            // server even if pi.exec doesn't forward the environment.
+            import type { HookAPI } from "@oh-my-pi/pi-coding-agent";
+
+            export default function bromureStatus(pi: HookAPI): void {
+              const env = (typeof process !== "undefined" && process.env) ? process.env : {};
+              const tmux = env.TMUX || "";
+              const pane = env.TMUX_PANE || "";
+              const report = (state: string): void => {
+                if (!pane) return;
+                const cmd = "TMUX='" + tmux + "' TMUX_PANE='" + pane +
+                  "' /home/ubuntu/.bromure/agent-status.sh '" + state + "'";
+                try {
+                  Promise.resolve(pi.exec("sh", ["-c", cmd])).catch(() => {});
+                } catch {
+                  /* status reporting must never break a turn */
+                }
+              };
+              pi.on("turn_start", () => { report("working"); });
+              pi.on("tool_call", () => { report("working"); });
+              pi.on("turn_end", () => { report("done"); });
+              pi.on("session_shutdown", () => { report("done"); });
+            }
+            """#
+            let ompHookURL = ompHooksDir.appendingPathComponent("agent-status.ts")
+            try? ompHook.write(to: ompHookURL, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o644)],
+                                  ofItemAtPath: ompHookURL.path)
         }
 
         // ~/.docker/config.json — Docker stores per-registry HTTP Basic
@@ -4704,9 +4763,19 @@ public final class ProfileStore {
             python3 -c "import json,os,sys;p=os.path.expanduser('~/.omp/agent/mcp.json');e=(json.load(open(p)) if os.path.exists(p) else {});srv=e.get('mcpServers',{});_=(srv.pop('browser',None) if 'bromure-browser-mcp' in json.dumps(srv.get('browser') or {}) else None);m=json.load(open(sys.argv[1])).get('mcpServers',{});m=({**m,'bromure-web':m.pop('browser')} if 'browser' in m else m);e['mcpServers']={**srv,**m};t=p+'.tmp.'+str(os.getpid());json.dump(e,open(t,'w'),indent=2);os.replace(t,p)" /mnt/bromure-meta/mcp/claude.json 2>/dev/null || true
         fi
         # Wrapper: every omp launch (interactive or scripted) carries the
-        # staged settings overlay (browser.enabled: false — see above).
+        # staged settings overlay (browser.enabled: false — see above) AND the
+        # managed status hook. omp does NOT auto-discover ~/.omp/agent/hooks in
+        # this version (verified live: the log shows no discovery, and
+        # --no-extensions exists), so the hook must be loaded EXPLICITLY with
+        # --hook or the sidebar dot never updates for MITM-blind providers
+        # (z.ai/Ollama/custom). The hook reports working/done per tab via
+        # agent-status.sh.
         if [ -r /mnt/bromure-meta/omp-config.yml ]; then
-            omp() { command omp --config /mnt/bromure-meta/omp-config.yml "$@"; }
+            if [ -r "$HOME/.omp/agent/hooks/agent-status.ts" ]; then
+                omp() { command omp --config /mnt/bromure-meta/omp-config.yml --hook "$HOME/.omp/agent/hooks/agent-status.ts" "$@"; }
+            else
+                omp() { command omp --config /mnt/bromure-meta/omp-config.yml "$@"; }
+            fi
         fi
     fi
 

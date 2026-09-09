@@ -265,12 +265,19 @@ enum AgentTranscript {
 /// Tolerant reader for Oh My Pi (`omp`) session files
 /// (`~/.omp/agent/sessions/<slug>/<timestamp>_<uuid>.jsonl`). Each line is a
 /// typed record; the conversation lives in `{"type":"message","message":{...}}`
-/// lines whose `message` is an Anthropic-messages object (`role` +
-/// `content` blocks) — the same block shapes Claude uses — so this reuses
-/// `ClaudeTranscriptParser`'s block helpers. `session`/`model_change`/
-/// `thinking_level_change`/`title`/`custom` lines are metadata and skipped.
-/// Tool calls are read from the assistant `content` blocks (not the parallel
-/// `custom` tool entries) to avoid double-counting. Unknown lines are skipped.
+/// lines. `session`/`model_change`/`thinking_level_change`/`title`/`custom`
+/// lines are metadata and skipped.
+///
+/// omp's message shapes have drifted from the Anthropic-messages layout the
+/// first cut assumed, so both are handled:
+///   • text/thinking blocks — unchanged.
+///   • a tool CALL is a `toolCall` block (current: `arguments` + a human
+///     `intent`) OR a `tool_use` block (older/Anthropic: `input`).
+///   • a tool RESULT is its OWN message with `role:"toolResult"` carrying
+///     `toolName`/`isError`/`content` (current) OR an inline `tool_result`
+///     block in a user message (older). The role gate must let "toolResult"
+///     through, or every tool result silently vanishes.
+/// Unknown lines/blocks are skipped.
 enum OmpTranscriptParser {
     static func parse(_ data: Data) -> [TranscriptItem] {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
@@ -285,8 +292,7 @@ enum OmpTranscriptParser {
                 with: Data(line.utf8)) as? [String: Any] else { continue }
             guard obj["type"] as? String == "message",
                   let message = obj["message"] as? [String: Any],
-                  let role = message["role"] as? String,
-                  role == "user" || role == "assistant" else { continue }
+                  let role = message["role"] as? String else { continue }
             let isUser = role == "user"
             let stamp = (obj["timestamp"] as? String).flatMap {
                 iso.date(from: $0) ?? isoPlain.date(from: $0)
@@ -295,7 +301,22 @@ enum OmpTranscriptParser {
                 items.append(TranscriptItem(id: items.count, kind: kind, timestamp: stamp))
             }
 
-            // content: a bare string or an array of Anthropic-style blocks.
+            // Current omp records each tool result as its own message
+            // (role "toolResult") with the tool name + result at the message
+            // level. (Older omp inlined a `tool_result` block in a user
+            // message — still handled in the block loop below.)
+            if role == "toolResult" {
+                let tool = message["toolName"] as? String
+                    ?? (message["toolCallId"] as? String).flatMap { toolNames[$0] }
+                    ?? "tool"
+                add(.toolResult(tool: tool,
+                                content: ClaudeTranscriptParser.resultText(message["content"]),
+                                isError: message["isError"] as? Bool ?? false))
+                continue
+            }
+            guard role == "user" || role == "assistant" else { continue }
+
+            // content: a bare string or an array of blocks.
             if let s = message["content"] as? String {
                 let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !t.isEmpty { add(isUser ? .userText(t) : .assistantText(t)) }
@@ -312,17 +333,24 @@ enum OmpTranscriptParser {
                     let s = (block["thinking"] as? String ?? block["text"] as? String ?? "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     if !s.isEmpty { add(.thinking(s)) }
-                case "tool_use":
+                // Current omp: `toolCall` (args in `arguments`, plus a human
+                // `intent`). Older omp / Anthropic: `tool_use` (`input`).
+                case "toolCall", "tool_use":
                     let name = block["name"] as? String ?? "tool"
                     if let id = block["id"] as? String { toolNames[id] = name }
-                    let input = block["input"] as? [String: Any] ?? [:]
+                    let input = Self.toolInput(block)
                     let questions = name == "AskUserQuestion"
                         ? TranscriptQuestion.parse(input) : []
                     if !questions.isEmpty {
                         questions.forEach { add(.question($0)) }
                     } else {
-                        add(.toolUse(name: name,
-                                     summary: ClaudeTranscriptParser.toolSummary(name: name, input: input),
+                        // Prefer omp's own one-line `intent` ("Writing foo.html")
+                        // as the summary; fall back to the derived one.
+                        let intent = (block["intent"] as? String)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        let summary = (intent?.isEmpty == false) ? intent!
+                            : ClaudeTranscriptParser.toolSummary(name: name, input: input)
+                        add(.toolUse(name: name, summary: summary,
                                      detail: ClaudeTranscriptParser.prettyJSON(input)))
                     }
                 case "tool_result":
@@ -337,6 +365,22 @@ enum OmpTranscriptParser {
             }
         }
         return items
+    }
+
+    /// A tool call's arguments as a dict: `input` (Anthropic/older omp) or
+    /// `arguments` (current omp), tolerating a JSON-encoded string (and the
+    /// streamed `partialArgs` as a last resort).
+    private static func toolInput(_ block: [String: Any]) -> [String: Any] {
+        if let d = block["input"] as? [String: Any] { return d }
+        if let d = block["arguments"] as? [String: Any] { return d }
+        for key in ["arguments", "input", "partialArgs"] {
+            if let s = block[key] as? String,
+               let data = s.data(using: .utf8),
+               let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return d
+            }
+        }
+        return [:]
     }
 }
 

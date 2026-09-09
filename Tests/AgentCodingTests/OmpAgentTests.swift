@@ -171,6 +171,36 @@ struct OmpAgentTests {
         } else { Issue.record("item4 not toolResult") }
     }
 
+    @Test("OmpTranscriptParser reads current omp toolCall/toolResult shapes")
+    func transcriptParseCurrentFormat() {
+        // Current omp (verified live): a tool CALL is a `toolCall` block with
+        // `arguments` + a human `intent`; a tool RESULT is its own message with
+        // role "toolResult" carrying `toolName`/`isError`/`content`.
+        let jsonl = """
+        {"type":"session","version":3,"id":"s","timestamp":"2026-09-09T19:47:01.357Z","cwd":"/tmp"}
+        {"type":"message","id":"u1","timestamp":"2026-09-09T19:47:02.000Z","message":{"role":"user","content":[{"type":"text","text":"make a page"}]}}
+        {"type":"message","id":"a1","timestamp":"2026-09-09T19:47:03.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"ok"},{"type":"text","text":"Writing it"},{"type":"toolCall","id":"call_1","name":"write","intent":"Writing foo.html","arguments":{"path":"/tmp/foo.html","content":"<html></html>"},"streamIndex":0}]}}
+        {"type":"message","id":"r1","timestamp":"2026-09-09T19:47:04.000Z","message":{"role":"toolResult","toolName":"write","toolCallId":"call_1","isError":false,"content":[{"type":"text","text":"Successfully wrote 471 bytes to foo.html"}]}}
+        {"type":"custom","customType":"session_exit","data":{"reason":"dispose"},"id":"c1","timestamp":"2026-09-09T19:47:05.000Z"}
+        """
+        // Parse via sniff (agent: nil) too — this is the beautified view's path.
+        for agent in [String?.some("omp"), nil] {
+            let items = AgentTranscript.parse(Data(jsonl.utf8), agent: agent)
+            // userText, thinking, assistantText, toolCall, toolResult = 5.
+            #expect(items.count == 5)
+            if case .toolUse(let name, let summary, let detail) = items[3].kind {
+                #expect(name == "write")
+                #expect(summary == "Writing foo.html")   // omp's own intent
+                #expect(detail.contains("foo.html"))      // arguments in detail
+            } else { Issue.record("item3 not toolUse (agent=\(String(describing: agent))): \(items[3].kind)") }
+            if case .toolResult(let tool, let content, let isErr) = items[4].kind {
+                #expect(tool == "write")
+                #expect(content.contains("Successfully wrote"))
+                #expect(isErr == false)
+            } else { Issue.record("item4 not toolResult (agent=\(String(describing: agent)))") }
+        }
+    }
+
     @Test("sniff() recognizes omp session files without an explicit agent")
     func sniffOmp() {
         let jsonl = """
