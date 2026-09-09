@@ -360,3 +360,56 @@ struct OmpLocatorExecutionTests {
         }
     }
 }
+
+// TodoParse normalizes a todo/plan tool call's arguments into checklist rows.
+// Fixtures mirror the real on-disk shapes: omp `todo` (verified live against
+// omp v18.1.10 — `op`+`list:[{phase,items}]`), Claude `TodoWrite`, Codex plan.
+@Suite("Todo / plan card normalization")
+struct TodoParseTests {
+
+    @Test("omp `todo` init: phase + items become pending rows")
+    func ompInit() {
+        let input: [String: Any] = [
+            "i": "Planning tiny project steps",
+            "op": "init",
+            "list": [[
+                "phase": "Tiny Project",
+                "items": ["write hello.py", "write README.md", "run python3 hello.py"],
+            ]],
+        ]
+        let rows = TodoParse.rows(from: input)
+        #expect(rows.count == 3)
+        #expect(rows.allSatisfy { $0.status == .pending })
+        #expect(rows.allSatisfy { $0.phase == "Tiny Project" })
+        #expect(rows.first?.text == "write hello.py")
+    }
+
+    @Test("omp `todo` delta op (no list) yields no rows")
+    func ompDelta() {
+        #expect(TodoParse.rows(from: ["op": "done", "phase": "Tiny Project"]).isEmpty)
+    }
+
+    @Test("Claude TodoWrite: per-item status is mapped")
+    func claudeTodos() {
+        let input: [String: Any] = ["todos": [
+            ["content": "a", "status": "completed"],
+            ["content": "b", "status": "in_progress"],
+            ["content": "c", "status": "pending"],
+        ]]
+        let rows = TodoParse.rows(from: input)
+        #expect(rows.map(\.status) == [.done, .active, .pending])
+        #expect(rows.map(\.text) == ["a", "b", "c"])
+    }
+
+    @Test("Codex update_plan: steps with status")
+    func codexPlan() {
+        let input: [String: Any] = ["plan": [
+            ["step": "investigate", "status": "completed"],
+            ["step": "fix", "status": "in_progress"],
+        ]]
+        let rows = TodoParse.rows(from: input)
+        #expect(rows.count == 2)
+        #expect(rows[0].status == .done)
+        #expect(rows[1].status == .active)
+    }
+}

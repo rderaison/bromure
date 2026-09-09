@@ -1381,7 +1381,9 @@ struct ToolCallCard: View {
 
     var body: some View {
         let n = name.lowercased()
-        if let (old, new, path) = editParts(n) {
+        if isTodo(n) {
+            TodoCard(input: input, intent: summary)
+        } else if let (old, new, path) = editParts(n) {
             DiffCard(title: name, path: path, oldText: old, newText: new)
         } else if isBash(n), let cmd = firstString(["command"]) {
             CommandCard(icon: "terminal", tool: name, command: cmd)
@@ -1399,6 +1401,11 @@ struct ToolCallCard: View {
 
     private func isBash(_ n: String) -> Bool {
         ["bash", "shell", "run_command", "execute", "local_shell"].contains { n.contains($0) }
+    }
+    /// A todo / plan tool: omp's `todo`, Claude's `TodoWrite`, Codex's
+    /// `update_plan`. Rendered as a checklist rather than raw JSON.
+    private func isTodo(_ n: String) -> Bool {
+        n.contains("todo") || n == "update_plan" || n == "updateplan"
     }
     private func isWeb(_ n: String) -> Bool { n.contains("web") || n.contains("fetch") }
     private func isFileTool(_ n: String) -> Bool {
@@ -1448,6 +1455,177 @@ struct ToolCallCard: View {
             }
         }
         return (oldLines.joined(separator: "\n"), newLines.joined(separator: "\n"), path)
+    }
+}
+
+// MARK: - Todo / plan card
+
+enum TodoStatus: Equatable { case pending, active, done, blocked
+    static func parse(_ s: String?) -> TodoStatus {
+        switch (s ?? "").lowercased() {
+        case "completed", "complete", "done", "x": return .done
+        case "in_progress", "inprogress", "active", "doing", "running": return .active
+        case "blocked": return .blocked
+        default: return .pending
+        }
+    }
+}
+
+struct TodoRowModel: Identifiable {
+    let id = UUID()
+    let text: String
+    let status: TodoStatus
+    let phase: String?
+}
+
+/// Normalizes a todo/plan tool call's arguments into checklist rows. Kept
+/// separate from the view so it's unit-testable. Handles the three shapes seen
+/// in practice (Claude `todos`, omp `list`, Codex `plan`); a delta op with no
+/// item list yields no rows (the card shows a one-line status instead).
+enum TodoParse {
+    static func rows(from input: [String: Any]) -> [TodoRowModel] {
+        if let todos = input["todos"] as? [[String: Any]] {          // Claude
+            return todos.compactMap { t in
+                let text = (t["content"] as? String) ?? (t["activeForm"] as? String) ?? ""
+                return text.isEmpty ? nil
+                    : TodoRowModel(text: text, status: .parse(t["status"] as? String), phase: nil)
+            }
+        }
+        if let list = input["list"] as? [[String: Any]] {            // omp init
+            var out: [TodoRowModel] = []
+            for p in list {
+                let phase = p["phase"] as? String
+                for it in (p["items"] as? [String] ?? []) {
+                    out.append(TodoRowModel(text: it, status: .pending, phase: phase))
+                }
+            }
+            return out
+        }
+        if let plan = input["plan"] as? [[String: Any]] {            // Codex
+            return plan.compactMap { p in
+                guard let s = p["step"] as? String, !s.isEmpty else { return nil }
+                return TodoRowModel(text: s, status: .parse(p["status"] as? String), phase: nil)
+            }
+        }
+        return []
+    }
+}
+
+/// A checklist rendering of a todo/plan tool call, so a plan reads like the
+/// native agents' to-do panel instead of a raw JSON blob. Normalizes the three
+/// shapes seen in practice:
+///   • Claude `TodoWrite` — `todos:[{content,status,activeForm}]` (per-item status)
+///   • omp `todo` — `op` + `list:[{phase,items:[String]}]` (init carries the plan;
+///     delta ops like `done`/`unblock` carry just `op`+`task`/`phase`)
+///   • Codex `update_plan` — `plan:[{step,status}]`
+/// A delta op with no item list renders as a one-line status update.
+private struct TodoCard: View {
+    let input: [String: Any]
+    let intent: String
+
+    private var rows: [TodoRowModel] { TodoParse.rows(from: input) }
+
+    private var headerTitle: String {
+        let t = intent.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? NSLocalizedString("To-dos", comment: "todo card") : t
+    }
+
+    /// omp delta op (no item list) → "Completed: <phase/task>".
+    private var deltaLine: String? {
+        guard let op = input["op"] as? String else { return nil }
+        let what = (input["task"] as? String) ?? (input["phase"] as? String) ?? ""
+        let verb: String
+        switch op {
+        case "done": verb = NSLocalizedString("Completed", comment: "todo op")
+        case "unblock": verb = NSLocalizedString("Reopened", comment: "todo op")
+        case "block": verb = NSLocalizedString("Blocked", comment: "todo op")
+        case "add": verb = NSLocalizedString("Added", comment: "todo op")
+        default: verb = op.capitalized
+        }
+        return what.isEmpty ? verb : "\(verb): \(what)"
+    }
+
+    private var showPhases: Bool { Set(rows.compactMap(\.phase)).count > 1 }
+
+    var body: some View {
+        let rows = self.rows
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "checklist").font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(headerTitle).font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 6)
+                if !rows.isEmpty {
+                    let done = rows.filter { $0.status == .done }.count
+                    Text("\(done)/\(rows.count)")
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Color.primary.opacity(0.05))
+
+            if rows.isEmpty {
+                Text(deltaLine ?? headerTitle)
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
+                        TodoRow(row: row, showPhase: showPhases,
+                                prevPhase: i > 0 ? rows[i - 1].phase : nil)
+                    }
+                }
+                .padding(.vertical, 3)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
+    }
+}
+
+private struct TodoRow: View {
+    let row: TodoRowModel
+    let showPhase: Bool
+    let prevPhase: String?
+
+    private var icon: String {
+        switch row.status {
+        case .pending: return "circle"
+        case .active:  return "circle.dotted"
+        case .done:    return "checkmark.circle.fill"
+        case .blocked: return "exclamationmark.circle"
+        }
+    }
+    private var tint: Color {
+        switch row.status {
+        case .pending: return .secondary
+        case .active:  return .orange
+        case .done:    return .green
+        case .blocked: return .red
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if showPhase, let p = row.phase, p != prevPhase, !p.isEmpty {
+                Text(p).font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 1)
+            }
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: icon).font(.system(size: 11))
+                    .foregroundStyle(tint).frame(width: 14)
+                Text(row.text).font(.system(size: 12))
+                    .foregroundStyle(row.status == .done ? .secondary : .primary)
+                    .strikethrough(row.status == .done, color: .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 2)
+        }
     }
 }
 
