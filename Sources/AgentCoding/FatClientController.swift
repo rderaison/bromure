@@ -1670,6 +1670,11 @@ final class RemoteHostWindow: NSWindow {
     private var mountedBeautifiedHost: NSHostingView<BeautifiedSessionView>?
     private var beautifiedModel: BeautifiedSessionModel?
     private var beautifiedWorkspace: Profile.ID?
+    /// The tmux window index the mounted beautified host is showing. The model
+    /// re-targets the workspace's active tab, so a switch to a *different* tab
+    /// rebuilds the host — reusing it would show the previous tab's transcript
+    /// until the next poll (the stale/blank flash a toggle worked around).
+    private var beautifiedTabIndex: Int?
     /// Boot "dive screen" overlaid on the stage while the shown workspace's VM
     /// boots and its tmux roster hasn't landed yet — the same cue the native
     /// window shows, so a reboot/base-image reset over the fat client reads as
@@ -3866,9 +3871,13 @@ final class RemoteHostWindow: NSWindow {
 
     private func mountTerminal(for id: Profile.ID, window idx: Int) {
         // Beautified mode replaces the terminal with a live transcript view for
-        // this workspace. The active tab is resolved per-poll by the provider,
-        // so tab switches need no remount.
-        if viewMode == .beautified { mountBeautified(for: id); return }
+        // this workspace — but only for a tab actually running a coding agent. A
+        // plain shell (or any non-agent) tab has no transcript, so it stays the
+        // raw terminal even while the mode is on (the active tab's tmux label is
+        // the same signal the sidebar badges agents with).
+        let activeIsAgent = controller.tabsModel(for: id)?.activeTab
+            .map { BromureIcons.agentKind(forLabel: $0.shownLabel) != nil } ?? false
+        if viewMode == .beautified && activeIsAgent { mountBeautified(for: id); return }
         guard let profile = controller.profile(for: id) else {
             unmountTerminal(); return
         }
@@ -3977,10 +3986,15 @@ final class RemoteHostWindow: NSWindow {
     }
 
     /// Mount (or keep) the beautified transcript view for `id`, over the tunnel.
-    /// Idempotent — the live poll keeps a mounted view current across tab
-    /// switches, so only a workspace change rebuilds it.
+    /// Idempotent while the same workspace + tab stays shown (the live poll keeps
+    /// it current); a different workspace or tab rebuilds it so the transcript
+    /// matches what's on screen.
     private func mountBeautified(for id: Profile.ID) {
-        if beautifiedWorkspace == id, mountedBeautifiedHost != nil {
+        let tabIndex = controller.tabsModel(for: id)?.activeTab?.index
+        // Keep the live host only for the same workspace AND the same tab; a
+        // different tab (or workspace) rebuilds so the transcript matches the
+        // tab on screen instead of lagging a poll behind.
+        if beautifiedWorkspace == id, beautifiedTabIndex == tabIndex, mountedBeautifiedHost != nil {
             shownWorkspace = id; return
         }
         unmountBeautified()
@@ -3990,6 +4004,7 @@ final class RemoteHostWindow: NSWindow {
         let m = BeautifiedSessionModel(provider: provider)
         beautifiedModel = m
         beautifiedWorkspace = id
+        beautifiedTabIndex = tabIndex
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -4003,6 +4018,7 @@ final class RemoteHostWindow: NSWindow {
         beautifiedModel?.stop()
         beautifiedModel = nil
         beautifiedWorkspace = nil
+        beautifiedTabIndex = nil
         mountedBeautifiedHost?.removeFromSuperview()
         mountedBeautifiedHost = nil
     }

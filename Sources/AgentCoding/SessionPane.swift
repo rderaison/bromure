@@ -303,6 +303,12 @@ final class SessionPane {
         UserDefaults.standard.bool(forKey: "ui.beautifiedTranscript") ? .beautified : .terminal
     private var mountedBeautifiedHost: NSHostingView<BeautifiedSessionView>?
     private var beautifiedModel: BeautifiedSessionModel?
+    /// The tmux window index the mounted beautified host is currently showing.
+    /// The model re-targets whichever tab is active, so when the active tab
+    /// changes to a *different* index we rebuild the host (reusing it would show
+    /// the previous tab's transcript until the next poll); an unchanged index
+    /// keeps re-mounts idempotent so roster ticks don't churn the live view.
+    private var beautifiedTabIndex: Int?
 
     /// What a host should focus when this pane mounts.
     var preferredFirstResponder: NSView {
@@ -325,7 +331,14 @@ final class SessionPane {
     /// libghostty is unavailable.
     func updateNativeTerminalMount() {
         guard model.tabs.indices.contains(model.activeIndex) else { return }
-        if viewMode == .beautified { mountBeautified(); return }
+        // Beautified mode only applies to a tab that's actually running a coding
+        // agent — a plain shell (or any non-agent) tab has no transcript to
+        // show, so it stays the raw terminal even while the mode is toggled on.
+        // The active tab's foreground program (its tmux label) is the same
+        // signal the sidebar badges agent tabs with.
+        let activeIsAgent = BromureIcons.agentKind(
+            forLabel: model.tabs[model.activeIndex].shownLabel) != nil
+        if viewMode == .beautified && activeIsAgent { mountBeautified(); return }
         unmountBeautified()
         // Restore the profile's window translucency for the terminal.
         containerView.layer?.opacity = Float(min(1.0, max(0.3, profile.windowOpacity)))
@@ -360,18 +373,28 @@ final class SessionPane {
     }
 
     /// Mount (or keep) the beautified transcript view, unmounting the terminal
-    /// surface (tmux keeps running behind it). Idempotent — the live poll keeps
-    /// a mounted view current across tab switches.
+    /// surface (tmux keeps running behind it). Idempotent while the active tab is
+    /// unchanged (the live poll keeps that view current); a switch to a different
+    /// tab rebuilds it so the transcript matches the tab on screen.
     private func mountBeautified() {
+        let windowIndex = model.tabs[model.activeIndex].index
+        // Idempotent for the frequent in-place re-mounts (roster ticks) that
+        // don't change the tab: keep the live host + model so the poll stays
+        // current. A *different* tab must rebuild — the shared model re-targets
+        // the active tab, so reusing the old host would show the previous tab's
+        // transcript until the next poll (a stale/blank flash the user had to
+        // toggle away). `remountForSelection` clears the index so a pane that
+        // was swapped out of the display slot always rebuilds too (a detached-
+        // then-reattached SwiftUI host comes back blank).
+        if mountedBeautifiedHost != nil, beautifiedTabIndex == windowIndex { return }
+        unmountBeautified()
         mountedTerminalView?.removeFromSuperview()
         mountedTerminalView = nil
         containerView.layer?.opacity = 1   // opaque chat surface, never dimmed
-        if beautifiedModel == nil {
-            let m = BeautifiedSessionModel(provider: LocalTranscriptProvider(pane: self))
-            beautifiedModel = m
-            m.start()
-        }
-        guard mountedBeautifiedHost == nil, let m = beautifiedModel else { return }
+        let m = BeautifiedSessionModel(provider: LocalTranscriptProvider(pane: self))
+        beautifiedModel = m
+        beautifiedTabIndex = windowIndex
+        m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         host.translatesAutoresizingMaskIntoConstraints = false
         mountedBeautifiedHost = host
@@ -388,8 +411,21 @@ final class SessionPane {
     private func unmountBeautified() {
         beautifiedModel?.stop()
         beautifiedModel = nil
+        beautifiedTabIndex = nil
         mountedBeautifiedHost?.removeFromSuperview()
         mountedBeautifiedHost = nil
+    }
+
+    /// Called by the host when this pane (re)enters the shared display slot.
+    /// `UnifiedSessionWindow.mountSelected` detaches a pane's `containerView`
+    /// while another pane is shown and re-attaches it on return; a beautified
+    /// `NSHostingView` doesn't survive that round-trip — its SwiftUI ScrollView
+    /// comes back blank (the same symptom the toggle worked around) — so drop it
+    /// and let `updateNativeTerminalMount` build a fresh one. Cheap and a no-op
+    /// for the terminal surface, which survives re-attach fine.
+    func remountForSelection() {
+        unmountBeautified()
+        updateNativeTerminalMount()
     }
 
     /// Re-bind `profile` to a freshly-saved version and re-apply the pane-side
