@@ -422,6 +422,21 @@ pipeline {
                 }
             }
         }
+
+        stage('28. Browser VM (browser MCP / VM↔VM CDP)') {
+            // Drives a real Chromium in the SEPARATE browser VM through the
+            // browser MCP (CDP over VM↔VM TCP, host out of the loop): asserts
+            // the CDP round-trip works AND that a sustained CDP burst never
+            // wedges the host's main dispatch queue. Needs the BROWSER base
+            // image (linux-base.img), separate from `bromure-ac init`'s code
+            // image; self-skips (SKIP) when it's absent — the browser e2e runs
+            // ~1h earlier on the same node and provisions the shared image.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^28\\."'
+                }
+            }
+        }
     }
 
     post {
