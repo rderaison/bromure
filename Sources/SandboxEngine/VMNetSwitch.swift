@@ -483,14 +483,20 @@ public final class VMNetSwitch: @unchecked Sendable {
             writeToVmnet(buf, n)
         case .some(let dstPort) where dstPort != srcPortID:
             // A frame addressed to a peer VM — deliver only when bridging peers,
-            // otherwise drop it to preserve inter-VM isolation.
-            if bridgePeers, let fd = portFD(dstPort) { _ = Darwin.write(fd, buf, n) }
+            // otherwise drop it to preserve inter-VM isolation. CDP forwarder
+            // traffic (:9223) is additionally gated: only the browser VM's
+            // paired workspace VM may reach it (see cdpPeerBlocked).
+            if bridgePeers, !cdpPeerBlocked(dst, src, buf, n),
+               let fd = portFD(dstPort) { _ = Darwin.write(fd, buf, n) }
         case .some:
             break  // destined back to itself — drop
         case nil:
             // Unknown unicast: always try the uplink; flood peers only when
-            // bridging is enabled.
-            if bridgePeers {
+            // bridging is enabled. Never flood CDP forwarder frames to peers —
+            // they must reach only the paired browser VM (once its MAC is
+            // learned this becomes a guarded known-unicast above; the client's
+            // SYN retransmit lands there).
+            if bridgePeers, !Self.isCDPForwarderFrame(buf, n) {
                 for fd in peerPortFDs(except: srcPortID) { _ = Darwin.write(fd, buf, n) }
             }
             writeToVmnet(buf, n)
@@ -836,6 +842,63 @@ public final class VMNetSwitch: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let ip = dhcpLeases[packed] else { return nil }
         return Self.ipString(ip)
+    }
+
+    // MARK: - CDP forwarder peer ACL
+
+    /// The guest `cdp-lan-forwarder`'s LAN port. A browser VM exposes CDP here
+    /// so the paired workspace VM can drive it over VM↔VM TCP (the host stays
+    /// out of the CDP path — host-driven CDP wedged the main queue). This is
+    /// unauthenticated-if-you-have-the-secret full control of that browser, so
+    /// only the paired workspace VM is allowed to reach it on the switch —
+    /// defense-in-depth over the forwarder's per-boot secret.
+    static let cdpForwarderPort: UInt16 = 9223
+    private let cdpLock = NSLock()
+    private var cdpAllow: [UInt64: UInt64] = [:]   // browser MAC → paired client MAC (packed)
+
+    private static func packMAC(_ mac: String) -> UInt64? {
+        let parts = mac.split(separator: ":")
+        guard parts.count == 6 else { return nil }
+        var packed: UInt64 = 0
+        for p in parts {
+            guard let b = UInt8(p, radix: 16) else { return nil }
+            packed = (packed << 8) | UInt64(b)
+        }
+        return packed
+    }
+
+    /// Permit `clientMAC` (the paired workspace VM) to reach `browserMAC`'s CDP
+    /// forwarder port, and drop every other peer's frames to it. Idempotent.
+    public func allowCDPPeer(browserMAC: String, clientMAC: String) {
+        guard let b = Self.packMAC(browserMAC), let c = Self.packMAC(clientMAC) else { return }
+        cdpLock.lock(); cdpAllow[b] = c; cdpLock.unlock()
+    }
+
+    /// Stop guarding a browser VM's CDP port (called when its VM tears down).
+    public func clearCDPPeer(browserMAC: String) {
+        guard let b = Self.packMAC(browserMAC) else { return }
+        cdpLock.lock(); cdpAllow[b] = nil; cdpLock.unlock()
+    }
+
+    /// True when a peer-bound frame to the CDP forwarder port must be dropped: it
+    /// targets a guarded browser VM but isn't from that browser's paired
+    /// workspace VM. `dst`/`src` are the ethernet addresses already parsed by
+    /// the caller. Non-CDP frames short-circuit before any lock.
+    private func cdpPeerBlocked(_ dst: UInt64, _ src: UInt64,
+                                _ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
+        guard Self.isCDPForwarderFrame(buf, n) else { return false }
+        cdpLock.lock(); let allowed = cdpAllow[dst]; cdpLock.unlock()
+        guard let allowed else { return false }   // dst isn't a guarded browser VM
+        return src != allowed
+    }
+
+    /// IPv4/TCP frame whose destination port is the CDP forwarder port.
+    private static func isCDPForwarderFrame(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
+        guard n >= 14 + 20 + 4, u16(buf, 12) == 0x0800 else { return false }   // IPv4
+        let ihl = Int(buf[14] & 0x0F) * 4
+        guard ihl >= 20, n >= 14 + ihl + 4 else { return false }
+        guard buf[14 + 9] == 6 else { return false }                          // TCP
+        return u16(buf, 14 + ihl + 2) == cdpForwarderPort                     // dport 9223
     }
 
     /// Standard one's-complement checksum (IP header / UDP).

@@ -498,6 +498,7 @@ public final class VMPool {
             cfg["cdpLanAccess"] = true
             cfg["cdpSecret"] = secret
             cfg["cdpLanPort"] = config.cdpLanPort ?? 9223
+            if let allowedIP = config.cdpAllowedIP { cfg["cdpAllowedIP"] = allowedIP }
         }
         // Fat-client browser pane: host-supplied PAC (routes the remote subnet
         // through the SOCKS forwarder). Takes precedence over the above in

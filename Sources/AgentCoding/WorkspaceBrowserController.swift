@@ -295,6 +295,11 @@ final class WorkspaceBrowserController {
         // `cdpLANEndpoint()` can hand the same value to the workspace VM's MCP.
         let cdpSecret = Self.randomCDPSecret()
         cdpLANSecret = cdpSecret
+        // Lock the forwarder to the paired workspace VM's LAN IP (the switch ACL
+        // is the robust layer; this is belt-and-suspenders with the secret). The
+        // workspace VM booted first, so it already holds a DHCP lease.
+        let cdpAllowedIP = VMNetSwitch.shared.leasedIP(
+            forMAC: MACBindings.shared.macAddress(for: workspaceID))
         // Fat-client mode: a PAC routes the remote workspace subnet through the
         // SOCKS forwarder (at the pinned gateway); DIRECT otherwise. Local mode
         // connects straight out (directConnection).
@@ -328,6 +333,7 @@ final class WorkspaceBrowserController {
             exposeCDPOverLAN: true,
             cdpSecret: cdpSecret,
             cdpLanPort: Self.cdpLanPort,
+            cdpAllowedIP: cdpAllowedIP,
             proxyPacBase64: pacB64,
             // "Allow file downloads" off ⇒ block all downloads in the guest.
             blockDownloads: !permissions.allowDownloads,
@@ -362,6 +368,14 @@ final class WorkspaceBrowserController {
 
     private func attach(_ warm: VMPool.WarmVM) {
         self.warm = warm
+        // Gate this browser VM's CDP forwarder port to the paired workspace VM
+        // only (switch-level, unspoofable-by-honest-peers) — defense-in-depth
+        // over the forwarder's per-boot secret.
+        if let browserMAC = warm.macAddress {
+            VMNetSwitch.shared.allowCDPPeer(
+                browserMAC: browserMAC,
+                clientMAC: MACBindings.shared.macAddress(for: workspaceID))
+        }
         let view = VZVirtualMachineView()
         view.virtualMachine = warm.vm
         view.automaticallyReconfiguresDisplay = true
@@ -846,7 +860,10 @@ final class WorkspaceBrowserController {
     /// Mirror of VMPool.tearDown (private there): stop the VM, close pipes,
     /// destroy the ephemeral disk, release the MAC and network filter.
     nonisolated private static func tearDown(_ warm: VMPool.WarmVM) async {
-        if let mac = warm.macAddress { MACAddressPool.shared.release(mac) }
+        if let mac = warm.macAddress {
+            VMNetSwitch.shared.clearCDPPeer(browserMAC: mac)
+            MACAddressPool.shared.release(mac)
+        }
         warm.networkFilter?.stop()
         if warm.vm.state == .running || warm.vm.state == .paused {
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in

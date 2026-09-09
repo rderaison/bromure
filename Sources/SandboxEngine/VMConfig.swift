@@ -259,6 +259,11 @@ public struct VMConfig {
     /// Chromium's loopback 9222). Default 9223 when nil and CDP-over-LAN is on.
     public var cdpLanPort: Int?
 
+    /// The only peer IP the guest `cdp-lan-forwarder` accepts (the paired
+    /// workspace VM's LAN address). Belt-and-suspenders with the secret and the
+    /// VMNetSwitch ACL; nil accepts any peer that presents the secret.
+    public var cdpAllowedIP: String?
+
     /// Custom HTTP proxy hostname (e.g. "proxy.example.com").
     public var proxyHost: String?
 
@@ -391,6 +396,7 @@ public struct VMConfig {
         exposeCDPOverLAN: Bool = false,
         cdpSecret: String? = nil,
         cdpLanPort: Int? = nil,
+        cdpAllowedIP: String? = nil,
         proxyHost: String? = nil,
         proxyPort: Int? = nil,
         proxyUsername: String? = nil,
@@ -480,6 +486,7 @@ public struct VMConfig {
         self.exposeCDPOverLAN = exposeCDPOverLAN
         self.cdpSecret = cdpSecret
         self.cdpLanPort = cdpLanPort
+        self.cdpAllowedIP = cdpAllowedIP
         self.proxyHost = proxyHost
         self.proxyPort = proxyPort
         self.proxyUsername = proxyUsername
