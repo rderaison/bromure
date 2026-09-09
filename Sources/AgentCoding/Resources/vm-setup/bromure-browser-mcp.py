@@ -348,6 +348,16 @@ class CDPClient:
         self.session = r.get("sessionId")
         if not self.session:
             raise RuntimeError("attach: no sessionId")
+        # Enable the Runtime domain on this session so Chromium wires up (and
+        # reports) the page's default execution context. Without it,
+        # Runtime.evaluate HANGS when we attach to an already-loaded page — the
+        # context is never surfaced to a freshly-attached session (a fresh/blank
+        # target happens to expose it immediately, which masked this). Puppeteer
+        # enables Runtime for the same reason.
+        try:
+            self._raw_call("Runtime.enable", session=self.session)
+        except Exception:  # noqa: BLE001 — best-effort; evaluate still tries
+            pass
 
     def _send_frame(self, text):
         payload = text.encode()
