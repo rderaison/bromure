@@ -249,6 +249,12 @@ final class BromureACSetProfileJSONCommand: NSScriptCommand {
                 merged.apply(to: &incoming)
                 try d.store.save(incoming)
                 d.profiles = d.store.loadAll()
+                // Apply live to a running session (no reboot) — matching the
+                // GUI/automation save path. Without this an external edit via
+                // this bridge (e.g. flipping disableTransparentProxy) persists
+                // but never lands on the running VM until it restarts (ac-e2e
+                // 27.3).
+                d.applyLiveEditToRunningSession(incoming)
                 return "ok" as Any
             } catch {
                 return "error: \(error.localizedDescription)" as Any
@@ -329,6 +335,7 @@ final class BromureACSetProfileSettingCommand: NSScriptCommand {
             do {
                 try d.store.save(p)
                 d.profiles = d.store.loadAll()
+                d.applyLiveEditToRunningSession(p)   // live-apply (no reboot)
                 return "ok" as Any
             } catch {
                 return "error: \(error.localizedDescription)" as Any

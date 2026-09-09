@@ -6618,6 +6618,37 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `{ok:false, error}` (the caller maps that to a 4xx/5xx). Reuses the GUI
     /// persistence via `persistEditedProfile`.
     @MainActor
+    /// Apply an already-persisted profile edit to its running session in place
+    /// (host-side cosmetic + live-swap surfaces — env, credentials, guardrails,
+    /// transparent-interception toggle), matching the GUI save path but without
+    /// the restart prompt. Call after ANY path that writes a profile out of band
+    /// — `automationUpsertProfile`, and the `set profile json` / `set profile
+    /// setting` AppleScript bridges the e2e suite uses — so an external edit
+    /// (e.g. flipping `disableTransparentProxy` on a running VM, ac-e2e 27.3)
+    /// takes effect live instead of only on the next reboot. No-op when the
+    /// profile has no running session.
+    func applyLiveEditToRunningSession(_ new: Profile) {
+        // Keep the running session's captured profile current too — a reboot
+        // relaunches from `runningSessions[id].profile`, so VM-baked fields must
+        // survive an edit made just before it.
+        let priorRunning = runningSessions[new.id]?.profile
+        runningSessions[new.id]?.profile = new
+        if let win = pane(for: new.id) {
+            let runningProfile = win.profile
+            win.applyLiveProfileUpdates(new)
+            applyLiveSessionRefresh(from: runningProfile, to: new,
+                                    terminalDefaults: terminalDefaults, window: win,
+                                    sandbox: win.sandbox)
+        } else if let session = runningSessions[new.id], let old = priorRunning {
+            // Detached (headless) session: no pane, but the engine-side configs
+            // + guest files still refresh — otherwise a CLI/automation edit to a
+            // windowless VM was silently ignored until reboot.
+            applyLiveSessionRefresh(from: old, to: new,
+                                    terminalDefaults: terminalDefaults, window: nil,
+                                    sandbox: session.sandbox)
+        }
+    }
+
     func automationUpsertProfile(idOrName: String?, doc rawDoc: [String: Any]) -> [String: Any] {
         // Drop transport-only markers before decoding. `generateSSH` is a
         // control flag (not a Profile field): when set, the host mints a fresh
@@ -6719,31 +6750,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         // Push host-side cosmetic + live-swap updates into a running session,
         // matching the GUI (minus the restart prompt, which needs a window).
-        if editing != nil {
-            // Keep the running session's captured profile current too. A reboot
-            // relaunches from `runningSessions[id].profile` (see
-            // automationRebootVM), and VM-baked fields (network mode, memory,
-            // mounts) are only picked up on a fresh launch. Without this a
-            // settings change made just before a reboot silently reverted on
-            // relaunch — the pane's copy below only drives live/cosmetic refresh.
-            let priorRunning = runningSessions[toSave.id]?.profile
-            runningSessions[toSave.id]?.profile = toSave
-            if let win = pane(for: toSave.id) {
-                let runningProfile = win.profile
-                win.applyLiveProfileUpdates(toSave)
-                applyLiveSessionRefresh(from: runningProfile, to: toSave,
-                                        terminalDefaults: terminalDefaults, window: win,
-                                        sandbox: win.sandbox)
-            } else if let session = runningSessions[toSave.id], let old = priorRunning {
-                // Detached (headless) session: no pane, but the engine-side
-                // configs + guest files still refresh — otherwise a CLI edit
-                // to a windowless VM (guardrails, credentials, model) was
-                // silently ignored until reboot.
-                applyLiveSessionRefresh(from: old, to: toSave,
-                                        terminalDefaults: terminalDefaults, window: nil,
-                                        sandbox: session.sandbox)
-            }
-        }
+        if editing != nil { applyLiveEditToRunningSession(toSave) }
 
         var result = automationProfileDescribe(toSave.id.uuidString) ?? ["id": toSave.id.uuidString]
         result["ok"] = true
