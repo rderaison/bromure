@@ -3355,7 +3355,18 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
             head += "\r\n"
             for (k, v) in http.allHeaderFields {
                 guard let key = k as? String, let val = v as? String else { continue }
-                if stripped.contains(key.lowercased()) { continue }
+                let lk = key.lowercased()
+                // Preserve Content-Length on a bodyless response (HEAD / 204 /
+                // 304): there's no body to re-frame, the upstream length is
+                // accurate, and clients need it — huggingface_hub reads it from
+                // the metadata HEAD to size a download. We only strip it when we
+                // re-chunk a body (whose length URLSession may have changed by
+                // decompressing).
+                if lk == "content-length" {
+                    if useChunked { continue }
+                } else if stripped.contains(lk) {
+                    continue
+                }
                 head += "\(key): \(val)\r\n"
             }
             if useChunked { head += "Transfer-Encoding: chunked\r\n" }
@@ -3541,6 +3552,22 @@ private final class StreamingRelayDelegate: NSObject, URLSessionDataDelegate, @u
             return v.isEmpty ? nil : v
         }
         return nil
+    }
+
+    // Don't transparently follow redirects. A MiTM proxy should hand the 3xx
+    // back to the client and let it re-request (through us) — and some clients
+    // read headers off the redirect ITSELF that vanish if we follow it. Notably
+    // huggingface_hub does a `HEAD` on `…/resolve/…` with redirects DISABLED and
+    // reads the file's `X-Linked-Size` / `X-Linked-Etag` (and `Location`) from
+    // the 302; following it here delivered the CDN 200 instead, so HF got no
+    // size and raised LocalEntryNotFoundError. Passing nil delivers the redirect
+    // response to the delegate as the final response, so the guest sees the 302.
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 
     func urlSession(_ session: URLSession,
