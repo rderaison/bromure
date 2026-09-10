@@ -354,7 +354,14 @@ final class SessionListModel {
     /// toolbar button tint and the pane's own context/polling.
     var filePaneOpen = false
     /// True when the agentic browser pane is open. Drives the toolbar tint.
+    /// (Local window; set from the selected pane's browser state.)
     var browserPaneOpen = false
+    /// Fat client: the workspaces whose agentic browser is open. The remote
+    /// toolbar's globe tints from `contains(selectedID)`, so — because both this
+    /// set and `selectedID` are observed — it stays correct per-workspace as the
+    /// selection changes, without the local window's single-Bool bookkeeping.
+    /// Mirrors `RemoteHostWindow.browserOpen`.
+    var browserOpenWorkspaces: Set<Profile.ID> = []
     /// True when the SELECTED pane is showing the beautified transcript view
     /// (desktop-app look) instead of the raw terminal. Per-pane state mirrored
     /// here so the toolbar toggle can tint; updated on selection + flip.

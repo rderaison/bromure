@@ -1603,7 +1603,7 @@ struct RemoteToolbarBar: View {
                 HeaderIcon(system: "gearshape", help: "Edit workspace") { onSettings(entry.id) }
                 HeaderIcon(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") { onDetach(entry.id) }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
-                           active: model.browserPaneOpen) { onToggleBrowser() }
+                           active: model.browserOpenWorkspaces.contains(entry.id)) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide repo files (⌃⌘E)",
                            active: model.filePaneOpen) { onToggleFilePane() }
             }
@@ -3467,6 +3467,9 @@ final class RemoteHostWindow: NSWindow {
                 contentView?.layoutSubtreeIfNeeded()
             }
         }
+        // Keep the toolbar globe's per-workspace tint in sync (the button reads
+        // browserOpenWorkspaces.contains(selectedID); see SessionListModel).
+        controller.listModel.browserOpenWorkspaces = browserOpen
     }
 
     /// The workspace VM rebooted (uptime reset in /state), so its network is
@@ -3521,6 +3524,7 @@ final class RemoteHostWindow: NSWindow {
             setBrowserOpen(id, true)   // idempotent — no-ops if already shown
         } else {
             browserOpen.insert(id)
+            controller.listModel.browserOpenWorkspaces = browserOpen   // keep the tint in sync
             _ = browserController(for: id)
         }
     }
