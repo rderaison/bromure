@@ -1544,6 +1544,10 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
         try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
     }
 
+    func guestFileOp(_ op: [String: Any]) async -> [String: Any]? {
+        try? await controller.guestFileOp(workspaceID, op: op, timeout: 30)
+    }
+
     func isWorking() -> Bool {
         controller.tabsModel(for: workspaceID)?.activeTab?.agentStatus == .working
     }

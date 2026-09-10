@@ -33,6 +33,12 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     /// agent via MITM request activity — so it drives the "thinking" cue for
     /// all supported agents uniformly.
     func isWorking() -> Bool
+    /// Run one native file op (`{op,path,data,…}`) in the workspace guest — the
+    /// file-browser data plane. Payloads ride base64 inside JSON (no shell), so
+    /// unlike `execGuest` they aren't bound by the kernel's 128 KB per-argv
+    /// cap — which a single filled base64 chunk would blow past. nil on failure.
+    /// Used to stage dropped files (local: vsock; fat client: the tunnel).
+    func guestFileOp(_ op: [String: Any]) async -> [String: Any]?
 }
 
 extension BeautifiedTranscriptProvider {
@@ -77,14 +83,26 @@ extension BeautifiedTranscriptProvider {
     /// Write dropped/attached files into the guest at deterministic paths and
     /// return the guest paths written (for the message text + thumbnails). Does
     /// NOT type anything — the model composes and sends the message. Local and
-    /// fat client share this; only `execGuest` differs (vsock vs. tunnel).
+    /// fat client share this; only `guestFileOp` differs (vsock vs. tunnel).
+    ///
+    /// Uses the file-op write plane, NOT `execGuest` base64: a shell
+    /// `printf %s '<b64>'` passes the chunk as one argv, and the guest runs the
+    /// command as a single argv string — so a chunk over the kernel's 128 KB
+    /// per-argv-string cap fails with E2BIG and the file never lands (the drop's
+    /// path was referenced but the bytes were missing). File ops carry base64
+    /// inside JSON, so they clear the cap and upload each file in a few large
+    /// requests instead of many small exec round-trips over the tunnel.
     func stage(_ files: [DroppedFile]) async -> [String] {
         var paths: [String] = []
+        // The write op opens the path directly (no mkdir), so ensure the
+        // staging dir exists first; bail if we can't even create it.
+        guard await guestFileOp(["op": "mkdir", "path": GuestDrop.baseDir]) != nil
+        else { return paths }
         for (n, f) in files.enumerated() {
             let path = GuestDrop.path(index: n, name: f.name)
             var ok = true
-            for cmd in GuestDrop.writeCommands(guestPath: path, data: f.data) {
-                if await execGuest(cmd, timeout: 30) == nil { ok = false; break }
+            for op in GuestDrop.writeOps(guestPath: path, data: f.data) {
+                if await guestFileOp(op) == nil { ok = false; break }
             }
             if ok { paths.append(path) }
         }
@@ -107,9 +125,11 @@ enum GuestDrop {
     /// paths are deterministic on the host — which lets the drop echo them and
     /// render thumbnails against the same paths the real transcript will show.
     static let baseDir = "/tmp/bromure-drops"
-    /// Base64 chunk size — keeps each `printf` well under ARG_MAX; a multiple of
-    /// 4 so every chunk decodes to whole bytes independently (the append works).
-    private static let chunkBytes = 192 * 1024
+    /// Raw bytes per file-op write request — base64 of a chunk stays under the
+    /// guest's ~10 MB request cap. (A file-op payload rides base64 inside JSON,
+    /// so unlike a shell `printf` it isn't bound by the kernel's 128 KB
+    /// per-argv-string cap, which a single filled chunk would blow past.)
+    private static let writeChunk = 6 * 1024 * 1024
 
     /// A safe path component: everything outside `[A-Za-z0-9._-]` (plus unicode
     /// letters/digits) becomes `_`, so the name carries no shell metacharacters
@@ -134,25 +154,23 @@ enum GuestDrop {
         return "\(baseDir)/\(leaf)"
     }
 
-    /// Chunked base64 writes to `guestPath`: mkdir + first (truncate) chunk,
-    /// then appends. base64 is `[A-Za-z0-9+/=]` so the chunk is single-quoted;
-    /// the path is fixed/sanitized so double-quoting is safe.
-    static func writeCommands(guestPath: String, data: Data) -> [String] {
-        let b64 = data.base64EncodedString()
-        var cmds: [String] = []
-        var idx = b64.startIndex
+    /// The file-op sequence writing `data` to `guestPath`: a truncating first
+    /// write (`append:false`) then appends, chunked so each request's base64
+    /// clears the guest's request cap. Empty data yields one truncating write
+    /// (creates an empty file). The parent dir is created once by `stage`.
+    static func writeOps(guestPath: String, data: Data) -> [[String: Any]] {
+        var ops: [[String: Any]] = []
+        var offset = 0
         var first = true
-        while idx < b64.endIndex {
-            let end = b64.index(idx, offsetBy: chunkBytes, limitedBy: b64.endIndex) ?? b64.endIndex
-            let chunk = String(b64[idx..<end])
-            idx = end
-            let redir = first ? ">" : ">>"
-            let prefix = first ? "mkdir -p \(baseDir) && " : ""
-            cmds.append("\(prefix)printf %s '\(chunk)' | base64 -d \(redir) \"\(guestPath)\"")
+        repeat {
+            let end = min(offset + writeChunk, data.count)
+            let piece = data.subdata(in: offset..<end)
+            ops.append(["op": "write", "path": guestPath,
+                        "data": piece.base64EncodedString(), "append": !first])
+            offset = end
             first = false
-        }
-        if cmds.isEmpty { cmds = ["mkdir -p \(baseDir) && : > \"\(guestPath)\""] }
-        return cmds
+        } while offset < data.count
+        return ops
     }
 
 }
@@ -369,6 +387,11 @@ final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
     func execGuest(_ command: String, timeout: Int) async -> String? {
         guard let pane, let delegate = pane.acDelegate else { return nil }
         return try? await delegate.guestExec(profileID: pane.profile.id, command: command, timeout: timeout)
+    }
+
+    func guestFileOp(_ op: [String: Any]) async -> [String: Any]? {
+        guard let pane, let delegate = pane.acDelegate else { return nil }
+        return try? await delegate.guestFileOp(profileID: pane.profile.id, op: op, timeout: 30)
     }
 
     func isWorking() -> Bool { pane?.model.activeTab?.agentStatus == .working }
