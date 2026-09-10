@@ -51,6 +51,12 @@ extension BeautifiedTranscriptProvider {
     /// `claude` (not `--resume`) showed the prior conversation until the new one
     /// wrote its first turn. Cross-agent (pure process timing). Falls back to 0
     /// (newest overall) if the foreground process can't be determined.
+    ///
+    /// EXCEPTION — a RESUMED session (`--resume`/`--continue`/`resume`): the
+    /// agent reattaches an existing transcript whose file predates this process,
+    /// so the process-start floor would hide it until the next turn bumps its
+    /// mtime. When the foreground command line looks like a resume, drop the
+    /// floor to 0 so the reattached transcript shows immediately.
     func fetchTranscript() async -> Data? {
         guard let idx = activeTabIndex() else { return nil }
         let meta = await execGuest(
@@ -60,6 +66,14 @@ extension BeautifiedTranscriptProvider {
             + "pid=$(ps -t \"${tty#/dev/}\" -o pid=,stat= 2>/dev/null | awk '$2 ~ /\\+/ {print $1; exit}'); "
             + "et=$(ps -o etimes= -p \"$pid\" 2>/dev/null | tr -d ' '); "
             + "if [ -n \"$et\" ]; then s=$(( $(date +%s) - et )); else s=0; fi; "
+            // Resuming reattaches an older transcript → don't floor it out. Match
+            // only the long flags: the args string also contains the (free-text)
+            // prompt, so short flags / bare words like `-c` or `resume` there
+            // would false-positive and resurrect a stale session on a FRESH run.
+            + "a=$(ps -ww -o args= -p \"$pid\" 2>/dev/null); "
+            + "case \"$a\" in "
+            + "*--resume*|*--continue*|*--restore*) s=0;; "
+            + "esac; "
             + "printf '%s\\n%s\\n' \"$cwd\" \"$s\"",
             timeout: 8)
         let lines = (meta ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
@@ -633,10 +647,18 @@ private struct AttachmentThumbnails: View {
 /// beautified-view equivalent of Claude Code's "Crafting…/Thinking…".
 private struct ThinkingRow: View {
     private static let verbs = ["Thinking", "Working", "Crafting", "Pondering",
-                                "Reasoning", "Cooking", "Churning", "Noodling"]
+                                "Reasoning", "Cooking", "Churning", "Noodling",
+                                "Brewing", "Simmering", "Percolating", "Ruminating",
+                                "Mulling", "Synthesizing", "Conjuring", "Tinkering",
+                                "Wrangling", "Untangling", "Deliberating", "Contemplating",
+                                "Scheming", "Calculating", "Processing", "Weaving",
+                                "Distilling", "Formulating", "Marinating", "Puzzling"]
+    /// Seconds each verb shows before the next. Used for BOTH the tick interval
+    /// and the slot math, so they can't drift.
+    private static let period: TimeInterval = 7.2
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 2.4)) { context in
-            let slot = Int(context.date.timeIntervalSinceReferenceDate / 2.4)
+        TimelineView(.periodic(from: .now, by: Self.period)) { context in
+            let slot = Int(context.date.timeIntervalSinceReferenceDate / Self.period)
             let verb = Self.verbs[((slot % Self.verbs.count) + Self.verbs.count) % Self.verbs.count]
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
