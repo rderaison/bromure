@@ -1878,15 +1878,19 @@ private struct CompactRail: View {
                         .frame(width: 30, height: 26)
                         .background(RoundedRectangle(cornerRadius: 6)
                             .fill(model.gridSelected ? Color.accentColor.opacity(0.16) : .clear))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Grid")
 
                 ForEach(model.entries) { entry in
                     let accentHex = model.profileRows.first { $0.id == entry.id }?
-                        .accentHex ?? "#888888"
+                        .accentHex ?? entry.accentHex
+                    // Prefer the freshly-rebuilt profileRows name (tracks renames),
+                    // but fall back to the entry's own name so the tooltip is never
+                    // blank — the VMEntry always carries it, in both modes.
                     let workspaceName = model.profileRows.first { $0.id == entry.id }?
-                        .name ?? ""
+                        .name ?? entry.name
                     Divider().padding(.horizontal, 10)
                     ForEach(Array(entry.model.tabs.enumerated()), id: \.element.id) { idx, tab in
                         if tab.containerID == nil {
@@ -1945,10 +1949,13 @@ private struct RailTabButton: View {
             .background(RoundedRectangle(cornerRadius: 6)
                 .fill(isActive ? Color(hex: accentHex).opacity(0.16)
                                : (hovering ? Color.primary.opacity(0.05) : .clear)))
+            // Make the whole cell hoverable so the tooltip fires anywhere on the
+            // icon, not just on the (small, often transparent-backed) glyph.
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help("\(workspaceName) — \(tab.shownLabel)")
+        .help(tab.shownLabel.isEmpty ? workspaceName : "\(workspaceName) — \(tab.shownLabel)")
     }
 }
 
