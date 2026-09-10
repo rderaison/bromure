@@ -222,6 +222,14 @@ final class BeautifiedSessionModel: ObservableObject {
     private var nextOptimisticID = Int.max
     /// The parsed transcript (source of truth).
     private var parsedItems: [TranscriptItem] = []
+    /// Consecutive polls that parsed to EMPTY while we already had a transcript.
+    /// A populated transcript that suddenly reads empty is almost always a
+    /// transient fetch glitch — the session-floor probe momentarily resolving a
+    /// short-lived foreground child of the agent (flooring out the store), or a
+    /// guest/tunnel hiccup (more common on the fat client) — not the
+    /// conversation being cleared. Tolerate a few before believing it.
+    private var emptyParseStreak = 0
+    private static let maxEmptyParseStreak = 4   // ~6s at the 1.5s cadence
     /// Locally-echoed turns awaiting confirmation from the real transcript. Kept
     /// appended (so nothing flickers off) until the parse contains the same text
     /// — or they age out, in case the agent never records the turn.
@@ -280,7 +288,20 @@ final class BeautifiedSessionModel: ObservableObject {
         working = provider.isWorking()
         guard let data = await provider.fetchTranscript() else { loading = false; return }
         loading = false
-        parsedItems = AgentTranscript.parse(data)
+        let parsed = AgentTranscript.parse(data)
+        // Don't blank a populated transcript on a transient empty read (see
+        // `emptyParseStreak`) — that's the "beautified view goes all white" bug.
+        // Keep the last good items until either real content returns or the
+        // empties persist long enough to be a genuinely cleared session.
+        if parsed.isEmpty, !parsedItems.isEmpty {
+            emptyParseStreak += 1
+            if emptyParseStreak < Self.maxEmptyParseStreak {
+                working = provider.isWorking()
+                return
+            }
+        }
+        emptyParseStreak = 0
+        parsedItems = parsed
         reconcilePending()
         rebuild()
         working = provider.isWorking()
