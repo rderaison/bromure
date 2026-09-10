@@ -331,14 +331,27 @@ final class TerminalSurfaceView: NSView {
         ghostty_surface_mouse_button(surface, state, button, Self.mods(event.modifierFlags))
     }
 
-    override func mouseDown(with event: NSEvent) { send(button: GHOSTTY_MOUSE_LEFT, state: GHOSTTY_MOUSE_PRESS, event: event) }
-    override func mouseUp(with event: NSEvent) { send(button: GHOSTTY_MOUSE_LEFT, state: GHOSTTY_MOUSE_RELEASE, event: event) }
+    /// Mirrors ghostty's left-button press state (set by our mouseDown, cleared
+    /// by our mouseUp — the only callers of `ghostty_surface_mouse_button`). Used
+    /// to detect a swallowed mouse-up: see `mouseMoved`.
+    private var leftButtonDown = false
+
+    override func mouseDown(with event: NSEvent) {
+        leftButtonDown = true
+        send(button: GHOSTTY_MOUSE_LEFT, state: GHOSTTY_MOUSE_PRESS, event: event)
+    }
+    override func mouseUp(with event: NSEvent) {
+        leftButtonDown = false
+        send(button: GHOSTTY_MOUSE_LEFT, state: GHOSTTY_MOUSE_RELEASE, event: event)
+    }
     override func rightMouseDown(with event: NSEvent) { send(button: GHOSTTY_MOUSE_RIGHT, state: GHOSTTY_MOUSE_PRESS, event: event) }
     override func rightMouseUp(with event: NSEvent) { send(button: GHOSTTY_MOUSE_RIGHT, state: GHOSTTY_MOUSE_RELEASE, event: event) }
     override func otherMouseDown(with event: NSEvent) { send(button: GHOSTTY_MOUSE_MIDDLE, state: GHOSTTY_MOUSE_PRESS, event: event) }
     override func otherMouseUp(with event: NSEvent) { send(button: GHOSTTY_MOUSE_MIDDLE, state: GHOSTTY_MOUSE_RELEASE, event: event) }
 
-    override func mouseMoved(with event: NSEvent) {
+    /// Report the cursor position to ghostty. During a genuine drag this extends
+    /// a selection (ghostty knows the button is down).
+    private func reportMousePos(_ event: NSEvent) {
         guard let surface else { return }
         // View-local position, (0,0) top-left, in points.
         let pos = convert(event.locationInWindow, from: nil)
@@ -346,9 +359,26 @@ final class TerminalSurfaceView: NSView {
                                   Self.mods(event.modifierFlags))
     }
 
-    override func mouseDragged(with event: NSEvent) { mouseMoved(with: event) }
-    override func rightMouseDragged(with event: NSEvent) { mouseMoved(with: event) }
-    override func otherMouseDragged(with event: NSEvent) { mouseMoved(with: event) }
+    override func mouseMoved(with event: NSEvent) {
+        // AppKit delivers mouseMoved ONLY when no button is down. If we still
+        // think the left button is pressed, its mouse-up was swallowed — the
+        // click/drag began at the terminal's edge but was released over a
+        // sibling (the file-pane resize handle, a tab). Without the matching
+        // release ghostty keeps extending the selection as the cursor merely
+        // hovers, so synthesize the release before reporting the new position.
+        if leftButtonDown, let surface {
+            leftButtonDown = false
+            ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT,
+                                         Self.mods(event.modifierFlags))
+        }
+        reportMousePos(event)
+    }
+
+    // Drags carry a real button-down; report position without the stuck-release
+    // guard (which is for hover only).
+    override func mouseDragged(with event: NSEvent) { reportMousePos(event) }
+    override func rightMouseDragged(with event: NSEvent) { reportMousePos(event) }
+    override func otherMouseDragged(with event: NSEvent) { reportMousePos(event) }
 
     /// Accumulated trackpad magnification; each ±0.25 of pinch steps the
     /// font size once, mirroring ⌘+/⌘-.
