@@ -2377,6 +2377,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             self?.refreshStreamingState()
         }
 
+        // The menu item also tracks the ACCOUNT (personal browser sign-in /
+        // sign-out), not just device enrollment — so it flips to "Log out…" the
+        // instant a sign-in completes and back to "Log in…" on sign-out.
+        NotificationCenter.default.addObserver(
+            forName: .p2pIdentityChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.refreshEnrollmentMenuTitle()
+        }
+
         // Wire signal handlers BEFORE the MITM engine spawns its
         // ssh-agent — otherwise an unlucky signal between spawn and
         // handler install would orphan the child. SIGKILL and jetsam
@@ -5304,11 +5312,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         appMenu.items
             .filter { ($0.representedObject as? String) == "bromure.enrollment" }
             .forEach { appMenu.removeItem($0) }
-        let title = BACEnrollmentStore.load() == nil
-            ? NSLocalizedString("Log in to bromure.io…", comment: "")
-            : NSLocalizedString("bromure.io Enrollment…", comment: "")
         let item = NSMenuItem(
-            title: title,
+            title: enrollmentMenuTitle(),
             action: #selector(ACAppDelegate.openEnrollmentAction(_:)),
             keyEquivalent: "")
         item.target = self
@@ -5492,8 +5497,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         Ext4BrowserWindowController.show(imagePath: url.path)
     }
 
+    /// The bromure.io app-menu item's title, reflecting the account/enrollment
+    /// state: "log in" when disconnected, "log out" when a personal account is
+    /// signed in, and the neutral enrollment label for a managed/code-enrolled
+    /// install (which the user can't "log out" of from here — that's the admin's
+    /// to revoke).
+    private func enrollmentMenuTitle() -> String {
+        let account = P2PEnrollmentCoordinator.shared
+        if account.signedIn && !account.isEnterprise {
+            return NSLocalizedString("Log out of bromure.io…", comment: "")
+        }
+        if account.signedIn || BACEnrollmentStore.load() != nil {
+            return NSLocalizedString("bromure.io Enrollment…", comment: "")
+        }
+        return NSLocalizedString("Log in to bromure.io…", comment: "")
+    }
+
     private func makeEnrollmentContentView(in window: NSWindow) -> NSView {
-        if BACEnrollmentStore.load() == nil {
+        // "Connected" = signed in to an account OR device-enrolled. Either way we
+        // show the status panel (which offers the right way out) rather than the
+        // login sheet — the bug was offering to log in while already logged in.
+        let connected = P2PEnrollmentCoordinator.shared.signedIn || BACEnrollmentStore.load() != nil
+        if !connected {
             return NSHostingView(rootView: BACEnrollmentSheet { [weak self, weak window] _ in
                 window?.close()
                 self?.enrollmentWindow = nil
@@ -5551,9 +5576,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let main = NSApp.mainMenu, let windowMenu = NSApp.windowsMenu else { return }
         for item in windowMenu.items + (main.items.flatMap { $0.submenu?.items ?? [] }) {
             guard item.action == #selector(openEnrollmentAction(_:)) else { continue }
-            item.title = BACEnrollmentStore.load() == nil
-                ? NSLocalizedString("Log in to bromure.io…", comment: "")
-                : NSLocalizedString("bromure.io Enrollment…", comment: "")
+            item.title = enrollmentMenuTitle()
         }
     }
 

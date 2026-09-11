@@ -188,15 +188,57 @@ struct BACEnrollmentSheet: View {
 /// burying it in a settings panel.
 struct BACEnrollmentStatusView: View {
     @State private var install: BACInstall? = BACEnrollmentStore.load()
+    @State private var account = P2PEnrollmentCoordinator.shared
     @State private var leafExpiresAt: Date?
     @State private var health: BACEnrollmentHealth = BACEnrollmentStore.loadHealth()
     @State private var renewing = false
+    @State private var loggingOut = false
     @State private var renewError: String?
+    /// Called after the user logs out (account sign-out and/or unenroll) so the
+    /// host can swap this window's content back to the login sheet.
     let onUnenroll: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if let install {
+            if account.signedIn, !account.isEnterprise {
+                // Personal account signed in — the "logged in to bromure.io"
+                // state. Offer LOG OUT rather than another log-in.
+                Text(NSLocalizedString("Signed in to bromure.io", comment: "BAC account panel title"))
+                    .font(.title3).bold()
+                LabeledRow(label: NSLocalizedString("Account", comment: ""),
+                           value: account.accountLabel ?? "bromure.io")
+                if let install {
+                    LabeledRow(label: NSLocalizedString("Workspace", comment: ""), value: install.orgSlug)
+                    LabeledRow(label: NSLocalizedString("Device", comment: ""), value: install.deviceName)
+                    if let leafExpiresAt {
+                        LabeledRow(label: NSLocalizedString("Certificate", comment: ""),
+                                   value: leafExpiresAt > Date()
+                                    ? String(format: NSLocalizedString("Valid until %@", comment: "mTLS cert expiry"),
+                                             leafExpiresAt.formatted(date: .abbreviated, time: .shortened))
+                                    : NSLocalizedString("Expired — renewing automatically", comment: ""))
+                    }
+                }
+                if health != .ok { healthBanner }
+                if let renewError {
+                    Text(renewError).font(.callout).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack {
+                    if install != nil {
+                        Button { renew() } label: {
+                            if renewing { ProgressView().controlSize(.small) }
+                            else { Text(NSLocalizedString("Renew certificate", comment: "")) }
+                        }
+                        .disabled(renewing)
+                    }
+                    Spacer()
+                    Button(role: .destructive) { logOut() } label: {
+                        if loggingOut { ProgressView().controlSize(.small) }
+                        else { Text(NSLocalizedString("Log out", comment: "BAC account log out")) }
+                    }
+                    .disabled(loggingOut)
+                }
+            } else if let install {
                 Text(NSLocalizedString("bromure.io enrollment",
                                        comment: "BAC status panel title"))
                     .font(.title3).bold()
@@ -277,6 +319,27 @@ struct BACEnrollmentStatusView: View {
         install = BACEnrollmentStore.load()
         health = BACEnrollmentStore.loadHealth()
         leafExpiresAt = BACEnrollment.shared.leafExpiry()
+        account.refresh()
+    }
+
+    /// Fully log out of bromure.io: revoke this device server-side (needs a
+    /// still-valid bearer, and it drops the device's SSH key), unenroll the
+    /// device if it was enrolled for streaming, then forget the account
+    /// identity. Then hand back to the host to reset the window.
+    private func logOut() {
+        loggingOut = true
+        Task { @MainActor in
+            defer { loggingOut = false }
+            if let (client, bearer) = ControlPlaneClient.current() {
+                try? await client.selfRevoke(bearer: bearer)
+            }
+            if BACEnrollmentStore.load() != nil {
+                await BACEnrollment.shared.unenroll()
+            }
+            account.signOut()
+            install = nil
+            onUnenroll()
+        }
     }
 
     @ViewBuilder
