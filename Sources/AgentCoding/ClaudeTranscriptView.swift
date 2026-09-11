@@ -1308,30 +1308,34 @@ struct TranscriptQuestionBatchCard: View {
 
 struct TranscriptItemView: View {
     let item: TranscriptItem
+    @Environment(\.colorScheme) private var colorScheme
 
     #if os(iOS) || os(visionOS)
     private static let userTextSize: CGFloat = 16
     #else
-    private static let userTextSize: CGFloat = 12.5
+    private static let userTextSize: CGFloat = 13
     #endif
 
     var body: some View {
         switch item.kind {
         case .userText(let text):
-            VStack(alignment: .leading, spacing: 4) {
-                Label(NSLocalizedString("Prompt", comment: "transcript role"),
-                      systemImage: "person.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text(text)
-                    .font(.system(size: Self.userTextSize))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.secondary.opacity(0.12)))
+            // No role label — the filled card (against the assistant's plain
+            // flowing prose) and the accent spine already read as "your turn",
+            // the way Codex/Claude desktop distinguish input from output.
+            Text(text)
+                .font(.system(size: Self.userTextSize))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.10))
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.accentColor.opacity(0.5))
+                        .frame(width: 3)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         case .assistantText(let text):
             assistantText(text)
         case .question(let q):
@@ -1375,11 +1379,12 @@ struct TranscriptItemView: View {
         let bodySize: CGFloat = 17     // a reading surface on the phone
         let serif = true
         #else
-        let bodySize: CGFloat = 13.5   // a dense dev tool on the Mac
+        let bodySize: CGFloat = 14     // a dense dev tool on the Mac
         let serif = false
         #endif
         Markdown(text)
             .markdownTheme(.claudeReader(bodySize: bodySize, serif: serif))
+            .markdownCodeSyntaxHighlighter(TranscriptCodeHighlighter(dark: colorScheme == .dark))
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1391,8 +1396,7 @@ struct TranscriptItemView: View {
                 .textSelection(.enabled)
                 .padding(8)
         }
-        .background(RoundedRectangle(cornerRadius: 6)
-            .fill(Color.primary.opacity(0.05)))
+        .transcriptCard(radius: 6)
     }
 
     private func firstLine(_ s: String) -> String {
@@ -1400,6 +1404,59 @@ struct TranscriptItemView: View {
         return line.count > 160 ? String(line.prefix(160)) + "…" : line
     }
 }
+
+// MARK: - Shared transcript card chrome
+
+/// One place for the transcript's visual language, so every activity card
+/// (command, diff, file, checklist, raw JSON) reads as the same flat surface —
+/// the coherent, low-chrome look of the Codex / Claude desktop transcripts.
+enum TranscriptStyle {
+    static let radius: CGFloat = 8
+    static let cardFill = Color.secondary.opacity(0.07)
+    static let cardStroke = Color.primary.opacity(0.06)
+    static let headerFill = Color.primary.opacity(0.045)
+    static let gutter: CGFloat = 16
+    static let headerSize: CGFloat = 11.5
+    static let monoSize: CGFloat = 11.5
+}
+
+extension View {
+    /// Flat, subtly-filled rounded cell with a hairline border — the shared
+    /// chrome of every transcript activity card.
+    func transcriptCard(radius: CGFloat = TranscriptStyle.radius) -> some View {
+        self
+            .background(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(TranscriptStyle.cardFill))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(TranscriptStyle.cardStroke))
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+    }
+}
+
+#if os(macOS)
+/// Small, unobtrusive copy affordance shared by code fences, command cells and
+/// diffs — flips to a green check for a moment after a copy.
+struct CopyButton: View {
+    let text: String
+    var size: CGFloat = 11
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: size))
+                .foregroundStyle(copied ? Color.green : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .help(NSLocalizedString("Copy", comment: "copy"))
+    }
+}
+#endif
 
 /// A typed rendering of a tool call, so a beautified session reads like the
 /// native Claude Code / Codex desktop apps: Edit/Write → a green/red diff,
@@ -1427,7 +1484,7 @@ struct ToolCallCard: View {
         } else if let (old, new, path) = editParts(n) {
             DiffCard(title: name, path: path, oldText: old, newText: new)
         } else if isBash(n), let cmd = firstString(["command"]) {
-            CommandCard(icon: "terminal", tool: name, command: cmd)
+            CommandCard(command: cmd)
         } else if isWeb(n), let u = firstString(["url", "query"]) {
             FileCard(icon: "globe", tool: name, value: u)
         } else if isFileTool(n), let p = firstString(["file_path", "path", "pattern", "query", "notebook_path"]) {
@@ -1618,7 +1675,7 @@ struct TodoListView: View {
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(Color.primary.opacity(0.05))
+            .background(TranscriptStyle.headerFill)
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
                     TodoRow(row: row, showPhase: showPhases,
@@ -1627,8 +1684,7 @@ struct TodoListView: View {
             }
             .padding(.vertical, 3)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
+        .transcriptCard()
     }
 }
 
@@ -1670,9 +1726,7 @@ private struct TodoCard: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(Color.primary.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
+            .transcriptCard()
         } else {
             TodoListView(title: headerTitle, rows: rows)
         }
@@ -1735,25 +1789,31 @@ private struct DiffCard: View {
     var body: some View {
         let result = DiffLine.compute(old: oldText, new: newText, cap: Self.maxLines)
         VStack(alignment: .leading, spacing: 0) {
-            Button { expanded.toggle() } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "pencil").font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Text(title).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.secondary)
-                    if let path {
-                        Text(path).font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            HStack(spacing: 6) {
+                Button { expanded.toggle() } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "pencil").font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary).frame(width: 14)
+                        Text(title).font(.system(size: TranscriptStyle.headerSize, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        if let path {
+                            Text(path).font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer(minLength: 6)
+                        DiffStat(result: result)
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9)).foregroundStyle(.tertiary)
                     }
-                    Spacer(minLength: 6)
-                    DiffStat(result: result)
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9)).foregroundStyle(.tertiary)
+                    .contentShape(Rectangle())
                 }
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                #if os(macOS)
+                if !newText.isEmpty { CopyButton(text: newText) }
+                #endif
             }
-            .buttonStyle(.plain)
-            .background(Color.primary.opacity(0.05))
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(TranscriptStyle.headerFill)
             if expanded {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(result.lines.indices, id: \.self) { i in DiffRowView(row: result.lines[i]) }
@@ -1767,8 +1827,7 @@ private struct DiffCard: View {
                 .padding(.vertical, 3)
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
+        .transcriptCard()
     }
 }
 
@@ -1860,26 +1919,30 @@ struct DiffLine {
     }
 }
 
-/// `$ command` card for Bash / shell tool calls.
+/// Terminal-style cell for Bash / shell tool calls — a `$`-prefixed monospace
+/// command with a copy affordance, the way commands read in Codex desktop. The
+/// leading `$` says "shell" without a separate tool-name header.
 private struct CommandCard: View {
-    let icon: String
-    let tool: String
     let command: String
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                Text(tool).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.secondary)
-                Spacer(minLength: 0)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 8) {
+                Text(verbatim: "$")
+                    .foregroundStyle(.tertiary)
+                Text(command)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 3)
-            ScrollView(.horizontal) {
-                Text(command).font(.system(size: 11.5, design: .monospaced)).textSelection(.enabled)
-                    .padding(.horizontal, 10).padding(.bottom, 8)
-            }
+            .font(.system(size: TranscriptStyle.monoSize, design: .monospaced))
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            .padding(.trailing, 22)          // clear of the copy button
         }
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.10)))
+        .transcriptCard()
+        #if os(macOS)
+        .overlay(alignment: .topTrailing) {
+            CopyButton(text: command).padding(6)
+        }
+        #endif
     }
 }
 
@@ -1890,15 +1953,15 @@ private struct FileCard: View {
     let value: String
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: icon).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 16)
-            Text(tool).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.primary)
+            Image(systemName: icon).font(.system(size: 12)).foregroundStyle(.secondary)
+                .frame(width: TranscriptStyle.gutter)
+            Text(tool).font(.system(size: TranscriptStyle.headerSize, weight: .semibold)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: TranscriptStyle.monoSize, design: .monospaced)).foregroundStyle(.primary)
                 .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08)))
+        .transcriptCard()
     }
 }
 
@@ -1909,7 +1972,7 @@ private struct RawJSONBlock: View {
         ScrollView(.horizontal) {
             Text(text).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).padding(8)
         }
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+        .transcriptCard(radius: 6)
     }
 }
 
@@ -2021,15 +2084,148 @@ private extension MarkdownUI.Theme {
                 .markdownMargin(top: .em(0.3), bottom: .em(0.85))
         }
         t = t.codeBlock { c in
-            ScrollView(.horizontal, showsIndicators: false) {
-                c.label
-                    .markdownTextStyle { FontFamilyVariant(.monospaced); FontSize(bodySize * 0.86) }
-                    .padding(12)
-            }
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.secondary.opacity(0.10)))
-            .markdownMargin(top: .em(0.4), bottom: .em(0.85))
+            TranscriptCodeFence(configuration: c, bodySize: bodySize)
+                .markdownMargin(top: .em(0.4), bottom: .em(0.85))
         }
         return t
     }
 }
+
+// MARK: - Syntax-highlighted code fences (beautified transcript)
+
+/// A modern code fence for assistant prose: a compact header (language + copy)
+/// over syntax-colored, horizontally-scrollable code — the look of the Codex /
+/// Claude desktop transcripts. The coloring comes from `TranscriptCodeHighlighter`
+/// via the code block's `label`; this view owns the chrome and the mono font.
+private struct TranscriptCodeFence: View {
+    let configuration: CodeBlockConfiguration
+    let bodySize: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Text(languageLabel)
+                    .font(.system(size: bodySize * 0.7, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                #if os(macOS)
+                CopyButton(text: configuration.content, size: bodySize * 0.72)
+                #endif
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            Divider().opacity(0.4)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                configuration.label
+                    .relativeLineSpacing(.em(0.2))
+                    .markdownTextStyle { FontFamilyVariant(.monospaced); FontSize(bodySize * 0.86) }
+                    .padding(12)
+            }
+        }
+        .transcriptCard()
+    }
+
+    private var languageLabel: String {
+        let lang = (configuration.language ?? "").trimmingCharacters(in: .whitespaces)
+        return lang.isEmpty ? "code" : lang.lowercased()
+    }
+}
+
+/// Syntax highlighter for the markdown code fences in assistant prose, so the
+/// beautified transcript renders colored code the way Codex / Claude desktop do.
+/// MarkdownUI calls `highlightCode` synchronously during body evaluation, so the
+/// (comparatively slow) Highlightr / JavaScriptCore pass is memoized in a shared
+/// cache — the transcript re-renders on every ~1.5 s poll, and re-highlighting
+/// each block every time would hitch. No language, an oversized block, or the
+/// iOS port all fall back to plain (uncolored) text.
+struct TranscriptCodeHighlighter: CodeSyntaxHighlighter {
+    let dark: Bool
+
+    func highlightCode(_ code: String, language: String?) -> Text {
+        guard let language, !language.isEmpty else { return Text(code) }
+        #if os(macOS)
+        // MarkdownUI evaluates code blocks during view body on the main thread,
+        // so the cache's main-actor state is safe to touch synchronously here.
+        return MainActor.assumeIsolated {
+            TranscriptHighlightCache.shared.text(for: code, language: language, dark: dark)
+        }
+        #else
+        return Text(code)
+        #endif
+    }
+}
+
+#if os(macOS)
+/// Main-thread-only memoizing cache in front of a single Highlightr context.
+/// Keyed by (content, language, appearance); LRU-evicted so a long session
+/// doesn't grow without bound.
+@MainActor
+final class TranscriptHighlightCache {
+    static let shared = TranscriptHighlightCache()
+
+    private var highlightr: Highlightr?
+    private var themeName: String?
+    private var cache: [Key: Text] = [:]
+    private var order: [Key] = []
+    private let maxEntries = 240
+    /// Beyond this a synchronous JSC highlight would stall the render; the fence
+    /// stays monospaced but uncolored.
+    private let maxLength = 12_000
+
+    private struct Key: Hashable {
+        let hash: Int
+        let count: Int
+        let language: String
+        let dark: Bool
+    }
+
+    func text(for code: String, language: String, dark: Bool) -> Text {
+        guard code.count <= maxLength else { return Text(code) }
+        let key = Key(hash: code.hashValue, count: code.count, language: language, dark: dark)
+        if let hit = cache[key] { return hit }
+        let value = render(code, language: language, dark: dark)
+        cache[key] = value
+        order.append(key)
+        if order.count > maxEntries {
+            let evict = order.removeFirst()
+            cache.removeValue(forKey: evict)
+        }
+        return value
+    }
+
+    private func render(_ code: String, language: String, dark: Bool) -> Text {
+        guard let h = highlightr ?? Highlightr() else { return Text(code) }
+        highlightr = h
+        let theme = dark ? "atom-one-dark" : "xcode"
+        if themeName != theme {
+            h.setTheme(to: theme)
+            themeName = theme
+        }
+        // Unknown language ids fall back to highlight.js auto-detection inside
+        // Highlightr, so pass the fence's language through as-is.
+        guard let ns = h.highlight(code, as: language, fastRender: true) else {
+            return Text(code)
+        }
+        return Self.text(from: ns)
+    }
+
+    /// One `Text` run per foreground-color span, carrying only the color — the
+    /// code-fence view owns the monospaced font, so a baked-in font would fight
+    /// its `FontSize`/`FontFamilyVariant`.
+    private static func text(from ns: NSAttributedString) -> Text {
+        var result = Text(verbatim: "")
+        ns.enumerateAttribute(.foregroundColor,
+                              in: NSRange(location: 0, length: ns.length)) { value, range, _ in
+            let piece = ns.attributedSubstring(from: range).string
+            var run = Text(verbatim: piece)
+            if let color = value as? NSColor {
+                run = run.foregroundStyle(Color(nsColor: color))
+            }
+            result = result + run
+        }
+        return result
+    }
+}
+#endif
