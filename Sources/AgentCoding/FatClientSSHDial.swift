@@ -277,6 +277,9 @@ final class SSHDialer: @unchecked Sendable {
             }
         }
         let captured = CapturedKeyBox()
+        // Signalled the moment the server presents its host key (the ECDH reply,
+        // one KEX round trip in). We close on that — see below.
+        let keyReady = DispatchSemaphore(value: 0)
         let bootstrap = ClientBootstrap(group: group)
             .channelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
@@ -284,7 +287,7 @@ final class SSHDialer: @unchecked Sendable {
                         NIOSSHHandler(
                             role: .client(SSHClientConfiguration(
                                 userAuthDelegate: NoAuth(),
-                                serverAuthDelegate: Capture { captured.set($0) })),
+                                serverAuthDelegate: Capture { captured.set($0); keyReady.signal() })),
                             allocator: channel.allocator,
                             inboundChildChannelInitializer: nil))
                 }
@@ -292,19 +295,17 @@ final class SSHDialer: @unchecked Sendable {
             .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
             .connectTimeout(.seconds(30))
         guard let channel = try? bootstrap.connect(host: address, port: port).wait() else { return nil }
-        // The validation failure tears the connection down; wait for that —
-        // but bound it. A TCP-connected-but-silent endpoint (the remote's SSH
-        // front door down, or a P2P relay that spliced but delivers no bytes)
-        // would otherwise hang here forever. This is only reached on a FIRST
-        // connect (host-key TOFU) and grabs the key in one KEX round trip, so a
-        // generous fixed budget is fine — a high-latency link just needs the
-        // room (the steady-state auth path uses the adaptive stall watchdog).
-        let timeout = channel.eventLoop.scheduleTask(in: .seconds(30)) {
-            channel.close(promise: nil)
-        }
-        _ = try? channel.closeFuture.wait()
-        timeout.cancel()
-        guard let key = captured.get(), let blob = SSHKeyWire.blob(of: key) else { return nil }
+        // Close as soon as the host key is in hand, rather than waiting for the
+        // connection to tear down on its own. Failing the validation promise
+        // aborts authentication, but swift-nio-ssh does NOT translate that into a
+        // prompt channel close — the socket lingered until the fixed backstop
+        // fired, so every host-key scan (the "Verifying …" phase) stalled ~20-30 s
+        // even though the key had already arrived in the first KEX round trip.
+        // Wait for the key (bounded, for a silent/half-open endpoint), then close
+        // the channel ourselves.
+        let gotKey = keyReady.wait(timeout: .now() + 15) == .success
+        channel.close(promise: nil)
+        guard gotKey, let key = captured.get(), let blob = SSHKeyWire.blob(of: key) else { return nil }
         let token = KnownHostsStore.hostToken(address: address, port: port)
         return HostKeyInfo(line: "\(token) \(String(openSSHPublicKey: key))",
                            fingerprint: SSHKeyWire.fingerprint(ofBlob: blob))
@@ -396,6 +397,7 @@ final class SSHConnection: @unchecked Sendable {
          knownHosts: KnownHostsStore?, clientKey: Curve25519.Signing.PrivateKey?) throws {
         self.host = host
         guard let clientKey else { throw SSHDialError.authFailed }
+        FatClientLog.log("nio-conn: offering key \(SSHKeyWire.fingerprint(ofBlob: SSHKeyWire.ed25519Blob(clientKey.publicKey))) \(host.connectLabel)")
 
         let token = host.hostKeyAlias ?? KnownHostsStore.hostToken(address: host.address, port: host.port)
         let outcome = HandshakeOutcome()

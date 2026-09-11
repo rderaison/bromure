@@ -176,16 +176,35 @@ enum RemoteTransport {
     }
 
     static func clientPublicKey() -> String? {
-        if let onDisk = (try? String(contentsOf: publicKeyPath, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !onDisk.isEmpty {
-            return onDisk
+        // The keychain private key is the source of truth: auth offers it
+        // (`loadClientKeyCrypto`), so the public key we PUBLISH to bromure.io and
+        // ENROLL in servers' authorized_keys MUST be the one that matches it.
+        //
+        // Deriving it from the on-disk `.pub` first (the old behaviour) let a
+        // STALE `.pub` — one left behind when the keychain key was re-minted
+        // (e.g. a keychain that briefly read `.notFound`, or a code-signature
+        // change that rescoped the item) — get published/authorized while auth
+        // kept offering the real keychain key. The offered key then never
+        // matched any authorized key (`inSet=false`) and EVERY connection to
+        // EVERY server failed auth, hanging ~20s per attempt. Derive from the
+        // keychain and keep the `.pub` in sync; the file is only a fallback for
+        // when the keychain is momentarily unavailable (a locked Mac).
+        if let key = loadClientKeyCrypto() {
+            let line = SSHKeyWire.opensshPublicLine(key.publicKey, comment: "bromure-ac-fatclient")
+            let onDisk = (try? String(contentsOf: publicKeyPath, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if onDisk != line {
+                if onDisk != nil {
+                    FatClientLog.log("client key: stale .pub (\(onDisk ?? "")) ≠ keychain key — rewriting to match")
+                }
+                try? (line + "\n").write(to: publicKeyPath, atomically: true, encoding: .utf8)
+            }
+            return line
         }
-        // The .pub is a convenience copy; the keychain is the source of truth.
-        // Re-derive (and re-write) it if the file went missing.
-        guard let key = loadClientKeyCrypto() else { return nil }
-        let line = SSHKeyWire.opensshPublicLine(key.publicKey, comment: "bromure-ac-fatclient")
-        try? (line + "\n").write(to: publicKeyPath, atomically: true, encoding: .utf8)
-        return line
+        // Keychain unavailable (locked): fall back to the last-known on-disk copy.
+        let onDisk = (try? String(contentsOf: publicKeyPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (onDisk?.isEmpty == false) ? onDisk : nil
     }
 
     /// Publish this Mac's SSH public key to bromure.io so the user's servers

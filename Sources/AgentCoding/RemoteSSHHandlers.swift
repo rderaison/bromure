@@ -83,11 +83,11 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
             // the key is enrolled. Wrong-name and unenrolled-key failures are
             // identical (both instant), so this path leaks nothing about
             // which name is right.
-            if allowPubkey, request.username == username, authorizedKeys.contains(pk.publicKey) {
-                responsePromise.succeed(.success)
-            } else {
-                responsePromise.succeed(.failure)
-            }
+            let ok = allowPubkey && request.username == username && authorizedKeys.contains(pk.publicKey)
+            FatClientLog.log("srv-auth: publickey user=\(request.username) allow=\(allowPubkey) "
+                + "nameMatch=\(request.username == username) inSet=\(authorizedKeys.contains(pk.publicKey)) "
+                + "keys=\(authorizedKeys.count) → \(ok ? "SUCCESS" : "FAILURE")")
+            responsePromise.succeed(ok ? .success : .failure)
         case .password(let pw):
             guard allowPassword else { responsePromise.succeed(.failure); return }
             let user = username
