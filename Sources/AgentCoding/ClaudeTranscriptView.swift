@@ -960,6 +960,10 @@ struct ChatComposer: View {
     /// Allow sending with empty text (the beautified composer with pending
     /// attachments: the paths ARE the message).
     var canSendEmpty = false
+    /// The agent is running — the send control becomes a Stop button (Esc), so a
+    /// runaway turn can be interrupted without hunting for the hidden terminal.
+    var working = false
+    var onStop: () -> Void = {}
     let onSend: () -> Void
 
     @FocusState private var focused: Bool
@@ -982,28 +986,44 @@ struct ChatComposer: View {
                 .disabled(disabled)
                 .frame(minHeight: 22)
             HStack(spacing: 8) {
-                Text(NSLocalizedString("⏎ send   ⌥⏎ newline", comment: "composer hint"))
+                Text(working
+                     ? NSLocalizedString("⎋ stop   ⏎ send", comment: "composer hint")
+                     : NSLocalizedString("⏎ send   ⌥⏎ newline", comment: "composer hint"))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.quaternary)
                 Spacer(minLength: 0)
-                Button(action: { if sendable { onSend() } }) {
-                    Group {
-                        if busy {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(.white)
-                        }
+                if working {
+                    // Interrupt the running agent (sends Esc to its pane).
+                    Button(action: onStop) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 27, height: 27)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.red))
                     }
-                    .frame(width: 27, height: 27)
-                    .background(RoundedRectangle(cornerRadius: 8)
-                        .fill(sendable ? accent : Color.secondary.opacity(0.28)))
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)          // Esc
+                    .help(NSLocalizedString("Stop the agent (Esc)", comment: "composer"))
+                } else {
+                    Button(action: { if sendable { onSend() } }) {
+                        Group {
+                            if busy {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                        .frame(width: 27, height: 27)
+                        .background(RoundedRectangle(cornerRadius: 8)
+                            .fill(sendable ? accent : Color.secondary.opacity(0.28)))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!sendable)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .help(NSLocalizedString("Send (⏎)", comment: "composer"))
                 }
-                .buttonStyle(.plain)
-                .disabled(!sendable)
-                .keyboardShortcut(.return, modifiers: .command)
-                .help(NSLocalizedString("Send (⏎)", comment: "composer"))
             }
         }
         .padding(.horizontal, 14)

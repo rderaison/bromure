@@ -446,6 +446,17 @@ final class BeautifiedSessionModel: ObservableObject {
         }
     }
 
+    /// Interrupt the running agent — send Esc to its pane, the interrupt key
+    /// every supported TUI honours ("esc to interrupt"). Optimistically drops the
+    /// cue for instant feedback; the next poll reconciles from real status.
+    func interrupt() {
+        withAnimation(.easeOut(duration: 0.15)) { setWorking(false) }
+        Task { [weak self] in
+            await self?.provider.pressKeys(["Escape"])
+            await self?.rescanSoon()
+        }
+    }
+
     /// Force the throttled terminal scan to run on the next poll (so a card
     /// updates promptly after we send it a keystroke), then poll.
     private func rescanSoon() async {
@@ -603,6 +614,8 @@ struct BeautifiedSessionView: View {
                 busy: model.sending,
                 accent: model.accent,
                 canSendEmpty: !model.pendingAttachments.isEmpty,
+                working: model.working,
+                onStop: { model.interrupt() },
                 onSend: { model.send() })
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
