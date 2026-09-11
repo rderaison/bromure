@@ -1418,6 +1418,23 @@ enum TranscriptStyle {
     static let gutter: CGFloat = 16
     static let headerSize: CGFloat = 11.5
     static let monoSize: CGFloat = 11.5
+
+    /// A subtle per-category tint for a tool's glyph, so the transcript is
+    /// scannable at a glance (green = shell, orange = writes/edits, blue =
+    /// reads, teal = search, indigo = web) without breaking the flat, low-chrome
+    /// language — only the small icon is tinted, never a fill. An unrecognized
+    /// tool stays neutral `.secondary`.
+    static func toolTint(_ name: String) -> Color {
+        let n = name.lowercased()
+        if n.contains("bash") || n.contains("shell") || n.contains("command")
+            || n.contains("execute") || n.contains("run_") { return .green }
+        if n.contains("write") || n.contains("create") || n.contains("edit")
+            || n.contains("patch") || n.contains("notebook") { return .orange }
+        if n.contains("grep") || n.contains("search") { return .teal }
+        if n.contains("web") || n.contains("fetch") { return .indigo }
+        if n.contains("read") || n.contains("glob") || n.contains("ls") { return .blue }
+        return .secondary
+    }
 }
 
 extension View {
@@ -1481,6 +1498,8 @@ struct ToolCallCard: View {
         let n = name.lowercased()
         if isTodo(n) {
             TodoCard(input: input, intent: summary)
+        } else if let (content, path) = writeParts(n) {
+            FileWriteCard(tool: name, path: path, content: content)
         } else if let (old, new, path) = editParts(n) {
             DiffCard(title: name, path: path, oldText: old, newText: new)
         } else if isBash(n), let cmd = firstString(["command"]) {
@@ -1516,15 +1535,24 @@ struct ToolCallCard: View {
         return "doc"
     }
 
-    /// Edit → (old, new, path); Write/create → ("", content, path) = all
-    /// additions; Codex apply_patch → the patch split into removed/added.
+    /// A whole-file Write/create → (content, path): the brand-new file's
+    /// contents plus its path. Only a create carrying `content` (and NOT an
+    /// `old_string` edit) lands here — it renders as syntax-highlighted SOURCE
+    /// (`FileWriteCard`) instead of a wall of `+` additions. Real edits and
+    /// patches fall through to `editParts` → `DiffCard`.
+    private func writeParts(_ n: String) -> (String, String?)? {
+        guard n.contains("write") || n.contains("create"),
+              input["old_string"] == nil,
+              let content = input["content"] as? String else { return nil }
+        return (content, firstString(["file_path", "path", "notebook_path"]))
+    }
+
+    /// Edit → (old, new, path); Codex apply_patch → the patch split into
+    /// removed/added. (A whole-file write is caught earlier by `writeParts`.)
     private func editParts(_ n: String) -> (String, String, String?)? {
         let path = firstString(["file_path", "path", "notebook_path"])
         if let old = input["old_string"] as? String, let new = input["new_string"] as? String {
             return (old, new, path)
-        }
-        if (n.contains("write") || n.contains("create")), let content = input["content"] as? String {
-            return ("", content, path)
         }
         if n.contains("patch"), let patch = firstString(["patch", "input", "diff"]) {
             return splitUnifiedPatch(patch, path: path)
@@ -1793,7 +1821,7 @@ private struct DiffCard: View {
                 Button { expanded.toggle() } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "pencil").font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary).frame(width: 14)
+                            .foregroundStyle(TranscriptStyle.toolTint(title)).frame(width: 14)
                         Text(title).font(.system(size: TranscriptStyle.headerSize, weight: .semibold))
                             .foregroundStyle(.secondary)
                         if let path {
@@ -1919,19 +1947,359 @@ struct DiffLine {
     }
 }
 
-/// Terminal-style cell for Bash / shell tool calls — a `$`-prefixed monospace
-/// command with a copy affordance, the way commands read in Codex desktop. The
-/// leading `$` says "shell" without a separate tool-name header.
+// MARK: - Source rendering (shared by file writes and heredocs)
+
+/// Maps a file path, an interpreter name, or a heredoc delimiter word to a
+/// highlight.js language id ("code" = none/unknown → plain monospaced text).
+enum TranscriptLang {
+    /// From a path's extension: `foo.swift` → "swift".
+    static func forPath(_ path: String?) -> String {
+        guard let path else { return "code" }
+        let ext = (path as NSString).pathExtension.lowercased()
+        guard !ext.isEmpty else { return "code" }
+        switch ext {
+        case "swift": return "swift"
+        case "py", "pyw": return "python"
+        case "js", "mjs", "cjs", "jsx": return "javascript"
+        case "ts", "tsx": return "typescript"
+        case "json": return "json"
+        case "sh", "bash", "zsh": return "bash"
+        case "yml", "yaml": return "yaml"
+        case "html", "htm": return "html"
+        case "css", "scss": return "css"
+        case "md", "markdown": return "markdown"
+        case "rb": return "ruby"
+        case "go": return "go"
+        case "rs": return "rust"
+        case "c", "h": return "c"
+        case "cpp", "cc", "cxx", "hpp", "hh": return "cpp"
+        case "m", "mm": return "objectivec"
+        case "java": return "java"
+        case "kt", "kts": return "kotlin"
+        case "toml", "ini", "cfg": return "ini"
+        case "xml", "plist", "entitlements", "storyboard", "xib": return "xml"
+        case "sql": return "sql"
+        default: return "code"
+        }
+    }
+
+    /// The language a heredoc's interpreter emits: `python3 - <<PY` → python.
+    static func forInterpreter(_ launcher: String) -> String {
+        let l = launcher.lowercased()
+        if l.contains("python") { return "python" }
+        if l.range(of: #"\bnode\b"#, options: .regularExpression) != nil { return "javascript" }
+        if l.contains("ruby") { return "ruby" }
+        if l.contains("perl") { return "perl" }
+        if l.contains("psql") || l.contains("sqlite3") || l.contains("mysql") { return "sql" }
+        if l.contains("awk") { return "awk" }
+        if l.range(of: #"\b(bash|sh|zsh)\b"#, options: .regularExpression) != nil { return "bash" }
+        return "code"
+    }
+
+    /// Authors often name the delimiter after the content — `<<'PY'`, `<<SQL`,
+    /// `<<'JSON'`. A last-resort hint when neither path nor interpreter decides.
+    static func forDelimiter(_ word: String) -> String {
+        switch word.uppercased() {
+        case "PY", "PYTHON": return "python"
+        case "SQL": return "sql"
+        case "JSON": return "json"
+        case "YAML", "YML": return "yaml"
+        case "HTML": return "html"
+        case "JS", "JAVASCRIPT": return "javascript"
+        case "TS": return "typescript"
+        case "SH", "BASH", "ZSH": return "bash"
+        case "RB", "RUBY": return "ruby"
+        case "CSS": return "css"
+        case "MD", "MARKDOWN": return "markdown"
+        case "XML": return "xml"
+        case "TOML": return "ini"
+        case "GO": return "go"
+        case "RS", "RUST": return "rust"
+        default: return "code"
+        }
+    }
+}
+
+/// The source as a single (optionally syntax-colored) `Text`. macOS reuses the
+/// memoizing Highlightr cache; iOS and unknown languages fall back to plain
+/// monospaced text. Font is applied on the whole run — the cache bakes in only
+/// per-span colors, so it composes without a fight. Called from a view body
+/// (main thread on macOS), mirroring `TranscriptCodeHighlighter`.
+fileprivate func transcriptSource(_ code: String, language: String, dark: Bool, size: CGFloat) -> Text {
+    #if os(macOS)
+    if language != "code" {
+        let colored = MainActor.assumeIsolated {
+            TranscriptHighlightCache.shared.text(for: code, language: language, dark: dark)
+        }
+        return colored.font(.system(size: size, design: .monospaced))
+    }
+    #endif
+    return Text(code).font(.system(size: size, design: .monospaced))
+}
+
+/// Syntax-highlighted, horizontally-scrollable source with a line cap — the
+/// body shared by the file-write card and the heredoc block.
+private struct SourceBody: View {
+    let code: String
+    let language: String
+    var maxLines = 240
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var lines: [String] { code.components(separatedBy: "\n") }
+    private var shown: String {
+        lines.count <= maxLines ? code : lines.prefix(maxLines).joined(separator: "\n")
+    }
+    private var hidden: Int { max(0, lines.count - maxLines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                transcriptSource(shown, language: language,
+                                 dark: colorScheme == .dark, size: TranscriptStyle.monoSize)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if hidden > 0 {
+                Text(String(format: NSLocalizedString("… %d more lines", comment: "source"), hidden))
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 12).padding(.vertical, 4)
+            }
+        }
+    }
+}
+
+/// A small monospace language pill (hidden for unknown "code").
+private struct LanguageChip: View {
+    let language: String
+    var body: some View {
+        if !language.isEmpty, language != "code" {
+            Text(language)
+                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Capsule().fill(Color.secondary.opacity(0.12)))
+        }
+    }
+}
+
+/// A written file shown as SOURCE, not a diff. Write/create tool calls carry the
+/// whole new file in `content`; rendering that as an all-`+` DiffCard buried the
+/// code in diff chrome, so a freshly-written file gets its own card — a header
+/// (path · +lines · language) over syntax-highlighted source.
+private struct FileWriteCard: View {
+    let tool: String
+    let path: String?
+    let content: String
+    @State private var expanded = true
+
+    private var lineCount: Int { content.components(separatedBy: "\n").count }
+    private var language: String { TranscriptLang.forPath(path) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.12)) { expanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(TranscriptStyle.toolTint(tool)).frame(width: 14)
+                        Text(tool).font(.system(size: TranscriptStyle.headerSize, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        if let path {
+                            Text(path).font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.primary).lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer(minLength: 6)
+                        Text(verbatim: "+\(lineCount)")
+                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.green)
+                        LanguageChip(language: language)
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9)).foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                #if os(macOS)
+                CopyButton(text: content)
+                #endif
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(TranscriptStyle.headerFill)
+            if expanded { SourceBody(code: content, language: language) }
+        }
+        .transcriptCard()
+    }
+}
+
+// MARK: - Heredoc-aware shell command card
+
+/// A run of a shell command: literal command text, or a heredoc body pulled out
+/// so it can render as its own syntax-highlighted block.
+enum CommandSegment: Equatable {
+    case shell(String)
+    case heredoc(target: String?, language: String, content: String)
+}
+
+/// Splits a shell command into command text and heredoc bodies — the thing that
+/// makes "modern agents write files via bash" legible. Agents constantly write
+/// through `python3 - <<'PY' … PY`, `cat > f <<EOF … EOF`, etc.; left whole
+/// that's an opaque monospace wall, so we lift each heredoc body out to show it
+/// as real (highlighted) source. No heredoc → one `.shell` segment (the caller
+/// keeps the plain rendering).
+enum HeredocParser {
+    struct Opener { let word: String; let stripTabs: Bool }
+
+    static func segments(_ command: String) -> [CommandSegment] {
+        let lines = command.components(separatedBy: "\n")
+        var out: [CommandSegment] = []
+        var cmd: [String] = []
+        var i = 0
+        func flush() {
+            let joined = cmd.joined(separator: "\n").trimmingCharacters(in: .newlines)
+            if !joined.isEmpty { out.append(.shell(joined)) }
+            cmd = []
+        }
+        while i < lines.count {
+            let line = lines[i]
+            let openers = heredocOpeners(line)
+            guard !openers.isEmpty else { cmd.append(line); i += 1; continue }
+            cmd.append(line)
+            flush()
+            let head = launcher(line)
+            let target = redirectTarget(head)
+            let interp = TranscriptLang.forInterpreter(head)
+            i += 1
+            for op in openers {
+                var body: [String] = []
+                while i < lines.count {
+                    let raw = lines[i]
+                    let candidate = op.stripTabs ? String(raw.drop(while: { $0 == "\t" })) : raw
+                    if candidate == op.word { i += 1; break }
+                    body.append(raw); i += 1
+                }
+                let byTarget = target.map(TranscriptLang.forPath) ?? "code"
+                let language = byTarget != "code" ? byTarget
+                    : (interp != "code" ? interp : TranscriptLang.forDelimiter(op.word))
+                out.append(.heredoc(target: target, language: language,
+                                    content: body.joined(separator: "\n")))
+            }
+        }
+        flush()
+        return out
+    }
+
+    /// Heredoc openers on a line, in order: `<<WORD`, `<<'WORD'`, `<<-WORD`.
+    private static func heredocOpeners(_ line: String) -> [Opener] {
+        guard line.contains("<<") else { return [] }
+        let pattern = #"<<(-?)\s*(["']?)([A-Za-z_][A-Za-z0-9_]*)\2"#
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let ns = line as NSString
+        return re.matches(in: line, range: NSRange(location: 0, length: ns.length)).map {
+            Opener(word: ns.substring(with: $0.range(at: 3)),
+                   stripTabs: ns.substring(with: $0.range(at: 1)) == "-")
+        }
+    }
+
+    /// The launcher text before the first `<<` on a line.
+    private static func launcher(_ line: String) -> String {
+        guard let r = line.range(of: "<<") else { return line }
+        return String(line[..<r.lowerBound])
+    }
+
+    /// A redirect target on the launcher: `> file`, `>> file`, `tee file`.
+    private static func redirectTarget(_ head: String) -> String? {
+        let pattern = #"(?:>>?|tee(?:\s+-a)?)\s+("?)([^\s"'|]+)\1"#
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let ns = head as NSString
+        guard let m = re.matches(in: head, range: NSRange(location: 0, length: ns.length)).last
+        else { return nil }
+        let t = ns.substring(with: m.range(at: 2))
+        return (t == "/dev/null" || t.hasPrefix("&")) ? nil : t
+    }
+}
+
+/// Best-effort scan of a shell command for the files it WRITES — shell redirects
+/// (`> f`, `>> f`, `tee f`) and Python `open('f','w')` (resolving a `var='…'`
+/// bound earlier in the same command). Purely a scannability hint: a miss just
+/// omits a chip, never blocks the render.
+enum FileWriteScan {
+    static func targets(in command: String) -> [String] {
+        var found: [String] = []
+        func push(_ raw: String) {
+            let t = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            guard !t.isEmpty, t != "/dev/null", t != "/dev/stdout", t != "-",
+                  !t.hasPrefix("&"), !found.contains(t) else { return }
+            found.append(t)
+        }
+        let ns = command as NSString
+        let whole = NSRange(location: 0, length: ns.length)
+        func scan(_ pattern: String, _ group: Int, _ body: (String) -> Void) {
+            guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+            for m in re.matches(in: command, range: whole) where m.range(at: group).location != NSNotFound {
+                body(ns.substring(with: m.range(at: group)))
+            }
+        }
+        // Shell redirects and tee (skip fd dups / bit-shift via lookbehind).
+        scan(#"(?<![-=<>&\d])>>?\s*("?)([^\s"'|;&()<>]+)\1"#, 2, push)
+        scan(#"\btee\b(?:\s+-a)?\s+("?)([^\s"'|;&()<>]+)\1"#, 2, push)
+        // Python open('literal', 'w'|'a').
+        scan(#"open\(\s*["']([^"']+)["']\s*,\s*["'][wax]"#, 1, push)
+        // Python open(var, 'w') → resolve `var = 'literal'` from the same command.
+        var vars: [String: String] = [:]
+        if let re = try? NSRegularExpression(pattern: #"(?m)^\s*([A-Za-z_]\w*)\s*=\s*["']([^"']+)["']"#) {
+            for m in re.matches(in: command, range: whole) {
+                vars[ns.substring(with: m.range(at: 1))] = ns.substring(with: m.range(at: 2))
+            }
+        }
+        scan(#"open\(\s*([A-Za-z_]\w*)\s*,\s*["'][wax]"#, 1) { name in
+            if let v = vars[name] { push(v) }
+        }
+        return found
+    }
+}
+
+/// Terminal-style card for Bash / shell tool calls. A plain command renders as a
+/// single `$`-prefixed line; a command carrying heredocs is broken into its
+/// launcher line(s) plus each heredoc body as a highlighted source block, with a
+/// "writes …" header naming the files the command mutates.
 private struct CommandCard: View {
+    let command: String
+
+    var body: some View {
+        let segments = HeredocParser.segments(command)
+        let hasHeredoc = segments.contains { if case .heredoc = $0 { return true } else { return false } }
+        if hasHeredoc {
+            let targets = FileWriteScan.targets(in: command)
+            VStack(alignment: .leading, spacing: 6) {
+                if !targets.isEmpty { WriteTargetsRow(targets: targets) }
+                ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+                    switch seg {
+                    case .shell(let c):
+                        ShellLine(command: c)
+                    case .heredoc(let target, let language, let content):
+                        HeredocBlock(target: target, language: language, content: content)
+                    }
+                }
+            }
+        } else {
+            ShellLine(command: command)
+        }
+    }
+}
+
+/// One `$`-prefixed shell command line, horizontally scrollable, with copy.
+private struct ShellLine: View {
     let command: String
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .top, spacing: 8) {
-                Text(verbatim: "$")
-                    .foregroundStyle(.tertiary)
-                Text(command)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(verbatim: "$").foregroundStyle(TranscriptStyle.toolTint("bash"))
+                Text(command).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
             .font(.system(size: TranscriptStyle.monoSize, design: .monospaced))
             .padding(.horizontal, 10).padding(.vertical, 8)
@@ -1939,10 +2307,87 @@ private struct CommandCard: View {
         }
         .transcriptCard()
         #if os(macOS)
-        .overlay(alignment: .topTrailing) {
-            CopyButton(text: command).padding(6)
-        }
+        .overlay(alignment: .topTrailing) { CopyButton(text: command).padding(6) }
         #endif
+    }
+}
+
+/// A heredoc body lifted out of a shell command and shown as source: a header
+/// (the redirect target as a path, else "heredoc" + a language pill) over the
+/// highlighted body. `cat > f <<EOF` reads as a file write; `python3 - <<PY`
+/// reads as an inline script.
+private struct HeredocBlock: View {
+    let target: String?
+    let language: String
+    let content: String
+    @State private var expanded = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.12)) { expanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: target != nil
+                              ? "square.and.pencil" : "chevron.left.forwardslash.chevron.right")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(target != nil
+                                             ? TranscriptStyle.toolTint("write") : .secondary)
+                            .frame(width: 14)
+                        if let target {
+                            Text(target).font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.primary).lineLimit(1).truncationMode(.middle)
+                        } else {
+                            Text(NSLocalizedString("heredoc", comment: "inline script"))
+                                .font(.system(size: TranscriptStyle.headerSize, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 6)
+                        LanguageChip(language: language)
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9)).foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                #if os(macOS)
+                CopyButton(text: content)
+                #endif
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(TranscriptStyle.headerFill)
+            if expanded { SourceBody(code: content, language: language) }
+        }
+        .transcriptCard()
+    }
+}
+
+/// A "writes file1 file2" header on a shell card — the files a command mutates,
+/// surfaced so a bash blob announces its side effects without being read.
+private struct WriteTargetsRow: View {
+    let targets: [String]
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "square.and.pencil").font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(TranscriptStyle.toolTint("write"))
+            Text(NSLocalizedString("writes", comment: "command writes files"))
+                .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(targets, id: \.self) { t in
+                        Text((t as NSString).lastPathComponent)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.1)))
+                            .help(t)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 4).padding(.top, 2)
     }
 }
 
@@ -1953,7 +2398,7 @@ private struct FileCard: View {
     let value: String
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: icon).font(.system(size: 12)).foregroundStyle(.secondary)
+            Image(systemName: icon).font(.system(size: 12)).foregroundStyle(TranscriptStyle.toolTint(tool))
                 .frame(width: TranscriptStyle.gutter)
             Text(tool).font(.system(size: TranscriptStyle.headerSize, weight: .semibold)).foregroundStyle(.secondary)
             Text(value).font(.system(size: TranscriptStyle.monoSize, design: .monospaced)).foregroundStyle(.primary)
