@@ -221,6 +221,32 @@ enum GuestDrop {
 
 }
 
+/// Reconciles the raw `isWorking()` signal with a user interrupt. A plain Esc
+/// doesn't reliably fire Claude's `Stop` hook, so after a Stop the hook-derived
+/// `isWorking()` can stay stuck `true` — which would make the "Thinking…" cue
+/// spring back the moment the poll re-applied it. Once interrupted, the gate
+/// reports NOT working (whatever the raw signal says) until the agent finally
+/// reports idle on its own, or the user sends a new message.
+struct WorkingGate {
+    private(set) var interrupted = false
+
+    /// User hit Stop/Esc — suppress "working" until reality catches up.
+    mutating func interrupt() { interrupted = true }
+    /// User sent a new message — a fresh turn supersedes the stop.
+    mutating func userSent() { interrupted = false }
+
+    /// The effective working state for a raw `isWorking()` reading. While
+    /// interrupted it stays `false`; the first idle reading releases the latch
+    /// (reality agreed with the stop) so later turns show normally.
+    mutating func effective(_ raw: Bool) -> Bool {
+        if interrupted {
+            if raw { return false }
+            interrupted = false
+        }
+        return raw
+    }
+}
+
 /// Drives one beautified view: polls its provider for the live transcript and
 /// relays composer input. `@MainActor` — it only touches provider calls (main-
 /// actor) and SwiftUI state.
@@ -282,6 +308,10 @@ final class BeautifiedSessionModel: ObservableObject {
     /// often before any transcript exists, so a working-gated scan misses them.
     private var lastScanAt = Date.distantPast
     private static let scanInterval: TimeInterval = 2
+    /// Suppresses a stuck "working" after the user interrupts — a plain Esc
+    /// doesn't reliably fire Claude's `Stop` hook, so `isWorking()` can stay true
+    /// and the cue would spring back. See `WorkingGate`.
+    private var gate = WorkingGate()
     /// Locally-echoed turns awaiting confirmation from the real transcript. Kept
     /// appended (so nothing flickers off) until the parse contains the same text
     /// — or they age out, in case the agent never records the turn.
@@ -341,7 +371,9 @@ final class BeautifiedSessionModel: ObservableObject {
     /// never show over a failure/prompt card, so the view can't hang on
     /// "Thinking…" while the agent is actually dead or waiting on a keypress.
     private func setWorking(_ w: Bool) {
-        let effective = w && failure == nil && prompt == nil
+        // The gate suppresses a stuck `isWorking()` after an interrupt, releasing
+        // once the agent truly reports idle.
+        let effective = gate.effective(w) && failure == nil && prompt == nil
         if effective {
             if workingSince == nil { workingSince = Date() }
         } else {
@@ -450,7 +482,10 @@ final class BeautifiedSessionModel: ObservableObject {
     /// every supported TUI honours ("esc to interrupt"). Optimistically drops the
     /// cue for instant feedback; the next poll reconciles from real status.
     func interrupt() {
-        withAnimation(.easeOut(duration: 0.15)) { setWorking(false) }
+        gate.interrupt()
+        // Force the cue off now; the next poll feeds the real `isWorking()` to
+        // the gate, which keeps it suppressed until the agent reports idle.
+        withAnimation(.easeOut(duration: 0.15)) { working = false; workingSince = nil }
         Task { [weak self] in
             await self?.provider.pressKeys(["Escape"])
             await self?.rescanSoon()
@@ -495,6 +530,7 @@ final class BeautifiedSessionModel: ObservableObject {
         pendingAttachments = []
         failure = nil
         prompt = nil
+        gate.userSent()                   // a fresh send supersedes any prior stop
         setWorking(true)
         sending = true
 
