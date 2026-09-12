@@ -522,9 +522,15 @@ final class InferenceRepairProxy: @unchecked Sendable {
             let tail = String(txt.suffix(400)).replacingOccurrences(of: "\n", with: "\\n")
             appendRepairLog("[repair] <- \(req.path) reason=\(reason) native=\(native) rescued=\(rescued) tools=\(toolNames.sorted()) textlen=\(txt.count) tail=\(tail)\n")
         }
+        // omp's native `ask` tool: local models routinely emit the options with
+        // ids and omit the REQUIRED per-question id, which omp's validator
+        // rejects ("questions[0].id must be question id"). Reshape the call to
+        // omp's schema before serving — a no-op unless the chat response carries
+        // a tool call literally named `ask`, so no other agent/tool is touched.
+        let served = AskArgsNormalizer.normalizeChatMessage(finalMessage)
         return httpResponse(status: 200,
                             headers: [("Content-Type", "text/event-stream"), ("Cache-Control", "no-cache")],
-                            body: api.repairedSSE(finalMessage, toolNames: toolNames, gemma: gemma))
+                            body: api.repairedSSE(served, toolNames: toolNames, gemma: gemma))
     }
 
     /// Auto-continue a "stuck preamble": a local model (notably Qwen3-Coder)
