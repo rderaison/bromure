@@ -637,6 +637,10 @@ struct BeautifiedSessionView: View {
     var body: some View {
         VStack(spacing: 0) {
             transcript
+            // omp keeps its TODO pinned at the bottom at all times; the inline
+            // card otherwise scrolls up out of view (the transcript auto-sticks
+            // to the tail). Pin the current todo here, above the composer.
+            if let todo = pinnedTodo { todoPinPanel(todo) }
             Divider().opacity(0.5)
             if !model.pendingAttachments.isEmpty {
                 PendingAttachmentChips(files: model.pendingAttachments,
@@ -702,7 +706,9 @@ struct BeautifiedSessionView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(model.items) { item in
-                            itemRow(item)
+                            // The consolidated todo is shown pinned above the
+                            // composer, not inline (where it scrolls away).
+                            if !Self.isTodo(item) { itemRow(item) }
                         }
                         if let prompt = model.prompt {
                             PromptCard(prompt: prompt,
@@ -744,6 +750,36 @@ struct BeautifiedSessionView: View {
             StreamingCaret()
         } else {
             ThinkingRow(since: model.workingSince)
+        }
+    }
+
+    /// True for the consolidated `.todo` item (omp's plan), which is pinned at
+    /// the bottom rather than shown inline (where it scrolls out of view).
+    static func isTodo(_ item: TranscriptItem) -> Bool {
+        if case .todo = item.kind { return true } else { return false }
+    }
+
+    /// The todo to pin (the latest consolidated one, if any).
+    private var pinnedTodo: TranscriptItem? {
+        model.items.last(where: Self.isTodo)
+    }
+
+    /// The pinned TODO panel — omp keeps its plan visible at all times; this is
+    /// the beautified-view equivalent, above the composer and capped so a long
+    /// plan scrolls in place instead of eating the transcript.
+    @ViewBuilder
+    private func todoPinPanel(_ item: TranscriptItem) -> some View {
+        if case .todo(let title, let rows) = item.kind {
+            VStack(spacing: 0) {
+                Divider().opacity(0.5)
+                ScrollView {
+                    TodoListView(title: title, rows: rows)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                }
+                .frame(maxHeight: 190)
+            }
+            .background(Color.platformTextBackground)
         }
     }
 
