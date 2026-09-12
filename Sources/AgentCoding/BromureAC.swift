@@ -7045,11 +7045,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         // Local model / routing: agents are pinned to the `bromure-local`
-        // sentinel, so switching the active model (or routing mode) is a
-        // host-side remap — re-point the sentinel + engine and update routing,
-        // with no reboot and no agent restart. Done unconditionally (before the
-        // guard) since neither field trips the credential/env diff below.
-        if old.activeModelID != new.activeModelID || old.modelRouting != new.modelRouting {
+        // sentinel, so switching the active model, the routing mode, OR the
+        // external engine's URL / API key is a host-side remap — re-point the
+        // sentinel + engine and update routing, with no reboot and no agent
+        // restart. The external URL/key only change the host-side FORWARD target
+        // (the guest still calls `bromure.llm`), so re-registering the repair
+        // proxy is all that's needed — no restage. Done unconditionally (before
+        // the guard) since these fields don't trip the credential/env diff below.
+        if old.activeModelID != new.activeModelID
+            || old.modelRouting != new.modelRouting
+            || old.localEngineBaseURL != new.localEngineBaseURL
+            || old.localEngineAPIKey != new.localEngineAPIKey {
             if let engine = mitmEngine { applyRouting(engine, for: new) }
             startLocalEngineIfNeeded(for: new)
         }
