@@ -55,9 +55,38 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         }
     }
 
-    /// Whether an interactive subscription (OAuth) login is possible in addition
-    /// to an API key. Only Anthropic and OpenAI support it here.
-    public var supportsSubscription: Bool { self == .anthropic || self == .openai }
+    /// Whether an interactive subscription (OAuth) login can be captured for
+    /// this provider (a throwaway-VM `<tool> login`, stored host-side). Anthropic
+    /// (Claude), OpenAI (ChatGPT), xAI (Grok) and Moonshot (Kimi) each have a
+    /// capture flow. z.ai's coding plan is delivered as an API key — no OAuth to
+    /// capture — so it stays key-only; `.custom` never has one.
+    public var supportsSubscription: Bool {
+        switch self {
+        case .anthropic, .openai, .xai, .moonshot: return true
+        case .zai, .custom:                        return false
+        }
+    }
+}
+
+/// A coding agent whose per-tier models can be configured independently of the
+/// global default. `ModelSettings.tiers` is the default that applies to every
+/// agent; `ModelSettings.agentTiers[agent]` overrides it for one agent.
+public enum ModelAgent: String, Codable, CaseIterable, Sendable {
+    case claude, codex, grok, kimi, omp
+
+    public var displayName: String {
+        switch self {
+        case .claude: return "Claude Code"
+        case .codex:  return "Codex"
+        case .grok:   return "Grok"
+        case .kimi:   return "Kimi"
+        case .omp:    return "omp"
+        }
+    }
+
+    /// Only Claude Code resolves three distinct tiers (haiku/sonnet/opus). Every
+    /// other agent is single-model and uses `medium` alone.
+    public var usesAllTiers: Bool { self == .claude }
 }
 
 /// A registered provider credential (global). Exactly one of an API key or a
@@ -188,17 +217,39 @@ public struct ModelSettings: Codable, Equatable, Sendable {
     public var localServer: LocalServer?
     /// On-device models (catalog ids) kept ready as the fallback for the lazy.
     public var localRunModels: [String]
-    /// The model chosen for each tier. A tier may be unset (nil) until configured.
+    /// The DEFAULT model chosen for each tier — applies to every agent unless
+    /// overridden in `agentTiers`. A tier may be unset (nil) until configured.
     public var tiers: [ModelTier: ModelRef]
+    /// Per-agent tier overrides. `agentTiers[.codex][.medium]` wins over
+    /// `tiers[.medium]` for Codex only; an unset entry inherits the default.
+    public var agentTiers: [ModelAgent: [ModelTier: ModelRef]]
 
     public init(providers: [ProviderCredential] = [],
                 localServer: LocalServer? = nil,
                 localRunModels: [String] = [],
-                tiers: [ModelTier: ModelRef] = [:]) {
+                tiers: [ModelTier: ModelRef] = [:],
+                agentTiers: [ModelAgent: [ModelTier: ModelRef]] = [:]) {
         self.providers = providers
         self.localServer = localServer
         self.localRunModels = localRunModels
         self.tiers = tiers
+        self.agentTiers = agentTiers
+    }
+
+    // Tolerant decoding so a `models.enc` written by an earlier build (before a
+    // field existed, e.g. `agentTiers`) still loads — a missing key defaults
+    // rather than throwing and wiping the user's saved settings.
+    enum CodingKeys: String, CodingKey {
+        case providers, localServer, localRunModels, tiers, agentTiers
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        providers = try c.decodeIfPresent([ProviderCredential].self, forKey: .providers) ?? []
+        localServer = try c.decodeIfPresent(LocalServer.self, forKey: .localServer)
+        localRunModels = try c.decodeIfPresent([String].self, forKey: .localRunModels) ?? []
+        tiers = try c.decodeIfPresent([ModelTier: ModelRef].self, forKey: .tiers) ?? [:]
+        agentTiers = try c.decodeIfPresent([ModelAgent: [ModelTier: ModelRef]].self,
+                                           forKey: .agentTiers) ?? [:]
     }
 
     // MARK: Lookups
@@ -206,7 +257,27 @@ public struct ModelSettings: Codable, Equatable, Sendable {
     public func credential(_ provider: ModelProvider) -> ProviderCredential? {
         providers.first { $0.provider == provider }
     }
+    /// The DEFAULT ref for a tier (agent-agnostic).
     public func ref(for tier: ModelTier) -> ModelRef? { tiers[tier] }
+
+    /// The ref an agent actually uses for a tier: its own override, else the
+    /// default.
+    public func ref(for agent: ModelAgent, tier: ModelTier) -> ModelRef? {
+        agentTiers[agent]?[tier] ?? tiers[tier]
+    }
+
+    /// The tiers an agent effectively runs with (overrides merged onto default).
+    public func effectiveTiers(for agent: ModelAgent) -> [ModelTier: ModelRef] {
+        var merged = tiers
+        for (t, r) in agentTiers[agent] ?? [:] { merged[t] = r }
+        return merged
+    }
+
+    /// The single model an agent uses (medium → large → small), honoring its
+    /// per-agent overrides.
+    public func primaryRef(for agent: ModelAgent) -> ModelRef? {
+        ref(for: agent, tier: .medium) ?? ref(for: agent, tier: .large) ?? ref(for: agent, tier: .small)
+    }
 
     /// The medium tier is the default any single-model agent uses; fall back to
     /// large then small so a partially-configured setup still resolves.
@@ -218,7 +289,8 @@ public struct ModelSettings: Codable, Equatable, Sendable {
     /// any `.localRun` tier model plus the explicit `localRunModels` list.
     public var distinctLocalRunModelIDs: [String] {
         var out = localRunModels
-        for ref in tiers.values {
+        let allRefs = tiers.values + agentTiers.values.flatMap { $0.values }
+        for ref in allRefs {
             if case .localRun(let id) = ref.source, !out.contains(id) { out.append(id) }
         }
         return out

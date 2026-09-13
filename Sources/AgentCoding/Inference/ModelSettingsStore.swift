@@ -83,7 +83,24 @@ public final class ModelSettingsStore: ObservableObject {
         update { s in s.providers.removeAll { $0.provider == provider } }
     }
 
+    /// Set (or clear) the DEFAULT model for a tier.
     public func setTier(_ tier: ModelTier, _ ref: ModelRef?) {
         update { s in s.tiers[tier] = ref }
+    }
+
+    /// Set (or clear) a tier's model for one agent (nil `agent` = the default).
+    /// Clearing an agent override makes that tier inherit the default again.
+    public func setTier(_ tier: ModelTier, _ ref: ModelRef?, for agent: ModelAgent?) {
+        guard let agent else { setTier(tier, ref); return }
+        update { s in
+            var t = s.agentTiers[agent] ?? [:]
+            t[tier] = ref
+            if t.isEmpty { s.agentTiers[agent] = nil } else { s.agentTiers[agent] = t }
+        }
+    }
+
+    /// Drop every override for an agent so it inherits the default entirely.
+    public func resetAgentOverrides(_ agent: ModelAgent) {
+        update { s in s.agentTiers[agent] = nil }
     }
 }

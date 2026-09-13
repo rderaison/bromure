@@ -21,56 +21,80 @@ import Foundation
 
 public extension Profile {
     /// A launch-time copy of this profile with the global model settings
-    /// projected on. Returns `self` unchanged when nothing is configured
-    /// globally (pre-migration / empty), preserving legacy behavior.
+    /// projected on — PER AGENT: each tool resolves its own medium tier (its
+    /// override, else the default), so different agents can run different
+    /// models. Returns `self` unchanged when nothing is configured globally.
+    ///
+    /// The staging pipeline serves ONE local model per session (the on-host
+    /// engine is single-model), so when several agents are local they share the
+    /// primary agent's local model via `activeModelID`; cloud agents each draw
+    /// their own provider credential independently.
     func overlaidWithGlobalModels(_ settings: ModelSettings) -> Profile {
         let hasProviders = settings.providers.contains { $0.isUsable }
-        guard hasProviders || settings.primaryRef() != nil else { return self }
+        let hasTiers = !settings.tiers.isEmpty
+            || settings.agentTiers.values.contains { !$0.isEmpty }
+        guard hasProviders || hasTiers else { return self }
 
         var p = self
+        var anyLocal = false
+        var localServerBackend: (url: String?, key: String?)?
 
-        // Local primary tier → run every agent on the local backend.
-        if let primary = settings.primaryRef(), primary.isLocal {
-            p.modelRouting = .local
-            p.authMode = .local
-            p.activeModelID = primary.modelID
-            for i in p.additionalTools.indices {
-                p.additionalTools[i].authMode = .local
-                p.additionalTools[i].localModelID = primary.modelID
+        // Resolve one agent: set its auth (+ return its local model id, if local).
+        func applyAgent(tool: Tool, ompProvider: OmpProvider?, ompBaseURL: String?,
+                        authMode: inout AuthMode, apiKey: inout String?) -> String? {
+            let agent = ModelAgent.from(tool)
+            let ref = settings.ref(for: agent, tier: .medium)
+                ?? settings.ref(for: agent, tier: .large)
+                ?? settings.ref(for: agent, tier: .small)
+            if let ref, ref.isLocal {
+                authMode = .local
+                anyLocal = true
+                if case .localServer = ref.source, let ls = settings.localServer {
+                    localServerBackend = (ls.baseURL, ls.apiKey)
+                }
+                return ref.modelID
             }
-            switch primary.source {
-            case .localServer:
-                p.localEngineURL = settings.localServer?.baseURL
-                p.localEngineAPIKey = settings.localServer?.apiKey
-            case .localRun:
-                p.localEngineURL = nil
-                p.localEngineAPIKey = nil
-            case .provider:
-                break
+            if let (mode, key) = Self.cloudAuth(tool: tool, ompProvider: ompProvider,
+                                                ompBaseURL: ompBaseURL, settings: settings) {
+                authMode = mode
+                apiKey = key
             }
-            return p
+            return nil
         }
 
-        // Cloud: a cloud primary tier means the cloud route; if only providers
-        // are registered (no tier yet) leave routing as-is and just project keys.
-        if let primary = settings.primaryRef(), !primary.isLocal {
-            p.modelRouting = .cloud
-        }
-
-        // Primary agent.
-        if let (mode, key) = Self.cloudAuth(tool: p.tool, ompProvider: p.ompProvider,
-                                            ompBaseURL: p.ompBaseURL, settings: settings) {
-            p.authMode = mode
-            p.apiKey = key
-        }
-        // Additional agents.
+        let primaryLocalModel = applyAgent(tool: p.tool, ompProvider: p.ompProvider,
+                                           ompBaseURL: p.ompBaseURL,
+                                           authMode: &p.authMode, apiKey: &p.apiKey)
         for i in p.additionalTools.indices {
-            let spec = p.additionalTools[i]
-            if let (mode, key) = Self.cloudAuth(tool: spec.tool, ompProvider: spec.ompProvider,
-                                                ompBaseURL: spec.ompBaseURL, settings: settings) {
-                p.additionalTools[i].authMode = mode
-                p.additionalTools[i].apiKey = key
+            let tool = p.additionalTools[i].tool
+            let ompProvider = p.additionalTools[i].ompProvider
+            let ompBaseURL = p.additionalTools[i].ompBaseURL
+            var mode = p.additionalTools[i].authMode
+            var key = p.additionalTools[i].apiKey
+            let lid = applyAgent(tool: tool, ompProvider: ompProvider, ompBaseURL: ompBaseURL,
+                                 authMode: &mode, apiKey: &key)
+            p.additionalTools[i].authMode = mode
+            p.additionalTools[i].apiKey = key
+            if let lid { p.additionalTools[i].localModelID = lid }
+        }
+
+        if anyLocal {
+            p.modelRouting = .local
+            // The one model the shared local engine serves: the primary agent's,
+            // else the first local additional's.
+            let localID = primaryLocalModel
+                ?? p.additionalTools.first { $0.authMode == .local }?.localModelID
+            if let localID { p.activeModelID = localID }
+            if let lb = localServerBackend {
+                p.localEngineURL = lb.url
+                p.localEngineAPIKey = lb.key
+            } else {
+                p.localEngineURL = nil   // on-device built-in engine
+                p.localEngineAPIKey = nil
             }
+        } else if hasTiers {
+            // A cloud tier is configured → the cloud route.
+            p.modelRouting = .cloud
         }
         return p
     }
@@ -93,5 +117,18 @@ public extension Profile {
         // A usable credential with no key is a custom endpoint keyed only by its
         // base URL — token mode, the guest reads whatever env the pipeline sets.
         return (.token, (key?.isEmpty == false) ? key : nil)
+    }
+}
+
+public extension ModelAgent {
+    /// The `ModelAgent` a profile tool maps to (1:1 today).
+    static func from(_ tool: Profile.Tool) -> ModelAgent {
+        switch tool {
+        case .claude: return .claude
+        case .codex:  return .codex
+        case .grok:   return .grok
+        case .kimi:   return .kimi
+        case .omp:    return .omp
+        }
     }
 }

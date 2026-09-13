@@ -54,6 +54,44 @@ struct ModelSettingsTests {
         #expect(ids == ["a", "b"])
     }
 
+    @Test("Old JSON without agentTiers still decodes (tolerant)") func backwardCompatDecode() throws {
+        // A payload from a build predating `agentTiers`.
+        let json = #"{"providers":[],"localRunModels":[],"tiers":[]}"#
+        let s = try JSONDecoder().decode(ModelSettings.self, from: Data(json.utf8))
+        #expect(s.agentTiers.isEmpty)
+        #expect(s.providers.isEmpty)
+        #expect(s.tiers.isEmpty)
+    }
+
+    @Test("Per-agent tier overrides the default; unset inherits it") func agentOverride() {
+        var s = ModelSettings()
+        s.tiers[.medium] = ModelRef(source: .provider(.anthropic), modelID: "default-med")
+        // Codex overrides medium; Claude inherits the default.
+        s.agentTiers[.codex] = [.medium: ModelRef(source: .provider(.openai), modelID: "codex-med")]
+        #expect(s.ref(for: .claude, tier: .medium)?.modelID == "default-med")
+        #expect(s.ref(for: .codex, tier: .medium)?.modelID == "codex-med")
+        #expect(s.primaryRef(for: .codex)?.modelID == "codex-med")
+        #expect(s.primaryRef(for: .grok)?.modelID == "default-med")   // inherits
+    }
+
+    @MainActor
+    @Test("Per-agent tier round-trips + reset clears the override") func agentTierStore() {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ms-agent-\(UUID().uuidString).enc")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = ModelSettingsStore(url: tmp)
+        store.setTier(.medium, ModelRef(source: .provider(.anthropic), modelID: "def"))
+        store.setTier(.medium, ModelRef(source: .provider(.openai), modelID: "codex-only"), for: .codex)
+
+        let reopened = ModelSettingsStore(url: tmp)
+        #expect(reopened.settings.ref(for: .codex, tier: .medium)?.modelID == "codex-only")
+        #expect(reopened.settings.ref(for: .claude, tier: .medium)?.modelID == "def")
+
+        reopened.resetAgentOverrides(.codex)
+        #expect(reopened.settings.ref(for: .codex, tier: .medium)?.modelID == "def")  // back to default
+        #expect(reopened.settings.agentTiers[.codex] == nil)
+    }
+
     @MainActor
     @Test("Store round-trips encrypted through a temp file") func storeRoundTrip() {
         let tmp = FileManager.default.temporaryDirectory

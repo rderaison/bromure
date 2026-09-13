@@ -75,6 +75,29 @@ struct ProfileModelOverlayTests {
         #expect(out.apiKey == "zai-global")
     }
 
+    @Test("Per-agent: Claude local + Codex cloud in one profile") func perAgentMix() {
+        var s = ModelSettings()
+        s.providers = [ProviderCredential(provider: .openai, apiKey: "oai-key")]
+        s.localServer = LocalServer(baseURL: "http://box:8000/v1")
+        // Default = local qwen; Codex overrides to cloud OpenAI.
+        s.tiers[.medium] = ModelRef(source: .localServer, modelID: "qwen")
+        s.agentTiers[.codex] = [.medium: ModelRef(source: .provider(.openai), modelID: "gpt-5")]
+
+        var p = Profile(name: "t", tool: .claude, authMode: .token, apiKey: "x")
+        p.additionalTools = [Profile.ToolSpec(tool: .codex, authMode: .token, apiKey: "y")]
+        let out = p.overlaidWithGlobalModels(s)
+
+        // Claude follows the local default.
+        #expect(out.authMode == .local)
+        #expect(out.activeModelID == "qwen")
+        #expect(out.localEngineURL == "http://box:8000/v1")
+        #expect(out.modelRouting == .local)
+        // Codex overrides to cloud OpenAI with the global key.
+        let codex = out.additionalTools.first { $0.tool == .codex }
+        #expect(codex?.authMode == .token)
+        #expect(codex?.apiKey == "oai-key")
+    }
+
     @Test("A cloud primary tier sets the cloud route") func cloudRoute() {
         var s = ModelSettings()
         s.providers = [ProviderCredential(provider: .anthropic, apiKey: "k")]

@@ -865,11 +865,47 @@ struct ProfileEditorView: View {
         // catalog, all bound to ModelSettingsStore.shared (not this profile).
         // It's filtered out of visibleCategories on iOS (this-machine catalog).
         #if os(macOS)
-        ModelsSettingsView()
+        ModelsSettingsView(subscription: modelsSubscriptionHooks)
         #else
         EmptyView()
         #endif
     }
+
+    #if os(macOS)
+    /// Bridge the editor's per-tool subscription register/forget/savedAt closures
+    /// to the Models pane's provider-keyed hooks. nil closures → no-op, so the
+    /// pane hides sign-in for providers the host can't register here.
+    private var modelsSubscriptionHooks: ModelsSubscriptionHooks {
+        ModelsSubscriptionHooks(
+            savedAt: { provider in
+                switch provider {
+                case .anthropic: return claudeAccountSavedAt?()
+                case .openai:    return codexAccountSavedAt?()
+                case .xai:       return grokAccountSavedAt?()
+                case .moonshot:  return kimiAccountSavedAt?()
+                case .zai, .custom: return nil
+                }
+            },
+            register: { provider in
+                switch provider {
+                case .anthropic: onRegisterClaude?()
+                case .openai:    onRegisterCodex?()
+                case .xai:       onRegisterGrok?()
+                case .moonshot:  onRegisterKimi?()
+                case .zai, .custom: break
+                }
+            },
+            forget: { provider in
+                switch provider {
+                case .anthropic: onForgetClaude?()
+                case .openai:    onForgetCodex?()
+                case .xai:       onForgetGrok?()
+                case .moonshot:  onForgetKimi?()
+                case .zai, .custom: break
+                }
+            })
+    }
+    #endif
 
     /// Local models installed on this machine (the fusion-leg / pinned-agent
     /// pickers). A mobile client has no local engine, so the list is empty and

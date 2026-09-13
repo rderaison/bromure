@@ -87,8 +87,18 @@ public extension ModelSettings {
     /// on-device models. A tier that can't resolve (unregistered provider, no
     /// local server) is dropped — the caller falls back via `primary`.
     func launchPlan(builtInEngineBase: String) -> ModelLaunchPlan {
+        resolvePlan(builtInEngineBase: builtInEngineBase) { ref(for: $0) }
+    }
+
+    /// The launch plan for one agent, honoring its per-agent tier overrides.
+    func launchPlan(for agent: ModelAgent, builtInEngineBase: String) -> ModelLaunchPlan {
+        resolvePlan(builtInEngineBase: builtInEngineBase) { ref(for: agent, tier: $0) }
+    }
+
+    private func resolvePlan(builtInEngineBase: String,
+                             refForTier: (ModelTier) -> ModelRef?) -> ModelLaunchPlan {
         func resolve(_ tier: ModelTier) -> ModelLaunchPlan.Resolved? {
-            guard let ref = ref(for: tier),
+            guard let ref = refForTier(tier),
                   let ep = endpoint(for: ref, builtInEngineBase: builtInEngineBase) else { return nil }
             return ModelLaunchPlan.Resolved(
                 modelID: ref.modelID,
