@@ -1703,7 +1703,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Push the profile's routing mode + hybrid policy knobs into the MITM
     /// engine at session launch (vLLM.md §4). The model label (catalog id
     /// or repo) is what the `served-by` trace marker shows.
-    func applyRouting(_ engine: MitmEngine, for profile: Profile) {
+    func applyRouting(_ engine: MitmEngine, for rawProfile: Profile) {
+        // Model config is global: project it onto the profile so routing reflects
+        // the tiers/providers the user set in "Models", not stale per-workspace
+        // fields. (No-op when nothing is configured globally.)
+        let profile = rawProfile.overlaidWithGlobalModels(ModelSettingsStore.shared.settings)
         // `effectiveModelRouting`, not the raw flag: a pure-local route with no
         // `.local` agent (e.g. a subscription Claude with a leftover model
         // selected) must NOT reroute the agent's real cloud traffic into the
@@ -1719,7 +1723,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// routing. Runs in the background so it warms while the VM boots; the
     /// guest reaches it once ready via the vsock-8446 bridge. No-op when the
     /// profile needs no local model. (Single-engine phase: one model.)
-    @MainActor func startLocalEngineIfNeeded(for profile: Profile) {
+    @MainActor func startLocalEngineIfNeeded(for rawProfile: Profile) {
+        // Same global-model projection as applyRouting: the local engine spins up
+        // when the global tiers/local-server (not per-workspace fields) call for it.
+        let profile = rawProfile.overlaidWithGlobalModels(ModelSettingsStore.shared.settings)
         let ids = profile.distinctLocalModelIDs
         guard !ids.isEmpty else { return }
         // A user-supplied external engine (vLLM/Ollama/LM Studio/…): nothing
@@ -7098,6 +7105,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         var profile = new
         populateMCPBearerTokens(in: &profile)
+        // Global model settings drive the restage too (see launch()).
+        profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.settings)
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
         let plan = self.sessionTokenPlan(for: profile, salt: salt)
 
@@ -7486,6 +7495,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // deterministic in (real value, install salt) so Claude Code
         // doesn't see the fake rotate session-to-session.
         populateMCPBearerTokens(in: &profile)
+        // Project the global model settings onto the launch-time profile so the
+        // whole staging pipeline (token plan, home dir, meta share, routing)
+        // stages the models + credentials the user configured in "Models".
+        profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.settings)
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
         let plan = self.sessionTokenPlan(for: profile, salt: salt)
         // (prepareHomeDirectory call moved below — needs the
