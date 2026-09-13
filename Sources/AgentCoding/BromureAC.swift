@@ -1710,7 +1710,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // on-host engine.
         engine.setRouting(profile.effectiveModelRouting,
                           modelLabel: profile.activeModelID ?? "default",
-                          hybrid: HybridConfig(profile: profile),
                           localCloudHosts: profile.localProviderCloudHosts,
                           for: profile.id)
     }
@@ -3684,17 +3683,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
             return ["ok": false, "error": "VM not found: \(idOrName)"]
         }
-        var profile = session.profile
-        switch knob {
-        case "budget": profile.hybridCloudTokenBudget = max(0, Int(value))
-        case "ttft":   profile.hybridSoftTTFTSeconds = max(0, value)
-        case "split":  profile.hybridLocalSplitPercent = max(0, min(100, Int(value)))
-        default: return ["ok": false, "error": "Unknown hybrid knob: \(knob)"]
-        }
-        session.profile = profile
-        try? store.save(profile)
-        if let engine = mitmEngine { applyRouting(engine, for: profile) }
-        return ["ok": true, "knob": knob, "value": value]
+        _ = (session, value)
+        return ["ok": false, "error": "Hybrid routing has been removed (knob: \(knob))"]
     }
 
     /// `model use <id>` — set the profile's active local model (drives the

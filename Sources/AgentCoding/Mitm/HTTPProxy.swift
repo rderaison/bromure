@@ -1445,29 +1445,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                             profileID: profileID)
         }
 
-        // Feed the hybrid policy engine from this cloud turn (§4.3). The
-        // streaming relay already committed the response, so we can't replay
-        // *this* turn — but the health gate (TTFT EWMA + error rate) and the
-        // rolling token budget steer *subsequent* sessions, at session
-        // granularity (the sticky-session coherence guard).
-        if let routingCtx, routingCtx.routing == .hybrid, routedBackend == .cloud {
-            let now = Date().timeIntervalSince1970
-            let session = profileID.uuidString
-            if LLMRouting.isHardErrorStatus(Self.parseStatusCode(relay.buffer)) {
-                routingCtx.hybrid.recordHardError(sessionID: session, now: now)
-            } else {
-                // Health gate: time-to-first-token. Soft-timeout TTFTs feed in
-                // as slow samples too (a slow first token raises the EWMA).
-                if let ttft = relay.ttftSeconds {
-                    routingCtx.hybrid.recordSuccess(ttftSeconds: ttft)
-                }
-                // Budget: cloud output tokens against the rolling window.
-                if let toks = Self.extractOutputTokens(relay.buffer) {
-                    routingCtx.hybrid.recordCloudTokens(toks, now: now)
-                }
-            }
-        }
-
         // Claude subscription 401 self-heal. The streaming relay has already
         // committed the response to the guest, so we can't retry transparently
         // — instead refresh the shared token in the background so the *next*

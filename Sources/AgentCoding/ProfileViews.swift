@@ -4268,17 +4268,8 @@ struct LocalModelsSettingsView: View {
 
             if routing != .cloud {
                 Section {
-                    Picker("Mode", selection: modeSelection) {
-                        Text("Local — always on-device").tag(Profile.Routing.local)
-                        Text("Hybrid — cloud, fall back to local").tag(Profile.Routing.hybrid)
-                    }
-                    .pickerStyle(.radioGroup)
-                } footer: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("**Local** keeps every request on this Mac — nothing leaves the machine. Replies are private but slower, and bounded by the model you can fit in memory.")
-                        Text("**Hybrid** sends requests to the cloud as usual, falling back to the on-device model only when the cloud is unreachable — cloud speed and quality, with a local safety net.")
-                    }
-                    .font(.caption).foregroundStyle(.secondary)
+                    Text("Every request runs on this Mac — nothing leaves the machine. Replies are private but bounded by the model you can fit in memory.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
 
                 engineSection

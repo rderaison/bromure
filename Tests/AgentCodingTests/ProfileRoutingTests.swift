@@ -33,13 +33,6 @@ struct ProfileEffectiveRoutingTests {
         #expect(p.effectiveModelRouting == .local)
     }
 
-    @Test("`.hybrid` is left untouched even with no local-auth tool")
-    func hybridUntouched() {
-        var p = Profile(name: "t", tool: .claude, authMode: .token)
-        p.modelRouting = .hybrid
-        #expect(p.effectiveModelRouting == .hybrid)
-    }
-
     @Test("`.cloud` stays `.cloud`")
     func cloudStays() {
         let p = Profile(name: "t", tool: .claude, authMode: .token)
