@@ -2174,6 +2174,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         profiles = store.loadAll()
+        // First launch after the model-management redesign: seed the global
+        // ModelSettings from what the user already configured per-workspace so
+        // the new "Models" pane opens pre-populated. Idempotent once configured.
+        ModelSettingsStore.shared.seedIfEmpty(from: profiles + [store.loadTemplate()])
         // Console-presence arbitration: track local input so agent browser
         // streams land on the console used last (server window vs a fat
         // client), and re-route live streams the moment the user changes
