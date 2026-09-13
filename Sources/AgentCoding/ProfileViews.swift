@@ -79,8 +79,7 @@ public extension Notification.Name {
 
 enum EditorCategory: String, CaseIterable, Identifiable {
     case general     = "General"
-    case models      = "Agents"
-    case localModels = "Local Models"
+    case localModels = "Models"
     case fusion      = "Fusion"
     case folders     = "Folders"
     case credentials = "Credentials"
@@ -103,8 +102,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .general:     "person.text.rectangle.fill"
-        case .models:      "sparkles"
-        case .localModels: "cpu.fill"
+        case .localModels: "sparkles"
         case .fusion:      "bolt.fill"
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
@@ -124,8 +122,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     var color: Color {
         switch self {
         case .general:     .indigo
-        case .models:      .purple
-        case .localModels: .mint
+        case .localModels: .purple
         case .fusion:      .yellow
         case .folders:     .orange
         case .credentials: .green
@@ -818,7 +815,6 @@ struct ProfileEditorView: View {
     private func detailContent(for category: EditorCategory) -> some View {
         switch category {
         case .general:     generalSection
-        case .models:      modelsSection
         case .localModels: localModelsSection
         case .fusion:      fusionSection
         case .folders:     foldersSection
@@ -865,15 +861,11 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private var localModelsSection: some View {
-        // The pane manages THIS machine's MLX catalog + downloads; it's
-        // filtered out of visibleCategories on iOS.
+        // The global "Models" pane: providers + tiers + local server + on-device
+        // catalog, all bound to ModelSettingsStore.shared (not this profile).
+        // It's filtered out of visibleCategories on iOS (this-machine catalog).
         #if os(macOS)
-        LocalModelsSettingsView(routing: $draft.modelRouting,
-                                activeModelID: $draft.activeModelID,
-                                engineURL: $draft.localEngineURL,
-                                engineKey: $draft.localEngineAPIKey,
-                                selectedModelIDs: draft.distinctLocalModelIDs,
-                                remote: localModelsRemoteAny as? RemoteModelBackend)
+        ModelsSettingsView()
         #else
         EmptyView()
         #endif
