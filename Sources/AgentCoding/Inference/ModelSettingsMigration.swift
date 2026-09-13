@@ -75,26 +75,16 @@ public extension ModelSettings {
                 }
             }
 
-            // Local server (recommended route): the first profile with a custom
-            // engine URL seeds it.
+            // Local server (recommended route): remember the first custom engine
+            // URL a profile used, as a convenience. This is just a remembered
+            // endpoint — it does NOT select a tier, so migrating never silently
+            // flips a cloud workspace onto a local model. The user picks the
+            // small/medium/large tier models themselves in the new pane (a global
+            // choice, deliberately theirs to make).
             if settings.localServer == nil,
                let url = profile.localEngineURL?.trimmingCharacters(in: .whitespaces),
                !url.isEmpty {
                 settings.localServer = LocalServer(baseURL: url, apiKey: profile.localEngineAPIKey)
-            }
-
-            // Medium tier (the model every single-model agent uses): seed from the
-            // first profile that had a local model selected. Cloud profiles used
-            // each provider's own default model (no id stored), so there's nothing
-            // to carry — the user picks one in the new pane.
-            if settings.tiers[.medium] == nil,
-               profile.effectiveModelRouting == .local,
-               let model = profile.activeModelID?.trimmingCharacters(in: .whitespaces),
-               !model.isEmpty {
-                let source: ModelRef.Source = (profile.localEngineURL?.isEmpty == false)
-                    ? .localServer
-                    : .localRun(catalogID: model)
-                settings.tiers[.medium] = ModelRef(source: source, modelID: model)
             }
         }
 

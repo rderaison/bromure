@@ -26,7 +26,7 @@ struct ModelSettingsMigrationTests {
         #expect(s.credential(.zai)?.apiKey == "zai-key")
     }
 
-    @Test("Custom-server profile seeds the local server + medium tier") func localServer() {
+    @Test("Custom-server profile remembers the server URL but seeds no tier") func localServer() {
         var p = Profile(name: "t", tool: .claude, authMode: .local)
         p.modelRouting = .local
         p.localEngineURL = "http://box:8000/v1"
@@ -35,19 +35,17 @@ struct ModelSettingsMigrationTests {
         let s = ModelSettings.migrated(from: [p])
         #expect(s.localServer?.baseURL == "http://box:8000/v1")
         #expect(s.localServer?.apiKey == "tok")
-        // A local model over a custom server → localServer-sourced medium tier.
-        #expect(s.tiers[.medium]?.modelID == "qwen3-coder")
-        if case .localServer = s.tiers[.medium]?.source {} else { Issue.record("expected .localServer source") }
+        // Migration must NOT auto-pick a tier — that would flip every workspace
+        // onto the local model. The user chooses tiers in the new pane.
+        #expect(s.tiers.isEmpty)
     }
 
-    @Test("On-device local model → localRun medium tier") func localRun() {
+    @Test("On-device local profile (no key, no server) carries nothing") func localRun() {
         var p = Profile(name: "t", tool: .claude, authMode: .local)
         p.modelRouting = .local
         p.activeModelID = "qwen3-coder-mlx"
         let s = ModelSettings.migrated(from: [p])
-        if case .localRun(let cid) = s.tiers[.medium]?.source {
-            #expect(cid == "qwen3-coder-mlx")
-        } else { Issue.record("expected .localRun source") }
+        #expect(s == ModelSettings())   // nothing to migrate
     }
 
     @Test("First usable key wins; a later blank profile doesn't clobber it") func firstWins() {
