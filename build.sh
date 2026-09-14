@@ -42,6 +42,21 @@ if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
     "$SCRIPT_DIR/tools/build-ghostty.sh"
 fi
 
+# Force SwiftPM to regenerate resource bundles from current source.
+# `swift build` recompiles the binary but does NOT reliably re-copy changed
+# resource FILES into a target's .bundle when only resources changed (or a
+# git checkout reset their mtimes) — it leaves whatever the bundle already
+# held. Editing vm-setup guest scripts (config-agent.py, dnsmasq configs,
+# bromure-hostkey, …) then building would ship a stale bundle: binary fresh,
+# guest scripts days old. A `bromure init` bake reads those scripts, so the
+# image silently lacks the fixes. Deleting the bundles first makes the copy
+# step re-run (SPM recreates a missing resource bundle from source). Matters
+# most on a warm build-server cache, where this trap is otherwise invisible.
+BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null || true)
+if [ -n "$BUILD_DIR" ]; then
+    rm -rf "$BUILD_DIR"/*.bundle 2>/dev/null || true
+fi
+
 # Build the requested product in release mode.
 # Dev-loop build: disable whole-module optimization so files compile in
 # parallel across all cores instead of one long single-core job per module
