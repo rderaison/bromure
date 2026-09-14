@@ -1,11 +1,23 @@
-#!/bin/sh
+#!/bin/bash
 # bromure-hostkey <key>
 #
 # Forward a browser-chrome keyboard shortcut that Openbox grabbed in the guest
-# back to the macOS host. Openbox binds ⌘T/⌘W/⌘L/⌘R/⌘P (the Cmd↔Ctrl swap turns
-# the Mac ⌘ into Ctrl, which Chromium would otherwise act on) and runs this
-# helper, which pokes tab-agent's localhost listener; tab-agent relays the key
-# over vsock so the host owns the chord even while the VM holds keyboard focus.
+# back to the macOS host. Openbox binds ⌘T/⌘W/⌘L/⌘R/⌘P/⌘H/⌘[/⌘] (the Cmd↔Ctrl
+# swap turns the Mac ⌘ into Ctrl, which Chromium would otherwise act on) and
+# runs this helper, which pokes tab-agent's localhost listener; tab-agent relays
+# the key over vsock so the host owns the chord even while the VM holds
+# keyboard focus.
+#
+# Transport is bash's /dev/tcp redirection, NOT nc: the Ubuntu base is a
+# debootstrap minbase installed with --no-install-recommends, so no netcat
+# package exists in the guest (busybox provided `nc` on the old Alpine base).
+# When this was `printf | nc …`, the missing binary failed silently here —
+# backgrounded, output discarded — and every host-owned chord went dead
+# whenever the page had keyboard focus ("⌘T does nothing"). bash is Essential
+# on Ubuntu, so this dependency can't go missing the same way.
 #
 # Best-effort and backgrounded so a keypress never stalls the window manager.
-printf '%s' "${1:-}" | nc -w 1 127.0.0.1 5917 >/dev/null 2>&1 &
+# A refused connect (tab-agent not up yet) fails fast on loopback.
+(
+    exec 3<>/dev/tcp/127.0.0.1/5917 && printf '%s' "${1:-}" >&3
+) >/dev/null 2>&1 &
