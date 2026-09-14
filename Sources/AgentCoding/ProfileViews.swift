@@ -556,11 +556,17 @@ struct ProfileEditorView: View {
     /// caller doesn't pass a `storageContext`). On iOS the editor is
     /// always remote: Automation (this-machine UserDefaults) and Local
     /// Models (this-machine MLX catalog/downloads) don't apply.
+    ///
+    /// Models appears in BOTH Preferences (edits the global settings) and a
+    /// workspace editor (edits that workspace's OVERRIDE of the global settings).
+    /// Automation is app-wide UserDefaults, so it stays Preferences-only.
     private var visibleCategories: [EditorCategory] {
         EditorCategory.allCases.filter { c in
             #if os(macOS)
             return c != .automation || storageContext == nil
             #else
+            // iOS editor is always remote: this-machine Automation + Models panes
+            // (MLX catalog / global store) don't apply.
             return c != .automation && c != .localModels
             #endif
         }
@@ -862,10 +868,16 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var localModelsSection: some View {
         // The global "Models" pane: providers + tiers + local server + on-device
-        // catalog, all bound to ModelSettingsStore.shared (not this profile).
-        // It's filtered out of visibleCategories on iOS (this-machine catalog).
+        // Global config in Preferences (storageContext == nil); a per-workspace
+        // OVERRIDE of it in a workspace editor. Filtered out on iOS.
         #if os(macOS)
-        ModelsSettingsView(subscription: modelsSubscriptionHooks)
+        if storageContext == nil {
+            GlobalModelsSettingsView(subscription: modelsSubscriptionHooks)
+        } else {
+            WorkspaceModelsSettingsView(override: $draft.modelOverride,
+                                        globalSettings: ModelSettingsStore.shared.settings,
+                                        subscription: modelsSubscriptionHooks)
+        }
         #else
         EmptyView()
         #endif
@@ -903,6 +915,15 @@ struct ProfileEditorView: View {
                 case .moonshot:  onForgetKimi?()
                 case .zai, .custom: break
                 }
+            },
+            fetchModels: { provider, useSubscription, apiKey, completion in
+                // Pull the provider's live model list (Fusion GETs its /v1/models)
+                // with the credential the PANE holds — global or a workspace
+                // override's own. Providers with no matching tool (z.ai, custom)
+                // fall back to the static list — return empty.
+                guard let tool = provider.fusionTool,
+                      let fetch = onFetchFusionModels else { completion([]); return }
+                fetch(tool, useSubscription ? .subscription : .token, apiKey, completion)
             })
     }
     #endif

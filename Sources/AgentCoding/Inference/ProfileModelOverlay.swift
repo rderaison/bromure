@@ -29,15 +29,32 @@ public extension Profile {
     /// engine is single-model), so when several agents are local they share the
     /// primary agent's local model via `activeModelID`; cloud agents each draw
     /// their own provider credential independently.
-    func overlaidWithGlobalModels(_ settings: ModelSettings) -> Profile {
+    /// `subscribed`: providers with a real host-side interactive login for this
+    /// profile (or the shared one it inherits). Consulted so a signed-in
+    /// subscription authenticates at launch even if the pane's `useSubscription`
+    /// mirror flag never synced — otherwise Claude would boot and ask you to
+    /// register despite being signed in.
+    func overlaidWithGlobalModels(_ settings: ModelSettings,
+                                  subscribed: Set<ModelProvider> = []) -> Profile {
         let hasProviders = settings.providers.contains { $0.isUsable }
         let hasTiers = !settings.tiers.isEmpty
             || settings.agentTiers.values.contains { !$0.isEmpty }
-        guard hasProviders || hasTiers else { return self }
+        guard hasProviders || hasTiers || !subscribed.isEmpty else { return self }
 
         var p = self
         var anyLocal = false
         var localServerBackend: (url: String?, key: String?)?
+
+        // Every agent must be ENABLED, not just configured. The staging scripts
+        // (api_key.env, the per-tool config files, the subscription bogus key)
+        // only emit for tools present in `allToolSpecs` — so an agent missing
+        // from the profile gets no credentials at all, and running e.g.
+        // `claude` in a Codex workspace makes it ask you to register. Add every
+        // agent to the launch copy (never persisted) so its variables propagate.
+        for tool in Tool.allCases
+        where tool != p.tool && !p.additionalTools.contains(where: { $0.tool == tool }) {
+            p.additionalTools.append(ToolSpec(tool: tool, authMode: .token))
+        }
 
         // Resolve one agent: set its auth (+ return its local model id, if local).
         func applyAgent(tool: Tool, ompProvider: OmpProvider?, ompBaseURL: String?,
@@ -55,7 +72,8 @@ public extension Profile {
                 return ref.modelID
             }
             if let (mode, key) = Self.cloudAuth(tool: tool, ompProvider: ompProvider,
-                                                ompBaseURL: ompBaseURL, settings: settings) {
+                                                ompBaseURL: ompBaseURL, settings: settings,
+                                                subscribed: subscribed) {
                 authMode = mode
                 apiKey = key
             }
@@ -105,18 +123,28 @@ public extension Profile {
     /// agent's existing auth alone.
     private static func cloudAuth(tool: Tool, ompProvider: OmpProvider?,
                                   ompBaseURL: String?,
-                                  settings: ModelSettings) -> (AuthMode, String?)? {
+                                  settings: ModelSettings,
+                                  subscribed: Set<ModelProvider>) -> (AuthMode, String?)? {
         let provider: ModelProvider = (tool == .omp)
             ? ModelProvider.from(omp: ompProvider ?? .default)
             : ModelProvider.native(for: tool)
-        guard let cred = settings.credential(provider), cred.isUsable else { return nil }
-        if cred.useSubscription, provider.supportsSubscription {
+        let cred = settings.credential(provider)
+        let key = cred?.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasKey = !(key ?? "").isEmpty
+
+        // 1. An explicitly pasted API key wins (the user chose pay-per-use).
+        if hasKey, cred?.useSubscription != true { return (.token, key) }
+        // 2. Otherwise a subscription — either the pane's flag or a real
+        //    host-side login record for this profile — authenticates the
+        //    provider's own agent.
+        if provider.supportsSubscription,
+           (cred?.useSubscription == true || subscribed.contains(provider)) {
             return (.subscription, nil)
         }
-        let key = cred.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        // A usable credential with no key is a custom endpoint keyed only by its
-        // base URL — token mode, the guest reads whatever env the pipeline sets.
-        return (.token, (key?.isEmpty == false) ? key : nil)
+        // 3. A usable credential with no key is a custom endpoint keyed only by
+        //    its base URL — token mode, the guest reads whatever env is set.
+        if let cred, cred.isUsable { return (.token, hasKey ? key : nil) }
+        return nil
     }
 }
 
@@ -129,6 +157,34 @@ public extension ModelAgent {
         case .grok:   return .grok
         case .kimi:   return .kimi
         case .omp:    return .omp
+        }
+    }
+}
+
+public extension ModelProvider {
+    /// The profile `Tool` whose credential + `/v1/models` endpoint can list this
+    /// provider's live models (via `Fusion.listModels`). nil for providers with
+    /// no matching tool (z.ai, custom) — those fall back to the static list.
+    var fusionTool: Profile.Tool? {
+        switch self {
+        case .anthropic: return .claude
+        case .openai:    return .codex
+        case .xai:       return .grok
+        case .moonshot:  return .kimi
+        case .zai, .custom: return nil
+        }
+    }
+
+    /// The agent this provider natively powers — so registering the provider can
+    /// pre-fill that agent's models. nil for provider-agnostic ones (z.ai/custom,
+    /// used via omp / the custom server).
+    var nativeAgent: ModelAgent? {
+        switch self {
+        case .anthropic: return .claude
+        case .openai:    return .codex
+        case .xai:       return .grok
+        case .moonshot:  return .kimi
+        case .zai, .custom: return nil
         }
     }
 }

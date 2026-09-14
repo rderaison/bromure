@@ -135,6 +135,14 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
 
     /// The credential to use for `profileID`: its per-profile override if one
     /// exists, otherwise the shared default. `nil` profileID → shared only.
+    /// True when THIS profile has its own per-profile record (as opposed to
+    /// only inheriting the shared one). Lets a per-workspace log-out clear
+    /// the right scope.
+    public func hasProfileRecord(_ profileID: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return loadLocked().perProfile[profileID.uuidString] != nil
+    }
+
     public func record(for profileID: UUID?) -> ClaudeSubscriptionRecord? {
         lock.lock(); defer { lock.unlock() }
         let file = loadLocked()

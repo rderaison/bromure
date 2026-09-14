@@ -1703,11 +1703,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Push the profile's routing mode + hybrid policy knobs into the MITM
     /// engine at session launch (vLLM.md §4). The model label (catalog id
     /// or repo) is what the `served-by` trace marker shows.
+    /// Providers with a real interactive-subscription login usable by this
+    /// profile (its own, or the shared one it inherits). Fed to the model
+    /// overlay so a signed-in subscription authenticates at launch even when the
+    /// Models pane's mirror flag hasn't synced.
+    func subscribedProviders(for profile: Profile) -> Set<ModelProvider> {
+        guard let e = mitmEngine else { return [] }
+        var s = Set<ModelProvider>()
+        if e.claudeSubscriptionStore.hasCredential(for: profile.id) { s.insert(.anthropic) }
+        if e.codexSubscriptionStore.hasCredential(for: profile.id)  { s.insert(.openai) }
+        if e.grokSubscriptionStore.hasCredential(for: profile.id)   { s.insert(.xai) }
+        if e.kimiSubscriptionStore.hasCredential(for: profile.id)   { s.insert(.moonshot) }
+        return s
+    }
+
     func applyRouting(_ engine: MitmEngine, for rawProfile: Profile) {
         // Model config is global: project it onto the profile so routing reflects
         // the tiers/providers the user set in "Models", not stale per-workspace
         // fields. (No-op when nothing is configured globally.)
-        let profile = rawProfile.overlaidWithGlobalModels(ModelSettingsStore.shared.settings)
+        let profile = rawProfile.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: rawProfile),
+                                                                  subscribed: subscribedProviders(for: rawProfile))
         // `effectiveModelRouting`, not the raw flag: a pure-local route with no
         // `.local` agent (e.g. a subscription Claude with a leftover model
         // selected) must NOT reroute the agent's real cloud traffic into the
@@ -1726,7 +1741,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func startLocalEngineIfNeeded(for rawProfile: Profile) {
         // Same global-model projection as applyRouting: the local engine spins up
         // when the global tiers/local-server (not per-workspace fields) call for it.
-        let profile = rawProfile.overlaidWithGlobalModels(ModelSettingsStore.shared.settings)
+        let profile = rawProfile.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: rawProfile),
+                                                                  subscribed: subscribedProviders(for: rawProfile))
         let ids = profile.distinctLocalModelIDs
         guard !ids.isEmpty else { return }
         // A user-supplied external engine (vLLM/Ollama/LM Studio/…): nothing
@@ -6246,7 +6262,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             },
             onForgetClaude: (editing ?? initialDraft).map { p in
                 { [weak self] in
-                    try? self?.mitmEngine?.claudeSubscriptionStore.forget(for: p.id)
+                    // Clear the scope actually in effect: this workspace's own
+                    // per-profile login if it has one, otherwise the shared/global
+                    // one it was inheriting (so "Log out" is never a no-op).
+                    let store = self?.mitmEngine?.claudeSubscriptionStore
+                    if store?.hasProfileRecord(p.id) == true { try? store?.forget(for: p.id) }
+                    else { try? store?.forget(for: nil) }
                     NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
                 }
             },
@@ -6261,7 +6282,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             },
             onForgetCodex: (editing ?? initialDraft).map { p in
                 { [weak self] in
-                    try? self?.mitmEngine?.codexSubscriptionStore.forget(for: p.id)
+                    // Clear the scope actually in effect: this workspace's own
+                    // per-profile login if it has one, otherwise the shared/global
+                    // one it was inheriting (so "Log out" is never a no-op).
+                    let store = self?.mitmEngine?.codexSubscriptionStore
+                    if store?.hasProfileRecord(p.id) == true { try? store?.forget(for: p.id) }
+                    else { try? store?.forget(for: nil) }
                     NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
                 }
             },
@@ -6276,7 +6302,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             },
             onForgetGrok: (editing ?? initialDraft).map { p in
                 { [weak self] in
-                    try? self?.mitmEngine?.grokSubscriptionStore.forget(for: p.id)
+                    // Clear the scope actually in effect: this workspace's own
+                    // per-profile login if it has one, otherwise the shared/global
+                    // one it was inheriting (so "Log out" is never a no-op).
+                    let store = self?.mitmEngine?.grokSubscriptionStore
+                    if store?.hasProfileRecord(p.id) == true { try? store?.forget(for: p.id) }
+                    else { try? store?.forget(for: nil) }
                     NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
                 }
             },
@@ -6291,7 +6322,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             },
             onForgetKimi: (editing ?? initialDraft).map { p in
                 { [weak self] in
-                    try? self?.mitmEngine?.kimiSubscriptionStore.forget(for: p.id)
+                    // Clear the scope actually in effect: this workspace's own
+                    // per-profile login if it has one, otherwise the shared/global
+                    // one it was inheriting (so "Log out" is never a no-op).
+                    let store = self?.mitmEngine?.kimiSubscriptionStore
+                    if store?.hasProfileRecord(p.id) == true { try? store?.forget(for: p.id) }
+                    else { try? store?.forget(for: nil) }
                     NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
                 }
             },
@@ -7106,7 +7142,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var profile = new
         populateMCPBearerTokens(in: &profile)
         // Global model settings drive the restage too (see launch()).
-        profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.settings)
+        profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: profile),
+                                                                  subscribed: subscribedProviders(for: profile))
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
         let plan = self.sessionTokenPlan(for: profile, salt: salt)
 
@@ -7498,7 +7535,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Project the global model settings onto the launch-time profile so the
         // whole staging pipeline (token plan, home dir, meta share, routing)
         // stages the models + credentials the user configured in "Models".
-        profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.settings)
+        profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: profile),
+                                                                  subscribed: subscribedProviders(for: profile))
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
         let plan = self.sessionTokenPlan(for: profile, salt: salt)
         // (prepareHomeDirectory call moved below — needs the

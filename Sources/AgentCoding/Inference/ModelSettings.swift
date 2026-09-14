@@ -279,6 +279,22 @@ public struct ModelSettings: Codable, Equatable, Sendable {
         ref(for: agent, tier: .medium) ?? ref(for: agent, tier: .large) ?? ref(for: agent, tier: .small)
     }
 
+    // MARK: Mutations
+
+    /// Set (or clear) a tier's model — the default (nil `agent`) or one agent's
+    /// override. Clearing an agent override lets that tier inherit the default.
+    public mutating func setTier(_ tier: ModelTier, _ ref: ModelRef?, for agent: ModelAgent? = nil) {
+        guard let agent else { tiers[tier] = ref; return }
+        var t = agentTiers[agent] ?? [:]
+        t[tier] = ref
+        agentTiers[agent] = t.isEmpty ? nil : t
+    }
+
+    /// Drop every override for an agent so it inherits the default entirely.
+    public mutating func resetAgentOverrides(_ agent: ModelAgent) {
+        agentTiers[agent] = nil
+    }
+
     /// The medium tier is the default any single-model agent uses; fall back to
     /// large then small so a partially-configured setup still resolves.
     public func primaryRef() -> ModelRef? {

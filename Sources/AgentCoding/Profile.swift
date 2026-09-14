@@ -1026,9 +1026,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                 // `apiKeyEnv` is OPENAI_API_KEY, so we export the dummy key
                 // here (the engine ignores it). The base URL + model live in
                 // models.yml; the `--model` at launch matches its entry.
+                //
+                // A local model can take a long time to produce its first
+                // token (cold load, big prompt, slow hardware); omp's default
+                // first-event timeout would abort the stream. Give it 30 min.
                 _ = (model, base)
                 return [
                     ("OPENAI_API_KEY", key),
+                    ("PI_STREAM_FIRST_EVENT_TIMEOUT_MS", "1800000"),
                 ]
             }
         }
@@ -1373,6 +1378,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var localEngineURL: String?
     /// Optional bearer token `localEngineURL` requires (vLLM `--api-key`).
     public var localEngineAPIKey: String?
+
+    /// Per-workspace override of the global model settings. nil ⇒ this workspace
+    /// inherits `ModelSettingsStore.shared` (the Preferences → Models config).
+    /// Non-nil ⇒ a complete `ModelSettings` (seeded from the global one when the
+    /// override is turned on) that this workspace uses instead. Edited via the
+    /// Models pane inside the workspace editor and committed with Save/Cancel.
+    public var modelOverride: ModelSettings? = nil
 
     /// `localEngineURL` normalized to a server-root base URL, or nil when the
     /// built-in engine serves this profile.
@@ -1943,6 +1955,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case modelRouting
         case activeModelID
         case localEngineURL
+        case modelOverride
         case localEngineAPIKey
         case subscriptionTokenSwap
         case codexTokenSwap
@@ -2054,6 +2067,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         modelRouting = try c.decodeIfPresent(Routing.self, forKey: .modelRouting) ?? .cloud
         activeModelID = try c.decodeIfPresent(String.self, forKey: .activeModelID)
         localEngineURL = try c.decodeIfPresent(String.self, forKey: .localEngineURL)
+        modelOverride = try c.decodeIfPresent(ModelSettings.self, forKey: .modelOverride)
         localEngineAPIKey = try c.decodeIfPresent(String.self, forKey: .localEngineAPIKey)
         subscriptionTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
                                                       forKey: .subscriptionTokenSwap) ?? .unset
@@ -2184,6 +2198,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if let localEngineURL, !localEngineURL.isEmpty {
             try c.encode(localEngineURL, forKey: .localEngineURL)
         }
+        try c.encodeIfPresent(modelOverride, forKey: .modelOverride)
         if let localEngineAPIKey, !localEngineAPIKey.isEmpty {
             try c.encode(localEngineAPIKey, forKey: .localEngineAPIKey)
         }

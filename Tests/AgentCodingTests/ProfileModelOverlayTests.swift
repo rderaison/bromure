@@ -107,4 +107,45 @@ struct ProfileModelOverlayTests {
         let out = p.overlaidWithGlobalModels(s)
         #expect(out.modelRouting == .cloud)
     }
+
+    /// The staging scripts only emit credentials for tools in `allToolSpecs`
+    /// ("enabled"). A workspace whose primary is Codex has no Claude spec, so
+    /// even with an Anthropic login the guest got no ANTHROPIC_API_KEY and
+    /// Claude asked you to register. The overlay must enable every agent.
+    @Test("Every agent is enabled so a non-primary agent's credentials propagate")
+    func enablesAllAgents() {
+        var s = ModelSettings()
+        s.tiers[.medium] = ModelRef(source: .provider(.anthropic), modelID: "claude-sonnet-5")
+        let salt = Data(repeating: 1, count: 32)
+
+        // Codex-primary workspace; Claude isn't in the profile at all.
+        let p = Profile(name: "t", tool: .codex, authMode: .token, apiKey: "oai")
+        #expect(!p.allToolSpecs.contains { $0.tool == .claude })
+        // The bug: not enabled → the token plan mints no bogus Claude key.
+        let before = p.makeTokenPlan(salt: salt, claudeSubscriptionAvailable: true)
+        #expect(before.claudeSubscriptionBogusKey == nil)
+
+        let out = p.overlaidWithGlobalModels(s, subscribed: [.anthropic])
+        // Every agent is now present (enabled), primary untouched…
+        #expect(out.tool == .codex)
+        for tool in Profile.Tool.allCases {
+            #expect(out.allToolSpecs.contains { $0.tool == tool })
+        }
+        // …Claude is in subscription mode via the real host-side login…
+        #expect(out.allToolSpecs.first { $0.tool == .claude }?.authMode == .subscription)
+        // …so the token plan mints the bogus ANTHROPIC_API_KEY the guest needs.
+        let after = out.makeTokenPlan(salt: salt, claudeSubscriptionAvailable: true)
+        #expect(after.claudeSubscriptionBogusKey != nil)
+    }
+
+    /// A local model can take minutes to emit its first token; omp's default
+    /// first-event timeout would abort the stream. Local omp must export a
+    /// 30-minute PI_STREAM_FIRST_EVENT_TIMEOUT_MS alongside its dummy key.
+    @Test("Local omp env exports a 30-minute first-event timeout")
+    func ompLocalStreamTimeout() {
+        let env = Profile.Tool.omp.localEnvExports(model: "qwen3-coder", key: "dummy")
+        let timeout = env.first { $0.name == "PI_STREAM_FIRST_EVENT_TIMEOUT_MS" }
+        #expect(timeout?.value == "1800000")
+        #expect(env.contains { $0.name == "OPENAI_API_KEY" })   // still exports the dummy key
+    }
 }
