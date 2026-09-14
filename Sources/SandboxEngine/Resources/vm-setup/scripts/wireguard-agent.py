@@ -59,8 +59,8 @@ LOG_FILE = "/tmp/bromure/wireguard-agent.log"
 # xinitrc gates Chrome on this file when auto-connect was requested.
 VPN_STATUS_FILE = "/tmp/bromure/vpn-status"
 
-DNSMASQ_CONF = "/etc/dnsmasq.d/pihole.conf"
-DNSMASQ_CONF_BACKUP = "/tmp/bromure/pihole.conf.wg-backup"
+DNSMASQ_UPSTREAM = "/etc/dnsmasq.d/upstream.conf"          # dnsmasq resolv-file
+DNSMASQ_UPSTREAM_BACKUP = "/tmp/bromure/upstream.conf.wg-backup"
 RESOLV_CONF = "/etc/resolv.conf"
 RESOLV_CONF_BACKUP = "/tmp/bromure/resolv.conf.wg-backup"
 
@@ -161,9 +161,12 @@ def apply_vpn_dns(dns_servers):
     """Switch DNS to the VPN's own servers to prevent leaks.
 
     Squid always points to the local dnsmasq (127.0.0.1), so we only need to
-    update dnsmasq's upstream server and send it SIGHUP.  dnsmasq handles
-    SIGHUP cleanly without dropping existing connections, unlike squid in
-    foreground (-N) mode which loses connectivity on reconfiguration.
+    rewrite dnsmasq's upstream file and send it SIGHUP.  dnsmasq re-reads
+    its resolv-file on SIGHUP (and flushes the cache) without dropping
+    anything, unlike squid in foreground (-N) mode which loses connectivity
+    on reconfiguration.  Note it does NOT re-read server= lines from its
+    config file on SIGHUP — this used to rewrite pihole.conf, a silent no-op
+    that left every lookup on the pre-tunnel resolver.
 
     /etc/resolv.conf is also updated so the system resolver and wg-quick
     itself use the VPN's DNS for any direct lookups.
@@ -187,18 +190,20 @@ def apply_vpn_dns(dns_servers):
     except OSError as e:
         log(f"apply_vpn_dns: resolv.conf update failed: {e}")
 
-    # Update dnsmasq upstream and SIGHUP (squid always uses dnsmasq)
+    # Swap dnsmasq's upstream file and SIGHUP (squid always uses dnsmasq).
+    # The backup is taken once so a repeated enable can't capture VPN DNS as
+    # the "original" and leave it behind on teardown.
     try:
-        with open(DNSMASQ_CONF) as f:
+        with open(DNSMASQ_UPSTREAM) as f:
             original = f.read()
-        with open(DNSMASQ_CONF_BACKUP, "w") as f:
-            f.write(original)
-        new_lines = [l for l in original.splitlines() if not l.startswith("server=")]
-        for srv in dns_servers:
-            new_lines.append(f"server={srv}")
-        with open(DNSMASQ_CONF, "w") as f:
-            f.write("\n".join(new_lines) + "\n")
-        run("pkill -HUP dnsmasq", quiet=True)
+        if not os.path.isfile(DNSMASQ_UPSTREAM_BACKUP):
+            with open(DNSMASQ_UPSTREAM_BACKUP, "w") as f:
+                f.write(original)
+        with open(DNSMASQ_UPSTREAM, "w") as f:
+            f.write("# VPN DNS (wireguard-agent); pre-tunnel upstreams restored on disable\n")
+            for srv in dns_servers:
+                f.write(f"nameserver {srv}\n")
+        run("pkill -HUP -x dnsmasq", quiet=True)
         log(f"dnsmasq upstream → VPN DNS: {dns_str}")
     except OSError as e:
         log(f"apply_vpn_dns: dnsmasq update failed: {e}")
@@ -213,10 +218,10 @@ def restore_dns():
         except OSError as e:
             log(f"restore_dns: resolv.conf restore failed: {e}")
 
-    if os.path.isfile(DNSMASQ_CONF_BACKUP):
+    if os.path.isfile(DNSMASQ_UPSTREAM_BACKUP):
         try:
-            os.replace(DNSMASQ_CONF_BACKUP, DNSMASQ_CONF)
-            run("pkill -HUP dnsmasq", quiet=True)
+            os.replace(DNSMASQ_UPSTREAM_BACKUP, DNSMASQ_UPSTREAM)
+            run("pkill -HUP -x dnsmasq", quiet=True)
             log("dnsmasq upstream restored")
         except OSError as e:
             log(f"restore_dns: dnsmasq restore failed: {e}")

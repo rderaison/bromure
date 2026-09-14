@@ -804,12 +804,24 @@ async function main() {
       );
     });
 
-    await test("8.2 Malware DNS — resolv uses 1.1.1.2", async () => {
+    await test("8.2 Malware DNS — dnsmasq upstream is 1.1.1.2", async () => {
       await withSession("E2E_Malware", { blockMalware: "true", adBlocking: "true" },
         async ({ sessionId }) => {
+          // On a LAN that hijacks public resolvers, config-agent swaps the
+          // host stub in before dnsmasq starts and leaves a marker — the
+          // Cloudflare upstream is then legitimately absent, not a regression.
+          const fallback = await vmExec(
+            sessionId,
+            "cat /tmp/bromure/dns-upstream-fallback 2>/dev/null"
+          );
+          if (fallback.stdout.trim()) {
+            console.log(`        (LAN hijacks public DNS — upstream fell back: ${fallback.stdout.trim().slice(0, 120)})`);
+            return;
+          }
+          // Upstreams live in dnsmasq's resolv-file, not in pihole.conf server= lines.
           const r = await vmExec(
             sessionId,
-            "cat /etc/dnsmasq.d/pihole.conf | grep server="
+            "grep ^nameserver /etc/dnsmasq.d/upstream.conf"
           );
           assertIncludes(r.stdout, "1.1.1.2");
         }

@@ -314,16 +314,18 @@ test_squid() {
 test_malware_dns() {
     expected="$TEST_EXPECT_MALWARE_DNS"
     [ -z "$expected" ] && { pass "malware_dns_skip"; return; }
-    conf="/etc/dnsmasq.d/pihole.conf"
-    [ ! -f "$conf" ] && { fail "malware_dns" "pihole.conf not found"; return; }
+    # Upstreams live in dnsmasq's resolv-file (pihole.conf: resolv-file=),
+    # not in server= lines.
+    conf="/etc/dnsmasq.d/upstream.conf"
+    [ ! -f "$conf" ] && { fail "malware_dns" "upstream.conf not found"; return; }
     if [ "$expected" = "1" ]; then
-        if grep -q "server=1.1.1.2" "$conf"; then
+        if grep -q "^nameserver 1.1.1.2" "$conf"; then
             pass "malware_dns_enabled"
         else
             fail "malware_dns_enabled" "Cloudflare security DNS (1.1.1.2) not configured"
         fi
     else
-        if grep -q "server=1.1.1.2" "$conf"; then
+        if grep -q "^nameserver 1.1.1.2" "$conf"; then
             fail "malware_dns_disabled" "Cloudflare security DNS should not be configured"
         else
             pass "malware_dns_disabled"

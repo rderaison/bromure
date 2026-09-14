@@ -215,8 +215,9 @@ if [ -z "$PROXY_HOST" ]; then
 fi
 
 if [ "$BLOCK_MALWARE" = "1" ]; then
-    sed -i 's/^server=1\.1\.1\.1/server=1.1.1.2/' /etc/dnsmasq.d/pihole.conf
-    sed -i 's/^server=1\.0\.0\.1/server=1.0.0.2/' /etc/dnsmasq.d/pihole.conf
+    # Upstreams live in dnsmasq's resolv-file (see pihole.conf), not server= lines.
+    sed -i 's/^nameserver 1\.1\.1\.1$/nameserver 1.1.1.2/' /etc/dnsmasq.d/upstream.conf
+    sed -i 's/^nameserver 1\.0\.0\.1$/nameserver 1.0.0.2/' /etc/dnsmasq.d/upstream.conf
 fi
 
 # Start dnsmasq for DNS filtering (ad-blocking, malware blocking, or WARP)

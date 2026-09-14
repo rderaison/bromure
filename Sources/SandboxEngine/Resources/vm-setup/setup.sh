@@ -672,6 +672,7 @@ done
 touch /mnt/etc/pihole/local.list /mnt/etc/pihole/custom.list
 install_config configs/pihole-setupVars.conf /mnt/etc/pihole/setupVars.conf
 install_config configs/dnsmasq-pihole.conf   /mnt/etc/dnsmasq.d/pihole.conf
+install_config configs/dnsmasq-upstream.conf /mnt/etc/dnsmasq.d/upstream.conf
 
 # Chromium policies
 mkdir -p /mnt/etc/chromium/policies/managed
