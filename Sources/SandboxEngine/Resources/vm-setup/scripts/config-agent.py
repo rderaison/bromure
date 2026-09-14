@@ -1231,18 +1231,16 @@ def configure_services(cfg, ca_count):
     # DHCP server because the pre-warm VMPool leases the VM at 1280 before any
     # profile claims it, so the host can't know a VPN is wanted at DHCP time.
     #
-    # dhclient OWNS the interface MTU: it requests interface-mtu and re-applies
-    # the host's DHCP option 26 (1280) on every BOUND/RENEW/REBIND, clobbering a
-    # one-shot `ip link set`. So we drop a marker that the dhclient exit-hook
-    # (/etc/dhcp/dhclient-exit-hooks.d/bromure-vpn-mtu) re-asserts AFTER
-    # dhclient's own set, on every lease event. The marker is written here —
-    # ahead of the DHCP wait further down — so the hook already sees it on the
-    # first lease. The direct set below covers the ordering where DHCP has
-    # already completed (eth0 is 1280, no future lease event to fire the hook);
-    # it's skipped pre-DHCP (eth0 still at the 1500 kernel default), where the
-    # hook handles it after dhclient lowers to 1280. Only VPN profiles get the
-    # marker; plain profiles keep the 1280 floor. Never lowers a larger MTU a
-    # user pinned via vm.mtu (both the marker check and the hook only raise).
+    # We only DROP A MARKER here; two consumers actually set the MTU, because
+    # two things clamp eth0 back to 1280 after config-agent runs:
+    #   • xinitrc is the LAST setter at boot (`doas ip link set … mtu $MTU`,
+    #     default 1280) — it reads this marker and raises $MTU to it.
+    #   • dhclient re-applies DHCP option 26 (1280) on every lease event — its
+    #     exit-hook (/etc/dhcp/dhclient-exit-hooks.d/bromure-vpn-mtu) re-asserts
+    #     this marker after each renewal, which xinitrc never sees.
+    # A direct `ip link set` here is pointless — xinitrc clobbers it. Only VPN
+    # profiles get the marker; plain profiles keep the 1280 floor. Both
+    # consumers only ever RAISE, so a larger vm.mtu the user pinned is safe.
     vpn_enabled = bool(
         cfg.get("enableWarp") or cfg.get("wireGuardConfig")
         or cfg.get("openVPNConfig") or cfg.get("enableIKEv2"))
@@ -1254,12 +1252,6 @@ def configure_services(cfg, ca_count):
         except OSError as e:
             print(f"config-agent: WARNING: cannot write {NIC_MTU_MARKER}: {e}",
                   file=sys.stderr)
-        try:
-            cur_mtu = int(open("/sys/class/net/eth0/mtu").read().strip())
-        except (OSError, ValueError):
-            cur_mtu = 0
-        if 0 < cur_mtu < VPN_NIC_MTU:
-            run(f"ip link set dev eth0 mtu {VPN_NIC_MTU}")
 
     # WARP: write markers for warp-agent.  When WARP is enabled, we start
     # dbus + warp-svc now so the VPN can connect during boot.  The

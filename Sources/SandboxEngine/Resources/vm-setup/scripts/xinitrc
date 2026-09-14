@@ -60,7 +60,20 @@ set +a
 # minimum) survives every VPN path (WireGuard ~1420, IKEv2 ~1400,
 # nested tunnels lower). Override on the host via:
 #   defaults write io.bromure.app vm.mtu -int <value>
+# This is the LAST thing to set eth0's MTU at boot (after dhclient's DHCP
+# option 26 and config-agent), so a VPN profile's larger MTU has to be
+# honored here or it gets clamped back to 1280. config-agent writes the
+# desired value to /tmp/bromure/nic-mtu for VPN profiles (WARP MASQUE
+# collapses to 65-90% packet loss at 1280); raise MTU to it, but never below
+# an explicit vm.mtu the user pinned. The dhclient exit-hook re-asserts the
+# same marker on later lease events (renewals), which xinitrc doesn't see.
 [ -z "$MTU" ] && MTU=1280
+if [ -r /tmp/bromure/nic-mtu ]; then
+    _vpn_mtu=$(cat /tmp/bromure/nic-mtu 2>/dev/null)
+    case "$_vpn_mtu" in
+        [1-9][0-9][0-9]*) [ "$_vpn_mtu" -gt "$MTU" ] 2>/dev/null && MTU=$_vpn_mtu ;;
+    esac
+fi
 # Wait (briefly) for DHCP to land the default route before Chrome can
 # start: under systemd, dhclient runs async and a claim right at boot
 # could otherwise race it — the address change mid-page-load surfaces
