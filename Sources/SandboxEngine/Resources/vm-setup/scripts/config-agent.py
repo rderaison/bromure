@@ -1223,6 +1223,26 @@ def configure_services(cfg, ca_count):
         if cfg.get("warpAutoConnect"):
             open("/tmp/bromure/warp-auto-connect", "w").close()
 
+        # Raise the NIC MTU for WARP. warp-svc's MASQUE tunnel (QUIC/UDP to
+        # the Cloudflare edge) collapses at the default 1280 NIC MTU: under
+        # load it hits 65-90% packet loss and pages stop loading, while the
+        # tunnel still reports "connected" — the reported "WARP connects but
+        # no page loads" bug. Empirically eth0=1400 fixes it (0.01% loss,
+        # full throughput). The vmnet egress path is 1500, so 1400 leaves
+        # headroom for a reduced-MTU host uplink (the same reason the global
+        # default stays 1280 — see VMConfig.resolvedNICMTU). We set it here,
+        # not via DHCP option 26, because the pre-warm pool leases the VM at
+        # 1280 before any profile claims it, so the host can't know WARP is
+        # wanted at DHCP time. Only WARP profiles are bumped; every other
+        # profile keeps the conservative 1280 floor. Never lower a larger MTU
+        # a user pinned via `vm.mtu`.
+        try:
+            cur_mtu = int(open("/sys/class/net/eth0/mtu").read().strip())
+        except (OSError, ValueError):
+            cur_mtu = 0
+        if cur_mtu < 1400:
+            run("ip link set dev eth0 mtu 1400")
+
         # Start dbus (required by warp-svc)
         rc, _ = run("pgrep -x dbus-daemon")
         if rc != 0:
