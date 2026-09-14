@@ -216,6 +216,10 @@ extension ACAppDelegate {
         }
 
         let win = TabbedSessionWindow(profile: scratch, acDelegate: self)
+        // The login is interactive (sign-in URL, the CLI's prompts) and the
+        // beautified transcript hides exactly those, so this window is pinned to
+        // the raw terminal regardless of the user's usual view preference.
+        win.pane.beautifierLocked = true
         win.delegate = self
         win.title = String(format: NSLocalizedString("Register with %@", comment: ""),
                            provider.displayName)

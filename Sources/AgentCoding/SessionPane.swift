@@ -301,6 +301,18 @@ final class SessionPane {
     /// lossless. `beautifiedModel` drives the live poll + composer.
     private(set) var viewMode: SessionViewMode =
         UserDefaults.standard.bool(forKey: "ui.beautifiedTranscript") ? .beautified : .terminal
+    /// Pins the pane to the raw terminal: the beautified transcript is never
+    /// mounted and `setViewMode(.beautified)` is ignored. Set for the
+    /// "Register with …" throwaway VM, whose interactive OAuth login (the
+    /// sign-in URL, the CLI's prompts) the beautified view would hide. Flips
+    /// only this pane — the app-global default is left untouched.
+    var beautifierLocked = false {
+        didSet {
+            guard beautifierLocked, viewMode != .terminal else { return }
+            viewMode = .terminal   // deliberately no UserDefaults write
+            updateNativeTerminalMount()
+        }
+    }
     private var mountedBeautifiedHost: NSHostingView<BeautifiedSessionView>?
     private var beautifiedModel: BeautifiedSessionModel?
     /// The tmux window index the mounted beautified host is currently showing.
@@ -319,6 +331,7 @@ final class SessionPane {
     /// Remembers the choice app-globally as the default for subsequent panes.
     func setViewMode(_ mode: SessionViewMode) {
         guard mode != viewMode else { return }
+        if beautifierLocked, mode == .beautified { return }   // registration VM: terminal only
         viewMode = mode
         UserDefaults.standard.set(mode == .beautified, forKey: "ui.beautifiedTranscript")
         updateNativeTerminalMount()
