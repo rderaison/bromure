@@ -53,6 +53,7 @@
 		7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */; };
 		A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */; };
 		FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */; };
+		E91B787E2C9DBFF12D604A3C /* MermaidFence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 475294421C25AAB556D7138F /* MermaidFence.swift */; };
 		B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */; };
 		61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */; };
 		A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */; };
@@ -182,6 +183,7 @@
 		C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorerViews.swift"; path = "Sources/BromureRemote/_shared/FileExplorerViews.swift"; sourceTree = "<group>"; };
 		D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Icons.swift"; path = "Sources/BromureRemote/_shared/Icons.swift"; sourceTree = "<group>"; };
 		C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Inference__ModelCatalog.swift"; path = "Sources/BromureRemote/_shared/Inference__ModelCatalog.swift"; sourceTree = "<group>"; };
+		475294421C25AAB556D7138F /* MermaidFence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MermaidFence.swift"; path = "Sources/BromureRemote/_shared/MermaidFence.swift"; sourceTree = "<group>"; };
 		D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__ConsentCredentialID.swift"; path = "Sources/BromureRemote/_shared/Mitm__ConsentCredentialID.swift"; sourceTree = "<group>"; };
 		6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__GuardrailsPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__GuardrailsPolicy.swift"; sourceTree = "<group>"; };
 		323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__OnePasswordCLI.swift"; path = "Sources/BromureRemote/_shared/Mitm__OnePasswordCLI.swift"; sourceTree = "<group>"; };
@@ -335,6 +337,7 @@
 				C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */,
 				D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */,
 				C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */,
+				475294421C25AAB556D7138F /* MermaidFence.swift */,
 				D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */,
 				6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */,
 				323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */,
@@ -541,6 +544,7 @@
 				7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */,
 				A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */,
 				FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */,
+				E91B787E2C9DBFF12D604A3C /* MermaidFence.swift in Sources */,
 				B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */,
 				61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */,
 				A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */,

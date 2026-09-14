@@ -75,6 +75,7 @@ SHARED = [
     "AutomationRunWindow.swift",
     "AutomationRunArchive.swift",
     "ClaudeTranscriptView.swift",
+    "MermaidFence.swift",  # ```mermaid fences; web view is #if AppKit/UIKit, iOS has no bundle → code-fence fallback
     "PushCrypto.swift",  # HPKE seal/open — shared by the Mac sender + iOS NSE
     "ConversationView.swift",
     "VMDashboard.swift",

@@ -119,6 +119,28 @@ struct BromureAC: ParsableCommand {
             renderEnrollmentSheet(to: filtered.count > 1 ? filtered[1] : "/tmp/bromure-enrollment.png")
             return
         }
+        // Hidden verification hook: render a mermaid fence exactly as the
+        // beautified transcript does and snapshot it to a PNG. Sibling of the
+        // enrollment shot — standalone, no servers or VMs.
+        //   bromure-ac __shot-mermaid [out.png] [source-file] [--dark]
+        if filtered.first == "__shot-mermaid" {
+            let args = Array(filtered.dropFirst())
+            let out = args.first { !$0.hasPrefix("--") } ?? "/tmp/bromure-mermaid.png"
+            let srcPath = args.filter { !$0.hasPrefix("--") }.dropFirst().first
+            let source = srcPath.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
+                ?? "flowchart LR\n    A[start] --> B[(store)]\n    A --> C[end]"
+            MermaidFence<EmptyView>.renderSnapshot(source: source, dark: args.contains("--dark"), to: out)
+        }
+        // End-to-end sibling: markdown (with a ```mermaid fence) through the real
+        // transcript theme, captured as composited window pixels.
+        //   bromure-ac __shot-transcript-md [out.png] [markdown-file]
+        if filtered.first == "__shot-transcript-md" {
+            let args = Array(filtered.dropFirst())
+            let out = args.first ?? "/tmp/bromure-transcript-md.png"
+            let md = (args.count > 1 ? (try? String(contentsOfFile: args[1], encoding: .utf8)) : nil)
+                ?? "Some prose before.\n\n```mermaid\nflowchart LR\n    A[start] --> B[(store)]\n```\n\nSome prose after."
+            MermaidFence<EmptyView>.renderTranscriptSnapshot(markdown: md, to: out)
+        }
         Self.main(filtered)
     }
 

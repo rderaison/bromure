@@ -83,7 +83,8 @@ let package = Package(
                         .copy("Resources/ac"),
                         .copy("Resources/catalog.json"),
                         .copy("Resources/img-catalog.json"),
-                        .copy("Resources/highlightr")],
+                        .copy("Resources/highlightr"),
+                        .copy("Resources/mermaid")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("OpenDirectory"),

@@ -2549,11 +2549,28 @@ private extension MarkdownUI.Theme {
                 .markdownMargin(top: .em(0.3), bottom: .em(0.85))
         }
         t = t.codeBlock { c in
-            TranscriptCodeFence(configuration: c, bodySize: bodySize)
-                .markdownMargin(top: .em(0.4), bottom: .em(0.85))
+            Group {
+                // A ```mermaid fence is a diagram, not code: render it with the
+                // bundled mermaid.js, falling back to the plain fence if it
+                // can't (no bundle on iOS, or a parse error).
+                if (c.language ?? "").trimmingCharacters(in: .whitespaces).lowercased() == "mermaid" {
+                    MermaidFence(source: c.content, bodySize: bodySize) {
+                        TranscriptCodeFence(configuration: c, bodySize: bodySize)
+                    }
+                } else {
+                    TranscriptCodeFence(configuration: c, bodySize: bodySize)
+                }
+            }
+            .markdownMargin(top: .em(0.4), bottom: .em(0.85))
         }
         return t
     }
+}
+
+/// Internal accessor for the (private) reader theme, so the standalone
+/// snapshot hooks can render markdown exactly as the transcript does.
+func transcriptReaderTheme(bodySize: CGFloat, serif: Bool) -> MarkdownUI.Theme {
+    .claudeReader(bodySize: bodySize, serif: serif)
 }
 
 // MARK: - Syntax-highlighted code fences (beautified transcript)
