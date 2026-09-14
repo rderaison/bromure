@@ -23,6 +23,13 @@ import time
 VSOCK_PORT = 5000
 HOST_CID = 2
 
+# VPN NIC MTU. VPN traffic tunnels over eth0 and needs headroom the default
+# 1280 DHCP floor denies it (WARP MASQUE collapses at 1280). config-agent
+# writes NIC_MTU_MARKER for VPN profiles; the dhclient exit-hook re-asserts
+# this after dhclient re-applies the DHCP MTU on each lease event.
+VPN_NIC_MTU = 1400
+NIC_MTU_MARKER = "/tmp/bromure/nic-mtu"
+
 # Non-default user-data-dir for ephemeral (non-persistent) Google Chrome
 # sessions. Branded Chrome refuses --remote-debugging-port on the default
 # dir; a persistent profile already supplies its own dir. Lives only for
@@ -1213,30 +1220,46 @@ def configure_services(cfg, ca_count):
     # PIDs we don't need to wait for before Chrome starts
     fire_and_forget = []
 
-    # Any VPN tunnels over eth0 and needs MTU headroom for its encapsulation.
-    # The default 1280 NIC MTU (VMConfig.resolvedNICMTU — a conservative floor
-    # that survives reduced-MTU host uplinks) is too small: WARP's MASQUE
-    # tunnel collapses to 65-90% packet loss under load ("connects but no page
-    # loads"), and WireGuard / OpenVPN / IKEv2 lose throughput or fragment
-    # (the 1280 clamp is the suspected cause of the slow IKE_AUTH handshake).
-    # Measured on a 1500 LAN: WARP eth0=1280 → 0 B/s, 65-87% loss; eth0=1400 →
-    # ~20 MB/s, 0.01% loss. The vmnet egress path is 1500, so 1400 keeps
-    # headroom for a reduced-MTU host uplink. Set here, not via DHCP option 26,
-    # because the pre-warm VMPool leases the VM at 1280 before any profile
-    # claims it, so the host can't know a VPN is wanted at DHCP time. Only VPN
-    # profiles are bumped; plain profiles keep the 1280 floor. WireGuard /
-    # OpenVPN derive their tun MTU from eth0, so raise it before those agents
-    # bring the tunnel up. Never lower an MTU a user pinned larger via vm.mtu.
+    # VPN NIC MTU. Every VPN tunnels over eth0 and needs headroom the default
+    # 1280 floor denies it: WARP's MASQUE tunnel collapses to 65-90% packet
+    # loss under load ("connects but no page loads"), and WireGuard / OpenVPN /
+    # IKEv2 lose throughput or fragment (the 1280 clamp is the suspected cause
+    # of the slow IKE_AUTH handshake). Measured on a 1500 LAN: WARP eth0=1280 →
+    # 0 B/s, 65-87% loss; eth0=1400 → ~20 MB/s, 0.01% loss. 1400 (not 1500)
+    # keeps headroom for a reduced-MTU host uplink — the same reason the global
+    # default stays 1280 (VMConfig.resolvedNICMTU). It can't be set via the host
+    # DHCP server because the pre-warm VMPool leases the VM at 1280 before any
+    # profile claims it, so the host can't know a VPN is wanted at DHCP time.
+    #
+    # dhclient OWNS the interface MTU: it requests interface-mtu and re-applies
+    # the host's DHCP option 26 (1280) on every BOUND/RENEW/REBIND, clobbering a
+    # one-shot `ip link set`. So we drop a marker that the dhclient exit-hook
+    # (/etc/dhcp/dhclient-exit-hooks.d/bromure-vpn-mtu) re-asserts AFTER
+    # dhclient's own set, on every lease event. The marker is written here —
+    # ahead of the DHCP wait further down — so the hook already sees it on the
+    # first lease. The direct set below covers the ordering where DHCP has
+    # already completed (eth0 is 1280, no future lease event to fire the hook);
+    # it's skipped pre-DHCP (eth0 still at the 1500 kernel default), where the
+    # hook handles it after dhclient lowers to 1280. Only VPN profiles get the
+    # marker; plain profiles keep the 1280 floor. Never lowers a larger MTU a
+    # user pinned via vm.mtu (both the marker check and the hook only raise).
     vpn_enabled = bool(
         cfg.get("enableWarp") or cfg.get("wireGuardConfig")
         or cfg.get("openVPNConfig") or cfg.get("enableIKEv2"))
     if vpn_enabled:
+        os.makedirs("/tmp/bromure", exist_ok=True)
+        try:
+            with open(NIC_MTU_MARKER, "w") as f:
+                f.write(f"{VPN_NIC_MTU}\n")
+        except OSError as e:
+            print(f"config-agent: WARNING: cannot write {NIC_MTU_MARKER}: {e}",
+                  file=sys.stderr)
         try:
             cur_mtu = int(open("/sys/class/net/eth0/mtu").read().strip())
         except (OSError, ValueError):
             cur_mtu = 0
-        if cur_mtu < 1400:
-            run("ip link set dev eth0 mtu 1400")
+        if 0 < cur_mtu < VPN_NIC_MTU:
+            run(f"ip link set dev eth0 mtu {VPN_NIC_MTU}")
 
     # WARP: write markers for warp-agent.  When WARP is enabled, we start
     # dbus + warp-svc now so the VPN can connect during boot.  The

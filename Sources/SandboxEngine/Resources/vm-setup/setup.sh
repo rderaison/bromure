@@ -674,6 +674,13 @@ install_config configs/pihole-setupVars.conf /mnt/etc/pihole/setupVars.conf
 install_config configs/dnsmasq-pihole.conf   /mnt/etc/dnsmasq.d/pihole.conf
 install_config configs/dnsmasq-upstream.conf /mnt/etc/dnsmasq.d/upstream.conf
 
+# dhclient exit-hook: re-assert the VPN NIC MTU after dhclient re-applies the
+# DHCP option-26 floor (1280) on every lease event. config-agent drops the
+# marker for VPN profiles; without this hook the higher MTU WARP/WireGuard/
+# OpenVPN/IKEv2 need is clobbered by dhclient. Sourced by dhclient-script.
+mkdir -p /mnt/etc/dhcp/dhclient-exit-hooks.d
+install_config configs/dhclient-exit-hook-vpn-mtu /mnt/etc/dhcp/dhclient-exit-hooks.d/bromure-vpn-mtu 644
+
 # Chromium policies
 mkdir -p /mnt/etc/chromium/policies/managed
 install_config configs/chromium-policy.json /mnt/etc/chromium/policies/managed/bromure.json
