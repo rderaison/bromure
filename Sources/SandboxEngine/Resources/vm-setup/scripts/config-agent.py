@@ -1252,6 +1252,17 @@ def configure_services(cfg, ca_count):
         except OSError as e:
             print(f"config-agent: WARNING: cannot write {NIC_MTU_MARKER}: {e}",
                   file=sys.stderr)
+        # Also set it directly. xinitrc (which reads the marker) is normally the
+        # last setter at boot, but the pre-warm pool makes the config-agent vs
+        # xinitrc ordering unguaranteed; this covers the case where xinitrc's
+        # `ip link set` already ran (marker still absent → it used 1280) before
+        # this point. Only raises; a larger pinned vm.mtu is left alone.
+        try:
+            cur_mtu = int(open("/sys/class/net/eth0/mtu").read().strip())
+        except (OSError, ValueError):
+            cur_mtu = 0
+        if 0 < cur_mtu < VPN_NIC_MTU:
+            run(f"ip link set dev eth0 mtu {VPN_NIC_MTU}")
 
     # WARP: write markers for warp-agent.  When WARP is enabled, we start
     # dbus + warp-svc now so the VPN can connect during boot.  The
