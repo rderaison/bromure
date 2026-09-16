@@ -533,6 +533,14 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     let wsMenu = NSMenu(title: L("Workspaces"))
     wsMenuItem.submenu = wsMenu
 
+    // Sessions first: the thing a user does most — start an agent — leads.
+    let newSessionItem = NSMenuItem(title: L("New Session…"),
+                                    action: #selector(ACAppDelegate.newSessionAction(_:)),
+                                    keyEquivalent: "n")
+    newSessionItem.target = delegate
+    wsMenu.addItem(newSessionItem)
+    wsMenu.addItem(NSMenuItem.separator())
+
     let newWsItem = NSMenuItem(title: L("New Workspace…"),
                                action: #selector(ACAppDelegate.newWorkspaceAction(_:)),
                                keyEquivalent: "n")
@@ -586,12 +594,20 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     autoBoardItem.target = delegate
     wsMenu.addItem(autoBoardItem)
 
-    let taskBoardItem = NSMenuItem(title: L("Coding Board"),
+    let taskBoardItem = NSMenuItem(title: L("Kanban"),
                                    action: #selector(ACAppDelegate.showTaskBoardAction(_:)),
                                    keyEquivalent: "t")
     taskBoardItem.keyEquivalentModifierMask = [.command, .shift]
     taskBoardItem.target = delegate
     wsMenu.addItem(taskBoardItem)
+
+    // The Linux machine behind the selected session: terminal, files, containers.
+    let hoodItem = NSMenuItem(title: L("Linux"),
+                              action: #selector(ACAppDelegate.toggleUnderTheHoodAction(_:)),
+                              keyEquivalent: "u")
+    hoodItem.keyEquivalentModifierMask = [.command, .option]
+    hoodItem.target = delegate
+    wsMenu.addItem(hoodItem)
 
     let deleteWsItem = NSMenuItem(title: L("Delete"),
                                   action: #selector(ACAppDelegate.deleteWorkspaceAction(_:)),
@@ -1283,6 +1299,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 state: runState(for: p),
                 compromised: SessionDisk.isCompromised(profile: p, store: store))
         }
+        // A pane came or went: the selected session's tab may have appeared
+        // (boot landed) or the workspace gone to sleep.
+        agentSessionStore.reconcile(entries: w.listModel.entries)
+        w.sessionStageDidChange()
     }
 
     /// Coarse run state for a profile, for the source-list badge: a live VM is
@@ -1503,6 +1523,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Coding kanban (sidebar "Tasks"): agent-driven tasks flowing Backlog →
     /// In Progress → Testing → Done through git worktrees.
     let codingTaskStore = CodingTaskStore()
+    /// Agent sessions — the unit the home screen is built around.
+    let agentSessionStore = AgentSessionStore()
+    private(set) lazy var agentSessionEngine =
+        AgentSessionEngine(store: agentSessionStore, delegate: self)
     private(set) lazy var codingTaskEngine =
         CodingTaskEngine(store: codingTaskStore, delegate: self)
 
@@ -2196,6 +2220,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Sessions-first UI + the beautified transcript are the defaults; a
+        // user who flipped either off before keeps their choice (register
+        // only fills in missing keys).
+        UserDefaults.standard.register(defaults: [
+            "ui.beautifiedTranscript": true,
+            "ui.sessionsFirst": true,
+        ])
+        // Design/E2E hook: pin the app's appearance regardless of the system
+        // setting (BROMURE_AC_APPEARANCE=dark|light) for dark-mode shots.
+        switch ProcessInfo.processInfo.environment["BROMURE_AC_APPEARANCE"] {
+        case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        default: break
+        }
         profiles = store.loadAll()
         // Console-presence arbitration: track local input so agent browser
         // streams land on the console used last (server window vs a fat
@@ -2946,6 +2984,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // Coding-task board as the stage surface.
                     self.ensureUnifiedWindow().showTaskBoard()
                     window = self.unifiedWindow
+                case "newsession":
+                    // Sessions-first: the new-session screen as the stage surface.
+                    self.ensureUnifiedWindow().showNewSession()
+                    window = self.unifiedWindow
+                case let w where w.hasPrefix("session:"):
+                    // Sessions-first: a session's own stage ("session:<uuid>") —
+                    // live chat, launch surface, or the ended/asleep page.
+                    guard let sid = UUID(uuidString: String(w.dropFirst(8))),
+                          self.agentSessionStore.session(sid) != nil
+                    else { return ["error": "unknown session"] }
+                    self.ensureUnifiedWindow().selectSession(sid)
+                    window = self.unifiedWindow
                 case "timeline":
                     // Security Timeline window (E2E / doc-shot hook).
                     self.openSecurityTimelineAction(nil)
@@ -2978,6 +3028,64 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return ["error": "no app"] }
                 let action = params["action"] as? String ?? ""
                 switch action {
+                case "start-session":
+                    // E2E/doc hook for the home screen: start an agent session
+                    // the way the New Session screen would.
+                    guard let profileName = params["profile"] as? String,
+                          let profile = self.profiles.first(where: {
+                              $0.name.lowercased() == profileName.lowercased() }),
+                          let toolRaw = params["tool"] as? String,
+                          let tool = Profile.Tool(rawValue: toolRaw)
+                    else { return ["error": "profile and tool required"] }
+                    let id = self.agentSessionEngine.start(.init(
+                        profileID: profile.id, tool: tool,
+                        cwd: params["cwd"] as? String ?? "~",
+                        cloneURL: params["cloneURL"] as? String,
+                        openingMessage: params["message"] as? String))
+                    self.ensureUnifiedWindow().selectSession(id)
+                    return ["ok": true, "id": id.uuidString]
+                case "resume-session":
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          self.agentSessionStore.session(id) != nil
+                    else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.resume(id, message: params["message"] as? String)
+                    return ["ok": true]
+                case "hood":
+                    // Toggle "Under the hood" for the selected session.
+                    self.unifiedWindow?.toggleUnderTheHood(nil)
+                    return ["ok": true, "underTheHood": self.unifiedWindow?.listModel.underTheHood ?? false]
+                case "send":
+                    // Press Return in the selected session's chat composer.
+                    guard let id = self.unifiedWindow?.selectedID,
+                          let pane = self.pane(for: id), pane.debugSendComposer()
+                    else { return ["error": "no beautified composer on stage"] }
+                    return ["ok": true]
+                case "files":
+                    // Toggle the Files pane (⌃⌘E).
+                    self.unifiedWindow?.toggleFilePane(nil)
+                    return ["ok": true, "filePaneOpen": self.unifiedWindow?.filePaneOpen ?? false]
+                case "browser":
+                    // Toggle the agentic browser pane (⌃⌘B) for the selected workspace.
+                    self.unifiedWindow?.toggleBrowserPane(nil)
+                    return ["ok": true, "browserPaneOpen": self.unifiedWindow?.browserPaneOpen ?? false]
+                case "compose":
+                    // Type into the selected session's chat composer (palette shots).
+                    guard let text = params["text"] as? String,
+                          let id = self.unifiedWindow?.selectedID,
+                          let pane = self.pane(for: id), pane.debugSetComposer(text)
+                    else { return ["error": "no beautified composer on stage"] }
+                    return ["ok": true]
+                case "sessions":
+                    let model = self.unifiedWindow?.listModel
+                    return ["sessions": self.agentSessionStore.sessions.map { s -> [String: Any] in
+                        ["id": s.id.uuidString, "title": s.title, "tool": s.tool.rawValue,
+                         "cwd": s.cwd, "windowIndex": s.windowIndex ?? -1,
+                         "ended": s.endedAt != nil, "launching": s.isLaunching,
+                         "agentAlive": s.agentAlive ?? false,
+                         // What the sidebar shows (Ended is often computed, not stored).
+                         "bucket": model.map { SessionHome.bucket(for: s, in: $0).title } ?? "",
+                         "error": s.lastError ?? ""]
+                    }]
                 case "seed-security-timeline":
                     // Screenshot/demo fixture for the Security Timeline window:
                     // a representative spread of engines + outcomes, staggered
@@ -3428,6 +3536,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.moveToTesting(id)
                 case "to-in-progress":
                     self.codingTaskEngine.moveToInProgress(id)
+                case "resume":
+                    // Relaunch (or nudge) the agent on the task's branch.
+                    self.codingTaskEngine.resumeSession(id)
+                case "start-over":
+                    // Fresh run on a new branch (repo/branch gone).
+                    self.codingTaskEngine.startOver(id)
                 case "close-no-merge":
                     self.codingTaskEngine.closeWithoutMerge(id)
                 case "comment":
@@ -5657,6 +5771,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         w.showTaskBoard()
     }
 
+    /// ⌘N — the new-session screen as the stage surface.
+    @objc func newSessionAction(_ sender: Any?) {
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showNewSession()
+    }
+
+    /// ⌥⌘U — flip the selected task between its chat and the raw terminal.
+    @objc func toggleUnderTheHoodAction(_ sender: Any?) {
+        unifiedWindow?.toggleUnderTheHood(nil)
+    }
+
     @objc func deleteWorkspaceAction(_ sender: Any?) {
         if let id = unifiedWindow?.selectedID, let p = profiles.first(where: { $0.id == id }) {
             deleteProfile(p)
@@ -5749,13 +5876,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSApp.setActivationPolicy(.regular)
         let w = ensureUnifiedWindow()
         refreshSidebar()
-        // Pick a sensible initial selection so the stage isn't blank: a running
-        // attached pane keeps its own; otherwise show the first profile's card.
-        if w.selectedID == nil, let first = w.listModel.profileRows.first {
+        if !w.listModel.sessionsFirst, w.selectedID == nil,
+           let first = w.listModel.profileRows.first {
+            // Pick a sensible initial selection so the stage isn't blank: a
+            // running attached pane keeps its own; otherwise the first
+            // profile's card.
             w.selectRow(first.id)
         }
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // Sessions first: land on the session that needs the user (or the
+        // new-session screen when there's none yet). AFTER the window is on
+        // screen, so the stage surface is laid out against the real frame —
+        // presented earlier it kept the pre-show geometry. Once per window
+        // life, so reopening never yanks the user off a machine they picked.
+        if w.listModel.sessionsFirst, !w.didShowHome { w.selectInitialSession() }
+    }
+
+    /// The agent's last conversation in a session's folder, read from the
+    /// workspace (nil when it isn't running or nothing is there).
+    func fetchSessionTranscript(_ s: AgentSession) async -> String? {
+        let cwd = ScheduledAutomationEngine.guestPath(s.cwd)
+        guard let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: 0,
+                                                               agent: s.tool.rawValue),
+              let out = try? await guestExec(profileID: s.profileID, command: cmd, timeout: 20),
+              !out.isEmpty else { return nil }
+        return out
     }
 
     /// Open (or focus) the Trace Inspector window. Pass a profile to
@@ -8192,6 +8338,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             name = "task-resume"
             let prompt = args[5].isEmpty ? "-" : b64(args[5])
             encoded = args.prefix(5).map(b64) + [prompt]
+        case "agent-tab":
+            // Home-screen session: an interactive agent tab in a folder (no
+            // worktree, no yolo). cwd, display, tool, prompt[, flags].
+            guard args.count >= 4 else { return false }
+            name = "agent-tab"
+            let prompt = args[3].isEmpty ? "-" : b64(args[3])
+            encoded = args.prefix(3).map(b64) + [prompt]
+                + (args.count >= 5 && !args[4].isEmpty ? [b64(args[4])] : [])
         case "merge":
             // src, target, mainRoot, display, tool[, mode ("merge"/"squash")
             // [, autonomy ("ask"/"auto" — board merges commit without asking)]]

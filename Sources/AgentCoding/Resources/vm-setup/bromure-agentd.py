@@ -2201,6 +2201,33 @@ def _automation_tab(cwd, display, tool, prompt_b64, slug=""):
         _set_window_option(win, "@worktree", "wt/" + slug)
 
 
+def _agent_tab(cwd, display, tool, prompt_b64, flags=""):
+    """Session-first home: an INTERACTIVE agent tab in a folder the user
+    chose — the launch env of a worktree tab (tool, optional opening
+    message) without a worktree and without yolo flags, so the agent asks
+    its permission questions like it would in a terminal. `flags` carries
+    a resume flag when the host reopens a conversation. Folder trust is
+    pre-seeded: the user picked the folder."""
+    _ensure_seed_current()
+    if prompt_b64 == "-":
+        prompt_b64 = ""
+    if not os.path.isdir(cwd):
+        cwd = HOME
+    env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    if flags:
+        env["BROMURE_AC_WT_FLAGS"] = flags
+    _pretrust(tool, cwd)
+    win = _new_window(command="bash -l", cwd=cwd, env=env)
+    if not win:
+        worktree_err("session: could not open a tab at %s" % cwd)
+        return
+    # No fixed @label: the roster label follows the FOREGROUND program, so
+    # the host can tell a running agent ("codex") from one that exited
+    # (back to "bash") and offer to resume the conversation.
+    if display:
+        _set_window_option(win, "@display", display)
+
+
 def _seed_question_hooks():
     """Make a pending AskUserQuestion visible to the host. Claude Code only
     writes an assistant turn to the session transcript when the turn
@@ -3400,6 +3427,13 @@ def _dispatch_command(action, arg):
     elif action == "automation-finish":
         f = _fields(arg, 1)
         _bg(_automation_finish, _b64d(f[0]))
+    elif action == "agent-tab":
+        # Home screen session: an interactive agent tab in a folder. Fields
+        # 1-3 base64 (cwd, display, tool); 4 the raw prompt b64 or "-";
+        # optional 5 base64 flags (a resume flag).
+        f = _fields(arg, 5)
+        _bg(_agent_tab, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
+            f[3] if f[3] else "-", _b64d(f[4]) if f[4] else "")
     elif action == "task-resume":
         # Coding board: reopen the agent in an existing worktree with a
         # follow-up prompt. Fields 1-5 base64, field 6 the raw prompt b64.

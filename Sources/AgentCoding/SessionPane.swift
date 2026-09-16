@@ -315,6 +315,31 @@ final class SessionPane {
     }
     private var mountedBeautifiedHost: NSHostingView<BeautifiedSessionView>?
     private var beautifiedModel: BeautifiedSessionModel?
+    /// tmux window indices known to host a coding agent regardless of what
+    /// their title says yet — a task's worktree tab is an agent tab by
+    /// construction, but its OSC title only names the agent once the agent
+    /// is past its startup prompts (folder trust, login). Lets the
+    /// beautified view mount from the first frame, where those prompts are
+    /// surfaced as cards instead of a raw TUI.
+    var agentWindows: Set<Int> = []
+    /// Opening messages to echo into the beautified view of a window the
+    /// moment it mounts (keyed by tmux window index; consumed once) — a
+    /// session started with a message shows it, with the thinking cue, before
+    /// the agent has written a word.
+    var beautifiedSeeds: [Int: String] = [:]
+    /// Which agent a window runs (by tmux window index), told by whoever
+    /// started it — the "/" palette's catalog before the tab's title says.
+    var agentHints: [Int: String] = [:]
+    /// Per window: where the chat's transcript reads are copied (the
+    /// session's local cache), set by the window before the tab is shown.
+    var transcriptSinks: [Int: (Data) -> Void] = [:]
+
+    /// Debug hook: send what's in the chat composer (the Return key).
+    func debugSendComposer() -> Bool {
+        guard let m = beautifiedModel else { return false }
+        m.send()
+        return true
+    }
     /// The tmux window index the mounted beautified host is currently showing.
     /// The model re-targets whichever tab is active, so when the active tab
     /// changes to a *different* index we rebuild the host (reusing it would show
@@ -329,11 +354,15 @@ final class SessionPane {
 
     /// Flip between the raw terminal and the beautified transcript view, live.
     /// Remembers the choice app-globally as the default for subsequent panes.
-    func setViewMode(_ mode: SessionViewMode) {
+    /// `persist: false` flips this pane only — the tasks-first "under the hood"
+    /// toggle uses it so peeking at the terminal doesn't change the default.
+    func setViewMode(_ mode: SessionViewMode, persist: Bool = true) {
         guard mode != viewMode else { return }
         if beautifierLocked, mode == .beautified { return }   // registration VM: terminal only
         viewMode = mode
-        UserDefaults.standard.set(mode == .beautified, forKey: "ui.beautifiedTranscript")
+        if persist {
+            UserDefaults.standard.set(mode == .beautified, forKey: "ui.beautifiedTranscript")
+        }
         updateNativeTerminalMount()
     }
 
@@ -349,8 +378,9 @@ final class SessionPane {
         // show, so it stays the raw terminal even while the mode is toggled on.
         // The active tab's foreground program (its tmux label) is the same
         // signal the sidebar badges agent tabs with.
-        let activeIsAgent = BromureIcons.agentKind(
-            forLabel: model.tabs[model.activeIndex].shownLabel) != nil
+        let activeTab = model.tabs[model.activeIndex]
+        let activeIsAgent = BromureIcons.agentKind(forLabel: activeTab.shownLabel) != nil
+            || agentWindows.contains(activeTab.index)
         if viewMode == .beautified && activeIsAgent { mountBeautified(); return }
         unmountBeautified()
         // Restore the profile's window translucency for the terminal.
@@ -407,6 +437,26 @@ final class SessionPane {
         let m = BeautifiedSessionModel(provider: LocalTranscriptProvider(pane: self))
         beautifiedModel = m
         beautifiedTabIndex = windowIndex
+        if let seed = beautifiedSeeds.removeValue(forKey: windowIndex) { m.seedOpening(seed) }
+        m.transcriptSink = transcriptSinks[windowIndex]
+        // The tab's own terminal surface, for an interactive slash command
+        // shown inline in the chat (same tmux client the Linux view uses).
+        m.inlineTerminal = { [weak self] in
+            guard let self else { return nil }
+            if self.terminalController == nil {
+                self.terminalController = TerminalSessionController(profile: self.profile)
+            }
+            return self.terminalController?.view(forWindow: windowIndex)
+        }
+        let tab = model.tabs[model.activeIndex]
+        // Which agent's commands: the session's own tool, else the tab's
+        // label, else the workspace's main agent — the palette always has
+        // something to show (the label reads "bash" for agents under an
+        // interpreter, and a tab opened by hand carries no session hint).
+        m.loadSlashCommands(
+            agent: agentHints[windowIndex] ?? BromureIcons.agentKind(forLabel: tab.shownLabel)
+                ?? profile.tool.rawValue,
+            cwd: tab.cwd)
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -419,6 +469,14 @@ final class SessionPane {
             host.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
         ])
         containerView.window?.makeFirstResponder(host)
+    }
+
+    /// E2E/doc-shot hook: put text in the mounted beautified composer (to
+    /// render the "/" palette, say). No-op without a beautified view.
+    func debugSetComposer(_ text: String) -> Bool {
+        guard let m = beautifiedModel else { return false }
+        m.composerText = text
+        return true
     }
 
     private func unmountBeautified() {

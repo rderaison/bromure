@@ -83,6 +83,17 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// launching, when it isn't already its own repository. Off by default:
     /// a monorepo subdirectory must NOT get a nested repo by surprise.
     var initRepo: Bool?
+    /// `git clone` this URL into `repoPath` before the first start (or plan)
+    /// when the folder doesn't hold a repository yet. Uses the workspace's
+    /// git credentials / SSH key like any clone the agent would run. A
+    /// folder that already is a repo is left alone (a restart never
+    /// re-clones over the agent's work).
+    var cloneURL: String?
+    /// Set when a resume found nothing to resume INTO — the repository
+    /// folder or the task's branch is gone (workspace reset, merge cleanup,
+    /// a deleted checkout). `lastError` carries the explanation; the only
+    /// way forward is `startOver`, which clears this.
+    var restartNeeded: Bool?
 
     init(id: UUID = UUID(), title: String = "", details: String = "",
          profileID: UUID, repoPath: String = "~", tool: Profile.Tool = .claude,
@@ -96,7 +107,8 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
          validatedAt: Date? = nil, validationRequestedAt: Date? = nil,
          lastError: String? = nil, plan: String? = nil,
          parentTaskID: UUID? = nil, dependsOn: [UUID]? = nil,
-         queuedAt: Date? = nil, initRepo: Bool? = nil) {
+         queuedAt: Date? = nil, initRepo: Bool? = nil,
+         cloneURL: String? = nil) {
         self.id = id
         self.title = title
         self.details = details
@@ -125,6 +137,47 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         self.dependsOn = dependsOn
         self.queuedAt = queuedAt
         self.initRepo = initRepo
+        self.cloneURL = cloneURL
+    }
+
+    /// The clone URL, trimmed; nil when unset or blank.
+    var effectiveCloneURL: String? {
+        let u = (cloneURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return u.isEmpty ? nil : u
+    }
+
+    /// The user-facing part of a task prompt as it appears in a transcript:
+    /// the brief (and a resume preface), minus the operating notes and the
+    /// board-tool blurb the engine appends — plumbing, not conversation.
+    static func displayPrompt(_ text: String) -> String {
+        var s = text
+        for marker in ["\n---\nOperating notes for this task",
+                       "This session has the bromure-board MCP tools"] {
+            if let r = s.range(of: marker) { s = String(s[..<r.lowerBound]) }
+        }
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? text : trimmed
+    }
+
+    /// "github.com/org/repo" for a chip — scheme, user, and ".git" dropped.
+    static func shortRepoURL(_ url: String) -> String {
+        var s = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = s.range(of: "://") { s = String(s[r.upperBound...]) }
+        if let at = s.firstIndex(of: "@") { s = String(s[s.index(after: at)...]) }
+        s = s.replacingOccurrences(of: ":", with: "/")
+        while s.hasSuffix("/") { s.removeLast() }
+        if s.lowercased().hasSuffix(".git") { s.removeLast(4) }
+        return s
+    }
+
+    /// The folder name a clone of `url` would create ("repo" for
+    /// github.com/org/repo.git); nil when the URL has no usable last segment.
+    static func repoName(fromCloneURL url: String) -> String? {
+        let short = shortRepoURL(url)
+        guard let last = short.split(separator: "/").last else { return nil }
+        let name = String(last).map { ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_") ? $0 : "-" }
+        let cleaned = String(name).trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        return cleaned.isEmpty ? nil : cleaned
     }
 
     /// Dependencies not yet Done, looked up in `all`. Deleted dependencies
@@ -429,11 +482,18 @@ enum AgentSessionLocator {
             + "\(v)=\"-tmp-$(printf %s \"${\(src)#/tmp/}\" | tr /: -)\"; "
             + "else \(v)=\"--$(printf %s \"${\(src)#/}\" | tr /: -)--\"; fi; "
         }
+        // omp doesn't always keep the tab's folder as its own cwd (it has been
+        // seen running in /tmp while its tab sat in the home), so when the
+        // folder-keyed store is empty fall back to the newest omp session
+        // anywhere that's newer than the floor — the floor is the agent's
+        // own start time, so that file is this agent's.
         return "ob=\"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/sessions\"; "
             + enc("d", into: "os1") + enc("r", into: "os2")
             + "\(varName)=$(find \"$ob/$os1\" \"$ob/$os2\" -maxdepth 1 -name '*.jsonl' "
             + "-newermt @\(since) 2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null "
             + "| head -1); "
+            + "[ -z \"$\(varName)\" ] && [ \(since) -gt 0 ] && \(varName)=$(find \"$ob\" -mindepth 2 -maxdepth 2 "
+            + "-name '*.jsonl' -newermt @\(since) 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); "
     }
 
     /// RFC 3986 percent-encoding with an empty safe set ('/' included) —
@@ -786,6 +846,10 @@ final class CodingTaskEngine {
             // branch, and the card can never leave In Progress. Refuse it
             // with the reason instead.
             let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            if let cloneError = await self.cloneIfRequested(task, profileID: profileID, quotedPath: q) {
+                revert(cloneError)
+                return
+            }
             if task.initRepo == true {
                 _ = try? await delegate.guestExec(
                     profileID: profileID,
@@ -883,6 +947,10 @@ final class CodingTaskEngine {
             // the interview writes no code and must see the tree exactly
             // as the user left it). The directory just has to exist.
             let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            if let cloneError = await self.cloneIfRequested(task, profileID: profileID, quotedPath: q) {
+                revert(cloneError)
+                return
+            }
             if task.initRepo == true {
                 _ = try? await delegate.guestExec(
                     profileID: profileID,
@@ -1178,14 +1246,94 @@ final class CodingTaskEngine {
         BACDebug.log("tasks", "“\(task.title)”: \(unsent.count) comment(s) sent back")
     }
 
+    /// What is left of a task's checkout in the guest, probed before a
+    /// relaunch: the whole repository, its branch, or just the worktree
+    /// directory may be gone.
+    private enum CheckoutState {
+        case ok(root: String, dir: String)
+        case worktreeMissing(root: String)
+        case branchMissing(root: String)
+        case repoMissing
+    }
+
+    private func checkoutState(profileID: UUID, repoHint: String, branch: String) async -> CheckoutState {
+        guard let delegate, Self.isSafeBranch(branch) else { return .repoMissing }
+        let qp = Self.shellQuote(repoHint)
+        let cmd = "r=$(git -C \(qp) rev-parse --show-toplevel 2>/dev/null); "
+            + "[ -n \"$r\" ] || { echo repo-missing; exit 0; }; "
+            + "git -C \"$r\" show-ref --verify --quiet 'refs/heads/\(branch)' "
+            + "|| { echo \"branch-missing $r\"; exit 0; }; "
+            + "d=$(git -C \"$r\" worktree list --porcelain 2>/dev/null "
+            + "| awk -v b='branch refs/heads/\(branch)' '/^worktree /{d=substr($0,10)} $0==b {print d; exit}'); "
+            + "if [ -n \"$d\" ] && [ -d \"$d\" ]; then echo \"ok $r $d\"; else echo \"worktree-missing $r\"; fi"
+        guard let out = try? await delegate.guestExec(profileID: profileID, command: cmd, timeout: 15)
+        else { return .repoMissing }
+        let parts = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: " ", maxSplits: 2).map(String.init)
+        switch parts.first {
+        case "ok" where parts.count == 3:            return .ok(root: parts[1], dir: parts[2])
+        case "worktree-missing" where parts.count >= 2: return .worktreeMissing(root: parts[1])
+        case "branch-missing" where parts.count >= 2:   return .branchMissing(root: parts[1])
+        default:                                     return .repoMissing
+        }
+    }
+
+    /// Re-create a task's worktree directory for a branch that still exists
+    /// (the checkout was removed but the work is safe on the branch). The
+    /// original directory when the task remembers one, else the guest's
+    /// worktrees layout. nil on failure.
+    private func recreateWorktree(profileID: UUID, root: String, branch: String,
+                                  preferredDir: String?) async -> String? {
+        guard let delegate, Self.isSafeBranch(branch) else { return nil }
+        let dir: String
+        if let d = preferredDir, !d.isEmpty {
+            dir = d
+        } else {
+            let repoName = (root as NSString).lastPathComponent
+            dir = "/home/ubuntu/.bromure/worktrees/\(repoName)/\(branch.dropFirst("wt/".count))"
+        }
+        let qr = Self.shellQuote(root), qd = Self.shellQuote(dir)
+        let cmd = "git -C \(qr) worktree prune 2>/dev/null; mkdir -p \"$(dirname \(qd))\" && "
+            + "git -C \(qr) worktree add \(qd) '\(branch)' 2>&1 | tail -3 >&2; "
+            + "[ -d \(qd) ]"
+        guard (try? await delegate.guestExec(profileID: profileID, command: cmd, timeout: 60)) != nil
+        else { return nil }
+        return dir
+    }
+
+    /// Run the task again from scratch on a fresh branch — the way forward
+    /// when its repository or branch is gone. Keeps the brief and the review
+    /// comments (delivered with the new run's first prompt), drops the old
+    /// branch metadata and any done/merge state.
+    func startOver(_ taskID: UUID) {
+        guard let task = store.task(taskID),
+              task.stage == .inProgress || task.stage == .testing || task.stage == .done
+        else { return }
+        BACDebug.log("tasks", "“\(task.title)”: starting over on a fresh branch")
+        store.mutate(taskID) {
+            $0.stage = .backlog
+            $0.branchSlug = nil; $0.branch = nil; $0.worktreeDir = nil
+            $0.parentBranch = nil; $0.rootRepo = nil
+            $0.startedAt = nil; $0.testingAt = nil; $0.completedAt = nil
+            $0.mergingAt = nil; $0.merged = false; $0.prOpened = nil
+            $0.lastError = nil; $0.restartNeeded = nil
+        }
+        start(taskID)
+    }
+
     /// Recovery for a task whose session can't be found (workspace
-    /// rebooted, tab closed, agent dead): boot the workspace if needed and
-    /// re-launch the agent on the EXISTING worktree via guest task-resume.
-    /// Unsent review comments ride along; otherwise the agent gets a
-    /// resume brief telling it to pick up where the worktree stands.
+    /// rebooted, tab closed, agent dead) — or a finished task the user wants
+    /// to keep working on: boot the workspace if needed, make sure there is
+    /// a checkout to resume into, and re-launch the agent on the task's
+    /// branch via guest task-resume. Unsent review comments ride along;
+    /// otherwise the agent gets a resume brief telling it to pick up where
+    /// the worktree stands. A missing worktree directory is re-created from
+    /// the branch; a missing branch or repository is reported on the task
+    /// with `restartNeeded` (the page then offers Start over) instead of
+    /// failing silently inside the guest.
     func resumeSession(_ taskID: UUID) {
         guard let task = store.task(taskID),
-              task.stage == .inProgress || task.stage == .testing,
+              task.stage == .inProgress || task.stage == .testing || task.stage == .done,
               let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }),
               delegate != nil else { return }
         let profileID = task.profileID
@@ -1193,7 +1341,7 @@ final class CodingTaskEngine {
         let prompt = unsent.isEmpty
             ? Self.resumePrompt(for: task)
             : Self.feedbackPrompt(comments: unsent)
-        store.mutate(taskID) { $0.lastError = nil }
+        store.mutate(taskID) { $0.lastError = nil; $0.restartNeeded = nil }
         BACDebug.log("tasks", "“\(task.title)”: restarting session (\(branch))")
         Task { [weak self] in
             guard let self, let delegate = self.delegate else { return }
@@ -1219,23 +1367,82 @@ final class CodingTaskEngine {
                     "The workspace did not boot in time", comment: "task resume") }
                 return
             }
-            // A live session may already exist (workspace was just slow):
-            // deliver the comments there instead of opening a second tab.
-            if await self.tabIndex(profileID: profileID, branch: branch) != nil {
-                if !unsent.isEmpty {
-                    _ = await self.typeIntoSession(profileID: profileID,
-                                                   branch: branch, text: prompt)
-                }
-            } else {
-                guard delegate.automationWorktreeCommand(
+            // Relaunch the agent on the task's branch (a fresh tab) — only
+            // once there is a checkout to land in.
+            @MainActor func relaunch(root: String) -> Bool {
+                delegate.automationWorktreeCommand(
                     profileNameOrID: profileID.uuidString, action: "task-resume",
-                    args: [self.store.task(taskID)?.rootRepo ?? "", branch,
-                           self.store.task(taskID)?.parentBranch ?? "",
+                    args: [root, branch, self.store.task(taskID)?.parentBranch ?? "",
                            task.title, task.tool.rawValue, prompt])
-                else {
-                    self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
-                        "Couldn't reach the workspace — is it running?",
-                        comment: "task start") }
+            }
+            @MainActor func fail(_ reason: String, restart: Bool = false) {
+                self.store.mutate(taskID) {
+                    $0.lastError = reason
+                    $0.restartNeeded = restart ? true : nil
+                }
+            }
+            @MainActor func ensureCheckout() async -> String? {
+                let hint = (task.rootRepo ?? "").isEmpty
+                    ? ScheduledAutomationEngine.guestPath(task.repoPath) : task.rootRepo!
+                switch await self.checkoutState(profileID: profileID, repoHint: hint, branch: branch) {
+                case .ok(let root, let dir):
+                    self.store.mutate(taskID) {
+                        if ($0.rootRepo ?? "").isEmpty { $0.rootRepo = root }
+                        if ($0.worktreeDir ?? "").isEmpty { $0.worktreeDir = dir }
+                    }
+                    return root
+                case .worktreeMissing(let root):
+                    // The branch (and the work on it) is safe — only the
+                    // checkout directory went away. Put it back.
+                    BACDebug.log("tasks", "“\(task.title)”: worktree for \(branch) missing — re-creating")
+                    guard let dir = await self.recreateWorktree(
+                        profileID: profileID, root: root, branch: branch,
+                        preferredDir: task.worktreeDir) else {
+                        fail(String(format: NSLocalizedString(
+                            "The checkout for %@ is gone and couldn't be re-created in %@. Start over runs the task again on a new branch.",
+                            comment: "task resume"), branch, root), restart: true)
+                        return nil
+                    }
+                    self.store.mutate(taskID) { $0.rootRepo = root; $0.worktreeDir = dir }
+                    return root
+                case .branchMissing(let root):
+                    fail(String(format: NSLocalizedString(
+                        "The task's branch %@ no longer exists in %@ — its checkout was removed (merged and cleaned up, or deleted). Start over runs the task again on a new branch.",
+                        comment: "task resume"), branch, root), restart: true)
+                    return nil
+                case .repoMissing:
+                    fail(String(format: NSLocalizedString(
+                        "The repository folder “%@” is gone from the workspace, so there is nothing to resume into. Start over runs the task again from scratch%@.",
+                        comment: "task resume"), task.repoPath,
+                        task.effectiveCloneURL != nil
+                            ? NSLocalizedString(", cloning the repository first", comment: "task resume")
+                            : ""), restart: true)
+                    return nil
+                }
+            }
+            // A live session may already exist (workspace was just slow, or
+            // the user hit Resume on a session that's still there). Only a
+            // tab with a RUNNING agent can take a prompt: one where the agent
+            // exited (crash, /exit — a bare shell) is the "never done" case,
+            // so kill it and relaunch. An agent that is alive gets the
+            // comments, or a nudge to pick the task back up when there are
+            // none — before this, Resume on a live idle session did nothing.
+            if let idx = await self.tabIndex(profileID: profileID, branch: branch),
+               await self.agentAlive(profileID: profileID, windowIndex: idx, branch: branch) {
+                _ = await self.typeIntoSession(
+                    profileID: profileID, branch: branch,
+                    text: unsent.isEmpty ? Self.nudgePrompt : prompt)
+            } else {
+                if let idx = await self.tabIndex(profileID: profileID, branch: branch) {
+                    BACDebug.log("tasks", "“\(task.title)”: agent gone from tab \(idx) — relaunching")
+                    _ = try? await delegate.guestExec(
+                        profileID: profileID,
+                        command: "tmux kill-window -t bromure:\(idx)", timeout: 10)
+                }
+                guard let root = await ensureCheckout() else { return }
+                guard relaunch(root: root) else {
+                    fail(NSLocalizedString("Couldn't reach the workspace — is it running?",
+                                           comment: "task start"))
                     return
                 }
             }
@@ -1243,12 +1450,41 @@ final class CodingTaskEngine {
             self.store.mutate(taskID) {
                 $0.stage = .inProgress
                 $0.startedAt = now   // restart the session-gone clock
+                // A finished task picked back up is active again.
+                $0.completedAt = nil; $0.merged = false; $0.prOpened = nil; $0.mergingAt = nil
+                $0.restartNeeded = nil
                 for i in $0.comments.indices where $0.comments[i].sentAt == nil {
                     $0.comments[i].sentAt = now
                 }
             }
         }
     }
+
+    /// Is a coding agent still running in the session's tab? The attached
+    /// pane's roster label when there is one (the same signal the sidebar
+    /// badges agents with); a detached session asks tmux for the foreground
+    /// command. A bare shell means the agent exited.
+    private func agentAlive(profileID: UUID, windowIndex: Int, branch: String) async -> Bool {
+        if let tab = delegate?.pane(for: profileID)?.model.tabs
+            .first(where: { $0.worktreeBranch == branch }) {
+            return BromureIcons.agentKind(forLabel: tab.shownLabel) != nil
+        }
+        guard let delegate else { return false }
+        let out = try? await delegate.guestExec(
+            profileID: profileID,
+            command: "tmux display-message -p -t bromure:\(windowIndex) '#{pane_current_command}' 2>/dev/null",
+            timeout: 8)
+        return BromureIcons.agentKind(
+            forLabel: (out ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) != nil
+    }
+
+    /// Typed into a LIVE but idle session when the user hits Resume with no
+    /// review comments pending: pick the task back up and finish it.
+    nonisolated static let nudgePrompt =
+        "Please continue with this task from where you left off: run `git status` "
+        + "and `git log` to see what's already done, finish the remaining work, "
+        + "commit it, and hand the task to review with "
+        + "`sh ~/.bromure/agent-status.sh done` when complete."
 
     /// Prompt for re-launching an interrupted task session on its existing
     /// worktree: orient in the checkout, then continue as originally
@@ -1479,6 +1715,47 @@ final class CodingTaskEngine {
         "mkdir -p \(quotedPath) && cd \(quotedPath) && "
             + "{ [ \"$(git rev-parse --show-toplevel 2>/dev/null)\" = \"$(pwd -P)\" ] "
             + "|| git init -q; } && " + ensureHeadFragment
+    }
+
+    /// The guest command that clones `quotedURL` into `quotedPath` for a task
+    /// with a clone URL — only when the folder holds no repository yet: an
+    /// existing repo is left untouched (restarts never re-clone over work),
+    /// a non-empty non-repo folder is refused rather than clobbered. Never
+    /// prompts: a missing credential fails fast instead of hanging the
+    /// start; an unknown SSH host is pinned on first contact.
+    nonisolated static func cloneRepoCommand(quotedPath: String, quotedURL: String) -> String {
+        "if git -C \(quotedPath) rev-parse --show-toplevel >/dev/null 2>&1; then :; "
+            + "elif [ -e \(quotedPath) ] && [ -n \"$(ls -A \(quotedPath) 2>/dev/null)\" ]; then "
+            + "echo 'the folder exists and is not a git repository' >&2; exit 3; "
+            + "else mkdir -p \"$(dirname \(quotedPath))\" && "
+            + "GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes' "
+            + "git clone --quiet \(quotedURL) \(quotedPath) 2>&1 | tail -5 >&2; "
+            + "test \"${PIPESTATUS[0]}\" -eq 0; fi"
+    }
+
+    /// Run the task's clone (if it has a URL). nil = fine (cloned, or
+    /// nothing to do); otherwise the reason to revert the start with.
+    private func cloneIfRequested(_ task: CodingTask, profileID: UUID,
+                                  quotedPath: String) async -> String? {
+        guard let url = task.effectiveCloneURL, let delegate else { return nil }
+        let qu = "'" + url.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        BACDebug.log("tasks", "“\(task.title)”: cloning \(url) → \(task.repoPath)")
+        do {
+            // A big repo takes a while — well past the usual exec timeout.
+            _ = try await delegate.guestExec(
+                profileID: profileID,
+                command: "bash -c " + Self.shellQuote(
+                    Self.cloneRepoCommand(quotedPath: quotedPath, quotedURL: qu)),
+                timeout: 900)
+            return nil
+        } catch {
+            return String(format: NSLocalizedString("Couldn't clone %@ — %@", comment: "task start"),
+                          url, error.localizedDescription)
+        }
+    }
+
+    private nonisolated static func shellQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// HEAD-ensure alone, for repos the USER initialized: a brand-new

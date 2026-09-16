@@ -366,6 +366,28 @@ final class SessionListModel {
     /// (desktop-app look) instead of the raw terminal. Per-pane state mirrored
     /// here so the toolbar toggle can tint; updated on selection + flip.
     var beautifiedActive = false
+
+    // MARK: Sessions-first
+
+    /// The sidebar leads with agent sessions (grouped by what they need from
+    /// the user) and folds the machines away; off = the classic workspace
+    /// source list.
+    var sessionsFirst = false
+    /// The session on stage (its live chat, the launch surface, or the
+    /// ended/asleep page).
+    var selectedSessionID: UUID?
+    /// The selected session's machine and folder — what the Files pane
+    /// follows (the session's, even when its tab is gone or asleep).
+    var selectedSessionProfileID: Profile.ID?
+    var selectedSessionCwd: String?
+    /// The new-session screen is the stage surface.
+    var newSessionSelected = false
+    /// "Machines" disclosure in the session sidebar.
+    var machinesExpanded = false
+    /// "Under the hood": the raw terminal instead of the chat for the
+    /// selected session, plus the machine shortcuts and the geekier toolbar
+    /// controls.
+    var underTheHood = false
 }
 
 /// Right-click actions on a tab row. Handled by the window, which reads the

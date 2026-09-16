@@ -189,7 +189,7 @@ struct CodingTasksSection: View {
         VStack(alignment: .leading, spacing: 1) {
             HStack {
                 Button(action: onShowBoard) {
-                    Text(NSLocalizedString("Tasks", comment: "sidebar section"))
+                    Text(NSLocalizedString("Kanban", comment: "sidebar section"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(model.taskBoardSelected
                                          ? Color.accentColor : .secondary)
@@ -339,7 +339,7 @@ struct CodingKanbanView: View {
             ToolbarItem(placement: .principal) {
                 // .titleAndIcon is not the default in a navigation bar — a bare
                 // Label renders icon-only there.
-                Label(NSLocalizedString("Coding Tasks", comment: "coding kanban title"),
+                Label(NSLocalizedString("Kanban", comment: "coding kanban title"),
                       systemImage: "checklist")
                     .labelStyle(.titleAndIcon)
                     .font(.headline)
@@ -382,7 +382,7 @@ struct CodingKanbanView: View {
             Image(systemName: "checklist")
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(.tint)
-            Text(NSLocalizedString("Coding Tasks", comment: "coding kanban title"))
+            Text(NSLocalizedString("Kanban", comment: "coding kanban title"))
                 .font(.system(size: 16, weight: .bold))
             Spacer()
             Button { editing = newDraft() } label: {
@@ -1365,6 +1365,15 @@ private struct TaskEditorSheet: View {
                     .font(.system(size: 11))
                     .help(NSLocalizedString(
                         "Starting or planning first runs mkdir + git init (with an empty root commit) when the folder isn't already a git repository of its own. Leave off for a folder inside an existing repo.",
+                        comment: "task editor"))
+                TextField("", text: Binding(
+                    get: { task.cloneURL ?? "" },
+                    set: { task.cloneURL = $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }),
+                          prompt: Text(verbatim: "https://github.com/org/repo.git"))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .help(NSLocalizedString(
+                        "Optional: clone this git repository into the folder above before the first start, using the workspace's git credentials. Skipped when the folder already holds a repository.",
                         comment: "task editor"))
             }
             .frame(maxWidth: compact ? .infinity : nil, alignment: .leading)

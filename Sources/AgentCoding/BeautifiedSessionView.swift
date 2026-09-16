@@ -63,7 +63,19 @@ extension BeautifiedTranscriptProvider {
             "i=\(idx); "
             + "cwd=$(tmux display-message -p -t bromure:$i '#{pane_current_path}' 2>/dev/null); "
             + "tty=$(tmux display-message -p -t bromure:$i '#{pane_tty}' 2>/dev/null); "
-            + "pid=$(ps -t \"${tty#/dev/}\" -o pid=,stat= 2>/dev/null | awk '$2 ~ /\\+/ {print $1; exit}'); "
+            // The foreground process — but never the tab's SHELL: an agent
+            // launched by the managed .bashrc shares bash's foreground group,
+            // so bash reads as "+" too (and first, by pid). Its start time is
+            // the tab's, not the agent's, and its args carry no resume flag —
+            // a `--continue` relaunched in a fresh tab was floored out. Take
+            // the first "+" process that isn't a shell; a shell only if
+            // nothing else is in the foreground. Still the FIRST such process
+            // (pid order), so a short-lived tool child of the agent doesn't
+            // win either.
+            + "pid=$(ps -t \"${tty#/dev/}\" -o pid=,stat=,args= 2>/dev/null | awk '"
+            + "$2 ~ /\\+/ { if (first == \"\") first = $1; "
+            + "if (!found && $3 !~ /(^|\\/)-?(bash|sh|zsh|dash|fish|login)$/) { print $1; found = 1 } } "
+            + "END { if (!found) print first }'); "
             + "et=$(ps -o etimes= -p \"$pid\" 2>/dev/null | tr -d ' '); "
             + "if [ -n \"$et\" ]; then s=$(( $(date +%s) - et )); else s=0; fi; "
             // Resuming reattaches an older transcript → don't floor it out. Match
@@ -287,6 +299,32 @@ final class BeautifiedSessionModel: ObservableObject {
 
     var accent: Color { provider.accent }
 
+    /// The agent's slash commands for the "/" palette: built-ins at once,
+    /// the user's own (custom commands, skills) once read from the guest.
+    @Published var slashCommands: [SlashCommand] = []
+    @Published var agentDisplayName: String = ""
+    /// Every transcript read is handed here too (the session's local copy,
+    /// readable once the machine sleeps).
+    var transcriptSink: ((Data) -> Void)?
+
+    func loadSlashCommands(agent: String?, cwd: String?) {
+        guard let agent else { return }
+        agentDisplayName = Profile.Tool(rawValue: agent)?.displayName ?? agent
+        let builtIn = SlashCommandCatalog.builtIn(for: agent)
+        slashCommands = builtIn
+        guard let cmd = SlashCommandCatalog.discoveryCommand(
+            agent: agent, cwd: ScheduledAutomationEngine.guestPath(cwd ?? "~")) else { return }
+        Task { [weak self] in
+            guard let self, let out = await self.provider.execGuest(cmd, timeout: 10) else { return }
+            let extra = SlashCommandCatalog.parseDiscovery(out)
+            guard !extra.isEmpty else { return }
+            var seen = Set(builtIn.map(\.name))
+            var merged = builtIn
+            for c in extra where !seen.contains(c.name) { merged.append(c); seen.insert(c.name) }
+            self.slashCommands = merged
+        }
+    }
+
     private let provider: BeautifiedTranscriptProvider
     private var pollTask: Task<Void, Never>?
     /// Ids for optimistic (locally-added) items — descend from Int.max so they
@@ -315,8 +353,38 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Locally-echoed turns awaiting confirmation from the real transcript. Kept
     /// appended (so nothing flickers off) until the parse contains the same text
     /// — or they age out, in case the agent never records the turn.
-    private struct Pending { let item: TranscriptItem; let added: Date }
+    private struct Pending { let item: TranscriptItem; let added: Date; var ttl: TimeInterval = 45 }
     private var pending: [Pending] = []
+    /// A session started with an opening message: the message is echoed
+    /// before the agent has written anything, and the thinking cue is held
+    /// up until the agent's first words land (or a generous timeout) — so a
+    /// fresh session never opens on a blank "send a message to begin".
+    private var seededUntil: Date?
+
+    func seedOpening(_ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        pending.append(Pending(item: TranscriptItem(id: nextOptimisticID, kind: .userText(t), timestamp: nil),
+                               added: Date(), ttl: 180))
+        nextOptimisticID -= 1
+        rebuild()
+        seededUntil = Date().addingTimeInterval(120)
+        loading = false
+        setWorking(true)
+    }
+
+    /// The seeded "working" holds until the agent has answered (an assistant
+    /// turn in the real transcript) or the seed times out.
+    private func seedHolds() -> Bool {
+        guard let until = seededUntil else { return false }
+        let answered = parsedItems.contains {
+            if case .assistantText = $0.kind { return true }
+            if case .toolUse = $0.kind { return true }
+            return false
+        }
+        if answered || Date() > until { seededUntil = nil; return false }
+        return true
+    }
 
     init(provider: BeautifiedTranscriptProvider) {
         self.provider = provider
@@ -341,7 +409,7 @@ final class BeautifiedSessionModel: ObservableObject {
     /// or that have aged out (the agent never recorded them).
     private func reconcilePending() {
         pending.removeAll { p in
-            if Date().timeIntervalSince(p.added) > 45 { return true }
+            if Date().timeIntervalSince(p.added) > p.ttl { return true }
             guard case .userText(let t) = p.item.kind else { return true }
             return parsedItems.contains {
                 if case .userText(let rt) = $0.kind { return rt == t }
@@ -383,13 +451,14 @@ final class BeautifiedSessionModel: ObservableObject {
     }
 
     private func poll() async {
-        let isWorking = provider.isWorking()
+        let isWorking = provider.isWorking() || seedHolds()
         // Terminal-state scan FIRST and unconditionally: a trust/login prompt (or
         // an auth error) can be on screen before any transcript store exists, so
         // it must not sit behind the transcript fetch's early return.
         await scanTerminal()
         guard let data = await provider.fetchTranscript() else { setWorking(isWorking); loading = false; return }
         loading = false
+        if !data.isEmpty { transcriptSink?(data) }   // the session's local copy
         let parsed = AgentTranscript.parse(data)
         // Don't blank a populated transcript on a transient empty read (see
         // `emptyParseStreak`) — that's the "beautified view goes all white" bug.
@@ -412,7 +481,7 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         reconcilePending()
         rebuild()
-        setWorking(isWorking)
+        setWorking(provider.isWorking() || seedHolds())
     }
 
     /// Sniff the tab's terminal for a state the transcript can't carry — a
@@ -444,8 +513,9 @@ final class BeautifiedSessionModel: ObservableObject {
         guard let p = prompt, p.canAnswerTrust else { return }
         withAnimation(.easeOut(duration: 0.2)) { prompt = nil }
         setWorking(true)
+        let keys = p.trustKeys
         Task { [weak self] in
-            await self?.provider.pressKeys(["Down", "Enter"])
+            await self?.provider.pressKeys(keys)
             await self?.rescanSoon()
         }
     }
@@ -526,6 +596,9 @@ final class BeautifiedSessionModel: ObservableObject {
         let raw = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         let atts = pendingAttachments
         guard !raw.isEmpty || !atts.isEmpty, !sending else { return }
+        // A slash command: the TUI answers on screen, not in the transcript.
+        let isCommand = raw.hasPrefix("/") && atts.isEmpty && !raw.contains("\n")
+        dismissCommandOutput()
         composerText = ""
         pendingAttachments = []
         failure = nil
@@ -553,10 +626,193 @@ final class BeautifiedSessionModel: ObservableObject {
             }
             self.appendOptimistic(.userText(text))
             if !prefixed.isEmpty { _ = await self.provider.stage(prefixed) }
+            let before = isCommand ? await self.provider.captureScreen() : nil
+            // Sent exactly as typed: the TUIs run the completion their popup
+            // highlights, which is the exact match when the name is right —
+            // hence the palette offers only names the agent really has (a
+            // trailing space would turn it into a plain message for some).
             await self.provider.send(text)
             self.sending = false
+            if isCommand { self.watchCommand(raw, before: before) }
             await self.poll()
         }
+    }
+
+    // MARK: Slash commands → what the terminal printed
+
+    /// What the TUI printed in answer to a slash command sent from the
+    /// composer. Local commands (/help, /cost, /status, /model…) never reach
+    /// the transcript, so the chat reads the screen instead — whatever is new
+    /// since the command went out, minus the input box and status chrome.
+    struct CommandOutput: Equatable {
+        let command: String
+        var lines: [String]
+        /// The TUI opened a menu (a picker, a list to arrow through).
+        var menu: Bool
+        /// The card IS the terminal right now: the tab's own surface, inline,
+        /// so the menu is answered here with the arrow keys and Return.
+        var live: Bool
+        /// The watch is over; what's here is what the command printed.
+        var settled: Bool
+    }
+    @Published var commandOutput: CommandOutput?
+    private var commandWatch: Task<Void, Never>?
+    private var liveWatch: Task<Void, Never>?
+    private var commandBaseline: Set<String> = []
+    /// The tab's native terminal surface, for the inline card (nil when the
+    /// pane has none — a fat-client mirror, say).
+    var inlineTerminal: (() -> NSView?)?
+
+    func dismissCommandOutput() {
+        commandWatch?.cancel(); commandWatch = nil
+        liveWatch?.cancel(); liveWatch = nil
+        if commandOutput != nil {
+            withAnimation(.easeOut(duration: 0.15)) { commandOutput = nil }
+        }
+    }
+
+    /// Show the terminal inline for the current command (or fold it back).
+    func toggleLiveCommand() {
+        guard var out = commandOutput else { return }
+        out.live.toggle()
+        commandWatch?.cancel(); commandWatch = nil
+        withAnimation(.easeOut(duration: 0.15)) { commandOutput = out }
+        if out.live { watchLive(out.command) } else { liveWatch?.cancel(); liveWatch = nil }
+    }
+
+    private func watchCommand(_ command: String, before: String?) {
+        commandWatch?.cancel()
+        liveWatch?.cancel()
+        commandBaseline = Set((before ?? "").split(whereSeparator: \.isNewline).map { Self.normalizedLine($0) })
+        commandOutput = CommandOutput(command: command, lines: [], menu: false, live: false, settled: false)
+        commandWatch = Task { [weak self] in
+            // Captures at ~0.7, 1.6, 3, 5, 8 s: fast commands show at once,
+            // slow ones (a network call behind /status) still land.
+            let gaps: [UInt64] = [700, 900, 1400, 2000, 3000]
+            for (i, gap) in gaps.enumerated() {
+                try? await Task.sleep(nanoseconds: gap * 1_000_000)
+                guard let self, !Task.isCancelled else { return }
+                guard var out = self.commandOutput, out.command == command, !out.live else { return }
+                let last = i == gaps.count - 1
+                if let screen = await self.provider.captureScreen() {
+                    out.menu = Self.looksLikeMenu(screen)
+                    out.lines = Self.commandLines(screen, excluding: self.commandBaseline, command: command)
+                    // A menu is answered in the terminal — so bring the
+                    // terminal here, the moment it shows.
+                    if out.menu, self.inlineTerminal != nil {
+                        out.live = true
+                        withAnimation(.easeOut(duration: 0.15)) { self.commandOutput = out }
+                        self.watchLive(command)
+                        return
+                    }
+                }
+                out.settled = last
+                if out != self.commandOutput {
+                    withAnimation(.easeOut(duration: 0.15)) { self.commandOutput = out }
+                }
+            }
+        }
+    }
+
+    /// While the terminal is inline: once its menu has gone (a pick made,
+    /// Esc pressed), fold the card back to what the screen says now.
+    ///
+    /// "Gone" is judged on the menu's OWN lines: what the picker drew when it
+    /// opened is its signature, and the menu is over when that signature has
+    /// (mostly) left the screen and no picker footer remains — whatever the
+    /// idle prompt looks like afterwards (Claude Code's starts with the same
+    /// "❯" a highlighted row does).
+    private func watchLive(_ command: String) {
+        liveWatch?.cancel()
+        liveWatch = Task { [weak self] in
+            var signature: Set<String>? = nil
+            var calm = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, var out = self.commandOutput, out.command == command, out.live else { return }
+                guard let screen = await self.provider.captureScreen() else { continue }
+                let current = Set(screen.split(whereSeparator: \.isNewline).map { Self.normalizedLine($0) })
+                if signature == nil {
+                    // First look with the menu up: remember what it drew.
+                    let drawn = Set(Self.commandLines(screen, excluding: self.commandBaseline, command: command)
+                        .map { $0.trimmingCharacters(in: .whitespaces) })
+                    if Self.looksLikeMenu(screen), !drawn.isEmpty { signature = drawn }
+                    continue
+                }
+                let remaining = signature!.filter { current.contains($0) }.count
+                let mostlyGone = remaining <= max(1, signature!.count * 3 / 10)
+                if Self.menuHints(screen) || !mostlyGone { calm = 0; continue }
+                calm += 1
+                guard calm >= 2 else { continue }
+                out.live = false
+                out.menu = false
+                out.settled = true
+                out.lines = Self.commandLines(screen, excluding: self.commandBaseline, command: command)
+                withAnimation(.easeOut(duration: 0.15)) { self.commandOutput = out }
+                return
+            }
+        }
+    }
+
+    nonisolated static func normalizedLine(_ s: Substring) -> String {
+        s.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The screen's lines that weren't there before the command, minus box
+    /// borders, prompt rows and status bars. Capped so a long help screen
+    /// stays a card.
+    nonisolated static func commandLines(_ screen: String, excluding baseline: Set<String>,
+                                         command: String) -> [String] {
+        var out: [String] = []
+        for raw in screen.split(whereSeparator: \.isNewline) {
+            let line = normalizedLine(raw)
+            if line.isEmpty || baseline.contains(line) { continue }
+            if isChrome(line) || line == command || line.hasSuffix(" " + command) { continue }
+            out.append(String(raw).replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression))
+        }
+        if out.count > 60 { out = Array(out.prefix(60)) + ["…"] }
+        return out
+    }
+
+    /// Box borders, prompt rows, status bars.
+    nonisolated static func isChrome(_ line: String) -> Bool {
+        let box: Set<Character> = ["─", "│", "╭", "╮", "╯", "╰", "┃", "━", "┌", "┐", "└", "┘",
+                                   "├", "┤", "═", "║", "╌", "┄", " "]
+        if line.allSatisfy({ box.contains($0) }) { return true }
+        for p in [">", "❯", "›", "π ", "⏵", "$ "] where line.hasPrefix(p) { return true }
+        return false
+    }
+
+    /// The footer a picker prints while it's open ("Enter to confirm · Esc
+    /// to exit", "↑/↓ providers · Esc close"). Never the idle prompt's own
+    /// hints ("? for shortcuts", "esc to interrupt").
+    nonisolated static func menuHints(_ screen: String) -> Bool {
+        let tail = screen.split(whereSeparator: \.isNewline).suffix(30).joined(separator: "\n").lowercased()
+        return tail.contains("↑/↓") || tail.contains("↑↓") || tail.contains("enter to select")
+            || tail.contains("enter to confirm") || tail.contains("esc to cancel") || tail.contains("esc to close")
+            || tail.contains("esc to exit") || tail.contains("esc close")
+            || (tail.contains("arrow") && tail.contains("select"))
+    }
+
+    /// A menu is open: its footer hints, or a highlighted row ("❯ …") that
+    /// sits inside a list — not Claude Code's input prompt, which starts
+    /// with the same glyph but has nothing but chrome and "? for shortcuts"
+    /// under it.
+    nonisolated static func looksLikeMenu(_ screen: String) -> Bool {
+        if menuHints(screen) { return true }
+        let lines = Array(screen.split(whereSeparator: \.isNewline).suffix(40)).map { String($0) }
+        for (i, raw) in lines.enumerated() {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("❯ ") else { continue }
+            let below = lines[(i + 1)..<min(lines.count, i + 4)]
+            let listy = below.contains { r in
+                let t = r.trimmingCharacters(in: .whitespaces)
+                return !t.isEmpty && !isChrome(t) && !t.lowercased().contains("for shortcuts")
+                    && !t.lowercased().contains("esc to interrupt")
+            }
+            if listy { return true }
+        }
+        return false
     }
 
     /// Rewrite host file paths in `text` to guest paths, uploading each file.
@@ -633,6 +889,32 @@ final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
 struct BeautifiedSessionView: View {
     @ObservedObject var model: BeautifiedSessionModel
     @State private var dropTargeted = false
+    /// Keyboard highlight in the "/" palette.
+    @State private var paletteIndex = 0
+
+    /// What's typed after a leading "/" — the palette shows for it until a
+    /// space (the command is chosen) or a newline.
+    private var paletteQuery: String? {
+        let t = model.composerText
+        guard t.hasPrefix("/"), !t.contains(" "), !t.contains("\n") else { return nil }
+        return String(t.dropFirst())
+    }
+    private var paletteCommands: [SlashCommand] {
+        guard let q = paletteQuery, !model.slashCommands.isEmpty else { return [] }
+        return SlashCommandCatalog.matches(q, in: model.slashCommands)
+    }
+    private var paletteVisible: Bool { !paletteCommands.isEmpty }
+    private var paletteCurrent: SlashCommand? {
+        let cmds = paletteCommands
+        return cmds.indices.contains(paletteIndex) ? cmds[paletteIndex] : cmds.first
+    }
+
+    /// Put the command into the composer. One that takes text gets a trailing
+    /// space (the palette closes, the user types on); a bare one stays exact
+    /// so ↩ sends it.
+    private func complete(_ c: SlashCommand) {
+        model.composerText = "/" + c.name + (c.takesArgument ? " " : "")
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -641,6 +923,20 @@ struct BeautifiedSessionView: View {
             // card otherwise scrolls up out of view (the transcript auto-sticks
             // to the tail). Pin the current todo here, above the composer.
             if let todo = pinnedTodo { todoPinPanel(todo) }
+            if paletteVisible {
+                SlashCommandPalette(
+                    commands: paletteCommands,
+                    agentName: model.agentDisplayName,
+                    highlighted: paletteIndex,
+                    onPick: { c in
+                        complete(c)
+                        if !c.takesArgument { model.send() }
+                    },
+                    onHover: { paletteIndex = $0 })
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             Divider().opacity(0.5)
             if !model.pendingAttachments.isEmpty {
                 PendingAttachmentChips(files: model.pendingAttachments,
@@ -649,7 +945,10 @@ struct BeautifiedSessionView: View {
                     .padding(.top, 8)
             }
             ChatComposer(
-                placeholder: NSLocalizedString("Message the agent…  (or drop files)", comment: "beautified composer"),
+                placeholder: model.agentDisplayName.isEmpty
+                    ? NSLocalizedString("Message the agent…  (or drop files)", comment: "beautified composer")
+                    : String(format: NSLocalizedString("Message %@…  (or drop files)", comment: "beautified composer"),
+                             model.agentDisplayName),
                 text: $model.composerText,
                 busy: model.sending,
                 accent: model.accent,
@@ -659,6 +958,32 @@ struct BeautifiedSessionView: View {
                 onSend: { model.send() })
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+        }
+        .animation(.easeOut(duration: 0.15), value: paletteVisible)
+        .onChange(of: paletteQuery) { _, _ in paletteIndex = 0 }
+        // Palette keys. Arrow/tab/return are answered here only while the
+        // palette is up; otherwise they fall through to the text field.
+        .onKeyPress(.upArrow) {
+            guard paletteVisible else { return .ignored }
+            paletteIndex = max(0, paletteIndex - 1); return .handled
+        }
+        .onKeyPress(.downArrow) {
+            guard paletteVisible else { return .ignored }
+            paletteIndex = min(paletteCommands.count - 1, paletteIndex + 1); return .handled
+        }
+        .onKeyPress(.tab) {
+            guard paletteVisible, let c = paletteCurrent else { return .ignored }
+            complete(c); return .handled
+        }
+        .onKeyPress(.return) {
+            // ↩ completes a partial command; on an exact match it falls
+            // through and the composer sends it.
+            guard paletteVisible, let c = paletteCurrent, c.name != paletteQuery else { return .ignored }
+            complete(c); return .handled
+        }
+        .onKeyPress(.escape) {
+            guard paletteVisible else { return .ignored }
+            model.composerText = ""; return .handled
         }
         // A chat surface, not a terminal: opaque so it never picks up the
         // window's terminal-translucency (which reads as a gray scrim here).
@@ -695,8 +1020,12 @@ struct BeautifiedSessionView: View {
                 } else {
                     Image(systemName: "text.bubble")
                         .font(.system(size: 30)).foregroundStyle(.tertiary)
-                    Text(NSLocalizedString("No agent activity yet — send a message to begin.",
-                                           comment: "beautified empty"))
+                    Text(model.agentDisplayName.isEmpty
+                         ? NSLocalizedString("Say what you need — the agent is listening.",
+                                             comment: "beautified empty")
+                         : String(format: NSLocalizedString("%@ is ready. Say what you need.",
+                                                            comment: "beautified empty"),
+                                  model.agentDisplayName))
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }
@@ -710,6 +1039,15 @@ struct BeautifiedSessionView: View {
                             // composer, not inline (where it scrolls away).
                             if !Self.isTodo(item) { itemRow(item) }
                         }
+                        if let out = model.commandOutput {
+                            CommandCard(output: out,
+                                        terminal: out.live ? model.inlineTerminal?() : nil,
+                                        canGoLive: model.inlineTerminal != nil,
+                                        onToggleLive: { model.toggleLiveCommand() },
+                                        onDismiss: { model.dismissCommandOutput() })
+                                .id("beautified-command")
+                                .transition(.opacity)
+                        }
                         if let prompt = model.prompt {
                             PromptCard(prompt: prompt,
                                        onTrust: { model.trustFolder() },
@@ -722,7 +1060,7 @@ struct BeautifiedSessionView: View {
                             FailureCard(failure: failure)
                                 .id("beautified-failure")
                                 .transition(.opacity)
-                        } else if model.working {
+                        } else if model.working, model.commandOutput == nil {
                             liveCue.id("beautified-thinking")
                         }
                         Color.clear.frame(height: 1).id(Self.tailID)
@@ -732,6 +1070,7 @@ struct BeautifiedSessionView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 16)
                 }
+                .onChange(of: model.commandOutput) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.revision) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.working) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.failure) { _, _ in scrollToTail(proxy) }
@@ -1094,8 +1433,12 @@ struct TerminalPrompt: Equatable {
     let kind: Kind
     /// Trust: the folder path. (Login carries its state in the fields below.)
     var detail: String = ""
-    /// Trust dialog we recognize well enough to answer with Down,Enter.
+    /// Trust dialog we recognize well enough to answer inline.
     var canAnswerTrust: Bool = false
+    /// The keystrokes that accept it: Claude's picker needs Down then Enter
+    /// ("Yes, I trust this folder" is the second option); Codex defaults to
+    /// "Yes, continue", so Enter alone.
+    var trustKeys: [String] = ["Down", "Enter"]
     /// Login — the method menu (non-empty at the "Select login method" stage).
     var loginMethods: [LoginOption] = []
     /// Login — the OAuth sign-in URL, once the agent prints it.
@@ -1135,12 +1478,21 @@ struct TerminalPrompt: Equatable {
                 awaitingCode: low.contains("paste code here"))
         }
 
-        // Folder-trust dialog.
+        // Folder-trust dialog (Claude's picker, Codex's "Do you trust the
+        // contents of this directory?").
         if trustNeedles.contains(where: { low.contains($0) }) {
+            // The folder: a line that is just a path (Claude), else the first
+            // absolute path mentioned ("You are in /home/…" — Codex).
             let folder = trimmed.first(where: { $0.hasPrefix("/") && !$0.contains(" ") })
+                ?? trimmed.joined(separator: " ").split(separator: " ")
+                    .first(where: { $0.hasPrefix("/home/") || $0.hasPrefix("/root/") })
+                    .map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: ".,:;)")) }
                 ?? NSLocalizedString("this folder", comment: "prompt")
+            let claudePicker = low.contains("yes, i trust this folder")
+            let codexPicker = low.contains("yes, continue")
             return TerminalPrompt(kind: .trust, detail: folder,
-                                  canAnswerTrust: low.contains("yes, i trust this folder"))
+                                  canAnswerTrust: claudePicker || codexPicker,
+                                  trustKeys: claudePicker ? ["Down", "Enter"] : ["Enter"])
         }
         return nil
     }
@@ -1181,6 +1533,120 @@ enum TerminalScan {
         if let p = TerminalPrompt.detect(tail: tail) { return .prompt(p) }
         if let f = SessionFailure.detect(tail: tail) { return .failure(f) }
         return nil
+    }
+}
+
+/// What the terminal printed after a slash command: a monospace card under
+/// the command, refreshed for a few seconds, with the way to the real
+/// terminal when the command opened a menu there.
+private struct CommandCard: View {
+    let output: BeautifiedSessionModel.CommandOutput
+    /// The tab's terminal surface to show inline while `output.live`.
+    let terminal: NSView?
+    let canGoLive: Bool
+    let onToggleLive: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(output.command)
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                if !output.settled, !output.live { ProgressView().controlSize(.mini) }
+                if output.live {
+                    Text(NSLocalizedString("↑↓ move · ⏎ pick · esc close", comment: "command card"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
+                if canGoLive {
+                    Button(action: onToggleLive) {
+                        Label(output.live
+                              ? NSLocalizedString("Fold", comment: "command card")
+                              : NSLocalizedString("Interact", comment: "command card"),
+                              systemImage: output.live ? "rectangle.compress.vertical" : "keyboard")
+                            .font(.system(size: 11.5, weight: .medium))
+                    }
+                    .controlSize(.small)
+                    .help(output.live
+                          ? NSLocalizedString("Back to the printed output", comment: "command card")
+                          : NSLocalizedString("Show the terminal here and type into it", comment: "command card"))
+                }
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("Dismiss", comment: ""))
+            }
+            if output.live, let terminal {
+                // The real thing: the tab's own surface, sized to a comfortable
+                // picker. Keys go straight to the agent.
+                InlineTerminalView(terminal: terminal)
+                    .frame(height: 380)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.10)))
+            } else if output.lines.isEmpty {
+                Text(output.settled
+                     ? NSLocalizedString("Nothing new appeared in the terminal.", comment: "command card")
+                     : NSLocalizedString("Waiting for the terminal…", comment: "command card"))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.tertiary)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(output.lines.joined(separator: "\n"))
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: true, vertical: true)
+                }
+                if output.menu, !canGoLive {
+                    Text(NSLocalizedString("This command opened a menu in the terminal — make your pick there (⌥⌘U).", comment: "command card"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.08)))
+    }
+}
+
+/// Hosts the tab's native terminal surface inside the chat for the length
+/// of an interactive command. The surface is the same one the Linux view
+/// mounts — one tmux client, re-parented — and goes back to being unmounted
+/// when the card folds.
+private struct InlineTerminalView: NSViewRepresentable {
+    let terminal: NSView
+
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        return container
+    }
+
+    func updateNSView(_ container: NSView, context: Context) {
+        guard terminal.superview !== container else { return }
+        terminal.removeFromSuperview()
+        terminal.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(terminal)
+        NSLayoutConstraint.activate([
+            terminal.topAnchor.constraint(equalTo: container.topAnchor),
+            terminal.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            terminal.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            terminal.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        ])
+        // The keys are the point: focus it as soon as it's on screen.
+        DispatchQueue.main.async { container.window?.makeFirstResponder(terminal) }
+    }
+
+    static func dismantleNSView(_ container: NSView, coordinator: ()) {
+        let win = container.window
+        for sub in container.subviews { sub.removeFromSuperview() }
+        win?.makeFirstResponder(nil)
     }
 }
 
@@ -1268,7 +1734,7 @@ private struct PromptCard: View {
             .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
         } else {
             Text(NSLocalizedString(
-                "Switch to the terminal view (the transcript toggle in the toolbar) to respond.",
+                "Open Linux (⌥⌘U) to answer in the terminal.",
                 comment: "prompt hint"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }

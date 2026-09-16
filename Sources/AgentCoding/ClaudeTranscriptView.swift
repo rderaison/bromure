@@ -1342,7 +1342,9 @@ struct TranscriptItemView: View {
             // No role label — the filled card (against the assistant's plain
             // flowing prose) and the accent spine already read as "your turn",
             // the way Codex/Claude desktop distinguish input from output.
-            Text(text)
+            // A task prompt shows the brief only — the operating notes the
+            // engine appends are plumbing, not conversation.
+            Text(CodingTask.displayPrompt(text))
                 .font(.system(size: Self.userTextSize))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
