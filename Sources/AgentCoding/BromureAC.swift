@@ -2019,6 +2019,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var browserMCPBridges: [Profile.ID: BrowserMCPVsockBridge] = [:]
     /// Coding-board MCP listeners (vsock 5831), one per running workspace.
     var taskMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
+    /// Automations MCP listeners (vsock 5833), one per running workspace.
+    var automationMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
     /// Plan-stream listeners (vsock 5832), one per running workspace — the
     /// streamed planning drivers connect here (see PlanEventBridge).
     var planEventBridges: [Profile.ID: PlanEventBridge] = [:]
@@ -8181,6 +8183,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         profileID: pid,
                         store: { [weak self] in self?.codingTaskStore },
                         engine: { [weak self] in self?.codingTaskEngine }))
+                // Automations MCP listener (vsock 5833): every agent in this
+                // workspace can list / create / edit / delete / run the
+                // workspace's OWN automations — the bridge is per machine,
+                // so the scope is the VM the call came from, not an argument.
+                self.automationMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: AutomationMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.scheduledAutomationStore },
+                        profile: { [weak self] in self?.profiles.first { $0.id == pid } },
+                        save: { [weak self] a in self?.saveAutomation(a) },
+                        remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
+                        runNow: { [weak self] id in self?.runAutomationNow(id) }),
+                    port: SessionDisk.automationMCPVsockPort)
                 // Plan-stream listener (vsock 5832): streamed planning
                 // drivers (claude SDK / codex app-server / grok ACP).
                 let planBridge = PlanEventBridge(socketDevice: dev)
@@ -10385,6 +10401,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         browserMCPBridges.removeValue(forKey: profile.id)
         taskMCPBridges[profile.id]?.stop()
         taskMCPBridges.removeValue(forKey: profile.id)
+        automationMCPBridges[profile.id]?.stop()
+        automationMCPBridges.removeValue(forKey: profile.id)
         planEventBridges[profile.id]?.stop()
         planEventBridges.removeValue(forKey: profile.id)
         planStreamHub.removeSessions(profileID: profile.id)
@@ -11095,6 +11113,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         profileID: pid,
                         store: { [weak self] in self?.codingTaskStore },
                         engine: { [weak self] in self?.codingTaskEngine }))
+                // Automations MCP listener (vsock 5833): every agent in this
+                // workspace can list / create / edit / delete / run the
+                // workspace's OWN automations — the bridge is per machine,
+                // so the scope is the VM the call came from, not an argument.
+                self.automationMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: AutomationMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.scheduledAutomationStore },
+                        profile: { [weak self] in self?.profiles.first { $0.id == pid } },
+                        save: { [weak self] a in self?.saveAutomation(a) },
+                        remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
+                        runNow: { [weak self] id in self?.runAutomationNow(id) }),
+                    port: SessionDisk.automationMCPVsockPort)
                 // Plan-stream listener (vsock 5832) — see the matching block
                 // on the warm-boot path.
                 let planBridge = PlanEventBridge(socketDevice: dev)

@@ -840,6 +840,11 @@ public final class SessionDisk {
         try Self.taskMCPShimScript.write(
             to: tmp.appendingPathComponent("bromure-task-mcp.py"),
             atomically: true, encoding: .utf8)
+        // Automations MCP shim — always on, for every agent (it's declared in
+        // the user-scope MCP configs next to the browser server).
+        try Self.automationMCPShimScript.write(
+            to: tmp.appendingPathComponent("bromure-automations-mcp.py"),
+            atomically: true, encoding: .utf8)
 
         // Plan-stream driver assets — staged unconditionally, like the task
         // MCP shim. bromure-plan-driver.py adapts codex/grok (and bridges
@@ -1109,6 +1114,21 @@ public final class SessionDisk {
     /// task tools coding-task agents get (set plan, create subtasks, hand to
     /// review). Sibling of the browser MCP, one port over.
     public static let taskBoardMCPVsockPort: UInt32 = 5831
+    /// The automations MCP (AutomationMCPServer): every agent in the
+    /// workspace can list / create / edit / delete / run ITS automations.
+    public static let automationMCPVsockPort: UInt32 = 5833
+    static let automationMCPShimGuestPath = "/mnt/bromure-meta/bromure-automations-mcp.py"
+    static var automationMCPClaudeEntry: [String: Any] {
+        ["command": "python3", "args": [automationMCPShimGuestPath]]
+    }
+    /// The task shim, pointed at the automations port (same reconnecting
+    /// stdio↔vsock pump; no branch to announce).
+    static var automationMCPShimScript: String {
+        taskMCPShimScript
+            .replacingOccurrences(of: "PORT = \(taskBoardMCPVsockPort)", with: "PORT = \(automationMCPVsockPort)")
+            .replacingOccurrences(of: "bromure-task-mcp", with: "bromure-automations-mcp")
+            .replacingOccurrences(of: "task-board MCP", with: "automations MCP")
+    }
     static let taskMCPShimGuestPath = "/mnt/bromure-meta/bromure-task-mcp.py"
     /// Host vsock port for the plan-stream channel (plan-stream protocol
     /// v1): guest plan drivers connect here and exchange NDJSON events/
@@ -1333,7 +1353,10 @@ public final class SessionDisk {
         servers: [MCPServer],
         fakes: [String: (envVar: String, fake: String)] = [:]
     ) -> String {
-        var mcpServers: [String: Any] = ["browser": browserMCPClaudeEntry]
+        var mcpServers: [String: Any] = [
+            "browser": browserMCPClaudeEntry,
+            "automations": automationMCPClaudeEntry,
+        ]
         for server in servers {
             // Raw JSON mode: parse and use as-is (allows OAuth blocks,
             // custom fields, or any config shape the form can't express).
@@ -1549,6 +1572,10 @@ public final class SessionDisk {
             "[mcp_servers.browser]",
             "command = \"python3\"",
             "args = [\(tomlQuote(browserMCPShimGuestPath))]",
+            "",
+            "[mcp_servers.automations]",
+            "command = \"python3\"",
+            "args = [\(tomlQuote(automationMCPShimGuestPath))]",
         ]
         for server in servers {
             // Raw JSON servers are written to Claude Code config only;
