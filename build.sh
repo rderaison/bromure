@@ -85,7 +85,21 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
-echo "Binary built at: $BINARY"
+# The Mach-O must carry the SDK it was built against (LC_BUILD_VERSION
+# "sdk"). A binary stamped with the deployment target instead (14.0) makes
+# AppKit on macOS 26 render the legacy look — grey window fill, taller
+# title bar, no glass. That happens when the toolchain's swift is run
+# outside its Xcode context (no DEVELOPER_DIR / xcrun); going through
+# /usr/bin/swift, as this script does, records the real SDK (27.0 today).
+SDK_STAMP=$(otool -l "$BINARY" | awk '/LC_BUILD_VERSION/{f=1} f && /^ *sdk /{print $2; exit}')
+MINOS_STAMP=$(otool -l "$BINARY" | awk '/LC_BUILD_VERSION/{f=1} f && /^ *minos /{print $2; exit}')
+if [ -z "$SDK_STAMP" ] || [ "$SDK_STAMP" = "$MINOS_STAMP" ]; then
+    echo "ERROR: $BINARY is stamped sdk=${SDK_STAMP:-?} (deployment target ${MINOS_STAMP:-?}):" >&2
+    echo "       it would get the legacy AppKit look. Build through /usr/bin/swift (xcrun context)." >&2
+    exit 1
+fi
+
+echo "Binary built at: $BINARY (SDK $SDK_STAMP, min macOS $MINOS_STAMP)"
 
 # Signing identity: use CODESIGN_IDENTITY env var, or fall back to ad-hoc (-)
 SIGN_ID="${CODESIGN_IDENTITY:--}"

@@ -104,6 +104,19 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
+# Same guard as build.sh: a binary stamped with the deployment target as
+# its SDK (LC_BUILD_VERSION sdk == minos) gets the legacy AppKit look on
+# macOS 26. Happens when the toolchain's swift runs outside its Xcode
+# context; /usr/bin/swift records the real SDK.
+SDK_STAMP=$(otool -l "$BINARY" | awk '/LC_BUILD_VERSION/{f=1} f && /^ *sdk /{print $2; exit}')
+MINOS_STAMP=$(otool -l "$BINARY" | awk '/LC_BUILD_VERSION/{f=1} f && /^ *minos /{print $2; exit}')
+if [ -z "$SDK_STAMP" ] || [ "$SDK_STAMP" = "$MINOS_STAMP" ]; then
+    echo "ERROR: $BINARY is stamped sdk=${SDK_STAMP:-?} (deployment target ${MINOS_STAMP:-?}):" >&2
+    echo "       it would get the legacy AppKit look. Build through /usr/bin/swift (xcrun context)." >&2
+    exit 1
+fi
+echo "SDK stamp: $SDK_STAMP (min macOS $MINOS_STAMP)"
+
 echo "Binary: $BINARY"
 
 # --- Create app bundle ---
