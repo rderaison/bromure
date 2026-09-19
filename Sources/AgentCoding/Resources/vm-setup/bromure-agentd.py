@@ -4257,6 +4257,7 @@ _UNIT_CONTENT = r"""[Unit]
 Description=Bromure guest agent daemon
 After=mnt-bromure\x2dmeta.mount network.target
 StartLimitIntervalSec=0
+ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
 [Service]
 Type=simple
 User=ubuntu
@@ -4268,6 +4269,24 @@ TimeoutStopSec=5
 [Install]
 WantedBy=multi-user.target
 """
+
+
+def task_apply_hostname():
+    """The workspace's hostname, from the meta share (hostname.txt). The
+    host-written tty1 .bash_profile used to do this before the agent ran;
+    on images that bake the agent's unit (imageVersion >= 201) that file
+    is gone with the virtiofs home, and nothing else runs early enough —
+    so it lives here too. Idempotent; runs before anything else."""
+    want = _read_text(os.path.join(META, "hostname.txt")).split("\n")[0].strip()
+    if not want or want == socket.gethostname():
+        return
+    # /etc/hosts first, so subsequent sudo calls can resolve the new name.
+    hosts = ("127.0.0.1\tlocalhost %s\n::1\tlocalhost %s\n127.0.1.1\t%s\n\n"
+             "# Bromure AC: managed at session boot.\n" % (want, want, want))
+    _sudo_write("/etc/hosts", hosts)
+    _sudo(["hostname", want])
+    _sudo_write("/etc/hostname", want + "\n")
+    log("agentd", "hostname -> %s" % want)
 
 
 def task_fix_systemd_unit():
@@ -4620,6 +4639,7 @@ def main():
         pass
 
     # 2. One-shot session tasks (each isolated; a failure never aborts boot).
+    _run_once("hostname", task_apply_hostname)
     _run_once("unit", task_fix_systemd_unit)
     _run_once("mtu", task_set_mtu)
     _run_once("ca", task_install_ca)

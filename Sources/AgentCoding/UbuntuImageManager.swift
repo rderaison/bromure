@@ -54,7 +54,11 @@ public final class UbuntuImageManager {
     /// Bumped to 31 (with explicit approval) to bake in the cloud
     /// CLIs needed for the Credentials → Cloud sections to work
     /// out of the box: kubectl, doctl, awscli v2, gcloud, az.
-    public static let imageVersion = "200"
+    /// Bumped to 201 (with explicit approval, v5.0.0) to bake + enable
+    /// the guest agent's systemd unit, so ext4-home boots no longer
+    /// attach the `bromure-home` virtiofs bootstrap share (see
+    /// `agentUnitBakedImageVersion`).
+    public static let imageVersion = "201"
 
     /// Ubuntu LTS release we target. Update when a new LTS lands.
     public static let ubuntuRelease = "noble"
@@ -149,6 +153,22 @@ public final class UbuntuImageManager {
         let major = Self.majorVersion(
             of: stamp.trimmingCharacters(in: .whitespacesAndNewlines))
         return major != Self.imageVersion
+    }
+
+    /// First base-image major that bakes (and enables) the guest agent's
+    /// systemd unit, so a fresh system disk starts the agent from the meta
+    /// share by itself and applies the workspace hostname. Older images
+    /// rely on the host-written tty1 `.bash_profile` reaching the guest
+    /// through the `bromure-home` virtiofs share — the only reason that
+    /// share is still attached on ext4-home boots (see UbuntuSandboxVM).
+    public static let agentUnitBakedImageVersion = 201
+
+    /// The installed base image starts the guest agent on its own: no
+    /// bootstrap home share needed at /home/ubuntu.
+    public var baseImageStartsAgentItself: Bool {
+        guard let stamp = installedImageVersion,
+              let major = Int(Self.majorVersion(of: stamp)) else { return false }
+        return major >= Self.agentUnitBakedImageVersion
     }
 
     /// On-disk version stamp ("31", "32", …) or nil when no image.

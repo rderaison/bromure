@@ -731,6 +731,34 @@ cat > /etc/skel/.bash_profile <<'EOB'
 [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 EOB
 
+# The guest agent as a baked, enabled unit (imageVersion >= 201): systemd
+# starts it from the meta share on every boot, so a fresh system disk needs
+# no host-written .bash_profile — and no virtiofs mount at /home/ubuntu —
+# to bootstrap it; the agent then mounts the ext4 home image itself and
+# applies the workspace hostname from the meta share. Keep the text
+# byte-identical with bromure-agentd.py's _UNIT_CONTENT and the legacy
+# .bash_profile bootstrap (Profile.bashProfileContent): the agent converges
+# an older unit by the KillMode=process marker only. ConditionPathExists:
+# a VM booted without the meta share simply skips the unit.
+cat > /etc/systemd/system/bromure-agentd.service <<'EOU'
+[Unit]
+Description=Bromure guest agent daemon
+After=mnt-bromure\x2dmeta.mount network.target
+StartLimitIntervalSec=0
+ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/usr/bin/python3 /mnt/bromure-meta/bromure-agentd.py
+Restart=always
+RestartSec=1
+KillMode=process
+TimeoutStopSec=5
+[Install]
+WantedBy=multi-user.target
+EOU
+systemctl enable bromure-agentd.service >/dev/null 2>&1 || true
+
 # System-wide xinitrc — startx falls back to this when ~/.xinitrc is
 # missing (which it always is here, since /home/ubuntu mounts empty from
 # the host on first boot until prepareHomeDirectory writes dotfiles).

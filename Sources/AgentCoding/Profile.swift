@@ -5123,6 +5123,7 @@ public final class ProfileStore {
     Description=Bromure guest agent daemon
     After=mnt-bromure\x2dmeta.mount network.target
     StartLimitIntervalSec=0
+    ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
     [Service]
     Type=simple
     User=ubuntu
