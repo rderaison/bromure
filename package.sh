@@ -89,9 +89,14 @@ if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
     "$SCRIPT_DIR/tools/build-ghostty.sh"
 fi
 
-swift build -c release --arch arm64 --product "$PRODUCT_NAME" 2>&1
+# Same backend as build.sh: Xcode 26's default `swiftbuild` backend fails in
+# macro packages ("unable to open dependencies file …-primary.d") and tries
+# to compile MLX's Metal kernels; the native backend does neither and shares
+# the .build/arm64-apple-macosx cache.
+SWIFT_BUILD_SYSTEM="${SWIFT_BUILD_SYSTEM:-native}"
+swift build --build-system "$SWIFT_BUILD_SYSTEM" -c release --arch arm64 --product "$PRODUCT_NAME" 2>&1
 
-BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
+BUILD_DIR=$(swift build --build-system "$SWIFT_BUILD_SYSTEM" -c release --arch arm64 --show-bin-path 2>/dev/null)
 BINARY="$BUILD_DIR/$PRODUCT_NAME"
 
 if [ ! -f "$BINARY" ]; then
