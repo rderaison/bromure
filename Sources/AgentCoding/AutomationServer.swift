@@ -99,6 +99,9 @@ final class ACAutomationServer {
     var onListAgentSessions: (() -> [[String: Any]])?
     var onAgentSessionCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
     var onAgentSessionTranscript: ((_ id: UUID) async -> Data?)?
+    /// The subfolders of a folder on a workspace (by id or name), for the
+    /// new-session folder browser over the fat client. nil: unreadable now.
+    var onAgentSessionFolders: ((_ profile: String, _ path: String) async -> [String]?)?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -800,6 +803,27 @@ final class ACAutomationServer {
                 sendResponse(fd: fd, status: 200, body: ["transcript": b64])
             } else {
                 sendResponse(fd: fd, status: 404, body: ["error": "No transcript"])
+            }
+
+        case ("POST", "/agent-sessions/folders"):
+            // {profile, path} → {folders: [name…]}: what the new-session
+            // browser walks; 404 when the machine can't be read right now.
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard let profileKey = bodyJSON["profile"] as? String, !profileKey.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "profile required"]); return
+            }
+            let path = bodyJSON["path"] as? String ?? "~"
+            let sem = DispatchSemaphore(value: 0)
+            var folders: [String]?
+            Task { @MainActor [weak self] in
+                folders = await self?.onAgentSessionFolders?(profileKey, path)
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 30)
+            if let folders {
+                sendResponse(fd: fd, status: 200, body: ["folders": folders])
+            } else {
+                sendResponse(fd: fd, status: 404, body: ["error": "The machine's folders can't be read right now"])
             }
 
         case ("POST", "/agent-sessions/start"):

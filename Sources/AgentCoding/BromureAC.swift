@@ -3612,6 +3612,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let live = await self.fetchSessionTranscript(s), !live.isEmpty { return Data(live.utf8) }
             return await MainActor.run { self.agentSessionEngine.transcripts.load(s.id) }
         }
+        server.onAgentSessionFolders = { [weak self] key, path in
+            guard let self else { return nil }
+            return await self.listGuestFolders(profileKey: key, path: path)
+        }
         server.onSecurityTimeline = {
             MainActor.assumeIsolated { SecurityTimeline.shared.mirrorRows() }
         }
@@ -8986,6 +8990,79 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return await Task.detached(priority: .userInitiated) {
             Self.ext4Transcript(imagePath: img.path, slug: slug, guestCwd: guestCwd)
         }.value
+    }
+
+    /// The folders inside `path` ("~", "~/proj", an absolute guest path)
+    /// on a workspace, for the new-session folder browser: asked of the
+    /// guest when it runs (what's there this second), read straight out
+    /// of the home image (or the legacy host home dir) when it's off.
+    /// Dotfolders are left out. nil when the machine can't be read right
+    /// now — no agent yet, or a path outside the home of a machine that
+    /// is off.
+    func listGuestFolders(profileID: UUID, path: String) async -> [String]? {
+        guard let profile = profiles.first(where: { $0.id == profileID }) else { return nil }
+        let guestPath = SessionHome.guestPath(path)
+        let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        // Only a machine that is actually up answers; a suspended one still
+        // holds a session entry (sandbox stopped, state saved) and would
+        // just time out — its home image is the source then.
+        if runState(for: profile) == .running,
+           let out = try? await guestExec(
+                profileID: profileID,
+                command: "if [ -d \(q) ]; then find \(q) -mindepth 1 -maxdepth 1 -type d "
+                    + "! -name '.*' -printf '%f\\n' 2>/dev/null | sort -f; fi; true",
+                timeout: 10) {
+            return out.split(whereSeparator: \.isNewline).map(String.init)
+        }
+        let home = "/home/ubuntu"
+        guard guestPath == home || guestPath.hasPrefix(home + "/") else { return nil }
+        let rel = guestPath == home ? "/" : String(guestPath.dropFirst(home.count))
+        switch profile.homeModel {
+        case .virtiofs:
+            let dir = store.homeDirectory(for: profile).appendingPathComponent(String(rel.dropFirst()))
+            return Self.hostFolders(in: dir)
+        case .ext4:
+            // Read-only; safe even if a VM has the disk attached — same
+            // tolerance as the ext4 browser and the transcript read below.
+            let img = store.homeImageURL(for: profile).path
+            guard FileManager.default.fileExists(atPath: img) else { return nil }
+            return await Task.detached(priority: .userInitiated) {
+                Self.ext4Folders(imagePath: img, path: rel)
+            }.value
+        }
+    }
+
+    /// `listGuestFolders` for the fat client, which names the workspace
+    /// by id or name.
+    func listGuestFolders(profileKey: String, path: String) async -> [String]? {
+        guard let p = profiles.first(where: {
+            $0.id.uuidString == profileKey || $0.name.lowercased() == profileKey.lowercased() })
+        else { return nil }
+        return await listGuestFolders(profileID: p.id, path: path)
+    }
+
+    nonisolated static func hostFolders(in dir: URL) -> [String]? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return nil }
+        return names.filter { name in
+            var isDir: ObjCBool = false
+            return !name.hasPrefix(".")
+                && FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path,
+                                                  isDirectory: &isDir)
+                && isDir.boolValue
+        }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// Subfolder names of a directory inside a home.img (home-relative
+    /// path, "/" for the home). Pure file IO — run detached.
+    nonisolated static func ext4Folders(imagePath: String, path: String) -> [String]? {
+        guard let vol = try? Ext4Volume(path: imagePath),
+              let dirIno = try? vol.resolve(path),
+              let entries = try? vol.listDir(dirIno) else { return nil }
+        var names: [String] = []
+        for e in entries where e.name != "." && e.name != ".." && !e.name.hasPrefix(".") {
+            if e.isDir || ((try? vol.inode(e.ino))?.isDir ?? false) { names.append(e.name) }
+        }
+        return names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     /// Locate + read the newest session transcript for a task inside a

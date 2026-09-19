@@ -370,7 +370,8 @@ struct MobileNewSessionScreen: View {
                 }
             },
             onCancel: onCancel,
-            onNewMachine: { workspaceEdit = .new })
+            onNewMachine: { workspaceEdit = .new },
+            listFolders: { await controller.listSessionFolders(profileID: $0, path: $1) })
         .disabled(starting)
         .overlay {
             if starting {

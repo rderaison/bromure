@@ -1008,6 +1008,19 @@ final class RemoteHostController {
         send("POST", "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
     }
 
+    /// POST /agent-sessions/folders — the subfolders of a folder on a
+    /// workspace, for the new-session browser. nil when the machine can't
+    /// be read right now, or the server predates the verb.
+    func listSessionFolders(profileID: Profile.ID, path: String) async -> [String]? {
+        let host = self.host
+        let body: [String: Any] = ["profile": profileID.uuidString, "path": path]
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", "/agent-sessions/folders", body: body)
+        }.value
+        guard let resp, resp.status == 200 else { return nil }
+        return resp.json["folders"] as? [String]
+    }
+
     /// GET /sessions/{id}/transcript — the server's copy (live when it can).
     func fetchSessionTranscript(_ id: UUID) async -> Data? {
         let host = self.host
@@ -3339,7 +3352,8 @@ final class RemoteHostWindow: NSWindow {
                 else { return }
                 self.selectSession(s.id)
             },
-            onNewMachine: { [weak self] in self?.createWorkspace(withWizard: false) })
+            onNewMachine: { [weak self] in self?.createWorkspace(withWizard: false) },
+            listFolders: { pid, path in await c.listSessionFolders(profileID: pid, path: path) })
         showSessionOverlay(view)
     }
 

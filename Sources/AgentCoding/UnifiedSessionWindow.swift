@@ -1451,6 +1451,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             onNewMachine: { [weak self] in
                 self?.acDelegate?.beginNewWorkspace(withWizard: false)
+            },
+            listFolders: { [weak delegate] pid, path in
+                await delegate?.listGuestFolders(profileID: pid, path: path)
             })
         showSessionOverlay(view)
         makeKeyAndOrderFront(nil)

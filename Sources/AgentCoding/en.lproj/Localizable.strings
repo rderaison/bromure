@@ -1821,6 +1821,11 @@
 "Create a machine" = "Create a machine";
 "Sign in when it starts" = "Sign in when it starts";
 "Pick a model provider when it starts" = "Pick a model provider when it starts";
+"Choose…" = "Choose…";
+"Choose" = "Choose";
+"Up one folder" = "Up one folder";
+"No folders in here yet." = "No folders in here yet.";
+"The machine's folders can't be read right now." = "The machine's folders can't be read right now.";
 "Message %@…  (or drop files)" = "Message %@…  (or drop files)";
 "Ready · %@" = "Ready · %@";
 "Ended · %@ ago" = "Ended · %@ ago";

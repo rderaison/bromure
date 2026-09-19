@@ -538,6 +538,11 @@ struct NewSessionView: View {
     let onCancel: () -> Void
     /// No machine yet: the new-workspace flow.
     let onNewMachine: () -> Void
+    /// The subfolders of a folder on a machine ("~", "~/proj"), for the
+    /// browser in the Where popover — nil when the machine can't be read
+    /// right now. Absent on a host without the verb (a mirror of an older
+    /// server): the browser stays hidden and the field is typed.
+    let listFolders: ((UUID, String) async -> [String]?)?
 
     private enum Where: String, CaseIterable, Identifiable {
         case home, folder, repository
@@ -561,6 +566,8 @@ struct NewSessionView: View {
     @State private var machinePopover = false
     @State private var agentPopover = false
     @State private var wherePopover = false
+    /// The folder picker sheet ("Choose…" in the Where popover).
+    @State private var folderPicker = false
     @FocusState private var messageFocused: Bool
 
     static let lastProfileKey = "sessions.lastProfileID"
@@ -586,13 +593,15 @@ struct NewSessionView: View {
     init(profiles: [Profile], runningIDs: Set<UUID>, recentFolders: @escaping (UUID) -> [String],
          onStart: @escaping (AgentSessionRequest) -> Void,
          onCancel: @escaping () -> Void,
-         onNewMachine: @escaping () -> Void = {}) {
+         onNewMachine: @escaping () -> Void = {},
+         listFolders: ((UUID, String) async -> [String]?)? = nil) {
         self.profiles = profiles
         self.runningIDs = runningIDs
         self.recentFolders = recentFolders
         self.onStart = onStart
         self.onCancel = onCancel
         self.onNewMachine = onNewMachine
+        self.listFolders = listFolders
         let remembered = UserDefaults.standard.string(forKey: Self.lastProfileKey)
             .flatMap { UUID(uuidString: $0) }
         let pid = remembered.flatMap { id in profiles.first { $0.id == id }?.id }
@@ -702,6 +711,17 @@ struct NewSessionView: View {
         }
         .background(Color.platformWindowBackground)
         .platformExitCommand(onCancel)
+        .sheet(isPresented: $folderPicker) {
+            GuestFolderPickerView(
+                profileID: profileID,
+                machineName: selectedProfile?.name ?? "",
+                start: folder.trimmingCharacters(in: .whitespaces),
+                listFolders: listFolders ?? { _, _ in nil },
+                onPick: { picked in
+                    place = .folder
+                    folder = picked
+                })
+        }
         .onAppear {
             messageFocused = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { messageFocused = true }
@@ -984,6 +1004,14 @@ struct NewSessionView: View {
             case .folder:
                 HStack(spacing: 8) {
                     pathField(prompt: "~/my-project")
+                    if listFolders != nil {
+                        // The panel comes up once the popover is out of the way.
+                        Button(NSLocalizedString("Choose…", comment: "new session where")) {
+                            wherePopover = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { folderPicker = true }
+                        }
+                        .fixedSize()
+                    }
                     let recent = recentFolders(profileID).filter { $0 != folder }
                     if !recent.isEmpty {
                         Menu {
@@ -1038,6 +1066,209 @@ struct NewSessionView: View {
         .frame(height: 34)
         .background(RoundedRectangle(cornerRadius: 9).fill(Color.platformTextBackground))
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.primary.opacity(0.12)))
+    }
+
+    // MARK: Guest paths
+
+    /// "~/a/b" → "~/a", "~/a" → "~", "/x/y" → "/x", "/x" → "/", "a" → "~".
+    static func parentFolder(of path: String) -> String {
+        if path == "~" || path == "/" { return path }
+        guard let cut = path.lastIndex(of: "/") else { return "~" }
+        let parent = String(path[..<cut])
+        return parent.isEmpty ? "/" : parent
+    }
+
+    /// "~" + "proj" → "~/proj"; "/" + "tmp" → "/tmp".
+    static func childFolder(of path: String, named name: String) -> String {
+        path == "/" ? "/" + name : path + "/" + name
+    }
+
+    /// The path and its ancestors up to the home (or the root), nearest
+    /// first: "~/a/b" → ["~/a/b", "~/a", "~"].
+    static func ancestors(of path: String) -> [String] {
+        var out = [path]
+        var p = path
+        while true {
+            let parent = parentFolder(of: p)
+            if parent == p { break }
+            out.append(parent)
+            p = parent
+        }
+        return out
+    }
+}
+
+// MARK: - Folder picker
+
+/// The panel behind "Choose…" in the new-session screen: a file-panel
+/// look over a machine's folders — the folder on show and its ancestors
+/// in a popup on top, its subfolders below, Cancel and Choose at the
+/// bottom. On the Mac a click selects and a double-click steps in, like
+/// an Open panel choosing directories; on a phone a tap steps in and
+/// Choose takes the folder on show. Read from the machine live when it
+/// runs, from its home image when it's off.
+struct GuestFolderPickerView: View {
+    let profileID: UUID
+    let machineName: String
+    /// The path to open on ("" = the home).
+    let start: String
+    let listFolders: (UUID, String) async -> [String]?
+    let onPick: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var path = "~"
+    @State private var entries: [String]?
+    @State private var unavailable = false
+    @State private var selected: String?
+
+    /// What Choose takes: the selected subfolder, else the folder on show.
+    private var chosen: String {
+        selected.map { NewSessionView.childFolder(of: path, named: $0) } ?? path
+    }
+    private var canChoose: Bool { chosen != "~" && chosen != "/" }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            content
+            Divider()
+            footer
+        }
+        #if os(macOS)
+        .frame(width: 560, height: 440)
+        #endif
+        .onAppear { path = start.isEmpty ? "~" : start }
+        .task(id: path) { await load() }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Button {
+                go(NewSessionView.parentFolder(of: path))
+            } label: {
+                Image(systemName: "chevron.left").font(.system(size: 12, weight: .semibold))
+            }
+            .disabled(path == "~" || path == "/")
+            .help(NSLocalizedString("Up one folder", comment: "folder picker"))
+            // The folder on show and the way back up, like the panel's path popup.
+            Menu {
+                ForEach(NewSessionView.ancestors(of: path), id: \.self) { p in
+                    Button { go(p) } label: {
+                        Label(prettyGuestPath(SessionHome.guestPath(p)), systemImage: "folder")
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder.fill").foregroundStyle(Color.accentColor)
+                    Text(Self.name(of: path)).font(.system(size: 13, weight: .medium))
+                }
+            }
+            .fixedSize()
+            Spacer(minLength: 8)
+            if entries == nil && !unavailable {
+                ProgressView().controlSize(.small)
+            }
+            if !machineName.isEmpty {
+                Text(machineName).font(.system(size: 11.5)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 46)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if unavailable {
+            placeholder(NSLocalizedString("The machine's folders can't be read right now.", comment: "folder picker"))
+        } else if let entries {
+            if entries.isEmpty {
+                placeholder(NSLocalizedString("No folders in here yet.", comment: "folder picker"))
+            } else {
+                #if os(macOS)
+                // Selection is the list's own; the double-click comes through
+                // its primary action — a tap gesture on the rows would fight
+                // the click that selects.
+                List(entries, id: \.self, selection: $selected) { name in row(name) }
+                    .listStyle(.inset)
+                    .contextMenu(forSelectionType: String.self) { names in
+                        if let name = names.first {
+                            Button(NSLocalizedString("Open", comment: "folder picker")) {
+                                go(NewSessionView.childFolder(of: path, named: name))
+                            }
+                            Button(NSLocalizedString("Choose", comment: "folder picker")) {
+                                onPick(NewSessionView.childFolder(of: path, named: name))
+                                dismiss()
+                            }
+                        }
+                    } primaryAction: { names in
+                        if let name = names.first { go(NewSessionView.childFolder(of: path, named: name)) }
+                    }
+                #else
+                List(entries, id: \.self) { name in
+                    Button { go(NewSessionView.childFolder(of: path, named: name)) } label: { row(name) }
+                }
+                .listStyle(.plain)
+                #endif
+            }
+        } else {
+            Color.clear
+        }
+    }
+
+    private func row(_ name: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder.fill").foregroundStyle(Color.accentColor.opacity(0.85))
+            Text(name).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func placeholder(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 13)).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Text(prettyGuestPath(SessionHome.guestPath(chosen)))
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Button(NSLocalizedString("Cancel", comment: "")) { dismiss() }
+                .keyboardShortcut(.cancelAction)
+            Button(NSLocalizedString("Choose", comment: "folder picker")) {
+                onPick(chosen)
+                dismiss()
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(!canChoose)
+        }
+        .padding(14)
+    }
+
+    private func go(_ p: String) {
+        selected = nil
+        path = p
+    }
+
+    private func load() async {
+        entries = nil
+        unavailable = false
+        let pid = profileID, p = path
+        let names = await listFolders(pid, p)
+        guard p == path else { return }   // moved on meanwhile
+        if let names { entries = names } else { unavailable = true }
+    }
+
+    /// The last component, "~" for the home.
+    static func name(of path: String) -> String {
+        if path == "~" || path == "/" { return path }
+        return path.split(separator: "/").last.map(String.init) ?? path
     }
 }
 
