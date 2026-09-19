@@ -24,6 +24,10 @@ struct SessionStageActions {
     /// Resume and say this — wakes the machine and the agent if need be.
     var resumeWith: (UUID, String) -> Void = { _, _ in }
     var forget: (UUID) -> Void = { _ in }
+    /// Put the conversation away: ends the agent, moves the row to the
+    /// Archived fold. Still readable; resuming brings it back.
+    var archive: (UUID) -> Void = { _ in }
+    var unarchive: (UUID) -> Void = { _ in }
     var represent: (UUID) -> Void = { _ in }
     var showFiles: () -> Void = {}
     var showContainers: (UUID) -> Void = { _ in }
@@ -206,9 +210,22 @@ struct SessionHeaderView: View {
                             Button(NSLocalizedString("Rename…", comment: "session menu")) {
                                 draftTitle = s.title; renaming = true
                             }
+                            if s.isArchived {
+                                Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
+                            } else {
+                                // Putting a live conversation away stops its agent
+                                // — say so in the item itself.
+                                Button(s.windowIndex != nil && !s.hasEnded
+                                       ? NSLocalizedString("End & Archive", comment: "session menu")
+                                       : NSLocalizedString("Archive", comment: "session menu")) {
+                                    actions.archive(s.id)
+                                }
+                            }
                             if s.windowIndex != nil {
                                 Button(NSLocalizedString("End session", comment: "session menu")) { actions.close(s.id) }
                             }
+                        } else if s.isArchived {
+                            Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
                         }
                         if s.hasEnded || gone {
                             Button(NSLocalizedString("Forget this session", comment: "session menu"), role: .destructive) {
@@ -278,10 +295,14 @@ struct SessionHeaderView: View {
         case .working: detail = s.isLaunching ? NSLocalizedString("starting", comment: "pill") : nil
         case .idle:    detail = SessionHome.elapsed(since: s.lastSeenAt)
         case .ended:   detail = SessionHome.elapsed(since: s.endedAt).map {
-            String(format: NSLocalizedString("%@ ago", comment: "pill"), $0) }
+            // "3 min ago" — but never "just now ago".
+            $0 == NSLocalizedString("just now", comment: "elapsed")
+                ? $0 : String(format: NSLocalizedString("%@ ago", comment: "pill"), $0) }
         default:       detail = nil
         }
-        return detail.map { bucket.title + " · " + $0 } ?? bucket.title
+        let title = bucket == .ended && s.isArchived
+            ? NSLocalizedString("Archived", comment: "session status") : bucket.title
+        return detail.map { title + " · " + $0 } ?? title
     }
 }
 
@@ -409,10 +430,13 @@ struct SessionRestView: View {
                     // The way back in is the same as ever: say something.
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 6) {
-                            Image(systemName: bucket == .asleep ? "moon.zzz" : "flag.checkered")
+                            Image(systemName: s.isArchived ? "archivebox"
+                                  : bucket == .asleep ? "moon.zzz" : "flag.checkered")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
-                            Text(bucket == .asleep
+                            Text(s.isArchived
+                                 ? NSLocalizedString("Archived. Your next message brings it back and carries on from here.", comment: "session rest")
+                                 : bucket == .asleep
                                  ? NSLocalizedString("Asleep. Your next message wakes it up and carries on from here.", comment: "session rest")
                                  : NSLocalizedString("This session ended. Your next message carries on from here.", comment: "session rest"))
                                 .font(.system(size: 12))

@@ -38,6 +38,8 @@ final class AgentSessionEngine {
     init(store: AgentSessionStore, delegate: ACAppDelegate?) {
         self.store = store
         self.delegate = delegate
+        // A session that leaves the store takes its transcript copy along.
+        store.onRemove = { [weak self] id in self?.transcripts.remove(id) }
     }
 
     /// The platform-neutral request lives with the model (AgentSessions.swift)
@@ -101,7 +103,8 @@ final class AgentSessionEngine {
             return
         }
         let message = message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-        store.mutate(id) { $0.lastError = nil }
+        // Picking it back up is what brings an archived conversation back.
+        store.mutate(id) { $0.lastError = nil; $0.archivedAt = nil }
         BACDebug.log("sessions", "resume “\(s.title)”\(message == nil ? "" : " with a message")")
         Task { [weak self] in
             guard let self else { return }
@@ -239,6 +242,24 @@ final class AgentSessionEngine {
         let t = title.trimmingCharacters(in: .whitespaces)
         guard !t.isEmpty else { return }
         store.mutate(id) { $0.title = t; $0.userTitled = true }
+    }
+
+    /// Put the conversation away: the agent stops (now, if its tab is at
+    /// hand; else the moment the workspace shows the tab again — see
+    /// `probeLiveness`), the record moves to the Archived fold, readable as
+    /// ever. Resume brings it back.
+    func archive(_ id: UUID) {
+        guard let s = store.session(id) else { return }
+        BACDebug.log("sessions", "archive “\(s.title)”")
+        if s.windowIndex != nil, delegate?.pane(for: s.profileID) != nil { close(id) }
+        store.mutate(id) { $0.launchingSince = nil }
+        store.setArchived(id, true)
+    }
+
+    func unarchive(_ id: UUID) {
+        guard let s = store.session(id) else { return }
+        BACDebug.log("sessions", "unarchive “\(s.title)”")
+        store.setArchived(id, false)
     }
 
     // MARK: Launch
@@ -394,6 +415,15 @@ final class AgentSessionEngine {
     func probeLiveness(entries: [SessionListModel.VMEntry]) {
         guard let delegate else { return }
         probeFolders(entries: entries)
+        // An archived session whose tab is back (its workspace was asleep
+        // when it was put away, and just woke): archiving meant "end it".
+        for s in store.sessions where s.isArchived && s.windowIndex != nil {
+            guard let entry = entries.first(where: { $0.id == s.profileID }), entry.model.rosterLive,
+                  entry.model.tabs.contains(where: { $0.index == s.windowIndex })
+            else { continue }
+            BACDebug.log("sessions", "archived “\(s.title)” is back — ending it")
+            close(s.id)
+        }
         let now = Date()
         for entry in entries {
             let bound = store.sessions.filter { $0.profileID == entry.id && $0.windowIndex != nil }

@@ -724,8 +724,11 @@ final class RemoteHostController {
                 }
             }
             applyRemoteTabs(model, tabDicts)
-            // An empty roster means tmux isn't up yet (boot), not "all windows
-            // closed" — only reconcile surfaces against a populated list.
+            // The server sends its guests' own rosters — live whenever there
+            // is one. An empty roster means tmux isn't up yet (boot), not
+            // "all windows closed" — only reconcile surfaces against a
+            // populated list.
+            if model.rosterLive != !tabDicts.isEmpty { model.rosterLive = !tabDicts.isEmpty }
             if !tabDicts.isEmpty { onTabsApplied?(id, Set(model.tabs.map(\.index))) }
             let name = vm["name"] as? String ?? profilesByID[id]?.name ?? "?"
             entries.append(SessionListModel.VMEntry(
@@ -1000,7 +1003,7 @@ final class RemoteHostController {
         return UUID(uuidString: idStr)
     }
 
-    /// POST /sessions/{id}/{resume|close|rename|forget}.
+    /// POST /sessions/{id}/{resume|close|rename|forget|archive|unarchive}.
     func sessionCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
         send("POST", "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
     }
@@ -3245,6 +3248,8 @@ final class RemoteHostWindow: NSWindow {
                 self.controller.sessionCommand(id, "forget")
                 if self.selectedSessionID == id { self.clearSessionStage(); self.showNewSession() }
             },
+            archive: { [weak self] id in self?.controller.sessionCommand(id, "archive") },
+            unarchive: { [weak self] id in self?.controller.sessionCommand(id, "unarchive") },
             represent: { [weak self] id in
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()
@@ -3544,7 +3549,7 @@ final class RemoteHostWindow: NSWindow {
                 "beautified": mountedBeautifiedHost != nil,
                 "sessions": controller.sessionStore.sessions.map {
                     ["id": $0.id.uuidString, "title": $0.title, "tool": $0.tool.rawValue,
-                     "windowIndex": $0.windowIndex ?? -1,
+                     "windowIndex": $0.windowIndex ?? -1, "archived": $0.isArchived,
                      "bucket": SessionHome.bucket(for: $0, in: model).title] as [String: Any]
                 },
             ]

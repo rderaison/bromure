@@ -226,6 +226,11 @@ final class TabsModel {
 
     var tabs: [Tab] = []
     var activeIndex: Int = 0
+    /// `tabs` is the guest's live roster. False for the placeholder pill a
+    /// fresh boot shows and for the pills rebuilt from a suspend snapshot
+    /// (labels only — every one at index 0): nothing to bind sessions to,
+    /// or to judge them by, until tmux has reported.
+    var rosterLive = false
 
     /// All docker containers in this VM (running + stopped), refreshed ~every 2s
     /// from the guest. Drives the source-list Docker sub-tree and the dashboard.

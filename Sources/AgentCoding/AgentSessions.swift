@@ -73,6 +73,11 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// The agent is sitting at its sign-in screen (the beautified view saw
     /// it) — surfaced as "needs you" until the host signs in for it.
     var needsSignIn: Bool?
+    /// The user put the conversation away: it leaves the session list for
+    /// the Archived fold, still readable, and comes back the moment it is
+    /// resumed. Archiving ends the agent (a running one, or one found
+    /// running later).
+    var archivedAt: Date?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -90,6 +95,13 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
 
     var isLaunching: Bool { launchingSince != nil }
     var hasEnded: Bool { endedAt != nil && windowIndex == nil }
+    var isArchived: Bool { archivedAt != nil }
+    /// A session the store made from a tab it found (no launch of ours, no
+    /// words of the user's): the kind that can be twinned by a bad roster,
+    /// and dropped again without losing anything.
+    var isPlainAdoptee: Bool {
+        launchDisplay == nil && openingMessage == nil && cloneURL == nil && userTitled != true
+    }
 
     /// "Fix the login redirect loop" from a multi-line opening message.
     static func title(fromMessage text: String) -> String {
@@ -151,8 +163,12 @@ final class AgentSessionStore {
         fileURL = FileManager.default.temporaryDirectory.appendingPathComponent("sessions-mirror.json")
     }
 
-    /// Replace the whole list with the server's (a fat client's poll).
+    /// Replace the whole list with the server's (a fat client's poll). Twins
+    /// an older server may still carry (see `twins(in:)`) are left out of
+    /// the mirror — the server's own copy is its business.
     func applyMirror(_ list: [AgentSession]) {
+        let drop = Self.twins(in: list).drop
+        let list = drop.isEmpty ? list : list.filter { !drop.contains($0.id) }
         guard list != sessions else { return }
         sessions = list
     }
@@ -173,6 +189,20 @@ final class AgentSessionStore {
 
     func remove(_ id: UUID) {
         sessions.removeAll { $0.id == id }
+        onRemove?(id)
+        save()
+    }
+
+    /// Told whenever a session leaves the store (a forget, a dropped twin),
+    /// so what hangs off it elsewhere — its transcript copy — goes too.
+    var onRemove: ((UUID) -> Void)?
+
+    /// Put a session away (or take it back out). Archiving is a flag: the
+    /// engine ends the agent, the list moves the row to the Archived fold.
+    func setArchived(_ id: UUID, _ archived: Bool, now: Date = Date()) {
+        guard let i = sessions.firstIndex(where: { $0.id == id }),
+              sessions[i].isArchived != archived else { return }
+        sessions[i].archivedAt = archived ? now : nil
         save()
     }
 
@@ -221,7 +251,11 @@ final class AgentSessionStore {
             // A running workspace always has its shell window: an empty
             // roster is one that hasn't loaded yet (right after a launch or
             // a reattach) — judging it would end every session it hosts.
-            guard !tabs.isEmpty else { continue }
+            // Likewise the pills a resume paints from its suspend snapshot
+            // (labels only, all at index 0) and a fresh boot's placeholder:
+            // adopting those once made a session at window 0 out of EVERY
+            // saved pill. Only the guest's own roster counts.
+            guard !tabs.isEmpty, entry.model.rosterLive else { continue }
             let indices = Set(tabs.map(\.index))
             // 0. Stale bindings: after a reboot the window indices start over,
             // so a session's index may now be another tab (one we opened
@@ -317,7 +351,11 @@ final class AgentSessionStore {
                         ?? BromureIcons.agentKind(forLabel: tab.shownLabel),
                       let tool = Profile.Tool(rawValue: kind) else { continue }
                 let cwd = tab.cwd ?? "~"
-                let title = Self.agentTitle(from: tab) ?? AgentSession.defaultTitle(tool: tool, cwd: cwd)
+                // The agent's own name for it, minus its glyphs ("π > tmp"
+                // is not a title) — else the plain "<Agent> in <folder>".
+                let title = Self.agentTitle(from: tab)
+                    .flatMap { SessionHome.cleanAgentTitle($0, agent: kind, cwd: cwd) }
+                    ?? AgentSession.defaultTitle(tool: tool, cwd: cwd)
                 let guestCwd = SessionHome.guestPath(cwd)
                 if let i = sessions.firstIndex(where: { cand in
                     guard cand.profileID == entry.id, cand.windowIndex == nil,
@@ -341,10 +379,55 @@ final class AgentSessionStore {
                 changed = true
             }
         }
+        if dedupeTwins(now: now) { changed = true }
         if changed {
             sessions.sort { activity($0) > activity($1) }
             save()
         }
+    }
+
+    /// Two sessions on one tmux window: one is a twin. Which one, and what
+    /// becomes of it — see `twins(in:)`. True when anything changed.
+    @discardableResult
+    private func dedupeTwins(now: Date = Date()) -> Bool {
+        let (drop, unbind) = Self.twins(in: sessions)
+        guard !drop.isEmpty || !unbind.isEmpty else { return false }
+        for i in sessions.indices where unbind.contains(sessions[i].id) {
+            sessions[i].windowIndex = nil
+            sessions[i].endedAt = now
+            sessions[i].agentAlive = nil
+            sessions[i].launchingSince = nil
+        }
+        sessions.removeAll { drop.contains($0.id) }
+        for id in drop { onRemove?(id) }
+        return true
+    }
+
+    /// Sessions bound to the same window of the same workspace can't both be
+    /// right. The one to keep is the one that carries the most of the user
+    /// (a launch of ours, an opening message, a name they gave it), else the
+    /// oldest. Of the rest, plain adoptees are dropped — they hold nothing
+    /// a tab doesn't (a bad roster once minted six of them for one window);
+    /// anything richer is unbound instead, so it shows as Ended and can be
+    /// resumed or forgotten by hand.
+    static func twins(in list: [AgentSession]) -> (drop: Set<UUID>, unbind: Set<UUID>) {
+        var byWindow: [String: [AgentSession]] = [:]
+        for s in list {
+            guard let w = s.windowIndex else { continue }
+            byWindow["\(s.profileID.uuidString)#\(w)", default: []].append(s)
+        }
+        var drop = Set<UUID>(), unbind = Set<UUID>()
+        for group in byWindow.values where group.count > 1 {
+            let ranked = group.sorted { a, b in
+                let ra = a.isPlainAdoptee ? 0 : 1, rb = b.isPlainAdoptee ? 0 : 1
+                if ra != rb { return ra > rb }
+                return a.createdAt < b.createdAt
+            }
+            for s in ranked.dropFirst() {
+                if s.isPlainAdoptee { drop.insert(s.id) } else { unbind.insert(s.id) }
+            }
+        }
+        return (drop, unbind)
     }
 
     /// The name an agent gave its session, as the guest folds it into the
@@ -403,6 +486,8 @@ final class AgentSessionStore {
             }
             return s
         }
+        // Twins an earlier build left behind go now, before anything shows.
+        if dedupeTwins() { save() }
     }
 
     /// Is an agent running in the session's tab? The tty probe when we have
@@ -494,21 +579,37 @@ enum SessionHome {
     }
 
     /// Every session in sidebar order: what needs you, then working, ready,
-    /// asleep, ended — and the gone ones last.
+    /// asleep, ended — and the gone ones last. Archived ones live in their
+    /// own fold (`archived(_:in:)`).
     @MainActor
     static func orderedAll(_ sessions: [AgentSession], in model: SessionListModel) -> [AgentSession] {
+        let sessions = sessions.filter { !$0.isArchived }
         let groups = grouped(sessions.filter { !isGone($0, in: model) }, in: model)
         let gone = sessions.filter { isGone($0, in: model) }
             .sorted { lastActivity($0) > lastActivity($1) }
         return SessionBucket.allCases.flatMap { groups[$0] ?? [] } + gone
     }
 
-    /// The session's live tab, when its workspace is attached and the tab
-    /// is still there.
+    /// The put-away sessions, most recently archived first.
+    static func archived(_ sessions: [AgentSession]) -> [AgentSession] {
+        sessions.filter { $0.isArchived }
+            .sorted { ($0.archivedAt ?? .distantPast) > ($1.archivedAt ?? .distantPast) }
+    }
+
+    /// The workspace is attached AND its tab roster is the guest's own (not
+    /// a boot placeholder or the pills painted from a suspend snapshot).
+    @MainActor
+    static func rosterLive(for profileID: UUID, in model: SessionListModel) -> Bool {
+        model.entries.first { $0.id == profileID }?.model.rosterLive ?? false
+    }
+
+    /// The session's live tab, when its workspace is attached, its roster
+    /// is real, and the tab is still there.
     @MainActor
     static func liveTab(for s: AgentSession, in model: SessionListModel) -> TabsModel.Tab? {
         guard let w = s.windowIndex,
-              let entry = model.entries.first(where: { $0.id == s.profileID }) else { return nil }
+              let entry = model.entries.first(where: { $0.id == s.profileID }),
+              entry.model.rosterLive else { return nil }
         return entry.model.tabs.first { $0.index == w }
     }
 
@@ -516,7 +617,8 @@ enum SessionHome {
     @MainActor
     static func liveTabPosition(for s: AgentSession, in model: SessionListModel) -> Int? {
         guard let w = s.windowIndex,
-              let entry = model.entries.first(where: { $0.id == s.profileID }) else { return nil }
+              let entry = model.entries.first(where: { $0.id == s.profileID }),
+              entry.model.rosterLive else { return nil }
         return entry.model.tabs.firstIndex { $0.index == w }
     }
 
@@ -560,9 +662,12 @@ enum SessionHome {
         if s.hasEnded { return .ended }
         let ws = workspaceState(of: s, in: model)
         guard ws == .running || ws == .booting else { return .asleep }
+        // Up, but tmux hasn't reported yet (a boot, a resume): still asleep
+        // as far as the session can tell — not "Ended" for a few seconds.
+        guard rosterLive(for: s.profileID, in: model) else { return .asleep }
         guard let tab = liveTab(for: s, in: model) else {
-            // Running workspace, tab not (yet) in the roster.
-            return model.entries.contains { $0.id == s.profileID } ? .ended : .asleep
+            // Running workspace, tab not in the roster.
+            return .ended
         }
         if !agentRunning(s, in: tab) {
             // A shell: the agent exited (resume) — or hasn't started yet.
@@ -611,9 +716,18 @@ enum SessionHome {
         case .idle:
             return NSLocalizedString("Ready", comment: "session status")
         case .asleep:
+            // A workspace on its way up (booting, or attached with tmux not
+            // yet heard from) is waking, not asleep.
+            let ws = workspaceState(of: s, in: model)
+            let attached = model.entries.contains { $0.id == s.profileID }
+            if ws == .booting || (ws == .running && attached) {
+                return NSLocalizedString("Waking up…", comment: "session status")
+            }
             return NSLocalizedString("Asleep", comment: "session status")
         case .ended:
-            return NSLocalizedString("Ended", comment: "session status")
+            return s.isArchived
+                ? NSLocalizedString("Archived", comment: "session status")
+                : NSLocalizedString("Ended", comment: "session status")
         }
     }
 
@@ -677,20 +791,22 @@ enum SessionHome {
         return out
     }
 
-    /// The sidebar's order (ended ones, folded away, excluded) — what ⌘1–9 count.
+    /// The sidebar's order (ended and archived ones, folded away, excluded)
+    /// — what ⌘1–9 count.
     @MainActor
     static func ordered(_ sessions: [AgentSession], in model: SessionListModel) -> [AgentSession] {
-        let groups = grouped(sessions, in: model)
+        let groups = grouped(sessions.filter { !$0.isArchived }, in: model)
         return SessionBucket.allCases.filter { $0 != .ended }.flatMap { groups[$0] ?? [] }
     }
 
     /// The session the home screen opens on: the remembered one if it's
-    /// still around, else the most pressing bucket's newest.
+    /// still around, else the most pressing bucket's newest (never one that
+    /// was put away).
     @MainActor
     static func initialSession(in store: AgentSessionStore, model: SessionListModel,
                                remembered: UUID?) -> AgentSession? {
-        if let id = remembered, let s = store.session(id), !s.hasEnded { return s }
-        let groups = grouped(store.sessions, in: model)
+        if let id = remembered, let s = store.session(id), !s.hasEnded, !s.isArchived { return s }
+        let groups = grouped(store.sessions.filter { !$0.isArchived }, in: model)
         for b in SessionBucket.allCases {
             if let s = groups[b]?.first { return s }
         }
@@ -849,7 +965,8 @@ struct SessionRowView: View {
 
 /// The session list: one "Sessions" section holding every session — what
 /// needs you first, then working, ready, asleep, ended, and last the ones
-/// whose machine or folder is gone. The caret folds the whole list away;
+/// whose machine or folder is gone — and, under it, an "Archived" fold for
+/// the ones put away (closed by default). The carets fold each list away;
 /// a search always shows its matches.
 struct SessionSectionsView: View {
     var store: AgentSessionStore
@@ -857,8 +974,9 @@ struct SessionSectionsView: View {
     var filter: String = ""
     let onSelect: (UUID) -> Void
     @AppStorage("sessions.listExpanded") private var expanded = true
+    @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
 
-    private var sessions: [AgentSession] {
+    private var matching: [AgentSession] {
         var sessions = store.sessions
         let q = filter.trimmingCharacters(in: .whitespaces)
         if !q.isEmpty {
@@ -868,8 +986,11 @@ struct SessionSectionsView: View {
                     || $0.cwd.localizedCaseInsensitiveContains(q)
             }
         }
-        return SessionHome.orderedAll(sessions, in: model)
+        return sessions
     }
+
+    private var sessions: [AgentSession] { SessionHome.orderedAll(matching, in: model) }
+    private var archived: [AgentSession] { SessionHome.archived(matching) }
 
     private func workspaceName(_ id: UUID) -> String {
         model.profileRows.first { $0.id == id }?.name ?? ""
@@ -917,20 +1038,59 @@ struct SessionSectionsView: View {
 
             if open {
                 if list.isEmpty { emptyHint }
-                ForEach(list) { s in
-                    SessionRowView(
-                        session: s,
-                        workspaceName: workspaceName(s.profileID),
-                        accentHex: accentHex(s.profileID),
-                        dot: SessionHome.dot(for: s, in: model),
-                        statusLine: SessionHome.statusLine(for: s, in: model),
-                        when: s.isLaunching ? nil : SessionHome.elapsedCompact(since: SessionHome.lastActivity(s)),
-                        gone: SessionHome.isGone(s, in: model),
-                        selected: model.selectedSessionID == s.id,
-                        onSelect: { onSelect(s.id) })
+                ForEach(list) { row($0) }
+            }
+
+            let put = archived
+            if !put.isEmpty {
+                // Put away, not gone: the fold opens on a click, a search,
+                // or when the session on stage is one of them.
+                let onStage = put.contains { $0.id == model.selectedSessionID }
+                let openArchived = archivedExpanded || !filter.isEmpty || onStage
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { archivedExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: openArchived ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 10)
+                        Text(NSLocalizedString("Archived", comment: "sidebar section"))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .textCase(.uppercase)
+                            .tracking(0.7)
+                        Spacer()
+                        Text("\(put.count)")
+                            .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 8)
+                .padding(.trailing, 8)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
+                .help(NSLocalizedString("Conversations you put away — still readable, back with one message", comment: "sidebar"))
+                if openArchived {
+                    ForEach(put) { row($0) }
                 }
             }
         }
+    }
+
+    private func row(_ s: AgentSession) -> some View {
+        SessionRowView(
+            session: s,
+            workspaceName: workspaceName(s.profileID),
+            accentHex: accentHex(s.profileID),
+            dot: SessionHome.dot(for: s, in: model),
+            statusLine: SessionHome.statusLine(for: s, in: model),
+            when: s.isLaunching ? nil : SessionHome.elapsedCompact(since: SessionHome.lastActivity(s)),
+            gone: SessionHome.isGone(s, in: model),
+            selected: model.selectedSessionID == s.id,
+            onSelect: { onSelect(s.id) })
     }
 
     private var emptyHint: some View {

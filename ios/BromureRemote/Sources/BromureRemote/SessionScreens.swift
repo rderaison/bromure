@@ -25,6 +25,8 @@ enum MobileSessions {
             rename: { id, title in controller.sessionCommand(id, "rename", body: ["title": title]) },
             resumeWith: { id, text in controller.sessionCommand(id, "resume", body: ["message": text]) },
             forget: { id in controller.sessionCommand(id, "forget"); onForget() },
+            archive: { controller.sessionCommand($0, "archive") },
+            unarchive: { controller.sessionCommand($0, "unarchive") },
             represent: { _ in },
             showFiles: onLinux,
             showContainers: { _ in onLinux() },
@@ -197,10 +199,24 @@ struct MobileSessionScreen: View {
                 Button { draftTitle = s.title; renaming = true } label: {
                     Label("Rename…", systemImage: "pencil")
                 }
+                if s.isArchived {
+                    Button { controller.sessionCommand(s.id, "unarchive") } label: {
+                        Label("Unarchive", systemImage: "tray.and.arrow.up")
+                    }
+                } else {
+                    Button { controller.sessionCommand(s.id, "archive") } label: {
+                        Label(s.windowIndex != nil && !s.hasEnded ? "End & Archive" : "Archive",
+                              systemImage: "archivebox")
+                    }
+                }
                 if s.windowIndex != nil {
                     Button(role: .destructive) { confirmEnd = true } label: {
                         Label("End session", systemImage: "stop.circle")
                     }
+                }
+            } else if s.isArchived {
+                Button { controller.sessionCommand(s.id, "unarchive") } label: {
+                    Label("Unarchive", systemImage: "tray.and.arrow.up")
                 }
             }
             if s.hasEnded || gone {
@@ -381,6 +397,7 @@ struct MobileSessionsSection: View {
     let onSelect: (UUID) -> Void
     let onNew: () -> Void
     @AppStorage("sessions.listExpanded") private var expanded = true
+    @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
 
     private var model: SessionListModel { controller.listModel }
 
@@ -427,6 +444,31 @@ struct MobileSessionsSection: View {
                     emptyCard
                 } else {
                     ForEach(list) { card($0) }
+                }
+            }
+            let put = SessionHome.archived(controller.sessionStore.sessions)
+            if !put.isEmpty {
+                // Put away, not gone: folded by default.
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { archivedExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Archived").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                        Text("\(put.count)")
+                            .font(.caption.weight(.medium)).monospacedDigit()
+                            .foregroundStyle(.tertiary)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(archivedExpanded ? 90 : 0))
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(archivedExpanded ? "Hide archived sessions" : "Show archived sessions")
+                if archivedExpanded {
+                    ForEach(put) { card($0) }
                 }
             }
         }
@@ -509,12 +551,35 @@ struct MobileSessionsSection: View {
 struct PadSessionSections: View {
     let controller: RemoteHostController
     @AppStorage("sessions.listExpanded") private var expanded = true
+    @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
 
     private var model: SessionListModel { controller.listModel }
 
     var body: some View {
         let list = SessionHome.orderedAll(controller.sessionStore.sessions, in: model)
         let needsYou = list.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
+        let put = SessionHome.archived(controller.sessionStore.sessions)
+        sessionsSection(list, needsYou: needsYou)
+        if !put.isEmpty {
+            // Put away, not gone: folded by default.
+            Section(isExpanded: $archivedExpanded) {
+                ForEach(put) { s in
+                    row(s).tag(PadSelection.session(s.id))
+                }
+            } header: {
+                HStack(spacing: 6) {
+                    Text("Archived")
+                    Spacer()
+                    Text("\(put.count)")
+                        .font(.footnote.weight(.semibold)).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .textCase(nil)
+                }
+            }
+        }
+    }
+
+    private func sessionsSection(_ list: [AgentSession], needsYou: Int) -> some View {
         Section(isExpanded: $expanded) {
             Label("New Session…", systemImage: "plus")
                 .foregroundStyle(.tint)

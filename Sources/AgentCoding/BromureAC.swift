@@ -3082,6 +3082,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     else { return ["error": "unknown session"] }
                     self.agentSessionEngine.resume(id, message: params["message"] as? String)
                     return ["ok": true]
+                case "archive-session", "unarchive-session":
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          self.agentSessionStore.session(id) != nil
+                    else { return ["error": "unknown session"] }
+                    if action == "archive-session" { self.agentSessionEngine.archive(id) }
+                    else { self.agentSessionEngine.unarchive(id) }
+                    self.unifiedWindow?.sessionStageDidChange()
+                    return ["ok": true, "archived": self.agentSessionStore.session(id)?.isArchived ?? false]
                 case "hood":
                     // Toggle "Under the hood" for the selected session.
                     self.unifiedWindow?.toggleUnderTheHood(nil)
@@ -3122,6 +3130,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         ["id": s.id.uuidString, "title": s.title, "tool": s.tool.rawValue,
                          "cwd": s.cwd, "windowIndex": s.windowIndex ?? -1,
                          "ended": s.endedAt != nil, "launching": s.isLaunching,
+                         "archived": s.isArchived,
                          "agentAlive": s.agentAlive ?? false,
                          // What the sidebar shows (Ended is often computed, not stored).
                          "bucket": model.map { SessionHome.bucket(for: s, in: $0).title } ?? "",
@@ -3547,6 +3556,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
                     self.agentSessionEngine.transcripts.remove(sid)
                     self.agentSessionStore.remove(sid)
+                    return ["ok": true]
+                case (let sid?, "archive"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.archive(sid)
+                    return ["ok": true]
+                case (let sid?, "unarchive"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.unarchive(sid)
                     return ["ok": true]
                 case (let sid?, "signin"):
                     // A fat client's sign-in card: the throwaway machine runs
@@ -8061,6 +8078,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Fresh boot: show one placeholder pill while VZ + tmux come up.
             // The agent auto-creates tmux window 0; the roster reconciles this
             // placeholder to the real window list within a tick.
+            win.model.rosterLive = false
             win.model.tabs = [TabsModel.Tab(label: "shell")]
         }
 
@@ -8159,6 +8177,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         // Restore failed → this is now a fresh boot. Drop the
                         // rehydrated pills; the agent creates tmux window 0 and
                         // the roster repopulates the bar.
+                        win.model.rosterLive = false
                         win.model.tabs = [TabsModel.Tab(label: "shell")]
                         win.model.activeIndex = 0
                     }
@@ -10792,8 +10811,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                               parentBranch: $0.parentBranch, rootRepo: $0.rootRepo,
                               display: $0.display, repoRoot: $0.repoRoot)
             }
+            pane.model.rosterLive = true   // the guest's own roster, cached
             pane.model.activeIndex = session.tabs.firstIndex(where: { $0.active }) ?? 0
         } else {
+            pane.model.rosterLive = false
             pane.model.tabs = [TabsModel.Tab(label: "shell")]
             pane.model.activeIndex = 0
         }
@@ -11007,6 +11028,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.resetBootDetection()
         // Placeholder pill while the fresh VM boots; the agent creates tmux
         // window 0 and the roster repopulates the bar.
+        win.model.rosterLive = false
         win.model.tabs = [TabsModel.Tab(label: "shell")]
 
         Task { @MainActor in

@@ -1301,6 +1301,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     self.selectInitialSession()
                 }
             },
+            archive: { [weak self] id in
+                self?.acDelegate?.agentSessionEngine.archive(id)
+                self?.sessionStageDidChange()
+            },
+            unarchive: { [weak self] id in
+                self?.acDelegate?.agentSessionEngine.unarchive(id)
+                self?.sessionStageDidChange()
+            },
             represent: { [weak self] id in
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()

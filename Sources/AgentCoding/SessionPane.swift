@@ -112,6 +112,7 @@ final class SessionPane {
     /// read as "all tabs closed" and power the fresh VM straight back off.
     func resetBootDetection() {
         sawTabList = false
+        model.rosterLive = false
         beginBootOverlay()   // reboot → show the dive screen again
     }
 
@@ -558,6 +559,10 @@ final class SessionPane {
     /// instantly. The resumed VM's tmux session still holds its windows, so the
     /// next roster tick (`applyTabList`) reconciles this to the truth.
     func rehydrateTabs(from state: SessionDisk.TabsState) {
+        // Labels only, every pill at index 0: a picture, not a roster. The
+        // session store must not bind to (or adopt) these — it did once, and
+        // every pill became a session at window 0 (see reconcile).
+        model.rosterLive = false
         model.tabs = state.tabs.map { TabsModel.Tab(label: $0.label, id: $0.id) }
         model.activeIndex = max(0, min(state.activeIndex, model.tabs.count - 1))
     }
@@ -630,6 +635,7 @@ final class SessionPane {
         // attaching. Retire the boot screen.
         if !sawTabList { endBootOverlay() }
         sawTabList = true
+        model.rosterLive = true
         if model.tabs.count > tabs.count {
             model.tabs.removeLast(model.tabs.count - tabs.count)
         }
