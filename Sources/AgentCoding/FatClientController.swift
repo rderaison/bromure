@@ -1656,9 +1656,13 @@ struct RemoteToolbarBar: View {
                 if showMachineControls {
                     if let ip = entry.model.ipAddress { ToolbarIP(ip: ip) }
                     FusionToggle(model: entry.model) { on in onToggleFusion(entry.id, on) }
-                    HeaderIcon(system: "doc.richtext",
-                               help: "Switch between the terminal and the beautified transcript view",
-                               active: model.beautifiedActive) { onToggleBeautified(entry.id) }
+                    // Sessions-first has no terminal/chat flip: a session is a
+                    // chat (Linux for its terminal), a machine's tab a terminal.
+                    if !model.sessionsFirst {
+                        HeaderIcon(system: "doc.richtext",
+                                   help: "Switch between the terminal and the beautified transcript view",
+                                   active: model.beautifiedActive) { onToggleBeautified(entry.id) }
+                    }
                 }
                 if model.sessionsFirst, model.selectedSessionID != nil {
                     UnderTheHoodToggle(active: model.underTheHood, action: onToggleLinux)
@@ -3445,7 +3449,8 @@ final class RemoteHostWindow: NSWindow {
         if let id = selectedSessionID, let s = controller.sessionStore.session(id) {
             presentSession(s)
         } else if let id = shownWorkspace {
-            sessionViewMode = model.underTheHood ? .terminal : nil
+            // A plain tab on stage is a terminal either way.
+            sessionViewMode = .terminal
             showWorkspace(id)
         }
     }
@@ -4108,6 +4113,8 @@ final class RemoteHostWindow: NSWindow {
                 }
                 self.clearSessionStage()
                 self.controller.selectTab(id, index: index)
+                // A tab from the Machines list is a terminal, full stop.
+                if self.sessionsFirst { self.sessionViewMode = .terminal }
                 self.showWorkspace(id, window: index)
             },
             onNewTab: { [weak self] id in self?.controller.newTab(id) },

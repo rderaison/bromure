@@ -111,6 +111,7 @@ struct SessionHeaderView: View {
         if let s = session {
             let bucket = SessionHome.bucket(for: s, in: model)
             let live = SessionHome.liveTabPosition(for: s, in: model)
+            let gone = SessionHome.isGone(s, in: model)
             VStack(spacing: 0) {
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -126,8 +127,11 @@ struct SessionHeaderView: View {
                                 .font(.system(size: 16, weight: .semibold))
                                 .lineLimit(1)
                                 .truncationMode(.tail)
-                                .onTapGesture(count: 2) { draftTitle = s.title; renaming = true }
-                                .help(NSLocalizedString("Double-click to rename", comment: "session header"))
+                                .onTapGesture(count: 2) {
+                                    guard !gone else { return }
+                                    draftTitle = s.title; renaming = true
+                                }
+                                .help(gone ? "" : NSLocalizedString("Double-click to rename", comment: "session header"))
                         }
                         // One quiet line: status · agent · machine · folder.
                         HStack(spacing: 7) {
@@ -137,7 +141,7 @@ struct SessionHeaderView: View {
                                 } else {
                                     Circle().fill(bucket.tint).frame(width: 7, height: 7)
                                 }
-                                Text(statusText(s, bucket: bucket))
+                                Text(SessionHome.goneReason(s, in: model) ?? statusText(s, bucket: bucket))
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundStyle(bucket.tint)
                             }
@@ -148,15 +152,17 @@ struct SessionHeaderView: View {
                                 Text(s.tool.displayName)
                             }
                             .fixedSize()
-                            metaDot
-                            HStack(spacing: 5) {
-                                WorkspaceSquare(accentHex: accentHex(s.profileID), size: 7)
-                                Text(workspaceName(s.profileID))
+                            if !workspaceName(s.profileID).isEmpty {
+                                metaDot
+                                HStack(spacing: 5) {
+                                    WorkspaceSquare(accentHex: accentHex(s.profileID), size: 7)
+                                    Text(workspaceName(s.profileID))
+                                }
+                                .fixedSize()
+                                .contentShape(Rectangle())
+                                .onTapGesture { actions.showMachine(s.profileID) }
+                                .help(NSLocalizedString("The machine this session runs on — click for its details", comment: "session header"))
                             }
-                            .fixedSize()
-                            .contentShape(Rectangle())
-                            .onTapGesture { actions.showMachine(s.profileID) }
-                            .help(NSLocalizedString("The machine this session runs on — click for its details", comment: "session header"))
                             metaDot
                             HStack(spacing: 4) {
                                 Image(systemName: "folder").font(.system(size: 10.5))
@@ -180,26 +186,31 @@ struct SessionHeaderView: View {
                         .lineLimit(1)
                     }
                     Spacer(minLength: 8)
-                    if bucket == .ended || bucket == .asleep {
+                    // Picking the conversation back up is one quiet glyph; the
+                    // composer below says the rest.
+                    if !gone, bucket == .ended || bucket == .asleep {
                         Button {
                             actions.resume(s.id)
                         } label: {
-                            Label(bucket == .asleep
-                                  ? NSLocalizedString("Wake up and continue", comment: "session header")
-                                  : NSLocalizedString("Resume", comment: "session header"),
-                                  systemImage: "play.fill")
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 20))
+                                .foregroundStyle(Color.accentColor)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .help(NSLocalizedString("Pick the conversation back up where it left off.", comment: "session header"))
+                        .buttonStyle(.plain)
+                        .help(bucket == .asleep
+                              ? NSLocalizedString("Wake up and continue where it left off", comment: "session header")
+                              : NSLocalizedString("Resume where it left off", comment: "session header"))
                     }
                     Menu {
-                        Button(NSLocalizedString("Rename…", comment: "session menu")) {
-                            draftTitle = s.title; renaming = true
+                        if !gone {
+                            Button(NSLocalizedString("Rename…", comment: "session menu")) {
+                                draftTitle = s.title; renaming = true
+                            }
+                            if s.windowIndex != nil {
+                                Button(NSLocalizedString("End session", comment: "session menu")) { actions.close(s.id) }
+                            }
                         }
-                        if s.windowIndex != nil {
-                            Button(NSLocalizedString("End session", comment: "session menu")) { actions.close(s.id) }
-                        }
-                        if s.hasEnded {
+                        if s.hasEnded || gone {
                             Button(NSLocalizedString("Forget this session", comment: "session menu"), role: .destructive) {
                                 actions.forget(s.id)
                             }
@@ -381,27 +392,42 @@ struct SessionRestView: View {
                     .padding(.vertical, 20)
                 }
                 Divider().opacity(0.5)
-                // The way back in is the same as ever: say something.
-                VStack(alignment: .leading, spacing: 8) {
+                if let why = SessionHome.goneReason(s, in: model) {
+                    // Nothing to send to: the machine or the folder is gone.
                     HStack(spacing: 6) {
-                        Image(systemName: bucket == .asleep ? "moon.zzz" : "flag.checkered")
+                        Image(systemName: "archivebox")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
-                        Text(bucket == .asleep
-                             ? NSLocalizedString("Asleep. Your next message wakes it up and carries on from here.", comment: "session rest")
-                             : NSLocalizedString("This session ended. Your next message carries on from here.", comment: "session rest"))
+                        Text(String(format: NSLocalizedString("%@. The conversation stays readable here; forget the session when you're done with it.", comment: "session rest gone"), why))
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
                     }
-                    .padding(.horizontal, 6)
-                    ChatComposer(
-                        placeholder: String(format: NSLocalizedString("Message %@…", comment: "session rest composer"), s.tool.displayName),
-                        text: $draft, busy: sending, accent: accent,
-                        onSend: { send(s) })
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                } else {
+                    // The way back in is the same as ever: say something.
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: bucket == .asleep ? "moon.zzz" : "flag.checkered")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            Text(bucket == .asleep
+                                 ? NSLocalizedString("Asleep. Your next message wakes it up and carries on from here.", comment: "session rest")
+                                 : NSLocalizedString("This session ended. Your next message carries on from here.", comment: "session rest"))
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 6)
+                        ChatComposer(
+                            placeholder: String(format: NSLocalizedString("Message %@…", comment: "session rest composer"), s.tool.displayName),
+                            text: $draft, busy: sending, accent: accent,
+                            onSend: { send(s) })
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
             }
             .background(Color.platformTextBackground)
             .task(id: s.id) { await loadTranscript(s, bucket: bucket) }

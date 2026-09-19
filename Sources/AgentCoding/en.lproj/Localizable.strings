@@ -1861,3 +1861,11 @@
 "Copy Path" = "Copy Path";
 "Show This Folder" = "Show This Folder";
 "Show or hide the Files pane (⌃⌘E)" = "Show or hide the Files pane (⌃⌘E)";
+"Sessions" = "Sessions";
+"Machine removed" = "Machine removed";
+"Folder removed" = "Folder removed";
+"Your conversations with agents — click to fold the list" = "Your conversations with agents — click to fold the list";
+"Wake up and continue where it left off" = "Wake up and continue where it left off";
+"Resume where it left off" = "Resume where it left off";
+"%@. The conversation stays readable here; forget the session when you're done with it." = "%@. The conversation stays readable here; forget the session when you're done with it.";
+"The folder no longer exists on the machine." = "The folder no longer exists on the machine.";

@@ -95,6 +95,11 @@ final class AgentSessionEngine {
     /// else once the relaunch has it running.
     func resume(_ id: UUID, message: String? = nil) {
         guard let s = store.session(id), let delegate else { return }
+        if s.folderMissing == true {
+            store.mutate(id) { $0.lastError = NSLocalizedString(
+                "The folder no longer exists on the machine.", comment: "session resume") }
+            return
+        }
         let message = message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
         store.mutate(id) { $0.lastError = nil }
         BACDebug.log("sessions", "resume “\(s.title)”\(message == nil ? "" : " with a message")")
@@ -358,6 +363,7 @@ final class AgentSessionEngine {
     /// an agent under an interpreter (omp under bun) reads as "bash".
     func probeLiveness(entries: [SessionListModel.VMEntry]) {
         guard let delegate else { return }
+        probeFolders(entries: entries)
         let now = Date()
         for entry in entries {
             let bound = store.sessions.filter { $0.profileID == entry.id && $0.windowIndex != nil }
@@ -376,6 +382,53 @@ final class AgentSessionEngine {
                 for s in self.store.sessions where s.profileID == profileID {
                     guard let w = s.windowIndex, let p = lines[w] else { continue }
                     self.apply(p, to: s)
+                }
+            }
+        }
+    }
+
+    // MARK: Folders
+
+    private var lastFolderProbeAt: [UUID: Date] = [:]
+    private var folderProbing: Set<UUID> = []
+    private static let folderProbeEvery: TimeInterval = 30
+
+    /// Every so often, ask each running workspace whether the folders its
+    /// sessions live in are still there. A deleted folder greys the session
+    /// out — readable, not resumable — until it shows up again.
+    func probeFolders(entries: [SessionListModel.VMEntry]) {
+        guard let delegate else { return }
+        let now = Date()
+        for entry in entries {
+            let mine = store.sessions.filter { $0.profileID == entry.id && !$0.isLaunching && $0.cwd != "~" }
+            let paths = Array(Set(mine.map { SessionHome.guestPath($0.cwd) })).sorted()
+            guard !paths.isEmpty, !folderProbing.contains(entry.id),
+                  now.timeIntervalSince(lastFolderProbeAt[entry.id] ?? .distantPast) > Self.folderProbeEvery
+            else { continue }
+            folderProbing.insert(entry.id)
+            lastFolderProbeAt[entry.id] = now
+            let profileID = entry.id
+            let quoted = paths.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+                .joined(separator: " ")
+            let cmd = "for p in \(quoted); do if [ -d \"$p\" ]; then printf '1\\t%s\\n' \"$p\"; "
+                + "else printf '0\\t%s\\n' \"$p\"; fi; done"
+            Task { [weak self] in
+                defer { self?.folderProbing.remove(profileID) }
+                guard let out = try? await delegate.guestExec(profileID: profileID, command: cmd, timeout: 10),
+                      let self else { return }
+                var exists: [String: Bool] = [:]
+                for line in out.split(whereSeparator: \.isNewline) {
+                    let parts = line.split(separator: "\t", maxSplits: 1)
+                    guard parts.count == 2 else { continue }
+                    exists[String(parts[1])] = parts[0] == "1"
+                }
+                guard !exists.isEmpty else { return }
+                for s in self.store.sessions where s.profileID == profileID {
+                    guard let there = exists[SessionHome.guestPath(s.cwd)] else { continue }
+                    // Flip only on a change: gone → back, or here → gone.
+                    if (s.folderMissing == true) == there {
+                        self.store.mutate(s.id) { $0.folderMissing = there ? nil : true }
+                    }
                 }
             }
         }

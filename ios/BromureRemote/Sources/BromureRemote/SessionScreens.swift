@@ -144,7 +144,7 @@ struct MobileSessionScreen: View {
         if s.isLaunching {
             SessionLaunchView(store: controller.sessionStore, model: model, sessionID: s.id,
                               accent: accent, actions: actions)
-        } else if !s.hasEnded, SessionHome.liveTab(for: s, in: model) != nil {
+        } else if !s.hasEnded, !SessionHome.isGone(s, in: model), SessionHome.liveTab(for: s, in: model) != nil {
             VStack(spacing: 0) {
                 MobileSessionHeader(controller: controller, session: s, actions: actions)
                 // The workspace screen opens on the session's tmux window; an
@@ -181,26 +181,29 @@ struct MobileSessionScreen: View {
     }
 
     private func menu(_ s: AgentSession) -> some View {
-        Menu {
-            if s.windowIndex != nil, !s.hasEnded {
-                Button { showLinux = true } label: {
-                    Label("Linux", systemImage: "terminal")
+        let gone = SessionHome.isGone(s, in: model)
+        return Menu {
+            if !gone {
+                if s.windowIndex != nil, !s.hasEnded {
+                    Button { showLinux = true } label: {
+                        Label("Linux", systemImage: "terminal")
+                    }
+                }
+                if s.hasEnded || SessionHome.bucket(for: s, in: model) == .asleep {
+                    Button { controller.sessionCommand(s.id, "resume") } label: {
+                        Label(s.hasEnded ? "Resume" : "Wake up and continue", systemImage: "play.fill")
+                    }
+                }
+                Button { draftTitle = s.title; renaming = true } label: {
+                    Label("Rename…", systemImage: "pencil")
+                }
+                if s.windowIndex != nil {
+                    Button(role: .destructive) { confirmEnd = true } label: {
+                        Label("End session", systemImage: "stop.circle")
+                    }
                 }
             }
-            if s.hasEnded || SessionHome.bucket(for: s, in: model) == .asleep {
-                Button { controller.sessionCommand(s.id, "resume") } label: {
-                    Label(s.hasEnded ? "Resume" : "Wake up and continue", systemImage: "play.fill")
-                }
-            }
-            Button { draftTitle = s.title; renaming = true } label: {
-                Label("Rename…", systemImage: "pencil")
-            }
-            if s.windowIndex != nil {
-                Button(role: .destructive) { confirmEnd = true } label: {
-                    Label("End session", systemImage: "stop.circle")
-                }
-            }
-            if s.hasEnded {
+            if s.hasEnded || gone {
                 Button(role: .destructive) {
                     controller.sessionCommand(s.id, "forget")
                     onForget()
@@ -225,6 +228,7 @@ struct MobileSessionHeader: View {
     var body: some View {
         let s = session
         let bucket = SessionHome.bucket(for: s, in: model)
+        let gone = SessionHome.isGone(s, in: model)
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -234,7 +238,7 @@ struct MobileSessionHeader: View {
                         } else {
                             Circle().fill(bucket.tint).frame(width: 7, height: 7)
                         }
-                        Text(statusText(s, bucket: bucket))
+                        Text(SessionHome.goneReason(s, in: model) ?? statusText(s, bucket: bucket))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(bucket.tint)
                     }
@@ -245,12 +249,14 @@ struct MobileSessionHeader: View {
                         Text(s.tool.displayName)
                     }
                     .fixedSize()
-                    Text("·").foregroundStyle(.tertiary)
-                    HStack(spacing: 4) {
-                        RoundedRectangle(cornerRadius: 1.5)
-                            .fill(Color(hex: MobileSessions.accentHex(model, s)))
-                            .frame(width: 6, height: 6)
-                        Text(MobileSessions.workspaceName(model, s))
+                    if !MobileSessions.workspaceName(model, s).isEmpty {
+                        Text("·").foregroundStyle(.tertiary)
+                        HStack(spacing: 4) {
+                            RoundedRectangle(cornerRadius: 1.5)
+                                .fill(Color(hex: MobileSessions.accentHex(model, s)))
+                                .frame(width: 6, height: 6)
+                            Text(MobileSessions.workspaceName(model, s))
+                        }
                     }
                 }
                 .font(.caption)
@@ -273,15 +279,18 @@ struct MobileSessionHeader: View {
                 .lineLimit(1)
             }
             Spacer(minLength: 6)
-            if bucket == .ended || bucket == .asleep {
+            // Picking the conversation back up is one quiet glyph; the
+            // composer below says the rest.
+            if !gone, bucket == .ended || bucket == .asleep {
                 Button {
                     actions.resume(s.id)
                 } label: {
-                    Label(bucket == .asleep ? "Wake up" : "Resume", systemImage: "play.fill")
-                        .font(.caption.weight(.semibold))
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundStyle(Color.accentColor)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(.plain)
+                .accessibilityLabel(bucket == .asleep ? "Wake up and continue" : "Resume")
             }
         }
         .padding(.horizontal, 16)
@@ -289,6 +298,7 @@ struct MobileSessionHeader: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.platformWindowBackground)
         .overlay(alignment: .bottom) { Divider().opacity(0.6) }
+        .opacity(gone ? 0.6 : 1)
     }
 
     private func statusText(_ s: AgentSession, bucket: SessionBucket) -> String {
@@ -362,97 +372,97 @@ struct MobileNewSessionScreen: View {
 
 // MARK: - The list (phone dashboard)
 
-/// The phone dashboard's "Sessions" block: grouped cards — Needs you,
-/// Working, Ready, Asleep, then Ended folded away — with the new-session
+/// The phone dashboard's "Sessions" block: one list — what needs you first,
+/// then working, ready, asleep, ended, and last the ones whose machine or
+/// folder is gone (dimmed) — with a caret to fold it and the new-session
 /// button in its header.
 struct MobileSessionsSection: View {
     let controller: RemoteHostController
     let onSelect: (UUID) -> Void
     let onNew: () -> Void
-    @State private var showEnded = false
+    @AppStorage("sessions.listExpanded") private var expanded = true
 
     private var model: SessionListModel { controller.listModel }
 
     var body: some View {
-        let groups = SessionHome.grouped(controller.sessionStore.sessions, in: model)
+        let list = SessionHome.orderedAll(controller.sessionStore.sessions, in: model)
+        let needsYou = list.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                Text("Sessions").font(.headline)
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Sessions").font(.headline).foregroundStyle(.primary)
+                        if needsYou > 0 {
+                            Text("\(needsYou)")
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Capsule().fill(Color.red))
+                                .foregroundStyle(.white)
+                                .accessibilityLabel("\(needsYou) sessions need you")
+                        }
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(expanded ? "Hide sessions" : "Show sessions")
                 Spacer()
+                if !list.isEmpty {
+                    Text("\(list.count)")
+                        .font(.caption.weight(.medium)).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
                 Button(action: onNew) {
                     Image(systemName: "plus").font(.body)
                 }
                 .accessibilityLabel("New session")
             }
-            if controller.sessionStore.sessions.isEmpty {
-                Button(action: onNew) {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(Color.accentColor.opacity(0.15)).frame(width: 42, height: 42)
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 18, weight: .medium)).foregroundStyle(Color.accentColor)
-                        }
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("What can I help you with?").font(.body.weight(.semibold))
-                                .foregroundStyle(.primary)
-                            Text(controller.hasSnapshot ? "Start your first session." : "Loading sessions…")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 4)
-                        Image(systemName: "chevron.right").font(.caption.weight(.semibold))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(12)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color(uiColor: .secondarySystemGroupedBackground)))
-                }
-                .buttonStyle(.plain)
-            } else {
-                ForEach(SessionBucket.allCases) { bucket in
-                    if let list = groups[bucket], !list.isEmpty {
-                        if bucket == .ended {
-                            Button { withAnimation(.easeOut(duration: 0.18)) { showEnded.toggle() } } label: {
-                                HStack(spacing: 5) {
-                                    bucketLabel(bucket, count: list.count)
-                                    Image(systemName: "chevron.right")
-                                        .font(.caption2.weight(.bold))
-                                        .foregroundStyle(.tertiary)
-                                        .rotationEffect(.degrees(showEnded ? 90 : 0))
-                                    Spacer()
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            if showEnded {
-                                ForEach(list) { card($0, bucket: bucket) }
-                            }
-                        } else {
-                            bucketLabel(bucket, count: list.count)
-                            ForEach(list) { card($0, bucket: bucket) }
-                        }
-                    }
+            if expanded {
+                if list.isEmpty {
+                    emptyCard
+                } else {
+                    ForEach(list) { card($0) }
                 }
             }
         }
     }
 
-    private func bucketLabel(_ bucket: SessionBucket, count: Int) -> some View {
-        HStack(spacing: 6) {
-            Text(bucket.title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(bucket == .needsYou ? Color.red : Color.secondary)
-                .textCase(.uppercase)
-                .tracking(0.5)
-            Text("\(count)")
-                .font(.caption2.weight(.semibold)).monospacedDigit()
-                .foregroundStyle(.tertiary)
+    private var emptyCard: some View {
+        Button(action: onNew) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.15)).frame(width: 42, height: 42)
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 18, weight: .medium)).foregroundStyle(Color.accentColor)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("What can I help you with?").font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(controller.hasSnapshot ? "Start your first session." : "Loading sessions…")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemGroupedBackground)))
         }
-        .padding(.top, 4)
+        .buttonStyle(.plain)
     }
 
-    private func card(_ s: AgentSession, bucket: SessionBucket) -> some View {
-        Button { onSelect(s.id) } label: {
+    private func card(_ s: AgentSession) -> some View {
+        let bucket = SessionHome.bucket(for: s, in: model)
+        let gone = SessionHome.isGone(s, in: model)
+        let urgent = bucket == .needsYou
+        return Button { onSelect(s.id) } label: {
             HStack(spacing: 12) {
                 AgentAvatar(tool: s.tool, size: 34, status: SessionHome.dot(for: s, in: model))
                     .opacity(s.hasEnded ? 0.55 : 1)
@@ -460,11 +470,13 @@ struct MobileSessionsSection: View {
                     Text(s.title).font(.body.weight(.semibold)).lineLimit(1)
                         .foregroundStyle(.primary)
                     HStack(spacing: 5) {
-                        RoundedRectangle(cornerRadius: 1.5)
-                            .fill(Color(hex: MobileSessions.accentHex(model, s)))
-                            .frame(width: 6, height: 6)
-                        Text(MobileSessions.workspaceName(model, s)).lineLimit(1)
-                        Text("·").foregroundStyle(.tertiary)
+                        if !MobileSessions.workspaceName(model, s).isEmpty {
+                            RoundedRectangle(cornerRadius: 1.5)
+                                .fill(Color(hex: MobileSessions.accentHex(model, s)))
+                                .frame(width: 6, height: 6)
+                            Text(MobileSessions.workspaceName(model, s)).lineLimit(1)
+                            Text("·").foregroundStyle(.tertiary)
+                        }
                         Text(SessionHome.statusLine(for: s, in: model))
                             .lineLimit(1).truncationMode(.tail)
                     }
@@ -475,14 +487,15 @@ struct MobileSessionsSection: View {
                     Text(when).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
                 }
                 Image(systemName: "chevron.right").font(.caption.weight(.semibold))
-                    .foregroundStyle(bucket == .needsYou ? Color.red.opacity(0.55) : Color.secondary.opacity(0.5))
+                    .foregroundStyle(urgent ? Color.red.opacity(0.55) : Color.secondary.opacity(0.5))
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(bucket == .needsYou ? Color.red.opacity(0.09)
-                                          : Color(uiColor: .secondarySystemGroupedBackground)))
+                .fill(urgent ? Color.red.opacity(0.09)
+                             : Color(uiColor: .secondarySystemGroupedBackground)))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(bucket == .needsYou ? Color.red.opacity(0.3) : .clear, lineWidth: 1))
+                .strokeBorder(urgent ? Color.red.opacity(0.3) : .clear, lineWidth: 1))
+            .opacity(gone ? 0.5 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -490,52 +503,48 @@ struct MobileSessionsSection: View {
 
 // MARK: - The list (iPad / visionOS sidebar)
 
-/// Sidebar sections for a `List(selection:)`: one per non-empty bucket,
-/// Ended collapsible, each row tagged with its `PadSelection`. Sits above
-/// the boards and workspaces so a session is the first thing to pick.
+/// One collapsible "Sessions" section for a `List(selection:)`: the
+/// new-session row, then every session in sidebar order (gone ones dimmed,
+/// last), each row tagged with its `PadSelection`.
 struct PadSessionSections: View {
     let controller: RemoteHostController
-    @State private var showEnded = false
+    @AppStorage("sessions.listExpanded") private var expanded = true
 
     private var model: SessionListModel { controller.listModel }
 
     var body: some View {
-        let groups = SessionHome.grouped(controller.sessionStore.sessions, in: model)
-        Section {
+        let list = SessionHome.orderedAll(controller.sessionStore.sessions, in: model)
+        let needsYou = list.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
+        Section(isExpanded: $expanded) {
             Label("New Session…", systemImage: "plus")
                 .foregroundStyle(.tint)
                 .tag(PadSelection.newSession)
-            if controller.sessionStore.sessions.isEmpty {
+            if list.isEmpty {
                 Text(controller.hasSnapshot ? "No sessions yet." : "Loading sessions…")
                     .font(.callout).foregroundStyle(.secondary)
             }
+            ForEach(list) { s in
+                row(s)
+                    .opacity(SessionHome.isGone(s, in: model) ? 0.5 : 1)
+                    .tag(PadSelection.session(s.id))
+            }
         } header: {
-            Text("Sessions")
-        }
-        ForEach(SessionBucket.allCases) { bucket in
-            if let list = groups[bucket], !list.isEmpty {
-                if bucket == .ended {
-                    Section(isExpanded: $showEnded) {
-                        ForEach(list) { row($0).tag(PadSelection.session($0.id)) }
-                    } header: {
-                        Text(bucket.title)
-                    }
-                } else {
-                    Section {
-                        ForEach(list) { row($0).tag(PadSelection.session($0.id)) }
-                    } header: {
-                        HStack(spacing: 6) {
-                            Text(bucket.title)
-                            if bucket == .needsYou {
-                                Text("\(list.count)")
-                                    .font(.caption2.weight(.bold))
-                                    .padding(.horizontal, 6).padding(.vertical, 1)
-                                    .background(Capsule().fill(Color.red))
-                                    .foregroundStyle(.white)
-                                    .textCase(nil)
-                            }
-                        }
-                    }
+            HStack(spacing: 6) {
+                Text("Sessions")
+                if needsYou > 0 {
+                    Text("\(needsYou)")
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.red))
+                        .foregroundStyle(.white)
+                        .textCase(nil)
+                }
+                Spacer()
+                if !list.isEmpty {
+                    Text("\(list.count)")
+                        .font(.footnote.weight(.semibold)).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .textCase(nil)
                 }
             }
         }
@@ -552,11 +561,13 @@ struct PadSessionSections: View {
                     }
                 }
                 HStack(spacing: 4) {
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Color(hex: MobileSessions.accentHex(model, s)))
-                        .frame(width: 6, height: 6)
-                    Text(MobileSessions.workspaceName(model, s))
-                    Text("·").foregroundStyle(.tertiary)
+                    if !MobileSessions.workspaceName(model, s).isEmpty {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Color(hex: MobileSessions.accentHex(model, s)))
+                            .frame(width: 6, height: 6)
+                        Text(MobileSessions.workspaceName(model, s))
+                        Text("·").foregroundStyle(.tertiary)
+                    }
                     Text(SessionHome.statusLine(for: s, in: model))
                         .lineLimit(1).truncationMode(.tail)
                 }

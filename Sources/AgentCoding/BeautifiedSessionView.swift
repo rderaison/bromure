@@ -418,13 +418,16 @@ final class BeautifiedSessionModel: ObservableObject {
         }
     }
 
-    /// Begin polling the live transcript (~1.5s cadence, like the plan window).
+    /// Begin polling the live transcript: brisk while the agent is working
+    /// (its turn streams into the file as it goes, and a lagging chat is
+    /// what the user notices), relaxed once it's idle.
     func start() {
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.poll()
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                let busy = self?.working ?? false
+                try? await Task.sleep(nanoseconds: busy ? 400_000_000 : 1_200_000_000)
             }
         }
     }

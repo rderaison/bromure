@@ -67,6 +67,9 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// the same index carrying another name is somebody else's — the
     /// machine rebooted and the indices started over.
     var launchDisplay: String?
+    /// A probe found the folder gone from the machine: the session can be
+    /// read and forgotten, nothing else.
+    var folderMissing: Bool?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -455,6 +458,37 @@ enum SessionHome {
         return home + "/" + trimmed
     }
 
+    /// The session's machine was deleted, or its folder is gone from the
+    /// machine: it can be read and forgotten, nothing else.
+    @MainActor
+    static func isGone(_ s: AgentSession, in model: SessionListModel) -> Bool {
+        goneReason(s, in: model) != nil
+    }
+
+    /// Why a session is gone, for the status line — nil when it isn't.
+    @MainActor
+    static func goneReason(_ s: AgentSession, in model: SessionListModel) -> String? {
+        // No machines known at all (a mirror before its first snapshot) is
+        // not the same as this machine being gone.
+        if !model.profileRows.isEmpty, !model.profileRows.contains(where: { $0.id == s.profileID }) {
+            return NSLocalizedString("Machine removed", comment: "session status")
+        }
+        if s.folderMissing == true {
+            return NSLocalizedString("Folder removed", comment: "session status")
+        }
+        return nil
+    }
+
+    /// Every session in sidebar order: what needs you, then working, ready,
+    /// asleep, ended — and the gone ones last.
+    @MainActor
+    static func orderedAll(_ sessions: [AgentSession], in model: SessionListModel) -> [AgentSession] {
+        let groups = grouped(sessions.filter { !isGone($0, in: model) }, in: model)
+        let gone = sessions.filter { isGone($0, in: model) }
+            .sorted { lastActivity($0) > lastActivity($1) }
+        return SessionBucket.allCases.flatMap { groups[$0] ?? [] } + gone
+    }
+
     /// The session's live tab, when its workspace is attached and the tab
     /// is still there.
     @MainActor
@@ -506,6 +540,7 @@ enum SessionHome {
 
     @MainActor
     static func bucket(for s: AgentSession, in model: SessionListModel) -> SessionBucket {
+        if isGone(s, in: model) { return .ended }
         if s.isLaunching { return .working }
         if s.hasEnded { return .ended }
         let ws = workspaceState(of: s, in: model)
@@ -545,6 +580,7 @@ enum SessionHome {
             case .running:         return NSLocalizedString("Starting…", comment: "session status")
             }
         }
+        if let why = goneReason(s, in: model) { return why }
         if let e = s.lastError, !e.isEmpty { return NSLocalizedString("Couldn't start", comment: "session status") }
         // Short, so it fits beside the machine's name in a narrow sidebar.
         switch bucket(for: s, in: model) {
@@ -732,6 +768,8 @@ struct SessionRowView: View {
     let statusLine: String
     /// "3m" — when it last did something; nil while starting.
     var when: String? = nil
+    /// Machine or folder gone: dimmed, still readable.
+    var gone = false
     let selected: Bool
     let onSelect: () -> Void
     @State private var hovering = false
@@ -754,11 +792,13 @@ struct SessionRowView: View {
                     }
                 }
                 HStack(spacing: 4) {
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Color(hex: accentHex))
-                        .frame(width: 6, height: 6)
-                    Text(workspaceName)
-                    Text("·").foregroundStyle(.tertiary)
+                    if !workspaceName.isEmpty {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Color(hex: accentHex))
+                            .frame(width: 6, height: 6)
+                        Text(workspaceName)
+                        Text("·").foregroundStyle(.tertiary)
+                    }
                     Text(statusLine)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -784,21 +824,24 @@ struct SessionRowView: View {
             }
         }
         .contentShape(Rectangle())
+        .opacity(gone ? 0.5 : 1)
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }
     }
 }
 
-/// The grouped session list: Needs you / Working / Ready / Asleep / Ended.
-/// Empty buckets don't render; Ended starts collapsed.
+/// The session list: one "Sessions" section holding every session — what
+/// needs you first, then working, ready, asleep, ended, and last the ones
+/// whose machine or folder is gone. The caret folds the whole list away;
+/// a search always shows its matches.
 struct SessionSectionsView: View {
     var store: AgentSessionStore
     @Bindable var model: SessionListModel
     var filter: String = ""
     let onSelect: (UUID) -> Void
-    @State private var endedExpanded = false
+    @AppStorage("sessions.listExpanded") private var expanded = true
 
-    private var groups: [SessionBucket: [AgentSession]] {
+    private var sessions: [AgentSession] {
         var sessions = store.sessions
         let q = filter.trimmingCharacters(in: .whitespaces)
         if !q.isEmpty {
@@ -808,7 +851,7 @@ struct SessionSectionsView: View {
                     || $0.cwd.localizedCaseInsensitiveContains(q)
             }
         }
-        return SessionHome.grouped(sessions, in: model)
+        return SessionHome.orderedAll(sessions, in: model)
     }
 
     private func workspaceName(_ id: UUID) -> String {
@@ -819,12 +862,55 @@ struct SessionSectionsView: View {
     }
 
     var body: some View {
-        let groups = groups
+        let list = sessions
+        let needsYou = list.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
+        let open = expanded || !filter.isEmpty
         VStack(alignment: .leading, spacing: 1) {
-            if groups.isEmpty { emptyHint }
-            ForEach(SessionBucket.allCases) { bucket in
-                if let list = groups[bucket], !list.isEmpty {
-                    section(bucket, list)
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: open ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 10)
+                    Text(NSLocalizedString("Sessions", comment: "sidebar section"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                        .tracking(0.7)
+                    if needsYou > 0 {
+                        SidebarAttentionBadge(count: needsYou, tint: SessionBucket.needsYou.tint)
+                    }
+                    Spacer()
+                    if !list.isEmpty {
+                        Text("\(list.count)")
+                            .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 8)
+            .padding(.trailing, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+            .help(NSLocalizedString("Your conversations with agents — click to fold the list", comment: "sidebar"))
+
+            if open {
+                if list.isEmpty { emptyHint }
+                ForEach(list) { s in
+                    SessionRowView(
+                        session: s,
+                        workspaceName: workspaceName(s.profileID),
+                        accentHex: accentHex(s.profileID),
+                        dot: SessionHome.dot(for: s, in: model),
+                        statusLine: SessionHome.statusLine(for: s, in: model),
+                        when: s.isLaunching ? nil : SessionHome.elapsedCompact(since: SessionHome.lastActivity(s)),
+                        gone: SessionHome.isGone(s, in: model),
+                        selected: model.selectedSessionID == s.id,
+                        onSelect: { onSelect(s.id) })
                 }
             }
         }
@@ -846,61 +932,6 @@ struct SessionSectionsView: View {
             }
         }
         .padding(.horizontal, 10)
-        .padding(.top, 16)
-    }
-
-    @ViewBuilder
-    private func section(_ bucket: SessionBucket, _ list: [AgentSession]) -> some View {
-        let collapsible = bucket == .ended
-        // A collapsed section never hides the session on stage.
-        let expanded = !collapsible || endedExpanded
-            || list.contains { $0.id == model.selectedSessionID }
-        VStack(alignment: .leading, spacing: 1) {
-            Button {
-                if collapsible { withAnimation(.easeInOut(duration: 0.15)) { endedExpanded.toggle() } }
-            } label: {
-                HStack(spacing: 6) {
-                    Text(bucket.title)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
-                        .tracking(0.7)
-                    if bucket.badged {
-                        SidebarAttentionBadge(count: list.count, tint: bucket.tint)
-                    } else if collapsible {
-                        Text("\(list.count)")
-                            .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer()
-                    if collapsible {
-                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!collapsible)
-            .padding(.leading, 10)
-            .padding(.trailing, 8)
-            .padding(.top, 14)
-            .padding(.bottom, 4)
-
-            if expanded {
-                ForEach(list) { s in
-                    SessionRowView(
-                        session: s,
-                        workspaceName: workspaceName(s.profileID),
-                        accentHex: accentHex(s.profileID),
-                        dot: SessionHome.dot(for: s, in: model),
-                        statusLine: SessionHome.statusLine(for: s, in: model),
-                        when: s.isLaunching ? nil : SessionHome.elapsedCompact(since: SessionHome.lastActivity(s)),
-                        selected: model.selectedSessionID == s.id,
-                        onSelect: { onSelect(s.id) })
-                }
-            }
-        }
+        .padding(.vertical, 8)
     }
 }

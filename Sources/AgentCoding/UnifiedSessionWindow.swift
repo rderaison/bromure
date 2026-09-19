@@ -354,7 +354,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     return
                 }
                 self.clearSessionStage()
-                self.selectTab(profileID: id, index: idx)
+                self.selectTab(profileID: id, index: idx)   // a terminal, in sessions-first
             },
             onNewTab:    { [weak self] id in self?.newTab(profileID: id) },
             onCloseTab:  { [weak self] id, idx in self?.closeTab(profileID: id, index: idx) },
@@ -1545,10 +1545,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         }
         setSessionHeader(visible: !sessionHeaderHost.isHidden)   // re-size for the shortcuts strip
         guard let id = selectedSessionID, let s = acDelegate?.agentSessionStore.session(id) else {
-            // A plain tab on stage: the terminal in Linux mode, the chat otherwise.
+            // A plain tab on stage is a terminal either way.
             if let pid = selectedID, let pane = pane(pid) {
-                pane.setViewMode(listModel.underTheHood ? .terminal : .beautified, persist: false)
+                pane.setViewMode(.terminal, persist: false)
                 pane.updateNativeTerminalMount()
+                listModel.beautifiedActive = false
             }
             return
         }
@@ -2042,10 +2043,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if selectedID != id { select(profileID: id) }
         guard let pane = pane(id) else { return }
         pane.switchTo(index: index)
-        // Linux mode shows terminals, whatever tab is picked by hand.
-        if listModel.sessionsFirst, listModel.underTheHood {
+        // Sessions-first: a tab picked by hand from the Machines list is a
+        // terminal, Linux mode or not — the chat is what sessions are for.
+        if listModel.sessionsFirst {
             pane.setViewMode(.terminal, persist: false)
             pane.updateNativeTerminalMount()
+            listModel.beautifiedActive = false
         }
     }
     func newTab(profileID id: Profile.ID) {
@@ -2354,12 +2357,33 @@ struct SessionSidebar: View {
         PlusButton(onNewProfile: onNewProfile)
     }
 
-    /// Sessions-first: the new-session button, a search field, the sessions
-    /// grouped by what they need from the user, the Kanban and Automations
-    /// rows, and the machines folded away at the bottom.
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+            TextField(NSLocalizedString("Search sessions", comment: "sidebar"), text: $sessionFilter)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+            if !sessionFilter.isEmpty {
+                Button { sessionFilter = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 26)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+    }
+
+    /// Sessions-first: the search field, the new-session button, one
+    /// Sessions list, the Kanban and Automations rows, and the machines
+    /// folded away at the bottom.
     @ViewBuilder
     private func sessionsFirstContent(_ sessionStore: AgentSessionStore, _ taskStore: CodingTaskStore) -> some View {
         VStack(spacing: 8) {
+            searchField
             Button(action: onNewSession) {
                 HStack(spacing: 6) {
                     Image(systemName: "plus")
@@ -2379,24 +2403,6 @@ struct SessionSidebar: View {
             }
             .buttonStyle(.plain)
             .help(NSLocalizedString("Start an agent (⌘N)", comment: "sidebar"))
-
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                TextField(NSLocalizedString("Search sessions", comment: "sidebar"), text: $sessionFilter)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                if !sessionFilter.isEmpty {
-                    Button { sessionFilter = "" } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 26)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
         }
         .padding(.horizontal, 10)
         .padding(.top, 6)
@@ -3429,9 +3435,13 @@ struct UnifiedToolbarBar: View {
                     if entry.model.streamingActive { StreamingDot() }
                     if let status = entry.model.engineStatus { EngineBadge(status: status) }
                     FusionToggle(model: entry.model) { on in onToggleFusion(entry.id, on) }
-                    HeaderIcon(system: "doc.richtext",
-                               help: "Switch between the terminal and the beautified transcript view",
-                               active: model.beautifiedActive) { onToggleBeautified(entry.id) }
+                    // Sessions-first has no terminal/chat flip: a session is a
+                    // chat (Linux for its terminal), a machine's tab a terminal.
+                    if !model.sessionsFirst {
+                        HeaderIcon(system: "doc.richtext",
+                                   help: "Switch between the terminal and the beautified transcript view",
+                                   active: model.beautifiedActive) { onToggleBeautified(entry.id) }
+                    }
                 }
                 if model.sessionsFirst, model.selectedSessionID != nil {
                     UnderTheHoodToggle(active: model.underTheHood, action: onToggleUnderTheHood)
