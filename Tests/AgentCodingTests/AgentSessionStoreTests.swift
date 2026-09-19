@@ -130,6 +130,31 @@ struct AgentSessionStoreTests {
         #expect(store.sessions.first?.title == "Deploy the panel")
     }
 
+    @Test("a deleted session hides at once and is purged once its tab is gone")
+    func deleteWaitsForTheTab() {
+        let store = tempStore()
+        let ws = UUID()
+        let model = SessionListModel()
+        var s = AgentSession(profileID: ws, tool: .claude, title: "Lux", cwd: "~/lux", windowIndex: 2)
+        s.launchDisplay = "Lux"
+        store.upsert(s)
+        store.setDeleted(s.id)
+        // Hidden from every list, still in the store while the tab is listed.
+        #expect(SessionHome.orderedAll(store.sessions, in: model).isEmpty)
+        #expect(SessionHome.archived(store.sessions).isEmpty)
+        #expect(store.session(s.id)?.isDeleted == true)
+        let t0 = Date()
+        store.reconcile(entries: [entry(ws, tabs: [(2, "claude", "/home/ubuntu/lux")], live: true)], now: t0)
+        #expect(store.session(s.id) != nil)
+        // The tab is killed and drops out of the roster: the record goes with
+        // it (after the missing grace), and nothing is adopted in its place.
+        store.reconcile(entries: [entry(ws, tabs: [(0, "bash", "/home/ubuntu")], live: true)], now: t0)
+        store.reconcile(entries: [entry(ws, tabs: [(0, "bash", "/home/ubuntu")], live: true)],
+                        now: t0.addingTimeInterval(AgentSessionStore.missingGrace + 1))
+        #expect(store.session(s.id) == nil)
+        #expect(store.sessions.isEmpty)
+    }
+
     @Test("archived sessions leave the list and come back on resume")
     func archiveFlag() {
         let store = tempStore()

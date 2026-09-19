@@ -27,6 +27,7 @@ enum MobileSessions {
             forget: { id in controller.sessionCommand(id, "forget"); onForget() },
             archive: { controller.sessionCommand($0, "archive") },
             unarchive: { controller.sessionCommand($0, "unarchive") },
+            delete: { id in controller.sessionCommand(id, "delete"); onForget() },
             represent: { _ in },
             showFiles: onLinux,
             showContainers: { _ in onLinux() },
@@ -84,6 +85,7 @@ struct MobileSessionScreen: View {
     @State private var renaming = false
     @State private var draftTitle = ""
     @State private var confirmEnd = false
+    @State private var confirmDelete = false
 
     private var model: SessionListModel { controller.listModel }
     private var session: AgentSession? { controller.sessionStore.session(sessionID) }
@@ -131,6 +133,14 @@ struct MobileSessionScreen: View {
             Button("End session", role: .destructive) { controller.sessionCommand(sessionID, "close") }
         } message: {
             Text("The agent stops. The conversation stays readable here, and you can pick it back up later.")
+        }
+        .confirmationDialog("Delete this session?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete session", role: .destructive) {
+                controller.sessionCommand(sessionID, "delete")
+                onForget()
+            }
+        } message: {
+            Text("The agent stops and the session leaves the list. Its folder stays on the machine.")
         }
     }
 
@@ -219,12 +229,11 @@ struct MobileSessionScreen: View {
                     Label("Unarchive", systemImage: "tray.and.arrow.up")
                 }
             }
-            if s.hasEnded || gone {
-                Button(role: .destructive) {
-                    controller.sessionCommand(s.id, "forget")
-                    onForget()
-                } label: { Label("Forget this session", systemImage: "trash") }
-            }
+            Divider()
+            Button(role: .destructive) {
+                if SessionHome.isAgentLive(s, in: model) { confirmDelete = true }
+                else { controller.sessionCommand(s.id, "delete"); onForget() }
+            } label: { Label("Delete session", systemImage: "trash") }
         } label: {
             Image(systemName: "ellipsis.circle")
         }
@@ -398,6 +407,8 @@ struct MobileSessionsSection: View {
     let onNew: () -> Void
     @AppStorage("sessions.listExpanded") private var expanded = true
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
+    /// A long-press Delete on a session whose agent is running asks first.
+    @State private var pendingDelete: AgentSession?
 
     private var model: SessionListModel { controller.listModel }
 
@@ -472,6 +483,43 @@ struct MobileSessionsSection: View {
                 }
             }
         }
+        .confirmationDialog("Delete this session?", isPresented: Binding(
+            get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            titleVisibility: .visible) {
+            Button("Delete session", role: .destructive) {
+                if let s = pendingDelete { controller.sessionCommand(s.id, "delete") }
+                pendingDelete = nil
+            }
+        } message: {
+            Text("The agent stops and the session leaves the list. Its folder stays on the machine.")
+        }
+    }
+
+    /// Long-press: the same choices as the session's own menu.
+    @ViewBuilder private func rowMenu(_ s: AgentSession) -> some View {
+        let gone = SessionHome.isGone(s, in: model)
+        if !gone {
+            if s.isArchived {
+                Button { controller.sessionCommand(s.id, "unarchive") } label: {
+                    Label("Unarchive", systemImage: "tray.and.arrow.up")
+                }
+            } else {
+                Button { controller.sessionCommand(s.id, "archive") } label: {
+                    Label(s.windowIndex != nil && !s.hasEnded ? "End & Archive" : "Archive",
+                          systemImage: "archivebox")
+                }
+            }
+            if s.windowIndex != nil, !s.hasEnded {
+                Button { controller.sessionCommand(s.id, "close") } label: {
+                    Label("End session", systemImage: "stop.circle")
+                }
+            }
+        }
+        Divider()
+        Button(role: .destructive) {
+            if SessionHome.isAgentLive(s, in: model) { pendingDelete = s }
+            else { controller.sessionCommand(s.id, "delete") }
+        } label: { Label("Delete session", systemImage: "trash") }
     }
 
     private var emptyCard: some View {
@@ -540,6 +588,7 @@ struct MobileSessionsSection: View {
             .opacity(gone ? 0.5 : 1)
         }
         .buttonStyle(.plain)
+        .contextMenu { rowMenu(s) }
     }
 }
 
@@ -552,6 +601,8 @@ struct PadSessionSections: View {
     let controller: RemoteHostController
     @AppStorage("sessions.listExpanded") private var expanded = true
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
+    /// A right-click / long-press Delete on a running agent asks first.
+    @State private var pendingDelete: AgentSession?
 
     private var model: SessionListModel { controller.listModel }
 
@@ -564,7 +615,7 @@ struct PadSessionSections: View {
             // Put away, not gone: folded by default.
             Section(isExpanded: $archivedExpanded) {
                 ForEach(put) { s in
-                    row(s).tag(PadSelection.session(s.id))
+                    row(s).tag(PadSelection.session(s.id)).contextMenu { rowMenu(s) }
                 }
             } header: {
                 HStack(spacing: 6) {
@@ -584,6 +635,18 @@ struct PadSessionSections: View {
             Label("New Session…", systemImage: "plus")
                 .foregroundStyle(.tint)
                 .tag(PadSelection.newSession)
+                // The rows' Delete asks here when the agent is running (a
+                // row inside the list can present; the Section can't).
+                .confirmationDialog("Delete this session?", isPresented: Binding(
+                    get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+                    titleVisibility: .visible) {
+                    Button("Delete session", role: .destructive) {
+                        if let s = pendingDelete { controller.sessionCommand(s.id, "delete") }
+                        pendingDelete = nil
+                    }
+                } message: {
+                    Text("The agent stops and the session leaves the list. Its folder stays on the machine.")
+                }
             if list.isEmpty {
                 Text(controller.hasSnapshot ? "No sessions yet." : "Loading sessions…")
                     .font(.callout).foregroundStyle(.secondary)
@@ -592,6 +655,7 @@ struct PadSessionSections: View {
                 row(s)
                     .opacity(SessionHome.isGone(s, in: model) ? 0.5 : 1)
                     .tag(PadSelection.session(s.id))
+                    .contextMenu { rowMenu(s) }
             }
         } header: {
             HStack(spacing: 6) {
@@ -613,6 +677,33 @@ struct PadSessionSections: View {
                 }
             }
         }
+    }
+
+    /// Right-click / long-press: the same choices as the session's own menu.
+    @ViewBuilder private func rowMenu(_ s: AgentSession) -> some View {
+        let gone = SessionHome.isGone(s, in: model)
+        if !gone {
+            if s.isArchived {
+                Button { controller.sessionCommand(s.id, "unarchive") } label: {
+                    Label("Unarchive", systemImage: "tray.and.arrow.up")
+                }
+            } else {
+                Button { controller.sessionCommand(s.id, "archive") } label: {
+                    Label(s.windowIndex != nil && !s.hasEnded ? "End & Archive" : "Archive",
+                          systemImage: "archivebox")
+                }
+            }
+            if s.windowIndex != nil, !s.hasEnded {
+                Button { controller.sessionCommand(s.id, "close") } label: {
+                    Label("End session", systemImage: "stop.circle")
+                }
+            }
+        }
+        Divider()
+        Button(role: .destructive) {
+            if SessionHome.isAgentLive(s, in: model) { pendingDelete = s }
+            else { controller.sessionCommand(s.id, "delete") }
+        } label: { Label("Delete session", systemImage: "trash") }
     }
 
     private func row(_ s: AgentSession) -> some View {

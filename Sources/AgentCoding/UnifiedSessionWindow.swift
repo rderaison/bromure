@@ -385,7 +385,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onShowTaskBoard: { [weak self] in self?.showTaskBoard() },
             sessionStore: acDelegate.agentSessionStore,
             onNewSession: { [weak self] in self?.showNewSession() },
-            onSelectSession: { [weak self] id in self?.selectSession(id) })
+            onSelectSession: { [weak self] id in self?.selectSession(id) },
+            sessionActions: sessionStageActions)
         // NonMovable so a drag inside the sidebar — notably dragging a tab
         // row onto the Grid — selects/drags the row instead of moving the
         // whole window (the window is isMovableByWindowBackground).
@@ -1309,6 +1310,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self?.acDelegate?.agentSessionEngine.unarchive(id)
                 self?.sessionStageDidChange()
             },
+            delete: { [weak self] id in self?.confirmDeleteSession(id) },
             represent: { [weak self] id in
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()
@@ -1317,6 +1319,32 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             showContainers: { [weak self] pid in self?.showDockerDashboard(pid) },
             showMachine: { [weak self] pid in self?.showVMDashboard(pid) },
             toggleUnderTheHood: { [weak self] in self?.toggleUnderTheHood(nil) })
+    }
+
+    /// Delete a session — after a word when its agent is running; at once
+    /// otherwise. The stage moves on when it was the one on show.
+    private func confirmDeleteSession(_ id: UUID) {
+        guard let delegate = acDelegate, let s = delegate.agentSessionStore.session(id) else { return }
+        let perform = { [weak self] in
+            guard let self else { return }
+            delegate.agentSessionEngine.delete(id)
+            if self.selectedSessionID == id {
+                self.clearSessionStage()
+                self.selectInitialSession()
+            } else {
+                self.sessionStageDidChange()
+            }
+        }
+        guard SessionHome.isAgentLive(s, in: listModel) else { perform(); return }
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Delete “%@”?", comment: "delete session"), s.title)
+        alert.informativeText = NSLocalizedString("The agent stops and the session leaves the list. Its folder stays on the machine.", comment: "delete session")
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete session"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.beginSheetModal(for: self) { resp in
+            guard resp == .alertFirstButtonReturn else { return }
+            perform()
+        }
     }
 
     private var rememberedSessionID: UUID? {
@@ -2308,6 +2336,8 @@ struct SessionSidebar: View {
     /// Sessions-first sidebar (host window only): the new-session screen + selection.
     var onNewSession: () -> Void = {}
     var onSelectSession: (UUID) -> Void = { _ in }
+    /// The rows' context menu (archive, end, delete).
+    var sessionActions = SessionStageActions()
     @State private var sessionFilter = ""
 
     var body: some View {
@@ -2437,7 +2467,8 @@ struct SessionSidebar: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 3) {
                 SessionSectionsView(store: sessionStore, model: model,
-                                    filter: sessionFilter, onSelect: onSelectSession)
+                                    filter: sessionFilter, onSelect: onSelectSession,
+                                    actions: sessionActions)
                 CodingTasksSection(
                     store: taskStore,
                     model: model,

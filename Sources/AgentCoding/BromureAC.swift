@@ -3090,6 +3090,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     else { self.agentSessionEngine.unarchive(id) }
                     self.unifiedWindow?.sessionStageDidChange()
                     return ["ok": true, "archived": self.agentSessionStore.session(id)?.isArchived ?? false]
+                case "delete-session":
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          self.agentSessionStore.session(id) != nil
+                    else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.delete(id)
+                    if self.unifiedWindow?.selectedID != nil { self.unifiedWindow?.sessionStageDidChange() }
+                    return ["ok": true, "present": self.agentSessionStore.session(id) != nil,
+                            "deleted": self.agentSessionStore.session(id)?.isDeleted ?? false]
                 case "hood":
                     // Toggle "Under the hood" for the selected session.
                     self.unifiedWindow?.toggleUnderTheHood(nil)
@@ -3130,7 +3138,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         ["id": s.id.uuidString, "title": s.title, "tool": s.tool.rawValue,
                          "cwd": s.cwd, "windowIndex": s.windowIndex ?? -1,
                          "ended": s.endedAt != nil, "launching": s.isLaunching,
-                         "archived": s.isArchived,
+                         "archived": s.isArchived, "deleted": s.isDeleted,
                          "agentAlive": s.agentAlive ?? false,
                          // What the sidebar shows (Ended is often computed, not stored).
                          "bucket": model.map { SessionHome.bucket(for: s, in: $0).title } ?? "",
@@ -3564,6 +3572,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case (let sid?, "unarchive"):
                     guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
                     self.agentSessionEngine.unarchive(sid)
+                    return ["ok": true]
+                case (let sid?, "delete"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.delete(sid)
+                    self.unifiedWindow?.sessionStageDidChange()
                     return ["ok": true]
                 case (let sid?, "signin"):
                     // A fat client's sign-in card: the throwaway machine runs

@@ -28,6 +28,10 @@ struct SessionStageActions {
     /// Archived fold. Still readable; resuming brings it back.
     var archive: (UUID) -> Void = { _ in }
     var unarchive: (UUID) -> Void = { _ in }
+    /// Delete the session: ends the agent (asking first when it's running),
+    /// drops the record and its transcript copy. The folder on the machine
+    /// stays.
+    var delete: (UUID) -> Void = { _ in }
     var represent: (UUID) -> Void = { _ in }
     var showFiles: () -> Void = {}
     var showContainers: (UUID) -> Void = { _ in }
@@ -227,10 +231,9 @@ struct SessionHeaderView: View {
                         } else if s.isArchived {
                             Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
                         }
-                        if s.hasEnded || gone {
-                            Button(NSLocalizedString("Forget this session", comment: "session menu"), role: .destructive) {
-                                actions.forget(s.id)
-                            }
+                        Divider()
+                        Button(NSLocalizedString("Delete session", comment: "session menu"), role: .destructive) {
+                            actions.delete(s.id)
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -419,7 +422,7 @@ struct SessionRestView: View {
                         Image(systemName: "archivebox")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
-                        Text(String(format: NSLocalizedString("%@. The conversation stays readable here; forget the session when you're done with it.", comment: "session rest gone"), why))
+                        Text(String(format: NSLocalizedString("%@. The conversation stays readable here; delete the session when you're done with it.", comment: "session rest gone"), why))
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)

@@ -1003,7 +1003,7 @@ final class RemoteHostController {
         return UUID(uuidString: idStr)
     }
 
-    /// POST /sessions/{id}/{resume|close|rename|forget|archive|unarchive}.
+    /// POST /sessions/{id}/{resume|close|rename|forget|archive|unarchive|delete}.
     func sessionCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
         send("POST", "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
     }
@@ -3213,6 +3213,27 @@ final class RemoteHostWindow: NSWindow {
         sessionStageDidChange()
     }
 
+    /// Delete a session on the server — after a word when its agent is
+    /// running; at once otherwise. The stage moves on when it was on show.
+    private func confirmDeleteSession(_ id: UUID) {
+        guard let s = controller.sessionStore.session(id) else { return }
+        let perform = { [weak self] in
+            guard let self else { return }
+            self.controller.sessionCommand(id, "delete")
+            if self.selectedSessionID == id { self.clearSessionStage(); self.showNewSession() }
+        }
+        guard SessionHome.isAgentLive(s, in: controller.listModel) else { perform(); return }
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Delete “%@”?", comment: "delete session"), s.title)
+        alert.informativeText = NSLocalizedString("The agent stops and the session leaves the list. Its folder stays on the machine.", comment: "delete session")
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: "delete session"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.beginSheetModal(for: self) { resp in
+            guard resp == .alertFirstButtonReturn else { return }
+            perform()
+        }
+    }
+
     /// See UnifiedSessionWindow.newSessionWorkspacesKey.
     private var newSessionWorkspacesKey = ""
     private func workspacesKey() -> String {
@@ -3250,6 +3271,7 @@ final class RemoteHostWindow: NSWindow {
             },
             archive: { [weak self] id in self?.controller.sessionCommand(id, "archive") },
             unarchive: { [weak self] id in self?.controller.sessionCommand(id, "unarchive") },
+            delete: { [weak self] id in self?.confirmDeleteSession(id) },
             represent: { [weak self] id in
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()
@@ -3550,6 +3572,7 @@ final class RemoteHostWindow: NSWindow {
                 "sessions": controller.sessionStore.sessions.map {
                     ["id": $0.id.uuidString, "title": $0.title, "tool": $0.tool.rawValue,
                      "windowIndex": $0.windowIndex ?? -1, "archived": $0.isArchived,
+                     "deleted": $0.isDeleted,
                      "bucket": SessionHome.bucket(for: $0, in: model).title] as [String: Any]
                 },
             ]
@@ -4169,7 +4192,8 @@ final class RemoteHostWindow: NSWindow {
             onShowTaskBoard: { [weak self] in self?.showTaskBoard() },
             sessionStore: c.sessionStore,
             onNewSession: { [weak self] in self?.showNewSession() },
-            onSelectSession: { [weak self] id in self?.selectSession(id) })
+            onSelectSession: { [weak self] id in self?.selectSession(id) },
+            sessionActions: sessionStageActions)
     }
 
     // MARK: Stage

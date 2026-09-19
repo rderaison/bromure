@@ -78,6 +78,10 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// resumed. Archiving ends the agent (a running one, or one found
     /// running later).
     var archivedAt: Date?
+    /// The user deleted it. Hidden everywhere at once; the record itself
+    /// stays until its tab is gone from the roster (killed now, or when
+    /// the machine wakes), so the dying tab isn't adopted as a stranger.
+    var deletedAt: Date?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -96,6 +100,7 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var isLaunching: Bool { launchingSince != nil }
     var hasEnded: Bool { endedAt != nil && windowIndex == nil }
     var isArchived: Bool { archivedAt != nil }
+    var isDeleted: Bool { deletedAt != nil }
     /// A session the store made from a tab it found (no launch of ours, no
     /// words of the user's): the kind that can be twinned by a bad roster,
     /// and dropped again without losing anything.
@@ -204,6 +209,24 @@ final class AgentSessionStore {
               sessions[i].isArchived != archived else { return }
         sessions[i].archivedAt = archived ? now : nil
         save()
+    }
+
+    /// Mark a session deleted: gone from every list now, purged once its
+    /// tab is (see `purgeDeleted`).
+    func setDeleted(_ id: UUID, now: Date = Date()) {
+        guard let i = sessions.firstIndex(where: { $0.id == id }), !sessions[i].isDeleted else { return }
+        sessions[i].deletedAt = now
+        save()
+    }
+
+    /// Deleted sessions whose tab is gone (or never came) leave the store.
+    @discardableResult
+    private func purgeDeleted() -> Bool {
+        let gone = sessions.filter { $0.isDeleted && $0.windowIndex == nil && $0.launchingSince == nil }
+        guard !gone.isEmpty else { return false }
+        sessions.removeAll { s in gone.contains { $0.id == s.id } }
+        for s in gone { onRemove?(s.id) }
+        return true
     }
 
     /// Record a liveness probe result. In memory every tick; persisted only
@@ -380,6 +403,7 @@ final class AgentSessionStore {
             }
         }
         if dedupeTwins(now: now) { changed = true }
+        if purgeDeleted() { changed = true }
         if changed {
             sessions.sort { activity($0) > activity($1) }
             save()
@@ -486,8 +510,10 @@ final class AgentSessionStore {
             }
             return s
         }
-        // Twins an earlier build left behind go now, before anything shows.
-        if dedupeTwins() { save() }
+        // Twins an earlier build left behind go now, before anything shows;
+        // so does anything deleted whose tab is gone.
+        let tidied = dedupeTwins()
+        if purgeDeleted() || tidied { save() }
     }
 
     /// Is an agent running in the session's tab? The tty probe when we have
@@ -583,7 +609,7 @@ enum SessionHome {
     /// own fold (`archived(_:in:)`).
     @MainActor
     static func orderedAll(_ sessions: [AgentSession], in model: SessionListModel) -> [AgentSession] {
-        let sessions = sessions.filter { !$0.isArchived }
+        let sessions = sessions.filter { !$0.isArchived && !$0.isDeleted }
         let groups = grouped(sessions.filter { !isGone($0, in: model) }, in: model)
         let gone = sessions.filter { isGone($0, in: model) }
             .sorted { lastActivity($0) > lastActivity($1) }
@@ -592,8 +618,16 @@ enum SessionHome {
 
     /// The put-away sessions, most recently archived first.
     static func archived(_ sessions: [AgentSession]) -> [AgentSession] {
-        sessions.filter { $0.isArchived }
+        sessions.filter { $0.isArchived && !$0.isDeleted }
             .sorted { ($0.archivedAt ?? .distantPast) > ($1.archivedAt ?? .distantPast) }
+    }
+
+    /// An agent is running in the session's tab right now — what makes
+    /// ending or deleting it worth a second look.
+    @MainActor
+    static func isAgentLive(_ s: AgentSession, in model: SessionListModel) -> Bool {
+        guard let tab = liveTab(for: s, in: model) else { return false }
+        return agentRunning(s, in: tab)
     }
 
     /// The workspace is attached AND its tab roster is the guest's own (not
@@ -795,7 +829,7 @@ enum SessionHome {
     /// — what ⌘1–9 count.
     @MainActor
     static func ordered(_ sessions: [AgentSession], in model: SessionListModel) -> [AgentSession] {
-        let groups = grouped(sessions.filter { !$0.isArchived }, in: model)
+        let groups = grouped(sessions.filter { !$0.isArchived && !$0.isDeleted }, in: model)
         return SessionBucket.allCases.filter { $0 != .ended }.flatMap { groups[$0] ?? [] }
     }
 
@@ -805,8 +839,8 @@ enum SessionHome {
     @MainActor
     static func initialSession(in store: AgentSessionStore, model: SessionListModel,
                                remembered: UUID?) -> AgentSession? {
-        if let id = remembered, let s = store.session(id), !s.hasEnded, !s.isArchived { return s }
-        let groups = grouped(store.sessions.filter { !$0.isArchived }, in: model)
+        if let id = remembered, let s = store.session(id), !s.hasEnded, !s.isArchived, !s.isDeleted { return s }
+        let groups = grouped(store.sessions.filter { !$0.isArchived && !$0.isDeleted }, in: model)
         for b in SessionBucket.allCases {
             if let s = groups[b]?.first { return s }
         }
@@ -973,6 +1007,8 @@ struct SessionSectionsView: View {
     @Bindable var model: SessionListModel
     var filter: String = ""
     let onSelect: (UUID) -> Void
+    /// What a row's context menu can do (archive, end, delete).
+    var actions = SessionStageActions()
     @AppStorage("sessions.listExpanded") private var expanded = true
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
 
@@ -1081,16 +1117,41 @@ struct SessionSectionsView: View {
     }
 
     private func row(_ s: AgentSession) -> some View {
-        SessionRowView(
+        let gone = SessionHome.isGone(s, in: model)
+        return SessionRowView(
             session: s,
             workspaceName: workspaceName(s.profileID),
             accentHex: accentHex(s.profileID),
             dot: SessionHome.dot(for: s, in: model),
             statusLine: SessionHome.statusLine(for: s, in: model),
             when: s.isLaunching ? nil : SessionHome.elapsedCompact(since: SessionHome.lastActivity(s)),
-            gone: SessionHome.isGone(s, in: model),
+            gone: gone,
             selected: model.selectedSessionID == s.id,
             onSelect: { onSelect(s.id) })
+        .contextMenu {
+            // The header's ⋯ menu, one right-click away — minus Rename,
+            // which is the title itself.
+            if !gone {
+                if s.isArchived {
+                    Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
+                } else {
+                    Button(s.windowIndex != nil && !s.hasEnded
+                           ? NSLocalizedString("End & Archive", comment: "session menu")
+                           : NSLocalizedString("Archive", comment: "session menu")) {
+                        actions.archive(s.id)
+                    }
+                }
+                if s.windowIndex != nil, !s.hasEnded {
+                    Button(NSLocalizedString("End session", comment: "session menu")) { actions.close(s.id) }
+                }
+            } else if s.isArchived {
+                Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
+            }
+            Divider()
+            Button(NSLocalizedString("Delete session", comment: "session menu"), role: .destructive) {
+                actions.delete(s.id)
+            }
+        }
     }
 
     private var emptyHint: some View {

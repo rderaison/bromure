@@ -262,6 +262,34 @@ final class AgentSessionEngine {
         store.setArchived(id, false)
     }
 
+    /// Delete the session. No tab and no launch under way: the record (and
+    /// its transcript copy) goes at once. Otherwise it's hidden and marked;
+    /// its tab is killed — now, or when the machine wakes and shows it
+    /// again (`probeLiveness`) — and the record is purged once the roster
+    /// no longer lists the tab, so the dying tab can't be adopted as a
+    /// session of its own in the meantime.
+    func delete(_ id: UUID) {
+        guard let s = store.session(id) else { return }
+        BACDebug.log("sessions", "delete “\(s.title)”")
+        if s.windowIndex == nil, s.launchingSince == nil {
+            store.remove(id)
+            return
+        }
+        store.setDeleted(id)
+        killTabIfShown(store.session(id) ?? s)
+    }
+
+    /// Kill a deleted session's tab when its workspace is up — once per
+    /// binding; the roster catching up is what ends the record.
+    private var killSent: Set<String> = []
+    private func killTabIfShown(_ s: AgentSession) {
+        guard let w = s.windowIndex, let delegate, let pane = delegate.pane(for: s.profileID) else { return }
+        let key = "\(s.id.uuidString)#\(w)"
+        guard !killSent.contains(key) else { return }
+        killSent.insert(key)
+        delegate.requestCloseTab(index: w, in: pane)
+    }
+
     // MARK: Launch
 
     private func launch(_ id: UUID, prompt: String, flags: String, alreadyUp: Bool = false) {
@@ -415,14 +443,20 @@ final class AgentSessionEngine {
     func probeLiveness(entries: [SessionListModel.VMEntry]) {
         guard let delegate else { return }
         probeFolders(entries: entries)
-        // An archived session whose tab is back (its workspace was asleep
-        // when it was put away, and just woke): archiving meant "end it".
-        for s in store.sessions where s.isArchived && s.windowIndex != nil {
+        // An archived or deleted session whose tab is back (its workspace
+        // was asleep when it was put away, and just woke): both meant "end
+        // it". A deleted one keeps its binding until the roster drops the
+        // tab — that's what purges it.
+        for s in store.sessions where (s.isArchived || s.isDeleted) && s.windowIndex != nil {
             guard let entry = entries.first(where: { $0.id == s.profileID }), entry.model.rosterLive,
                   entry.model.tabs.contains(where: { $0.index == s.windowIndex })
             else { continue }
-            BACDebug.log("sessions", "archived “\(s.title)” is back — ending it")
-            close(s.id)
+            if s.isDeleted {
+                killTabIfShown(s)
+            } else {
+                BACDebug.log("sessions", "archived “\(s.title)” is back — ending it")
+                close(s.id)
+            }
         }
         let now = Date()
         for entry in entries {
