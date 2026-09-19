@@ -106,6 +106,12 @@ enum ClaudeTranscriptParser {
             // content is either a bare string or an array of typed blocks.
             if let s = message["content"] as? String {
                 let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if type == "user", isLocalRecord(trimmed) {
+                    // `/clear` empties the conversation on screen; older
+                    // Claude Codes kept writing to the same file after it.
+                    if isClearCommand(trimmed) { items.removeAll() }
+                    continue
+                }
                 if !trimmed.isEmpty {
                     add(type == "user" ? .userText(trimmed) : .assistantText(trimmed))
                 }
@@ -118,6 +124,10 @@ enum ClaudeTranscriptParser {
                     let s = (block["text"] as? String ?? "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !s.isEmpty else { continue }
+                    if type == "user", isLocalRecord(s) {
+                        if isClearCommand(s) { items.removeAll() }
+                        continue
+                    }
                     add(type == "user" ? .userText(s) : .assistantText(s))
                 case "thinking":
                     let s = (block["thinking"] as? String ?? "")
@@ -162,6 +172,28 @@ enum ClaudeTranscriptParser {
             }
         }
         return items
+    }
+
+    /// Claude Code records what happened in the terminal as user turns
+    /// wrapped in its own tags — a slash command (`<command-name>`), what
+    /// it printed (`<local-command-stdout>`), a `!` shell line and its
+    /// output (`<bash-input>`, `<bash-stdout>`), plus the reminders it
+    /// slips in for the model (`<system-reminder>`). None of it is
+    /// something the user said; the chat has its own command card.
+    private static let localTags = [
+        "<command-name>", "<command-message>", "<command-args>",
+        "<local-command-stdout>", "<local-command-caveat>",
+        "<bash-input>", "<bash-stdout>", "<bash-stderr>",
+        "<system-reminder>",
+    ]
+    static func isLocalRecord(_ text: String) -> Bool {
+        localTags.contains { text.hasPrefix($0) }
+    }
+
+    /// The `/clear` record — the point where the conversation on screen
+    /// starts over.
+    static func isClearCommand(_ text: String) -> Bool {
+        text.contains("<command-name>/clear</command-name>")
     }
 
     /// The one-liner shown on a collapsed tool call — the command for shells,

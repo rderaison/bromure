@@ -699,7 +699,11 @@ final class BeautifiedSessionModel: ObservableObject {
                 text = text.isEmpty ? attPaths.joined(separator: " ")
                                     : text + " " + attPaths.joined(separator: " ")
             }
-            self.appendOptimistic(.userText(text))
+            // A slash command is shown by its card, not as a turn: the
+            // transcript never carries it as plain text (Claude Code writes
+            // a tagged record the parser drops), so an echo would sit there
+            // until it aged out.
+            if !isCommand { self.appendOptimistic(.userText(text)) }
             if !prefixed.isEmpty { _ = await self.provider.stage(prefixed) }
             let before = isCommand ? await self.provider.captureScreen() : nil
             // Sent exactly as typed: the TUIs run the completion their popup
