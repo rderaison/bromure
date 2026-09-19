@@ -3201,7 +3201,20 @@ final class RemoteHostWindow: NSWindow {
             selectSession(pending)
             return
         }
+        // The new-session screen holds the workspaces by value: rebuild it
+        // when they changed under it (the first one just saved on the server).
+        if controller.listModel.newSessionSelected, newSessionWorkspacesKey != workspacesKey() {
+            showNewSession()
+            return
+        }
         sessionStageDidChange()
+    }
+
+    /// See UnifiedSessionWindow.newSessionWorkspacesKey.
+    private var newSessionWorkspacesKey = ""
+    private func workspacesKey() -> String {
+        controller.profiles.map { "\($0.id.uuidString)|\($0.name)|\($0.allToolSpecs.map(\.tool.rawValue).joined(separator: ","))" }
+            .joined(separator: ";")
     }
 
     private static let remoteSelectedSessionKey = "sessions.remote.selected"
@@ -3253,6 +3266,7 @@ final class RemoteHostWindow: NSWindow {
     /// The new-session screen as the stage.
     func showNewSession() {
         guard sessionsFirst else { return }
+        newSessionWorkspacesKey = workspacesKey()
         gridView?.removeFromSuperview()
         unmountTerminal()
         clearAutomationBoard()

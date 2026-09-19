@@ -1351,9 +1351,28 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     /// The new-session screen as the stage surface.
+    /// The workspaces the new-session screen was built with. It takes them
+    /// by value, so when they change underneath it — the first workspace
+    /// saved from the editor the wizard opened, a rename, a deletion — the
+    /// screen is rebuilt (`workspacesDidChange`) instead of keeping
+    /// "Let's set up a machine first" on stage next to a machine that exists.
+    private var newSessionWorkspacesKey = ""
+    private func workspacesKey(_ delegate: ACAppDelegate) -> String {
+        delegate.profiles.map { "\($0.id.uuidString)|\($0.name)|\($0.allToolSpecs.map(\.tool.rawValue).joined(separator: ","))" }
+            .joined(separator: ";")
+    }
+
+    /// A workspace appeared, went, or changed while the new-session screen is up.
+    func workspacesDidChange() {
+        guard listModel.sessionsFirst, listModel.newSessionSelected, let delegate = acDelegate,
+              workspacesKey(delegate) != newSessionWorkspacesKey else { return }
+        showNewSession()
+    }
+
     func showNewSession() {
         guard let delegate = acDelegate else { return }
         guard clearAutomationEditor() else { return }   // dirty draft kept
+        newSessionWorkspacesKey = workspacesKey(delegate)
         hideGrid()
         clearAutomationBoard()
         clearTaskBoard()

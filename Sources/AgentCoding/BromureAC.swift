@@ -1299,6 +1299,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 state: runState(for: p),
                 compromised: SessionDisk.isCompromised(profile: p, store: store))
         }
+        // The new-session screen holds the workspaces by value: rebuild it
+        // when they changed (the first one just saved from the editor).
+        w.workspacesDidChange()
         // A pane came or went: the selected session's tab may have appeared
         // (boot landed) or the workspace gone to sleep.
         agentSessionStore.reconcile(entries: w.listModel.entries)
@@ -3032,6 +3035,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return ["error": "no app"] }
                 let action = params["action"] as? String ?? ""
                 switch action {
+                case "wizard":
+                    // First-run wizard (doc/E2E hook): press its primary or
+                    // secondary button, and report the step it's on.
+                    guard let wizard = self.onboarding else { return ["error": "no wizard on screen"] }
+                    switch params["button"] as? String ?? "" {
+                    case "primary":
+                        switch wizard.step {
+                        case .welcome:
+                            wizard.advanceFromWelcome()
+                            if wizard.step == .installing { self.startInit(fromWizard: true) }
+                        case .installing: break
+                        case .scanOffer: wizard.beginScan()
+                        case .pick: self.finishOnboarding(wizard.findings.filter(\.include))
+                        case .done: self.leaveOnboarding()
+                        }
+                    case "secondary":
+                        switch wizard.step {
+                        case .scanOffer, .pick: self.finishOnboarding([])
+                        default: break
+                        }
+                    default: break
+                    }
+                    let w = self.onboarding
+                    return ["ok": true, "step": "\(w?.step ?? wizard.step)",
+                            "findings": w?.findings.count ?? 0, "scanning": w?.scanning ?? false]
                 case "start-session":
                     // E2E/doc hook for the home screen: start an agent session
                     // the way the New Session screen would.
@@ -5283,9 +5311,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // when the new image is fully in place.
         initProgress.reset()
         ensureInstallWindow()
-        renderInitializing()
+        // Driven by the wizard, the install runs inside its Install step (the
+        // rail keeps the user oriented); the standalone installer view is for
+        // rebuilds and CLI-started installs.
+        if !fromWizard { renderInitializing() }
 
-        // No SSH front door while the image is being installed — a remote
+        // No SSH front door while the base image is being installed — a remote
         // session could otherwise launch workspaces against a base that's
         // absent or mid-swap. Resumed (when still enabled) by the defer.
         if RemoteAccessServer.shared.isRunning {
