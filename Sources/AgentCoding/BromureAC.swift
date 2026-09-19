@@ -6983,6 +6983,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         where p.additionalTools[i].tool == tool && p.additionalTools[i].authMode != .subscription {
             p.additionalTools[i].authMode = .subscription; changed = true
         }
+        // An agent the workspace never had (the new-session screen offers
+        // every agent): the sign-in makes it one of the workspace's tools,
+        // so its credentials get staged and seeded like the others'.
+        if p.tool != tool, !p.additionalTools.contains(where: { $0.tool == tool }) {
+            p.additionalTools.append(Profile.ToolSpec(tool: tool, authMode: .subscription))
+            changed = true
+        }
         if changed {
             do { try store.save(p) } catch { NSLog("[bromure-ac] sign-in: couldn't save profile: \(error)") }
             if let i = profiles.firstIndex(where: { $0.id == p.id }) { profiles[i] = p }

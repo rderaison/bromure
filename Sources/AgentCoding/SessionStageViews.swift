@@ -600,17 +600,21 @@ struct NewSessionView: View {
             ?? profiles.first?.id
             ?? UUID()
         let profile = profiles.first { $0.id == pid }
-        let available = profile?.allToolSpecs.map(\.tool) ?? []
         let rememberedTool = UserDefaults.standard.string(forKey: Self.lastToolKey).flatMap(Profile.Tool.init(rawValue:))
         _profileID = State(initialValue: pid)
-        _tool = State(initialValue: rememberedTool.flatMap { available.contains($0) ? $0 : nil }
-                      ?? profile?.tool ?? .claude)
+        // Any agent can be picked on any machine (see `configuredTools`), so
+        // the last choice stands whatever the machine has set up.
+        _tool = State(initialValue: rememberedTool ?? profile?.tool ?? .claude)
         _place = State(initialValue: .home)
         _folder = State(initialValue: "")
     }
 
     private var selectedProfile: Profile? { profiles.first { $0.id == profileID } }
-    private var availableTools: [Profile.Tool] { selectedProfile?.allToolSpecs.map(\.tool) ?? [] }
+    /// Agents the machine already holds credentials for. Every agent is
+    /// startable regardless: the images ship all of them, and one without
+    /// credentials shows its sign-in on first start, which the chat turns
+    /// into a sign-in card the host completes (`beginProxySignIn`).
+    private var configuredTools: [Profile.Tool] { selectedProfile?.allToolSpecs.map(\.tool) ?? [] }
 
     private var effectiveFolder: String {
         switch place {
@@ -626,7 +630,7 @@ struct NewSessionView: View {
     }
 
     private var canStart: Bool {
-        guard selectedProfile != nil, availableTools.contains(tool) else { return false }
+        guard selectedProfile != nil else { return false }
         if place == .repository {
             return !repoURL.trimmingCharacters(in: .whitespaces).isEmpty
                 && !effectiveFolder.isEmpty && effectiveFolder != "~"
@@ -701,9 +705,6 @@ struct NewSessionView: View {
         .onAppear {
             messageFocused = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { messageFocused = true }
-        }
-        .onChange(of: profileID) { _, _ in
-            if !availableTools.contains(tool), let primary = selectedProfile?.tool { tool = primary }
         }
         .onChange(of: repoURL) { _, new in
             guard let name = CodingTask.repoName(fromCloneURL: new) else { return }
@@ -885,7 +886,7 @@ struct NewSessionView: View {
     private var agentList: some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(Profile.Tool.allCases, id: \.self) { t in
-                let available = availableTools.contains(t)
+                let configured = configuredTools.contains(t)
                 let selected = t == tool
                 Button {
                     tool = t; agentPopover = false
@@ -895,9 +896,11 @@ struct NewSessionView: View {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(t.displayName)
                                 .font(.system(size: 13, weight: selected ? .semibold : .medium))
-                            Text(available
+                            Text(configured
                                  ? NSLocalizedString("Ready", comment: "new session agent")
-                                 : NSLocalizedString("Not set up on this machine", comment: "new session agent"))
+                                 : t == .omp
+                                 ? NSLocalizedString("Pick a model provider when it starts", comment: "new session agent")
+                                 : NSLocalizedString("Sign in when it starts", comment: "new session agent"))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }
@@ -911,12 +914,9 @@ struct NewSessionView: View {
                     .frame(height: 44)
                     .background(RoundedRectangle(cornerRadius: 8)
                         .fill(selected ? Color.accentColor.opacity(0.14) : .clear))
-                    .opacity(available ? 1 : 0.45)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(!available)
-                .help(available ? "" : NSLocalizedString("Set this agent up in the machine's settings (Agents) to use it here.", comment: "new session agent"))
             }
         }
         .padding(6)

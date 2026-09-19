@@ -1819,8 +1819,8 @@
 "Set up your first machine" = "Set up your first machine";
 "An isolated Linux machine with the agents and keys you choose. Sessions run inside it — nothing on your Mac is touched." = "An isolated Linux machine with the agents and keys you choose. Sessions run inside it — nothing on your Mac is touched.";
 "Create a machine" = "Create a machine";
-"Not set up on this machine" = "Not set up on this machine";
-"Set this agent up in the machine's settings (Agents) to use it here." = "Set this agent up in the machine's settings (Agents) to use it here.";
+"Sign in when it starts" = "Sign in when it starts";
+"Pick a model provider when it starts" = "Pick a model provider when it starts";
 "Message %@…  (or drop files)" = "Message %@…  (or drop files)";
 "Ready · %@" = "Ready · %@";
 "Ended · %@ ago" = "Ended · %@ ago";
