@@ -546,7 +546,7 @@ struct KubeDashboardView: View {
                             Text(addon == nil ? (status.phase == .running ? "Driver not installed" : "Starts with the cluster")
                                  : addon?.ready == true ? "Driver ready" : "Driver starting")
                                 .font(.system(size: 12))
-                            Text("· \(syn.host):\(String(syn.port)) · \(syn.location) · \(syn.protocolKind.rawValue.uppercased()) · storage class bromure-synology (default)")
+                            Text("· \(syn.host):\(String(syn.port)) · \(syn.volumes.isEmpty ? "volume chosen by DSM" : syn.volumes.joined(separator: ", ")) · \(syn.protocolKind.rawValue.uppercased()) · \(syn.storageClassNames.joined(separator: ", ")) (first is default)")
                                 .font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                     }
@@ -1069,14 +1069,18 @@ struct KubeSynologyFields: View {
                 SecureField("DSM password", text: $password).textFieldStyle(.roundedBorder).frame(width: 140)
             }
             HStack(spacing: 8) {
-                TextField("Volume, e.g. /volume1", text: $spec.location).textFieldStyle(.roundedBorder).frame(width: 140)
+                TextField("Volumes (optional), e.g. /volume1, /volume3", text: $spec.location).textFieldStyle(.roundedBorder).frame(width: 220)
                 Picker("", selection: $spec.protocolKind) {
                     ForEach(KubeSynologySpec.TransportKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
                 }
                 .labelsHidden().frame(width: 190)
                 TextField("fs", text: $spec.fsType).textFieldStyle(.roundedBorder).frame(width: 60)
             }
-            Text("The password is stored encrypted on this Mac and only lands in the cluster's own Secret. The DSM account needs storage-manager rights; iSCSI needs open-iscsi on the nodes (installed automatically).")
+            Text(spec.volumes.isEmpty
+                 ? "Leave volumes empty and DSM picks a volume with free space (storage class bromure-synology). Name volumes to get one class each, the first one default."
+                 : "Storage classes: \(spec.storageClassNames.joined(separator: ", ")) — the first is the default.")
+                .font(.system(size: 10.5)).foregroundStyle(.secondary)
+            Text("The password is stored encrypted on this Mac and only lands in the cluster's own Secrets. The DSM account needs storage-manager rights; iSCSI needs open-iscsi on the nodes (installed automatically).")
                 .font(.system(size: 10.5)).foregroundStyle(.secondary)
         }
     }

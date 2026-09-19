@@ -303,14 +303,25 @@ install_synology() {
         kubectl -n synology-csi rollout restart statefulset 2>/dev/null || true
         kubectl -n synology-csi rollout restart daemonset 2>/dev/null || true
     fi
+    local smb=/mnt/bromure-meta/synology-smb.json
+    if [ -r "$smb" ]; then
+        # SMB shares are mounted with the DSM account: the node-stage secret
+        # the storage class points at.
+        local su sp
+        su=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["username"])' "$smb")
+        sp=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["password"])' "$smb")
+        kubectl -n synology-csi delete secret synology-smb-credentials >/dev/null 2>&1 || true
+        kubectl -n synology-csi create secret generic synology-smb-credentials \
+            --from-literal=username="$su" --from-literal=password="$sp" 2>&1 | tail -n 1
+    fi
     if [ -r "$sc" ]; then
-        kubectl apply -f "$sc" 2>&1 | tail -n 1
-        # The NAS becomes the default class; the others stay by name.
+        kubectl apply -f "$sc" 2>&1 | tail -n 3
+        # The NAS's first class becomes the default; the others stay by name.
         kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' >/dev/null 2>&1 || true
         kubectl patch storageclass bromure-longhorn -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' >/dev/null 2>&1 || true
         kubectl patch storageclass longhorn -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' >/dev/null 2>&1 || true
     fi
-    log "Synology CSI configured (default storage class: bromure-synology)"
+    log "Synology CSI configured (storage classes: $(kubectl get storageclass -o name 2>/dev/null | grep -o 'bromure-synology[^ ]*' | tr '\n' ' '))"
 }
 
 do_addons() {

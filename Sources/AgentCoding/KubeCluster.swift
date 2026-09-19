@@ -52,8 +52,11 @@ public struct KubeSynologySpec: Codable, Equatable, Sendable {
     public var port: Int = 5000
     public var https: Bool = false
     public var username: String = ""
-    /// The DSM volume volumes live on, e.g. "/volume1".
-    public var location: String = "/volume1"
+    /// DSM volumes to carve storage from, comma-separated ("/volume1,
+    /// /volume3") — one storage class per volume, the first one default.
+    /// Empty = one class without a location: the driver then picks a DSM
+    /// volume with free space itself (the documented default).
+    public var location: String = ""
     public var protocolKind: TransportKind = .iscsi
     public var fsType: String = "ext4"
 
@@ -78,26 +81,54 @@ public struct KubeSynologySpec: Codable, Equatable, Sendable {
         """
     }
 
-    /// The StorageClass the cluster gets (default class when present).
-    public func storageClassYAML(name: String = "bromure-synology", isDefault: Bool = true) -> String {
-        """
-        apiVersion: storage.k8s.io/v1
-        kind: StorageClass
-        metadata:
-          name: \(name)
-          annotations:
-            storageclass.kubernetes.io/is-default-class: "\(isDefault ? "true" : "false")"
-        provisioner: csi.san.synology.com
-        parameters:
-          fsType: '\(fsType)'
-          dsm: '\(host.trimmingCharacters(in: .whitespaces))'
-          location: '\(location)'
-          protocol: '\(protocolKind.rawValue)'
-        reclaimPolicy: Delete
-        allowVolumeExpansion: true
-        volumeBindingMode: Immediate
+    /// The DSM volumes named in `location`, normalized ("/volumeN").
+    public var volumes: [String] {
+        location.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { $0.hasPrefix("/") ? $0 : "/" + $0 }
+    }
 
-        """
+    /// Storage class names the cluster gets: `bromure-synology` when the
+    /// driver picks the volume, else `bromure-synology-<volume>` each.
+    public var storageClassNames: [String] {
+        let v = volumes
+        return v.isEmpty ? ["bromure-synology"] : v.map { "bromure-synology-" + $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased() }
+    }
+
+    /// Secret holding the SMB mount credentials (node-stage secret).
+    public static let smbSecretName = "synology-smb-credentials"
+    public static let namespace = "synology-csi"
+
+    /// The StorageClasses the cluster gets, one per volume (or one unpinned
+    /// class), the first one default. Multi-document YAML.
+    public func storageClassesYAML() -> String {
+        let dsm = host.trimmingCharacters(in: .whitespaces)
+        let names = storageClassNames
+        let locs: [String?] = volumes.isEmpty ? [nil] : volumes
+        var docs: [String] = []
+        for (i, loc) in locs.enumerated() {
+            var params = "  fsType: '\(fsType)'\n  dsm: '\(dsm)'\n  protocol: '\(protocolKind.rawValue)'\n"
+            if let loc { params += "  location: '\(loc)'\n" }
+            if protocolKind == .smb {
+                params += "  csi.storage.k8s.io/node-stage-secret-name: '\(Self.smbSecretName)'\n"
+                params += "  csi.storage.k8s.io/node-stage-secret-namespace: '\(Self.namespace)'\n"
+            }
+            docs.append("""
+            apiVersion: storage.k8s.io/v1
+            kind: StorageClass
+            metadata:
+              name: \(names[i])
+              annotations:
+                storageclass.kubernetes.io/is-default-class: "\(i == 0 ? "true" : "false")"
+            provisioner: csi.san.synology.com
+            parameters:
+            \(params.trimmingCharacters(in: .newlines))
+            reclaimPolicy: Delete
+            allowVolumeExpansion: true
+            volumeBindingMode: Immediate
+            """)
+        }
+        return docs.joined(separator: "\n---\n") + "\n"
     }
 }
 

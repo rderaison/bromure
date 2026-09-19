@@ -2050,6 +2050,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var taskMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
     /// Automations MCP listeners (vsock 5833), one per running workspace.
     var automationMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
+    /// Per-workspace infrastructure MCP listeners (vsock 5834): the clusters
+    /// and registries this workspace may use, and creating new ones.
+    var kubeMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
     /// Plan-stream listeners (vsock 5832), one per running workspace — the
     /// streamed planning drivers connect here (see PlanEventBridge).
     var planEventBridges: [Profile.ID: PlanEventBridge] = [:]
@@ -8337,6 +8340,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
                         runNow: { [weak self] id in self?.runAutomationNow(id) }),
                     port: SessionDisk.automationMCPVsockPort)
+                // Infrastructure MCP listener (vsock 5834): the Kubernetes
+                // clusters and container registries this workspace may use,
+                // with the docs to use them; agents can create new ones.
+                self.kubeMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: KubeMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.kubeClusterStore },
+                        engine: { [weak self] in self?.kubeClusterEngine }),
+                    port: SessionDisk.kubeMCPVsockPort)
                 // Plan-stream listener (vsock 5832): streamed planning
                 // drivers (claude SDK / codex app-server / grok ACP).
                 let planBridge = PlanEventBridge(socketDevice: dev)
@@ -10634,6 +10647,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         taskMCPBridges.removeValue(forKey: profile.id)
         automationMCPBridges[profile.id]?.stop()
         automationMCPBridges.removeValue(forKey: profile.id)
+        kubeMCPBridges[profile.id]?.stop()
+        kubeMCPBridges.removeValue(forKey: profile.id)
         planEventBridges[profile.id]?.stop()
         planEventBridges.removeValue(forKey: profile.id)
         planStreamHub.removeSessions(profileID: profile.id)
@@ -11363,6 +11378,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
                         runNow: { [weak self] id in self?.runAutomationNow(id) }),
                     port: SessionDisk.automationMCPVsockPort)
+                // Infrastructure MCP listener (vsock 5834): the Kubernetes
+                // clusters and container registries this workspace may use,
+                // with the docs to use them; agents can create new ones.
+                self.kubeMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: KubeMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.kubeClusterStore },
+                        engine: { [weak self] in self?.kubeClusterEngine }),
+                    port: SessionDisk.kubeMCPVsockPort)
                 // Plan-stream listener (vsock 5832) — see the matching block
                 // on the warm-boot path.
                 let planBridge = PlanEventBridge(socketDevice: dev)

@@ -228,10 +228,24 @@ struct KubeClusterTests {
         #expect(info.contains("host: \"nas.local\""))
         #expect(info.contains("https: true"))
         #expect(info.contains("password: \"p\\\"w\""))
-        let sc = syn.storageClassYAML()
+        // No volume named → one unpinned class (DSM picks the volume).
+        var sc = syn.storageClassesYAML()
         #expect(sc.contains("provisioner: csi.san.synology.com"))
         #expect(sc.contains("protocol: 'iscsi'"))
+        #expect(sc.contains("name: bromure-synology\n"))
+        #expect(!sc.contains("location:"))
         #expect(sc.contains("is-default-class: \"true\""))
+        // Two volumes → two classes, the first default; SMB adds the node-stage secret.
+        syn.location = "/volume1, volume3"
+        syn.protocolKind = .smb
+        #expect(syn.volumes == ["/volume1", "/volume3"])
+        #expect(syn.storageClassNames == ["bromure-synology-volume1", "bromure-synology-volume3"])
+        sc = syn.storageClassesYAML()
+        #expect(sc.components(separatedBy: "kind: StorageClass").count == 3)
+        #expect(sc.contains("location: '/volume3'"))
+        #expect(sc.contains("is-default-class: \"false\""))
+        #expect(sc.contains("node-stage-secret-name: 'synology-smb-credentials'"))
+        syn.protocolKind = .iscsi
         var spec = KubeClusterSpec()
         spec.storageEnabled = false
         #expect(!spec.needsISCSI)
@@ -241,6 +255,38 @@ struct KubeClusterTests {
         let data = try JSONEncoder().encode(spec)
         #expect(!String(decoding: data, as: UTF8.self).contains("p\"w"))
         #expect(try JSONDecoder().decode(KubeClusterSpec.self, from: data).synology?.host == "nas.local")
+    }
+
+    @Test("the infrastructure MCP tells agents what exists and how to use it")
+    func mcpOverview() {
+        var spec = KubeClusterSpec()
+        spec.lanPool = "10.163.15.20-10.163.15.23"
+        var syn = KubeSynologySpec(); syn.host = "nas.local"; syn.username = "k8s"; syn.location = "/volume1, /volume3"
+        spec.synology = syn
+        var c = KubeCluster(name: "Dev", spec: spec)
+        c.nodes = [KubeNodeRecord(name: "k8s-dev-1", role: .server, index: 1, lastIP: "172.28.153.2")]
+        var cs = KubeClusterStatus(); cs.phase = .running; cs.hostIP = "10.163.15.54"
+        cs.lbEndpoints = [KubeLBEndpoint(namespace: "default", service: "web", port: 80, nodePort: 31080, protocolName: "TCP", bound: true, ip: "10.163.15.20")]
+        var r = KubeRegistry(name: "reg"); r.node.lastIP = "172.28.153.5"
+        var rs = KubeClusterStatus(); rs.phase = .running; rs.address = "172.28.153.5:5000"
+        let text = KubeMCPServer.overviewText(clusters: [c], registries: [r],
+                                              status: { $0 == c.id ? cs : rs }, hostIP: "10.163.15.54")
+        #expect(text.contains("Context `dev`"))
+        #expect(text.contains("https://172.28.153.2:6443"))
+        #expect(text.contains("`bromure-synology-volume1` (default"))
+        #expect(text.contains("`bromure-longhorn`"))
+        #expect(text.contains("pool 10.163.15.20-10.163.15.23"))
+        #expect(text.contains("default/web 10.163.15.20:80/TCP"))
+        #expect(text.contains("docker push 172.28.153.5:5000/myapp:dev"))
+        #expect(text.contains("Traefik"))
+        // Storage class order: NAS classes first (default), then Longhorn, then local-path.
+        let classes = KubeMCPServer.storageClasses(of: c).map(\.name)
+        #expect(classes == ["bromure-synology-volume1", "bromure-synology-volume3", "bromure-longhorn", "longhorn", "local-path"])
+        #expect(KubeMCPServer.storageClasses(of: c).filter(\.isDefault).count == 1)
+        // Without any storage add-on, local-path is the default.
+        let plain = KubeCluster(name: "p", spec: { var s = KubeClusterSpec(); s.storageEnabled = false; return s }())
+        #expect(KubeMCPServer.storageClasses(of: plain).first?.name == "local-path")
+        #expect(KubeMCPServer.storageClasses(of: plain).first?.isDefault == true)
     }
 
     @Test("k3s.yaml becomes a direct kubeconfig pointed at the node")

@@ -864,6 +864,11 @@ public final class SessionDisk {
         try Self.automationMCPShimScript.write(
             to: tmp.appendingPathComponent("bromure-automations-mcp.py"),
             atomically: true, encoding: .utf8)
+        // Infrastructure MCP shim — the clusters and registries this
+        // workspace may use, with the documentation to use them.
+        try Self.kubeMCPShimScript.write(
+            to: tmp.appendingPathComponent("bromure-infra-mcp.py"),
+            atomically: true, encoding: .utf8)
 
         // Plan-stream driver assets — staged unconditionally, like the task
         // MCP shim. bromure-plan-driver.py adapts codex/grok (and bridges
@@ -1137,6 +1142,19 @@ public final class SessionDisk {
     /// workspace can list / create / edit / delete / run ITS automations.
     public static let automationMCPVsockPort: UInt32 = 5833
     static let automationMCPShimGuestPath = "/mnt/bromure-meta/bromure-automations-mcp.py"
+    /// The infrastructure MCP (KubeMCPServer): what clusters / registries
+    /// this workspace can use and how, plus creating new ones.
+    public static let kubeMCPVsockPort: UInt32 = 5834
+    static let kubeMCPShimGuestPath = "/mnt/bromure-meta/bromure-infra-mcp.py"
+    static var kubeMCPClaudeEntry: [String: Any] {
+        ["command": "python3", "args": [kubeMCPShimGuestPath]]
+    }
+    static var kubeMCPShimScript: String {
+        taskMCPShimScript
+            .replacingOccurrences(of: "PORT = \(taskBoardMCPVsockPort)", with: "PORT = \(kubeMCPVsockPort)")
+            .replacingOccurrences(of: "bromure-task-mcp", with: "bromure-infra-mcp")
+            .replacingOccurrences(of: "task-board MCP", with: "infrastructure MCP")
+    }
     static var automationMCPClaudeEntry: [String: Any] {
         ["command": "python3", "args": [automationMCPShimGuestPath]]
     }
@@ -1375,6 +1393,7 @@ public final class SessionDisk {
         var mcpServers: [String: Any] = [
             "browser": browserMCPClaudeEntry,
             "automations": automationMCPClaudeEntry,
+            "infrastructure": kubeMCPClaudeEntry,
         ]
         for server in servers {
             // Raw JSON mode: parse and use as-is (allows OAuth blocks,
@@ -1595,6 +1614,10 @@ public final class SessionDisk {
             "[mcp_servers.automations]",
             "command = \"python3\"",
             "args = [\(tomlQuote(automationMCPShimGuestPath))]",
+            "",
+            "[mcp_servers.infrastructure]",
+            "command = \"python3\"",
+            "args = [\(tomlQuote(kubeMCPShimGuestPath))]",
         ]
         for server in servers {
             // Raw JSON servers are written to Claude Code config only;

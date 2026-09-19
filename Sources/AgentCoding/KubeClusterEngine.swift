@@ -486,8 +486,16 @@ final class KubeClusterEngine {
                 let sc = meta.appendingPathComponent("synology-storage-class.yml")
                 try syn.clientInfoYAML(password: password).write(to: info, atomically: true, encoding: .utf8)
                 try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: info.path)
-                try syn.storageClassYAML().write(to: sc, atomically: true, encoding: .utf8)
+                try syn.storageClassesYAML().write(to: sc, atomically: true, encoding: .utf8)
                 staged = [info, sc]
+                if syn.protocolKind == .smb {
+                    // SMB mounts need the DSM account as a node-stage secret.
+                    let smb = meta.appendingPathComponent("synology-smb.json")
+                    let doc: [String: String] = ["username": syn.username.trimmingCharacters(in: .whitespaces), "password": password]
+                    try JSONSerialization.data(withJSONObject: doc).write(to: smb, options: .atomic)
+                    try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: smb.path)
+                    staged.append(smb)
+                }
                 synology = "1"
             } else {
                 log(id, "Synology NAS configured but no password stored — skipping the CSI driver")
