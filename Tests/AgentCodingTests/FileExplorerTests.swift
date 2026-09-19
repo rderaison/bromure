@@ -39,6 +39,41 @@ struct FileExplorerTests {
         #expect(statuses.count == 4)
     }
 
+    @Test("Statuses map to the folder on show: inside a repo, and repos nested under it")
+    func statusMapping() {
+        // The home isn't a repository; project/ under it is (unfolded).
+        let nested = FileExplorerModel.mapStatuses(root: "/home/ubuntu", sections: [
+            ("", ""),
+            ("/home/ubuntu/project", " M src/a.swift\u{0}?? README.md\u{0}"),
+        ])
+        #expect(nested.statuses["project/src/a.swift"] == .modified)
+        #expect(nested.statuses["project/README.md"] == .untracked)
+        #expect(nested.statuses.count == 2)
+        #expect(nested.origins["project/src/a.swift"]?.repo == "/home/ubuntu/project")
+        #expect(nested.origins["project/src/a.swift"]?.path == "src/a.swift")
+
+        // A subfolder of a repository on show: only what's under it, relative.
+        let inside = FileExplorerModel.mapStatuses(root: "/home/ubuntu/project/src", sections: [
+            ("/home/ubuntu/project", " M src/a.swift\u{0}?? README.md\u{0}"),
+        ])
+        #expect(inside.statuses == ["a.swift": .modified])
+        #expect(inside.origins["a.swift"]?.path == "src/a.swift")
+
+        // The repository itself on show, plus a second one nested in it.
+        let same = FileExplorerModel.mapStatuses(root: "/home/ubuntu/project", sections: [
+            ("/home/ubuntu/project", " M src/a.swift\u{0}"),
+            ("/home/ubuntu/project/vendor/lib", "?? new.c\u{0}"),
+        ])
+        #expect(same.statuses["src/a.swift"] == .modified)
+        #expect(same.statuses["vendor/lib/new.c"] == .untracked)
+
+        // Repositories elsewhere say nothing about this folder.
+        let other = FileExplorerModel.mapStatuses(root: "/home/ubuntu/project", sections: [
+            ("/opt/elsewhere", " M x\u{0}"),
+        ])
+        #expect(other.statuses.isEmpty)
+    }
+
     // MARK: Tree building
 
     @Test("Tree nests, sorts dirs first, and unions deleted files from status")

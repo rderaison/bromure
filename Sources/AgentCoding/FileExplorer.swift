@@ -220,6 +220,10 @@ final class FileExplorerModel {
 
     private(set) var rootNodes: [FileNode] = []
     private(set) var statuses: [String: GitFileStatus] = [:]
+    /// Where each status came from: the repository (absolute guest path)
+    /// and the path inside it — what `git diff` needs, since a folder on
+    /// show may hold several repositories (the home with a project in it).
+    private(set) var statusOrigins: [String: (repo: String, path: String)] = [:]
     private(set) var loadError: String?
     /// True until the first listing for the current repo lands.
     private(set) var loading = false
@@ -374,6 +378,7 @@ final class FileExplorerModel {
         shownDetailKey = nil
         rootNodes = []
         statuses = [:]
+        statusOrigins = [:]
         expandedDirs = []
         selectedPath = nil
         detail = .none
@@ -385,9 +390,12 @@ final class FileExplorerModel {
     }
 
     /// Re-list the folder (one level, plus every unfolded folder), find the
-    /// repo it sits in and its git status — one guest round-trip, safe on a
-    /// timer. The whole payload is base64-wrapped in the guest: filenames
-    /// are raw bytes, and one non-UTF-8 name must not poison the channel.
+    /// repositories in play and their git status — one guest round-trip,
+    /// safe on a timer. "In play" = the repo the folder sits in, plus the
+    /// repo of every unfolded folder: browsing the home and unfolding a
+    /// project in it shows that project's changes. The whole payload is
+    /// base64-wrapped in the guest: filenames are raw bytes, and one
+    /// non-UTF-8 name must not poison the channel.
     func refresh() async {
         guard let root else { return }
         refreshGeneration += 1
@@ -401,9 +409,14 @@ final class FileExplorerModel {
                 + "-printf '%y%f\\0' 2>/dev/null"
         }.joined(separator: "; ")
         let q = shellQuote(root)
+        // Then, per distinct repository among those folders:
+        // "\002<toplevel>\001<status --porcelain -z>".
+        let probe = dirs.map(shellQuote).joined(separator: " ")
         let cmd = "{ t=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); printf '%s\\003' \"$t\"; "
             + "\(listing); printf '\\003'; "
-            + "[ -n \"$t\" ] && git -C \"$t\" status --porcelain -z 2>/dev/null; true; } | base64 -w0"
+            + "for d in \(probe); do git -C \"$d\" rev-parse --show-toplevel 2>/dev/null; done | sort -u "
+            + "| while IFS= read -r r; do [ -n \"$r\" ] || continue; printf '\\002%s\\001' \"$r\"; "
+            + "git -C \"$r\" status --porcelain -z 2>/dev/null; done; true; } | base64 -w0"
         do {
             let out = try await exec(cmd)
             guard generation == refreshGeneration, root == self.root else { return }
@@ -414,19 +427,18 @@ final class FileExplorerModel {
             } ?? ""
             repoRoot = toplevel.isEmpty ? nil : toplevel
             // Statuses come repo-relative; the tree is root-relative.
-            var mapped: [String: GitFileStatus] = [:]
-            if let top = repoRoot, parts.count > 2 {
-                let raw = Self.parsePorcelain(String(decoding: parts[2], as: UTF8.self))
-                let prefix: String? = root == top ? ""
-                    : (root.hasPrefix(top + "/") ? String(root.dropFirst(top.count + 1)) + "/" : nil)
-                if let prefix {
-                    for (k, v) in raw {
-                        if prefix.isEmpty { mapped[k] = v }
-                        else if k.hasPrefix(prefix) { mapped[String(k.dropFirst(prefix.count))] = v }
-                    }
+            var sections: [(toplevel: String, porcelain: String)] = []
+            if parts.count > 2 {
+                for section in parts[2].split(separator: UInt8(0x02), omittingEmptySubsequences: true) {
+                    let kv = section.split(separator: UInt8(0x01), maxSplits: 1, omittingEmptySubsequences: false)
+                    guard let first = kv.first else { continue }
+                    let top = String(decoding: first, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                    sections.append((top, kv.count > 1 ? String(decoding: kv[1], as: UTF8.self) : ""))
                 }
             }
+            let (mapped, origins) = Self.mapStatuses(root: root, sections: sections)
             statuses = mapped
+            statusOrigins = origins
             var byDir: [String: [(name: String, isDir: Bool)]] = [:]
             if parts.count > 1 {
                 for section in parts[1].split(separator: UInt8(0x02), omittingEmptySubsequences: true) {
@@ -452,6 +464,34 @@ final class FileExplorerModel {
             loadError = error.localizedDescription
             loading = false
         }
+    }
+
+    /// Each repository's statuses (toplevel-relative, as porcelain reports
+    /// them) as paths relative to the folder on show: the folder may sit
+    /// inside the repository (keep what's under it, strip the way down) or
+    /// hold it (prefix the way in). Repositories elsewhere are ignored.
+    /// Also where each mapped path came from, for `git diff`.
+    static func mapStatuses(root: String, sections: [(toplevel: String, porcelain: String)])
+        -> (statuses: [String: GitFileStatus], origins: [String: (repo: String, path: String)]) {
+        var statuses: [String: GitFileStatus] = [:]
+        var origins: [String: (repo: String, path: String)] = [:]
+        let rootPrefix = root.hasSuffix("/") ? root : root + "/"
+        for (top, raw) in sections where !top.isEmpty {
+            let parsed = parsePorcelain(raw)
+            if top == root {
+                for (k, v) in parsed { statuses[k] = v; origins[k] = (top, k) }
+            } else if root.hasPrefix(top + "/") {
+                let prefix = String(root.dropFirst(top.count + 1)) + "/"
+                for (k, v) in parsed where k.hasPrefix(prefix) {
+                    let rel = String(k.dropFirst(prefix.count))
+                    statuses[rel] = v; origins[rel] = (top, k)
+                }
+            } else if top.hasPrefix(rootPrefix) {
+                let prefix = String(top.dropFirst(rootPrefix.count)) + "/"
+                for (k, v) in parsed { statuses[prefix + k] = v; origins[prefix + k] = (top, k) }
+            }
+        }
+        return (statuses, origins)
     }
 
     /// The tree from per-folder listings: folders first, then files, both
@@ -703,10 +743,14 @@ final class FileExplorerModel {
         let qpath = shellQuote(path)
         do {
             if detailMode == .diff && selectionHasDiff {
+                // In the file's own repository — the folder on show may not
+                // be one (the home, with the project unfolded in it).
+                let (qrepo, qfile) = statusOrigins[path].map { (shellQuote($0.repo), shellQuote($0.path)) }
+                    ?? (qroot, qpath)
                 // base64 for the same reason as refresh(): the diff body is
                 // whatever bytes the file contains.
                 let out = try await exec(
-                    "git -C \(qroot) diff HEAD --no-color --no-ext-diff -- \(qpath) " +
+                    "git -C \(qrepo) diff HEAD --no-color --no-ext-diff -- \(qfile) " +
                     "| head -c \(Self.maxDiffBytes) | base64 -w0")
                 guard generation == detailGeneration else { return }
                 let data = Data(base64Encoded: out.filter { !$0.isWhitespace }) ?? Data()
