@@ -441,6 +441,11 @@ struct Run: ParsableCommand {
     var headless = false
 
     func run() throws {
+        // First: a durable copy of stderr + launch/quit/fatal-signal stamps
+        // (~/Library/Logs/BromureAC/bromure-ac.log), so a quit that leaves
+        // no crash report is still explained when we weren't started
+        // from a terminal.
+        AppLog.install()
         let imageManager = try makeImageManager()
         // No base-image gate here. `ACAppDelegate.applicationDidFinishLaunching`
         // checks `imageManager.hasBaseImage` and routes to the in-app
@@ -4801,6 +4806,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        AppLog.stamp("applicationWillTerminate (clean quit)")
         // Discard the ephemeral browser VM (if any) so we don't orphan it.
         unifiedWindow?.teardownBrowserVM()
         // Nuke every workspace's ssh-agent. The orphaned-process risk is
