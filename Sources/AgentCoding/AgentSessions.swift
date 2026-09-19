@@ -1079,10 +1079,11 @@ struct SessionSectionsView: View {
 
             let put = archived
             if !put.isEmpty {
-                // Put away, not gone: the fold opens on a click, a search,
-                // or when the session on stage is one of them.
-                let onStage = put.contains { $0.id == model.selectedSessionID }
-                let openArchived = archivedExpanded || !filter.isEmpty || onStage
+                // Put away, not gone: the fold opens on a click or a search
+                // — and once, by itself, when the selection moves into it
+                // (see `revealSelectedArchived`), so the caret still folds
+                // it away with an archived session on stage.
+                let openArchived = archivedExpanded || !filter.isEmpty
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) { archivedExpanded.toggle() }
                 } label: {
@@ -1114,6 +1115,17 @@ struct SessionSectionsView: View {
                 }
             }
         }
+        .onAppear { revealSelectedArchived(model.selectedSessionID) }
+        .onChange(of: model.selectedSessionID) { _, id in revealSelectedArchived(id) }
+    }
+
+    /// The selection just landed on an archived session: open the fold so
+    /// its row is on screen. One-shot — folding it back by hand sticks
+    /// until the selection moves into the fold again.
+    private func revealSelectedArchived(_ id: UUID?) {
+        guard let id, !archivedExpanded,
+              let s = store.session(id), s.isArchived, !s.isDeleted else { return }
+        withAnimation(.easeInOut(duration: 0.15)) { archivedExpanded = true }
     }
 
     private func row(_ s: AgentSession) -> some View {
