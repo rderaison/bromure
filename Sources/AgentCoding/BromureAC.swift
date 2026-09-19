@@ -560,6 +560,13 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     newWsFromConfigs.target = delegate
     wsMenu.addItem(newWsFromConfigs)
 
+    // Kubernetes: a shared cluster of node VMs the workspaces can reach.
+    let newClusterItem = NSMenuItem(title: L("New Kubernetes Cluster…"),
+                                    action: #selector(ACAppDelegate.newKubeClusterAction(_:)),
+                                    keyEquivalent: "")
+    newClusterItem.target = delegate
+    wsMenu.addItem(newClusterItem)
+
     // Fat client: mirror a remote bromure-ac (its grid, workspaces, tabs,
     // automations) 1:1 over SSH. A peer of "New Workspace…" — both bring a
     // source of workspaces into the app.
@@ -755,6 +762,9 @@ final class RunningSession {
     /// The VM. Strong owner — this is what keeps the VZVirtualMachine alive
     /// independent of any window.
     var sandbox: UbuntuSandboxVM
+    /// Set for a Kubernetes node VM (owned by `KubeClusterEngine`, never a
+    /// workspace): hidden from the status item and the fat-client sidebar.
+    var kubeClusterID: UUID?
     /// When the VM booted — surfaced as uptime in `vm ls`.
     let startedAt: Date
     /// Last tab snapshot, captured on detach so a reattaching window can
@@ -1532,6 +1542,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         AgentSessionEngine(store: agentSessionStore, delegate: self)
     private(set) lazy var codingTaskEngine =
         CodingTaskEngine(store: codingTaskStore, delegate: self)
+    /// Kubernetes clusters — shared machines (node VMs) next to the
+    /// workspaces; see KubeCluster.swift / KubeClusterEngine.swift.
+    let kubeClusterStore = KubeClusterStore()
+    private(set) lazy var kubeClusterEngine =
+        KubeClusterEngine(app: self, store: kubeClusterStore)
 
     /// Profiles created with `vm run --rm`: deleted (profile + disk) when their
     /// VM stops, mirroring `docker run --rm`.
@@ -1725,6 +1740,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     lazy var loopbackRelayAgentURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/loopback-relay-agent",
                              withExtension: "py")
+    }()
+    /// Kubernetes node provisioning script + status probe, staged into each
+    /// node VM's meta share by the cluster engine.
+    lazy var kubeNodeScriptURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/bromure-k8s-node", withExtension: "sh")
+    }()
+    lazy var kubeProbeScriptURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/bromure-k8s-probe", withExtension: "py")
     }()
 
     /// Live host→guest loopback forwarders, one per detected OAuth login.
@@ -2351,6 +2374,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // routes fires missed while the app was quit through each
         // automation's missed-run policy.
         scheduledAutomationEngine.start()
+        // Kubernetes clusters flagged to start with the app boot a few
+        // seconds in, once the switch + control plane are settled.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.kubeClusterEngine.startAutoStartClusters()
+        }
         // Planning sessions that were in flight when the app last quit must
         // not spin forever — re-arm their watchdogs (which abort with a
         // clear reason if the session is gone).
@@ -3788,6 +3816,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     ?? ["ok": false, "error": "unavailable"]
             }
         }
+        // Kubernetes clusters: the records + live status ride /state; the
+        // verbs (create / start / stop / restart / delete / access / watch /
+        // kubeconfig) are validated here and executed by the engine.
+        server.onListKubeClusters = { [weak self] in
+            MainActor.assumeIsolated { self?.kubeClusterStore.snapshot() ?? ["clusters": [], "status": [:]] }
+        }
+        server.onKubeCommand = { [weak self] id, doc in
+            MainActor.assumeIsolated {
+                self?.automationKubeCommand(id: id, doc: doc) ?? ["ok": false, "error": "unavailable"]
+            }
+        }
         server.onListPendingPrompts = {
             MainActor.assumeIsolated { PendingPromptBroker.shared.pendingList() }
         }
@@ -4110,6 +4149,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "name": s.profile.name,
                 "tool": s.profile.tool.rawValue,
                 "state": stateStr,
+                // A Kubernetes node VM (not a workspace): clients skip it in
+                // the machines list; the CLI can still `vm exec` it.
+                "kubeClusterID": s.kubeClusterID?.uuidString ?? "",
                 "attached": isAttached(s.profileID),
                 "uptimeSeconds": Int(now.timeIntervalSince(s.startedAt)),
                 "ip": s.lastIP ?? "",
@@ -5923,6 +5965,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         w.showTaskBoard()
     }
 
+    @objc func newKubeClusterAction(_ sender: Any?) {
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showNewKubeCluster()
+    }
+
     /// ⌘N — the new-session screen as the stage surface.
     @objc func newSessionAction(_ sender: Any?) {
         let w = ensureUnifiedWindow()
@@ -7437,6 +7486,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// stand-in keys, incl. a subscription's bogus key), push the swap map,
     /// rewrite the guest-side credential files and the meta-share env. Also
     /// what a fresh host sign-in needs with NO profile change at all — the
+    /// A Kubernetes cluster came up, went away, or changed its access list:
+    /// re-materialize `~/.kube/config` (+ proxy.env's NO_PROXY) in every
+    /// running workspace so `kubectl` sees the current set of clusters —
+    /// the same live restage an editor save triggers.
+    @MainActor func refreshKubeAccessForRunningWorkspaces() {
+        for session in runningSessions.values where session.kubeClusterID == nil {
+            guard let profile = profiles.first(where: { $0.id == session.profileID }) else { continue }
+            session.profile = profile
+            pushLiveCredentials(for: profile, terminalDefaults: terminalDefaults, sandbox: session.sandbox)
+        }
+    }
+
     /// plan changed because a credential now exists.
     private func pushLiveCredentials(for new: Profile, terminalDefaults: TerminalAppDefaults,
                                      sandbox: UbuntuSandboxVM?) {
@@ -7467,7 +7528,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // same composition the launch path builds.
             var fresh = plan.tokenMap()
             let kubeMat = KubeconfigMaterializer().materialize(
-                profile: profile, bromureCAPEM: engine.ca.certificatePEM)
+                profile: profile, bromureCAPEM: engine.ca.certificatePEM,
+                directClusters: kubeClusterEngine.directClusters(for: profile.id))
             kubeYAML = kubeMat.yaml
             for swap in kubeMat.bearerSwaps {
                 fresh.entries.append(TokenMap.Entry(
@@ -7511,6 +7573,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Rewrite api_key.env / proxy.env / MCP configs into the stable
         // meta-share dir and bump env.generation for the guest's
         // PROMPT_COMMAND hook.
+        sandbox?.sessionDisk?.extraNoProxy = kubeClusterEngine.extraNoProxy(for: profile.id)
         do {
             try sandbox?.sessionDisk?.refreshMetadataShare(
                 profile: profile, tokenPlan: plan)
@@ -7689,6 +7752,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         do {
             try store.delete(profile)
             profiles = store.loadAll()
+            kubeClusterEngine.workspaceDeleted(profile.id)
             refreshSidebar()
         } catch {
             showError(error, message: "Couldn't delete the workspace.")
@@ -7861,9 +7925,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var kubeYAMLForVM: String?
         if let engine = mitmEngine {
             // Materialize the synthetic kubeconfig + extract bearer
-            // swaps + client identities + exec contexts.
+            // swaps + client identities + exec contexts. Bromure-run
+            // clusters this workspace may use ride along as direct contexts.
             let kubeMat = KubeconfigMaterializer().materialize(
-                profile: profile, bromureCAPEM: engine.ca.certificatePEM)
+                profile: profile, bromureCAPEM: engine.ca.certificatePEM,
+                directClusters: kubeClusterEngine.directClusters(for: profile.id))
             kubeYAMLForVM = kubeMat.yaml
 
             // Token map = the profile-derived plan + the kubeconfig
@@ -8103,6 +8169,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             )
             sessionDisk.tokenPlan = plan
             sessionDisk.migrateHomeThisBoot = migrateHomeThisBoot
+            sessionDisk.extraNoProxy = kubeClusterEngine.extraNoProxy(for: profile.id)
             if let engine = mitmEngine, let scriptURL = bridgeScriptURL {
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
@@ -9636,6 +9703,56 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return ["ok": true]
     }
 
+    /// Handle a fat-client Kubernetes verb (`POST /k8s` with action "create",
+    /// or `POST /k8s/{id}/{action}`). Mirrors what the local dashboard does
+    /// through `kubeClusterEngine` directly.
+    @MainActor func automationKubeCommand(id: String?, doc: [String: Any]) -> [String: Any] {
+        let action = (doc["action"] as? String) ?? ""
+        func decodeAccess(_ raw: Any?) -> KubeWorkspaceAccess? {
+            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
+        }
+        if id == nil {
+            guard action == "create" else { return ["ok": false, "error": "unknown action: \(action)"] }
+            guard let name = doc["name"] as? String, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+                return ["ok": false, "error": "missing name"]
+            }
+            var spec = KubeClusterSpec()
+            if let raw = doc["spec"], let data = try? JSONSerialization.data(withJSONObject: raw),
+               let decoded = try? JSONDecoder().decode(KubeClusterSpec.self, from: data) {
+                spec = decoded
+            }
+            let access = decodeAccess(doc["access"]) ?? .all
+            let cluster = kubeClusterEngine.create(name: name, spec: spec, access: access,
+                                                   autoStart: (doc["autoStart"] as? Bool) ?? true)
+            return ["ok": true, "id": cluster.id.uuidString]
+        }
+        guard let id, let uuid = UUID(uuidString: id), kubeClusterStore.cluster(uuid) != nil else {
+            return ["ok": false, "error": "no such cluster"]
+        }
+        switch action {
+        case "start":   kubeClusterEngine.start(uuid)
+        case "stop":    Task { await self.kubeClusterEngine.stop(uuid) }
+        case "restart": kubeClusterEngine.restart(uuid)
+        case "delete":  Task { await self.kubeClusterEngine.delete(uuid) }
+        case "access":
+            guard let access = decodeAccess(doc["access"]) else { return ["ok": false, "error": "bad access"] }
+            kubeClusterEngine.setAccess(uuid, access)
+        case "autostart":
+            kubeClusterEngine.setAutoStart(uuid, (doc["on"] as? Bool) ?? true)
+        case "watch":
+            kubeClusterEngine.setWatch(uuid, (doc["on"] as? Bool) ?? false)
+        case "kubeconfig":
+            guard let yaml = kubeClusterEngine.kubeconfigYAML(uuid) else {
+                return ["ok": false, "error": "no kubeconfig yet"]
+            }
+            return ["ok": true, "kubeconfig": yaml]
+        default:
+            return ["ok": false, "error": "unknown kube action: \(action)"]
+        }
+        return ["ok": true]
+    }
+
     /// Handle a fat-client `POST /vms/{id}/file` op — the remote file browser's
     /// data plane, bridged to the same vsock `{"file": …}` channel the local
     /// one uses.
@@ -10909,7 +11026,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu = NSMenu()
             menu.delegate = self
         }
-        let sessions = runningSessions.values.sorted { $0.profile.name < $1.profile.name }
+        let sessions = runningSessions.values
+            .filter { $0.kubeClusterID == nil }   // cluster nodes have their own dashboard
+            .sorted { $0.profile.name < $1.profile.name }
         if sessions.isEmpty {
             let none = NSMenuItem(title: NSLocalizedString("No running VMs", comment: ""),
                                   action: nil, keyEquivalent: "")

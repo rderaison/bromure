@@ -239,6 +239,13 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
 
     /// CPU count for the runtime VM. RAM is per-profile (Profile.memoryGB).
     public static let runtimeCPUs: Int = 4
+    /// Per-VM vCPU override (Kubernetes node VMs size their own). nil = the
+    /// workspace default above.
+    public var cpuCountOverride: Int?
+    /// Extra raw disk images attached as additional virtio-blk devices after
+    /// the boot (and home) disks — a Kubernetes node's Longhorn data disk.
+    /// The guest sees them as /dev/vdb, /dev/vdc, … in this order.
+    public var extraDiskURLs: [URL] = []
 
     /// Session-less init for legacy callers. Boots base.img directly
     /// (no per-profile disk) — kept so tools / smoke tests still work.
@@ -291,7 +298,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
 
         let config = VZVirtualMachineConfiguration()
-        config.cpuCount = Self.runtimeCPUs
+        config.cpuCount = cpuCountOverride.map { max(1, min($0, VZVirtualMachineConfiguration.maximumAllowedCPUCount)) }
+            ?? Self.runtimeCPUs
         // Per-profile RAM. Default 8 GB if no profile (legacy CLI mode).
         let memGB = sessionDisk?.profile.memoryGB ?? 8
         config.memorySize = UInt64(memGB) * 1024 * 1024 * 1024
@@ -325,6 +333,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 url: session.homeImageURL, readOnly: false)
             config.storageDevices.append(
                 VZVirtioBlockDeviceConfiguration(attachment: homeAttachment))
+        }
+        for url in extraDiskURLs {
+            let attachment = try VZDiskImageStorageDeviceAttachment(url: url, readOnly: false)
+            config.storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: attachment))
         }
 
         let net = VZVirtioNetworkDeviceConfiguration()

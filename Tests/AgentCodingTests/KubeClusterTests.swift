@@ -1,0 +1,253 @@
+import Foundation
+import SandboxEngine
+import Testing
+@testable import bromure_ac
+
+// Kubernetes clusters: the persisted record + access list, the probe the
+// guest emits, the /state round-trip the fat client mirrors, and the
+// kubeconfig material handed to workspaces.
+
+@Suite("Kubernetes clusters")
+@MainActor
+struct KubeClusterTests {
+    private func tempStore() -> KubeClusterStore {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kube-\(UUID().uuidString)")
+            .appendingPathComponent("clusters.json")
+        return KubeClusterStore(fileURL: url)
+    }
+
+    @Test("slugs are DNS-label safe and stable")
+    func slugs() {
+        #expect(KubeCluster.slug(for: "Dev Cluster") == "dev-cluster")
+        #expect(KubeCluster.slug(for: "  Ünïcode!! stuff ") == "n-code-stuff")
+        #expect(KubeCluster.slug(for: "42") == "k-42")
+        #expect(KubeCluster.slug(for: "") == "cluster")
+        let c = KubeCluster(name: "My Dev", spec: KubeClusterSpec())
+        #expect(c.nodeName(index: 2) == "k8s-my-dev-2")
+        #expect(c.contextName == "my-dev")
+    }
+
+    @Test("access lists: all vs only, never empty")
+    func access() throws {
+        let a = UUID(), b = UUID()
+        #expect(KubeWorkspaceAccess.all.allows(a))
+        let only = KubeWorkspaceAccess.only([a])
+        #expect(only.allows(a))
+        #expect(!only.allows(b))
+        // Removing the last allowed workspace falls back to everyone.
+        #expect(only.removing(a) == .all)
+        #expect(KubeWorkspaceAccess.only([a, b]).removing(a) == .only([b]))
+        // Round-trips; an empty allow-list decodes as .all.
+        let enc = JSONEncoder(), dec = JSONDecoder()
+        let data = try enc.encode(KubeWorkspaceAccess.only([a, b]))
+        #expect(try dec.decode(KubeWorkspaceAccess.self, from: data) == .only([a, b]))
+        let empty = Data(#"{"mode":"only","ids":[]}"#.utf8)
+        #expect(try dec.decode(KubeWorkspaceAccess.self, from: empty) == .all)
+    }
+
+    @Test("spec clamps into its supported ranges")
+    func clamp() {
+        var s = KubeClusterSpec()
+        s.nodeCount = 99; s.cpusPerNode = 0; s.memoryGBPerNode = 1; s.storageDiskGB = 5
+        let c = s.clamped
+        #expect(c.nodeCount == KubeClusterSpec.nodeRange.upperBound)
+        #expect(c.cpusPerNode == KubeClusterSpec.cpuRange.lowerBound)
+        #expect(c.memoryGBPerNode == KubeClusterSpec.memoryRange.lowerBound)
+        #expect(c.storageDiskGB == KubeClusterSpec.storageRange.lowerBound)
+        #expect(c.storageReplicas == 3)
+        s.nodeCount = 2
+        #expect(s.storageReplicas == 2)
+    }
+
+    @Test("store persists clusters and prunes deleted workspaces")
+    func persistence() {
+        let store = tempStore()
+        let ws1 = UUID(), ws2 = UUID()
+        var c = KubeCluster(name: "dev", spec: KubeClusterSpec(), access: .only([ws1, ws2]))
+        c.nodes = [KubeNodeRecord(name: "k8s-dev-1", role: .server, index: 1, lastIP: "192.168.64.7")]
+        store.upsert(c)
+        #expect(store.clusters(for: ws1).count == 1)
+        #expect(store.clusters(for: UUID()).isEmpty)
+        store.workspaceDeleted(ws1)
+        #expect(store.cluster(c.id)?.access == .only([ws2]))
+        store.workspaceDeleted(ws2)
+        #expect(store.cluster(c.id)?.access == .all)
+
+        // A fresh store on the same file sees the saved record.
+        let reopened = KubeClusterStore(fileURL: storeFileURL(store))
+        #expect(reopened.cluster(c.id)?.name == "dev")
+        #expect(reopened.cluster(c.id)?.serverIP == "192.168.64.7")
+    }
+
+    /// The store keeps its file URL private; recover it from a save.
+    private func storeFileURL(_ store: KubeClusterStore) -> URL {
+        // Mirror of KubeClusterStore's default path logic isn't needed: the
+        // temp store was created with an explicit URL — reuse the snapshot
+        // round-trip instead.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kube-reopen-\(UUID().uuidString).json")
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        struct Payload: Codable { var version = 1; var clusters: [KubeCluster] }
+        try? enc.encode(Payload(clusters: store.clusters)).write(to: url)
+        return url
+    }
+
+    @Test("/state snapshot round-trips into a mirror store")
+    func snapshotRoundTrip() {
+        let host = tempStore()
+        let c = KubeCluster(name: "prod", spec: KubeClusterSpec(), access: .all)
+        host.upsert(c)
+        host.setStatus(c.id) {
+            $0.phase = .running
+            $0.hostIP = "10.0.0.5"
+            $0.lbEndpoints = [KubeLBEndpoint(namespace: "default", service: "web", port: 80,
+                                             nodePort: 31080, protocolName: "TCP", bound: true)]
+            $0.appendLog("hello")
+        }
+        let snapshot = host.snapshot()
+        // Through JSON, as the control socket would carry it.
+        let data = try! JSONSerialization.data(withJSONObject: snapshot)
+        let back = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let decoded = KubeClusterStore.decodeSnapshot(back)
+        let mirror = KubeClusterStore(mirror: true)
+        mirror.mirror(clusters: decoded.clusters, status: decoded.status)
+        #expect(mirror.cluster(c.id)?.name == "prod")
+        #expect(mirror.status(c.id).phase == .running)
+        #expect(mirror.status(c.id).hostIP == "10.0.0.5")
+        #expect(mirror.status(c.id).lbEndpoints.first?.nodePort == 31080)
+        #expect(mirror.status(c.id).log == ["hello"])
+    }
+
+    @Test("probe JSON decodes and aggregates")
+    func probe() throws {
+        let json = """
+        {"at":"2026-09-19T10:00:00Z","reachable":true,"version":"v1.31.4+k3s1","full":true,
+         "nodes":[{"name":"k8s-dev-1","ready":true,"roles":["control-plane","master"],"ip":"192.168.64.7",
+                   "version":"v1.31.4+k3s1","cpuCapacityM":2000,"memCapacityBytes":4000000000,
+                   "cpuUsedM":500,"memUsedBytes":1000000000,"pods":9,"unschedulable":false,"pressure":[]},
+                  {"name":"k8s-dev-2","ready":false,"roles":[],"ip":"192.168.64.8","version":"v1.31.4+k3s1",
+                   "cpuCapacityM":2000,"memCapacityBytes":4000000000,"cpuUsedM":100,"memUsedBytes":500000000,
+                   "pods":2,"unschedulable":false,"pressure":["MemoryPressure"]}],
+         "podSummary":{"total":11,"running":10,"pending":1,"failed":0,"succeeded":0,"unknown":0},
+         "podsByNamespace":{"kube-system":9,"default":2},
+         "services":[{"namespace":"default","name":"web","type":"LoadBalancer","clusterIP":"10.43.0.9",
+                      "ports":[{"name":"http","port":80,"nodePort":31080,"protocol":"TCP","targetPort":"8080"}],
+                      "ingress":[],"lbClass":""}],
+         "deployments":{"total":3,"available":2},
+         "longhorn":{"installed":true,"ready":true,"volumes":[],"nodes":[{"name":"k8s-dev-1","ready":true,
+                     "schedulable":true,"storageMaximumBytes":40000000000,"storageAvailableBytes":30000000000}]},
+         "pods":[],"pvcs":[],"warnings":[],"probeMillis":420}
+        """
+        let p = try #require(KubeProbe.decode(Data(json.utf8)))
+        #expect(p.readyNodes == 1)
+        #expect(p.nodes.first?.isControlPlane == true)
+        #expect(p.cpuCapacityM == 4000)
+        #expect(p.cpuUsedM == 600)
+        #expect(abs(p.cpuPercent - 15) < 0.01)
+        #expect(p.loadBalancerServices.count == 1)
+        #expect(p.loadBalancerServices.first?.ports.first?.nodePort == 31080)
+        #expect(p.longhorn?.storageAvailableBytes == 30_000_000_000)
+        // A later light probe keeps the heavy tables of the last full one.
+        var lightJSON = json.replacingOccurrences(of: "\"full\":true", with: "\"full\":false")
+        lightJSON = lightJSON.replacingOccurrences(of: "\"warnings\":[]", with: "\"warnings\":[{\"at\":\"x\",\"reason\":\"BackOff\",\"message\":\"m\",\"object\":\"pod/a\",\"namespace\":\"default\",\"count\":3}]")
+        var fullProbe = p
+        fullProbe.warnings = [KubeProbe.Warning(at: "t", reason: "Failed", message: "boom", object: "pod/x", namespace: "ns", count: 1)]
+        let light = try #require(KubeProbe.decode(Data(lightJSON.utf8)))
+        let merged = light.mergingDetails(from: fullProbe)
+        #expect(merged.warnings.first?.reason == "Failed")
+        #expect(merged.full == false)
+    }
+
+    @Test("LAN pools parse ranges, CIDRs and singles")
+    func lanPool() {
+        let range = KubeLANPool.parse("10.163.15.20-10.163.15.23")
+        #expect(range?.count == 4)
+        #expect(range?.first.map(VMNetSwitch.ipString) == "10.163.15.20")
+        let cidr = KubeLANPool.parse("10.0.0.32/30")
+        #expect(cidr?.map(VMNetSwitch.ipString) == ["10.0.0.33", "10.0.0.34"])
+        #expect(KubeLANPool.parse("10.0.0.5")?.count == 1)
+        #expect(KubeLANPool.parse("10.0.0.9-10.0.0.1") == nil)
+        #expect(KubeLANPool.parse("nope") == nil)
+        #expect(KubeLANPool.parse("") == nil)
+        // Endpoints carry the address they're answered on.
+        let e = KubeLBEndpoint(namespace: "default", service: "web", port: 80, nodePort: 31080,
+                               protocolName: "TCP", bound: true, ip: "10.163.15.22")
+        let data = try! JSONEncoder().encode(e)
+        #expect(try! JSONDecoder().decode(KubeLBEndpoint.self, from: data).ip == "10.163.15.22")
+    }
+
+    @Test("ARP and Ethernet frames are laid out on the wire")
+    func arpFrame() {
+        let mac: [UInt8] = [0x02, 0x62, 0x00, 0x00, 0x00, 0x01]
+        let f = KubeLANAnnouncer.arpFrame(op: 2, senderMAC: mac, senderIP: 0x0AA30F16,
+                                          targetMAC: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff], targetIP: 0x0AA30F16,
+                                          dstMAC: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff])
+        #expect(f.count == 42)
+        #expect(Array(f[12..<14]) == [0x08, 0x06])            // ethertype ARP
+        #expect(Array(f[20..<22]) == [0x00, 0x02])            // reply
+        #expect(Array(f[22..<28]) == mac)                     // sender MAC
+        #expect(Array(f[28..<32]) == [10, 163, 15, 22])       // sender IP
+    }
+
+    @Test("UDP relay frames carry the flow's return info")
+    func udpFrame() {
+        let f = KubeUDPRelay.frame(srcIP: 0x0AA30F05, srcPort: 40000, dstPort: 31053, payload: [1, 2, 3][...])
+        #expect(f.count == 2 + 8 + 3)
+        #expect(Array(f[0..<2]) == [0, 11])                 // body length
+        #expect(Array(f[2..<6]) == [10, 163, 15, 5])        // src IP
+        #expect(UtunPacket.u16(f, 6) == 40000)
+        #expect(UtunPacket.u16(f, 8) == 31053)
+        #expect(Array(f[10...]) == [1, 2, 3])
+    }
+
+    @Test("k3s.yaml becomes a direct kubeconfig pointed at the node")
+    func k3sYAML() throws {
+        let yaml = """
+        apiVersion: v1
+        clusters:
+        - cluster:
+            certificate-authority-data: Q0FEQVRB
+            server: https://127.0.0.1:6443
+          name: default
+        contexts:
+        - context:
+            cluster: default
+            user: default
+          name: default
+        current-context: default
+        kind: Config
+        preferences: {}
+        users:
+        - name: default
+          user:
+            client-certificate-data: Q0VSVA==
+            client-key-data: S0VZ
+        """
+        let d = try #require(KubeDirectCluster.fromK3sYAML(yaml, contextName: "dev", serverIP: "192.168.64.7"))
+        #expect(d.serverURL == "https://192.168.64.7:6443")
+        #expect(d.caData == "Q0FEQVRB")
+        #expect(d.clientKeyData == "S0VZ")
+        #expect(d.standaloneYAML.contains("current-context: dev"))
+        #expect(d.standaloneYAML.contains("server: https://192.168.64.7:6443"))
+        #expect(KubeDirectCluster.fromK3sYAML("kind: Config\n", contextName: "x", serverIP: "1.2.3.4") == nil)
+    }
+
+    @Test("the materializer emits direct contexts and keeps imported ones current")
+    func materializer() {
+        let direct = KubeDirectCluster(contextName: "dev", serverURL: "https://192.168.64.7:6443",
+                                       caData: "Q0E=", clientCertData: "Q0VSVA==", clientKeyData: "S0VZ")
+        var profile = Profile(name: "ws", tool: .claude, authMode: .token)
+        var m = KubeconfigMaterializer().materialize(profile: profile, bromureCAPEM: "PEM", directClusters: [direct])
+        #expect(m.yaml.contains("current-context: dev"))
+        #expect(m.yaml.contains("server: https://192.168.64.7:6443"))
+        #expect(m.yaml.contains("name: dev-admin"))
+        #expect(m.bearerSwaps.isEmpty)
+        // An imported context keeps the current-context slot.
+        profile.kubeconfigs = [KubeconfigEntry(name: "cloud", serverURL: "https://k8s.example.com",
+                                               auth: .bearerToken("t"))]
+        m = KubeconfigMaterializer().materialize(profile: profile, bromureCAPEM: "PEM", directClusters: [direct])
+        #expect(m.yaml.contains("current-context: cloud"))
+        #expect(m.yaml.contains("- name: dev\n"))
+    }
+}

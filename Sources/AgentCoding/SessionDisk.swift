@@ -38,6 +38,11 @@ public final class SessionDisk {
     /// agent (to start its OAuth login). Normal sessions leave this false and
     /// land at a plain shell.
     public var registrationMode = false
+    /// Extra NO_PROXY entries for proxy.env — the VM subnet and the node
+    /// addresses of the Kubernetes clusters this workspace may use. kubectl
+    /// honours HTTPS_PROXY, and the host MITM can't dial into the VM LAN, so
+    /// those destinations must bypass the cooperative proxy.
+    public var extraNoProxy: [String] = []
 
     public struct MitmSessionAssets: Sendable {
         public let caCertificatePEM: String
@@ -627,9 +632,10 @@ public final class SessionDisk {
                 "export HTTP_PROXY=http://127.0.0.1:8080",
                 "export HTTPS_PROXY=http://127.0.0.1:8080",
             ]
+            let noProxy = (["localhost", "127.0.0.1", "::1"] + extraNoProxy).joined(separator: ",")
             proxyLines += [
-                "export NO_PROXY=localhost,127.0.0.1,::1",
-                "export no_proxy=localhost,127.0.0.1,::1",
+                "export NO_PROXY=\(noProxy)",
+                "export no_proxy=\(noProxy)",
                 "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/bromure-ca.pem",
                 "export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
                 "export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",

@@ -175,6 +175,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private var dockerHosting: NSHostingView<DockerDashboardView>?
     /// The VM whose Docker dashboard is currently shown (nil = none).
     private var dockerSelectedID: Profile.ID?
+    /// Full-bleed overlay showing a Kubernetes cluster's dashboard.
+    private let kubeSlot = NSView()
+    private var kubeHosting: NSHostingView<KubeDashboardView>?
+    private var kubeSelectedID: UUID?
+    /// The "New Kubernetes cluster" sheet while it's up.
+    private var kubeSheetWindow: NSWindow?
     /// Full-bleed overlay showing the VM dashboard (vitals + config) for the
     /// selected workspace. Hidden unless `vmDashboardSelectedID` is set.
     private let vmDashboardSlot = NSView()
@@ -386,7 +392,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             sessionStore: acDelegate.agentSessionStore,
             onNewSession: { [weak self] in self?.showNewSession() },
             onSelectSession: { [weak self] id in self?.selectSession(id) },
-            sessionActions: sessionStageActions)
+            sessionActions: sessionStageActions,
+            kubeStore: acDelegate.kubeClusterStore,
+            onSelectKube: { [weak self] id in self?.showKubeDashboard(id) },
+            onNewKube: { [weak self] in self?.showNewKubeCluster() },
+            onKubeAction: { [weak self] id, action in self?.performKubeAction(id, action) })
         // NonMovable so a drag inside the sidebar — notably dragging a tab
         // row onto the Grid — selects/drags the row instead of moving the
         // whole window (the window is isMovableByWindowBackground).
@@ -485,6 +495,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         dockerSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         dockerSlot.isHidden = true
         stage.addSubview(dockerSlot)
+        // Kubernetes cluster dashboard overlay — same treatment.
+        kubeSlot.translatesAutoresizingMaskIntoConstraints = false
+        kubeSlot.wantsLayer = true
+        kubeSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        kubeSlot.isHidden = true
+        stage.addSubview(kubeSlot)
         // Automation editor overlay — same full-bleed pattern as Docker.
         automationSlot.translatesAutoresizingMaskIntoConstraints = false
         automationSlot.wantsLayer = true
@@ -635,6 +651,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             dockerSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
             dockerSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
             dockerSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            kubeSlot.topAnchor.constraint(equalTo: stage.topAnchor),
+            kubeSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
+            kubeSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            kubeSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
             automationSlot.topAnchor.constraint(equalTo: stage.topAnchor),
             automationSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
             automationSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
@@ -1127,6 +1147,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearAutomationBoard()
         clearTaskBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         clearVMDashboard()
         clearSessionStage()
         listModel.gridSelected = true
@@ -1220,6 +1241,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearAutomationBoard()
         clearTaskBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         clearVMDashboard()
         clearSessionStage()
         selectedID = id
@@ -1413,6 +1435,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearAutomationBoard()
         clearTaskBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         clearVMDashboard()
         selectedSessionID = nil
         listModel.selectedSessionID = nil
@@ -1472,6 +1495,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearAutomationBoard()
         clearTaskBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         clearVMDashboard()
         listModel.newSessionSelected = false
         selectedSessionID = id
@@ -1680,6 +1704,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearTaskBoard()
         hideGrid()
         clearVMDashboard()
+        clearKubeDashboard()
         clearSessionStage()
         if let prev = dockerSelectedID, prev != id, let p = pane(prev) {
             acDelegate?.setDockerWatch(false, in: p)   // hand off watch between VMs
@@ -1739,6 +1764,124 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         dockerSlot.isHidden = (dockerSelectedID == nil)
     }
 
+    // MARK: Kubernetes cluster dashboard overlay
+
+    /// Show a cluster's dashboard in the stage and switch the engine's probe
+    /// to the fast/full cadence for the duration.
+    func showKubeDashboard(_ id: UUID) {
+        guard let delegate = acDelegate, delegate.kubeClusterStore.cluster(id) != nil else { return }
+        guard clearAutomationEditor() else { return }   // dirty draft kept
+        clearAutomationBoard()
+        clearTaskBoard()
+        hideGrid()
+        clearVMDashboard()
+        clearDockerDashboard()
+        clearKubeDashboard()
+        clearSessionStage()
+        if let prev = kubeSelectedID, prev != id { delegate.kubeClusterEngine.setWatch(prev, false) }
+        kubeSelectedID = id
+        listModel.kubeSelectedID = id
+        kubeHosting?.removeFromSuperview()
+        let engine = delegate.kubeClusterEngine
+        let actions = KubeDashboardActions(
+            start:   { engine.start(id) },
+            stop:    { Task { await engine.stop(id) } },
+            restart: { engine.restart(id) },
+            delete:  { [weak self] in
+                Task { @MainActor in
+                    self?.clearKubeDashboard()
+                    await engine.delete(id)
+                }
+            },
+            setAccess: { engine.setAccess(id, $0) },
+            setAutoStart: { engine.setAutoStart(id, $0) },
+            copyKubeconfig: { if let y = engine.kubeconfigYAML(id) { platformCopyToPasteboard(y) } })
+        let view = KubeDashboardView(
+            store: delegate.kubeClusterStore, clusterID: id,
+            workspaces: delegate.profiles.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
+            actions: actions)
+        let host = NSHostingView(rootView: view)
+        host.sizingOptions = []
+        host.translatesAutoresizingMaskIntoConstraints = false
+        kubeSlot.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: kubeSlot.topAnchor),
+            host.bottomAnchor.constraint(equalTo: kubeSlot.bottomAnchor),
+            host.leadingAnchor.constraint(equalTo: kubeSlot.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: kubeSlot.trailingAnchor),
+        ])
+        kubeHosting = host
+        kubeSlot.isHidden = false
+        engine.setWatch(id, true)
+        makeFirstResponder(host)
+    }
+
+    func clearKubeDashboard() {
+        guard let id = kubeSelectedID else { return }
+        acDelegate?.kubeClusterEngine.setWatch(id, false)
+        kubeSelectedID = nil
+        listModel.kubeSelectedID = nil
+        kubeHosting?.removeFromSuperview()
+        kubeHosting = nil
+        kubeSlot.isHidden = true
+    }
+
+    /// The creation sheet; on Create the engine provisions and the new
+    /// cluster's dashboard (its setup log) takes the stage.
+    func showNewKubeCluster() {
+        guard let delegate = acDelegate, kubeSheetWindow == nil else { return }
+        let hostGB = Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024))
+        let sheet = NewKubeClusterSheet(
+            workspaces: delegate.profiles.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
+            existingNames: delegate.kubeClusterStore.clusters.map(\.name),
+            hostMemoryGB: hostGB,
+            onCreate: { [weak self] name, spec, access, autoStart in
+                guard let self else { return }
+                self.dismissKubeSheet()
+                let cluster = delegate.kubeClusterEngine.create(name: name, spec: spec, access: access, autoStart: autoStart)
+                self.listModel.machinesExpanded = true
+                self.showKubeDashboard(cluster.id)
+            },
+            onCancel: { [weak self] in self?.dismissKubeSheet() })
+        let hc = NSHostingController(rootView: sheet)
+        let win = NSWindow(contentViewController: hc)
+        win.styleMask = [.titled]
+        win.isReleasedWhenClosed = false
+        kubeSheetWindow = win
+        beginSheet(win)
+    }
+
+    private func dismissKubeSheet() {
+        guard let win = kubeSheetWindow else { return }
+        endSheet(win)
+        win.orderOut(nil)
+        kubeSheetWindow = nil
+    }
+
+    /// Sidebar row verbs (⋯ menu / right-click).
+    func performKubeAction(_ id: UUID, _ action: KubeRowAction) {
+        guard let engine = acDelegate?.kubeClusterEngine else { return }
+        switch action {
+        case .start:   engine.start(id)
+        case .stop:    Task { await engine.stop(id) }
+        case .restart: engine.restart(id)
+        case .access:  showKubeDashboard(id)
+        case .delete:
+            guard let c = acDelegate?.kubeClusterStore.cluster(id) else { return }
+            let alert = NSAlert()
+            alert.messageText = String(format: NSLocalizedString("Delete cluster “%@”?", comment: "k8s"), c.name)
+            alert.informativeText = NSLocalizedString("Stops every node and deletes their disks, including all Longhorn volumes. Workspaces lose the cluster from their kubeconfig. This can't be undone.", comment: "k8s")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: NSLocalizedString("Delete", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+            alert.beginSheetModal(for: self) { [weak self] resp in
+                guard resp == .alertFirstButtonReturn else { return }
+                if self?.kubeSelectedID == id { self?.clearKubeDashboard() }
+                Task { await engine.delete(id) }
+            }
+        }
+    }
+
     // MARK: VM dashboard overlay
 
     /// Show the workspace VM dashboard (vitals + config) over the framebuffer.
@@ -1750,6 +1893,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearAutomationBoard()
         clearTaskBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         clearSessionStage()
         let p = pane(id)
         let state = listModel.profileRows.first { $0.id == id }?.state ?? (p != nil ? .running : .off)
@@ -1816,6 +1960,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearAutomationBoard()
         clearTaskBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         clearVMDashboard()
         clearSessionStage()
         automationEditorVisible = true
@@ -1896,6 +2041,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         hideGrid()
         clearTaskBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         clearVMDashboard()
         clearSessionStage()
         listModel.automationBoardSelected = true
@@ -1945,6 +2091,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         hideGrid()
         clearAutomationBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         clearVMDashboard()
         clearSessionStage()
         listModel.taskBoardSelected = true
@@ -2094,6 +2241,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearTaskBoard()
         clearAutomationBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         clearVMDashboard()
         if selectedID != id { select(profileID: id) }
         guard let pane = pane(id) else { return }
@@ -2112,6 +2260,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearTaskBoard()
         clearAutomationBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         clearVMDashboard()
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) { acDelegate?.spawnNewTab(in: p) }
@@ -2161,6 +2310,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // The new shell becomes the active tmux window; surface it by dropping
         // the dashboard so the framebuffer is visible.
         clearDockerDashboard()
+        clearKubeDashboard()
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) {
             acDelegate?.requestDockerAttach(containerID: containerID, shell: shell, in: p)
@@ -2170,6 +2320,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func dockerLogs(profileID id: Profile.ID, containerID: String) {
         // `docker logs -f` opens a tmux tab — surface it by dropping the dashboard.
         clearDockerDashboard()
+        clearKubeDashboard()
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) {
             acDelegate?.requestDockerLogs(containerID: containerID, in: p)
@@ -2338,6 +2489,11 @@ struct SessionSidebar: View {
     var onSelectSession: (UUID) -> Void = { _ in }
     /// The rows' context menu (archive, end, delete).
     var sessionActions = SessionStageActions()
+    /// Kubernetes clusters — their own category under Machines.
+    var kubeStore: KubeClusterStore? = nil
+    var onSelectKube: (UUID) -> Void = { _ in }
+    var onNewKube: () -> Void = {}
+    var onKubeAction: (UUID, KubeRowAction) -> Void = { _, _ in }
     @State private var sessionFilter = ""
 
     var body: some View {
@@ -2405,6 +2561,7 @@ struct SessionSidebar: View {
                 .padding(.top, 14)
                 .padding(.bottom, 4)
                 workspaceRows
+                kubeSection
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
@@ -2535,6 +2692,17 @@ struct SessionSidebar: View {
                 PlusButton(onNewProfile: onNewProfile)
                 Spacer()
             }
+            kubeSection
+        }
+    }
+
+    /// "Kubernetes" — the clusters, a sibling category of the workspaces
+    /// under Machines (shared node VMs, one dashboard each).
+    @ViewBuilder
+    private var kubeSection: some View {
+        if let kubeStore {
+            KubeClustersSection(store: kubeStore, model: model,
+                                onSelect: onSelectKube, onNew: onNewKube, onAction: onKubeAction)
         }
     }
 
@@ -2799,6 +2967,175 @@ private struct GridSection: View {
 }
 
 /// "+" affordance at the bottom of the source list — creates a new profile.
+/// "Kubernetes" — one row per cluster (state dot, name, nodes/pods line)
+/// plus "+" to create one. Selecting a row puts its dashboard on stage.
+private struct KubeClustersSection: View {
+    let store: KubeClusterStore
+    @Bindable var model: SessionListModel
+    let onSelect: (UUID) -> Void
+    let onNew: () -> Void
+    let onAction: (UUID, KubeRowAction) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack {
+                Text(NSLocalizedString("Kubernetes", comment: "sidebar section"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .tracking(0.7)
+                Spacer()
+                Button(action: onNew) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("New Kubernetes cluster", comment: "sidebar"))
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 6)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+            if store.clusters.isEmpty {
+                Button(action: onNew) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "helm")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18)
+                        Text(NSLocalizedString("Create a cluster…", comment: "sidebar"))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("A k3s cluster in its own VMs, shared by your workspaces", comment: "sidebar"))
+            }
+            ForEach(store.clusters) { c in
+                KubeClusterRow(cluster: c, status: store.status(c.id),
+                               isSelected: model.kubeSelectedID == c.id,
+                               onSelect: { onSelect(c.id) },
+                               onAction: { onAction(c.id, $0) })
+            }
+        }
+    }
+}
+
+private struct KubeClusterRow: View {
+    let cluster: KubeCluster
+    let status: KubeClusterStatus
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onAction: (KubeRowAction) -> Void
+    @State private var hovering = false
+
+    private var dotColor: Color {
+        switch status.phase {
+        case .running: return .green
+        case .error: return .red
+        case .stopped: return Color.secondary.opacity(0.4)
+        default: return .orange
+        }
+    }
+
+    private var subline: String {
+        switch status.phase {
+        case .running:
+            var parts: [String] = []
+            if let p = status.probe {
+                parts.append(String(format: NSLocalizedString("%d/%d nodes", comment: "k8s row"), p.readyNodes, max(p.nodes.count, cluster.spec.nodeCount)))
+                parts.append(String(format: NSLocalizedString("%d pods", comment: "k8s row"), p.podSummary.running))
+            } else {
+                parts.append(String(format: NSLocalizedString("%d node(s)", comment: "k8s"), cluster.spec.nodeCount))
+            }
+            return parts.joined(separator: " · ")
+        case .creating, .starting:
+            return status.step ?? status.phase.displayName
+        default:
+            return status.phase.displayName
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: "helm")
+                    .font(.system(size: 13))
+                    .foregroundStyle(isSelected ? KubeDashboardView.kubeBlue : .secondary)
+                    .frame(width: 18, height: 16)
+                Circle().fill(dotColor).frame(width: 6, height: 6).offset(x: 2, y: 1)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                Text(cluster.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+                Text(subline)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            if status.phase.isBusy {
+                ProgressView().controlSize(.mini)
+            }
+            Menu {
+                if status.phase == .running {
+                    Button(NSLocalizedString("Restart", comment: "")) { onAction(.restart) }
+                    Button(NSLocalizedString("Stop", comment: "")) { onAction(.stop) }
+                } else if !status.phase.isBusy {
+                    Button(NSLocalizedString("Start", comment: "")) { onAction(.start) }
+                }
+                Button(NSLocalizedString("Workspace access…", comment: "")) { onAction(.access) }
+                Divider()
+                Button(NSLocalizedString("Delete cluster…", comment: ""), role: .destructive) { onAction(.delete) }
+                    .disabled(status.phase.isBusy)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(isSelected ? KubeDashboardView.kubeBlue.opacity(0.16)
+                                 : (hovering ? Color.primary.opacity(0.04) : .clear)))
+        .overlay(alignment: .leading) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(KubeDashboardView.kubeBlue)
+                    .frame(width: 3, height: 18)
+                    .offset(x: -5)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { hovering = $0 }
+        .contextMenu {
+            if status.phase == .running {
+                Button(NSLocalizedString("Restart", comment: "")) { onAction(.restart) }
+                Button(NSLocalizedString("Stop", comment: "")) { onAction(.stop) }
+            } else if !status.phase.isBusy {
+                Button(NSLocalizedString("Start", comment: "")) { onAction(.start) }
+            }
+            Button(NSLocalizedString("Workspace access…", comment: "")) { onAction(.access) }
+            Divider()
+            Button(NSLocalizedString("Delete cluster…", comment: ""), role: .destructive) { onAction(.delete) }
+        }
+    }
+}
+
 private struct PlusButton: View {
     let onNewProfile: () -> Void
     @State private var hovering = false

@@ -38,6 +38,8 @@ final class RemoteHostController {
     let gridStore: GridLayoutStore
     /// Mirror of the remote automations.
     let automationStore: ScheduledAutomationStore
+    /// Mirror of the remote Kubernetes clusters (records + live status).
+    let kubeStore = KubeClusterStore(mirror: true)
 
     /// Connection health, surfaced in the window chrome.
     var connected = false
@@ -577,6 +579,8 @@ final class RemoteHostController {
         applyGrid(grid)
         applyAutomations(autos)
         applyTasks((snapshot["tasks"] as? [String: Any]) ?? [:])
+        // Only when present: a partial snapshot must not wipe the clusters.
+        if let kube = snapshot["kubeClusters"] as? [String: Any] { applyKubeClusters(kube) }
         applySessions(snapshot["agentSessions"] as? [[String: Any]])
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
@@ -666,6 +670,9 @@ final class RemoteHostController {
         var rebootedIDs = Set<Profile.ID>()   // uptime reset since last poll → the VM rebooted
         for vm in vms {
             guard let idStr = vm["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
+            // Kubernetes node VMs aren't workspaces — the cluster dashboard
+            // shows them; they must not mint machine rows or sessions here.
+            if let k = vm["kubeClusterID"] as? String, !k.isEmpty { continue }
             liveIDs.insert(id)
             let model = tabsModels[id] ?? {
                 let m = TabsModel(); tabsModels[id] = m; return m
@@ -956,6 +963,11 @@ final class RemoteHostController {
         let nextFires = ((autos["nextFires"] as? [String: String]) ?? [:])
             .compactMapValues { iso.date(from: $0) }
         automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires)
+    }
+
+    private func applyKubeClusters(_ payload: [String: Any]) {
+        let decoded = KubeClusterStore.decodeSnapshot(payload)
+        kubeStore.mirror(clusters: decoded.clusters, status: decoded.status)
     }
 
     private func applyTasks(_ payload: [String: Any]) {
@@ -1389,6 +1401,36 @@ final class RemoteHostController {
         send("POST", "/vms/\(seg(id))/docker", body: ["action": "watch", "on": on], then: false)
     }
 
+    // Kubernetes clusters — verbs run on the host; the mirror confirms on poll.
+    func kubeAction(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
+        send("POST", "/k8s/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
+    }
+    func setKubeWatch(_ id: UUID, on: Bool) {
+        send("POST", "/k8s/\(ControlClient.encodeSegment(id.uuidString))/watch", body: ["on": on], then: false)
+    }
+    func createKubeCluster(name: String, spec: KubeClusterSpec, access: KubeWorkspaceAccess, autoStart: Bool) {
+        var doc: [String: Any] = ["action": "create", "name": name, "autoStart": autoStart]
+        if let d = ACAppDelegate.codableToDict(spec) { doc["spec"] = d }
+        if let d = ACAppDelegate.codableToDict(access) { doc["access"] = d }
+        send("POST", "/k8s", body: doc)
+    }
+    func setKubeAccess(_ id: UUID, _ access: KubeWorkspaceAccess) {
+        var doc: [String: Any] = [:]
+        if let d = ACAppDelegate.codableToDict(access) { doc["access"] = d }
+        kubeAction(id, "access", body: doc)
+    }
+    /// The cluster's kubeconfig text from the host (nil = not provisioned /
+    /// transport failure).
+    func fetchKubeconfig(_ id: UUID) async -> String? {
+        let host = self.host
+        let path = "/k8s/\(ControlClient.encodeSegment(id.uuidString))/kubeconfig"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", path, body: [:])
+        }.value
+        guard let resp, resp.status == 200 else { return nil }
+        return resp.json["kubeconfig"] as? String
+    }
+
     /// Run a shell command in the remote workspace's guest, over the tunnel —
     /// satisfies `GuestExecProvider` for the remote file-explorer pane.
     func guestExec(_ id: Profile.ID, command: String, timeout: Int) async throws -> String {
@@ -1773,6 +1815,9 @@ final class RemoteHostWindow: NSWindow {
     private var shownDashboard: (id: Profile.ID, state: SessionListModel.RunState)?
     private var dockerHost: NSHostingView<DockerDashboardView>?
     private var dockerShownFor: Profile.ID?
+    private var kubeHost: NSHostingView<KubeDashboardView>?
+    private var kubeShownFor: UUID?
+    private var kubeSheetWindow: NSWindow?
     private let fileExplorerModel = FileExplorerModel()
     private var filePaneHost: NSHostingView<FileExplorerPane>!
     private var filePaneWidthConstraint: NSLayoutConstraint!
@@ -1948,6 +1993,7 @@ final class RemoteHostWindow: NSWindow {
     override func close() {
         refreshTimer?.invalidate(); refreshTimer = nil
         clearDockerDashboard()
+        clearKubeDashboard()
         for (_, w) in fileBrowserWindows { w.close() }
         fileBrowserWindows.removeAll()
         for (_, w) in settingsWindows { w.close() }
@@ -2848,6 +2894,7 @@ final class RemoteHostWindow: NSWindow {
         clearTaskBoard()
         clearVMDashboard()
         clearDockerDashboard()
+        clearKubeDashboard()
         hideShownBrowser()
         // The boards are workspace-independent, but the file column sits
         // OUTSIDE the stage in this window — it would linger next to the board
@@ -3128,6 +3175,7 @@ final class RemoteHostWindow: NSWindow {
         clearAutomationBoard()
         clearVMDashboard()
         clearDockerDashboard()
+        clearKubeDashboard()
         hideShownBrowser()
         // Same as showAutomationBoard: the file column lives outside the
         // stage here, so it would linger next to the board. Collapse it.
@@ -3300,6 +3348,7 @@ final class RemoteHostWindow: NSWindow {
         clearTaskBoard()
         clearVMDashboard()
         clearDockerDashboard()
+        clearKubeDashboard()
         let model = controller.listModel
         model.gridSelected = false
         selectedSessionID = nil
@@ -3357,6 +3406,7 @@ final class RemoteHostWindow: NSWindow {
         clearTaskBoard()
         clearVMDashboard()
         clearDockerDashboard()
+        clearKubeDashboard()
         model.gridSelected = false
         model.newSessionSelected = false
         selectedSessionID = id
@@ -4193,7 +4243,11 @@ final class RemoteHostWindow: NSWindow {
             sessionStore: c.sessionStore,
             onNewSession: { [weak self] in self?.showNewSession() },
             onSelectSession: { [weak self] id in self?.selectSession(id) },
-            sessionActions: sessionStageActions)
+            sessionActions: sessionStageActions,
+            kubeStore: c.kubeStore,
+            onSelectKube: { [weak self] id in self?.showKubeDashboard(id) },
+            onNewKube: { [weak self] in self?.showNewKubeCluster() },
+            onKubeAction: { [weak self] id, action in self?.performKubeAction(id, action) })
     }
 
     // MARK: Stage
@@ -4207,6 +4261,7 @@ final class RemoteHostWindow: NSWindow {
         clearTaskBoard()
         clearVMDashboard()
         clearDockerDashboard()
+        clearKubeDashboard()
         // The Grid has no browser pane — collapse any shown browser (it stays
         // resumable, so returning to the workspace re-shows it).
         hideShownBrowser()
@@ -4239,6 +4294,7 @@ final class RemoteHostWindow: NSWindow {
         clearAutomationBoard()
         clearTaskBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         unmountTerminal()
         showVMDashboard(id)
         followBrowserPane(for: id)
@@ -4252,6 +4308,7 @@ final class RemoteHostWindow: NSWindow {
         clearAutomationBoard()
         clearTaskBoard()
         clearDockerDashboard()
+        clearKubeDashboard()
         // Same gate as the local window's `selectRow`: an off/suspended VM has
         // no terminal to attach — mounting one anyway left the login greeting
         // ("Last login: …") on screen while the attach pump polled a VM that
@@ -4336,6 +4393,7 @@ final class RemoteHostWindow: NSWindow {
         clearAutomationBoard()
         clearTaskBoard()
         clearVMDashboard()
+        clearKubeDashboard()
         if let prev = dockerShownFor, prev != id {
             controller.setDockerWatch(prev, on: false)
         }
@@ -4368,6 +4426,111 @@ final class RemoteHostWindow: NSWindow {
         dockerShownFor = id
         mount(host)
         controller.setDockerWatch(id, on: true)
+    }
+
+    // MARK: Kubernetes dashboard (mirrors the local overlay)
+
+    /// A cluster's dashboard from the mirrored store; verbs ride
+    /// `POST /k8s/{id}/…`. Opening switches the host's probe to the fast
+    /// cadence for the duration, like the local window.
+    func showKubeDashboard(_ id: UUID) {
+        guard controller.kubeStore.cluster(id) != nil else { return }
+        controller.listModel.gridSelected = false
+        gridView?.removeFromSuperview()
+        unmountTerminal()
+        clearAutomationBoard()
+        clearTaskBoard()
+        clearVMDashboard()
+        clearDockerDashboard()
+        clearKubeDashboard()
+        clearSessionStage()
+        if let prev = kubeShownFor, prev != id { controller.setKubeWatch(prev, on: false) }
+        controller.listModel.kubeSelectedID = id
+        let c = controller
+        let actions = KubeDashboardActions(
+            start:   { c.kubeAction(id, "start") },
+            stop:    { c.kubeAction(id, "stop") },
+            restart: { c.kubeAction(id, "restart") },
+            delete:  { [weak self] in self?.clearKubeDashboard(); c.kubeAction(id, "delete") },
+            setAccess: { c.setKubeAccess(id, $0) },
+            setAutoStart: { c.kubeAction(id, "autostart", body: ["on": $0]) },
+            copyKubeconfig: {
+                Task { @MainActor in
+                    if let y = await c.fetchKubeconfig(id) { platformCopyToPasteboard(y) }
+                }
+            })
+        let view = KubeDashboardView(
+            store: c.kubeStore, clusterID: id,
+            workspaces: c.listModel.profileRows.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
+            actions: actions)
+        let host = NSHostingView(rootView: view)
+        host.sizingOptions = []
+        host.translatesAutoresizingMaskIntoConstraints = false
+        kubeHost = host
+        kubeShownFor = id
+        mount(host)
+        controller.setKubeWatch(id, on: true)
+    }
+
+    private func clearKubeDashboard() {
+        guard let id = kubeShownFor else { return }
+        controller.setKubeWatch(id, on: false)
+        kubeShownFor = nil
+        controller.listModel.kubeSelectedID = nil
+        kubeHost?.removeFromSuperview()
+        kubeHost = nil
+    }
+
+    /// The creation sheet — the host provisions; the mirror shows the new
+    /// cluster on the next poll.
+    func showNewKubeCluster() {
+        guard kubeSheetWindow == nil else { return }
+        let c = controller
+        let sheet = NewKubeClusterSheet(
+            workspaces: c.listModel.profileRows.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
+            existingNames: c.kubeStore.clusters.map(\.name),
+            hostMemoryGB: 0,
+            onCreate: { [weak self] name, spec, access, autoStart in
+                self?.dismissKubeSheet()
+                c.createKubeCluster(name: name, spec: spec, access: access, autoStart: autoStart)
+                c.listModel.machinesExpanded = true
+            },
+            onCancel: { [weak self] in self?.dismissKubeSheet() })
+        let hc = NSHostingController(rootView: sheet)
+        let win = NSWindow(contentViewController: hc)
+        win.styleMask = [.titled]
+        win.isReleasedWhenClosed = false
+        kubeSheetWindow = win
+        beginSheet(win)
+    }
+
+    private func dismissKubeSheet() {
+        guard let win = kubeSheetWindow else { return }
+        endSheet(win)
+        win.orderOut(nil)
+        kubeSheetWindow = nil
+    }
+
+    private func performKubeAction(_ id: UUID, _ action: KubeRowAction) {
+        switch action {
+        case .start:   controller.kubeAction(id, "start")
+        case .stop:    controller.kubeAction(id, "stop")
+        case .restart: controller.kubeAction(id, "restart")
+        case .access:  showKubeDashboard(id)
+        case .delete:
+            guard let cl = controller.kubeStore.cluster(id) else { return }
+            let alert = NSAlert()
+            alert.messageText = String(format: NSLocalizedString("Delete cluster “%@”?", comment: "k8s"), cl.name)
+            alert.informativeText = NSLocalizedString("Stops every node and deletes their disks, including all Longhorn volumes. Workspaces lose the cluster from their kubeconfig. This can't be undone.", comment: "k8s")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: NSLocalizedString("Delete", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+            alert.beginSheetModal(for: self) { [weak self] resp in
+                guard resp == .alertFirstButtonReturn, let self else { return }
+                if self.kubeShownFor == id { self.clearKubeDashboard() }
+                self.controller.kubeAction(id, "delete")
+            }
+        }
     }
 
     private func clearDockerDashboard() {

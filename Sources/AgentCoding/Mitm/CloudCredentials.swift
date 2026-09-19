@@ -297,7 +297,8 @@ public final class KubeconfigMaterializer {
     /// callers thread the result into the swap map / identity registry
     /// / exec poller before VM start.
     public func materialize(profile: Profile,
-                            bromureCAPEM: String) -> Materialized {
+                            bromureCAPEM: String,
+                            directClusters: [KubeDirectCluster] = []) -> Materialized {
         var contexts: [String] = []
         var clusters: [String] = []
         var users: [String] = []
@@ -305,6 +306,31 @@ public final class KubeconfigMaterializer {
         var identities: [ClientIdentitySpec] = []
         var execContexts: [ExecContext] = []
         var clusterCAs: [(String, String)] = []
+
+        // Bromure-run clusters (sibling node VMs on the VM LAN): real CA +
+        // admin cert, reached directly — the switch never intercepts
+        // on-subnet traffic, so nothing here is proxied or swapped.
+        for direct in directClusters {
+            let ctx = direct.contextName
+            clusters.append("""
+            - name: \(ctx)
+              cluster:
+                server: \(direct.serverURL)
+                certificate-authority-data: \(direct.caData)
+            """)
+            contexts.append("""
+            - name: \(ctx)
+              context:
+                cluster: \(ctx)
+                user: \(ctx)-admin
+            """)
+            users.append("""
+            - name: \(ctx)-admin
+              user:
+                client-certificate-data: \(direct.clientCertData)
+                client-key-data: \(direct.clientKeyData)
+            """)
+        }
 
         for entry in profile.kubeconfigs {
             let safeName = entry.name.isEmpty ? entry.id.uuidString.prefix(8).lowercased() : entry.name
@@ -407,7 +433,10 @@ public final class KubeconfigMaterializer {
             }
         }
 
-        let firstCtx = (profile.kubeconfigs.first?.name).map { $0.isEmpty ? "" : $0 } ?? ""
+        // Imported contexts keep the current-context slot they always had; a
+        // bromure cluster takes it only when nothing was imported.
+        let firstCtx = (profile.kubeconfigs.first?.name).map { $0.isEmpty ? "" : $0 }
+            ?? directClusters.first?.contextName ?? ""
         let yaml = """
         apiVersion: v1
         kind: Config
