@@ -146,12 +146,20 @@ public final class UbuntuImageManager {
     /// fires the reset prompt on `200` → `200.1` — compares the full
     /// stamp instead (see `BromureAC.startSession`), so the revision
     /// suffix still reaches existing profiles.
+    ///
+    /// Strictly OLDER, not different: an image newer than the app knows
+    /// still boots (images stay backward compatible), and nagging about
+    /// it only sent users in circles — "update" to what is already
+    /// installed. Non-numeric majors fall back to plain inequality.
     public var baseImageNeedsUpdate: Bool {
         guard hasBaseImage,
               let stamp = try? String(contentsOf: versionStampURL, encoding: .utf8)
         else { return false }
         let major = Self.majorVersion(
             of: stamp.trimmingCharacters(in: .whitespacesAndNewlines))
+        if let installed = Int(major), let bundled = Int(Self.imageVersion) {
+            return installed < bundled
+        }
         return major != Self.imageVersion
     }
 
