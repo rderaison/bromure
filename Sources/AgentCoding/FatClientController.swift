@@ -577,6 +577,7 @@ final class RemoteHostController {
         applyGrid(grid)
         applyAutomations(autos)
         applyTasks((snapshot["tasks"] as? [String: Any]) ?? [:])
+        applySessions(snapshot["agentSessions"] as? [[String: Any]])
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
@@ -961,6 +962,59 @@ final class RemoteHostController {
             return try? dec.decode(CodingTask.self, from: data)
         }
         taskStore.mirror(tasks: tasks)
+    }
+
+    // MARK: Sessions (the sessions-first home, mirrored)
+
+    /// The server's agent sessions, as it stores them. Buckets (Needs you /
+    /// Working / Ready / Asleep / Ended) are computed here against the
+    /// mirrored machines and tabs, exactly as the local sidebar does.
+    let sessionStore = AgentSessionStore(mirror: true)
+    /// The server sends sessions (a build with the sessions-first home); an
+    /// older server doesn't, and the window keeps the classic layout.
+    private(set) var supportsSessions = false
+
+    private func applySessions(_ list: [[String: Any]]?) {
+        guard let list else { supportsSessions = false; return }
+        supportsSessions = true
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let sessions = list.compactMap { dict -> AgentSession? in
+            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+            return try? dec.decode(AgentSession.self, from: data)
+        }
+        sessionStore.applyMirror(sessions)
+    }
+
+    /// POST /sessions/start — the new session's id once the server has it.
+    func startSession(profileID: Profile.ID, tool: Profile.Tool, cwd: String,
+                      cloneURL: String?, message: String?) async -> UUID? {
+        let host = self.host
+        var body: [String: Any] = ["profile": profileID.uuidString, "tool": tool.rawValue, "cwd": cwd]
+        if let cloneURL, !cloneURL.isEmpty { body["cloneURL"] = cloneURL }
+        if let message, !message.isEmpty { body["message"] = message }
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", "/agent-sessions/start", body: body)
+        }.value
+        pollOnce()
+        guard let resp, resp.status == 200, let idStr = resp.json["id"] as? String else { return nil }
+        return UUID(uuidString: idStr)
+    }
+
+    /// POST /sessions/{id}/{resume|close|rename|forget}.
+    func sessionCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
+        send("POST", "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
+    }
+
+    /// GET /sessions/{id}/transcript — the server's copy (live when it can).
+    func fetchSessionTranscript(_ id: UUID) async -> Data? {
+        let host = self.host
+        let path = "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/transcript"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("GET", path)
+        }.value
+        guard let resp, resp.status == 200,
+              let b64 = resp.json["transcript"] as? String, !b64.isEmpty else { return nil }
+        return Data(base64Encoded: b64)
     }
 
     // MARK: Actions (client → remote), routed over the tunnel
@@ -1566,10 +1620,17 @@ struct RemoteToolbarBar: View {
     let onToggleFilePane: () -> Void
     let onToggleTunnel: () -> Void
     let onToggleBeautified: (Profile.ID) -> Void
+    /// Sessions-first (a server with the home): the Linux toggle.
+    var onToggleLinux: () -> Void = {}
 
     private var entry: SessionListModel.VMEntry? {
         model.entries.first { $0.id == model.selectedID }
     }
+    /// A session is on stage: the machine-level controls wait for Linux mode.
+    private var sessionOnStage: Bool {
+        model.sessionsFirst && (model.selectedSessionID != nil || model.newSessionSelected)
+    }
+    private var showMachineControls: Bool { !sessionOnStage || model.underTheHood }
 
     private var tunnelHelp: String {
         switch controller.tunnelState {
@@ -1591,20 +1652,29 @@ struct RemoteToolbarBar: View {
                               : "point.3.connected.trianglepath.dotted"),
                        help: tunnelHelp,
                        active: controller.tunnelState == "active") { onToggleTunnel() }
-            if let entry {
-                if let ip = entry.model.ipAddress { ToolbarIP(ip: ip) }
-                FusionToggle(model: entry.model) { on in onToggleFusion(entry.id, on) }
-                HeaderIcon(system: "doc.richtext",
-                           help: "Switch between the terminal and the beautified transcript view",
-                           active: model.beautifiedActive) { onToggleBeautified(entry.id) }
-                HeaderIcon(system: "folder", help: "Browse files") { onFiles(entry.id) }
-                HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
-                HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
+            if let entry, !(model.sessionsFirst && model.newSessionSelected) {
+                if showMachineControls {
+                    if let ip = entry.model.ipAddress { ToolbarIP(ip: ip) }
+                    FusionToggle(model: entry.model) { on in onToggleFusion(entry.id, on) }
+                    HeaderIcon(system: "doc.richtext",
+                               help: "Switch between the terminal and the beautified transcript view",
+                               active: model.beautifiedActive) { onToggleBeautified(entry.id) }
+                }
+                if model.sessionsFirst, model.selectedSessionID != nil {
+                    UnderTheHoodToggle(active: model.underTheHood, action: onToggleLinux)
+                }
+                if showMachineControls {
+                    HeaderIcon(system: "folder", help: "Browse files") { onFiles(entry.id) }
+                    HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
+                    HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
+                }
                 HeaderIcon(system: "gearshape", help: "Edit workspace") { onSettings(entry.id) }
-                HeaderIcon(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") { onDetach(entry.id) }
+                if showMachineControls {
+                    HeaderIcon(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") { onDetach(entry.id) }
+                }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserOpenWorkspaces.contains(entry.id)) { onToggleBrowser() }
-                HeaderIcon(system: "sidebar.right", help: "Show or hide repo files (⌃⌘E)",
+                HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
                            active: model.filePaneOpen) { onToggleFilePane() }
             }
         }
@@ -1709,6 +1779,32 @@ final class RemoteHostWindow: NSWindow {
     private static let filePaneWidthKey = "ac.remote.filePaneWidth"
     private var fileBrowserWindows: [Profile.ID: NSWindow] = [:]
 
+    // Sessions-first home (mirrored from a server that has it): the header
+    // strip above the stage, the session surfaces on the stage, and what
+    // the mirror needs to show a session's tab as its chat.
+    private let sessionHeaderSlot = NSView()
+    private var sessionHeaderHost: NSHostingView<SessionHeaderView>?
+    private var sessionHeaderHeight: NSLayoutConstraint!
+    private var sessionOverlayHost: NSView?
+    private var selectedSessionID: UUID?
+    private var sessionPresentationKey: String?
+    /// A session just started here: select it as soon as the mirror has it.
+    private var pendingSelectSessionID: UUID?
+    private var didShowSessionsHome = false
+    /// "profile:window" of tabs that are sessions — beautified even when the
+    /// roster label reads "bash" (agents under an interpreter).
+    private var sessionAgentWindows: Set<String> = []
+    private var sessionToolHints: [String: String] = [:]
+    /// A session's opening message, echoed into its chat the moment it
+    /// mounts (once per session) — no blank wait for the first transcript.
+    private var sessionSeeds: [String: String] = [:]
+    private var seededSessions: Set<UUID> = []
+    /// While a session is on stage: chat, or the terminal in Linux mode —
+    /// never the app-wide default.
+    private var sessionViewMode: SessionViewMode?
+    private static let sessionHeaderHeightValue: CGFloat = 66
+    private static let linuxHeaderExtra: CGFloat = 30
+
     // Resizable sidebar (fat-client counterpart of the local window's
     // drag-to-resize divider). Width is user-adjustable and persisted.
     private var sidebarWidthConstraint: NSLayoutConstraint!
@@ -1793,6 +1889,7 @@ final class RemoteHostWindow: NSWindow {
         showGrid()
         controller.onSnapshotApplied = { [weak self] in
             guard let self else { return }
+            self.syncSessionsHome()
             // Re-attempt the browser-MCP relay dial for the selected
             // workspace and any with an open/remembered browser: the
             // dial is guarded on a live VM, so a workspace selected
@@ -1878,11 +1975,32 @@ final class RemoteHostWindow: NSWindow {
         guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command]
         else { return false }
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        let fire = !event.isARepeat   // don't spawn/close on autorepeat
+        // Sessions-first chords, as in the local window: ⌘N a new session;
+        // ⌘1–9 the sidebar's sessions and ⌘W the session on stage (asked
+        // first) while the chat is up — under Linux the tab chords apply.
+        if sessionsFirst {
+            if chars == "n" {
+                if fire { showNewSession() }
+                return true
+            }
+            if !controller.listModel.underTheHood,
+               selectedSessionID != nil || controller.listModel.newSessionSelected {
+                if let n = Int(chars), (1...9).contains(n) {
+                    let ordered = SessionHome.ordered(controller.sessionStore.sessions, in: controller.listModel)
+                    if fire, ordered.indices.contains(n - 1) { selectSession(ordered[n - 1].id) }
+                    return true
+                }
+                if chars == "w" {
+                    if fire, let id = selectedSessionID { confirmEndSession(id) }
+                    return true
+                }
+            }
+        }
         // The workspace the user is looking at — a mounted terminal, else the
         // dashboard, else the sidebar selection.
         guard let id = shownWorkspace ?? shownDashboard?.id ?? controller.listModel.selectedID
         else { return false }
-        let fire = !event.isARepeat   // don't spawn/close on autorepeat
         switch chars {
         case "t":
             if fire {
@@ -1975,6 +2093,13 @@ final class RemoteHostWindow: NSWindow {
         stage.wantsLayer = true
         stage.layer?.backgroundColor = NSColor.black.cgColor
         content.addSubview(sidebarHost)
+        // The session header rides above the stage (height 0 until a
+        // session is on stage), spanning the stage's width.
+        sessionHeaderSlot.translatesAutoresizingMaskIntoConstraints = false
+        sessionHeaderSlot.wantsLayer = true
+        sessionHeaderSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        sessionHeaderSlot.isHidden = true
+        content.addSubview(sessionHeaderSlot)
         content.addSubview(stage)
         // File-explorer pane sits between the stage and the browser pane;
         // width toggles 0 ↔ N (⌃⌘E / the toolbar's sidebar.right button).
@@ -1982,9 +2107,19 @@ final class RemoteHostWindow: NSWindow {
             guard let self else { throw ACAppDelegate.GuestExecError.vmNotRunning }
             return try await self.controller.guestExec(id, command: command, timeout: timeout)
         }
+        // Drag-out / drop-in over the tunnel's file channel, like the
+        // remote file browser window.
+        fileExplorerModel.fileOpProvider = { [weak self] id, op in
+            guard let self else { throw ACAppDelegate.GuestExecError.vmNotRunning }
+            return try await self.controller.guestFileOp(id, op: op, timeout: 30)
+        }
         let filePane = FileExplorerPane(
             model: fileExplorerModel, listModel: controller.listModel,
-            onAutoSetOpen: { [weak self] open in self?.setFilePaneOpen(open) })
+            onAutoSetOpen: { [weak self] open in
+                // Sessions-first: the pane opens and closes by hand only.
+                guard let self, !self.controller.listModel.sessionsFirst else { return }
+                self.setFilePaneOpen(open)
+            })
         let fpHost = NSHostingView(rootView: filePane)
         fpHost.translatesAutoresizingMaskIntoConstraints = false
         fpHost.clipsToBounds = true   // squish cleanly during open/close
@@ -2099,6 +2234,7 @@ final class RemoteHostWindow: NSWindow {
             ? min(storedSidebar, Self.sidebarMaxWidth) : Self.sidebarDefaultWidth
         expandedSidebarWidth = sidebarInitial
         sidebarWidthConstraint = sidebarHost.widthAnchor.constraint(equalToConstant: sidebarInitial)
+        sessionHeaderHeight = sessionHeaderSlot.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             sidebarHost.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             sidebarHost.topAnchor.constraint(equalTo: content.topAnchor),
@@ -2114,9 +2250,13 @@ final class RemoteHostWindow: NSWindow {
             fileHandle.topAnchor.constraint(equalTo: content.topAnchor),
             fileHandle.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             fileHandle.widthAnchor.constraint(equalToConstant: 8),
+            sessionHeaderSlot.leadingAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
+            sessionHeaderSlot.trailingAnchor.constraint(equalTo: browser.leadingAnchor),
+            sessionHeaderSlot.topAnchor.constraint(equalTo: content.topAnchor),
+            sessionHeaderHeight,
             stage.leadingAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
             stage.trailingAnchor.constraint(equalTo: browser.leadingAnchor),
-            stage.topAnchor.constraint(equalTo: content.topAnchor),
+            stage.topAnchor.constraint(equalTo: sessionHeaderSlot.bottomAnchor),
             stage.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             browser.trailingAnchor.constraint(equalTo: fpHost.leadingAnchor),
             browser.topAnchor.constraint(equalTo: content.topAnchor),
@@ -2177,7 +2317,8 @@ final class RemoteHostWindow: NSWindow {
                 guard let c = self?.controller else { return }
                 c.setTunnelEnabled(c.tunnelState == "off" || c.tunnelState == "failed")
             },
-            onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) })
+            onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
+            onToggleLinux: { [weak self] in self?.toggleLinux() })
         let delegate = RemoteToolbarDelegate(rootView: AnyView(bar))
         toolbarDelegate = delegate
         let tb = NSToolbar(identifier: "io.bromure.ac.remote")
@@ -2691,6 +2832,7 @@ final class RemoteHostWindow: NSWindow {
     }
 
     func showAutomationBoard() {
+        clearSessionStage()
         controller.listModel.gridSelected = false
         controller.listModel.selectedID = nil
         controller.listModel.automationBoardSelected = true
@@ -2970,6 +3112,7 @@ final class RemoteHostWindow: NSWindow {
     }
 
     func showTaskBoard() {
+        clearSessionStage()
         controller.listModel.gridSelected = false
         controller.listModel.selectedID = nil
         controller.listModel.taskBoardSelected = true
@@ -3030,6 +3173,296 @@ final class RemoteHostWindow: NSWindow {
         taskBoardHost?.removeFromSuperview()
     }
 
+    // MARK: - Sessions-first home (mirrored from the server)
+
+    private var sessionsFirst: Bool { controller.listModel.sessionsFirst }
+
+    /// On every snapshot: turn the home on once the server reports sessions
+    /// (off again if it stops), pick up a session started from here, and
+    /// re-plan the stage for whatever changed.
+    private func syncSessionsHome() {
+        let supported = controller.supportsSessions
+        if controller.listModel.sessionsFirst != supported {
+            controller.listModel.sessionsFirst = supported
+            if !supported { clearSessionStage() }
+        }
+        guard supported else { return }
+        if !didShowSessionsHome {
+            didShowSessionsHome = true
+            selectInitialSession()
+            return
+        }
+        if let pending = pendingSelectSessionID, controller.sessionStore.session(pending) != nil {
+            pendingSelectSessionID = nil
+            selectSession(pending)
+            return
+        }
+        sessionStageDidChange()
+    }
+
+    private static let remoteSelectedSessionKey = "sessions.remote.selected"
+
+    private func selectInitialSession() {
+        let remembered = UserDefaults.standard.string(forKey: Self.remoteSelectedSessionKey)
+            .flatMap(UUID.init(uuidString:))
+        if let s = SessionHome.initialSession(in: controller.sessionStore, model: controller.listModel,
+                                              remembered: remembered) {
+            selectSession(s.id)
+        } else {
+            showNewSession()
+        }
+    }
+
+    private var sessionStageActions: SessionStageActions {
+        SessionStageActions(
+            resume: { [weak self] id in self?.controller.sessionCommand(id, "resume") },
+            close: { [weak self] id in self?.controller.sessionCommand(id, "close") },
+            rename: { [weak self] id, title in
+                self?.controller.sessionCommand(id, "rename", body: ["title": title])
+            },
+            resumeWith: { [weak self] id, text in
+                self?.controller.sessionCommand(id, "resume", body: ["message": text])
+            },
+            forget: { [weak self] id in
+                guard let self else { return }
+                self.controller.sessionCommand(id, "forget")
+                if self.selectedSessionID == id { self.clearSessionStage(); self.showNewSession() }
+            },
+            represent: { [weak self] id in
+                guard let self, self.selectedSessionID == id else { return }
+                self.sessionStageDidChange()
+            },
+            showFiles: { [weak self] in self?.setFilePaneOpen(true) },
+            showContainers: { [weak self] pid in
+                self?.clearSessionStage()
+                self?.showDockerDashboard(pid)
+            },
+            showMachine: { [weak self] pid in
+                self?.clearSessionStage()
+                self?.controller.listModel.selectedID = pid
+                self?.unmountTerminal()
+                self?.showVMDashboard(pid)
+            },
+            toggleUnderTheHood: { [weak self] in self?.toggleLinux() })
+    }
+
+    /// The new-session screen as the stage.
+    func showNewSession() {
+        guard sessionsFirst else { return }
+        gridView?.removeFromSuperview()
+        unmountTerminal()
+        clearAutomationBoard()
+        clearTaskBoard()
+        clearVMDashboard()
+        clearDockerDashboard()
+        let model = controller.listModel
+        model.gridSelected = false
+        selectedSessionID = nil
+        model.selectedSessionID = nil
+        model.selectedSessionProfileID = nil
+        model.selectedSessionCwd = nil
+        model.newSessionSelected = true
+        sessionPresentationKey = nil
+        setSessionHeader(visible: false)
+        let c = controller
+        let running = Set(model.profileRows.filter { $0.state == .running || $0.state == .booting }.map(\.id))
+        let view = NewSessionView(
+            profiles: c.profiles,
+            runningIDs: running,
+            recentFolders: { pid in
+                var seen: [String] = []
+                for s in c.sessionStore.sessions where s.profileID == pid && s.cwd != "~" {
+                    let p = prettyGuestPath(s.cwd)
+                    if !seen.contains(p) { seen.append(p) }
+                    if seen.count >= 6 { break }
+                }
+                return seen
+            },
+            onStart: { [weak self] req in
+                Task { @MainActor in
+                    guard let id = await c.startSession(profileID: req.profileID, tool: req.tool, cwd: req.cwd,
+                                                        cloneURL: req.cloneURL, message: req.openingMessage),
+                          let self else { return }
+                    // The mirror gets it with the next poll; select it then.
+                    if c.sessionStore.session(id) != nil { self.selectSession(id) }
+                    else { self.pendingSelectSessionID = id }
+                }
+            },
+            onCancel: { [weak self] in
+                guard let self,
+                      let s = SessionHome.initialSession(in: c.sessionStore, model: c.listModel, remembered: nil)
+                else { return }
+                self.selectSession(s.id)
+            },
+            onNewMachine: { [weak self] in self?.createWorkspace(withWizard: false) })
+        showSessionOverlay(view)
+    }
+
+    /// Select a session: its chat (terminal in Linux mode) while the agent
+    /// runs, the launch surface while it starts, else its asleep/ended page.
+    func selectSession(_ id: UUID) {
+        guard let s = controller.sessionStore.session(id) else { return }
+        let model = controller.listModel
+        if selectedSessionID == id, !model.newSessionSelected {
+            presentSession(s)
+            return
+        }
+        gridView?.removeFromSuperview()
+        clearAutomationBoard()
+        clearTaskBoard()
+        clearVMDashboard()
+        clearDockerDashboard()
+        model.gridSelected = false
+        model.newSessionSelected = false
+        selectedSessionID = id
+        model.selectedSessionID = id
+        model.selectedSessionProfileID = s.profileID
+        model.selectedSessionCwd = s.cwd
+        UserDefaults.standard.set(id.uuidString, forKey: Self.remoteSelectedSessionKey)
+        sessionPresentationKey = nil
+        presentSession(s)
+    }
+
+    private func sessionStageDidChange() {
+        guard sessionsFirst, let id = selectedSessionID else { return }
+        guard let s = controller.sessionStore.session(id) else { clearSessionStage(); return }
+        presentSession(s)
+    }
+
+    private func presentSession(_ s: AgentSession) {
+        let model = controller.listModel
+        let live = SessionHome.liveTabPosition(for: s, in: model)
+        let bucket = SessionHome.bucket(for: s, in: model)
+        let running: Bool
+        switch controller.runState(for: s.profileID) {
+        case .running, .booting: running = true
+        default: running = false
+        }
+        let liveChat = live != nil && running && (bucket != .ended || model.underTheHood)
+        let key: String
+        if liveChat, let w = s.windowIndex {
+            key = "live:\(s.profileID.uuidString):\(w):\(model.underTheHood)"
+        } else if s.isLaunching {
+            key = "launch:\(model.underTheHood)"
+        } else {
+            key = "rest:\(bucket.rawValue):\(s.lastError ?? ""):\(model.underTheHood)"
+        }
+        guard key != sessionPresentationKey else { return }
+        sessionPresentationKey = key
+        setSessionHeader(visible: true)
+        if liveChat, let w = s.windowIndex {
+            sessionOverlayHost?.removeFromSuperview()
+            sessionOverlayHost = nil
+            let k = "\(s.profileID.uuidString):\(w)"
+            sessionAgentWindows.insert(k)
+            sessionToolHints[k] = s.tool.rawValue
+            if !seededSessions.contains(s.id), let msg = s.openingMessage, !msg.isEmpty,
+               Date().timeIntervalSince(s.createdAt) < 600 {
+                seededSessions.insert(s.id)
+                sessionSeeds[k] = msg
+            }
+            sessionViewMode = model.underTheHood ? .terminal : .beautified
+            model.selectedID = s.profileID
+            controller.selectTab(s.profileID, index: w)
+            showWorkspace(s.profileID, window: w)
+            model.beautifiedActive = sessionViewMode == .beautified
+            return
+        }
+        unmountTerminal()
+        let accent = Color(hex: controller.profile(for: s.profileID)?.color.hexInUI ?? "#3B82F6")
+        let c = controller
+        if s.isLaunching {
+            showSessionOverlay(SessionLaunchView(
+                store: c.sessionStore, model: model, sessionID: s.id, accent: accent,
+                actions: sessionStageActions))
+        } else {
+            showSessionOverlay(SessionRestView(
+                store: c.sessionStore, model: model, sessionID: s.id, accent: accent,
+                actions: sessionStageActions,
+                fetchTranscript: { s in
+                    await c.fetchSessionTranscript(s.id).map { String(decoding: $0, as: UTF8.self) }
+                },
+                cachedTranscript: { _ in nil },
+                fetchWhenAsleep: true))
+        }
+    }
+
+    private func showSessionOverlay<V: View>(_ view: V) {
+        sessionOverlayHost?.removeFromSuperview()
+        let host = NSHostingView(rootView: view)
+        host.sizingOptions = []
+        host.translatesAutoresizingMaskIntoConstraints = false
+        sessionOverlayHost = host
+        mount(host)
+        makeFirstResponder(host)
+    }
+
+    private func setSessionHeader(visible: Bool) {
+        if visible, sessionHeaderHost == nil {
+            let host = NSHostingView(rootView: SessionHeaderView(
+                store: controller.sessionStore, model: controller.listModel, actions: sessionStageActions))
+            host.sizingOptions = []
+            host.translatesAutoresizingMaskIntoConstraints = false
+            sessionHeaderSlot.addSubview(host)
+            NSLayoutConstraint.activate([
+                host.topAnchor.constraint(equalTo: sessionHeaderSlot.topAnchor),
+                host.bottomAnchor.constraint(equalTo: sessionHeaderSlot.bottomAnchor),
+                host.leadingAnchor.constraint(equalTo: sessionHeaderSlot.leadingAnchor),
+                host.trailingAnchor.constraint(equalTo: sessionHeaderSlot.trailingAnchor),
+            ])
+            sessionHeaderHost = host
+        }
+        sessionHeaderSlot.isHidden = !visible
+        sessionHeaderHeight.constant = visible
+            ? Self.sessionHeaderHeightValue + (controller.listModel.underTheHood ? Self.linuxHeaderExtra : 0)
+            : 0
+    }
+
+    /// Leave the session surfaces — a machine row, a board or a dashboard
+    /// took the stage.
+    private func clearSessionStage() {
+        let model = controller.listModel
+        guard selectedSessionID != nil || model.newSessionSelected || sessionOverlayHost != nil else { return }
+        selectedSessionID = nil
+        model.selectedSessionID = nil
+        model.selectedSessionProfileID = nil
+        model.selectedSessionCwd = nil
+        model.newSessionSelected = false
+        sessionPresentationKey = nil
+        sessionViewMode = nil
+        sessionOverlayHost?.removeFromSuperview()
+        sessionOverlayHost = nil
+        setSessionHeader(visible: false)
+    }
+
+    /// Linux mode: the terminal for every tab, the machine's controls back,
+    /// the Machines list unfolded.
+    func toggleLinux() {
+        let model = controller.listModel
+        model.underTheHood.toggle()
+        if model.underTheHood { model.machinesExpanded = true }
+        setSessionHeader(visible: !sessionHeaderSlot.isHidden)
+        if let id = selectedSessionID, let s = controller.sessionStore.session(id) {
+            presentSession(s)
+        } else if let id = shownWorkspace {
+            sessionViewMode = model.underTheHood ? .terminal : nil
+            showWorkspace(id)
+        }
+    }
+
+    private func confirmEndSession(_ id: UUID) {
+        guard let s = controller.sessionStore.session(id), s.windowIndex != nil, !s.hasEnded else { return }
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("End “%@”?", comment: "end session"), s.title)
+        alert.informativeText = NSLocalizedString("The agent stops. The conversation stays in its folder and can be resumed later.", comment: "end session")
+        alert.addButton(withTitle: NSLocalizedString("End Session", comment: "end session"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.beginSheetModal(for: self) { [weak self] resp in
+            guard resp == .alertFirstButtonReturn else { return }
+            self?.controller.sessionCommand(id, "close")
+        }
+    }
+
     // MARK: E2E debug control surface (POST /debug/fatclient; debug-gated)
 
     /// Drive rich-client features headlessly for the E2E harness. Control-plane
@@ -3048,6 +3481,54 @@ final class RemoteHostWindow: NSWindow {
         }
         let focused = { (self.firstResponder === self.mountedTermView) && self.mountedTermView != nil }
         switch action {
+        // Sessions-first home over the mirror: list (with the buckets this
+        // client computes), select one, the new-session screen, Linux mode.
+        // Each takes an optional "shot" (offscreen PNG of the window).
+        case "start-session":
+            // Start a session THROUGH the mirror (the client→server verb), the
+            // way the New session screen does; selected once the mirror has it.
+            guard let pid = resolveID(), let toolRaw = p["tool"] as? String,
+                  let tool = Profile.Tool(rawValue: toolRaw) else { return ["error": "workspace and tool required"] }
+            let c = controller
+            let cwd = p["cwd"] as? String ?? "~"
+            let message = p["message"] as? String
+            Task { @MainActor [weak self] in
+                guard let id = await c.startSession(profileID: pid, tool: tool, cwd: cwd, cloneURL: nil, message: message),
+                      let self else { return }
+                if c.sessionStore.session(id) != nil { self.selectSession(id) } else { self.pendingSelectSessionID = id }
+            }
+            return ["ok": true]
+        case "sessions", "select-session", "new-session", "linux":
+            switch action {
+            case "select-session":
+                guard let s = p["id"] as? String, let id = UUID(uuidString: s),
+                      controller.sessionStore.session(id) != nil else { return ["error": "unknown session"] }
+                selectSession(id)
+            case "new-session": showNewSession()
+            case "linux": toggleLinux()
+            default: break
+            }
+            if let shot = p["shot"] as? String {
+                contentView?.layoutSubtreeIfNeeded()
+                writeSnapshot(to: shot)
+            }
+            let model = controller.listModel
+            return [
+                "ok": true,
+                "sessionsFirst": model.sessionsFirst,
+                "supportsSessions": controller.supportsSessions,
+                "selectedSession": selectedSessionID?.uuidString ?? "",
+                "newSessionSelected": model.newSessionSelected,
+                "underTheHood": model.underTheHood,
+                "shownWorkspace": shownWorkspace?.uuidString ?? "",
+                "shownWindowIndex": shownWindowIndex ?? -1,
+                "beautified": mountedBeautifiedHost != nil,
+                "sessions": controller.sessionStore.sessions.map {
+                    ["id": $0.id.uuidString, "title": $0.title, "tool": $0.tool.rawValue,
+                     "windowIndex": $0.windowIndex ?? -1,
+                     "bucket": SessionHome.bucket(for: $0, in: model).title] as [String: Any]
+                },
+            ]
         case "get-mirror-state":
             return [
                 "connected": controller.connected,
@@ -3618,6 +4099,14 @@ final class RemoteHostWindow: NSWindow {
             // as window indices have gaps.
             onSelectTab: { [weak self] id, pos in
                 guard let self, let index = self.windowIndex(for: id, position: pos) else { return }
+                // Linux mode: a tab that IS a session selects the session
+                // (header and all); any other tab is a plain terminal.
+                if self.sessionsFirst, self.controller.listModel.underTheHood,
+                   let s = self.controller.sessionStore.session(profileID: id, windowIndex: index) {
+                    self.selectSession(s.id)
+                    return
+                }
+                self.clearSessionStage()
                 self.controller.selectTab(id, index: index)
                 self.showWorkspace(id, window: index)
             },
@@ -3651,12 +4140,16 @@ final class RemoteHostWindow: NSWindow {
             onNewAutomation: { [weak self] in self?.showAutomationEditor(nil) },
             onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
             taskStore: c.taskStore,
-            onShowTaskBoard: { [weak self] in self?.showTaskBoard() })
+            onShowTaskBoard: { [weak self] in self?.showTaskBoard() },
+            sessionStore: c.sessionStore,
+            onNewSession: { [weak self] in self?.showNewSession() },
+            onSelectSession: { [weak self] id in self?.selectSession(id) })
     }
 
     // MARK: Stage
 
     private func showGrid() {
+        clearSessionStage()
         controller.listModel.gridSelected = true
         controller.listModel.selectedID = nil
         unmountTerminal()
@@ -3689,6 +4182,7 @@ final class RemoteHostWindow: NSWindow {
     /// window's `selectWorkspaceName`), even when the VM is running. Individual
     /// tabs still open their terminal via `onSelectTab` → `showWorkspace(_:window:)`.
     private func selectWorkspaceName(_ id: Profile.ID) {
+        clearSessionStage()
         controller.listModel.gridSelected = false
         controller.listModel.selectedID = id
         gridView?.removeFromSuperview()
@@ -3885,7 +4379,8 @@ final class RemoteHostWindow: NSWindow {
         // the same signal the sidebar badges agents with).
         let activeIsAgent = controller.tabsModel(for: id)?.activeTab
             .map { BromureIcons.agentKind(forLabel: $0.shownLabel) != nil } ?? false
-        if viewMode == .beautified && activeIsAgent { mountBeautified(for: id); return }
+            || sessionAgentWindows.contains("\(id.uuidString):\(idx)")
+        if (sessionViewMode ?? viewMode) == .beautified && activeIsAgent { mountBeautified(for: id); return }
         guard let profile = controller.profile(for: id) else {
             unmountTerminal(); return
         }
@@ -4013,6 +4508,32 @@ final class RemoteHostWindow: NSWindow {
         beautifiedModel = m
         beautifiedWorkspace = id
         beautifiedTabIndex = tabIndex
+        // The "/" palette and the composer's name: the tab's agent, else the
+        // workspace's main one (the label reads "bash" for agents under an
+        // interpreter).
+        let tab = controller.listModel.entries.first { $0.id == id }?.model.tabs
+            .first { $0.index == tabIndex }
+        if let w = tabIndex, let seed = sessionSeeds.removeValue(forKey: "\(id.uuidString):\(w)") {
+            m.seedOpening(seed)
+        }
+        m.loadSlashCommands(
+            agent: sessionToolHints["\(id.uuidString):\(tabIndex ?? -1)"]
+                ?? tab.flatMap { BromureIcons.agentKind(forLabel: $0.shownLabel) }
+                ?? controller.profile(for: id)?.tool.rawValue,
+            cwd: tab?.cwd)
+        // An interactive slash command shows the tab's real terminal inline —
+        // the same SSH-attached surface the terminal view mounts.
+        if let profile = controller.profile(for: id), let w = tabIndex {
+            m.inlineTerminal = { [weak self] in
+                guard let self else { return nil }
+                let ctl = self.termControllers[id] ?? {
+                    let c = TerminalSessionController(profile: profile, remoteHost: self.controller.host.id)
+                    self.termControllers[id] = c
+                    return c
+                }()
+                return ctl.view(forWindow: w)
+            }
+        }
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         host.translatesAutoresizingMaskIntoConstraints = false

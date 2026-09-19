@@ -94,6 +94,11 @@ final class ACAutomationServer {
     /// A finished task's raw session transcript (vsock or ext4) — nil when
     /// none exists.
     var onTaskTranscript: ((_ id: UUID) async -> String?)?
+    /// Sessions-first home over the wire (fat client): the session records
+    /// with their live verdicts, the verbs that drive one, and its transcript.
+    var onListAgentSessions: (() -> [[String: Any]])?
+    var onAgentSessionCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
+    var onAgentSessionTranscript: ((_ id: UUID) async -> Data?)?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -767,6 +772,53 @@ final class ACAutomationServer {
             let action = m == "DELETE" ? "delete" : (parts.count > 1 ? parts[1] : "")
             let r = DispatchQueue.main.sync {
                 self.onTaskCommand?(id, action, bodyJSON) ?? ["error": "no handler"]
+            }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        // Agent sessions (the sessions-first home, over the wire):
+        // POST /sessions/start {profile, tool, cwd?, cloneURL?, message?}
+        // POST /sessions/{id}/{resume|close|rename|forget} (resume: {message?},
+        // rename: {title}) and GET /sessions/{id}/transcript (base64 JSONL —
+        // the server's local copy, or the live file when the machine is up).
+        case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/transcript"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return
+            }
+            let idStr = String(p.dropFirst("/agent-sessions/".count).dropLast("/transcript".count))
+                .removingPercentEncoding ?? ""
+            guard let sid = UUID(uuidString: idStr) else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad session id"]); return
+            }
+            let sem = DispatchSemaphore(value: 0)
+            var b64: String?
+            Task { @MainActor [weak self] in
+                if let data = await self?.onAgentSessionTranscript?(sid) { b64 = data.base64EncodedString() }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 90)
+            if let b64 {
+                sendResponse(fd: fd, status: 200, body: ["transcript": b64])
+            } else {
+                sendResponse(fd: fd, status: 404, body: ["error": "No transcript"])
+            }
+
+        case ("POST", "/agent-sessions/start"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let r = DispatchQueue.main.sync {
+                self.onAgentSessionCommand?(nil, "start", bodyJSON) ?? ["error": "no handler"]
+            }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case ("POST", let p) where p.hasPrefix("/agent-sessions/"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let rest = String(p.dropFirst("/agent-sessions/".count))
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            guard let sid = parts.first.flatMap({ $0.removingPercentEncoding })
+                .flatMap(UUID.init(uuidString:)), parts.count > 1 else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad session id or action"]); return
+            }
+            let r = DispatchQueue.main.sync {
+                self.onAgentSessionCommand?(sid, parts[1], bodyJSON) ?? ["error": "no handler"]
             }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
@@ -1753,6 +1805,10 @@ final class ACAutomationServer {
             ]
             // Only present while a client-initiated registration is in flight.
             if let reg = self.onPendingRegistration?() { d["pendingRegistration"] = reg }
+            // Only present on a server with the sessions-first home: an older
+            // client ignores it, a newer client falls back to the classic
+            // layout when it's missing.
+            if let sessions = self.onListAgentSessions?() { d["agentSessions"] = sessions }
             return d
         }
         // The workspace VM subnet, so a fat client can route/tunnel to it. nil

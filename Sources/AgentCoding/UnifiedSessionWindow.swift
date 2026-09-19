@@ -3457,7 +3457,7 @@ struct UnifiedToolbarBar: View {
 }
 
 /// Toolbar pill: reveal the terminal, branch and machine behind a task.
-private struct UnderTheHoodToggle: View {
+struct UnderTheHoodToggle: View {
     let active: Bool
     let action: () -> Void
     @State private var hovering = false

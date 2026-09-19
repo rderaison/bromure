@@ -125,9 +125,28 @@ struct RootView: View {
             hostBox.onChange = { activeHost = $0; pendingPeer = nil }
             AppBadge.requestAuthorization()
             push.syncToken()
+            #if DEBUG
+            // Headless simulator bring-up: `BROMURE_DEBUG_SEED_KEY=<base64 of a
+            // 32-byte ed25519 seed>` installs this device's SSH identity (only
+            // when none exists) so a test server can pre-authorize it, and
+            // `BROMURE_DEBUG_OPEN_HOST=<saved host UUID>` opens that server's
+            // mirror at launch — no taps needed for a screenshot run. (AppBadge
+            // honours `BROMURE_DEBUG_NO_PUSH_PROMPT=1` for the permission alert.)
+            let debugEnv = ProcessInfo.processInfo.environment
+            if let seed = debugEnv["BROMURE_DEBUG_SEED_KEY"], !seed.isEmpty,
+               case .notFound = FatClientKeyStore.load() {
+                _ = FatClientKeyStore.store(seed)
+            }
+            #endif
             // Publish our SSH key so the user's servers authorize us passwordless.
             RemoteTransport.publishSSHKey()
             #if DEBUG
+            if let id = debugEnv["BROMURE_DEBUG_OPEN_HOST"].flatMap(UUID.init(uuidString:)) {
+                store.reload()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    if let h = savedHosts.first(where: { $0.id == id }) { activeHost = h }
+                }
+            }
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG_EDITOR"] == "1" {
                 debugEditorController = RemoteHostController(
                     host: RemoteHost(name: "debug", address: "127.0.0.1", user: "debug"))

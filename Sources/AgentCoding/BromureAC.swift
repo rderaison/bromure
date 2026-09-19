@@ -3463,6 +3463,62 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ["tasks": self?.codingTaskStore.tasks.compactMap(Self.codableToDict) ?? []]
             }
         }
+        // Sessions-first home for a fat client: the records as stored (the
+        // client recomputes buckets from them against its own mirror of the
+        // machines and tabs, exactly as the local sidebar does).
+        server.onListAgentSessions = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.agentSessionStore.sessions.compactMap(Self.codableToDict) ?? []
+            }
+        }
+        server.onAgentSessionCommand = { [weak self] id, action, body in
+            MainActor.assumeIsolated {
+                guard let self else { return ["error": "no app"] }
+                switch (id, action) {
+                case (nil, "start"):
+                    guard let profileKey = body["profile"] as? String,
+                          let profile = self.profiles.first(where: {
+                              $0.id.uuidString == profileKey
+                                  || $0.name.lowercased() == profileKey.lowercased() }),
+                          let toolRaw = body["tool"] as? String,
+                          let tool = Profile.Tool(rawValue: toolRaw)
+                    else { return ["error": "profile and tool required"] }
+                    let sid = self.agentSessionEngine.start(.init(
+                        profileID: profile.id, tool: tool,
+                        cwd: body["cwd"] as? String ?? "~",
+                        cloneURL: body["cloneURL"] as? String,
+                        openingMessage: body["message"] as? String))
+                    return ["ok": true, "id": sid.uuidString]
+                case (let sid?, "resume"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.resume(sid, message: body["message"] as? String)
+                    return ["ok": true]
+                case (let sid?, "close"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.close(sid)
+                    return ["ok": true]
+                case (let sid?, "rename"):
+                    guard self.agentSessionStore.session(sid) != nil,
+                          let title = body["title"] as? String else { return ["error": "unknown session or no title"] }
+                    self.agentSessionEngine.rename(sid, to: title)
+                    return ["ok": true]
+                case (let sid?, "forget"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.transcripts.remove(sid)
+                    self.agentSessionStore.remove(sid)
+                    return ["ok": true]
+                default:
+                    return ["error": "unknown action \(action)"]
+                }
+            }
+        }
+        server.onAgentSessionTranscript = { [weak self] sid in
+            guard let self, let s = await MainActor.run(body: { self.agentSessionStore.session(sid) }) else { return nil }
+            // The live file when the machine can be read (fresher), else the
+            // local copy — the same order the local Ended page uses.
+            if let live = await self.fetchSessionTranscript(s), !live.isEmpty { return Data(live.utf8) }
+            return await MainActor.run { self.agentSessionEngine.transcripts.load(s.id) }
+        }
         server.onSecurityTimeline = {
             MainActor.assumeIsolated { SecurityTimeline.shared.mirrorRows() }
         }

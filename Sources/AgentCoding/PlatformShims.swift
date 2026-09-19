@@ -175,6 +175,35 @@ extension View {
         #endif
     }
 
+    /// `.onExitCommand` (Escape) exists on macOS only; touch platforms
+    /// dismiss with their own gestures, so the action is simply not wired.
+    @ViewBuilder func platformExitCommand(_ action: @escaping () -> Void) -> some View {
+        #if os(macOS)
+        self.onExitCommand(perform: action)
+        #else
+        self
+        #endif
+    }
+
+    /// Popover content that stays a popover on a compact iPhone instead of
+    /// turning into a sheet (the content is sized for an anchored bubble).
+    @ViewBuilder func platformCompactPopover() -> some View {
+        #if os(iOS) || os(visionOS)
+        self.presentationCompactAdaptation(.popover)
+        #else
+        self
+        #endif
+    }
+
+    /// A fixed popover width, narrowed on a phone so the bubble fits.
+    @ViewBuilder func platformPopoverWidth(_ width: CGFloat) -> some View {
+        #if os(iOS)
+        self.frame(width: UIDevice.current.userInterfaceIdiom == .phone ? min(width, 340) : width)
+        #else
+        self.frame(width: width)
+        #endif
+    }
+
     /// `.pickerStyle(.radioGroup)` is macOS-only; iOS renders a menu picker.
     @ViewBuilder func platformRadioGroupPickerStyle() -> some View {
         #if os(macOS)

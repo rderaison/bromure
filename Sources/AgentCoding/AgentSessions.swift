@@ -12,6 +12,20 @@ import SwiftUI
 // grouping the sidebar shows, and the shared row/section views. The macOS
 // engine that starts/resumes sessions lives in AgentSessionEngine.swift.
 
+/// What the new-session screen hands to whoever starts sessions: the local
+/// engine on macOS, the mirror controller (→ the server's engine) on a
+/// fat client.
+struct AgentSessionRequest {
+    var profileID: UUID
+    var tool: Profile.Tool
+    /// Guest folder ("~" = home). With `cloneURL`, the clone target.
+    var cwd: String = "~"
+    var cloneURL: String? = nil
+    var openingMessage: String? = nil
+    /// Optional explicit name; else derived from the message / folder.
+    var title: String? = nil
+}
+
 struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var id: UUID
     var profileID: UUID
@@ -108,7 +122,12 @@ final class AgentSessionStore {
     /// Sessions whose tab was never found are given up after this long.
     static let launchTimeout: TimeInterval = 180
 
+    /// A mirror holds another instance's sessions (a fat client's view of
+    /// the server's): fed by `applyMirror`, never read from or written to disk.
+    private let isMirror: Bool
+
     init(fileURL: URL? = nil) {
+        isMirror = false
         if let fileURL {
             self.fileURL = fileURL
         } else {
@@ -119,6 +138,17 @@ final class AgentSessionStore {
                 .appendingPathComponent("sessions.json")
         }
         load()
+    }
+
+    init(mirror: Bool) {
+        isMirror = mirror
+        fileURL = FileManager.default.temporaryDirectory.appendingPathComponent("sessions-mirror.json")
+    }
+
+    /// Replace the whole list with the server's (a fat client's poll).
+    func applyMirror(_ list: [AgentSession]) {
+        guard list != sessions else { return }
+        sessions = list
     }
 
     func session(_ id: UUID) -> AgentSession? { sessions.first { $0.id == id } }
@@ -200,10 +230,10 @@ final class AgentSessionStore {
                 // tab that works in another folder isn't this session's.
                 // The home itself is exempt — an agent started there may
                 // move to a scratch folder of its own.
-                let home = ScheduledAutomationEngine.guestPath("~")
-                let mineCwd = ScheduledAutomationEngine.guestPath(s.cwd)
+                let home = SessionHome.guestPath("~")
+                let mineCwd = SessionHome.guestPath(s.cwd)
                 if !stale, s.launchDisplay == nil, mineCwd != home,
-                   let tc = tab.cwd, !tc.isEmpty, ScheduledAutomationEngine.guestPath(tc) != mineCwd {
+                   let tc = tab.cwd, !tc.isEmpty, SessionHome.guestPath(tc) != mineCwd {
                     stale = true
                 }
                 guard stale else { continue }
@@ -280,14 +310,14 @@ final class AgentSessionStore {
                       let tool = Profile.Tool(rawValue: kind) else { continue }
                 let cwd = tab.cwd ?? "~"
                 let title = Self.agentTitle(from: tab) ?? AgentSession.defaultTitle(tool: tool, cwd: cwd)
-                let guestCwd = ScheduledAutomationEngine.guestPath(cwd)
+                let guestCwd = SessionHome.guestPath(cwd)
                 if let i = sessions.firstIndex(where: { cand in
                     guard cand.profileID == entry.id, cand.windowIndex == nil,
                           cand.launchingSince == nil, cand.tool == tool else { return false }
                     // The tab still carries the name we opened it under…
                     if let d = tab.display, !d.isEmpty, d == cand.launchDisplay { return true }
                     // …or it reads exactly like the session, in the same folder.
-                    return cand.title == title && ScheduledAutomationEngine.guestPath(cand.cwd) == guestCwd
+                    return cand.title == title && SessionHome.guestPath(cand.cwd) == guestCwd
                 }) {
                     sessions[i].windowIndex = tab.index
                     sessions[i].endedAt = nil
@@ -366,6 +396,7 @@ final class AgentSessionStore {
     }
 
     private func save() {
+        guard !isMirror else { return }
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -412,6 +443,18 @@ enum SessionBucket: Int, CaseIterable, Identifiable {
 }
 
 enum SessionHome {
+    /// Absolute guest path for a session cwd ("~" conventions), for
+    /// comparing a session against a tab's reported cwd. Platform-neutral
+    /// twin of the macOS automation engine's helper.
+    nonisolated static func guestPath(_ path: String) -> String {
+        let home = "/home/ubuntu"
+        let trimmed = path.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty || trimmed == "~" { return home }
+        if trimmed.hasPrefix("~/") { return home + String(trimmed.dropFirst(1)) }
+        if trimmed.hasPrefix("/") { return trimmed }
+        return home + "/" + trimmed
+    }
+
     /// The session's live tab, when its workspace is attached and the tab
     /// is still there.
     @MainActor
@@ -552,7 +595,7 @@ enum SessionHome {
         let agentNames: Set<String> = [agent, "claude code", "codex", "kimi code", "oh my pi", "omp", "bash", "shell", "tmux"]
         if agentNames.contains(lower) { return nil }
         if let cwd, !cwd.isEmpty {
-            let folder = (ScheduledAutomationEngine.guestPath(cwd) as NSString).lastPathComponent.lowercased()
+            let folder = (SessionHome.guestPath(cwd) as NSString).lastPathComponent.lowercased()
             if lower == folder { return nil }
         }
         if t.count > 60 { t = String(t.prefix(60)).trimmingCharacters(in: .whitespaces) }

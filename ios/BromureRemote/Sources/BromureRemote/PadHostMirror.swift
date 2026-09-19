@@ -14,6 +14,9 @@ enum PadSelection: Hashable {
     case automations
     case grid
     case workspace(Profile.ID)
+    /// Sessions-first (a server that reports agent sessions).
+    case session(UUID)
+    case newSession
 }
 
 struct PadHostMirror: View {
@@ -30,6 +33,10 @@ struct PadHostMirror: View {
     /// The tmux window a deep-linked workspace should open on (cleared after
     /// the workspace screen consumes it via `initialWindow`).
     @State private var deepLinkWindow: Int?
+    /// Sessions-first: once the mirror reports sessions, the column opens on
+    /// the one that needs you (or the new-session composer) — same as the
+    /// desktop — instead of an empty "Select a workspace".
+    @State private var didPickInitialSession = false
 
     var body: some View {
         NavigationSplitView {
@@ -44,7 +51,7 @@ struct PadHostMirror: View {
             tryDeepLink()
         }
         .onChange(of: waitingCount) { AppBadge.set($0) }
-        .onChange(of: controller.revision) { tryDeepLink() }
+        .onChange(of: controller.revision) { tryDeepLink(); pickInitialSession() }
         // Foreground snap-back: after a long absence the P2P path is almost
         // certainly dead — drop it so the next dial re-establishes fresh.
         .onReceive(NotificationCenter.default.publisher(for: .bromureDidForeground)) { note in
@@ -72,6 +79,10 @@ struct PadHostMirror: View {
                           systemImage: "wifi.exclamationmark")
                         .foregroundStyle(.orange)
                 }
+            }
+
+            if controller.supportsSessions {
+                PadSessionSections(controller: controller)
             }
 
             Section("Boards") {
@@ -237,10 +248,53 @@ struct PadHostMirror: View {
             WorkspaceScreen(controller: controller, profileID: id,
                             initialWindow: consumeDeepLinkWindow(id))
                 .id(id)
+        case .session(let id):
+            MobileSessionScreen(controller: controller, sessionID: id,
+                                onForget: { selection = .newSession })
+                .id(id)
+        case .newSession:
+            MobileNewSessionScreen(controller: controller,
+                                   onStarted: { selection = .session($0) },
+                                   onCancel: {
+                                       if let s = SessionHome.initialSession(in: controller.sessionStore,
+                                                                             model: controller.listModel,
+                                                                             remembered: nil) {
+                                           selection = .session(s.id)
+                                       }
+                                   })
         case nil:
-            ContentUnavailableView("Select a workspace",
-                systemImage: "cpu",
-                description: Text("Pick a workspace or a board from the sidebar."))
+            if controller.supportsSessions {
+                ContentUnavailableView("Select a session",
+                    systemImage: "bubble.left.and.bubble.right",
+                    description: Text("Pick a session from the sidebar, or start a new one."))
+            } else {
+                ContentUnavailableView("Select a workspace",
+                    systemImage: "cpu",
+                    description: Text("Pick a workspace or a board from the sidebar."))
+            }
+        }
+    }
+
+    /// The desktop opens on the session that needs you; so does the pad.
+    private func pickInitialSession() {
+        guard !didPickInitialSession, controller.supportsSessions, controller.hasSnapshot,
+              selection == nil, openWorkspace == nil
+        else { return }
+        didPickInitialSession = true
+        #if DEBUG
+        // Headless screenshot runs — same hooks as the phone's HostMirrorScreen.
+        let env = ProcessInfo.processInfo.environment
+        if let id = env["BROMURE_DEBUG_OPEN_SESSION"].flatMap(UUID.init(uuidString:)),
+           controller.sessionStore.session(id) != nil {
+            selection = .session(id); return
+        }
+        if env["BROMURE_DEBUG_NEW_SESSION"] == "1" { selection = .newSession; return }
+        #endif
+        if let s = SessionHome.initialSession(in: controller.sessionStore,
+                                              model: controller.listModel, remembered: nil) {
+            selection = .session(s.id)
+        } else {
+            selection = .newSession
         }
     }
 

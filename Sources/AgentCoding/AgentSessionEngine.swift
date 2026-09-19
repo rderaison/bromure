@@ -40,16 +40,9 @@ final class AgentSessionEngine {
         self.delegate = delegate
     }
 
-    struct NewSessionRequest {
-        var profileID: UUID
-        var tool: Profile.Tool
-        /// Guest folder ("~" = home). With `cloneURL`, the clone target.
-        var cwd: String = "~"
-        var cloneURL: String? = nil
-        var openingMessage: String? = nil
-        /// Optional explicit name; else derived from the message / folder.
-        var title: String? = nil
-    }
+    /// The platform-neutral request lives with the model (AgentSessions.swift)
+    /// so the shared new-session screen can build one on every platform.
+    typealias NewSessionRequest = AgentSessionRequest
 
     /// Create the session record and launch it. The record is on screen
     /// immediately (the chat surface with the opening message); the tab

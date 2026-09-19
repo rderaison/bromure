@@ -1,5 +1,6 @@
-#if os(macOS)
+#if canImport(AppKit)
 import AppKit
+#endif
 import SwiftUI
 
 // MARK: - Session-first stage views (macOS)
@@ -119,7 +120,7 @@ struct SessionHeaderView: View {
                             })
                             .textFieldStyle(.plain)
                             .font(.system(size: 16, weight: .semibold))
-                            .onExitCommand { renaming = false }
+                            .platformExitCommand { renaming = false }
                         } else {
                             Text(s.title)
                                 .font(.system(size: 16, weight: .semibold))
@@ -206,7 +207,7 @@ struct SessionHeaderView: View {
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
-                    .menuStyle(.borderlessButton)
+                    .platformBorderlessMenuStyle()
                     .menuIndicator(.hidden)
                     .frame(width: 26)
                 }
@@ -239,7 +240,7 @@ struct SessionHeaderView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Color.platformWindowBackground)
             .overlay(alignment: .bottom) { Divider().opacity(0.6) }
             .onChange(of: live) { _, _ in actions.represent(s.id) }
             .onChange(of: bucket) { _, _ in actions.represent(s.id) }
@@ -353,6 +354,9 @@ struct SessionRestView: View {
     /// The conversation as last copied to this Mac — readable with the
     /// machine asleep.
     let cachedTranscript: (AgentSession) -> Data?
+    /// Ask `fetchTranscript` for asleep sessions too (a fat client: the
+    /// server answers from its own copy).
+    var fetchWhenAsleep = false
 
     private enum Load { case idle, loading, loaded([TranscriptItem]), unavailable }
     @State private var load: Load = .idle
@@ -426,7 +430,7 @@ struct SessionRestView: View {
             }.value
             load = items.isEmpty ? .unavailable : .loaded(items)
         }
-        guard bucket == .ended, let raw = await fetchTranscript(s), !raw.isEmpty else {
+        guard bucket == .ended || fetchWhenAsleep, let raw = await fetchTranscript(s), !raw.isEmpty else {
             if case .loading = load { load = .unavailable }
             return
         }
@@ -477,7 +481,7 @@ struct NewSessionView: View {
     let runningIDs: Set<UUID>
     /// Folders earlier sessions in a workspace ran in, most recent first.
     let recentFolders: (UUID) -> [String]
-    let onStart: (AgentSessionEngine.NewSessionRequest) -> Void
+    let onStart: (AgentSessionRequest) -> Void
     let onCancel: () -> Void
     /// No machine yet: the new-workspace flow.
     let onNewMachine: () -> Void
@@ -509,8 +513,25 @@ struct NewSessionView: View {
     static let lastProfileKey = "sessions.lastProfileID"
     static let lastToolKey = "sessions.lastTool"
 
+    /// A wide stage gets a wide margin; a phone keeps every point.
+    private static var sidePadding: CGFloat {
+        #if os(macOS)
+        return 32
+        #else
+        return 16
+        #endif
+    }
+
+    private static var footnote: String {
+        #if os(macOS)
+        return NSLocalizedString("Runs in an isolated machine of its own. Nothing on your Mac is touched.", comment: "new session footnote")
+        #else
+        return NSLocalizedString("Runs in an isolated machine of its own on your Mac, not on this device.", comment: "new session footnote (mobile)")
+        #endif
+    }
+
     init(profiles: [Profile], runningIDs: Set<UUID>, recentFolders: @escaping (UUID) -> [String],
-         onStart: @escaping (AgentSessionEngine.NewSessionRequest) -> Void,
+         onStart: @escaping (AgentSessionRequest) -> Void,
          onCancel: @escaping () -> Void,
          onNewMachine: @escaping () -> Void = {}) {
         self.profiles = profiles
@@ -582,7 +603,7 @@ struct NewSessionView: View {
         guard canStart else { return }
         UserDefaults.standard.set(profileID.uuidString, forKey: Self.lastProfileKey)
         UserDefaults.standard.set(tool.rawValue, forKey: Self.lastToolKey)
-        onStart(AgentSessionEngine.NewSessionRequest(
+        onStart(AgentSessionRequest(
             profileID: profileID, tool: tool, cwd: effectiveFolder,
             cloneURL: place == .repository ? repoURL.trimmingCharacters(in: .whitespaces) : nil,
             openingMessage: message))
@@ -602,13 +623,14 @@ struct NewSessionView: View {
                         .font(.system(size: 30, weight: .semibold))
                         .tracking(-0.3)
                         .multilineTextAlignment(.center)
+                        .minimumScaleFactor(0.8)
                         .padding(.bottom, 2)
                     if profiles.isEmpty {
                         firstMachineCard
                     } else {
                         composer
                         recentRow
-                        Text(NSLocalizedString("Runs in an isolated machine of its own. Nothing on your Mac is touched.", comment: "new session footnote"))
+                        Text(Self.footnote)
                             .font(.system(size: 11.5))
                             .foregroundStyle(.tertiary)
                             .multilineTextAlignment(.center)
@@ -618,11 +640,11 @@ struct NewSessionView: View {
                 .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: geo.size.height)
-                .padding(.horizontal, 32)
+                .padding(.horizontal, Self.sidePadding)
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .onExitCommand(perform: onCancel)
+        .background(Color.platformWindowBackground)
+        .platformExitCommand(onCancel)
         .onAppear {
             messageFocused = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { messageFocused = true }
@@ -651,12 +673,13 @@ struct NewSessionView: View {
                 .padding(.horizontal, 4)
                 .padding(.top, 4)
             HStack(spacing: 8) {
+                ChipStrip {
                 ComposerChip(help: NSLocalizedString("The agent that runs this session", comment: "new session chip"),
                              action: { agentPopover.toggle() }) {
                     AgentAvatar(tool: tool, size: 16)
                     Text(tool.displayName)
                 }
-                .popover(isPresented: $agentPopover, arrowEdge: .bottom) { agentList }
+                .popover(isPresented: $agentPopover, arrowEdge: .bottom) { agentList.platformCompactPopover() }
 
                 ComposerChip(help: runningIDs.contains(profileID)
                                 ? NSLocalizedString("The machine it runs on — running", comment: "new session chip")
@@ -668,7 +691,7 @@ struct NewSessionView: View {
                         Circle().fill(Color.green).frame(width: 5, height: 5)
                     }
                 }
-                .popover(isPresented: $machinePopover, arrowEdge: .bottom) { machineList }
+                .popover(isPresented: $machinePopover, arrowEdge: .bottom) { machineList.platformCompactPopover() }
 
                 ComposerChip(help: NSLocalizedString("Where it works: a fresh folder, one of yours, or a repository to check out", comment: "new session chip"),
                              action: { wherePopover.toggle() }) {
@@ -682,17 +705,24 @@ struct NewSessionView: View {
                         .frame(maxWidth: 220)
                         .fixedSize(horizontal: true, vertical: false)
                 }
-                .popover(isPresented: $wherePopover, arrowEdge: .bottom) { whereEditor }
+                .popover(isPresented: $wherePopover, arrowEdge: .bottom) { whereEditor.platformCompactPopover() }
+                }
 
                 Spacer(minLength: 8)
+                #if os(macOS)
                 Text(NSLocalizedString("⏎ start   ⌥⏎ newline", comment: "new session hint"))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.quaternary)
                     .lineLimit(1)
+                #endif
                 Button(action: start) {
                     HStack(spacing: 6) {
+                        // Touch screens get the familiar arrow-only send pill;
+                        // the label would cost the third chip its room.
+                        #if os(macOS)
                         Text(NSLocalizedString("Start", comment: "new session"))
                             .font(.system(size: 12.5, weight: .semibold))
+                        #endif
                         Image(systemName: "arrow.up")
                             .font(.system(size: 11, weight: .bold))
                     }
@@ -701,7 +731,9 @@ struct NewSessionView: View {
                     .frame(height: 28)
                     .background(Capsule().fill(canStart ? Color.accentColor : Color.secondary.opacity(0.28)))
                 }
+                .fixedSize()   // never squeezed by the chip strip beside it
                 .buttonStyle(.plain)
+                .accessibilityLabel(NSLocalizedString("Start", comment: "new session"))
                 .disabled(!canStart)
                 .keyboardShortcut(.return, modifiers: .command)
                 .help(NSLocalizedString("Start the session (⏎)", comment: "new session"))
@@ -709,7 +741,7 @@ struct NewSessionView: View {
         }
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(Color(nsColor: .textBackgroundColor))
+            .fill(Color.platformTextBackground)
             .shadow(color: .black.opacity(0.08), radius: 16, y: 5))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(messageFocused ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.10),
@@ -723,6 +755,7 @@ struct NewSessionView: View {
     private var recentRow: some View {
         let recent = Array(recentFolders(profileID).prefix(4))
         if !recent.isEmpty {
+            ChipStrip {
             HStack(spacing: 6) {
                 Spacer(minLength: 0)
                 Text(NSLocalizedString("Recent", comment: "new session recent"))
@@ -757,6 +790,7 @@ struct NewSessionView: View {
                 }
                 Spacer(minLength: 0)
             }
+            }
         }
     }
 
@@ -787,7 +821,7 @@ struct NewSessionView: View {
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(Color(nsColor: .textBackgroundColor))
+            .fill(Color.platformTextBackground)
             .shadow(color: .black.opacity(0.08), radius: 16, y: 5))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(Color.primary.opacity(0.10)))
@@ -904,7 +938,7 @@ struct NewSessionView: View {
                         } label: {
                             Label(NSLocalizedString("Recent", comment: "new session where"), systemImage: "clock")
                         }
-                        .menuStyle(.borderlessButton)
+                        .platformBorderlessMenuStyle()
                         .fixedSize()
                     }
                 }
@@ -920,7 +954,7 @@ struct NewSessionView: View {
                 }
                 .padding(.horizontal, 10)
                 .frame(height: 34)
-                .background(RoundedRectangle(cornerRadius: 9).fill(Color(nsColor: .textBackgroundColor)))
+                .background(RoundedRectangle(cornerRadius: 9).fill(Color.platformTextBackground))
                 .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.primary.opacity(0.12)))
                 HStack(spacing: 8) {
                     Text(NSLocalizedString("into", comment: "new session where")).font(.system(size: 12)).foregroundStyle(.secondary)
@@ -937,7 +971,7 @@ struct NewSessionView: View {
             }
         }
         .padding(14)
-        .frame(width: 420)
+        .platformPopoverWidth(420)
     }
 
     private func pathField(prompt: String) -> some View {
@@ -949,8 +983,27 @@ struct NewSessionView: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 34)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Color(nsColor: .textBackgroundColor)))
+        .background(RoundedRectangle(cornerRadius: 9).fill(Color.platformTextBackground))
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.primary.opacity(0.12)))
+    }
+}
+
+/// The composer's row of chips: inline on a wide stage, a horizontal
+/// scroller on a phone so three chips never fight for 350 points.
+private struct ChipStrip<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        #if os(macOS)
+        content()
+        #else
+        // Wins the width contest against the trailing Spacer, so the chips
+        // only scroll when the composer is genuinely too narrow (a phone).
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) { content() }
+        }
+        .layoutPriority(1)
+        #endif
     }
 }
 
@@ -981,4 +1034,3 @@ private struct ComposerChip<Content: View>: View {
         .help(help)
     }
 }
-#endif
