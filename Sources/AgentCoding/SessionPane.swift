@@ -340,6 +340,19 @@ final class SessionPane {
         m.send()
         return true
     }
+    /// Debug: press the sign-in card's button (a host-run sign-in).
+    func debugStartSignIn() -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        guard m.signInProvider != nil else { return ["error": "no account for \(m.agentKind ?? "?")"] }
+        m.startHostSignIn()
+        return ["ok": true, "prompt": m.prompt?.kind == .login, "status": m.hostSignInStatus ?? ""]
+    }
+    /// Debug: the sign-in card's state.
+    func debugSignInState() -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        return ["prompt": m.prompt.map { "\($0.kind)" } ?? "", "failure": m.failure?.detail ?? "",
+                "status": m.hostSignInStatus ?? "", "agent": m.agentKind ?? ""]
+    }
     /// The tmux window index the mounted beautified host is currently showing.
     /// The model re-targets whichever tab is active, so when the active tab
     /// changes to a *different* index we rebuild the host (reusing it would show
@@ -457,6 +470,31 @@ final class SessionPane {
             agent: agentHints[windowIndex] ?? BromureIcons.agentKind(forLabel: tab.shownLabel)
                 ?? profile.tool.rawValue,
             cwd: tab.cwd)
+        // Sign-in on the host: a throwaway machine does the OAuth and the
+        // credential never enters this workspace; the agent then restarts
+        // on the stand-in key. The sidebar hears about a sign-in screen too.
+        m.hostSignIn = { [weak self] provider, events in
+            guard let self, let delegate = self.acDelegate else { return }
+            delegate.beginProxySignIn(provider: provider, profileID: self.profile.id,
+                                      windowIndex: windowIndex, events: events)
+        }
+        m.relaunchAfterSignIn = { [weak self, weak m] in
+            guard let self, let delegate = self.acDelegate, let provider = m?.signInProvider else { return }
+            delegate.applyRegisteredSubscription(provider: provider, profileID: self.profile.id)
+            if let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex) {
+                delegate.agentSessionEngine.relaunchAfterSignIn(s.id)
+            }
+        }
+        m.loginPromptChanged = { [weak self] needs in
+            guard let self, let delegate = self.acDelegate,
+                  let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
+            else { return }
+            delegate.agentSessionStore.setNeedsSignIn(s.id, needs)
+        }
+        m.openProviderSettings = { [weak self] in
+            guard let self else { return }
+            self.acDelegate?.sidebarEditProfile(self.profile.id)
+        }
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         host.translatesAutoresizingMaskIntoConstraints = false

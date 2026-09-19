@@ -174,6 +174,36 @@ final class AgentSessionEngine {
         }
     }
 
+    /// The agent sat at its sign-in screen; the host now holds the account
+    /// and the workspace env carries the stand-in key. Drop that tab and
+    /// start the agent again in a fresh one on the new env: a conversation
+    /// that had begun is resumed, one that never started gets its opening
+    /// message for real.
+    func relaunchAfterSignIn(_ id: UUID) {
+        guard let s = store.session(id), let delegate else { return }
+        store.mutate(id) { $0.needsSignIn = nil; $0.lastError = nil }
+        BACDebug.log("sessions", "relaunch “\(s.title)” after sign-in")
+        Task { [weak self] in
+            if let w = s.windowIndex {
+                _ = try? await delegate.guestExec(
+                    profileID: s.profileID,
+                    command: "tmux kill-window -t bromure:\(w) 2>/dev/null; true", timeout: 10)
+            }
+            guard let self else { return }
+            if s.agentSeenAt != nil {
+                self.store.mutate(id) { $0.windowIndex = nil }
+                self.resume(id)
+            } else {
+                self.store.mutate(id) {
+                    $0.windowIndex = nil; $0.endedAt = nil
+                    $0.launchingSince = Date(); $0.launchBaselineIndex = nil
+                    $0.resumedAt = Date(); $0.agentAlive = nil
+                }
+                self.launch(id, prompt: s.openingMessage ?? "", flags: "", alreadyUp: true)
+            }
+        }
+    }
+
     /// Type `text` into the session's tab as soon as its agent is seen
     /// running (a relaunch takes a few seconds; a wake-up, a minute).
     private func deliverWhenAlive(_ id: UUID, _ text: String) {

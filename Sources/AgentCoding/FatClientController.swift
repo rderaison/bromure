@@ -4528,6 +4528,23 @@ final class RemoteHostWindow: NSWindow {
                 ?? tab.flatMap { BromureIcons.agentKind(forLabel: $0.shownLabel) }
                 ?? controller.profile(for: id)?.tool.rawValue,
             cwd: tab?.cwd)
+        // Sign-in runs on the server (a throwaway machine there does the
+        // OAuth); this client opens the page and tunnels the callback — the
+        // path the editor's Register button already uses — and the server
+        // restarts the session's agent on the stand-in key.
+        if let w = tabIndex {
+            m.hostSignIn = { [weak self] _, events in
+                guard let self,
+                      let s = self.controller.sessionStore.session(profileID: id, windowIndex: w)
+                else {
+                    events(.finished(success: false, message: NSLocalizedString(
+                        "This tab isn't a session — sign in from the machine's settings instead.", comment: "sign-in")))
+                    return
+                }
+                self.controller.sessionCommand(s.id, "signin")
+                events(.status(NSLocalizedString("Sign-in started — your browser will open shortly…", comment: "sign-in")))
+            }
+        }
         // An interactive slash command shows the tab's real terminal inline —
         // the same SSH-attached surface the terminal view mounts.
         if let profile = controller.profile(for: id), let w = tabIndex {

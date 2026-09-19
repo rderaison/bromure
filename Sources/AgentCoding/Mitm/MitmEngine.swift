@@ -23,6 +23,8 @@ public final class MitmEngine {
     public let grokRefresher: GrokSubscriptionRefresher
     /// Kimi (Moonshot) counterparts.
     public let kimiSubscriptionStore: KimiSubscriptionStore
+    /// Sign-ins the proxy is answering itself (SignInCapture.swift).
+    let signInCaptures = SignInCaptureRegistry()
     public let kimiRefresher: KimiSubscriptionRefresher
     public let sshAgent: SSHAgentServer
     public let awsCreds: AWSCredentialServer
@@ -392,6 +394,9 @@ public final class MitmEngine {
         HTTPMitmConnection.codexSubscriptionProvider = { [weak self] in
             guard let self else { return nil }
             return (self.codexSubscriptionStore, self.codexRefresher)
+        }
+        HTTPMitmConnection.signInCaptureProvider = { [weak self] pid in
+            self?.signInCaptures.capture(for: pid)
         }
         HTTPMitmConnection.grokSubscriptionProvider = { [weak self] in
             guard let self else { return nil }

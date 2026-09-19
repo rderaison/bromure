@@ -72,6 +72,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// subscription auth off. Set once by `MitmEngine.register`; static, same
     /// rationale as the providers above.
     nonisolated(unsafe) static var claudeSubscriptionProvider: (@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?)?
+    /// A sign-in the host is capturing for this workspace (SignInCapture.swift):
+    /// the token exchange is answered by the host, not the provider.
+    nonisolated(unsafe) static var signInCaptureProvider: (@Sendable (UUID) -> SignInCapture?)?
     /// Codex / ChatGPT counterpart of `claudeSubscriptionProvider`.
     nonisolated(unsafe) static var codexSubscriptionProvider: (@Sendable () -> (CodexSubscriptionStore, CodexSubscriptionRefresher)?)?
     /// Grok (xAI) counterpart of `claudeSubscriptionProvider`.
@@ -645,6 +648,32 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 FileHandle.standardError.write(Data(
                     "[mitm] Kimi subscription token unavailable for \(host): \(error)\n".utf8))
             }
+        }
+
+        // 5f. Sign-in capture. The workspace's CLI is running its login for
+        //     the user; the token exchange's reply is the one response the
+        //     host keeps for itself: the real credential goes to the host
+        //     store and the guest hears what the host decides (an error, or a
+        //     reply carrying stand-in tokens). Buffered — a small JSON
+        //     document; a pending device-code poll passes through untouched.
+        if !insecure, bodyFile == nil,
+           let capture = Self.signInCaptureProvider?(profileID),
+           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)),
+           capture.matches(host: host, method: reqMethod, path: reqPath,
+                           body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
+            let captureSession = upstreamSession(for: host, insecure: insecure)
+            defer { captureSession.finishTasksAndInvalidate() }
+            let upstream = try await relayUpstreamCollecting(
+                rawRequest: swap.modified, host: host, port: port,
+                session: captureSession, scheme: upstreamScheme)
+            let status = Self.parseStatusCode(upstream)
+            let body = upstream.range(of: Data("\r\n\r\n".utf8))
+                .map { upstream.subdata(in: $0.upperBound..<upstream.count) } ?? Data()
+            let reply = await capture.handle(status, body)
+            try tls.write(reply ?? upstream)
+            FileHandle.standardError.write(Data(
+                "[mitm] sign-in exchange \(host)\(reqPath) → \(status), \(reply == nil ? "passed through" : "kept on the host")\n".utf8))
+            return
         }
 
         // 6a. WebSocket upgrade — bypass URLSession (which can't

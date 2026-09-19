@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
 // The iOS fat client compiles this file without SandboxEngine (macOS-only:
 // Virtualization et al.) — PlatformStubs.swift supplies the EgressPolicy
 // stand-in there.
@@ -4433,6 +4436,10 @@ public final class ProfileStore {
         let usesClaude = profile.tool == .claude
             || profile.additionalTools.contains { $0.tool == .claude }
         var spec: [String: Any] = ["usesClaude": usesClaude]
+        // Claude Code's first-run wizard asks for a text style: the guest
+        // answers with the host's appearance (and marks onboarding done) so a
+        // session opens on the conversation — agentd `_preonboard`.
+        spec["claudeTheme"] = Self.claudeThemeForHostAppearance()
         if usesClaude, let key = anthropicEnvKey, !key.isEmpty {
             // Claude Code stores approvals as the key's last 20 characters.
             spec["approvedApiKeySuffix"] = String(key.suffix(20))
@@ -4452,6 +4459,18 @@ public final class ProfileStore {
             withJSONObject: spec, options: [.prettyPrinted, .sortedKeys])
         try specData.write(to: seedDir.appendingPathComponent("claude-settings.spec.json"),
                            options: .atomic)
+    }
+
+    /// "dark" or "light" for Claude Code's `theme`, following the app's
+    /// effective appearance (dark when there is no app, e.g. the CLI).
+    static func claudeThemeForHostAppearance() -> String {
+        #if canImport(AppKit)
+        if let app = NSApp,
+           app.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .aqua {
+            return "light"
+        }
+        #endif
+        return "dark"
     }
 
     /// Percent-encode a string for use in the userinfo portion of a URL
@@ -5028,11 +5047,15 @@ public final class ProfileStore {
             # would have to type /login); its `kimi login` subcommand drives
             # the device-code flow directly, which is exactly what a
             # registration VM exists for.
-            if [ "$BROMURE_AC_TOOL" = "kimi" ]; then
-                kimi login
-            else
-                "$BROMURE_AC_TOOL"
-            fi
+            # Each CLI's login subcommand goes straight to the browser
+            # hand-off — no wizard in between (see launchRegistrationAgentIfNeeded).
+            case "$BROMURE_AC_TOOL" in
+                claude) claude auth login --claudeai ;;
+                codex)  codex login ;;
+                grok)   grok login ;;
+                kimi)   kimi login ;;
+                *)      "$BROMURE_AC_TOOL" ;;
+            esac
         fi
     fi
     unset _bromure_marker

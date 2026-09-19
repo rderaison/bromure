@@ -307,8 +307,71 @@ final class BeautifiedSessionModel: ObservableObject {
     /// readable once the machine sleeps).
     var transcriptSink: ((Data) -> Void)?
 
+    /// The agent kind behind this tab ("claude", "codex", …), from the slash
+    /// command load — decides which account a sign-in card offers.
+    @Published var agentKind: String?
+    /// A sign-in the host runs for this tab (a throwaway machine does the
+    /// OAuth; the credential stays on the host): the pane wires it, the card
+    /// shows its events. nil when this window can't offer it.
+    var hostSignIn: ((SubscriptionProvider, @escaping (HostSignInEvent) -> Void) -> Void)?
+    /// After a successful host sign-in: push the stand-in key into the
+    /// workspace and start the agent again on it.
+    var relaunchAfterSignIn: (() -> Void)?
+    /// Agents with no account to sign into (Oh My Pi): where a model
+    /// provider is added.
+    var openProviderSettings: (() -> Void)?
+    /// The tab shows (or stopped showing) a sign-in screen — the sidebar
+    /// reflects it.
+    var loginPromptChanged: ((Bool) -> Void)?
+    /// What the host sign-in is doing right now, for the card. nil = idle.
+    @Published var hostSignInStatus: String?
+    /// Why the last host sign-in didn't land, shown in the card under the
+    /// button until the next attempt.
+    @Published var hostSignInError: String?
+
+    /// "Claude", "ChatGPT", "Grok", "Kimi" — the account, not the tool.
+    var signInAccountName: String {
+        signInProvider?.displayName ?? (agentDisplayName.isEmpty ? "Claude" : agentDisplayName)
+    }
+
+    var signInProvider: SubscriptionProvider? {
+        agentKind.flatMap { SubscriptionProvider(rawValue: $0) }
+    }
+
+    /// The card's "Sign in…": run the account sign-in on the host and, once
+    /// the credential is stored, restart the agent on the stand-in key. The
+    /// login card stays up (pinned against the scan) while this runs.
+    func startHostSignIn() {
+        guard let provider = signInProvider, let hostSignIn, hostSignInStatus == nil else { return }
+        if prompt?.kind != .login {
+            withAnimation(.easeOut(duration: 0.2)) { prompt = TerminalPrompt(kind: .login); failure = nil }
+        }
+        hostSignInStatus = NSLocalizedString("Starting the sign-in…", comment: "sign-in")
+        hostSignInError = nil
+        hostSignIn(provider) { [weak self] event in
+            Task { @MainActor in
+                guard let self else { return }
+                switch event {
+                case .status(let text):
+                    self.hostSignInStatus = text
+                case .finished(let ok, let message):
+                    if ok {
+                        self.hostSignInStatus = String(format: NSLocalizedString(
+                            "Signed in. Starting %@ again…", comment: "sign-in"), self.agentDisplayName)
+                        self.relaunchAfterSignIn?()
+                    } else {
+                        self.hostSignInStatus = nil
+                        self.hostSignInError = message ?? NSLocalizedString(
+                            "The sign-in didn't complete. You can try again.", comment: "sign-in")
+                    }
+                }
+            }
+        }
+    }
+
     func loadSlashCommands(agent: String?, cwd: String?) {
         guard let agent else { return }
+        agentKind = agent
         agentDisplayName = Profile.Tool(rawValue: agent)?.displayName ?? agent
         let builtIn = SlashCommandCatalog.builtIn(for: agent)
         slashCommands = builtIn
@@ -479,7 +542,10 @@ final class BeautifiedSessionModel: ObservableObject {
             parsedItems = parsed
             // Real transcript progress ⇒ any earlier terminal card is stale.
             if failure != nil || prompt != nil {
+                let wasLogin = prompt?.kind == .login
                 withAnimation(.easeOut(duration: 0.2)) { failure = nil; prompt = nil }
+                if wasLogin { loginPromptChanged?(false) }
+                hostSignInStatus = nil
             }
         }
         reconcilePending()
@@ -497,16 +563,22 @@ final class BeautifiedSessionModel: ObservableObject {
         guard now.timeIntervalSince(lastScanAt) > Self.scanInterval else { return }
         lastScanAt = now
         guard let screen = await provider.captureScreen() else { return }
-        let state = TerminalScan.classify(screen)
+        // A host sign-in in flight owns the card: the screen still shows the
+        // login menu (or the error that led here) until the agent restarts.
+        guard hostSignInStatus == nil else { return }
+        let state = TerminalScan.classify(screen, agent: agentKind)
         // Only touch published state when it actually changes, so a steady error
         // banner doesn't re-fire the animation every scan.
         let newPrompt: TerminalPrompt? = { if case .prompt(let p) = state { return p } else { return nil } }()
         let newFailure: SessionFailure? = { if case .failure(let f) = state { return f } else { return nil } }()
         guard newPrompt != prompt || newFailure != failure else { return }
+        let wasLogin = prompt?.kind == .login
         withAnimation(.easeOut(duration: 0.2)) {
             prompt = newPrompt
             failure = newFailure
         }
+        let isLogin = newPrompt?.kind == .login
+        if isLogin != wasLogin { loginPromptChanged?(isLogin) }
     }
 
     /// Answer Claude's folder-trust dialog inline (Down → "Yes, I trust this
@@ -1053,6 +1125,12 @@ struct BeautifiedSessionView: View {
                         }
                         if let prompt = model.prompt {
                             PromptCard(prompt: prompt,
+                                       providerName: model.signInAccountName,
+                                       hostSignInAvailable: model.hostSignIn != nil && model.signInProvider != nil,
+                                       signInStatus: model.hostSignInStatus,
+                                       signInError: model.hostSignInError,
+                                       onHostSignIn: { model.startHostSignIn() },
+                                       onOpenProviderSettings: model.signInProvider == nil ? model.openProviderSettings : nil,
                                        onTrust: { model.trustFolder() },
                                        onMethod: { model.chooseLoginMethod($0) },
                                        onOpenURL: { model.openLoginURL() },
@@ -1060,7 +1138,10 @@ struct BeautifiedSessionView: View {
                                 .id("beautified-prompt")
                                 .transition(.opacity)
                         } else if let failure = model.failure {
-                            FailureCard(failure: failure)
+                            FailureCard(failure: failure,
+                                        providerName: model.signInAccountName,
+                                        onSignIn: model.hostSignIn != nil && model.signInProvider != nil
+                                            ? { model.startHostSignIn() } : nil)
                                 .id("beautified-failure")
                                 .transition(.opacity)
                         } else if model.working, model.commandOutput == nil {
@@ -1462,17 +1543,35 @@ struct TerminalPrompt: Equatable {
         "yes, i trust this folder", "trust the authors of", "quick safety check",
     ]
 
-    static func detect(inScreen screen: String) -> TerminalPrompt? { detect(tail: terminalTail(screen)) }
+    static func detect(inScreen screen: String, agent: String? = nil) -> TerminalPrompt? {
+        detect(tail: terminalTail(screen), agent: agent)
+    }
 
-    static func detect(tail: [String]) -> TerminalPrompt? {
+    /// `agent`: the tab's agent kind, for the wording only it uses (Oh My Pi
+    /// has no account — a missing provider key is its "sign-in").
+    static func detect(tail: [String], agent: String? = nil) -> TerminalPrompt? {
         let trimmed = tail.map { $0.trimmingCharacters(in: .whitespaces) }
         let low = trimmed.joined(separator: "\n").lowercased()
 
-        // `/login` flow: the method menu, then the OAuth URL + code prompt.
+        // Sign-in screens: Claude's `/login` flow (the method menu, then the
+        // OAuth URL + code prompt), Codex's first-run picker, and the
+        // logged-out banners Grok / Kimi print.
         let looksLikeLogin = low.contains("select login method")
             || low.contains("browser didn't open")
             || low.contains("paste code here")
             || trimmed.contains { $0.contains("/oauth/authorize") }
+            || low.contains("sign in with chatgpt")
+            || low.contains("sign in with your chatgpt")
+            || low.contains("grok login") || low.contains("kimi login")
+            || low.contains("not logged in") || low.contains("please log in")
+            || low.contains("login required")
+            // Grok's first run: its own device-code screen.
+            || low.contains("approve in your browser")
+            // Oh My Pi's first-run wizard ("Setup step 1 of 5 · Set up your
+            // providers"), or a run with no provider key at all.
+            || (agent == "omp" && (low.contains("set up your providers") || low.contains("select provider to login")
+                                   || low.contains("no api key") || low.contains("api key is not set")
+                                   || low.contains("missing api key") || low.contains("anthropic_api_key")))
         if looksLikeLogin {
             return TerminalPrompt(
                 kind: .login,
@@ -1493,8 +1592,10 @@ struct TerminalPrompt: Equatable {
                 ?? NSLocalizedString("this folder", comment: "prompt")
             let claudePicker = low.contains("yes, i trust this folder")
             let codexPicker = low.contains("yes, continue")
+            // Kimi's picker defaults to "Trust this folder" (Enter picks it).
+            let kimiPicker = low.contains("don't trust") && low.contains("trust this folder")
             return TerminalPrompt(kind: .trust, detail: folder,
-                                  canAnswerTrust: claudePicker || codexPicker,
+                                  canAnswerTrust: claudePicker || codexPicker || kimiPicker,
                                   trustKeys: claudePicker ? ["Down", "Enter"] : ["Enter"])
         }
         return nil
@@ -1531,9 +1632,9 @@ enum TerminalState: Equatable {
 
 /// Classifies a terminal snapshot, splitting the tail once for both detectors.
 enum TerminalScan {
-    static func classify(_ screen: String) -> TerminalState? {
+    static func classify(_ screen: String, agent: String? = nil) -> TerminalState? {
         let tail = terminalTail(screen)
-        if let p = TerminalPrompt.detect(tail: tail) { return .prompt(p) }
+        if let p = TerminalPrompt.detect(tail: tail, agent: agent) { return .prompt(p) }
         if let f = SessionFailure.detect(tail: tail) { return .failure(f) }
         return nil
     }
@@ -1656,8 +1757,17 @@ private struct InlineTerminalView: NSViewRepresentable {
 /// The failure card shown in place of the cue — red-accented so a dead session
 /// is unmistakable, carrying the terminal's own error line and a nudge back to
 /// the terminal, where the fix (re-login, top up) actually happens.
+/// What a host-run sign-in reports to the card that started it.
+enum HostSignInEvent: Equatable {
+    case status(String)
+    case finished(success: Bool, message: String?)
+}
+
 private struct FailureCard: View {
     let failure: SessionFailure
+    /// Auth failures: the host sign-in, when this window can offer it.
+    var providerName: String = ""
+    var onSignIn: (() -> Void)? = nil
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -1671,11 +1781,20 @@ private struct FailureCard: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(NSLocalizedString("Switch to the terminal to resolve it, then send again.",
-                                       comment: "failure hint"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 1)
+                if failure.kind == .auth, let onSignIn {
+                    Button(action: onSignIn) {
+                        Label(String(format: NSLocalizedString("Sign in to %@…", comment: "login"), providerName),
+                              systemImage: "person.badge.key.fill")
+                    }
+                    .controlSize(.small).buttonStyle(.borderedProminent).tint(.red)
+                    .padding(.top, 3)
+                } else {
+                    Text(NSLocalizedString("Switch to the terminal to resolve it, then send again.",
+                                           comment: "failure hint"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 1)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -1695,6 +1814,15 @@ private struct FailureCard: View {
 /// sign-in page" button → a paste-the-code field.
 private struct PromptCard: View {
     let prompt: TerminalPrompt
+    /// "Claude", "ChatGPT"… — the account the sign-in is for.
+    var providerName: String = "Claude"
+    /// The host can sign in for this tab (see BeautifiedSessionModel.hostSignIn).
+    var hostSignInAvailable = false
+    var signInStatus: String? = nil
+    var signInError: String? = nil
+    var onHostSignIn: () -> Void = {}
+    /// No account to sign into (Oh My Pi): the machine's provider settings.
+    var onOpenProviderSettings: (() -> Void)? = nil
     var onTrust: () -> Void = {}
     var onMethod: (Int) -> Void = { _ in }
     var onOpenURL: () -> Void = {}
@@ -1708,7 +1836,7 @@ private struct PromptCard: View {
                 .font(.system(size: 15))
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 6) {
-                Text(prompt.headline).font(.system(size: 12.5, weight: .semibold))
+                Text(headline).font(.system(size: 12.5, weight: .semibold))
                 switch prompt.kind {
                 case .trust: trustBody
                 case .login: loginBody
@@ -1743,8 +1871,54 @@ private struct PromptCard: View {
         }
     }
 
+    private var headline: String {
+        guard prompt.kind == .login else { return prompt.headline }
+        if onOpenProviderSettings != nil {
+            return String(format: NSLocalizedString("%@ needs a model provider", comment: "prompt"), providerName)
+        }
+        return String(format: NSLocalizedString("Sign in to %@", comment: "prompt"), providerName)
+    }
+
     @ViewBuilder private var loginBody: some View {
-        if !prompt.loginMethods.isEmpty {
+        if let onOpenProviderSettings {
+            // No account to sign into: the machine needs an API key or a
+            // local model for this agent.
+            Text(String(format: NSLocalizedString(
+                "%@ has no model provider on this machine yet. Add an API key or a local model in the machine's settings, then start the session again.",
+                comment: "login"), providerName))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(action: onOpenProviderSettings) {
+                Label(NSLocalizedString("Machine settings…", comment: "login"), systemImage: "gearshape")
+            }
+            .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+        } else if hostSignInAvailable {
+            // The host signs in: a throwaway machine does the OAuth, the
+            // credential is stored on this Mac, the agent gets a stand-in key.
+            Text(String(format: NSLocalizedString(
+                "Bromure signs you in on this Mac and keeps your %@ account out of the machine — the agent only ever sees a stand-in key.",
+                comment: "login"), providerName))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let signInStatus {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text(signInStatus).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                }
+                .padding(.top, 2)
+            } else {
+                Button(action: onHostSignIn) {
+                    Label(String(format: NSLocalizedString("Sign in to %@…", comment: "login"), providerName),
+                          systemImage: "person.badge.key.fill")
+                }
+                .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+                if let signInError {
+                    Text(signInError)
+                        .font(.system(size: 11)).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        } else if !prompt.loginMethods.isEmpty {
             // Stage 1 — pick a sign-in method.
             Text(NSLocalizedString("How would you like to sign in?", comment: "login"))
                 .font(.system(size: 11)).foregroundStyle(.secondary)

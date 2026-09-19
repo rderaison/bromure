@@ -70,6 +70,9 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// A probe found the folder gone from the machine: the session can be
     /// read and forgotten, nothing else.
     var folderMissing: Bool?
+    /// The agent is sitting at its sign-in screen (the beautified view saw
+    /// it) — surfaced as "needs you" until the host signs in for it.
+    var needsSignIn: Bool?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -278,7 +281,9 @@ final class AgentSessionStore {
                     // the workspace's own shell would be mistaken for it):
                     // the new tab carrying the session's name, else the
                     // first new agent tab past the baseline nobody owns.
-                    let bound = Set(sessions.compactMap { $0.windowIndex })
+                    // Window indices are per machine: another workspace's
+                    // session on index 1 says nothing about this one's tab 1.
+                    let bound = Set(sessions.filter { $0.profileID == entry.id }.compactMap { $0.windowIndex })
                     let candidates = tabs.filter { t in
                         t.index > baseline && !bound.contains(t.index) && t.containerID == nil
                     }
@@ -354,6 +359,15 @@ final class AgentSessionStore {
 
     /// The agent named its session (its terminal title, read by the
     /// liveness probe): take it unless the user named the session by hand.
+    /// The beautified view's verdict on whether the tab shows a sign-in
+    /// screen. Persisted only on change, like liveness.
+    func setNeedsSignIn(_ id: UUID, _ needs: Bool) {
+        guard let i = sessions.firstIndex(where: { $0.id == id }),
+              (sessions[i].needsSignIn == true) != needs else { return }
+        sessions[i].needsSignIn = needs ? true : nil
+        save()
+    }
+
     func setAgentTitle(_ id: UUID, _ title: String) {
         guard let i = sessions.firstIndex(where: { $0.id == id }),
               sessions[i].userTitled != true, sessions[i].title != title else { return }
@@ -542,6 +556,7 @@ enum SessionHome {
     static func bucket(for s: AgentSession, in model: SessionListModel) -> SessionBucket {
         if isGone(s, in: model) { return .ended }
         if s.isLaunching { return .working }
+        if s.needsSignIn == true, !s.hasEnded, liveTab(for: s, in: model) != nil { return .needsYou }
         if s.hasEnded { return .ended }
         let ws = workspaceState(of: s, in: model)
         guard ws == .running || ws == .booting else { return .asleep }
@@ -585,7 +600,9 @@ enum SessionHome {
         // Short, so it fits beside the machine's name in a narrow sidebar.
         switch bucket(for: s, in: model) {
         case .needsYou:
-            return NSLocalizedString("Needs you", comment: "session status")
+            return s.needsSignIn == true
+                ? NSLocalizedString("Sign in needed", comment: "session status")
+                : NSLocalizedString("Needs you", comment: "session status")
         case .working:
             if let tab = liveTab(for: s, in: model), !agentRunning(s, in: tab) {
                 return NSLocalizedString("Starting…", comment: "session status")

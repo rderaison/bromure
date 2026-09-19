@@ -1731,6 +1731,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// window-close handler can route to its teardown instead of the normal
     /// session cleanup, and to guard against launching two at once.
     var claudeRegistration: ClaudeRegistrationState?
+    /// Sign-ins captured at the proxy, one per workspace (SessionSignIn.swift).
+    var proxySignIns: [UUID: ProxySignIn] = [:]
     /// First-run wizard state (welcome → install → scan → pick → done). Non-nil
     /// only while the setup window is showing it.
     var onboarding: OnboardingWizardModel?
@@ -3060,6 +3062,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                           let pane = self.pane(for: id), pane.debugSendComposer()
                     else { return ["error": "no beautified composer on stage"] }
                     return ["ok": true]
+                case "signin":
+                    // Press the sign-in card's button on the selected session.
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugStartSignIn()
+                case "signin-state":
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugSignInState()
                 case "files":
                     // Toggle the Files pane (⌃⌘E).
                     self.unifiedWindow?.toggleFilePane(nil)
@@ -3506,6 +3517,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
                     self.agentSessionEngine.transcripts.remove(sid)
                     self.agentSessionStore.remove(sid)
+                    return ["ok": true]
+                case (let sid?, "signin"):
+                    // A fat client's sign-in card: the throwaway machine runs
+                    // here, the client opens the page (RemoteRegistrationBroker
+                    // via /state) and tunnels the callback; once the credential
+                    // lands, the session's agent restarts on the stand-in key.
+                    guard let s = self.agentSessionStore.session(sid) else { return ["error": "unknown session"] }
+                    guard let provider = SubscriptionProvider(rawValue: s.tool.rawValue) else {
+                        return ["error": "no account sign-in for \(s.tool.rawValue)"]
+                    }
+                    guard self.claudeRegistration == nil else { return ["error": "a sign-in is already in progress"] }
+                    let pid = s.profileID
+                    self.beginSubscriptionRegistration(
+                        provider: provider, scope: .alwaysShared, remoteInitiated: true, quiet: true,
+                        events: { [weak self] event in
+                            guard case .finished(true, _) = event else { return }
+                            Task { @MainActor in
+                                guard let self else { return }
+                                self.applyRegisteredSubscription(provider: provider, profileID: pid)
+                                self.agentSessionEngine.relaunchAfterSignIn(sid)
+                            }
+                        })
                     return ["ok": true]
                 default:
                     return ["error": "unknown action \(action)"]
@@ -6873,6 +6906,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor
     /// Apply an already-persisted profile edit to its running session in place
     /// (host-side cosmetic + live-swap surfaces — env, credentials, guardrails,
+    /// A host sign-in just landed for `provider`: make sure the workspace's
+    /// spec for that agent runs in subscription mode (a workspace created
+    /// without a key defaults to a token it doesn't have), save, and push
+    /// the stand-in key into the running machine so a relaunched agent picks
+    /// it up from its shell env — no reboot.
+    func applyRegisteredSubscription(provider: SubscriptionProvider, profileID: UUID) {
+        guard var p = profiles.first(where: { $0.id == profileID }) else { return }
+        let tool = provider.scratchTool
+        var changed = false
+        if p.tool == tool, p.authMode != .subscription { p.authMode = .subscription; changed = true }
+        for i in p.additionalTools.indices
+        where p.additionalTools[i].tool == tool && p.additionalTools[i].authMode != .subscription {
+            p.additionalTools[i].authMode = .subscription; changed = true
+        }
+        if changed {
+            do { try store.save(p) } catch { NSLog("[bromure-ac] sign-in: couldn't save profile: \(error)") }
+            if let i = profiles.firstIndex(where: { $0.id == p.id }) { profiles[i] = p }
+            applyLiveEditToRunningSession(p)
+        } else {
+            runningSessions[p.id]?.profile = p
+            pushLiveCredentials(for: p, terminalDefaults: terminalDefaults,
+                                sandbox: runningSessions[p.id]?.sandbox)
+        }
+    }
+
     /// transparent-interception toggle), matching the GUI save path but without
     /// the restart prompt. Call after ANY path that writes a profile out of band
     /// — `automationUpsertProfile`, and the `set profile json` / `set profile
@@ -7309,7 +7367,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         guard sessionRefreshAffectingChange(from: old, to: new) else { return }
+        pushLiveCredentials(for: new, terminalDefaults: terminalDefaults, sandbox: sandbox)
+    }
 
+    /// The credential half of a live refresh: mint the token plan (the
+    /// stand-in keys, incl. a subscription's bogus key), push the swap map,
+    /// rewrite the guest-side credential files and the meta-share env. Also
+    /// what a fresh host sign-in needs with NO profile change at all — the
+    /// plan changed because a credential now exists.
+    private func pushLiveCredentials(for new: Profile, terminalDefaults: TerminalAppDefaults,
+                                     sandbox: UbuntuSandboxVM?) {
         // Guardrail config is consulted live on every proxied request —
         // update it unconditionally so a mode change lands even when no
         // credential moved.
@@ -7371,6 +7438,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                             terminalDefaults: terminalDefaults,
                                             tokenPlan: plan,
                                             kubeconfigYAML: kubeYAML)
+            // A subscription that arrived while the machine runs: its
+            // stand-in credential files, straight into the live home.
+            seedCodexAuthFile(for: profile)
+            seedGrokAuthFile(for: profile)
+            seedKimiAuthFile(for: profile)
         }
 
         // Rewrite api_key.env / proxy.env / MCP configs into the stable
@@ -10109,6 +10181,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.loopbackForwarders.append(fwd)
                     FileHandle.standardError.write(Data(
                         "[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
+                }
+                // A sign-in card is waiting on this very page.
+                if let self, let signIn = self.proxySignIns[pid], !signIn.finished {
+                    signIn.onEvent?(.status(NSLocalizedString(
+                        "Finish signing in in your browser…", comment: "sign-in")))
                 }
                 Self.openGuestRelayedURL(url)
             }

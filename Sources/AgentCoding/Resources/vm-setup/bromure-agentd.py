@@ -1960,6 +1960,80 @@ def _pretrust(tool, *dirs):
         log("worktree", "pretrust failed:", e)
 
 
+def _preonboard(tool, cwd=None):
+    """Answer the first-run questions an agent asks before it will talk, so
+    a session opens on the conversation — the beautified view can't show a
+    TUI wizard. Claude Code: the text-style (theme) picker and the security
+    notes screen, both gated by hasCompletedOnboarding in ~/.claude.json;
+    the theme follows the host's appearance (seed spec claudeTheme, dark by
+    default). Codex: trust for the folder in ~/.codex/config.toml, so its
+    "do you trust this directory" picker doesn't come first. Best-effort,
+    same clobber caveat as _pretrust."""
+    try:
+        if tool == "claude":
+            _preonboard_claude()
+        elif tool == "codex" and cwd:
+            _pretrust_codex(cwd)
+    except Exception as e:
+        log("worktree", "preonboard failed:", e)
+
+
+def _claude_theme_from_spec():
+    try:
+        with open(os.path.join(SEED_DIR, "claude-settings.spec.json")) as f:
+            spec = json.load(f)
+        t = spec.get("claudeTheme")
+        if t in ("dark", "light", "dark-daltonized", "light-daltonized",
+                 "dark-ansi", "light-ansi"):
+            return t
+    except Exception:
+        pass
+    return "dark"
+
+
+def _preonboard_claude():
+    path = os.path.join(HOME, ".claude.json")
+    cfg = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            obj = json.load(f)
+        if isinstance(obj, dict):
+            cfg = obj
+    changed = False
+    if not cfg.get("theme"):
+        cfg["theme"] = _claude_theme_from_spec()
+        changed = True
+    if cfg.get("hasCompletedOnboarding") is not True:
+        cfg["hasCompletedOnboarding"] = True
+        changed = True
+    if changed:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, path)
+
+
+def _pretrust_codex(cwd):
+    """Codex records folder trust in ~/.codex/config.toml as
+    [projects."<abs path>"] trust_level = "trusted". Append the table when
+    the folder has none (a textual check — the file is the user's)."""
+    d = os.path.realpath(cwd)
+    cdir = os.path.join(HOME, ".codex")
+    path = os.path.join(cdir, "config.toml")
+    text = ""
+    if os.path.exists(path):
+        with open(path) as f:
+            text = f.read()
+    key = '[projects."%s"]' % d
+    if key in text:
+        return
+    os.makedirs(cdir, exist_ok=True)
+    block = ("\n" if text and not text.endswith("\n") else "") \
+        + key + '\ntrust_level = "trusted"\n'
+    with open(path, "a") as f:
+        f.write(block)
+
+
 _TASK_MCP_SHIM = "/mnt/bromure-meta/bromure-task-mcp.py"
 
 
@@ -2121,6 +2195,7 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
     if yolo and _YOLO_FLAGS.get(tool):
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
+        _preonboard(tool, wt_dir)
     win = _new_window(command="bash -l", cwd=wt_dir, env=_env)
     if not win:
         worktree_err("worktree: could not open a tab (created %s at %s)"
@@ -2161,6 +2236,7 @@ def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
     if _YOLO_FLAGS.get(tool):
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
+        _preonboard(tool, wt_dir)
     win = _new_window(command="bash -l", cwd=wt_dir, env=env)
     if not win:
         worktree_err("task-resume: could not open a tab for %s" % branch)
@@ -2191,6 +2267,7 @@ def _automation_tab(cwd, display, tool, prompt_b64, slug=""):
         env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
         _preaccept_yolo(tool)
         _pretrust(tool, cwd)
+        _preonboard(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("automation: could not open a tab at %s" % cwd)
@@ -2217,6 +2294,7 @@ def _agent_tab(cwd, display, tool, prompt_b64, flags=""):
     if flags:
         env["BROMURE_AC_WT_FLAGS"] = flags
     _pretrust(tool, cwd)
+    _preonboard(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("session: could not open a tab at %s" % cwd)
@@ -2305,6 +2383,7 @@ def _plan_tab(cwd, slug, display, tool, prompt_b64):
     if _YOLO_FLAGS.get(tool):
         _preaccept_yolo(tool)
         _pretrust(tool, cwd)
+        _preonboard(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("plan: could not open a tab at %s" % cwd)
@@ -3913,6 +3992,12 @@ def _seed_claude_settings():
         except Exception:
             log("home", "claude.json key pre-approve failed:\n"
                 + traceback.format_exc())
+    # First-run wizard answers (text style, security notes) — see _preonboard.
+    if uses_claude:
+        try:
+            _preonboard_claude()
+        except Exception:
+            log("home", "claude onboarding seed failed:\n" + traceback.format_exc())
 
     claude_dir = os.path.join(HOME_MOUNT, ".claude")
     path = os.path.join(claude_dir, "settings.json")
