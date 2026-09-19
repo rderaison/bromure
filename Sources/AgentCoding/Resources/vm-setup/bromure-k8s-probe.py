@@ -270,6 +270,19 @@ def probe_longhorn(full):
     return info
 
 
+def probe_addon(namespace):
+    """Presence + readiness of an add-on namespace (all pods Running & ready)."""
+    if not kubectl_json("get", "ns", namespace):
+        return None
+    pods = (kubectl_json("get", "pods", "-n", namespace) or {}).get("items", [])
+    ready = 0
+    for p in pods:
+        cs = (p.get("status") or {}).get("containerStatuses") or []
+        if cs and all(c.get("ready") for c in cs):
+            ready += 1
+    return {"installed": True, "ready": bool(pods) and ready == len(pods), "pods": len(pods)}
+
+
 def probe_events():
     events = []
     doc = kubectl_json("get", "events", "-A", "--field-selector", "type=Warning") or {}
@@ -322,6 +335,9 @@ def main():
         lh = probe_longhorn(full)
         if lh:
             result["longhorn"] = lh
+        syn = probe_addon("synology-csi")
+        if syn:
+            result["synology"] = syn
         if full:
             result["pods"] = pods
             result["pvcs"] = probe_pvcs()

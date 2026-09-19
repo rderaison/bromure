@@ -537,6 +537,20 @@ struct KubeDashboardView: View {
                 } else if cluster.spec.storageEnabled {
                     KubeEmpty(text: status.phase == .running ? "Longhorn is coming up…" : "Longhorn storage starts with the cluster.")
                 }
+                if let syn = cluster.spec.synology, syn.isConfigured {
+                    KubeCard(title: "Synology NAS", systemImage: "externaldrive.connected.to.line.below") {
+                        HStack(spacing: 6) {
+                            let addon = probe?.synology
+                            Circle().fill(addon?.ready == true ? Color.green : (addon == nil ? Color.secondary.opacity(0.4) : Color.orange))
+                                .frame(width: 8, height: 8)
+                            Text(addon == nil ? (status.phase == .running ? "Driver not installed" : "Starts with the cluster")
+                                 : addon?.ready == true ? "Driver ready" : "Driver starting")
+                                .font(.system(size: 12))
+                            Text("· \(syn.host):\(String(syn.port)) · \(syn.location) · \(syn.protocolKind.rawValue.uppercased()) · storage class bromure-synology (default)")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 let pvcs = (probe?.pvcs ?? []).filter { query.isEmpty || $0.id.localizedCaseInsensitiveContains(query) }
                 KubeCard(title: "Volume claims", systemImage: "internaldrive", trailing: "\(pvcs.count)") {
                     if pvcs.isEmpty {
@@ -693,13 +707,17 @@ struct NewKubeClusterSheet: View {
     /// Names already taken (the sheet suggests a free one).
     let existingNames: [String]
     let hostMemoryGB: Int
-    let onCreate: (_ name: String, _ spec: KubeClusterSpec, _ access: KubeWorkspaceAccess, _ autoStart: Bool) -> Void
+    let onCreate: (_ name: String, _ spec: KubeClusterSpec, _ access: KubeWorkspaceAccess, _ autoStart: Bool,
+                   _ synologyPassword: String?) -> Void
     let onCancel: () -> Void
 
     @State private var name: String = ""
     @State private var spec = KubeClusterSpec()
     @State private var access: KubeWorkspaceAccess = .all
     @State private var autoStart = true
+    @State private var synologyOn = false
+    @State private var synology = KubeSynologySpec()
+    @State private var synologyPassword = ""
 
     private var totalMemoryGB: Int { spec.nodeCount * spec.memoryGBPerNode }
     private var totalDiskGB: Int { spec.storageEnabled ? spec.nodeCount * spec.storageDiskGB : 0 }
@@ -712,7 +730,9 @@ struct NewKubeClusterSheet: View {
         return nil
     }
     private var canCreate: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        if synologyOn { return synology.isConfigured && !synologyPassword.isEmpty }
+        return true
     }
 
     var body: some View {
@@ -766,6 +786,19 @@ struct NewKubeClusterSheet: View {
                             stepperRow("Data disk per node (GB)", value: $spec.storageDiskGB, range: KubeClusterSpec.storageRange,
                                        step: 10, caption: "\(totalDiskGB) GB reserved (sparse — only written blocks use space) · \(spec.storageReplicas) replica(s)")
                         }
+                        Toggle(isOn: $synologyOn) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Synology NAS")
+                                Text("Volumes on your NAS through Synology's CSI driver (iSCSI LUNs or SMB shares on a DSM volume). Becomes the default storage class; the driver's manifests are fetched from Synology's GitHub.")
+                                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                            }
+                        }
+                        .kubeCheckboxStyle()
+                        .padding(.leading, 128)
+                        if synologyOn {
+                            KubeSynologyFields(spec: $synology, password: $synologyPassword)
+                                .padding(.leading, 128)
+                        }
                     }
                     section("Networking") {
                         HStack(alignment: .top) {
@@ -817,14 +850,17 @@ struct NewKubeClusterSheet: View {
                 Spacer()
                 Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
                 Button("Create Cluster") {
-                    onCreate(name.trimmingCharacters(in: .whitespaces), spec.clamped, access, autoStart)
+                    var final = spec.clamped
+                    final.synology = synologyOn && synology.isConfigured ? synology : nil
+                    onCreate(name.trimmingCharacters(in: .whitespaces), final, access, autoStart,
+                             synologyOn ? synologyPassword : nil)
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canCreate)
             }
             .padding(.horizontal, 20).padding(.vertical, 14)
         }
-        .frame(width: 620, height: 640)
+        .frame(width: 620, height: synologyOn ? 760 : 660)
         .onAppear {
             if name.isEmpty {
                 var candidate = "dev"
@@ -1012,5 +1048,365 @@ extension View {
         #else
         self
         #endif
+    }
+}
+
+// MARK: - Synology NAS fields (creation sheet)
+
+struct KubeSynologyFields: View {
+    @Binding var spec: KubeSynologySpec
+    @Binding var password: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("DSM address (IP or hostname)", text: $spec.host).textFieldStyle(.roundedBorder).frame(width: 200)
+                TextField("Port", value: $spec.port, format: .number).textFieldStyle(.roundedBorder).frame(width: 64)
+                Toggle("HTTPS", isOn: $spec.https).kubeCheckboxStyle()
+            }
+            HStack(spacing: 8) {
+                TextField("DSM user", text: $spec.username).textFieldStyle(.roundedBorder).frame(width: 140)
+                SecureField("DSM password", text: $password).textFieldStyle(.roundedBorder).frame(width: 140)
+            }
+            HStack(spacing: 8) {
+                TextField("Volume, e.g. /volume1", text: $spec.location).textFieldStyle(.roundedBorder).frame(width: 140)
+                Picker("", selection: $spec.protocolKind) {
+                    ForEach(KubeSynologySpec.TransportKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                }
+                .labelsHidden().frame(width: 190)
+                TextField("fs", text: $spec.fsType).textFieldStyle(.roundedBorder).frame(width: 60)
+            }
+            Text("The password is stored encrypted on this Mac and only lands in the cluster's own Secret. The DSM account needs storage-manager rights; iSCSI needs open-iscsi on the nodes (installed automatically).")
+                .font(.system(size: 10.5)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - Registry dashboard
+
+struct KubeRegistryActions {
+    var start: () -> Void = {}
+    var stop: () -> Void = {}
+    var restart: () -> Void = {}
+    var delete: () -> Void = {}
+    var setAccess: (KubeWorkspaceAccess) -> Void = { _ in }
+    var setAutoStart: (Bool) -> Void = { _ in }
+}
+
+struct KubeRegistryDashboardView: View {
+    let store: KubeClusterStore
+    let registryID: UUID
+    let workspaces: [KubeWorkspaceRef]
+    let actions: KubeRegistryActions
+
+    enum Pane: String, CaseIterable, Hashable {
+        case images, access, log
+        var title: LocalizedStringKey {
+            switch self {
+            case .images: return "Images"
+            case .access: return "Access"
+            case .log:    return "Log"
+            }
+        }
+    }
+
+    @State private var pane: Pane = .images
+    @State private var query = ""
+    @State private var confirmDelete = false
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var compact: Bool { hSize == .compact }
+
+    static let registryTint = Color(hex: "#F97316")
+
+    private var registry: KubeRegistry? { store.registry(registryID) }
+    private var status: KubeClusterStatus { store.status(registryID) }
+    private var info: KubeRegistryInfo? { status.registry }
+
+    var body: some View {
+        if let registry {
+            content(registry)
+        } else {
+            ContentUnavailableView("Registry removed", systemImage: "shippingbox")
+        }
+    }
+
+    private func content(_ registry: KubeRegistry) -> some View {
+        VStack(spacing: 0) {
+            header(registry)
+            Divider()
+            if status.phase == .error, let msg = status.message {
+                KubeBanner(kind: .error, text: msg)
+            } else if status.phase.isBusy {
+                KubeBanner(kind: .progress, text: status.step ?? status.phase.displayName)
+            }
+            Group {
+                switch pane {
+                case .images: images(registry)
+                case .access:
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            KubeCard(title: "Workspace access", systemImage: "person.2") {
+                                Text("Allowed workspaces get \(status.address ?? "the registry") as an insecure registry for docker and BROMURE_REGISTRY in their shell. Every cluster can pull from it.")
+                                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                                KubeAccessPicker(isAll: { if case .all = registry.access { return true } else { return false } }(),
+                                                 selected: { if case .only(let ids) = registry.access { return ids } else { return Set(workspaces.map(\.id)) } }(),
+                                                 workspaces: workspaces) { actions.setAccess($0) }
+                            }
+                        }
+                        .padding(18)
+                    }
+                case .log: logPane
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(Color.platformWindowBackground)
+        .onChange(of: status.phase, initial: true) { _, phase in
+            if phase == .creating { pane = .log }
+            if phase == .running, pane == .log { pane = .images }
+        }
+        .confirmationDialog("Delete registry?", isPresented: $confirmDelete) {
+            Button("Delete \(registry.name)", role: .destructive) { actions.delete() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Stops the registry VM and deletes every image it holds. Workspaces and clusters stop trusting its address. This can't be undone.")
+        }
+    }
+
+    private func header(_ registry: KubeRegistry) -> some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Self.registryTint.opacity(0.15))
+                    .frame(width: 38, height: 38)
+                    .overlay(Image(systemName: "shippingbox.and.arrow.backward").font(.system(size: 17)).foregroundStyle(Self.registryTint))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(registry.name).font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                    HStack(spacing: 6) {
+                        KubePhasePill(phase: status.phase)
+                        Text(subtitle(registry)).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                Spacer()
+                if !compact { primaryActions.fixedSize() }
+                Menu {
+                    Button { if let a = status.address { platformCopyToPasteboard(a) } } label: { Label("Copy address", systemImage: "doc.on.doc") }
+                        .disabled(status.address == nil)
+                    Button { pane = .access } label: { Label("Workspace access…", systemImage: "person.2") }
+                    Toggle(isOn: Binding(get: { registry.autoStart }, set: { actions.setAutoStart($0) })) {
+                        Label("Start with Bromure", systemImage: "power")
+                    }
+                    Divider()
+                    Button(role: .destructive) { confirmDelete = true } label: { Label("Delete registry…", systemImage: "trash") }
+                        .disabled(status.phase.isBusy)
+                } label: {
+                    Image(systemName: "ellipsis.circle").font(.system(size: 16))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+            if compact { primaryActions }
+            HStack(spacing: 10) {
+                Picker("", selection: $pane) {
+                    ForEach(Pane.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                if !compact {
+                    Spacer()
+                    KubeSearchField(text: $query, prompt: "Filter images").frame(width: 200)
+                }
+            }
+        }
+        .padding(.horizontal, compact ? 16 : 18)
+        .padding(.vertical, compact ? 12 : 14)
+    }
+
+    private func subtitle(_ registry: KubeRegistry) -> String {
+        var parts: [String] = []
+        if let a = status.address { parts.append(a) }
+        parts.append("\(registry.memoryGB) GB RAM · \(registry.diskGB) GB disk")
+        if let up = status.startedAt, status.phase == .running {
+            parts.append(String(format: NSLocalizedString("up %@", comment: "k8s uptime"), kubeUptime(since: up)))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    @ViewBuilder private var primaryActions: some View {
+        HStack(spacing: 8) {
+            switch status.phase {
+            case .stopped, .error:
+                Button { actions.start() } label: { Label("Start", systemImage: "play.fill") }
+                    .buttonStyle(.borderedProminent).tint(Self.registryTint)
+            case .running:
+                Button { actions.restart() } label: { Label("Restart", systemImage: "arrow.clockwise") }
+                    .buttonStyle(.bordered)
+                Button { actions.stop() } label: { Label("Stop", systemImage: "stop.fill") }
+                    .buttonStyle(.bordered)
+            default:
+                ProgressView().controlSize(.small)
+                Text(status.phase.displayName).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func images(_ registry: KubeRegistry) -> some View {
+        let repos = (info?.repositories ?? []).filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: compact ? 2 : 3), spacing: 12) {
+                    StatCard(title: "Repositories", value: "\(info?.repositories.count ?? 0)",
+                             caption: LocalizedStringKey("\(String(info?.imageCount ?? 0)) tagged images"),
+                             systemImage: "shippingbox.fill", tint: Self.registryTint)
+                    StatCard(title: "Disk", value: info.map { kubeFormatBytes($0.diskUsedBytes) } ?? "—",
+                             caption: LocalizedStringKey(info.map { "of \(kubeFormatBytes($0.diskTotalBytes))" } ?? "waiting for the registry"),
+                             systemImage: "internaldrive.fill", tint: .teal)
+                    StatCard(title: "Address", value: status.address ?? "—",
+                             caption: "plain HTTP on the VM network",
+                             systemImage: "network", tint: .purple)
+                }
+                if let a = status.address {
+                    KubeCard(title: "Push from a workspace", systemImage: "terminal") {
+                        Text("docker build -t \(a)/myapp:dev .\ndocker push \(a)/myapp:dev\nkubectl run myapp --image=\(a)/myapp:dev")
+                            .font(.system(size: 11, design: .monospaced))
+                            .textSelection(.enabled)
+                        Text("dockerd in allowed workspaces already trusts this address, and BROMURE_REGISTRY carries it. Every cluster pulls from it without extra configuration.")
+                            .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    }
+                }
+                KubeCard(title: "Images", systemImage: "square.stack.3d.up", trailing: "\(repos.count)") {
+                    if repos.isEmpty {
+                        Text(status.phase == .running ? "Nothing pushed yet." : "Start the registry to see its images.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(repos) { r in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: "shippingbox").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 16)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(r.name).font(.system(size: 12, weight: .medium)).textSelection(.enabled)
+                                        Text(r.tags.isEmpty ? "no tags" : r.tags.joined(separator: "  "))
+                                            .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
+                                            .textSelection(.enabled)
+                                    }
+                                    Spacer()
+                                    Text("\(String(r.tags.count))").font(.system(size: 11).monospacedDigit()).foregroundStyle(.tertiary)
+                                }
+                                .padding(.vertical, 5)
+                                if r.id != repos.last?.id { Divider() }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    private var logPane: some View {
+        let lines = status.log.filter { query.isEmpty || $0.localizedCaseInsensitiveContains(query) }
+        return ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    if lines.isEmpty { KubeEmpty(text: "Nothing logged yet.") }
+                    ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
+                        Text(line)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(line.hasPrefix("✗") ? Color.red : line.hasPrefix("▸") || line.hasPrefix("✓") ? Color.primary : Color.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id(i)
+                    }
+                }
+                .padding(14)
+            }
+            .onChange(of: lines.count) { _, n in if n > 0 { withAnimation { proxy.scrollTo(n - 1, anchor: .bottom) } } }
+            .onAppear { if !lines.isEmpty { proxy.scrollTo(lines.count - 1, anchor: .bottom) } }
+        }
+    }
+}
+
+// MARK: - New registry sheet
+
+struct NewRegistrySheet: View {
+    let workspaces: [KubeWorkspaceRef]
+    let existingNames: [String]
+    let onCreate: (_ name: String, _ memoryGB: Int, _ diskGB: Int, _ access: KubeWorkspaceAccess, _ autoStart: Bool) -> Void
+    let onCancel: () -> Void
+
+    @State private var name = ""
+    @State private var memoryGB = 1
+    @State private var diskGB = 40
+    @State private var access: KubeWorkspaceAccess = .all
+    @State private var autoStart = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(KubeRegistryDashboardView.registryTint.opacity(0.15))
+                    .frame(width: 38, height: 38)
+                    .overlay(Image(systemName: "shippingbox.and.arrow.backward").font(.system(size: 17)).foregroundStyle(KubeRegistryDashboardView.registryTint))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("New container registry").font(.system(size: 16, weight: .semibold))
+                    Text("A private Docker registry in its own VM: build in a workspace, push here, run it in a cluster.")
+                        .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 12)
+            Divider()
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Name").frame(width: 120, alignment: .trailing)
+                    TextField("registry", text: $name).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
+                }
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Memory (GB)").frame(width: 120, alignment: .trailing)
+                    Stepper(value: $memoryGB, in: KubeRegistry.memoryRange) {
+                        Text(String(memoryGB)).font(.system(size: 12).monospacedDigit()).frame(width: 40, alignment: .trailing)
+                    }.fixedSize()
+                }
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Image storage (GB)").frame(width: 120, alignment: .trailing)
+                    Stepper(value: $diskGB, in: KubeRegistry.diskRange, step: 10) {
+                        Text(String(diskGB)).font(.system(size: 12).monospacedDigit()).frame(width: 40, alignment: .trailing)
+                    }.fixedSize()
+                    Text("sparse — only pushed layers use space").font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+                HStack(alignment: .top) {
+                    Text("Push access").frame(width: 120, alignment: .trailing)
+                    KubeAccessPicker(isAll: { if case .all = access { return true } else { return false } }(),
+                                     selected: { if case .only(let ids) = access { return ids } else { return Set(workspaces.map(\.id)) } }(),
+                                     workspaces: workspaces) { access = $0 }
+                }
+                Toggle(isOn: $autoStart) { Text("Start with Bromure") }.kubeCheckboxStyle().padding(.leading, 128)
+                Text("Every cluster can pull from the registry; push access is per workspace. The address is plain HTTP on the VM network and never leaves this Mac.")
+                    .font(.system(size: 10.5)).foregroundStyle(.tertiary).padding(.leading, 128)
+            }
+            .padding(20)
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Create Registry") {
+                    onCreate(name.trimmingCharacters(in: .whitespaces), memoryGB, diskGB, access, autoStart)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(.horizontal, 20).padding(.vertical, 14)
+        }
+        .frame(width: 560)
+        .onAppear {
+            if name.isEmpty {
+                var candidate = "registry"
+                var n = 2
+                while existingNames.contains(where: { $0.caseInsensitiveCompare(candidate) == .orderedSame }) {
+                    candidate = "registry \(n)"; n += 1
+                }
+                name = candidate
+            }
+        }
     }
 }

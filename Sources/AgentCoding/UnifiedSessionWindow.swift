@@ -179,8 +179,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private let kubeSlot = NSView()
     private var kubeHosting: NSHostingView<KubeDashboardView>?
     private var kubeSelectedID: UUID?
-    /// The "New Kubernetes cluster" sheet while it's up.
+    /// The "New Kubernetes cluster" / "New registry" sheet while it's up.
     private var kubeSheetWindow: NSWindow?
+    /// Full-bleed overlay showing a container registry's dashboard.
+    private let registrySlot = NSView()
+    private var registryHosting: NSHostingView<KubeRegistryDashboardView>?
+    private var registrySelectedID: UUID?
     /// Full-bleed overlay showing the VM dashboard (vitals + config) for the
     /// selected workspace. Hidden unless `vmDashboardSelectedID` is set.
     private let vmDashboardSlot = NSView()
@@ -396,7 +400,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             kubeStore: acDelegate.kubeClusterStore,
             onSelectKube: { [weak self] id in self?.showKubeDashboard(id) },
             onNewKube: { [weak self] in self?.showNewKubeCluster() },
-            onKubeAction: { [weak self] id, action in self?.performKubeAction(id, action) })
+            onKubeAction: { [weak self] id, action in self?.performKubeAction(id, action) },
+            onSelectRegistry: { [weak self] id in self?.showRegistryDashboard(id) },
+            onNewRegistry: { [weak self] in self?.showNewRegistry() },
+            onRegistryAction: { [weak self] id, action in self?.performRegistryAction(id, action) })
         // NonMovable so a drag inside the sidebar — notably dragging a tab
         // row onto the Grid — selects/drags the row instead of moving the
         // whole window (the window is isMovableByWindowBackground).
@@ -501,6 +508,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         kubeSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         kubeSlot.isHidden = true
         stage.addSubview(kubeSlot)
+        registrySlot.translatesAutoresizingMaskIntoConstraints = false
+        registrySlot.wantsLayer = true
+        registrySlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        registrySlot.isHidden = true
+        stage.addSubview(registrySlot)
         // Automation editor overlay — same full-bleed pattern as Docker.
         automationSlot.translatesAutoresizingMaskIntoConstraints = false
         automationSlot.wantsLayer = true
@@ -655,6 +667,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             kubeSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
             kubeSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
             kubeSlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
+            registrySlot.topAnchor.constraint(equalTo: stage.topAnchor),
+            registrySlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
+            registrySlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
+            registrySlot.bottomAnchor.constraint(equalTo: stage.bottomAnchor),
             automationSlot.topAnchor.constraint(equalTo: stage.topAnchor),
             automationSlot.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
             automationSlot.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
@@ -1148,6 +1164,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearTaskBoard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearVMDashboard()
         clearSessionStage()
         listModel.gridSelected = true
@@ -1242,6 +1259,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearTaskBoard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearVMDashboard()
         clearSessionStage()
         selectedID = id
@@ -1436,6 +1454,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearTaskBoard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearVMDashboard()
         selectedSessionID = nil
         listModel.selectedSessionID = nil
@@ -1496,6 +1515,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearTaskBoard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearVMDashboard()
         listModel.newSessionSelected = false
         selectedSessionID = id
@@ -1705,6 +1725,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         hideGrid()
         clearVMDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearSessionStage()
         if let prev = dockerSelectedID, prev != id, let p = pane(prev) {
             acDelegate?.setDockerWatch(false, in: p)   // hand off watch between VMs
@@ -1777,6 +1798,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearVMDashboard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearSessionStage()
         if let prev = kubeSelectedID, prev != id { delegate.kubeClusterEngine.setWatch(prev, false) }
         kubeSelectedID = id
@@ -1835,10 +1857,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             workspaces: delegate.profiles.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
             existingNames: delegate.kubeClusterStore.clusters.map(\.name),
             hostMemoryGB: hostGB,
-            onCreate: { [weak self] name, spec, access, autoStart in
+            onCreate: { [weak self] name, spec, access, autoStart, synologyPassword in
                 guard let self else { return }
                 self.dismissKubeSheet()
-                let cluster = delegate.kubeClusterEngine.create(name: name, spec: spec, access: access, autoStart: autoStart)
+                let cluster = delegate.kubeClusterEngine.create(name: name, spec: spec, access: access,
+                                                                autoStart: autoStart, synologyPassword: synologyPassword)
                 self.listModel.machinesExpanded = true
                 self.showKubeDashboard(cluster.id)
             },
@@ -1856,6 +1879,111 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         endSheet(win)
         win.orderOut(nil)
         kubeSheetWindow = nil
+    }
+
+    // MARK: Container registry dashboard overlay
+
+    func showRegistryDashboard(_ id: UUID) {
+        guard let delegate = acDelegate, delegate.kubeClusterStore.registry(id) != nil else { return }
+        guard clearAutomationEditor() else { return }   // dirty draft kept
+        clearAutomationBoard()
+        clearTaskBoard()
+        hideGrid()
+        clearVMDashboard()
+        clearDockerDashboard()
+        clearKubeDashboard()
+        clearRegistryDashboard()
+        clearSessionStage()
+        if let prev = registrySelectedID, prev != id { delegate.kubeClusterEngine.setWatch(prev, false) }
+        registrySelectedID = id
+        listModel.registrySelectedID = id
+        registryHosting?.removeFromSuperview()
+        let engine = delegate.kubeClusterEngine
+        let actions = KubeRegistryActions(
+            start:   { engine.startRegistry(id) },
+            stop:    { Task { await engine.stopRegistry(id) } },
+            restart: { engine.restartRegistry(id) },
+            delete:  { [weak self] in
+                Task { @MainActor in
+                    self?.clearRegistryDashboard()
+                    await engine.deleteRegistry(id)
+                }
+            },
+            setAccess: { engine.setRegistryAccess(id, $0) },
+            setAutoStart: { engine.setRegistryAutoStart(id, $0) })
+        let view = KubeRegistryDashboardView(
+            store: delegate.kubeClusterStore, registryID: id,
+            workspaces: delegate.profiles.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
+            actions: actions)
+        let host = NSHostingView(rootView: view)
+        host.sizingOptions = []
+        host.translatesAutoresizingMaskIntoConstraints = false
+        registrySlot.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: registrySlot.topAnchor),
+            host.bottomAnchor.constraint(equalTo: registrySlot.bottomAnchor),
+            host.leadingAnchor.constraint(equalTo: registrySlot.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: registrySlot.trailingAnchor),
+        ])
+        registryHosting = host
+        registrySlot.isHidden = false
+        engine.setWatch(id, true)
+        makeFirstResponder(host)
+    }
+
+    func clearRegistryDashboard() {
+        guard let id = registrySelectedID else { return }
+        acDelegate?.kubeClusterEngine.setWatch(id, false)
+        registrySelectedID = nil
+        listModel.registrySelectedID = nil
+        registryHosting?.removeFromSuperview()
+        registryHosting = nil
+        registrySlot.isHidden = true
+    }
+
+    func showNewRegistry() {
+        guard let delegate = acDelegate, kubeSheetWindow == nil else { return }
+        let sheet = NewRegistrySheet(
+            workspaces: delegate.profiles.map { KubeWorkspaceRef(id: $0.id, name: $0.name) },
+            existingNames: delegate.kubeClusterStore.registries.map(\.name),
+            onCreate: { [weak self] name, memoryGB, diskGB, access, autoStart in
+                guard let self else { return }
+                self.dismissKubeSheet()
+                let registry = delegate.kubeClusterEngine.createRegistry(
+                    name: name, access: access, memoryGB: memoryGB, diskGB: diskGB, autoStart: autoStart)
+                self.listModel.machinesExpanded = true
+                self.showRegistryDashboard(registry.id)
+            },
+            onCancel: { [weak self] in self?.dismissKubeSheet() })
+        let hc = NSHostingController(rootView: sheet)
+        let win = NSWindow(contentViewController: hc)
+        win.styleMask = [.titled]
+        win.isReleasedWhenClosed = false
+        kubeSheetWindow = win
+        beginSheet(win)
+    }
+
+    func performRegistryAction(_ id: UUID, _ action: KubeRowAction) {
+        guard let engine = acDelegate?.kubeClusterEngine else { return }
+        switch action {
+        case .start:   engine.startRegistry(id)
+        case .stop:    Task { await engine.stopRegistry(id) }
+        case .restart: engine.restartRegistry(id)
+        case .access:  showRegistryDashboard(id)
+        case .delete:
+            guard let r = acDelegate?.kubeClusterStore.registry(id) else { return }
+            let alert = NSAlert()
+            alert.messageText = String(format: NSLocalizedString("Delete registry “%@”?", comment: "registry"), r.name)
+            alert.informativeText = NSLocalizedString("Stops the registry VM and deletes every image it holds. Workspaces and clusters stop trusting its address. This can't be undone.", comment: "registry")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: NSLocalizedString("Delete", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+            alert.beginSheetModal(for: self) { [weak self] resp in
+                guard resp == .alertFirstButtonReturn else { return }
+                if self?.registrySelectedID == id { self?.clearRegistryDashboard() }
+                Task { await engine.deleteRegistry(id) }
+            }
+        }
     }
 
     /// Sidebar row verbs (⋯ menu / right-click).
@@ -1894,6 +2022,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearTaskBoard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearSessionStage()
         let p = pane(id)
         let state = listModel.profileRows.first { $0.id == id }?.state ?? (p != nil ? .running : .off)
@@ -1961,6 +2090,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearTaskBoard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearVMDashboard()
         clearSessionStage()
         automationEditorVisible = true
@@ -2042,6 +2172,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearTaskBoard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearVMDashboard()
         clearSessionStage()
         listModel.automationBoardSelected = true
@@ -2092,6 +2223,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearAutomationBoard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearVMDashboard()
         clearSessionStage()
         listModel.taskBoardSelected = true
@@ -2242,6 +2374,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearAutomationBoard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearVMDashboard()
         if selectedID != id { select(profileID: id) }
         guard let pane = pane(id) else { return }
@@ -2261,6 +2394,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearAutomationBoard()
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         clearVMDashboard()
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) { acDelegate?.spawnNewTab(in: p) }
@@ -2311,6 +2445,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // the dashboard so the framebuffer is visible.
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) {
             acDelegate?.requestDockerAttach(containerID: containerID, shell: shell, in: p)
@@ -2321,6 +2456,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // `docker logs -f` opens a tmux tab — surface it by dropping the dashboard.
         clearDockerDashboard()
         clearKubeDashboard()
+        clearRegistryDashboard()
         if selectedID != id { select(profileID: id) }
         if let p = pane(id) {
             acDelegate?.requestDockerLogs(containerID: containerID, in: p)
@@ -2494,6 +2630,10 @@ struct SessionSidebar: View {
     var onSelectKube: (UUID) -> Void = { _ in }
     var onNewKube: () -> Void = {}
     var onKubeAction: (UUID, KubeRowAction) -> Void = { _, _ in }
+    /// Container registries — sibling category of the clusters.
+    var onSelectRegistry: (UUID) -> Void = { _ in }
+    var onNewRegistry: () -> Void = {}
+    var onRegistryAction: (UUID, KubeRowAction) -> Void = { _, _ in }
     @State private var sessionFilter = ""
 
     var body: some View {
@@ -2703,6 +2843,8 @@ struct SessionSidebar: View {
         if let kubeStore {
             KubeClustersSection(store: kubeStore, model: model,
                                 onSelect: onSelectKube, onNew: onNewKube, onAction: onKubeAction)
+            KubeRegistriesSection(store: kubeStore, model: model,
+                                  onSelect: onSelectRegistry, onNew: onNewRegistry, onAction: onRegistryAction)
         }
     }
 
@@ -3023,6 +3165,165 @@ private struct KubeClustersSection: View {
                                onAction: { onAction(c.id, $0) })
             }
         }
+    }
+}
+
+/// "Registries" — the private container registries, one row each.
+private struct KubeRegistriesSection: View {
+    let store: KubeClusterStore
+    @Bindable var model: SessionListModel
+    let onSelect: (UUID) -> Void
+    let onNew: () -> Void
+    let onAction: (UUID, KubeRowAction) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack {
+                Text(NSLocalizedString("Registries", comment: "sidebar section"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .tracking(0.7)
+                Spacer()
+                Button(action: onNew) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("New container registry", comment: "sidebar"))
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 6)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+            if store.registries.isEmpty {
+                Button(action: onNew) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "shippingbox.and.arrow.backward")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18)
+                        Text(NSLocalizedString("Create a registry…", comment: "sidebar"))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("A private Docker registry your workspaces push to and your clusters pull from", comment: "sidebar"))
+            }
+            ForEach(store.registries) { r in
+                let st = store.status(r.id)
+                KubeMachineRow(name: r.name, status: st, icon: "shippingbox.and.arrow.backward",
+                               tint: KubeRegistryDashboardView.registryTint,
+                               subline: registrySubline(r, st),
+                               isSelected: model.registrySelectedID == r.id,
+                               onSelect: { onSelect(r.id) }, onAction: { onAction(r.id, $0) })
+            }
+        }
+    }
+
+    private func registrySubline(_ r: KubeRegistry, _ st: KubeClusterStatus) -> String {
+        switch st.phase {
+        case .running:
+            var parts: [String] = []
+            if let a = st.address { parts.append(a) }
+            if let info = st.registry { parts.append(String(format: NSLocalizedString("%d image(s)", comment: "registry row"), info.imageCount)) }
+            return parts.joined(separator: " · ")
+        case .creating, .starting:
+            return st.step ?? st.phase.displayName
+        default:
+            return st.phase.displayName
+        }
+    }
+}
+
+/// One managed-machine row (cluster or registry): icon with a state dot,
+/// name, a one-line status, and the ⋯ / right-click verbs.
+private struct KubeMachineRow: View {
+    let name: String
+    let status: KubeClusterStatus
+    let icon: String
+    let tint: Color
+    let subline: String
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onAction: (KubeRowAction) -> Void
+    @State private var hovering = false
+
+    private var dotColor: Color {
+        switch status.phase {
+        case .running: return .green
+        case .error: return .red
+        case .stopped: return Color.secondary.opacity(0.4)
+        default: return .orange
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: icon)
+                    .font(.system(size: 13))
+                    .foregroundStyle(isSelected ? tint : .secondary)
+                    .frame(width: 18, height: 16)
+                Circle().fill(dotColor).frame(width: 6, height: 6).offset(x: 2, y: 1)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                Text(name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+                Text(subline)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            if status.phase.isBusy { ProgressView().controlSize(.mini) }
+            Menu {
+                verbs
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(isSelected ? tint.opacity(0.16) : (hovering ? Color.primary.opacity(0.04) : .clear)))
+        .overlay(alignment: .leading) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 2).fill(tint).frame(width: 3, height: 18).offset(x: -5)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { hovering = $0 }
+        .contextMenu { verbs }
+    }
+
+    @ViewBuilder private var verbs: some View {
+        if status.phase == .running {
+            Button(NSLocalizedString("Restart", comment: "")) { onAction(.restart) }
+            Button(NSLocalizedString("Stop", comment: "")) { onAction(.stop) }
+        } else if !status.phase.isBusy {
+            Button(NSLocalizedString("Start", comment: "")) { onAction(.start) }
+        }
+        Button(NSLocalizedString("Workspace access…", comment: "")) { onAction(.access) }
+        Divider()
+        Button(NSLocalizedString("Delete…", comment: ""), role: .destructive) { onAction(.delete) }
+            .disabled(status.phase.isBusy)
     }
 }
 

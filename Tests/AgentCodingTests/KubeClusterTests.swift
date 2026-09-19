@@ -201,6 +201,48 @@ struct KubeClusterTests {
         #expect(Array(f[10...]) == [1, 2, 3])
     }
 
+    @Test("registries: containerd mirrors, records, and the NAS driver files")
+    func registriesAndSynology() throws {
+        let yaml = KubeRegistriesConfig.yaml(addresses: ["172.28.153.5:5000"])
+        #expect(yaml.contains("\"172.28.153.5:5000\":"))
+        #expect(yaml.contains("- \"http://172.28.153.5:5000\""))
+        #expect(yaml.contains("insecure_skip_verify: true"))
+        #expect(KubeRegistriesConfig.yaml(addresses: []) == "mirrors: {}\n")
+
+        var r = KubeRegistry(name: "Team Registry", memoryGB: 2, diskGB: 80)
+        #expect(r.node.name == "registry-team-registry")
+        #expect(r.address == nil)
+        r.node.lastIP = "172.28.153.5"
+        #expect(r.address == "172.28.153.5:5000")
+        let store = tempStore()
+        store.upsert(r)
+        #expect(store.registries(for: UUID()).count == 1)
+        store.removeRegistry(r.id)
+        #expect(store.registries.isEmpty)
+
+        var syn = KubeSynologySpec()
+        #expect(!syn.isConfigured)
+        syn.host = "nas.local"; syn.username = "k8s"; syn.https = true; syn.port = 5001
+        #expect(syn.isConfigured)
+        let info = syn.clientInfoYAML(password: "p\"w")
+        #expect(info.contains("host: \"nas.local\""))
+        #expect(info.contains("https: true"))
+        #expect(info.contains("password: \"p\\\"w\""))
+        let sc = syn.storageClassYAML()
+        #expect(sc.contains("provisioner: csi.san.synology.com"))
+        #expect(sc.contains("protocol: 'iscsi'"))
+        #expect(sc.contains("is-default-class: \"true\""))
+        var spec = KubeClusterSpec()
+        spec.storageEnabled = false
+        #expect(!spec.needsISCSI)
+        spec.synology = syn
+        #expect(spec.needsISCSI)
+        // The spec (with a NAS) round-trips without the password.
+        let data = try JSONEncoder().encode(spec)
+        #expect(!String(decoding: data, as: UTF8.self).contains("p\"w"))
+        #expect(try JSONDecoder().decode(KubeClusterSpec.self, from: data).synology?.host == "nas.local")
+    }
+
     @Test("k3s.yaml becomes a direct kubeconfig pointed at the node")
     func k3sYAML() throws {
         let yaml = """

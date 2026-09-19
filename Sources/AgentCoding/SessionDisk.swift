@@ -43,6 +43,11 @@ public final class SessionDisk {
     /// honours HTTPS_PROXY, and the host MITM can't dial into the VM LAN, so
     /// those destinations must bypass the cooperative proxy.
     public var extraNoProxy: [String] = []
+    /// Plain-HTTP registries ("<ip>:<port>") this workspace may push to —
+    /// the bromure registries its access lists allow. Staged as
+    /// docker-registries.txt for the guest agent's dockerd config; the first
+    /// one is also exported as BROMURE_REGISTRY for agents and scripts.
+    public var extraInsecureRegistries: [String] = []
 
     public struct MitmSessionAssets: Sendable {
         public let caCertificatePEM: String
@@ -660,6 +665,14 @@ public final class SessionDisk {
                 "export SSH_AUTH_SOCK=/tmp/bromure-agent.sock",
             ]
             proxyLines.append(contentsOf: ghEnv)
+            if let first = extraInsecureRegistries.first {
+                proxyLines.append("export BROMURE_REGISTRY=\(shellQuote(first))")
+            }
+            // The registries dockerd may talk plain HTTP to (guest agent →
+            // /etc/docker/daemon.json). Always written so a removal lands too.
+            try (extraInsecureRegistries.joined(separator: "\n") + "\n").write(
+                to: tmp.appendingPathComponent("docker-registries.txt"),
+                atomically: true, encoding: .utf8)
 
             // Local inference (Path 1, vLLM.md §3.3). For each tool the user
             // set to "Local model", pin it at the on-host engine via the

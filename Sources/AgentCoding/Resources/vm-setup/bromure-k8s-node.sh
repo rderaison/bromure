@@ -12,10 +12,14 @@
 #   bromure-k8s-node.sh <query>                synchronous one-shots (token, kubeconfig, ip…)
 #
 # Steps (all idempotent — re-running on a provisioned node is a no-op):
-#   prepare <storage 0|1>                     packages, iSCSI, data disk, sysctls
+#   prepare <iscsi 0|1> [registries-yaml-b64]  packages, iSCSI, data disk, sysctls,
+#                                              containerd registry mirrors
 #   server  <name> <noproxy> <k3s-flags…>     k3s server; waits for the API
 #   agent   <name> <server-ip> <token> <noproxy>
-#   addons  <longhorn 0|1> <replicas> <metallb 0|1> <range|-> <lb-mode>
+#   addons  <longhorn 0|1> <replicas> <metallb 0|1> <range|-> <lb-mode> [synology 0|1]
+#           Synology: reads /mnt/bromure-meta/synology-client-info.yml +
+#           synology-storage-class.yml (staged by the host for this step only)
+#   registries <yaml-b64>                     rewrite registries.yaml, restart k3s
 #   repoint <server-ip>                       agent: follow a moved control plane
 #
 # Runs as `ubuntu` (NOPASSWD sudo). The proxy env the shell channel sources
@@ -33,6 +37,8 @@ export KUBECONFIG=$K3S_YAML
 # of a newer release without a bromure update.
 LONGHORN_VERSION="${BROMURE_LONGHORN_VERSION:-v1.9.1}"
 METALLB_VERSION="${BROMURE_METALLB_VERSION:-v0.15.2}"
+SYNOLOGY_CSI_VERSION="${BROMURE_SYNOLOGY_CSI_VERSION:-v1.2.0}"
+REGISTRIES_YAML=/etc/rancher/k3s/registries.yaml
 
 sudo mkdir -p "$STATE" 2>/dev/null
 sudo chown ubuntu:ubuntu "$STATE" 2>/dev/null
@@ -97,9 +103,26 @@ cmd_poll() {
 
 # ─────────────────────────────── steps ─────────────────────────────────────
 
+write_registries() {
+    # <base64 yaml> → /etc/rancher/k3s/registries.yaml (containerd mirrors for
+    # the bromure registries). Prints "changed" when the file differs.
+    local b64="${1:-}"
+    [ -n "$b64" ] || return 0
+    local tmp; tmp=$(mktemp)
+    printf '%s' "$b64" | base64 -d > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    sudo mkdir -p /etc/rancher/k3s
+    if sudo cmp -s "$tmp" "$REGISTRIES_YAML" 2>/dev/null; then rm -f "$tmp"; return 0; fi
+    sudo install -m 644 "$tmp" "$REGISTRIES_YAML"
+    rm -f "$tmp"
+    echo changed
+}
+
 do_prepare() {
-    local storage="${1:-0}"
-    log "prepare: storage=$storage"
+    local storage="${1:-0}" registries="${2:-}"
+    log "prepare: iscsi=$storage"
+    if [ -n "$registries" ]; then
+        write_registries "$registries" >/dev/null && log "containerd registry mirrors written"
+    fi
 
     # Kernel + sysctl bits kube-proxy / flannel want (k3s sets most itself).
     sudo modprobe br_netfilter 2>/dev/null || true
@@ -114,10 +137,10 @@ do_prepare() {
     sudo systemctl disable --now docker.socket docker.service >/dev/null 2>&1 || true
 
     if [ "$storage" = "1" ]; then
-        log "installing iSCSI initiator + NFS client (Longhorn prerequisites)"
+        log "installing iSCSI initiator + NFS/SMB clients (storage prerequisites)"
         export DEBIAN_FRONTEND=noninteractive
         psudo apt-get update -qq 2>&1 | tail -n 3
-        psudo apt-get install -y -qq open-iscsi nfs-common cryptsetup 2>&1 | tail -n 5
+        psudo apt-get install -y -qq open-iscsi nfs-common cifs-utils cryptsetup 2>&1 | tail -n 5
         sudo modprobe iscsi_tcp 2>/dev/null || true
         sudo modprobe dm_crypt 2>/dev/null || true
         printf 'iscsi_tcp\ndm_crypt\n' | sudo tee -a /etc/modules-load.d/bromure-k8s.conf >/dev/null
@@ -235,9 +258,64 @@ wait_nodes() {
     return 1
 }
 
+do_registries() {
+    # Live update: rewrite the mirrors and bounce k3s so containerd reloads them.
+    local out; out=$(write_registries "$1") || { log "registries: bad payload"; return 1; }
+    if [ "$out" = "changed" ]; then
+        if systemctl is-active --quiet k3s 2>/dev/null; then sudo systemctl restart k3s; log "registries: k3s restarted"
+        elif systemctl is-active --quiet k3s-agent 2>/dev/null; then sudo systemctl restart k3s-agent; log "registries: k3s-agent restarted"
+        fi
+    else
+        log "registries: unchanged"
+    fi
+}
+
+install_synology() {
+    # Synology CSI driver (iSCSI LUNs / SMB shares on a DSM volume). The
+    # host staged client-info.yml + the storage class into the meta share
+    # for this step; the Secret is the only place the password persists.
+    local info=/mnt/bromure-meta/synology-client-info.yml
+    local sc=/mnt/bromure-meta/synology-storage-class.yml
+    [ -r "$info" ] || { log "Synology: client-info.yml missing"; return 1; }
+    if ! kubectl get ns synology-csi >/dev/null 2>&1; then
+        log "installing Synology CSI $SYNOLOGY_CSI_VERSION"
+        local src="$STATE/synology-csi"
+        if [ ! -d "$src/deploy" ]; then
+            rm -rf "$src"
+            git clone -q --depth 1 --branch "$SYNOLOGY_CSI_VERSION"                 https://github.com/SynologyOpenSource/synology-csi.git "$src" 2>&1 | tail -n 2                 || { log "Synology CSI clone failed"; return 1; }
+        fi
+        local dir="$src/deploy/kubernetes/v1.20"
+        [ -d "$dir" ] || dir=$(ls -d "$src"/deploy/kubernetes/v1.* 2>/dev/null | sort -V | tail -1)
+        [ -d "$dir" ] || { log "Synology CSI manifests not found"; return 1; }
+        kubectl apply -f "$dir/namespace.yml" 2>&1 | tail -n 1
+        kubectl -n synology-csi delete secret client-info-secret >/dev/null 2>&1 || true
+        kubectl -n synology-csi create secret generic client-info-secret --from-file=client-info.yml="$info" 2>&1 | tail -n 1
+        local f
+        for f in "$dir"/*.yml; do
+            case "$f" in *namespace.yml|*storage-class*|*storage_class*) continue ;; esac
+            kubectl apply -f "$f" 2>&1 | tail -n 3
+        done
+    else
+        log "Synology CSI already present — refreshing its credentials"
+        kubectl -n synology-csi delete secret client-info-secret >/dev/null 2>&1 || true
+        kubectl -n synology-csi create secret generic client-info-secret --from-file=client-info.yml="$info" 2>&1 | tail -n 1
+        kubectl -n synology-csi rollout restart deploy 2>/dev/null || true
+        kubectl -n synology-csi rollout restart statefulset 2>/dev/null || true
+        kubectl -n synology-csi rollout restart daemonset 2>/dev/null || true
+    fi
+    if [ -r "$sc" ]; then
+        kubectl apply -f "$sc" 2>&1 | tail -n 1
+        # The NAS becomes the default class; the others stay by name.
+        kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' >/dev/null 2>&1 || true
+        kubectl patch storageclass bromure-longhorn -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' >/dev/null 2>&1 || true
+        kubectl patch storageclass longhorn -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' >/dev/null 2>&1 || true
+    fi
+    log "Synology CSI configured (default storage class: bromure-synology)"
+}
+
 do_addons() {
-    local longhorn="$1" replicas="$2" metallb="$3" range="$4" lbmode="${5:-bromure}"
-    log "addons: longhorn=$longhorn replicas=$replicas metallb=$metallb range=$range lb=$lbmode"
+    local longhorn="$1" replicas="$2" metallb="$3" range="$4" lbmode="${5:-bromure}" synology="${6:-0}"
+    log "addons: longhorn=$longhorn replicas=$replicas metallb=$metallb range=$range lb=$lbmode synology=$synology"
     wait_api 60 || { log "API not ready"; return 1; }
 
     if [ "$longhorn" = "1" ]; then
@@ -320,6 +398,10 @@ EOF
         done
         log "MetalLB configured (pool $range)"
     fi
+
+    if [ "$synology" = "1" ]; then
+        install_synology || return 1
+    fi
     log "addons: done"
 }
 
@@ -353,6 +435,7 @@ case "${1:-}" in
     do-server)   shift; do_server "$@" ;;
     do-agent)    shift; do_agent "$@" ;;
     do-addons)   shift; do_addons "$@" ;;
+    do-registries) shift; do_registries "$@" ;;
     do-repoint)  shift; do_repoint "$@" ;;
     token)       cmd_token ;;
     kubeconfig)  cmd_kubeconfig ;;

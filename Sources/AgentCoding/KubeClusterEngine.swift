@@ -23,9 +23,10 @@ final class KubeClusterEngine {
     unowned let app: ACAppDelegate
     let store: KubeClusterStore
 
-    private var runtimes: [UUID: ClusterRuntime] = [:]
-    /// Clusters whose dashboard is on screen: full probes on a fast cadence.
-    private var watched: Set<UUID> = []
+    var runtimes: [UUID: ClusterRuntime] = [:]
+    /// Clusters (and registries) whose dashboard is on screen: full probes
+    /// on a fast cadence.
+    var watched: Set<UUID> = []
     private var startedAutoClusters = false
 
     init(app: ACAppDelegate, store: KubeClusterStore) {
@@ -89,7 +90,7 @@ final class KubeClusterEngine {
         init(id: UUID) { self.id = id }
     }
 
-    private func runtime(_ id: UUID) -> ClusterRuntime {
+    func runtime(_ id: UUID) -> ClusterRuntime {
         if let rt = runtimes[id] { return rt }
         let rt = ClusterRuntime(id: id)
         runtimes[id] = rt
@@ -102,7 +103,7 @@ final class KubeClusterEngine {
     /// (already in the store, phase `.creating`).
     @discardableResult
     func create(name: String, spec: KubeClusterSpec, access: KubeWorkspaceAccess,
-                autoStart: Bool = true) -> KubeCluster {
+                autoStart: Bool = true, synologyPassword: String? = nil) -> KubeCluster {
         let clean = spec.clamped
         var cluster = KubeCluster(name: name.trimmingCharacters(in: .whitespacesAndNewlines),
                                   spec: clean, access: access, autoStart: autoStart)
@@ -118,11 +119,58 @@ final class KubeClusterEngine {
             KubeNodeRecord(name: cluster.nodeName(index: i), role: i == 1 ? .server : .agent, index: i)
         }
         store.upsert(cluster)
+        if let pw = synologyPassword, clean.synology?.isConfigured == true {
+            storeSynologyPassword(pw, for: cluster.id)
+        }
         store.setStatus(cluster.id) { $0 = KubeClusterStatus(); $0.phase = .creating }
         let id = cluster.id
         let rt = runtime(id)
         rt.lifecycleTask = Task { [weak self] in await self?.provision(id) }
         return cluster
+    }
+
+    // MARK: Synology credentials (encrypted at rest, like profile secrets)
+
+    private func synologySecretURL(_ id: UUID) -> URL {
+        clusterDirectory(id).appendingPathComponent("synology.enc")
+    }
+
+    func storeSynologyPassword(_ password: String, for id: UUID) {
+        do {
+            try FileManager.default.createDirectory(at: clusterDirectory(id), withIntermediateDirectories: true)
+            let blob = try SecretsVault.encrypt(Data(password.utf8))
+            try blob.write(to: synologySecretURL(id), options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                                   ofItemAtPath: synologySecretURL(id).path)
+        } catch {
+            log(id, "Couldn't store the NAS password: \(error.localizedDescription)")
+        }
+    }
+
+    func synologyPassword(for id: UUID) -> String? {
+        guard let blob = try? Data(contentsOf: synologySecretURL(id)),
+              let plain = try? SecretsVault.decrypt(blob) else { return nil }
+        return String(data: plain, encoding: .utf8)
+    }
+
+    /// Change the NAS credentials of a provisioned cluster: re-run the
+    /// Synology add-on step (refreshes the driver's Secret).
+    func updateSynology(_ id: UUID, spec: KubeSynologySpec, password: String?) {
+        guard var cluster = store.cluster(id) else { return }
+        cluster.spec.synology = spec.isConfigured ? spec : nil
+        store.upsert(cluster)
+        if let password, !password.isEmpty { storeSynologyPassword(password, for: id) }
+        guard store.status(id).phase == .running, spec.isConfigured, let server = cluster.server else { return }
+        let rt = runtime(id)
+        rt.lifecycleTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.runAddons(cluster, server: server, storage: cluster.spec.needsISCSI ? "1" : "0")
+                self.log(id, "✓ Synology CSI credentials updated.")
+            } catch {
+                self.log(id, "✗ Synology update failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     func start(_ id: UUID) {
@@ -208,7 +256,7 @@ final class KubeClusterEngine {
         if on { watched.insert(id) } else { watched.remove(id) }
         if on, let rt = runtimes[id], rt.probeTask != nil {
             // Restart the loop so the first full probe lands immediately.
-            startProbeLoop(id)
+            if store.registry(id) != nil { startRegistryProbeLoop(id) } else { startProbeLoop(id) }
         }
     }
 
@@ -217,16 +265,19 @@ final class KubeClusterEngine {
         store.workspaceDeleted(profileID)
     }
 
-    /// Boot every cluster marked to start with the app (once per launch).
+    /// Boot every cluster and registry marked to start with the app (once
+    /// per launch). Registries first: clusters pick up their mirrors.
     func startAutoStartClusters() {
         guard !startedAutoClusters else { return }
         startedAutoClusters = true
+        for r in store.registries where r.autoStart && r.provisioned { startRegistry(r.id) }
         for c in store.clusters where c.autoStart && c.provisioned { start(c.id) }
     }
 
-    /// Whether `profileID` is one of our node VMs.
+    /// Whether `profileID` is one of our node / registry VMs.
     func isNode(_ profileID: UUID) -> Bool {
         store.clusters.contains { $0.nodes.contains { $0.id == profileID } }
+            || store.registries.contains { $0.node.id == profileID }
     }
 
     // MARK: Workspace integration
@@ -252,7 +303,38 @@ final class KubeClusterEngine {
                 if let ip = node.lastIP, !ip.isEmpty { out.append(ip) }
             }
         }
+        for registry in store.registries(for: profileID) {
+            if let ip = registry.node.lastIP, !ip.isEmpty { out.append(ip) }
+        }
         return Array(NSOrderedSet(array: out)) as? [String] ?? out
+    }
+
+    /// "<ip>:<port>" of every provisioned registry this workspace may push to.
+    func registryAddresses(for profileID: UUID) -> [String] {
+        store.registries(for: profileID).compactMap { $0.provisioned ? $0.address : nil }
+    }
+
+    /// containerd mirror config for every provisioned registry (clusters
+    /// trust all of them — registries are shared machines).
+    func registriesYAMLBase64() -> String {
+        let addresses = store.registries.compactMap { $0.provisioned ? $0.address : nil }
+        return Data(KubeRegistriesConfig.yaml(addresses: addresses).utf8).base64EncodedString()
+    }
+
+    /// A registry appeared, moved or went away: rewrite registries.yaml on
+    /// every node of every running cluster (k3s restarts to reload it).
+    func pushRegistriesToClusters() {
+        let b64 = registriesYAMLBase64()
+        for cluster in store.clusters where store.status(cluster.id).phase == .running {
+            guard let rt = runtimes[cluster.id] else { continue }
+            let id = cluster.id
+            for node in cluster.nodes where rt.nodes[node.id]?.up == true {
+                Task { [weak self] in
+                    do { try await self?.runStep(id, node: node, step: "registries", args: [b64]) }
+                    catch { self?.log(id, "Registry mirrors on \(node.name): \(error.localizedDescription)") }
+                }
+            }
+        }
     }
 
     /// Standalone kubeconfig text for one cluster (Copy button, remote hand-off).
@@ -268,13 +350,13 @@ final class KubeClusterEngine {
         return KubeDirectCluster.fromK3sYAML(yaml, contextName: cluster.contextName, serverIP: ip)
     }
 
-    private func pushKubeconfigsToWorkspaces() {
+    func pushKubeconfigsToWorkspaces() {
         app.refreshKubeAccessForRunningWorkspaces()
     }
 
     // MARK: Logging
 
-    private func log(_ id: UUID, _ line: String) {
+    func log(_ id: UUID, _ line: String) {
         store.setStatus(id) { $0.appendLog(line) }
         FileHandle.standardError.write(Data("[k8s] \(line)\n".utf8))
         let url = clusterDirectory(id).appendingPathComponent("setup.log")
@@ -288,12 +370,12 @@ final class KubeClusterEngine {
         }
     }
 
-    private func step(_ id: UUID, _ text: String) {
+    func step(_ id: UUID, _ text: String) {
         store.setStatus(id) { $0.step = text; $0.message = text }
         log(id, "▸ \(text)")
     }
 
-    private func fail(_ id: UUID, _ message: String) {
+    func fail(_ id: UUID, _ message: String) {
         store.setStatus(id) { $0.phase = .error; $0.message = message; $0.step = nil }
         log(id, "✗ \(message)")
     }
@@ -305,6 +387,7 @@ final class KubeClusterEngine {
         let rt = runtime(id)
         log(id, "Creating “\(cluster.name)”: \(cluster.spec.nodeCount) node(s), \(cluster.spec.cpusPerNode) vCPU / \(cluster.spec.memoryGBPerNode) GB each"
             + (cluster.spec.storageEnabled ? ", Longhorn storage \(cluster.spec.storageDiskGB) GB per node" : "")
+            + (cluster.spec.synology?.isConfigured == true ? ", Synology NAS \(cluster.spec.synology?.host ?? "")" : "")
             + ", load balancer: \(cluster.spec.loadBalancer.displayName)")
         do {
             try await bootAllNodes(&cluster, rt)
@@ -322,12 +405,13 @@ final class KubeClusterEngine {
                 }
             }
 
-            let storage = cluster.spec.storageEnabled ? "1" : "0"
+            let storage = cluster.spec.needsISCSI ? "1" : "0"
+            let registries = registriesYAMLBase64()
             step(id, "Preparing \(cluster.nodes.count) node(s)")
             try await withThrowingTaskGroup(of: Void.self) { group in
                 for node in cluster.nodes {
                     group.addTask { @MainActor [weak self] in
-                        try await self?.runStep(id, node: node, step: "prepare", args: [storage])
+                        try await self?.runStep(id, node: node, step: "prepare", args: [storage, registries])
                     }
                 }
                 try await group.waitForAll()
@@ -362,14 +446,12 @@ final class KubeClusterEngine {
             }
 
             let wantsAddons = cluster.spec.storageEnabled
+                || cluster.spec.synology?.isConfigured == true
                 || (cluster.spec.loadBalancer == .metallb && cluster.metallbRange != nil)
             if wantsAddons {
-                step(id, cluster.spec.storageEnabled ? "Installing Longhorn storage" : "Installing MetalLB")
-                let metallb = (cluster.spec.loadBalancer == .metallb && cluster.metallbRange != nil) ? "1" : "0"
-                try await runStep(id, node: server, step: "addons", args: [
-                    storage, String(cluster.spec.storageReplicas), metallb,
-                    cluster.metallbRange ?? "-", cluster.spec.loadBalancer.rawValue,
-                ])
+                step(id, cluster.spec.storageEnabled ? "Installing Longhorn storage"
+                     : cluster.spec.synology?.isConfigured == true ? "Installing the Synology CSI driver" : "Installing MetalLB")
+                try await runAddons(cluster, server: server, storage: cluster.spec.storageEnabled ? "1" : "0")
             }
 
             step(id, "Collecting the cluster's kubeconfig")
@@ -385,6 +467,37 @@ final class KubeClusterEngine {
             // (`bromure-ac vm exec k8s-<name>-1 -- journalctl -u k3s`).
             fail(id, "Provisioning failed: \(error.localizedDescription)")
         }
+    }
+
+    /// The add-ons step (Longhorn / MetalLB / Synology). Synology's DSM
+    /// credentials are staged into the control-plane node's meta share
+    /// only for the duration of the step.
+    private func runAddons(_ cluster: KubeCluster, server: KubeNodeRecord, storage: String) async throws {
+        let id = cluster.id
+        let metallb = (cluster.spec.loadBalancer == .metallb && cluster.metallbRange != nil) ? "1" : "0"
+        var synology = "0"
+        var staged: [URL] = []
+        if let syn = cluster.spec.synology, syn.isConfigured {
+            if let password = synologyPassword(for: id) {
+                let nodes = nodeStore(id)
+                let meta = nodes.profileDirectory(for: Profile(id: server.id, name: server.name, tool: .claude, authMode: .token))
+                    .appendingPathComponent("meta-share", isDirectory: true)
+                let info = meta.appendingPathComponent("synology-client-info.yml")
+                let sc = meta.appendingPathComponent("synology-storage-class.yml")
+                try syn.clientInfoYAML(password: password).write(to: info, atomically: true, encoding: .utf8)
+                try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: info.path)
+                try syn.storageClassYAML().write(to: sc, atomically: true, encoding: .utf8)
+                staged = [info, sc]
+                synology = "1"
+            } else {
+                log(id, "Synology NAS configured but no password stored — skipping the CSI driver")
+            }
+        }
+        defer { for url in staged { try? FileManager.default.removeItem(at: url) } }
+        try await runStep(id, node: server, step: "addons", args: [
+            storage, String(cluster.spec.storageReplicas), metallb,
+            cluster.metallbRange ?? "-", cluster.spec.loadBalancer.rawValue, synology,
+        ])
     }
 
     /// Boot an already-provisioned cluster.
@@ -449,6 +562,18 @@ final class KubeClusterEngine {
         }
         startProbeLoop(id)
         pushKubeconfigsToWorkspaces()
+        // A registry that came up while this cluster was still provisioning
+        // (or since it last ran) isn't in its registries.yaml yet: converge
+        // now. The step is a no-op when the file already matches.
+        if store.registries.contains(where: \.provisioned) {
+            let b64 = registriesYAMLBase64()
+            for node in cluster.nodes where rt.nodes[node.id]?.up == true {
+                Task { [weak self] in
+                    do { try await self?.runStep(id, node: node, step: "registries", args: [b64]) }
+                    catch { self?.log(id, "Registry mirrors on \(node.name): \(error.localizedDescription)") }
+                }
+            }
+        }
     }
 
     // MARK: Node VMs
@@ -486,15 +611,42 @@ final class KubeClusterEngine {
     /// Boot one node and wait until its shell channel answers. Returns the
     /// guest's IP.
     private func bootNode(_ cluster: KubeCluster, _ node: KubeNodeRecord, rt: ClusterRuntime) async throws -> String {
-        let id = cluster.id
+        try await bootMachine(MachineSpec(
+            ownerID: cluster.id, record: node, cpus: cluster.spec.cpusPerNode,
+            memoryGB: cluster.spec.memoryGBPerNode,
+            dataDiskGB: cluster.spec.storageEnabled ? cluster.spec.storageDiskGB : nil,
+            comment: "Kubernetes node of cluster “\(cluster.name)” — managed by Bromure.",
+            scripts: [("bromure-k8s-node.sh", app.kubeNodeScriptURL), ("bromure-k8s-probe.py", app.kubeProbeScriptURL)],
+            ipCommand: "bash \(Self.scriptPath) ip"), rt: rt)
+    }
+
+    /// One managed VM: a cluster node or a registry.
+    struct MachineSpec {
+        let ownerID: UUID
+        let record: KubeNodeRecord
+        let cpus: Int
+        let memoryGB: Int
+        let dataDiskGB: Int?
+        let comment: String
+        /// Files copied into the guest's read-only meta share.
+        let scripts: [(String, URL?)]
+        /// Guest command printing the VM's IPv4 (fallback for the outbox report).
+        let ipCommand: String
+    }
+
+    /// Boot a managed VM and wait until its shell channel answers. Returns
+    /// the guest's IP.
+    func bootMachine(_ m: MachineSpec, rt: ClusterRuntime) async throws -> String {
+        let id = m.ownerID
+        let node = m.record
         let nodes = nodeStore(id)
         var profile = Profile(id: node.id, name: node.name, tool: .claude, authMode: .token,
                               homeModel: .virtiofs)
-        profile.memoryGB = cluster.spec.memoryGBPerNode
+        profile.memoryGB = m.memoryGB
         profile.closeAction = .shutdown
         profile.color = .gray
         profile.nativeTerminal = true
-        profile.comments = "Kubernetes node of cluster “\(cluster.name)” — managed by Bromure."
+        profile.comments = m.comment
 
         let sessionDisk = SessionDisk(profile: profile, store: nodes, baseDiskURL: app.imageManager.baseDiskURL)
         sessionDisk.tokenPlan = nil
@@ -510,10 +662,10 @@ final class KubeClusterEngine {
                 agentdURL: app.agentdURL)
         }
         let sandbox = UbuntuSandboxVM(imageManager: app.imageManager, sessionDisk: sessionDisk)
-        sandbox.cpuCountOverride = cluster.spec.cpusPerNode
-        if cluster.spec.storageEnabled {
+        sandbox.cpuCountOverride = m.cpus
+        if let gb = m.dataDiskGB {
             let dataURL = nodes.profileDirectory(for: profile).appendingPathComponent("data.img")
-            try Self.ensureSparseImage(at: dataURL, gigabytes: cluster.spec.storageDiskGB)
+            try Self.ensureSparseImage(at: dataURL, gigabytes: gb)
             sandbox.extraDiskURLs = [dataURL]
         }
         let runtime = NodeRuntime(record: node, profile: profile, sessionDisk: sessionDisk, sandbox: sandbox)
@@ -533,7 +685,7 @@ final class KubeClusterEngine {
         log(id, "Booting \(node.name)…")
         try nodes.prepareHomeDirectory(for: profile, terminalDefaults: app.terminalDefaults)
         try sandbox.prepare()
-        try stageNodeScripts(nodes.profileDirectory(for: profile))
+        try stageScripts(m.scripts, into: nodes.profileDirectory(for: profile))
         try await sandbox.start()
 
         guard let dev = sandbox.socketDevice else {
@@ -568,7 +720,7 @@ final class KubeClusterEngine {
         for _ in 0..<120 where ip == nil || ip?.isEmpty == true {
             try Task.checkCancellation()
             if let reported = runtime.ip, !reported.isEmpty { ip = reported; break }
-            if let out = try? await exec(node.id, script("ip"), timeout: 10) {
+            if let out = try? await exec(node.id, m.ipCommand, timeout: 10) {
                 let v = out.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !v.isEmpty { ip = v; break }
             }
@@ -582,7 +734,7 @@ final class KubeClusterEngine {
         return ip
     }
 
-    private func nodeStopped(clusterID: UUID, nodeID: UUID, error: Error?) {
+    func nodeStopped(clusterID: UUID, nodeID: UUID, error: Error?) {
         app.handleSessionStopped(profileID: nodeID)
         guard let rt = runtimes[clusterID], let node = rt.nodes[nodeID] else { return }
         node.up = false
@@ -606,14 +758,12 @@ final class KubeClusterEngine {
         }
     }
 
-    /// Copy the provisioning script + probe into the node's (read-only in
-    /// the guest) meta share. Re-done after every `prepare()`, which wipes
-    /// the share.
-    private func stageNodeScripts(_ profileDir: URL) throws {
+    /// Copy scripts into the VM's (read-only in the guest) meta share.
+    /// Re-done after every `prepare()`, which wipes the share.
+    private func stageScripts(_ files: [(String, URL?)], into profileDir: URL) throws {
         let meta = profileDir.appendingPathComponent("meta-share", isDirectory: true)
         try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
-        for (name, url) in [("bromure-k8s-node.sh", app.kubeNodeScriptURL),
-                            ("bromure-k8s-probe.py", app.kubeProbeScriptURL)] {
+        for (name, url) in files {
             guard let url else { throw KubeError.message("\(name) missing from the app bundle") }
             let dest = meta.appendingPathComponent(name)
             try? FileManager.default.removeItem(at: dest)
@@ -636,27 +786,29 @@ final class KubeClusterEngine {
 
     // MARK: Guest exec + detached steps
 
-    private static let scriptPath = "/mnt/bromure-meta/bromure-k8s-node.sh"
+    static let scriptPath = "/mnt/bromure-meta/bromure-k8s-node.sh"
     private static let probePath = "/mnt/bromure-meta/bromure-k8s-probe.py"
+    static let registryScriptPath = "/mnt/bromure-meta/bromure-registry.sh"
     /// Private ranges + cluster-internal names: node↔node and pod traffic
     /// must never go through the host proxy (which can't reach the VM LAN).
     static let noProxyForNodes = "localhost,127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local"
 
     private func script(_ args: String) -> String { "bash \(Self.scriptPath) \(args)" }
 
-    private func exec(_ nodeID: UUID, _ command: String, timeout: Int) async throws -> String {
+    func exec(_ nodeID: UUID, _ command: String, timeout: Int) async throws -> String {
         try await app.guestExec(profileID: nodeID, command: command, timeout: timeout)
     }
 
-    private static func shellQuote(_ s: String) -> String {
+    static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// Run `bromure-k8s-node.sh start <step> …` detached in the guest and
     /// poll its log into the cluster log until it exits.
-    private func runStep(_ id: UUID, node: KubeNodeRecord, step: String, args: [String]) async throws {
+    func runStep(_ id: UUID, node: KubeNodeRecord, step: String, args: [String],
+                 scriptPath: String = KubeClusterEngine.scriptPath) async throws {
         let quoted = args.map(Self.shellQuote).joined(separator: " ")
-        _ = try await exec(node.id, script("start \(step) \(quoted)"), timeout: 30)
+        _ = try await exec(node.id, "bash \(scriptPath) start \(step) \(quoted)", timeout: 30)
         var offset = 0
         let started = Date()
         while true {
@@ -664,7 +816,7 @@ final class KubeClusterEngine {
             try await Task.sleep(nanoseconds: 2_000_000_000)
             let out: String
             do {
-                out = try await exec(node.id, script("poll \(step) \(offset)"), timeout: 30)
+                out = try await exec(node.id, "bash \(scriptPath) poll \(step) \(offset)", timeout: 30)
             } catch {
                 if Date().timeIntervalSince(started) > 1800 { throw error }
                 continue   // a transient shell-channel hiccup; the step keeps running

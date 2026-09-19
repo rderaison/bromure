@@ -4459,29 +4459,131 @@ def task_install_ca():
     log("session", "installed MITM CA")
 
 
+DOCKER_REGISTRIES_FILE = os.path.join(META, "docker-registries.txt")
+DOCKER_DAEMON_JSON = "/etc/docker/daemon.json"
+
+
+def _meta_no_proxy():
+    """NO_PROXY as the host wrote it into proxy.env (VM subnet, cluster
+    nodes, registries) — dockerd must skip the proxy for those too, or a
+    `docker push` to a registry on the VM LAN would be sent to the host
+    proxy, which can't reach the guests."""
+    try:
+        with open(os.path.join(META, "proxy.env")) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export NO_PROXY="):
+                    return line.split("=", 1)[1].strip().strip("'\"")
+    except OSError:
+        pass
+    return "localhost,127.0.0.1,::1"
+
+
+def _docker_registries():
+    """Insecure (plain-HTTP) registries the host lists for this workspace."""
+    try:
+        with open(DOCKER_REGISTRIES_FILE) as f:
+            return [l.strip() for l in f if l.strip() and not l.startswith("#")]
+    except OSError:
+        return []
+
+
+def _docker_daemon_json_text(registries):
+    current = {}
+    try:
+        with open(DOCKER_DAEMON_JSON) as f:
+            current = json.load(f) or {}
+    except (OSError, ValueError):
+        current = {}
+    if registries:
+        current["insecure-registries"] = sorted(set(registries))
+    else:
+        current.pop("insecure-registries", None)
+    return json.dumps(current, indent=2, sort_keys=True) + "\n"
+
+
+def _docker_proxy_fragment():
+    return (DOCKER_PROXY_FRAGMENT.replace(
+        'Environment="NO_PROXY=localhost,127.0.0.1,::1"',
+        'Environment="NO_PROXY=%s"' % _meta_no_proxy()))
+
+
+def _apply_docker_config(restart_if_unchanged):
+    """Write the proxy drop-in + daemon.json; restart dockerd when anything
+    changed (or unconditionally on the boot pass). Returns True when it
+    restarted."""
+    changed = restart_if_unchanged
+    frag = _docker_proxy_fragment()
+    frag_path = "/etc/systemd/system/docker.service.d/bromure-proxy.conf"
+    try:
+        with open(frag_path) as f:
+            if f.read() != frag:
+                changed = True
+    except OSError:
+        changed = True
+    _sudo(["mkdir", "-p", "/etc/systemd/system/docker.service.d"])
+    try:
+        subprocess.run(["sudo", "tee", frag_path], input=frag, text=True,
+                       stdout=_DEVNULL, stderr=_DEVNULL)
+    except Exception:
+        return False
+    daemon = _docker_daemon_json_text(_docker_registries())
+    try:
+        with open(DOCKER_DAEMON_JSON) as f:
+            if f.read() != daemon:
+                changed = True
+    except OSError:
+        changed = True
+    _sudo(["mkdir", "-p", "/etc/docker"])
+    try:
+        subprocess.run(["sudo", "tee", DOCKER_DAEMON_JSON], input=daemon, text=True,
+                       stdout=_DEVNULL, stderr=_DEVNULL)
+    except Exception:
+        return False
+    if not changed:
+        return False
+    _sudo(["systemctl", "daemon-reload"])
+    if _sudo(["systemctl", "restart", "docker"]).returncode == 0:
+        log("session", "docker restarted (proxy + CA + %d insecure registr%s)"
+            % (len(_docker_registries()), "y" if len(_docker_registries()) == 1 else "ies"))
+        return True
+    log("session", "docker restart failed (non-fatal)")
+    return False
+
+
 def task_apt_and_docker_proxy():
     """Drop stale bake-time apt proxy config; wire dockerd through the bridge
-    (proxy env + freshly installed CA) and restart it."""
+    (proxy env + freshly installed CA + the bromure registries) and restart it."""
     stale = "/etc/apt/apt.conf.d/99-bromure-proxy"
     if os.path.isfile(stale):
         _sudo(["rm", "-f", stale])
         log("session", "removed stale bake-time apt proxy config")
     if not shutil.which("docker"):
         return
-    _sudo(["mkdir", "-p", "/etc/systemd/system/docker.service.d"])
-    try:
-        subprocess.run(
-            ["sudo", "tee",
-             "/etc/systemd/system/docker.service.d/bromure-proxy.conf"],
-            input=DOCKER_PROXY_FRAGMENT, text=True, stdout=_DEVNULL,
-            stderr=_DEVNULL)
-    except Exception:
-        return
-    _sudo(["systemctl", "daemon-reload"])
-    if _sudo(["systemctl", "restart", "docker"]).returncode == 0:
-        log("session", "docker restarted with bromure proxy + CA")
-    else:
-        log("session", "docker restart failed (non-fatal)")
+    _apply_docker_config(restart_if_unchanged=True)
+
+
+def docker_registries_watcher_service():
+    """A registry appeared or went away while the workspace runs: the host
+    rewrites docker-registries.txt (and proxy.env's NO_PROXY); re-apply and
+    bounce dockerd only when the effective config changed."""
+    if not shutil.which("docker"):
+        while True:
+            time.sleep(3600)
+    last = None
+    while True:
+        time.sleep(5)
+        try:
+            sig = (os.stat(DOCKER_REGISTRIES_FILE).st_mtime if os.path.exists(DOCKER_REGISTRIES_FILE) else 0,
+                   os.stat(os.path.join(META, "proxy.env")).st_mtime if os.path.exists(os.path.join(META, "proxy.env")) else 0)
+        except OSError:
+            continue
+        if last is None:
+            last = sig
+            continue
+        if sig != last:
+            last = sig
+            _apply_docker_config(restart_if_unchanged=False)
 
 
 def task_set_timezone():
@@ -4690,6 +4792,7 @@ def main():
         ("ip", ip_reporter_service),
         ("session-monitor", session_monitor_service),
         ("seed", seed_watcher_service),
+        ("docker-registries", docker_registries_watcher_service),
         ("upgrade", upgrade_watcher),
     ]
     for name, fn in services:

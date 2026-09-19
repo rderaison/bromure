@@ -1749,6 +1749,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     lazy var kubeProbeScriptURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/bromure-k8s-probe", withExtension: "py")
     }()
+    lazy var kubeRegistryScriptURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/bromure-registry", withExtension: "sh")
+    }()
 
     /// Live host→guest loopback forwarders, one per detected OAuth login.
     /// They auto-expire (5 min); we also prune stopped ones on each new login.
@@ -3825,6 +3828,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onKubeCommand = { [weak self] id, doc in
             MainActor.assumeIsolated {
                 self?.automationKubeCommand(id: id, doc: doc) ?? ["ok": false, "error": "unavailable"]
+            }
+        }
+        server.onRegistryCommand = { [weak self] id, doc in
+            MainActor.assumeIsolated {
+                self?.automationRegistryCommand(id: id, doc: doc) ?? ["ok": false, "error": "unavailable"]
             }
         }
         server.onListPendingPrompts = {
@@ -7574,6 +7582,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // meta-share dir and bump env.generation for the guest's
         // PROMPT_COMMAND hook.
         sandbox?.sessionDisk?.extraNoProxy = kubeClusterEngine.extraNoProxy(for: profile.id)
+        sandbox?.sessionDisk?.extraInsecureRegistries = kubeClusterEngine.registryAddresses(for: profile.id)
         do {
             try sandbox?.sessionDisk?.refreshMetadataShare(
                 profile: profile, tokenPlan: plan)
@@ -8170,6 +8179,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             sessionDisk.tokenPlan = plan
             sessionDisk.migrateHomeThisBoot = migrateHomeThisBoot
             sessionDisk.extraNoProxy = kubeClusterEngine.extraNoProxy(for: profile.id)
+            sessionDisk.extraInsecureRegistries = kubeClusterEngine.registryAddresses(for: profile.id)
             if let engine = mitmEngine, let scriptURL = bridgeScriptURL {
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
@@ -9724,7 +9734,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             let access = decodeAccess(doc["access"]) ?? .all
             let cluster = kubeClusterEngine.create(name: name, spec: spec, access: access,
-                                                   autoStart: (doc["autoStart"] as? Bool) ?? true)
+                                                   autoStart: (doc["autoStart"] as? Bool) ?? true,
+                                                   synologyPassword: doc["synologyPassword"] as? String)
             return ["ok": true, "id": cluster.id.uuidString]
         }
         guard let id, let uuid = UUID(uuidString: id), kubeClusterStore.cluster(uuid) != nil else {
@@ -9749,6 +9760,46 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return ["ok": true, "kubeconfig": yaml]
         default:
             return ["ok": false, "error": "unknown kube action: \(action)"]
+        }
+        return ["ok": true]
+    }
+
+    /// Handle a fat-client registry verb (`POST /registries` "create", or
+    /// `POST /registries/{id}/{action}`).
+    @MainActor func automationRegistryCommand(id: String?, doc: [String: Any]) -> [String: Any] {
+        let action = (doc["action"] as? String) ?? ""
+        func decodeAccess(_ raw: Any?) -> KubeWorkspaceAccess? {
+            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
+        }
+        if id == nil {
+            guard action == "create" else { return ["ok": false, "error": "unknown action: \(action)"] }
+            guard let name = doc["name"] as? String, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+                return ["ok": false, "error": "missing name"]
+            }
+            let registry = kubeClusterEngine.createRegistry(
+                name: name, access: decodeAccess(doc["access"]) ?? .all,
+                memoryGB: (doc["memoryGB"] as? Int) ?? 1, diskGB: (doc["diskGB"] as? Int) ?? 40,
+                autoStart: (doc["autoStart"] as? Bool) ?? true)
+            return ["ok": true, "id": registry.id.uuidString]
+        }
+        guard let id, let uuid = UUID(uuidString: id), kubeClusterStore.registry(uuid) != nil else {
+            return ["ok": false, "error": "no such registry"]
+        }
+        switch action {
+        case "start":   kubeClusterEngine.startRegistry(uuid)
+        case "stop":    Task { await self.kubeClusterEngine.stopRegistry(uuid) }
+        case "restart": kubeClusterEngine.restartRegistry(uuid)
+        case "delete":  Task { await self.kubeClusterEngine.deleteRegistry(uuid) }
+        case "access":
+            guard let access = decodeAccess(doc["access"]) else { return ["ok": false, "error": "bad access"] }
+            kubeClusterEngine.setRegistryAccess(uuid, access)
+        case "autostart":
+            kubeClusterEngine.setRegistryAutoStart(uuid, (doc["on"] as? Bool) ?? true)
+        case "watch":
+            kubeClusterEngine.setWatch(uuid, (doc["on"] as? Bool) ?? false)
+        default:
+            return ["ok": false, "error": "unknown registry action: \(action)"]
         }
         return ["ok": true]
     }

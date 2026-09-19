@@ -37,6 +37,70 @@ public enum KubeLoadBalancerKind: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// A Synology NAS providing persistent volumes through Synology's CSI
+/// driver (iSCSI LUNs or SMB shares carved out of a DSM volume). The DSM
+/// password is never in this record — it's kept encrypted next to the
+/// cluster and only ever lands in the cluster's own Secret.
+public struct KubeSynologySpec: Codable, Equatable, Sendable {
+    public enum TransportKind: String, Codable, CaseIterable, Sendable {
+        case iscsi, smb
+        public var displayName: String { self == .iscsi ? "iSCSI (block LUNs)" : "SMB (shared folders)" }
+    }
+    /// DSM address (IP or hostname).
+    public var host: String = ""
+    /// DSM management port: 5000 (HTTP) or 5001 (HTTPS).
+    public var port: Int = 5000
+    public var https: Bool = false
+    public var username: String = ""
+    /// The DSM volume volumes live on, e.g. "/volume1".
+    public var location: String = "/volume1"
+    public var protocolKind: TransportKind = .iscsi
+    public var fsType: String = "ext4"
+
+    public init() {}
+
+    public var isConfigured: Bool {
+        !host.trimmingCharacters(in: .whitespaces).isEmpty && !username.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// The driver's `client-info.yml` (DSM connection details).
+    public func clientInfoYAML(password: String) -> String {
+        func q(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\"" }
+        return """
+        ---
+        clients:
+          - host: \(q(host.trimmingCharacters(in: .whitespaces)))
+            port: \(port)
+            https: \(https ? "true" : "false")
+            username: \(q(username.trimmingCharacters(in: .whitespaces)))
+            password: \(q(password))
+
+        """
+    }
+
+    /// The StorageClass the cluster gets (default class when present).
+    public func storageClassYAML(name: String = "bromure-synology", isDefault: Bool = true) -> String {
+        """
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: \(name)
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "\(isDefault ? "true" : "false")"
+        provisioner: csi.san.synology.com
+        parameters:
+          fsType: '\(fsType)'
+          dsm: '\(host.trimmingCharacters(in: .whitespaces))'
+          location: '\(location)'
+          protocol: '\(protocolKind.rawValue)'
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+        volumeBindingMode: Immediate
+
+        """
+    }
+}
+
 /// What the user tunes when creating a cluster.
 public struct KubeClusterSpec: Codable, Equatable, Sendable {
     /// Total nodes. Node 1 is the control plane (and schedules workloads
@@ -57,8 +121,14 @@ public struct KubeClusterSpec: Codable, Equatable, Sendable {
     /// comma list). The host answers ARP for them itself, MetalLB-style;
     /// without a pool every Service shares the Mac's own address by port.
     public var lanPool: String? = nil
+    /// Persistent volumes on a Synology NAS (Synology CSI). When set, its
+    /// storage class becomes the default; Longhorn stays available by name.
+    public var synology: KubeSynologySpec? = nil
 
     public init() {}
+
+    /// Any storage add-on that needs the iSCSI initiator on the nodes.
+    public var needsISCSI: Bool { storageEnabled || synology?.isConfigured == true }
 
     public static let nodeRange = 1...8
     public static let cpuRange = 1...16
@@ -236,6 +306,100 @@ public struct KubeCluster: Codable, Identifiable, Equatable, Sendable {
 /// Right-click / "⋯" actions on a cluster's sidebar row.
 public enum KubeRowAction: Sendable {
     case start, stop, restart, delete, access
+}
+
+// MARK: - Container registries
+
+/// A private Docker registry (registry:2) in its own small VM on the VM
+/// LAN, shared by the workspaces (docker push) and the clusters (image
+/// pulls). Reachable as `<vm ip>:<port>` over plain HTTP — workspaces get
+/// it as an insecure registry, clusters as a containerd mirror.
+public struct KubeRegistry: Codable, Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var createdAt: Date
+    public var access: KubeWorkspaceAccess
+    public var memoryGB: Int
+    /// Sparse data disk holding the image layers.
+    public var diskGB: Int
+    public var port: Int
+    /// The VM (a single machine record; `id` is its synthetic profile id).
+    public var node: KubeNodeRecord
+    public var autoStart: Bool
+    public var provisioned: Bool
+
+    public init(id: UUID = UUID(), name: String, createdAt: Date = Date(),
+                access: KubeWorkspaceAccess = .all, memoryGB: Int = 1, diskGB: Int = 40,
+                port: Int = 5000, node: KubeNodeRecord? = nil, autoStart: Bool = true,
+                provisioned: Bool = false) {
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+        self.access = access
+        self.memoryGB = memoryGB
+        self.diskGB = diskGB
+        self.port = port
+        self.node = node ?? KubeNodeRecord(name: "registry-" + KubeCluster.slug(for: name), role: .server, index: 1)
+        self.autoStart = autoStart
+        self.provisioned = provisioned
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, createdAt, access, memoryGB, diskGB, port, node, autoStart, provisioned
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        access = try c.decodeIfPresent(KubeWorkspaceAccess.self, forKey: .access) ?? .all
+        memoryGB = try c.decodeIfPresent(Int.self, forKey: .memoryGB) ?? 1
+        diskGB = try c.decodeIfPresent(Int.self, forKey: .diskGB) ?? 40
+        port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 5000
+        node = try c.decodeIfPresent(KubeNodeRecord.self, forKey: .node)
+            ?? KubeNodeRecord(name: "registry-" + KubeCluster.slug(for: name), role: .server, index: 1)
+        autoStart = try c.decodeIfPresent(Bool.self, forKey: .autoStart) ?? true
+        provisioned = try c.decodeIfPresent(Bool.self, forKey: .provisioned) ?? false
+    }
+
+    public var slug: String { KubeCluster.slug(for: name) }
+    /// "<ip>:<port>" once the VM has an address.
+    public var address: String? { node.lastIP.map { "\($0):\(port)" } }
+
+    public static let memoryRange = 1...16
+    public static let diskRange = 10...2000
+}
+
+/// What the registry VM reports (`bromure-registry.sh probe`).
+public struct KubeRegistryInfo: Codable, Equatable, Sendable {
+    public struct Repository: Codable, Equatable, Identifiable, Sendable {
+        public var id: String { name }
+        public var name: String
+        public var tags: [String]
+    }
+    public var reachable: Bool
+    public var repositories: [Repository]
+    public var diskUsedBytes: Int64
+    public var diskTotalBytes: Int64
+    public var at: String
+
+    private enum CodingKeys: String, CodingKey { case reachable, repositories, diskUsedBytes, diskTotalBytes, at }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        reachable = try c.decodeIfPresent(Bool.self, forKey: .reachable) ?? false
+        repositories = try c.decodeIfPresent([Repository].self, forKey: .repositories) ?? []
+        diskUsedBytes = try c.decodeIfPresent(Int64.self, forKey: .diskUsedBytes) ?? 0
+        diskTotalBytes = try c.decodeIfPresent(Int64.self, forKey: .diskTotalBytes) ?? 0
+        at = try c.decodeIfPresent(String.self, forKey: .at) ?? ""
+    }
+
+    public static func decode(_ data: Data) -> KubeRegistryInfo? {
+        try? JSONDecoder().decode(KubeRegistryInfo.self, from: data)
+    }
+
+    public var imageCount: Int { repositories.reduce(0) { $0 + $1.tags.count } }
 }
 
 // MARK: - Runtime status (host-owned, mirrored)
@@ -441,14 +605,22 @@ public struct KubeProbe: Codable, Equatable, Sendable {
     public var services: [Service]
     public var deployments: Deployments
     public var longhorn: Longhorn?
+    /// Synology CSI driver state (present once its namespace exists).
+    public var synology: AddOn?
     public var pods: [Pod]
     public var pvcs: [PVC]
     public var warnings: [Warning]
     public var probeMillis: Int
 
+    public struct AddOn: Codable, Equatable, Sendable {
+        public var installed: Bool
+        public var ready: Bool
+        public var pods: Int
+    }
+
     private enum CodingKeys: String, CodingKey {
         case at, reachable, version, full, nodes, podSummary, podsByNamespace, services,
-             deployments, longhorn, pods, pvcs, warnings, probeMillis
+             deployments, longhorn, synology, pods, pvcs, warnings, probeMillis
     }
 
     public init(from decoder: Decoder) throws {
@@ -463,6 +635,7 @@ public struct KubeProbe: Codable, Equatable, Sendable {
         services = try c.decodeIfPresent([Service].self, forKey: .services) ?? []
         deployments = try c.decodeIfPresent(Deployments.self, forKey: .deployments) ?? Deployments()
         longhorn = try c.decodeIfPresent(Longhorn.self, forKey: .longhorn)
+        synology = try c.decodeIfPresent(AddOn.self, forKey: .synology)
         pods = try c.decodeIfPresent([Pod].self, forKey: .pods) ?? []
         pvcs = try c.decodeIfPresent([PVC].self, forKey: .pvcs) ?? []
         warnings = try c.decodeIfPresent([Warning].self, forKey: .warnings) ?? []
@@ -517,6 +690,9 @@ public struct KubeClusterStatus: Codable, Equatable, Sendable {
     /// Nodes whose VM is up (booted, shell reachable).
     public var nodesUp: Int = 0
     public var startedAt: Date?
+    /// Registries: the address it answers on ("<ip>:<port>") and its catalog.
+    public var address: String?
+    public var registry: KubeRegistryInfo?
 
     public init() {}
 
@@ -539,6 +715,8 @@ public struct KubeClusterStatus: Codable, Equatable, Sendable {
 @Observable
 public final class KubeClusterStore {
     public private(set) var clusters: [KubeCluster] = []
+    public private(set) var registries: [KubeRegistry] = []
+    /// Keyed by cluster OR registry id.
     public private(set) var status: [UUID: KubeClusterStatus] = [:]
 
     private let fileURL: URL?
@@ -565,11 +743,32 @@ public final class KubeClusterStore {
     }
 
     public func cluster(_ id: UUID) -> KubeCluster? { clusters.first { $0.id == id } }
+    public func registry(_ id: UUID) -> KubeRegistry? { registries.first { $0.id == id } }
     public func status(_ id: UUID) -> KubeClusterStatus { status[id] ?? KubeClusterStatus() }
 
     /// Clusters whose kubeconfig this workspace receives.
     public func clusters(for profileID: UUID) -> [KubeCluster] {
         clusters.filter { $0.access.allows(profileID) }
+    }
+
+    /// Registries this workspace may push to.
+    public func registries(for profileID: UUID) -> [KubeRegistry] {
+        registries.filter { $0.access.allows(profileID) }
+    }
+
+    public func upsert(_ registry: KubeRegistry) {
+        if let i = registries.firstIndex(where: { $0.id == registry.id }) {
+            registries[i] = registry
+        } else {
+            registries.append(registry)
+        }
+        save()
+    }
+
+    public func removeRegistry(_ id: UUID) {
+        registries.removeAll { $0.id == id }
+        status[id] = nil
+        save()
     }
 
     public func upsert(_ cluster: KubeCluster) {
@@ -594,6 +793,10 @@ public final class KubeClusterStore {
             let next = clusters[i].access.removing(profileID)
             if next != clusters[i].access { clusters[i].access = next; changed = true }
         }
+        for i in registries.indices {
+            let next = registries[i].access.removing(profileID)
+            if next != registries[i].access { registries[i].access = next; changed = true }
+        }
         if changed { save() }
     }
 
@@ -605,9 +808,12 @@ public final class KubeClusterStore {
         if status[id] != s { status[id] = s }
     }
 
-    /// Fat-client mirror: replace clusters + status from a `/state` snapshot.
-    public func mirror(clusters newClusters: [KubeCluster], status newStatus: [UUID: KubeClusterStatus]) {
+    /// Fat-client mirror: replace clusters, registries + status from a
+    /// `/state` snapshot.
+    public func mirror(clusters newClusters: [KubeCluster], status newStatus: [UUID: KubeClusterStatus],
+                       registries newRegistries: [KubeRegistry] = []) {
         if clusters != newClusters { clusters = newClusters }
+        if registries != newRegistries { registries = newRegistries }
         if status != newStatus { status = newStatus }
     }
 
@@ -616,6 +822,7 @@ public final class KubeClusterStore {
     private struct FilePayload: Codable {
         var version = 1
         var clusters: [KubeCluster]
+        var registries: [KubeRegistry]?
     }
 
     private func load() {
@@ -624,6 +831,7 @@ public final class KubeClusterStore {
         dec.dateDecodingStrategy = .iso8601
         if let payload = try? dec.decode(FilePayload.self, from: data) {
             clusters = payload.clusters
+            registries = payload.registries ?? []
         }
     }
 
@@ -632,7 +840,7 @@ public final class KubeClusterStore {
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .iso8601
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? enc.encode(FilePayload(clusters: clusters)) else { return }
+        guard let data = try? enc.encode(FilePayload(clusters: clusters, registries: registries)) else { return }
         let dir = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? data.write(to: fileURL, options: .atomic)
@@ -656,6 +864,7 @@ public final class KubeClusterStore {
         }
         return [
             "clusters": clusters.compactMap { dict($0) },
+            "registries": registries.compactMap { dict($0) },
             "status": Dictionary(uniqueKeysWithValues: status.compactMap { k, v in
                 dict(v).map { (k.uuidString, $0) }
             }),
@@ -664,7 +873,7 @@ public final class KubeClusterStore {
 
     /// Decode a snapshot produced by `snapshot()` (on the mirroring client).
     public static func decodeSnapshot(_ payload: [String: Any])
-        -> (clusters: [KubeCluster], status: [UUID: KubeClusterStatus]) {
+        -> (clusters: [KubeCluster], status: [UUID: KubeClusterStatus], registries: [KubeRegistry]) {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         func decode<T: Decodable>(_ obj: Any, _ type: T.Type) -> T? {
@@ -673,12 +882,31 @@ public final class KubeClusterStore {
         }
         let clusters = ((payload["clusters"] as? [[String: Any]]) ?? [])
             .compactMap { decode($0, KubeCluster.self) }
+        let registries = ((payload["registries"] as? [[String: Any]]) ?? [])
+            .compactMap { decode($0, KubeRegistry.self) }
         var status: [UUID: KubeClusterStatus] = [:]
         for (k, v) in (payload["status"] as? [String: Any]) ?? [:] {
             guard let id = UUID(uuidString: k), let s = decode(v, KubeClusterStatus.self) else { continue }
             status[id] = s
         }
-        return (clusters, status)
+        return (clusters, status, registries)
+    }
+}
+
+/// The containerd registry configuration (`/etc/rancher/k3s/registries.yaml`)
+/// that lets a cluster pull from the bromure registries over plain HTTP.
+public enum KubeRegistriesConfig {
+    public static func yaml(addresses: [String]) -> String {
+        guard !addresses.isEmpty else { return "mirrors: {}\n" }
+        var out = "mirrors:\n"
+        for a in addresses {
+            out += "  \"\(a)\":\n    endpoint:\n      - \"http://\(a)\"\n"
+        }
+        out += "configs:\n"
+        for a in addresses {
+            out += "  \"\(a)\":\n    tls:\n      insecure_skip_verify: true\n"
+        }
+        return out
     }
 }
 

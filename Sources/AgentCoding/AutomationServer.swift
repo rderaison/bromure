@@ -198,6 +198,9 @@ final class ACAutomationServer {
     /// start/stop/restart/delete/access/autostart/watch/kubeconfig.
     var onListKubeClusters: (() -> [String: Any])?
     var onKubeCommand: ((_ id: String?, _ doc: [String: Any]) -> [String: Any])?
+    /// Container registries: `id == nil` + "create", else start/stop/restart/
+    /// delete/access/autostart/watch.
+    var onRegistryCommand: ((_ id: String?, _ doc: [String: Any]) -> [String: Any])?
     /// Decision prompts pending for a remote client (fat client), + answer.
     var onListPendingPrompts: (() -> [[String: Any]])?
     /// In-flight remote subscription registration (provider, sign-in URL, and
@@ -902,6 +905,27 @@ final class ACAutomationServer {
             let result = DispatchQueue.main.sync { self.onKubeCommand?(id, doc) } ?? ["ok": false, "error": "unavailable"]
             let ok = (result["ok"] as? Bool) ?? false
             sendResponse(fd: fd, status: ok ? 200 : 400, body: result)
+
+        case ("POST", "/registries"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            var doc = bodyJSON
+            if doc["action"] == nil { doc["action"] = "create" }
+            let result = DispatchQueue.main.sync { self.onRegistryCommand?(nil, doc) } ?? ["ok": false, "error": "unavailable"]
+            sendResponse(fd: fd, status: (result["ok"] as? Bool) == true ? 200 : 400, body: result)
+
+        case (let m, let p) where p.hasPrefix("/registries/"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let rest = String(p.dropFirst("/registries/".count))
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            let id = parts.first.flatMap { $0.removingPercentEncoding } ?? ""
+            var doc = bodyJSON
+            if parts.count > 1, !parts[1].isEmpty { doc["action"] = parts[1] }
+            if m == "DELETE" { doc["action"] = "delete" }
+            guard m == "POST" || m == "DELETE" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let result = DispatchQueue.main.sync { self.onRegistryCommand?(id, doc) } ?? ["ok": false, "error": "unavailable"]
+            sendResponse(fd: fd, status: (result["ok"] as? Bool) == true ? 200 : 400, body: result)
 
         case (let m, let p) where p.hasPrefix("/vms/"):
             handleVMRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)
