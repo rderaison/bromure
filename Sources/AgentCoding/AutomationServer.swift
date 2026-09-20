@@ -117,6 +117,10 @@ final class ACAutomationServer {
     /// Resolve an id-or-name to the canonical profile UUID string, so interactive
     /// attach state is keyed the same way the consent broker queries it (by UUID).
     var onResolveProfileID: ((_ idOrName: String) -> String?)?
+    /// Run state ("off" / "suspended" / "booting" / "running") of a workspace
+    /// by id-or-name, running or not; nil for an unknown one. Lets `/exec`
+    /// refuse an off or suspended VM immediately instead of waiting 10s.
+    var onVMRunState: ((_ idOrName: String) -> String?)?
 
     // docker-style VM control plane (CLI). Each returns plain dicts/bools so
     // the server stays free of app types.
@@ -1490,6 +1494,18 @@ final class ACAutomationServer {
         // the guest can execute it without the quote-destroying join+re-parse.
         let argv = bodyJSON["argv"] as? [String]
         let timeout = bodyJSON["timeout"] as? Int ?? 30
+
+        // An off or suspended workspace has no shell agent and won't grow one
+        // by waiting: say so now. (The 10s wait below is for a VM that IS
+        // coming up — a boot race — not for one that isn't running at all.)
+        if let state = DispatchQueue.main.sync(execute: { self.onVMRunState?(profileID) }),
+           state == "off" || state == "suspended" {
+            sendResponse(fd: fd, status: 409, body: [
+                "error": "VM '\(profileID)' is \(state)",
+                "state": state,
+            ])
+            return
+        }
 
         // Wait up to 10s for a shell connection (matches the browser's behavior).
         var shellConn: ACShellProxyConnection?

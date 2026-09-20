@@ -1537,7 +1537,20 @@ final class RemoteHostController {
 
     /// Run a shell command in the remote workspace's guest, over the tunnel —
     /// satisfies `GuestExecProvider` for the remote file-explorer pane.
+    /// The mirror already knows an off or suspended workspace has no guest to
+    /// talk to: fail right away with the state, rather than round-tripping to
+    /// the host and sitting on its shell-connection wait. Unknown rows (the
+    /// roster not mirrored yet) fall through and let the host decide.
+    private func checkGuestReachable(_ id: Profile.ID) throws {
+        switch listModel.profileRows.first(where: { $0.id == id })?.state {
+        case .off:       throw ACAppDelegate.GuestExecError.vmOff
+        case .suspended: throw ACAppDelegate.GuestExecError.vmSuspended
+        case .booting, .running, nil: break
+        }
+    }
+
     func guestExec(_ id: Profile.ID, command: String, timeout: Int) async throws -> String {
+        try checkGuestReachable(id)
         let host = self.host
         let path = "/vms/\(seg(id))/exec"
         let resp = try await Task.detached(priority: .userInitiated) {
@@ -1559,6 +1572,7 @@ final class RemoteHostController {
     /// Run one native file op in the remote guest — the remote file browser's
     /// data plane (upload/download/list/delete as base64 JSON over the tunnel).
     func guestFileOp(_ id: Profile.ID, op: [String: Any], timeout: Int = 30) async throws -> [String: Any] {
+        try checkGuestReachable(id)
         let host = self.host
         let path = "/vms/\(seg(id))/file"
         let resp = try await Task.detached(priority: .userInitiated) {

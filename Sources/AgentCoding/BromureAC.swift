@@ -2230,16 +2230,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Errors from `guestExec`.
     enum GuestExecError: LocalizedError {
         case vmNotRunning
+        /// The workspace is powered off — nothing to talk to until it boots.
+        case vmOff
+        /// The workspace is suspended (RAM saved to disk) — resume it first.
+        case vmSuspended
         case connectionFailed
         case commandFailed(exitCode: Int, stderr: String)
         var errorDescription: String? {
             switch self {
             case .vmNotRunning: "The VM isn't running"
+            case .vmOff: "The VM is off"
+            case .vmSuspended: "The VM is suspended"
             case .connectionFailed: "Couldn't reach the VM's shell agent"
             case .commandFailed(let code, let stderr):
                 stderr.isEmpty ? "Command failed (exit \(code))"
                                : stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             }
+        }
+    }
+
+    /// The error for a guest with no shell bridge: names the VM's actual
+    /// state (off / suspended) so the file explorer and the fat client can say
+    /// "The VM is suspended" instead of a generic "isn't running".
+    private func guestUnavailableError(_ profileID: Profile.ID) -> GuestExecError {
+        guard let profile = profiles.first(where: { $0.id == profileID }) else { return .vmNotRunning }
+        switch runState(for: profile) {
+        case .off:       return .vmOff
+        case .suspended: return .vmSuspended
+        case .booting, .running: return .vmNotRunning
         }
     }
 
@@ -2254,7 +2272,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // blocking the main actor.
         var connection: VZVirtioSocketConnection?
         for _ in 0..<30 {
-            guard let bridge = shellBridges[profileID] else { throw GuestExecError.vmNotRunning }
+            guard let bridge = shellBridges[profileID] else { throw guestUnavailableError(profileID) }
             if let c = bridge.dequeueConnection() { connection = c; break }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -2295,7 +2313,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                      timeout: Int = 30) async throws -> [String: Any] {
         var connection: VZVirtioSocketConnection?
         for _ in 0..<30 {
-            guard let bridge = shellBridges[profileID] else { throw GuestExecError.vmNotRunning }
+            guard let bridge = shellBridges[profileID] else { throw guestUnavailableError(profileID) }
             if let c = bridge.dequeueConnection() { connection = c; break }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -3679,6 +3697,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onResolveProfileID = { [weak self] idOrName in
             guard let self else { return nil }
             return MainActor.assumeIsolated { self.resolveRunningSessionID(idOrName)?.uuidString }
+        }
+        // Run state of ANY known workspace (running or not), so the exec route
+        // can answer "VM is off/suspended" at once instead of waiting 10s for a
+        // shell connection that can't come.
+        server.onVMRunState = { [weak self] idOrName in
+            guard let self else { return nil }
+            return MainActor.assumeIsolated {
+                guard let profile = self.profileByNameOrID(idOrName) else { return nil }
+                switch self.runState(for: profile) {
+                case .off:       return "off"
+                case .suspended: return "suspended"
+                case .booting:   return "booting"
+                case .running:   return "running"
+                }
+            }
         }
 
         // (Consent for CLI/SSH-attached sessions is rendered host-side on the
