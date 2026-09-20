@@ -208,6 +208,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// The Files pane was open when the hood closed (or at launch, in chat
     /// mode): reopen it the next time the hood opens.
     private var filePaneParkedForHood = false
+    /// The (session, batch of changes) the Files pane last popped up for —
+    /// see `revealChangedFiles`.
+    private var revealedChangesKey: String?
     private var sessionReconcileTimer: Timer?
     private static let sessionHeaderHeightValue: CGFloat = 66
     private static let underTheHoodHeaderExtra: CGFloat = 30
@@ -1533,6 +1536,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard let delegate = acDelegate else { return }
         let livePosition = SessionHome.liveTabPosition(for: s, in: listModel)
         let bucket = SessionHome.bucket(for: s, in: listModel)
+        revealChangedFiles(for: s, live: livePosition != nil && pane(s.profileID) != nil)
         // The tab itself is the surface while the agent runs — and under the
         // hood always (an ended session's shell is still a terminal).
         let liveChat = livePosition != nil && pane(s.profileID) != nil
@@ -1590,6 +1594,33 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         }
     }
 
+    /// The Files pane pops up on its own the first time changes show up in
+    /// the folder of the session on stage — a file written since it began,
+    /// uncommitted work git reports (the engine's probe) — while its tab is
+    /// there to browse from. Once per batch of changes: closed by hand, it
+    /// stays closed until the folder reads clean and gets dirty again.
+    private func revealChangedFiles(for s: AgentSession, live: Bool) {
+        guard listModel.sessionsFirst, live, let at = s.changesSeenAt else { return }
+        let key = Self.changesKey(s.id, at)
+        guard key != revealedChangesKey else { return }
+        revealedChangesKey = key
+        guard !filePaneOpen else { return }
+        filePaneParkedForHood = false
+        setFilePaneOpen(true, animated: true)
+    }
+
+    private static func changesKey(_ id: UUID, _ at: Date) -> String {
+        "\(id.uuidString)|\(Int(at.timeIntervalSince1970))"
+    }
+
+    /// The pane is up for the changes of the session on stage (not a
+    /// leftover of the classic layout): a trip under the hood keeps it.
+    private var filePaneRevealedForStage: Bool {
+        guard let id = selectedSessionID, let s = acDelegate?.agentSessionStore.session(id),
+              let at = s.changesSeenAt else { return false }
+        return revealedChangesKey == Self.changesKey(id, at)
+    }
+
     /// Chat by default; the raw terminal "under the hood". Pane-local — never
     /// rewrites the app-wide beautified default.
     private func applySessionViewMode(_ pane: SessionPane) {
@@ -1612,7 +1643,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             listModel.machinesExpanded = true
             // The Files pane left open under the hood comes back with it.
             if filePaneParkedForHood { filePaneParkedForHood = false; setFilePaneOpen(true, animated: true) }
-        } else if filePaneOpen {
+        } else if filePaneOpen, !filePaneRevealedForStage {
             filePaneParkedForHood = true
             setFilePaneOpen(false, animated: true)
         }

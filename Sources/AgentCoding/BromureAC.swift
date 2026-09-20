@@ -3145,12 +3145,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     return ["ok": true]
                 case "sessions":
                     let model = self.unifiedWindow?.listModel
-                    return ["sessions": self.agentSessionStore.sessions.map { s -> [String: Any] in
+                    return ["filePaneOpen": self.unifiedWindow?.filePaneOpen ?? false,
+                            "sessions": self.agentSessionStore.sessions.map { s -> [String: Any] in
                         ["id": s.id.uuidString, "title": s.title, "tool": s.tool.rawValue,
                          "cwd": s.cwd, "windowIndex": s.windowIndex ?? -1,
                          "ended": s.endedAt != nil, "launching": s.isLaunching,
                          "archived": s.isArchived, "deleted": s.isDeleted,
                          "agentAlive": s.agentAlive ?? false,
+                         "changes": s.changesSeenAt != nil,
                          // What the sidebar shows (Ended is often computed, not stored).
                          "bucket": model.map { SessionHome.bucket(for: s, in: $0).title } ?? "",
                          "error": s.lastError ?? ""]

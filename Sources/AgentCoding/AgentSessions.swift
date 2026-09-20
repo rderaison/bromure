@@ -89,6 +89,12 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var worktreeOf: UUID?
     /// The worktree's branch ("wt/<slug>"), once the tab reported it.
     var worktreeBranch: String?
+    /// Changes were noticed in the session's folder during this run of it:
+    /// uncommitted work git reports when the folder is in a repository,
+    /// else a file written since the session began. Set when first
+    /// noticed, cleared once the folder reads clean again (a commit) and
+    /// on a resume — the Files pane pops up for each batch.
+    var changesSeenAt: Date?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,

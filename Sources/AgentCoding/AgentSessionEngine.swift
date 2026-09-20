@@ -194,6 +194,7 @@ final class AgentSessionEngine {
                 self.store.mutate(id) {
                     $0.endedAt = nil; $0.lastSeenAt = Date()
                     $0.resumedAt = Date(); $0.agentAlive = nil
+                    $0.changesSeenAt = nil
                 }
                 if !alive, let message { self.deliverWhenAlive(id, message) }
                 return
@@ -207,6 +208,7 @@ final class AgentSessionEngine {
                 $0.launchBaselineIndex = nil
                 $0.resumedAt = Date()
                 $0.agentAlive = nil
+                $0.changesSeenAt = nil
             }
             // Claude and Oh My Pi take the message on the command line next
             // to their resume flag; Codex and Kimi don't, so it's typed once
@@ -539,6 +541,7 @@ final class AgentSessionEngine {
     func probeLiveness(entries: [SessionListModel.VMEntry]) {
         guard let delegate else { return }
         probeFolders(entries: entries)
+        probeChanges(entries: entries)
         // An archived or deleted session whose tab is back (its workspace
         // was asleep when it was put away, and just woke): both meant "end
         // it". A deleted one keeps its binding until the roster drops the
@@ -622,6 +625,84 @@ final class AgentSessionEngine {
                 }
             }
         }
+    }
+
+    // MARK: Changes in the folder
+
+    private var lastChangesProbeAt: [UUID: Date] = [:]
+    private var changesProbing: Set<UUID> = []
+    private static let changesProbeEvery: TimeInterval = 10
+
+    /// Every so often, ask each running workspace whether the folders of
+    /// its live sessions carry changes: uncommitted work when the folder is
+    /// in a git repository (untracked files included, ignored ones not),
+    /// else any file written since the session began — this run of it, a
+    /// resume starts over. Hidden folders and node_modules don't count:
+    /// agents keep their own state in dotfolders, and dependency trees
+    /// churn. The windows pop the Files pane the first time a session
+    /// reads dirty; a folder that reads clean again (a commit) re-arms it.
+    func probeChanges(entries: [SessionListModel.VMEntry]) {
+        guard let delegate else { return }
+        let now = Date()
+        for entry in entries {
+            let live = store.sessions.filter {
+                $0.profileID == entry.id && $0.windowIndex != nil && !$0.isArchived && !$0.isDeleted
+            }
+            guard !live.isEmpty, !changesProbing.contains(entry.id),
+                  now.timeIntervalSince(lastChangesProbeAt[entry.id] ?? .distantPast) > Self.changesProbeEvery
+            else { continue }
+            changesProbing.insert(entry.id)
+            lastChangesProbeAt[entry.id] = now
+            let profileID = entry.id
+            let cmd = Self.changesProbeCommand(live.map { s in
+                (key: s.id.uuidString, path: SessionHome.guestPath(s.cwd),
+                 since: max(s.createdAt, s.resumedAt ?? .distantPast))
+            })
+            Task { [weak self] in
+                defer { self?.changesProbing.remove(profileID) }
+                guard let out = try? await delegate.guestExec(profileID: profileID, command: cmd, timeout: 20),
+                      let self else { return }
+                let verdicts = Self.parseChangesProbe(out)
+                for s in self.store.sessions where s.profileID == profileID {
+                    guard let dirty = verdicts[s.id.uuidString] else { continue }
+                    if dirty, s.changesSeenAt == nil {
+                        BACDebug.log("sessions", "“\(s.title)”: changes in \(s.cwd)")
+                        self.store.mutate(s.id) { $0.changesSeenAt = Date() }
+                    } else if !dirty, s.changesSeenAt != nil {
+                        self.store.mutate(s.id) { $0.changesSeenAt = nil }
+                    }
+                }
+            }
+        }
+    }
+
+    /// One line per target: `key<TAB>1` when its folder carries changes,
+    /// `key<TAB>` when it reads clean — or can't be read at all (a missing
+    /// folder is no reason to pop anything). Inside a repository git has
+    /// the say (`status` on the folder's subtree); elsewhere the first file
+    /// newer than `since` settles it, hidden folders and node_modules
+    /// pruned, with a cap so a huge tree can't hold the probe up.
+    static func changesProbeCommand(_ targets: [(key: String, path: String, since: Date)]) -> String {
+        targets.map { t in
+            let q = "'" + t.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            let epoch = Int(t.since.timeIntervalSince1970)
+            return "p=\(q); if git -C \"$p\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
+                + "r=$(git -C \"$p\" status --porcelain -- . 2>/dev/null | head -c1); else "
+                + "r=$(timeout 8 find \"$p\" -mindepth 1 \\( -name '.*' -o -name node_modules \\) -prune "
+                + "-o -type f -newermt '@\(epoch)' -print -quit 2>/dev/null); fi; "
+                + "printf '%s\\t%s\\n' '\(t.key)' \"${r:+1}\""
+        }.joined(separator: "; ")
+    }
+
+    /// Key → dirty, for every line the probe answered.
+    static func parseChangesProbe(_ out: String) -> [String: Bool] {
+        var verdicts: [String: Bool] = [:]
+        for line in out.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let key = parts.first, !key.isEmpty else { continue }
+            verdicts[String(key)] = parts.count == 2 && parts[1] == "1"
+        }
+        return verdicts
     }
 
     /// The workspace is reachable — booting or resuming it first when it

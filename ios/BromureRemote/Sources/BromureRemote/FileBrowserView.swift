@@ -328,10 +328,7 @@ final class FileBrowserModel {
     /// A guest listing name is only ever a single path component. Reject
     /// anything that could traverse or confuse host-side path handling.
     /// (Internal — not private — so the security-guard tests can pin it.)
-    static func isSafeGuestName(_ name: String) -> Bool {
-        !name.isEmpty && name != "." && name != ".."
-            && !name.contains("/") && !name.contains("\\") && !name.contains("\0")
-    }
+    static func isSafeGuestName(_ name: String) -> Bool { GuestFileNames.isSafe(name) }
 
     /// Pull a guest file into the local cache; returns the local URL.
     func download(_ entry: FileEntry) async throws -> URL {

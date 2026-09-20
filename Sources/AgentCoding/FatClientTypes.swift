@@ -252,3 +252,17 @@ final class RemoteHostStore {
 
     func client(for host: RemoteHost) -> ControlClient { RemoteTransport.client(for: host) }
 }
+
+// MARK: - Guest file names
+
+/// Names the guest reports for its files are untrusted: a crafted listing
+/// entry must not be able to walk out of the directory it was listed in
+/// when a client turns it into a path (a download under the local cache,
+/// a follow-up guest op). One check for every file browser, both platforms.
+enum GuestFileNames {
+    /// A single path component: not a traversal shape, no separators, no NUL.
+    nonisolated static func isSafe(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".."
+            && !name.contains("/") && !name.contains("\\") && !name.contains("\0")
+    }
+}

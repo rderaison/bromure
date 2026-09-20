@@ -1853,6 +1853,9 @@ final class RemoteHostWindow: NSWindow {
     /// mounts (once per session) — no blank wait for the first transcript.
     private var sessionSeeds: [String: String] = [:]
     private var seededSessions: Set<UUID> = []
+    /// The (session, batch of changes) the Files pane last popped up for —
+    /// see `revealChangedFiles`.
+    private var revealedChangesKey: String?
     /// While a session is on stage: chat, or the terminal in Linux mode —
     /// never the app-wide default.
     private var sessionViewMode: SessionViewMode?
@@ -3397,6 +3400,7 @@ final class RemoteHostWindow: NSWindow {
         default: running = false
         }
         let liveChat = live != nil && running && (bucket != .ended || model.underTheHood)
+        revealChangedFiles(for: s, live: live != nil && running)
         let key: String
         if liveChat, let w = s.windowIndex {
             key = "live:\(s.profileID.uuidString):\(w):\(model.underTheHood)"
@@ -3443,6 +3447,19 @@ final class RemoteHostWindow: NSWindow {
                 cachedTranscript: { _ in nil },
                 fetchWhenAsleep: true))
         }
+    }
+
+    /// The Files pane pops up on its own the first time changes show up in
+    /// the folder of the session on stage (the server's probe: a file
+    /// written since it began, uncommitted work git reports) while its tab
+    /// is there to browse from. Once per batch of changes: closed by hand,
+    /// it stays closed until the folder reads clean and gets dirty again.
+    private func revealChangedFiles(for s: AgentSession, live: Bool) {
+        guard sessionsFirst, live, let at = s.changesSeenAt else { return }
+        let key = "\(s.id.uuidString)|\(Int(at.timeIntervalSince1970))"
+        guard key != revealedChangesKey else { return }
+        revealedChangesKey = key
+        if !filePaneOpen { setFilePaneOpen(true) }
     }
 
     private func showSessionOverlay<V: View>(_ view: V) {
@@ -3582,10 +3599,11 @@ final class RemoteHostWindow: NSWindow {
                 "shownWorkspace": shownWorkspace?.uuidString ?? "",
                 "shownWindowIndex": shownWindowIndex ?? -1,
                 "beautified": mountedBeautifiedHost != nil,
+                "filePaneOpen": filePaneOpen,
                 "sessions": controller.sessionStore.sessions.map {
                     ["id": $0.id.uuidString, "title": $0.title, "tool": $0.tool.rawValue,
                      "windowIndex": $0.windowIndex ?? -1, "archived": $0.isArchived,
-                     "deleted": $0.isDeleted,
+                     "deleted": $0.isDeleted, "changes": $0.changesSeenAt != nil,
                      "bucket": SessionHome.bucket(for: $0, in: model).title] as [String: Any]
                 },
             ]
