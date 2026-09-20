@@ -1099,6 +1099,39 @@ struct ChatComposer: View {
     }
 }
 
+/// The pictures of a user turn, inside its bubble: each at its own shape,
+/// no taller than a few lines of text, side by side and scrolling
+/// sideways when there are several.
+struct DropPictureStrip: View {
+    let images: [Data]
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(images.indices, id: \.self) { i in
+                    if let img = PlatformImage(data: images[i]) {
+                        picture(img)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: 360, maxHeight: 240)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.12)))
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func picture(_ img: PlatformImage) -> Image {
+        #if os(macOS)
+        Image(nsImage: img)
+        #else
+        Image(uiImage: img)
+        #endif
+    }
+}
+
 /// An AskUserQuestion rendered statically (archived transcripts, or a
 /// question that is no longer answerable): the question with its options.
 struct TranscriptQuestionCard: View {
@@ -1387,6 +1420,11 @@ struct TranscriptQuestionBatchCard: View {
 
 struct TranscriptItemView: View {
     let item: TranscriptItem
+    /// Pictures shown inside a user turn's bubble, under its words (the
+    /// chat's dropped images), and the paths they stand for — left out of
+    /// the words, since the picture says it.
+    var attachments: [Data] = []
+    var hiddenPaths: [String] = []
     @Environment(\.colorScheme) private var colorScheme
 
     #if os(iOS) || os(visionOS)
@@ -1394,6 +1432,17 @@ struct TranscriptItemView: View {
     #else
     private static let userTextSize: CGFloat = 13
     #endif
+
+    /// `text` without `paths`, the whitespace around them folded.
+    static func withoutPaths(_ text: String, _ paths: [String]) -> String {
+        guard !paths.isEmpty else { return text }
+        var out = text
+        for p in paths { out = out.replacingOccurrences(of: p, with: "") }
+        return out.split(whereSeparator: \.isNewline)
+            .map { $0.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ") }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
 
     var body: some View {
         switch item.kind {
@@ -1403,20 +1452,26 @@ struct TranscriptItemView: View {
             // the way Codex/Claude desktop distinguish input from output.
             // A task prompt shows the brief only — the operating notes the
             // engine appends are plumbing, not conversation.
-            Text(CodingTask.displayPrompt(text))
-                .font(.system(size: Self.userTextSize))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.vertical, 10)
-                .padding(.horizontal, 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.secondary.opacity(0.10))
-                .overlay(alignment: .leading) {
-                    Rectangle()
-                        .fill(Color.accentColor.opacity(0.5))
-                        .frame(width: 3)
+            let words = Self.withoutPaths(CodingTask.displayPrompt(text), hiddenPaths)
+            VStack(alignment: .leading, spacing: 8) {
+                if !words.isEmpty {
+                    Text(words)
+                        .font(.system(size: Self.userTextSize))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                if !attachments.isEmpty { DropPictureStrip(images: attachments) }
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.secondary.opacity(0.10))
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.5))
+                    .frame(width: 3)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         case .assistantText(let text):
             assistantText(text)
         case .question(let q):

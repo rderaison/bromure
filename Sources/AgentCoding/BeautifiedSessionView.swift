@@ -1294,19 +1294,22 @@ struct BeautifiedSessionView: View {
         }
     }
 
-    /// One transcript item plus, for a user turn that references dropped
-    /// images, their thumbnails below it (persists after the poll, since the
-    /// real user turn carries the same guest paths the drop echoed).
+    /// One transcript item. A user turn that references pictures this Mac
+    /// uploaded shows them inside its bubble in place of their paths
+    /// (persists after the poll, since the real user turn carries the same
+    /// guest paths the drop echoed).
     @ViewBuilder
     private func itemRow(_ item: TranscriptItem) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        if case .userText(let text) = item.kind {
+            let paths = GuestDrop.imagePaths(in: text).filter { model.imagesByPath[$0] != nil }
+            TranscriptItemView(item: item,
+                               attachments: paths.compactMap { model.imagesByPath[$0] },
+                               hiddenPaths: paths)
+                .id(item.id)
+        } else {
             TranscriptItemView(item: item)
-            if case .userText(let text) = item.kind {
-                let imgs = model.imagesByPath.compactMap { text.contains($0.key) ? $0.value : nil }
-                if !imgs.isEmpty { AttachmentThumbnails(images: imgs) }
-            }
+                .id(item.id)
         }
-        .id(item.id)
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -1401,29 +1404,6 @@ private struct PendingAttachmentChips: View {
             .buttonStyle(.plain)
             .padding(3)
             .help(NSLocalizedString("Remove attachment", comment: "chip"))
-        }
-    }
-}
-
-/// Horizontal strip of dropped-image thumbnails shown under the user turn.
-private struct AttachmentThumbnails: View {
-    let images: [Data]
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(images.indices, id: \.self) { i in
-                    if let ns = NSImage(data: images[i]) {
-                        Image(nsImage: ns)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 128, height: 96)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.15)))
-                    }
-                }
-            }
-            .padding(.vertical, 2)
         }
     }
 }

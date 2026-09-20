@@ -25,6 +25,16 @@ struct GuestDropTests {
         #expect(GuestDrop.path(index: 0, name: "\(a)_photo.png").contains(a))
     }
 
+    @Test("a turn's words lose the paths its pictures stand for, whitespace folded")
+    func wordsWithoutPaths() {
+        let img = GuestDrop.baseDir + "/0_20260919-213000-ab12_photo.png"
+        #expect(TranscriptItemView.withoutPaths("Second picture. \(img)", [img]) == "Second picture.")
+        #expect(TranscriptItemView.withoutPaths("\(img)", [img]) == "")
+        #expect(TranscriptItemView.withoutPaths("Look:\n\(img)\nand tell me", [img]) == "Look:\nand tell me")
+        // Paths not stood for by a picture stay in the words.
+        #expect(TranscriptItemView.withoutPaths("see \(img)", []) == "see \(img)")
+    }
+
     @Test("imagePaths finds the drop images a turn names, old dir included")
     func imagePathsInTurn() {
         let img = GuestDrop.baseDir + "/0_20260919-213000-ab12_photo.png"
