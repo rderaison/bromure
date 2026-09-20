@@ -101,6 +101,10 @@ enum ConfigScan {
         var deferredSSHKeys: [(url: URL, label: String)] = []
         /// Subscription tokens go to the MITM stores, not the profile.
         var subscriptions: [SubscriptionImport] = []
+        /// Agent API keys, so the caller can register them as global model
+        /// providers (Preferences → Models) — models are configured once for
+        /// every workspace, not per draft.
+        var agentKeys: [(tool: Profile.Tool, value: String)] = []
         var headline = ""
         var detail = ""
     }
@@ -797,6 +801,9 @@ enum ConfigScan {
 
             case .agentKeys(let keys):
                 for (tool, value) in keys {
+                    if !s.agentKeys.contains(where: { $0.tool == tool }) {
+                        s.agentKeys.append((tool, value))
+                    }
                     if profile.tool == tool {
                         profile.apiKey = value; profile.authMode = .token
                     } else if let i = profile.additionalTools.firstIndex(where: { $0.tool == tool }) {
@@ -836,6 +843,9 @@ enum ConfigScan {
                     guard let slot = EnvFileImport.slot(forName: v.name) else { continue }
                     switch slot {
                     case .toolKey(let t):
+                        if !s.agentKeys.contains(where: { $0.tool == t }) {
+                            s.agentKeys.append((t, v.value))
+                        }
                         if profile.tool == t {
                             profile.apiKey = v.value; profile.authMode = .token
                         } else if let i = profile.additionalTools.firstIndex(where: { $0.tool == t }) {

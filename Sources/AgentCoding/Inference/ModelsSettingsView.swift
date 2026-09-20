@@ -36,6 +36,9 @@ struct ModelsSubscriptionHooks {
 struct ModelsSettingsView: View {
     @Binding var settings: ModelSettings
     var subscription: ModelsSubscriptionHooks? = nil
+    /// The pane's own "Models" heading. Off when the host already titles the
+    /// screen (the onboarding wizard's step heading).
+    var showsTitle: Bool = true
 
     /// A source in the left column.
     enum Source: Hashable, Identifiable {
@@ -81,10 +84,12 @@ struct ModelsSettingsView: View {
     var body: some View {
         let _ = (catalogTick, subTick)
         return VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Models").font(.title2.bold())
-                Text("Register a source on the left, then give each agent a model on the right.")
-                    .font(.callout).foregroundStyle(.secondary)
+            if showsTitle {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Models").font(.title2.bold())
+                    Text("Register a source on the left, then give each agent a model on the right.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
             }
             HStack(alignment: .top, spacing: 16) {
                 sourcesColumn.frame(width: 210)
@@ -97,6 +102,10 @@ struct ModelsSettingsView: View {
             if settings.localServer != nil { probeLocalServer() }
             syncSubscriptions()
             fetchUsableProviderModels()
+            // A provider registered outside this pane (an API key the
+            // onboarding scan imported) gets its native agent pre-filled the
+            // same way a key pasted here does — never over an explicit choice.
+            for p in usableProviders { autofillAgent(for: p) }
         }
         .onReceive(NotificationCenter.default.publisher(for: .bromureSubscriptionStoresChanged)) { _ in
             subTick &+= 1
@@ -753,11 +762,13 @@ private struct ProviderConfigPopover: View {
 struct GlobalModelsSettingsView: View {
     @ObservedObject var store = ModelSettingsStore.shared
     var subscription: ModelsSubscriptionHooks? = nil
+    var showsTitle: Bool = true
     var body: some View {
         ModelsSettingsView(
             settings: Binding(get: { store.settings },
                               set: { store.settings = $0; store.save() }),
-            subscription: subscription)
+            subscription: subscription,
+            showsTitle: showsTitle)
     }
 }
 

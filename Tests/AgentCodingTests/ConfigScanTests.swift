@@ -186,6 +186,23 @@ struct ConfigScanAgentTests {
         #expect(grok?.apiKey == "xai-key")
         #expect(grok?.authMode == .token)
         #expect(s.total == 2)
+        // …and the summary carries them for the global Models registration.
+        #expect(s.agentKeys.map(\.tool) == [.claude, .grok])
+        #expect(s.agentKeys.first?.value == "sk-ant-key")
+    }
+
+    @Test(".env agent keys reach the summary too, once per tool")
+    func envAgentKeysInSummary() {
+        var p = Profile(name: "w", tool: .claude, authMode: .subscription)
+        let f = ConfigScan.Finding(
+            id: "e", kind: .envFile, path: URL(fileURLWithPath: "/tmp/.env"),
+            title: ".env", detail: "", credentialCount: 2, symbol: "x", include: true,
+            payload: .env([.init(name: "OPENAI_API_KEY", value: "sk-oai"),
+                           .init(name: "OPENAI_API_KEY", value: "sk-oai-dup")]))
+        let s = ConfigScan.apply([f], to: &p)
+        #expect(s.agentKeys.count == 1)
+        #expect(s.agentKeys.first?.tool == .codex)
+        #expect(s.agentKeys.first?.value == "sk-oai")
     }
 
     @Test("all four subscription providers are carried, not dropped")

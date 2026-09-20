@@ -3179,6 +3179,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         case .installing: break
                         case .scanOffer: wizard.beginScan()
                         case .pick: self.finishOnboarding(wizard.findings.filter(\.include))
+                        case .models: wizard.step = .done
                         case .done: self.leaveOnboarding()
                         }
                     case "secondary":
@@ -3186,11 +3187,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         case .scanOffer, .pick: self.finishOnboarding([])
                         default: break
                         }
+                    case "signin":
+                        // Models step: press "Sign in with <provider>" (E2E /
+                        // doc hook for the wizard's sign-in card).
+                        guard let raw = params["provider"] as? String,
+                              let provider = ModelProvider(rawValue: raw)
+                        else { return ["error": "provider: anthropic|openai|xai|moonshot"] }
+                        self.beginWizardSignIn(provider: provider)
+                    case "cancel-signin":
+                        self.cancelWizardSignIn()
                     default: break
                     }
                     let w = self.onboarding
-                    return ["ok": true, "step": "\(w?.step ?? wizard.step)",
-                            "findings": w?.findings.count ?? 0, "scanning": w?.scanning ?? false]
+                    var out: [String: Any] = ["ok": true, "step": "\(w?.step ?? wizard.step)",
+                                              "findings": w?.findings.count ?? 0,
+                                              "scanning": w?.scanning ?? false]
+                    if let s = w?.signIn {
+                        out["signIn"] = ["provider": s.provider.rawValue,
+                                         "status": s.status ?? "",
+                                         "error": s.error ?? "",
+                                         "authURL": s.authURL ?? "",
+                                         "deviceCode": s.deviceCode ?? "",
+                                         "succeeded": s.succeeded]
+                    }
+                    return out
                 case "start-session":
                     // E2E/doc hook for the home screen: start an agent session
                     // the way the New Session screen would.
@@ -5602,6 +5622,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             switch want {
             case "scan": model.step = .scanOffer
             case "pick": model.beginScan()
+            case "models": model.step = .models
             case "done": model.step = .done
             default: break
             }
@@ -5613,7 +5634,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             onStartInstall: { [weak self] in self?.startInit(fromWizard: true) },
             onCancelInstall: { [weak self] in self?.renderSetup() },
             onFinish: { [weak self] findings in self?.finishOnboarding(findings) },
-            onDone: { [weak self] in self?.leaveOnboarding() }))
+            onDone: { [weak self] in self?.leaveOnboarding() },
+            modelsHooks: wizardModelsHooks(),
+            onCancelSignIn: { [weak self] in self?.cancelWizardSignIn() },
+            onDismissSignIn: { [weak self] in self?.onboarding?.signIn = nil }))
         win.contentMinSize = .zero
         // Wider than the old welcome pane: the wizard is a two-column
         // setup-assistant layout (artwork rail + content) with a button bar.
@@ -6673,7 +6697,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return
             }
             wizard.summary = nil
-            wizard.step = .done
+            // First run still gets the Models step: signing in there is how
+            // a fresh Mac with nothing to import ends up with working agents.
+            wizard.step = wizard.showsModels ? .models : .done
             renderSetup()
             return
         }
@@ -6682,7 +6708,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // an explicit "new workspace" run always mints its own.
         var profile = wizard.purpose == .newWorkspace
             ? store.newProfileFromTemplate(name: nextDefaultProfileName())
-            : (profiles.first ?? store.newProfileFromTemplate(name: "Default"))
+            : (profiles.first ?? store.newProfileFromTemplate(name: nextDefaultProfileName()))
         let summary = ConfigScan.apply(findings, to: &profile)
         do { try store.save(profile) } catch {
             FileHandle.standardError.write(Data(
@@ -6702,16 +6728,47 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     "[onboarding] ssh key \(key.label) skipped: \(error)\n".utf8))
             }
         }
-        // Subscription logins live in the MITM stores, not the profile.
+        // Subscription logins live in the MITM stores, not the profile; agent
+        // API keys register their provider in the global Models settings, so
+        // every workspace (not just this draft) can run that agent.
         for sub in summary.subscriptions { applyImportedSubscription(sub) }
+        registerImportedAgentKeys(summary.agentKeys)
 
         try? store.save(profile)
         profiles = store.loadAll()
 
         wizard.createdProfileID = profile.id
         wizard.summary = summary
-        wizard.step = .done
+        wizard.step = wizard.showsModels ? .models : .done
         renderSetup()
+    }
+
+    /// Register imported agent API keys as global model providers. A provider
+    /// the user already configured (key or subscription) is never clobbered.
+    /// omp is provider-agnostic — no env var maps to it, so nothing to do.
+    @MainActor
+    private func registerImportedAgentKeys(_ keys: [(tool: Profile.Tool, value: String)]) {
+        let models = ModelSettingsStore.shared
+        for (tool, value) in keys where tool != .omp {
+            let provider = ModelProvider.native(for: tool)
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let cred = models.settings.credential(provider), cred.isUsable { continue }
+            models.setProvider(provider, apiKey: trimmed)
+        }
+    }
+
+    /// Reflect a host-side subscription login in the global Models settings:
+    /// the provider becomes usable in subscription mode (keeping any key it
+    /// already had). Launch consults the real login regardless, but the pane
+    /// should tell the truth even before it is opened.
+    @MainActor
+    func markProviderSubscribed(_ provider: ModelProvider) {
+        let models = ModelSettingsStore.shared
+        let existing = models.settings.credential(provider)
+        guard existing?.useSubscription != true else { return }
+        models.setProvider(provider, apiKey: existing?.apiKey, useSubscription: true,
+                           baseURL: existing?.baseURL)
     }
 
     /// Write a subscription login lifted from the user's own CLI config into the
@@ -6744,6 +6801,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 for: nil)
         default: break
         }
+        switch sub.provider {
+        case "claude": markProviderSubscribed(.anthropic)
+        case "codex":  markProviderSubscribed(.openai)
+        case "grok":   markProviderSubscribed(.xai)
+        case "kimi":   markProviderSubscribed(.moonshot)
+        default: break
+        }
         NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
     }
 
@@ -6755,15 +6819,46 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         onboarding = nil
         if let w = mainWindow { w.close() }
         mainWindow = nil
+        // First run: the wizard asked everything it needs (credentials, then
+        // models), so the first machine is created here without a form — the
+        // user lands on the new-session screen and just starts.
+        if !wasNewWorkspace { ensureFirstWorkspace(created: created) }
         showUnifiedWindowAsHome()
         // A new-workspace run lands in the editor for what it just built, so
         // the user can name it and review what came in.
         if wasNewWorkspace, let id = created,
            let p = profiles.first(where: { $0.id == id }) {
             openEditorWindow(editing: p)
-        } else if profiles.isEmpty {
-            openEditorWindow(editing: nil)
         }
+    }
+
+    /// The first machine, created silently at the end of onboarding. Its main
+    /// agent is the first one the global Models settings can actually start
+    /// (Claude Code, then Codex, Grok, Kimi, omp); with nothing configured it
+    /// stays Claude Code, whose in-session sign-in card covers the first start.
+    @MainActor
+    private func ensureFirstWorkspace(created: UUID?) {
+        var p: Profile
+        if let id = created, let existing = profiles.first(where: { $0.id == id }) {
+            p = existing
+        } else if !profiles.isEmpty {
+            return
+        } else {
+            p = store.newProfileFromTemplate(name: nextDefaultProfileName())
+        }
+        let ready = p.agentsReadyToStart(ModelSettingsStore.shared.effective(for: p),
+                                         subscribed: subscribedProviders(for: p))
+        let preference: [Profile.Tool] = [.claude, .codex, .grok, .kimi, .omp]
+        if !ready.contains(p.tool), let pick = preference.first(where: ready.contains) {
+            p.tool = pick
+            if p.tool == .omp, p.authMode == .subscription { p.authMode = .token }
+        }
+        do { try store.save(p) } catch {
+            FileHandle.standardError.write(Data(
+                "[onboarding] couldn't create the first workspace: \(error)\n".utf8))
+        }
+        profiles = store.loadAll()
+        refreshSidebar()
     }
 
     func openEditorWindow(editing: Profile?) {

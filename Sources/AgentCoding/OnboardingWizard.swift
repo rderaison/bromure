@@ -6,9 +6,11 @@ import SwiftUI
 //
 //   1. Welcome
 //   2. Install the base image      (skipped when one is already present)
-//   3. Offer to scan for credentials — declining ends the wizard
+//   3. Offer to scan for credentials
 //   4. Pick which discovered files to import (plus any .env chosen by hand)
-//   5. Done
+//   5. Models — the global Models pane, so every provider the user wants is
+//      signed in (or keyed) before the first workspace exists (first run only)
+//   6. Done — the first workspace is created silently on the way out
 //
 // Everything imported lands in a workspace draft, so the credentials the user
 // already has on their Mac are carried in as *faked* credentials: the real
@@ -24,6 +26,9 @@ final class OnboardingWizardModel {
         case installing
         case scanOffer
         case pick
+        /// Review / add model providers (first run only — a new-workspace run
+        /// inherits the global settings already in place).
+        case models
         case done
     }
 
@@ -46,6 +51,22 @@ final class OnboardingWizardModel {
     /// Whether a base image already exists, so step 2 can be skipped.
     let needsImage: Bool
 
+    /// A provider sign-in running from the Models step. Same shape as the
+    /// chat's sign-in card: the host does the OAuth in a hidden throwaway
+    /// machine and the user only sees progress — never a terminal. The URL /
+    /// device code are lifted from that machine's screen for the CLIs whose
+    /// browser hand-off doesn't reach the host on its own.
+    struct SignIn: Equatable {
+        let provider: ModelProvider
+        var providerName: String
+        var status: String?
+        var error: String?
+        var authURL: String?
+        var deviceCode: String?
+        var succeeded = false
+    }
+    var signIn: SignIn?
+
     init(needsImage: Bool, purpose: Purpose = .firstRun) {
         self.needsImage = needsImage
         self.purpose = purpose
@@ -57,7 +78,10 @@ final class OnboardingWizardModel {
     enum StepState { case done, current, upcoming }
 
     /// Linear order used only for the rail's progress rendering.
-    private var order: [Step] { [.welcome, .installing, .scanOffer, .pick, .done] }
+    private var order: [Step] { [.welcome, .installing, .scanOffer, .pick, .models, .done] }
+
+    /// Whether this run shows the Models step: first run only.
+    var showsModels: Bool { purpose == .firstRun }
 
     func state(of s: Step) -> StepState {
         guard let a = order.firstIndex(of: s), let b = order.firstIndex(of: step) else {
@@ -115,13 +139,22 @@ struct OnboardingWizardView: View {
     let onFinish: ([ConfigScan.Finding]) -> Void
     /// Leave setup and land on the workspace home.
     let onDone: () -> Void
+    /// Sign-in / log-out / model-list hooks for the Models step (nil hides
+    /// the sign-in buttons — the pane still takes API keys).
+    var modelsHooks: ModelsSubscriptionHooks? = nil
+    /// Abandon the sign-in running from the Models step (tears the hidden
+    /// throwaway machine down).
+    var onCancelSignIn: () -> Void = {}
+    /// Dismiss a finished (succeeded or failed) sign-in card.
+    var onDismissSignIn: () -> Void = {}
 
     @Environment(\.colorScheme) private var scheme
 
     /// Wizard content size. The window is fixed, so the root carries a definite
     /// frame — an `.infinity` max height reads as "as tall as possible" to
-    /// NSHostingView, which AppKit then clamps to the whole screen.
-    static let contentSize = CGSize(width: 780, height: 470)
+    /// NSHostingView, which AppKit then clamps to the whole screen. Tall enough
+    /// for the Models board (sources column + six agent rows) without scrolling.
+    static let contentSize = CGSize(width: 780, height: 600)
 
     var body: some View {
         HStack(spacing: 0) {
@@ -155,6 +188,9 @@ struct OnboardingWizardView: View {
         }
         s.append((.scanOffer, NSLocalizedString("Credentials", comment: "wizard step")))
         s.append((.pick, NSLocalizedString("Choose", comment: "wizard step")))
+        if model.showsModels {
+            s.append((.models, NSLocalizedString("Models", comment: "wizard step")))
+        }
         s.append((.done, NSLocalizedString("Done", comment: "wizard step")))
         return s
     }
@@ -259,6 +295,7 @@ struct OnboardingWizardView: View {
         case .installing: installing
         case .scanOffer:  scanOffer
         case .pick:       pick
+        case .models:     models
         case .done:       done
         }
     }
@@ -379,6 +416,34 @@ struct OnboardingWizardView: View {
         .padding(.bottom, 4)
     }
 
+    /// The global Models board, exactly as in Preferences: whatever the scan
+    /// imported already shows as signed in / keyed; the user adds the rest
+    /// here so the first workspace starts with every agent it needs.
+    private var models: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            heading(NSLocalizedString("Your models", comment: ""),
+                    NSLocalizedString("Sign in to the providers you want to use, or paste API keys. Each agent picks its model on the right — you can change all of this later in Preferences → Models.", comment: ""))
+                .padding(.horizontal, 28)
+                .padding(.top, 28)
+            if let signIn = model.signIn {
+                WizardSignInCard(signIn: signIn,
+                                 onCancel: onCancelSignIn,
+                                 onDismiss: onDismissSignIn,
+                                 onOpenURL: { url in
+                                     if let u = URL(string: url) { NSWorkspace.shared.open(u) }
+                                 })
+                    .padding(.horizontal, 28)
+                    .padding(.top, 10)
+            }
+            ScrollView {
+                GlobalModelsSettingsView(subscription: modelsHooks, showsTitle: false)
+                    .padding(.horizontal, 10)
+            }
+            // One sign-in at a time: the board waits until it settles.
+            .disabled(model.signIn.map { !$0.succeeded && $0.error == nil } ?? false)
+        }
+    }
+
     private var done: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 10) {
@@ -386,7 +451,9 @@ struct OnboardingWizardView: View {
                     .font(.system(size: 30)).foregroundStyle(.green)
                 heading(NSLocalizedString("You're all set", comment: ""),
                         model.summary.map(\.headline)
-                            ?? NSLocalizedString("Enjoy — add credentials any time from a workspace's Credentials pane.", comment: ""))
+                            ?? (model.showsModels
+                                ? NSLocalizedString("Your first machine is ready — start a session and pick any agent.", comment: "")
+                                : NSLocalizedString("Enjoy — add credentials any time from a workspace's Credentials pane.", comment: "")))
             }
             if let d = model.summary?.detail, !d.isEmpty {
                 Text(d).font(.caption).foregroundStyle(.secondary)
@@ -434,6 +501,12 @@ struct OnboardingWizardView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(model.scanning)
+            case .models:
+                Button("Continue") { model.step = .done }
+                    .keyboardShortcut(.defaultAction)
+                    // Not while a sign-in is mid-flight: leaving would strand
+                    // the hidden machine and lose the tokens it's about to get.
+                    .disabled(model.signIn.map { !$0.succeeded && $0.error == nil } ?? false)
             case .done:
                 Button("Start Using Bromure", action: onDone)
                     .keyboardShortcut(.defaultAction)
@@ -452,6 +525,85 @@ struct OnboardingWizardView: View {
         panel.showsHiddenFiles = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         model.addEnvFile(url)
+    }
+}
+
+// MARK: - Sign-in card (Models step)
+
+/// The chat's host sign-in card, for the wizard: explainer, progress, and —
+/// when the CLI's browser hand-off didn't reach the host — the sign-in URL
+/// and device code lifted from the hidden machine's screen. No terminal.
+private struct WizardSignInCard: View {
+    let signIn: OnboardingWizardModel.SignIn
+    let onCancel: () -> Void
+    let onDismiss: () -> Void
+    let onOpenURL: (String) -> Void
+
+    private var inFlight: Bool { !signIn.succeeded && signIn.error == nil }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: signIn.succeeded ? "checkmark.circle.fill" : "person.badge.key.fill")
+                .font(.system(size: 15))
+                .foregroundStyle(signIn.succeeded ? Color.green : Color.orange)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(signIn.succeeded
+                     ? String(format: NSLocalizedString("Signed in to %@", comment: "wizard sign-in"), signIn.providerName)
+                     : String(format: NSLocalizedString("Sign in to %@", comment: "wizard sign-in"), signIn.providerName))
+                    .font(.system(size: 12.5, weight: .semibold))
+                if inFlight {
+                    Text(String(format: NSLocalizedString(
+                        "Bromure signs you in on this Mac and keeps your %@ account out of every machine — agents only ever see a stand-in key.",
+                        comment: "wizard sign-in"), signIn.providerName))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let status = signIn.status {
+                        HStack(spacing: 7) {
+                            ProgressView().controlSize(.small)
+                            Text(status).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 2)
+                    }
+                    if let url = signIn.authURL {
+                        Button { onOpenURL(url) } label: {
+                            Label(NSLocalizedString("Open sign-in page", comment: "wizard sign-in"),
+                                  systemImage: "arrow.up.right.square.fill")
+                        }
+                        .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+                    }
+                    if let code = signIn.deviceCode {
+                        HStack(spacing: 6) {
+                            Text(NSLocalizedString("Your code:", comment: "wizard sign-in"))
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                            Text(code)
+                                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                } else if let error = signIn.error {
+                    Text(error)
+                        .font(.system(size: 11)).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(NSLocalizedString("Your account stays on this Mac; every machine can use it.", comment: "wizard sign-in"))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+            if inFlight {
+                Button(NSLocalizedString("Cancel", comment: "wizard sign-in"), action: onCancel)
+                    .controlSize(.small)
+            } else {
+                Button(NSLocalizedString("OK", comment: "wizard sign-in"), action: onDismiss)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill((signIn.succeeded ? Color.green : Color.orange).opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder((signIn.succeeded ? Color.green : Color.orange).opacity(0.3)))
     }
 }
 
