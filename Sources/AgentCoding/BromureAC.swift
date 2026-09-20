@@ -6048,7 +6048,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         w.showTaskBoard()
     }
 
+    /// The fat-client window that has the focus, if one does: a "create"
+    /// from the menu bar then means the machine it mirrors — the cluster or
+    /// registry is provisioned there, on that Mac.
+    private var keyRemoteWindow: RemoteHostWindow? { NSApp.keyWindow as? RemoteHostWindow }
+
     @objc func newKubeClusterAction(_ sender: Any?) {
+        if let rw = keyRemoteWindow { rw.showNewKubeCluster(); return }
         let w = ensureUnifiedWindow()
         NSApp.setActivationPolicy(.regular)
         w.makeKeyAndOrderFront(nil)
@@ -6056,6 +6062,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc func newRegistryAction(_ sender: Any?) {
+        if let rw = keyRemoteWindow { rw.showNewRegistry(); return }
         let w = ensureUnifiedWindow()
         NSApp.setActivationPolicy(.regular)
         w.makeKeyAndOrderFront(nil)
