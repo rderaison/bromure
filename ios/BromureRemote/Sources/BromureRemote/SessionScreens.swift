@@ -80,12 +80,15 @@ struct MobileSessionScreen: View {
     let sessionID: UUID
     /// After "Forget": the iPhone pops back home, the iPad clears its column.
     var onForget: () -> Void = {}
+    /// A session this one spawned (a worktree off its folder): show it.
+    var onOpen: (UUID) -> Void = { _ in }
 
     @State private var showLinux = false
     @State private var renaming = false
     @State private var draftTitle = ""
     @State private var confirmEnd = false
     @State private var confirmDelete = false
+    @State private var worktreeSheet = false
 
     private var model: SessionListModel { controller.listModel }
     private var session: AgentSession? { controller.sessionStore.session(sessionID) }
@@ -119,6 +122,19 @@ struct MobileSessionScreen: View {
             if let s = session {
                 WorkspaceScreen(controller: controller, profileID: s.profileID,
                                 initialWindow: s.windowIndex)
+            }
+        }
+        .sheet(isPresented: $worktreeSheet) {
+            if let s = session {
+                NewWorktreeSheet(parent: s) { name, tool, message in
+                    Task {
+                        if let id = await controller.startWorktreeSession(
+                            from: s.id, name: name, tool: tool, message: message) {
+                            onOpen(id)
+                        }
+                    }
+                }
+                .presentationDetents([.medium, .large])
             }
         }
         .alert("Rename session", isPresented: $renaming) {
@@ -208,6 +224,11 @@ struct MobileSessionScreen: View {
                 }
                 Button { draftTitle = s.title; renaming = true } label: {
                     Label("Rename…", systemImage: "pencil")
+                }
+                if SessionHome.hasFolder(s) {
+                    Button { worktreeSheet = true } label: {
+                        Label("New worktree…", systemImage: "arrow.triangle.branch")
+                    }
                 }
                 if s.isArchived {
                     Button { controller.sessionCommand(s.id, "unarchive") } label: {
@@ -410,6 +431,8 @@ struct MobileSessionsSection: View {
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
     /// A long-press Delete on a session whose agent is running asks first.
     @State private var pendingDelete: AgentSession?
+    /// A long-press "New worktree…": the session to branch off.
+    @State private var pendingWorktree: AgentSession?
 
     private var model: SessionListModel { controller.listModel }
 
@@ -484,6 +507,17 @@ struct MobileSessionsSection: View {
                 }
             }
         }
+        .sheet(item: $pendingWorktree) { s in
+            NewWorktreeSheet(parent: s) { name, tool, message in
+                Task {
+                    if let id = await controller.startWorktreeSession(
+                        from: s.id, name: name, tool: tool, message: message) {
+                        onSelect(id)
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+        }
         .confirmationDialog("Delete this session?", isPresented: Binding(
             get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
             titleVisibility: .visible) {
@@ -500,6 +534,11 @@ struct MobileSessionsSection: View {
     @ViewBuilder private func rowMenu(_ s: AgentSession) -> some View {
         let gone = SessionHome.isGone(s, in: model)
         if !gone {
+            if SessionHome.hasFolder(s) {
+                Button { pendingWorktree = s } label: {
+                    Label("New worktree…", systemImage: "arrow.triangle.branch")
+                }
+            }
             if s.isArchived {
                 Button { controller.sessionCommand(s.id, "unarchive") } label: {
                     Label("Unarchive", systemImage: "tray.and.arrow.up")
@@ -600,10 +639,14 @@ struct MobileSessionsSection: View {
 /// last), each row tagged with its `PadSelection`.
 struct PadSessionSections: View {
     let controller: RemoteHostController
+    /// A session a row spawned (a worktree off its folder): select it.
+    var onOpen: (UUID) -> Void = { _ in }
     @AppStorage("sessions.listExpanded") private var expanded = true
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
     /// A right-click / long-press Delete on a running agent asks first.
     @State private var pendingDelete: AgentSession?
+    /// A right-click / long-press "New worktree…": the session to branch off.
+    @State private var pendingWorktree: AgentSession?
 
     private var model: SessionListModel { controller.listModel }
 
@@ -636,6 +679,18 @@ struct PadSessionSections: View {
             Label("New Session…", systemImage: "plus")
                 .foregroundStyle(.tint)
                 .tag(PadSelection.newSession)
+                // The rows' "New worktree…" presents its sheet here too.
+                .sheet(item: $pendingWorktree) { s in
+                    NewWorktreeSheet(parent: s) { name, tool, message in
+                        Task {
+                            if let id = await controller.startWorktreeSession(
+                                from: s.id, name: name, tool: tool, message: message) {
+                                onOpen(id)
+                            }
+                        }
+                    }
+                    .presentationDetents([.medium, .large])
+                }
                 // The rows' Delete asks here when the agent is running (a
                 // row inside the list can present; the Section can't).
                 .confirmationDialog("Delete this session?", isPresented: Binding(
@@ -684,6 +739,11 @@ struct PadSessionSections: View {
     @ViewBuilder private func rowMenu(_ s: AgentSession) -> some View {
         let gone = SessionHome.isGone(s, in: model)
         if !gone {
+            if SessionHome.hasFolder(s) {
+                Button { pendingWorktree = s } label: {
+                    Label("New worktree…", systemImage: "arrow.triangle.branch")
+                }
+            }
             if s.isArchived {
                 Button { controller.sessionCommand(s.id, "unarchive") } label: {
                     Label("Unarchive", systemImage: "tray.and.arrow.up")

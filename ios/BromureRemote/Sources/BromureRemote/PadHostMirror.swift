@@ -82,7 +82,8 @@ struct PadHostMirror: View {
             }
 
             if controller.supportsSessions {
-                PadSessionSections(controller: controller)
+                PadSessionSections(controller: controller,
+                                   onOpen: { selection = .session($0) })
             }
 
             Section("Boards") {
@@ -250,7 +251,8 @@ struct PadHostMirror: View {
                 .id(id)
         case .session(let id):
             MobileSessionScreen(controller: controller, sessionID: id,
-                                onForget: { selection = .newSession })
+                                onForget: { selection = .newSession },
+                                onOpen: { selection = .session($0) })
                 .id(id)
         case .newSession:
             MobileNewSessionScreen(controller: controller,

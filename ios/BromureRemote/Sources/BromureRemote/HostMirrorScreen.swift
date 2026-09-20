@@ -131,7 +131,8 @@ struct HostMirrorScreen: View {
         }
         .navigationDestination(item: $openSessionID) { id in
             MobileSessionScreen(controller: controller, sessionID: id,
-                                onForget: { openSessionID = nil })
+                                onForget: { openSessionID = nil },
+                                onOpen: { openSessionID = $0 })
         }
         .sheet(isPresented: $newSession, onDismiss: {
             if let id = pendingSessionID { pendingSessionID = nil; openSessionID = id }
