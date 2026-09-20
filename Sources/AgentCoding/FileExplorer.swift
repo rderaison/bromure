@@ -657,8 +657,7 @@ final class FileExplorerModel {
     nonisolated static func dragProvider(for relPath: String, model: FileExplorerModel) -> NSItemProvider {
         let provider = NSItemProvider()
         let name = (relPath as NSString).lastPathComponent
-        let ext = (name as NSString).pathExtension
-        let type = UTType(filenameExtension: ext) ?? .data
+        let type = Self.dragType(forFileName: name)
         // The receiver names the file suggestedName + the type's preferred
         // extension — hand it an extension-less base.
         provider.suggestedName = type.preferredFilenameExtension != nil
@@ -674,6 +673,20 @@ final class FileExplorerModel {
         return provider
     }
 #endif
+
+    /// The type a dragged-out file travels as. The receiver names the copy
+    /// after the type's preferred extension, which for some types isn't the
+    /// file's own — ".yaml" is "yml" to the system, ".jpg" is "jpeg" — and
+    /// that renamed the copy. Such a file travels as plain data under its
+    /// full name instead; a file whose extension IS the preferred one keeps
+    /// its type, so images still drop into image wells.
+    nonisolated static func dragType(forFileName name: String) -> UTType {
+        let ext = (name as NSString).pathExtension
+        guard !ext.isEmpty, let declared = UTType(filenameExtension: ext),
+              declared.preferredFilenameExtension?.lowercased() == ext.lowercased()
+        else { return .data }
+        return declared
+    }
 
     static func nulSeparatedStrings(_ data: Data.SubSequence) -> [String] {
         data.split(separator: UInt8(0)).map { String(decoding: $0, as: UTF8.self) }
