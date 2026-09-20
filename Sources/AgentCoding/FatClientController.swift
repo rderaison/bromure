@@ -1618,15 +1618,35 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     let accent: Color
     private let controller: RemoteHostController
     private let workspaceID: Profile.ID
+    /// The tmux window this chat is FOR. The mirrored roster's active tab
+    /// is what the guest reports, a poll behind and shared with whoever
+    /// else drives the machine — reading it made two sessions on one
+    /// machine show the same transcript. nil: follow the active tab (a
+    /// plain workspace mount, no session on stage).
+    private let windowIndex: Int?
 
-    init(controller: RemoteHostController, workspaceID: Profile.ID, accent: Color) {
+    init(controller: RemoteHostController, workspaceID: Profile.ID, windowIndex: Int? = nil,
+         accent: Color) {
         self.controller = controller
         self.workspaceID = workspaceID
+        self.windowIndex = windowIndex
         self.accent = accent
     }
 
+    /// The bound window while the roster still lists it (gone = nothing to
+    /// read, not somebody else's tab), else the workspace's active tab.
     func activeTabIndex() -> Int? {
-        controller.tabsModel(for: workspaceID)?.activeTab?.index
+        guard let tabs = controller.tabsModel(for: workspaceID) else { return nil }
+        if let w = windowIndex {
+            return tabs.tabs.contains { $0.index == w } ? w : nil
+        }
+        return tabs.activeTab?.index
+    }
+
+    private var boundTab: TabsModel.Tab? {
+        guard let tabs = controller.tabsModel(for: workspaceID) else { return nil }
+        if let w = windowIndex { return tabs.tabs.first { $0.index == w } }
+        return tabs.activeTab
     }
 
     func execGuest(_ command: String, timeout: Int) async -> String? {
@@ -1637,9 +1657,7 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
         try? await controller.guestFileOp(workspaceID, op: op, timeout: 30)
     }
 
-    func isWorking() -> Bool {
-        controller.tabsModel(for: workspaceID)?.activeTab?.agentStatus == .working
-    }
+    func isWorking() -> Bool { boundTab?.agentStatus == .working }
 }
 
 struct RemoteToolbarBar: View {
@@ -4426,7 +4444,7 @@ final class RemoteHostWindow: NSWindow {
         let activeIsAgent = controller.tabsModel(for: id)?.activeTab
             .map { BromureIcons.agentKind(forLabel: $0.shownLabel) != nil } ?? false
             || sessionAgentWindows.contains("\(id.uuidString):\(idx)")
-        if (sessionViewMode ?? viewMode) == .beautified && activeIsAgent { mountBeautified(for: id); return }
+        if (sessionViewMode ?? viewMode) == .beautified && activeIsAgent { mountBeautified(for: id, window: idx); return }
         guard let profile = controller.profile(for: id) else {
             unmountTerminal(); return
         }
@@ -4538,8 +4556,12 @@ final class RemoteHostWindow: NSWindow {
     /// Idempotent while the same workspace + tab stays shown (the live poll keeps
     /// it current); a different workspace or tab rebuilds it so the transcript
     /// matches what's on screen.
-    private func mountBeautified(for id: Profile.ID) {
-        let tabIndex = controller.tabsModel(for: id)?.activeTab?.index
+    /// `idx` is the window the chat is for — the session's own tab, never the
+    /// roster's active one: that is the guest's word, a poll behind and shared
+    /// with whoever else drives the machine, and reading it showed two
+    /// sessions on one machine the same transcript.
+    private func mountBeautified(for id: Profile.ID, window idx: Int) {
+        let tabIndex: Int? = idx
         // Keep the live host only for the same workspace AND the same tab; a
         // different tab (or workspace) rebuilds so the transcript matches the
         // tab on screen instead of lagging a poll behind.
@@ -4549,7 +4571,8 @@ final class RemoteHostWindow: NSWindow {
         unmountBeautified()
         mountedTermView?.removeFromSuperview(); mountedTermView = nil
         let accent = controller.profile(for: id).map { Color(hex: $0.color.hexInUI) } ?? .accentColor
-        let provider = RemoteTranscriptProvider(controller: controller, workspaceID: id, accent: accent)
+        let provider = RemoteTranscriptProvider(controller: controller, workspaceID: id,
+                                                windowIndex: idx, accent: accent)
         let m = BeautifiedSessionModel(provider: provider)
         beautifiedModel = m
         beautifiedWorkspace = id
