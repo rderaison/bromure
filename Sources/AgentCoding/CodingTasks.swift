@@ -1862,6 +1862,10 @@ final class CodingTaskEngine {
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: afterSeconds * 1_000_000_000)
             guard let delegate = self?.delegate else { return }
+            // The run is finished: its session is put away with the tab,
+            // not left as Ended. Just before the kill — archiving ends the
+            // agent too, and the grace above is for its last words.
+            delegate.archiveFinishedSession(profileID: profileID, worktreeBranch: branch)
             let cmd = "for i in $(tmux list-windows -t bromure "
                 + "-F '#{window_index} #{@worktree}' "
                 + "| awk -v b='\(branch)' '$2==b {print $1}'); "

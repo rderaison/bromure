@@ -8754,6 +8754,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sendCommand("close-tab \(index)", in: pane)
     }
 
+    /// A run is over and its tab is on its way out — a coding task handed to
+    /// review, an automation run that finished with closeWhenDone, a
+    /// planning interview that filed its phases: the session that tab was
+    /// showing goes to the Archived fold by itself, readable as ever,
+    /// instead of lingering under Ended. Resolved off the live roster (or
+    /// the mirrored one, for a detached session), so it must run before
+    /// the tab is killed.
+    func archiveFinishedSession(profileID: Profile.ID, worktreeBranch: String) {
+        let tabs: [(index: Int, branch: String?)] =
+            pane(for: profileID)?.model.tabs.map { ($0.index, $0.worktreeBranch) }
+            ?? runningSessions[profileID]?.tabs.map { ($0.index, $0.worktreeBranch) }
+            ?? []
+        for tab in tabs where tab.branch == worktreeBranch {
+            guard let s = agentSessionStore.session(profileID: profileID, windowIndex: tab.index),
+                  !s.isArchived, !s.isDeleted else { continue }
+            BACDebug.log("sessions", "archiving finished “\(s.title)” (\(worktreeBranch))")
+            agentSessionStore.setArchived(s.id, true)
+        }
+    }
+
     // MARK: - Git worktrees
     //
     // All args are base64 (space-joined; base64 has no spaces) so paths and

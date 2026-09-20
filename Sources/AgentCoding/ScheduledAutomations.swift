@@ -1618,6 +1618,8 @@ final class ScheduledAutomationEngine {
             await delegate.pullAutomationTranscript(
                 profileID: profileID, branch: branch, runID: runID, tool: tool)
             guard closeWhenDone else { return }
+            // The run's session is put away with its tab, not left as Ended.
+            delegate.archiveFinishedSession(profileID: profileID, worktreeBranch: branch)
             _ = delegate.automationWorktreeCommand(
                 profileNameOrID: profileID.uuidString, action: "finish", args: [branch])
             if let cloneID {

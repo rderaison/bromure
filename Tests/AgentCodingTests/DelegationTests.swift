@@ -219,6 +219,8 @@ struct DelegationTests {
         #expect(!isError(closed), Comment(rawValue: text(closed)))
         #expect(f.store.delegation(d.id)?.status == .done)
         #expect(f.store.delegation(d.id)?.verdict == "accepted")
+        // The finished delegate's session is put away, not left as Ended.
+        #expect(f.sessions.session(d.childSessionID)?.isArchived == true)
         // Closed is closed: nothing more crosses.
         let late = parse(await f.server.handle(line: call("report", ["text": "one more thing"]), branch: "w7"))
         #expect(isError(late))
@@ -236,6 +238,7 @@ struct DelegationTests {
         let c = parse(await f.server.handle(line: call("cancel", ["delegation_id": d.id.uuidString, "reason": "changed plan"]), branch: "w3"))
         #expect(!isError(c), Comment(rawValue: text(c)))
         #expect(f.store.delegation(d.id)?.status == .cancelled)
+        #expect(f.sessions.session(d.childSessionID)?.isArchived == true)
     }
 
     @Test("a delegate that ends without delivering stays open; the parent hears once; deletion fails it")

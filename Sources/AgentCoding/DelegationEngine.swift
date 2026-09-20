@@ -248,7 +248,7 @@ final class DelegationEngine {
         store.mutate(d.id) { $0.messages.append(m); $0.status = .cancelled }
         audit(d.profileID, auditData(title: d.title, kind: .cancel, from: party, to: .child, text: why))
         wake(d.childSessionID)
-        endChild(d)
+        retireChild(d)
         BACDebug.log("delegation", "“\(d.title)” cancelled: \(why)")
     }
 
@@ -266,13 +266,16 @@ final class DelegationEngine {
         store.mutate(d.id) { $0.messages.append(m); $0.status = .done; $0.verdict = v }
         audit(d.profileID, auditData(title: d.title, kind: .note, from: party, to: .child, text: text))
         wake(d.childSessionID)
-        endChild(d)
+        retireChild(d)
         BACDebug.log("delegation", "“\(d.title)” closed: \(v)")
     }
 
-    private func endChild(_ d: Delegation) {
-        guard let child = sessions.session(d.childSessionID), !child.hasEnded else { return }
-        sessionEngine.close(d.childSessionID)
+    /// The delegation is over: the child's agent ends and its session is
+    /// put away (the Archived fold, readable as ever) rather than left
+    /// under Ended.
+    private func retireChild(_ d: Delegation) {
+        guard let child = sessions.session(d.childSessionID), !child.isDeleted, !child.isArchived else { return }
+        sessionEngine.archive(d.childSessionID)
     }
 
     // MARK: Inbox
@@ -436,6 +439,7 @@ final class DelegationEngine {
     private func fail(_ d: Delegation, _ why: String) {
         store.mutate(d.id) { $0.status = .failed; $0.failure = why }
         BACDebug.log("delegation", "“\(d.title)” failed: \(why)")
+        retireChild(d)
         Task { [weak self] in
             guard let self, let fresh = self.store.delegation(d.id) else { return }
             _ = try? await self.post(fresh.id, from: .host, kind: .note, text: "failed — \(why)")
