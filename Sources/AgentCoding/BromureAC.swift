@@ -3091,6 +3091,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     w.dismissInfrastructureSheet()
                     if which == "newcluster" { w.showNewKubeCluster() } else { w.showNewRegistry() }
                     window = w.attachedSheet ?? w
+                case let w where w.hasPrefix("rewind:"):
+                    // The Rewind-home sheet for a workspace ("rewind:<name or id>").
+                    guard let profile = self.profileByNameOrID(String(w.dropFirst(7)))
+                    else { return ["error": "unknown workspace"] }
+                    let win = self.ensureUnifiedWindow()
+                    win.showRewindHome(profile.id)
+                    window = win.attachedSheet ?? win
                 default:       window = self.unifiedWindow
                 }
                 return self.debugRenderWindow(window, to: path)
@@ -6849,6 +6856,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.alertStyle = .informational
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
         alert.runModal()
+    }
+
+    /// A workspace's home rollback points, newest first — the sidebar's
+    /// Rewind sheet.
+    func homeCheckpoints(for id: Profile.ID) -> [HomeCheckpoint] {
+        guard let p = profiles.first(where: { $0.id == id }) else { return [] }
+        return store.listHomeCheckpoints(for: p)
+            .map { HomeCheckpoint(id: $0.id, createdAt: $0.createdAt, allocatedBytes: $0.allocatedBytes) }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    /// Roll a workspace's home back to one of its checkpoints, the home as
+    /// it is now checkpointed first. nil when done, else why not.
+    func rewindHome(_ id: Profile.ID, to checkpointID: String) -> String? {
+        guard let p = profiles.first(where: { $0.id == id }) else {
+            return NSLocalizedString("Workspace not found.", comment: "rewind home")
+        }
+        guard p.homeModel == .ext4 else {
+            return NSLocalizedString("This machine keeps its home on the Mac, not in an image — nothing to rewind.", comment: "rewind home")
+        }
+        guard runningSessions[p.id] == nil else {
+            return NSLocalizedString("Shut the machine down first — its home can't be swapped while it's in use.", comment: "rewind home")
+        }
+        do {
+            _ = try store.snapshotHomeImage(for: p, at: Date())
+            try store.revertHomeImage(for: p, to: checkpointID)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     /// Editor "Restore home…" for an ext4-home workspace: pick one of the

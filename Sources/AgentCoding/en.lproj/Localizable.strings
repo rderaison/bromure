@@ -2280,3 +2280,17 @@
 "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh." = "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh.";
 "Couldn't start the VM: %@" = "Couldn't start the VM: %@";
 "try again." = "try again.";
+
+/* Rail sessions + Rewind home */
+"New session (⌘N)" = "New session (⌘N)";
+"Rewind home…" = "Rewind home…";
+"Rewind “%@”’s home" = "Rewind “%@”’s home";
+"Each point is the home folder as it was when that boot started. The next start boots from the one you pick; the home as it is now is kept as a new point, so this can be undone here." = "Each point is the home folder as it was when that boot started. The next start boots from the one you pick; the home as it is now is kept as a new point, so this can be undone here.";
+"Done — the next start of “%@” boots from its home of %@." = "Done — the next start of “%@” boots from its home of %@.";
+"The machine is running — its home can't be swapped while it's in use. Shut it down first." = "The machine is running — its home can't be swapped while it's in use. Shut it down first.";
+"Rewind" = "Rewind";
+"No rollback points yet — one is taken each time this machine starts." = "No rollback points yet — one is taken each time this machine starts.";
+"Workspace not found." = "Workspace not found.";
+"This machine keeps its home on the Mac, not in an image — nothing to rewind." = "This machine keeps its home on the Mac, not in an image — nothing to rewind.";
+"Shut the machine down first — its home can't be swapped while it's in use." = "Shut the machine down first — its home can't be swapped while it's in use.";
+"The server didn't answer." = "The server didn't answer.";

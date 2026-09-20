@@ -2245,3 +2245,17 @@
 "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh." = "Der angehaltene Zustand des Workspace konnte nicht wiederhergestellt werden — starten Sie ihn selbst, um ihn neu zu booten.";
 "Couldn't start the VM: %@" = "Die VM konnte nicht gestartet werden: %@";
 "try again." = "versuchen Sie es erneut.";
+
+/* Rail sessions + Rewind home */
+"New session (⌘N)" = "Neue Sitzung (⌘N)";
+"Rewind home…" = "Home zurückdrehen…";
+"Rewind “%@”’s home" = "Home von „%@“ zurückdrehen";
+"Each point is the home folder as it was when that boot started. The next start boots from the one you pick; the home as it is now is kept as a new point, so this can be undone here." = "Jeder Punkt ist der Home-Ordner, wie er beim jeweiligen Start war. Der nächste Start bootet von dem gewählten; das jetzige Home bleibt als neuer Punkt erhalten, sodass sich das hier wieder rückgängig machen lässt.";
+"Done — the next start of “%@” boots from its home of %@." = "Fertig — der nächste Start von „%@“ bootet vom Home vom %@.";
+"The machine is running — its home can't be swapped while it's in use. Shut it down first." = "Die Maschine läuft — ihr Home kann nicht ausgetauscht werden, solange es in Gebrauch ist. Fahren Sie sie zuerst herunter.";
+"Rewind" = "Zurückdrehen";
+"No rollback points yet — one is taken each time this machine starts." = "Noch keine Rücksetzpunkte — bei jedem Start dieser Maschine wird einer angelegt.";
+"Workspace not found." = "Workspace nicht gefunden.";
+"This machine keeps its home on the Mac, not in an image — nothing to rewind." = "Diese Maschine hält ihr Home auf dem Mac, nicht in einem Image — nichts zum Zurückdrehen.";
+"Shut the machine down first — its home can't be swapped while it's in use." = "Fahren Sie die Maschine zuerst herunter — ihr Home kann nicht ausgetauscht werden, solange es in Gebrauch ist.";
+"The server didn't answer." = "Der Server hat nicht geantwortet.";

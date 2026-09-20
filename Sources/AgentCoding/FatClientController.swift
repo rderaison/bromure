@@ -1482,6 +1482,38 @@ final class RemoteHostController {
         return resp.json["kubeconfig"] as? String
     }
 
+    /// GET /vms/{id}/checkpoints — the workspace's home rollback points on
+    /// the server, newest first (the disk's own are left out).
+    func listHomeCheckpoints(_ id: Profile.ID) async -> [HomeCheckpoint] {
+        let host = self.host
+        let path = "/vms/\(ControlClient.encodeSegment(id.uuidString))/checkpoints"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("GET", path)
+        }.value
+        guard let resp, resp.status == 200,
+              let list = resp.json["checkpoints"] as? [[String: Any]] else { return [] }
+        return list.compactMap { d -> HomeCheckpoint? in
+            guard (d["target"] as? String) == "home", let cpID = d["id"] as? String else { return nil }
+            let at = (d["createdAt"] as? Double) ?? (d["createdAt"] as? Int).map(Double.init) ?? 0
+            let bytes = (d["allocatedBytes"] as? Int64) ?? Int64((d["allocatedBytes"] as? Int) ?? 0)
+            return HomeCheckpoint(id: cpID, createdAt: Date(timeIntervalSince1970: at), allocatedBytes: bytes)
+        }.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    /// POST /vms/{id}/revert {checkpoint, target: home} — the server rolls
+    /// the home back (checkpointing the current one first). nil when done.
+    func rewindHome(_ id: Profile.ID, to checkpoint: String) async -> String? {
+        let host = self.host
+        let path = "/vms/\(ControlClient.encodeSegment(id.uuidString))/revert"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request(
+                "POST", path, body: ["checkpoint": checkpoint, "target": "home"])
+        }.value
+        guard let resp else { return NSLocalizedString("The server didn't answer.", comment: "rewind home") }
+        if resp.status == 200 { pollOnce(); return nil }
+        return (resp.json["error"] as? String) ?? "HTTP \(resp.status)"
+    }
+
     /// Run a shell command in the remote workspace's guest, over the tunnel —
     /// satisfies `GuestExecProvider` for the remote file-explorer pane.
     func guestExec(_ id: Profile.ID, command: String, timeout: Int) async throws -> String {
@@ -4308,7 +4340,8 @@ final class RemoteHostWindow: NSWindow {
             onKubeAction: { [weak self] id, action in self?.performKubeAction(id, action) },
             onSelectRegistry: { [weak self] id in self?.showRegistryDashboard(id) },
             onNewRegistry: { [weak self] in self?.showNewRegistry() },
-            onRegistryAction: { [weak self] id, action in self?.performRegistryAction(id, action) })
+            onRegistryAction: { [weak self] id, action in self?.performRegistryAction(id, action) },
+            onRewindHome: { [weak self] id in self?.showRewindHome(id) })
     }
 
     // MARK: Stage
@@ -4576,6 +4609,40 @@ final class RemoteHostWindow: NSWindow {
         endSheet(win)
         win.orderOut(nil)
         kubeSheetWindow = nil
+    }
+
+    // MARK: Rewind home (over the server's checkpoint API)
+
+    private var rewindSheetWindow: NSWindow?
+
+    func showRewindHome(_ id: Profile.ID) {
+        guard rewindSheetWindow == nil, let profile = controller.profile(for: id) else { return }
+        let c = controller
+        let sheet = HomeRewindSheet(
+            name: profile.name,
+            isRunning: {
+                switch c.runState(for: id) {
+                case .running, .booting: return true
+                default: return false
+                }
+            },
+            list: { await c.listHomeCheckpoints(id) },
+            rewind: { cp in await c.rewindHome(id, to: cp) },
+            shutdown: { c.shutdownWorkspace(id) },
+            onClose: { [weak self] in self?.dismissRewindSheet() })
+        let hc = NSHostingController(rootView: sheet)
+        let win = NSWindow(contentViewController: hc)
+        win.styleMask = [.titled]
+        win.isReleasedWhenClosed = false
+        rewindSheetWindow = win
+        beginSheet(win)
+    }
+
+    private func dismissRewindSheet() {
+        guard let win = rewindSheetWindow else { return }
+        endSheet(win)
+        win.orderOut(nil)
+        rewindSheetWindow = nil
     }
 
     // MARK: Container registry dashboard (mirrors the local overlay)

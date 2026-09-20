@@ -2245,3 +2245,17 @@
 "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh." = "无法恢复工作区的挂起状态 — 请自行启动它以重新引导。";
 "Couldn't start the VM: %@" = "无法启动虚拟机：%@";
 "try again." = "请重试。";
+
+/* Rail sessions + Rewind home */
+"New session (⌘N)" = "新建会话 (⌘N)";
+"Rewind home…" = "回退主目录…";
+"Rewind “%@”’s home" = "回退“%@”的主目录";
+"Each point is the home folder as it was when that boot started. The next start boots from the one you pick; the home as it is now is kept as a new point, so this can be undone here." = "每个点都是那次启动开始时的主目录。下次启动会从你选的点开始；当前的主目录会保留为一个新的点，因此可以在此撤销。";
+"Done — the next start of “%@” boots from its home of %@." = "完成 — “%@”下次启动将从 %@ 的主目录开始。";
+"The machine is running — its home can't be swapped while it's in use. Shut it down first." = "机器正在运行 — 使用中的主目录无法替换。请先关机。";
+"Rewind" = "回退";
+"No rollback points yet — one is taken each time this machine starts." = "还没有回退点 — 每次这台机器启动时都会创建一个。";
+"Workspace not found." = "未找到工作区。";
+"This machine keeps its home on the Mac, not in an image — nothing to rewind." = "这台机器的主目录保存在 Mac 上而不是镜像中 — 没有可回退的内容。";
+"Shut the machine down first — its home can't be swapped while it's in use." = "请先关闭机器 — 使用中的主目录无法替换。";
+"The server didn't answer." = "服务器没有响应。";

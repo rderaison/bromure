@@ -447,3 +447,14 @@ extension ProfileColor {
         }
     }
 }
+
+// MARK: - Home rollback points
+
+/// One rollback point of a workspace's home image, as the Rewind sheet
+/// lists it: the boot it was taken at, and the space its copy takes up.
+/// Shared with the fat client, which reads them off the server.
+struct HomeCheckpoint: Identifiable, Equatable, Sendable {
+    let id: String
+    let createdAt: Date
+    let allocatedBytes: Int64
+}

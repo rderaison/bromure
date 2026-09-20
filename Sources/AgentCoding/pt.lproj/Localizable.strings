@@ -2245,3 +2245,17 @@
 "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh." = "O estado suspenso do espaço de trabalho não pôde ser restaurado — inicie-o você mesmo para iniciá-lo do zero.";
 "Couldn't start the VM: %@" = "Não foi possível iniciar a VM: %@";
 "try again." = "tente de novo.";
+
+/* Rail sessions + Rewind home */
+"New session (⌘N)" = "Nova sessão (⌘N)";
+"Rewind home…" = "Rebobinar a pasta pessoal…";
+"Rewind “%@”’s home" = "Rebobinar a pasta pessoal de “%@”";
+"Each point is the home folder as it was when that boot started. The next start boots from the one you pick; the home as it is now is kept as a new point, so this can be undone here." = "Cada ponto é a pasta pessoal como estava quando aquela inicialização começou. A próxima inicialização parte do ponto escolhido; a pasta pessoal atual fica guardada como um novo ponto, então isso pode ser desfeito aqui.";
+"Done — the next start of “%@” boots from its home of %@." = "Pronto — a próxima inicialização de “%@” parte da pasta pessoal de %@.";
+"The machine is running — its home can't be swapped while it's in use. Shut it down first." = "A máquina está rodando — a pasta pessoal não pode ser trocada enquanto está em uso. Desligue-a primeiro.";
+"Rewind" = "Rebobinar";
+"No rollback points yet — one is taken each time this machine starts." = "Ainda não há pontos de retorno — um é criado sempre que esta máquina inicia.";
+"Workspace not found." = "Espaço de trabalho não encontrado.";
+"This machine keeps its home on the Mac, not in an image — nothing to rewind." = "Esta máquina mantém a pasta pessoal no Mac, não em uma imagem — nada a rebobinar.";
+"Shut the machine down first — its home can't be swapped while it's in use." = "Desligue a máquina primeiro — a pasta pessoal não pode ser trocada enquanto está em uso.";
+"The server didn't answer." = "O servidor não respondeu.";

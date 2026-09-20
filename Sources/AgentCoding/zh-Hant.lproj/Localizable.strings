@@ -2248,3 +2248,17 @@
 "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh." = "無法恢復工作區的暫停狀態 — 請自行啟動它以重新開機。";
 "Couldn't start the VM: %@" = "無法啟動虛擬機器：%@";
 "try again." = "請重試。";
+
+/* Rail sessions + Rewind home */
+"New session (⌘N)" = "新增工作階段 (⌘N)";
+"Rewind home…" = "回復個人檔案夾…";
+"Rewind “%@”’s home" = "回復「%@」的個人檔案夾";
+"Each point is the home folder as it was when that boot started. The next start boots from the one you pick; the home as it is now is kept as a new point, so this can be undone here." = "每個點都是那次啟動開始時的個人檔案夾。下次啟動會從你選的點開始；目前的個人檔案夾會保留為一個新的點，因此可以在此復原。";
+"Done — the next start of “%@” boots from its home of %@." = "完成 — 「%@」下次啟動將從 %@ 的個人檔案夾開始。";
+"The machine is running — its home can't be swapped while it's in use. Shut it down first." = "機器正在執行 — 使用中的個人檔案夾無法替換。請先關機。";
+"Rewind" = "回復";
+"No rollback points yet — one is taken each time this machine starts." = "還沒有回復點 — 每次這台機器啟動時都會建立一個。";
+"Workspace not found." = "找不到工作區。";
+"This machine keeps its home on the Mac, not in an image — nothing to rewind." = "這台機器的個人檔案夾保存在 Mac 上而不是映像檔中 — 沒有可回復的內容。";
+"Shut the machine down first — its home can't be swapped while it's in use." = "請先關閉機器 — 使用中的個人檔案夾無法替換。";
+"The server didn't answer." = "伺服器沒有回應。";

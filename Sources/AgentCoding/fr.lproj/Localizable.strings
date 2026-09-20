@@ -2245,3 +2245,17 @@
 "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh." = "L’état suspendu de l’espace de travail n’a pas pu être restauré — démarrez-le vous-même pour le relancer à neuf.";
 "Couldn't start the VM: %@" = "Impossible de démarrer la VM : %@";
 "try again." = "réessayez.";
+
+/* Rail sessions + Rewind home */
+"New session (⌘N)" = "Nouvelle session (⌘N)";
+"Rewind home…" = "Rembobiner le dossier personnel…";
+"Rewind “%@”’s home" = "Rembobiner le dossier personnel de « %@ »";
+"Each point is the home folder as it was when that boot started. The next start boots from the one you pick; the home as it is now is kept as a new point, so this can be undone here." = "Chaque point est le dossier personnel tel qu’il était au début de ce démarrage. Le prochain démarrage part de celui que vous choisissez ; le dossier personnel actuel est conservé comme nouveau point, ce qui permet d’annuler ici.";
+"Done — the next start of “%@” boots from its home of %@." = "Terminé — le prochain démarrage de « %@ » partira de son dossier personnel du %@.";
+"The machine is running — its home can't be swapped while it's in use. Shut it down first." = "La machine tourne — son dossier personnel ne peut pas être remplacé tant qu’il est utilisé. Éteignez-la d’abord.";
+"Rewind" = "Rembobiner";
+"No rollback points yet — one is taken each time this machine starts." = "Aucun point de retour pour l’instant — un est pris à chaque démarrage de cette machine.";
+"Workspace not found." = "Espace de travail introuvable.";
+"This machine keeps its home on the Mac, not in an image — nothing to rewind." = "Cette machine garde son dossier personnel sur le Mac, pas dans une image — rien à rembobiner.";
+"Shut the machine down first — its home can't be swapped while it's in use." = "Éteignez d’abord la machine — son dossier personnel ne peut pas être remplacé tant qu’il est utilisé.";
+"The server didn't answer." = "Le serveur n’a pas répondu.";

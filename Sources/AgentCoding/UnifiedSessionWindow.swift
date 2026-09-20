@@ -406,7 +406,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onKubeAction: { [weak self] id, action in self?.performKubeAction(id, action) },
             onSelectRegistry: { [weak self] id in self?.showRegistryDashboard(id) },
             onNewRegistry: { [weak self] in self?.showNewRegistry() },
-            onRegistryAction: { [weak self] id, action in self?.performRegistryAction(id, action) })
+            onRegistryAction: { [weak self] id, action in self?.performRegistryAction(id, action) },
+            onRewindHome: { [weak self] id in self?.showRewindHome(id) })
         // NonMovable so a drag inside the sidebar — notably dragging a tab
         // row onto the Grid — selects/drags the row instead of moving the
         // whole window (the window is isMovableByWindowBackground).
@@ -1930,6 +1931,41 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         kubeSheetWindow = nil
     }
 
+    // MARK: Rewind home
+
+    private var rewindSheetWindow: NSWindow?
+
+    /// "Rewind home…" on a machine: the sheet over its home's rollback
+    /// points. Lists and rewinds through the app delegate's store.
+    func showRewindHome(_ id: Profile.ID) {
+        guard let delegate = acDelegate, rewindSheetWindow == nil,
+              let profile = delegate.profiles.first(where: { $0.id == id }) else { return }
+        let sheet = HomeRewindSheet(
+            name: profile.name,
+            isRunning: { [weak self] in
+                guard let self else { return false }
+                let state = self.listModel.profileRows.first { $0.id == id }?.state
+                return state == .running || state == .booting
+            },
+            list: { [weak delegate] in delegate?.homeCheckpoints(for: id) ?? [] },
+            rewind: { [weak delegate] cp in delegate?.rewindHome(id, to: cp) },
+            shutdown: { [weak delegate] in delegate?.shutdownProfile(id) },
+            onClose: { [weak self] in self?.dismissRewindSheet() })
+        let hc = NSHostingController(rootView: sheet)
+        let win = NSWindow(contentViewController: hc)
+        win.styleMask = [.titled]
+        win.isReleasedWhenClosed = false
+        rewindSheetWindow = win
+        beginSheet(win)
+    }
+
+    private func dismissRewindSheet() {
+        guard let win = rewindSheetWindow else { return }
+        endSheet(win)
+        win.orderOut(nil)
+        rewindSheetWindow = nil
+    }
+
     // MARK: Container registry dashboard overlay
 
     func showRegistryDashboard(_ id: UUID) {
@@ -2696,13 +2732,18 @@ struct SessionSidebar: View {
     var onSelectRegistry: (UUID) -> Void = { _ in }
     var onNewRegistry: () -> Void = {}
     var onRegistryAction: (UUID, KubeRowAction) -> Void = { _, _ in }
+    /// A machine's "Rewind home…": the window puts up the sheet.
+    var onRewindHome: (Profile.ID) -> Void = { _ in }
     @State private var sessionFilter = ""
 
     var body: some View {
         if model.sidebarCollapsed {
             CompactRail(model: model,
                         onSelectGrid: onSelectGrid,
-                        onSelectTab: onSelectTab)
+                        onSelectTab: onSelectTab,
+                        sessionStore: model.sessionsFirst ? sessionStore : nil,
+                        onSelectSession: onSelectSession,
+                        onNewSession: onNewSession)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .background(Color(nsColor: .windowBackgroundColor))
         } else {
@@ -2965,7 +3006,8 @@ struct SessionSidebar: View {
                 onDuplicate: onDuplicate,
                 onReset: onReset,
                 onDelete: onDelete,
-                onAddAllToGrid: onAddAllToGrid)
+                onAddAllToGrid: onAddAllToGrid,
+                onRewindHome: onRewindHome)
         }
     }
 }
@@ -3603,6 +3645,7 @@ private struct VMSection: View {
     let onReset: (Profile.ID) -> Void
     let onDelete: (Profile.ID) -> Void
     let onAddAllToGrid: (Profile.ID) -> Void
+    let onRewindHome: (Profile.ID) -> Void
 
     @State private var hovering = false
 
@@ -3656,7 +3699,7 @@ private struct VMSection: View {
                             onStart: onStart, onShutdown: onShutdown, onSuspend: onSuspend, onRestart: onRestart,
                             onEdit: onEdit, onDuplicate: onDuplicate,
                             onReset: onReset, onDelete: onDelete,
-                            onAddAllToGrid: onAddAllToGrid)
+                            onAddAllToGrid: onAddAllToGrid, onRewindHome: onRewindHome)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -3757,6 +3800,7 @@ private struct ControlMenu: View {
     let onReset: (Profile.ID) -> Void
     let onDelete: (Profile.ID) -> Void
     let onAddAllToGrid: (Profile.ID) -> Void
+    let onRewindHome: (Profile.ID) -> Void
 
     var body: some View {
         Menu {
@@ -3777,6 +3821,7 @@ private struct ControlMenu: View {
             Divider()
             Button("Edit…") { onEdit(row.id) }
             Button("Duplicate") { onDuplicate(row.id) }
+            Button(NSLocalizedString("Rewind home…", comment: "machine menu")) { onRewindHome(row.id) }
             Divider()
             Button("Reset disk", role: .destructive) { onReset(row.id) }
             Button("Delete workspace", role: .destructive) { onDelete(row.id) }

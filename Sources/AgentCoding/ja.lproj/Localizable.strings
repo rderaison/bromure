@@ -2245,3 +2245,17 @@
 "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh." = "ワークスペースの一時停止状態を復元できませんでした — 新規に起動するにはご自身で起動してください。";
 "Couldn't start the VM: %@" = "VM を起動できませんでした：%@";
 "try again." = "もう一度お試しください。";
+
+/* Rail sessions + Rewind home */
+"New session (⌘N)" = "新規セッション (⌘N)";
+"Rewind home…" = "ホームを巻き戻す…";
+"Rewind “%@”’s home" = "「%@」のホームを巻き戻す";
+"Each point is the home folder as it was when that boot started. The next start boots from the one you pick; the home as it is now is kept as a new point, so this can be undone here." = "各ポイントは、その起動時点のホームフォルダです。次の起動は選んだポイントから始まります。今のホームは新しいポイントとして残るので、ここで元に戻せます。";
+"Done — the next start of “%@” boots from its home of %@." = "完了 — 「%@」の次の起動は %@ 時点のホームから始まります。";
+"The machine is running — its home can't be swapped while it's in use. Shut it down first." = "マシンは実行中です — 使用中のホームは入れ替えられません。先にシャットダウンしてください。";
+"Rewind" = "巻き戻す";
+"No rollback points yet — one is taken each time this machine starts." = "巻き戻しポイントはまだありません — このマシンが起動するたびに 1 つ作られます。";
+"Workspace not found." = "ワークスペースが見つかりません。";
+"This machine keeps its home on the Mac, not in an image — nothing to rewind." = "このマシンはホームをイメージではなく Mac 上に置いています — 巻き戻すものがありません。";
+"Shut the machine down first — its home can't be swapped while it's in use." = "先にマシンをシャットダウンしてください — 使用中のホームは入れ替えられません。";
+"The server didn't answer." = "サーバが応答しませんでした。";
