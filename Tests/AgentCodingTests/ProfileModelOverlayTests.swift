@@ -138,6 +138,30 @@ struct ProfileModelOverlayTests {
         #expect(after.claudeSubscriptionBogusKey != nil)
     }
 
+    /// The new-session screen's "Ready" label must follow the global Models
+    /// settings, not only the workspace's saved tool list: a Claude-only
+    /// workspace still starts omp on the global z.ai key and Codex on a
+    /// host-side ChatGPT login.
+    @Test("Agents are ready when the global settings can credential them")
+    func readyFollowsGlobalSettings() {
+        var s = ModelSettings()
+        s.providers = [ProviderCredential(provider: .zai, apiKey: "zai-global")]
+        s.localServer = LocalServer(baseURL: "http://box:8000/v1")
+        s.agentTiers[.kimi] = [.medium: ModelRef(source: .localServer, modelID: "qwen")]
+
+        var p = Profile(name: "t", tool: .claude, authMode: .token, apiKey: "own")
+        p.ompProvider = .zai
+        let ready = p.agentsReadyToStart(s, subscribed: [.openai])
+        #expect(ready.contains(.claude))   // the workspace's own tool
+        #expect(ready.contains(.omp))      // global z.ai key
+        #expect(ready.contains(.codex))    // host-side ChatGPT login
+        #expect(ready.contains(.kimi))     // local tier
+        #expect(!ready.contains(.grok))    // nothing for xAI anywhere
+
+        // Nothing global, nothing signed in: only the saved tool list counts.
+        #expect(p.agentsReadyToStart(ModelSettings()) == [.claude])
+    }
+
     /// A local model can take minutes to emit its first token; omp's default
     /// first-event timeout would abort the stream. Local omp must export a
     /// 30-minute PI_STREAM_FIRST_EVENT_TIMEOUT_MS alongside its dummy key.

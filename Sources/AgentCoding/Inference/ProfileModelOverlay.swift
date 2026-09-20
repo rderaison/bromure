@@ -117,6 +117,30 @@ public extension Profile {
         return p
     }
 
+    /// The agents that would start with credentials in hand — what the
+    /// new-session screen labels "Ready". Same resolution as the launch
+    /// overlay (a local tier for the agent, or a registered/signed-in cloud
+    /// provider), plus any agent the workspace itself configured. Reading only
+    /// the saved tool list is wrong now that models are global: a workspace
+    /// that names Claude Code alone still runs omp on the global z.ai key.
+    func agentsReadyToStart(_ settings: ModelSettings,
+                            subscribed: Set<ModelProvider> = []) -> Set<Tool> {
+        var ready = Set(allToolSpecs.map(\.tool))
+        for tool in Tool.allCases where !ready.contains(tool) {
+            let agent = ModelAgent.from(tool)
+            let ref = settings.ref(for: agent, tier: .medium)
+                ?? settings.ref(for: agent, tier: .large)
+                ?? settings.ref(for: agent, tier: .small)
+            if let ref, ref.isLocal {
+                ready.insert(tool)
+            } else if Self.cloudAuth(tool: tool, ompProvider: ompProvider, ompBaseURL: ompBaseURL,
+                                     settings: settings, subscribed: subscribed) != nil {
+                ready.insert(tool)
+            }
+        }
+        return ready
+    }
+
     /// The auth to apply to one cloud agent from the global credential of the
     /// provider it speaks to (omp → its configured provider; everyone else →
     /// their native provider). nil = that provider isn't registered → leave the

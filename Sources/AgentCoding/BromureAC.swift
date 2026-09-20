@@ -7957,6 +7957,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             eventData: data)
     }
 
+    /// Record which base image a freshly cloned system disk came from, on the
+    /// STORED record — never on the launch-time copy. By the time the disk is
+    /// cloned, `launch()`/`relaunchVM()` hold a profile that
+    /// `overlaidWithGlobalModels` has rewritten (every agent appended, auth
+    /// modes and routing recomputed from the global Models settings); saving
+    /// that copy persisted the projection into the workspace, so a first boot
+    /// silently turned "Claude Code only" into "every agent, Ready".
+    func stampBaseImageVersionAtClone(_ version: String, profileID: UUID) {
+        guard var p = store.loadAll().first(where: { $0.id == profileID }) else { return }
+        p.baseImageVersionAtClone = version
+        try? store.save(p)
+        profiles = store.loadAll()
+        refreshSidebar()
+    }
+
     private func resetProfile(_ profile: Profile) {
         if runningSessions[profile.id] != nil {
             showRunningRefusal(profile: profile, what: "system disk")
@@ -8699,11 +8714,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.planEventBridges[pid] = planBridge
             }
             if sessionDisk.didCloneOnLastEnsure, let current = currentBaseVersion {
-                var p = profile
-                p.baseImageVersionAtClone = current
-                try? self.store.save(p)
-                self.profiles = self.store.loadAll()
-                self.refreshSidebar()
+                self.stampBaseImageVersionAtClone(current, profileID: profile.id)
             }
             self.wireSandboxCallbacks(sandbox)
             self.registerSession(sandbox, profile: profile)
@@ -11766,11 +11777,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // stale version and asks the user to reset a disk that was just
             // cloned from that very base.
             if sessionDisk.didCloneOnLastEnsure, let current = self.readCurrentBaseVersion() {
-                var p = profile
-                p.baseImageVersionAtClone = current
-                try? self.store.save(p)
-                self.profiles = self.store.loadAll()
-                self.refreshSidebar()
+                self.stampBaseImageVersionAtClone(current, profileID: profile.id)
             }
             if let engine = self.mitmEngine, let dev = sandbox.socketDevice {
                 engine.register(socketDevice: dev, profileID: profile.id)

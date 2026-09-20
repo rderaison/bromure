@@ -1523,6 +1523,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             listFolders: { [weak delegate] pid, path in
                 await delegate?.listGuestFolders(profileID: pid, path: path)
+            },
+            readyTools: { [weak delegate] p in
+                p.agentsReadyToStart(ModelSettingsStore.shared.effective(for: p),
+                                     subscribed: delegate?.subscribedProviders(for: p) ?? [])
             })
         showSessionOverlay(view)
         makeKeyAndOrderFront(nil)

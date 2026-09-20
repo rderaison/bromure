@@ -582,6 +582,11 @@ struct NewSessionView: View {
     /// right now. Absent on a host without the verb (a mirror of an older
     /// server): the browser stays hidden and the field is typed.
     let listFolders: ((UUID, String) async -> [String]?)?
+    /// The agents a machine can start with credentials in hand, resolved
+    /// from the global Models settings (or the workspace's override) plus the
+    /// machine's own tools. nil (a mirror, which can't see the host's model
+    /// settings) falls back to the machine's saved tool list.
+    let readyTools: ((Profile) -> Set<Profile.Tool>)?
 
     private enum Where: String, CaseIterable, Identifiable {
         case home, folder, repository
@@ -633,7 +638,8 @@ struct NewSessionView: View {
          onStart: @escaping (AgentSessionRequest) -> Void,
          onCancel: @escaping () -> Void,
          onNewMachine: @escaping () -> Void = {},
-         listFolders: ((UUID, String) async -> [String]?)? = nil) {
+         listFolders: ((UUID, String) async -> [String]?)? = nil,
+         readyTools: ((Profile) -> Set<Profile.Tool>)? = nil) {
         self.profiles = profiles
         self.runningIDs = runningIDs
         self.recentFolders = recentFolders
@@ -641,6 +647,7 @@ struct NewSessionView: View {
         self.onCancel = onCancel
         self.onNewMachine = onNewMachine
         self.listFolders = listFolders
+        self.readyTools = readyTools
         let remembered = UserDefaults.standard.string(forKey: Self.lastProfileKey)
             .flatMap { UUID(uuidString: $0) }
         let pid = remembered.flatMap { id in profiles.first { $0.id == id }?.id }
@@ -662,7 +669,11 @@ struct NewSessionView: View {
     /// startable regardless: the images ship all of them, and one without
     /// credentials shows its sign-in on first start, which the chat turns
     /// into a sign-in card the host completes (`beginProxySignIn`).
-    private var configuredTools: [Profile.Tool] { selectedProfile?.allToolSpecs.map(\.tool) ?? [] }
+    private var configuredTools: [Profile.Tool] {
+        guard let p = selectedProfile else { return [] }
+        if let readyTools { return Array(readyTools(p)) }
+        return p.allToolSpecs.map(\.tool)
+    }
 
     private var effectiveFolder: String {
         switch place {
