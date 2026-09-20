@@ -2110,7 +2110,6 @@
 "Twenty addresses at the top of the VM subnet are reserved for MetalLB when the cluster is set up. Workspaces reach them directly; the Mac does through the VM network interface." = "Twenty addresses at the top of the VM subnet are reserved for MetalLB when the cluster is set up. Workspaces reach them directly; the Mac does through the VM network interface.";
 "k3s's bundled ingress. With the LAN load balancer it publishes ports 80 and 443 on this Mac." = "k3s's bundled ingress. With the LAN load balancer it publishes ports 80 and 443 on this Mac.";
 "AWS emulator (floci)" = "AWS emulator (floci)";
-"A local AWS inside the cluster: S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge and 100+ more services, with data kept on the cluster's storage. Published as a LoadBalancer Service on port 4566; the dashboard and the agents' infrastructure MCP hand out the endpoint and the test credentials (AWS_ENDPOINT_URL, any access key). Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers, such as Lambda and RDS, use the node's Docker and are best effort." = "A local AWS inside the cluster: S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge and 100+ more services, with data kept on the cluster's storage. Published as a LoadBalancer Service on port 4566; the dashboard and the agents' infrastructure MCP hand out the endpoint and the test credentials (AWS_ENDPOINT_URL, any access key). Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers, such as Lambda and RDS, use the node's Docker and are best effort.";
 "Workspaces on the list get the cluster in their ~/.kube/config and see it through the infrastructure MCP. You can change this later from the dashboard." = "Workspaces on the list get the cluster in their ~/.kube/config and see it through the infrastructure MCP. You can change this later from the dashboard.";
 "A private Docker registry in its own VM: build in a workspace, push here, run it in a cluster. Plain HTTP on the VM network; it never leaves this Mac." = "A private Docker registry in its own VM: build in a workspace, push here, run it in a cluster. Plain HTTP on the VM network; it never leaves this Mac.";
 "Image storage" = "Image storage";
@@ -2355,3 +2354,25 @@
 "The peer is on this Mac, reached through its mirror" = "The peer is on this Mac, reached through its mirror";
 "new name" = "new name";
 "sessions you can ask" = "sessions you can ask";
+
+/* Cloud emulators: the floci family (floci-az, floci-gcp, floci-oci), versions from Docker Hub */
+"Azure emulator (floci-az)" = "Azure emulator (floci-az)";
+"Google Cloud emulator (floci-gcp)" = "Google Cloud emulator (floci-gcp)";
+"Oracle Cloud emulator (floci-oci)" = "Oracle Cloud emulator (floci-oci)";
+"Azure emulator" = "Azure emulator";
+"Google Cloud emulator" = "Google Cloud emulator";
+"Oracle Cloud emulator" = "Oracle Cloud emulator";
+"%@ version" = "%@ version";
+"latest release" = "latest release";
+"Local clouds inside the cluster, from the floci family: each one a LoadBalancer Service on its own port, with data kept on the cluster's storage. The dashboard and the agents' infrastructure MCP hand out the endpoints and the test credentials. Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers use the node's Docker and are best effort." = "Local clouds inside the cluster, from the floci family: each one a LoadBalancer Service on its own port, with data kept on the cluster's storage. The dashboard and the agents' infrastructure MCP hand out the endpoints and the test credentials. Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers use the node's Docker and are best effort.";
+"%@ (%@), port %d: %@ and more." = "%@ (%@), port %d: %@ and more.";
+"Leave a version empty to get the latest release on Docker Hub at setup. A tag (2.1.0) or a full image reference pins it." = "Leave a version empty to get the latest release on Docker Hub at setup. A tag (2.1.0) or a full image reference pins it.";
+"%@ ready" = "%@ ready";
+"%@ starting" = "%@ starting";
+"%@ · port %d" = "%@ · port %d";
+"Any credentials work (a 12-digit access key id selects an account)." = "Any credentials work (a 12-digit access key id selects an account).";
+"The Azurite development account (devstoreaccount1 and its well-known key) works; credentials aren't validated. Cosmos DB, Key Vault and the other services answer under per-service paths of the same endpoint." = "The Azurite development account (devstoreaccount1 and its well-known key) works; credentials aren't validated. Cosmos DB, Key Vault and the other services answer under per-service paths of the same endpoint.";
+"No credentials needed once the emulator variables are set; the default project is floci-local." = "No credentials needed once the emulator variables are set; the default project is floci-local.";
+"Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1." = "Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1.";
+"State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort." = "State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort.";
+"%@ version: a tag such as 2.1.0 or a full image reference." = "%@ version: a tag such as 2.1.0 or a full image reference.";

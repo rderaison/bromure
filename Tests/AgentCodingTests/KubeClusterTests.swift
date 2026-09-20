@@ -264,12 +264,48 @@ struct KubeClusterTests {
         #expect(old.storageEnabled == false)
         #expect(old.ingress == true)
         #expect(old.awsEmulator == false)
+        #expect(old.azureEmulator == false && old.gcpEmulator == false && old.ociEmulator == false)
+        #expect(old.emulators.isEmpty)
+        #expect(old.emulatorVersions.isEmpty)
         #expect(old.loadBalancer == .bromure)
         // A new spec keeps to the VM network unless the owner opens it up.
         #expect(KubeClusterSpec().loadBalancer == .metallb)
-        var spec = KubeClusterSpec(); spec.awsEmulator = true
+        var spec = KubeClusterSpec(); spec.awsEmulator = true; spec[.oci] = true
+        spec.setEmulatorVersion(" 0.4.1 ", for: .oci)
         let round = try JSONDecoder().decode(KubeClusterSpec.self, from: JSONEncoder().encode(spec))
         #expect(round.awsEmulator == true)
+        #expect(round.emulators == [.aws, .oci])
+        #expect(round.emulatorVersions == ["oci": "0.4.1"])
+    }
+
+    @Test("an emulator's image is the owner's pin — a tag or a full reference — else the latest release")
+    func emulatorImagePins() {
+        var spec = KubeClusterSpec()
+        spec[.azure] = true
+        #expect(spec.emulatorImage(.azure) == nil)
+        spec.setEmulatorVersion("0.13.0", for: .azure)
+        #expect(spec.emulatorImage(.azure) == "floci/floci-az:0.13.0")
+        spec.setEmulatorVersion("registry.local:5000/mirror/floci-az:0.13.0", for: .azure)
+        #expect(spec.emulatorImage(.azure) == "registry.local:5000/mirror/floci-az:0.13.0")
+        spec.setEmulatorVersion("", for: .azure)
+        #expect(spec.emulatorImage(.azure) == nil)
+        #expect(spec.emulatorVersions.isEmpty)
+        #expect(KubeCloudEmulator.gcp.image(tag: "0.9.0") == "floci/floci-gcp:0.9.0")
+        // Pins travel to the node as a `kind=image` comma list: no spaces, commas or "=".
+        #expect(KubeCloudEmulator.isValidPin(nil) && KubeCloudEmulator.isValidPin("") && KubeCloudEmulator.isValidPin(" 2.1.0 "))
+        #expect(KubeCloudEmulator.isValidPin("ghcr.io/floci-io/floci@sha256:0123abcd"))
+        #expect(!KubeCloudEmulator.isValidPin("2.1.0,azure=x") && !KubeCloudEmulator.isValidPin("a=b") && !KubeCloudEmulator.isValidPin("2.1 .0") && !KubeCloudEmulator.isValidPin("é"))
+        #expect(KubeCloudEmulator.aws.imageReference(pin: "2.1.0,x") == nil)
+    }
+
+    @Test("the latest release is the highest x.y.z among Docker Hub tags; nightlies and variants don't count")
+    func latestReleaseTag() {
+        let tags = ["nightly-09202026-compat", "nightly", "2.0.9", "latest", "2.1.0-rc1", "2.1.0", "2.0.10", "nightly-09192026", "1.99.99"]
+        #expect(KubeEmulatorReleases.latestRelease(among: tags) == "2.1.0")
+        #expect(KubeEmulatorReleases.latestRelease(among: ["0.9.0", "0.10.0", "0.8.5"]) == "0.10.0")
+        #expect(KubeEmulatorReleases.latestRelease(among: ["v0.4.1", "0.4.0"]) == "v0.4.1")
+        #expect(KubeEmulatorReleases.latestRelease(among: ["nightly", "latest"]) == nil)
+        #expect(KubeEmulatorReleases.latestRelease(among: []) == nil)
     }
 
     @Test("the AWS emulator's endpoints come from the load balancer and the NodePort")
@@ -278,24 +314,77 @@ struct KubeClusterTests {
         var c = KubeCluster(name: "aws", spec: spec)
         c.nodes = [KubeNodeRecord(name: "k8s-aws-1", role: .server, index: 1, lastIP: "172.28.153.2")]
         let probeJSON = """
-        {"reachable":true,"version":"v1.36.4+k3s1","services":[{"namespace":"floci","name":"floci","type":"LoadBalancer","clusterIP":"10.43.0.9","ports":[{"name":"aws","port":4566,"nodePort":31566,"protocol":"TCP","targetPort":"4566"}],"ingress":[],"lbClass":""}],"floci":{"installed":true,"ready":true,"pods":1}}
+        {"reachable":true,"version":"v1.36.4+k3s1","services":[{"namespace":"floci","name":"floci","type":"LoadBalancer","clusterIP":"10.43.0.9","ports":[{"name":"aws","port":4566,"nodePort":31566,"protocol":"TCP","targetPort":"4566"}],"ingress":[],"lbClass":""}],"emulators":{"aws":{"installed":true,"ready":true,"pods":1,"image":"floci/floci:2.1.0"}}}
         """
         var st = KubeClusterStatus(); st.phase = .running; st.hostIP = "10.163.15.54"
         st.probe = try JSONDecoder().decode(KubeProbe.self, from: Data(probeJSON.utf8))
-        #expect(st.probe?.floci?.ready == true)
+        #expect(st.probe?.emulator(.aws)?.ready == true)
+        #expect(st.probe?.emulator(.aws)?.imageTag == "2.1.0")
+        #expect(st.probe?.emulator(.azure) == nil)
         // No LB endpoint yet: only the NodePort answers.
-        var eps = st.awsEmulatorEndpoints(for: c)
+        var eps = st.emulatorEndpoints(.aws, for: c)
         #expect(eps.lan == nil)
         #expect(eps.vmNetwork == "http://172.28.153.2:31566")
         st.lbEndpoints = [KubeLBEndpoint(namespace: "floci", service: "floci", port: 4566, nodePort: 31566, protocolName: "TCP", bound: true)]
-        eps = st.awsEmulatorEndpoints(for: c)
+        eps = st.emulatorEndpoints(.aws, for: c)
         #expect(eps.lan == "http://10.163.15.54:4566")
         let text = KubeMCPServer.overviewText(clusters: [c], registries: [], status: { _ in st }, hostIP: "10.163.15.54")
         #expect(text.contains("AWS emulator (floci): http://172.28.153.2:31566 from this workspace (http://10.163.15.54:4566 from the Mac and its LAN"))
         #expect(text.contains("AWS_ENDPOINT_URL=http://172.28.153.2:31566"))
+        #expect(text.contains("Version: floci 2.1.0."))
+        #expect(!text.contains("Azure emulator"))
         // Off: nothing.
         let plain = KubeCluster(name: "p", spec: KubeClusterSpec())
-        #expect(st.awsEmulatorEndpoints(for: plain).vmNetwork == nil)
+        #expect(st.emulatorEndpoints(.aws, for: plain).vmNetwork == nil)
+    }
+
+    @Test("a probe from before the emulator family still reports floci")
+    func legacyFlociProbe() throws {
+        let probeJSON = """
+        {"reachable":true,"floci":{"installed":true,"ready":false,"pods":1}}
+        """
+        let p = try JSONDecoder().decode(KubeProbe.self, from: Data(probeJSON.utf8))
+        #expect(p.emulator(.aws)?.installed == true)
+        #expect(p.emulator(.aws)?.ready == false)
+        #expect(p.emulator(.aws)?.imageTag == nil)
+    }
+
+    @Test("the other clouds get their own Service, port and client setup")
+    func otherCloudEmulators() throws {
+        var spec = KubeClusterSpec(); spec[.azure] = true; spec[.gcp] = true; spec[.oci] = true
+        var c = KubeCluster(name: "clouds", spec: spec)
+        c.nodes = [KubeNodeRecord(name: "k8s-clouds-1", role: .server, index: 1, lastIP: "172.28.153.2")]
+        #expect(KubeCloudEmulator.azure.port == 4577 && KubeCloudEmulator.gcp.port == 4588 && KubeCloudEmulator.oci.port == 4599)
+        let probeJSON = """
+        {"reachable":true,"services":[
+          {"namespace":"floci-az","name":"floci-az","type":"LoadBalancer","clusterIP":"10.43.0.10","ports":[{"name":"azure","port":4577,"nodePort":31577,"protocol":"TCP","targetPort":"4577"}],"ingress":[],"lbClass":""},
+          {"namespace":"floci-gcp","name":"floci-gcp","type":"LoadBalancer","clusterIP":"10.43.0.11","ports":[{"name":"gcp","port":4588,"nodePort":31588,"protocol":"TCP","targetPort":"4588"}],"ingress":["172.28.153.230"],"lbClass":""}],
+         "emulators":{"azure":{"installed":true,"ready":true,"pods":1,"image":"floci/floci-az:0.13.0"},"gcp":{"installed":true,"ready":false,"pods":1,"image":"floci/floci-gcp:latest"}}}
+        """
+        var st = KubeClusterStatus(); st.phase = .running; st.hostIP = "10.163.15.54"
+        st.probe = try JSONDecoder().decode(KubeProbe.self, from: Data(probeJSON.utf8))
+        st.lbEndpoints = [KubeLBEndpoint(namespace: "floci-az", service: "floci-az", port: 4577, nodePort: 31577, protocolName: "TCP", bound: true)]
+        let az = st.emulatorEndpoints(.azure, for: c)
+        #expect(az.lan == "http://10.163.15.54:4577")
+        #expect(az.vmNetwork == "http://172.28.153.2:31577")
+        // MetalLB-style: the Service's own ingress address stands in for the LAN one.
+        let gcp = st.emulatorEndpoints(.gcp, for: c)
+        #expect(gcp.lan == "http://172.28.153.230:4588")
+        #expect(gcp.vmNetwork == "http://172.28.153.2:31588")
+        // Not installed yet: no endpoint, the briefing says so.
+        #expect(st.emulatorEndpoints(.oci, for: c) == (nil, nil))
+        let text = KubeMCPServer.overviewText(clusters: [c], registries: [], status: { _ in st }, hostIP: "10.163.15.54")
+        #expect(text.contains("Azure emulator (floci-az): http://172.28.153.2:31577 from this workspace"))
+        #expect(text.contains("AZURE_STORAGE_CONNECTION_STRING=\"DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"))
+        #expect(text.contains("BlobEndpoint=http://172.28.153.2:31577/devstoreaccount1"))
+        #expect(text.contains("Version: floci-az 0.13.0."))
+        #expect(text.contains("Google Cloud emulator (floci-gcp): http://172.28.153.2:31588 from this workspace"))
+        #expect(text.contains("PUBSUB_EMULATOR_HOST=172.28.153.2:31588"))
+        #expect(text.contains("STORAGE_EMULATOR_HOST=http://172.28.153.2:31588"))
+        #expect(text.contains("(Its pod is still starting.)"))
+        #expect(text.contains("Oracle Cloud emulator (floci-oci): installed and starting"))
+        #expect(!text.contains("AWS emulator"))
+        #expect(KubeCloudEmulator.oci.clientSetup(endpoint: "http://h:4599").hasPrefix("oci --endpoint http://h:4599"))
     }
 
     @Test("with several clusters or registries the MCP tells the agent to ask which one")

@@ -2075,7 +2075,6 @@
 "Twenty addresses at the top of the VM subnet are reserved for MetalLB when the cluster is set up. Workspaces reach them directly; the Mac does through the VM network interface." = "クラスタのセットアップ時に、VM サブネットの末尾 20 個のアドレスが MetalLB 用に予約されます。ワークスペースは直接到達でき、Mac は VM ネットワークインターフェイス経由で到達します。";
 "k3s's bundled ingress. With the LAN load balancer it publishes ports 80 and 443 on this Mac." = "k3s 同梱の Ingress。LAN ロードバランサと組み合わせると、この Mac でポート 80 と 443 を公開します。";
 "AWS emulator (floci)" = "AWS エミュレータ (floci)";
-"A local AWS inside the cluster: S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge and 100+ more services, with data kept on the cluster's storage. Published as a LoadBalancer Service on port 4566; the dashboard and the agents' infrastructure MCP hand out the endpoint and the test credentials (AWS_ENDPOINT_URL, any access key). Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers, such as Lambda and RDS, use the node's Docker and are best effort." = "クラスタ内のローカル AWS：S3、DynamoDB、SQS、SNS、Lambda、API Gateway、Step Functions、EventBridge など 100 以上のサービスで、データはクラスタのストレージに保持されます。ポート 4566 の LoadBalancer サービスとして公開され、ダッシュボードとエージェントのインフラ MCP がエンドポイントとテスト用認証情報（AWS_ENDPOINT_URL、任意のアクセスキー）を提供します。フリーかつオープンソース (MIT) で、セットアップ時に Docker Hub から取得します。Lambda や RDS などコンテナを生成するサービスはノードの Docker を使い、ベストエフォートです。";
 "Workspaces on the list get the cluster in their ~/.kube/config and see it through the infrastructure MCP. You can change this later from the dashboard." = "リストにあるワークスペースは ~/.kube/config にクラスタを受け取り、インフラ MCP を通じて参照できます。あとでダッシュボードから変更できます。";
 "A private Docker registry in its own VM: build in a workspace, push here, run it in a cluster. Plain HTTP on the VM network; it never leaves this Mac." = "専用 VM 内のプライベート Docker レジストリ：ワークスペースでビルドし、ここにプッシュし、クラスタで実行します。VM ネットワーク上の平文 HTTP で、この Mac の外には出ません。";
 "Image storage" = "イメージ用ストレージ";
@@ -2320,3 +2319,25 @@
 "The peer is on this Mac, reached through its mirror" = "相手はこの Mac 上にあり、そのミラー経由で到達しています";
 "new name" = "新しい名前";
 "sessions you can ask" = "質問できるセッション";
+
+/* Cloud emulators: the floci family (floci-az, floci-gcp, floci-oci), versions from Docker Hub */
+"Azure emulator (floci-az)" = "Azure エミュレータ (floci-az)";
+"Google Cloud emulator (floci-gcp)" = "Google Cloud エミュレータ (floci-gcp)";
+"Oracle Cloud emulator (floci-oci)" = "Oracle Cloud エミュレータ (floci-oci)";
+"Azure emulator" = "Azure エミュレータ";
+"Google Cloud emulator" = "Google Cloud エミュレータ";
+"Oracle Cloud emulator" = "Oracle Cloud エミュレータ";
+"%@ version" = "%@ のバージョン";
+"latest release" = "最新リリース";
+"Local clouds inside the cluster, from the floci family: each one a LoadBalancer Service on its own port, with data kept on the cluster's storage. The dashboard and the agents' infrastructure MCP hand out the endpoints and the test credentials. Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers use the node's Docker and are best effort." = "クラスタ内のローカルクラウド（floci ファミリー）: それぞれが独自のポートの LoadBalancer Service で、データはクラスタのストレージに保持されます。ダッシュボードとエージェントのインフラ MCP がエンドポイントとテスト用認証情報を提供します。無料のオープンソース（MIT）で、セットアップ時に Docker Hub から取得します。コンテナを起動するサービスはノードの Docker を使い、ベストエフォートで動作します。";
+"%@ (%@), port %d: %@ and more." = "%@（%@）、ポート %d: %@ など。";
+"Leave a version empty to get the latest release on Docker Hub at setup. A tag (2.1.0) or a full image reference pins it." = "バージョンを空にすると、セットアップ時に Docker Hub の最新リリースを取得します。タグ（2.1.0）または完全なイメージ参照で固定できます。";
+"%@ ready" = "%@ 準備完了";
+"%@ starting" = "%@ 起動中";
+"%@ · port %d" = "%@ · ポート %d";
+"Any credentials work (a 12-digit access key id selects an account)." = "任意の認証情報が使えます（12 桁のアクセスキー ID でアカウントを選択）。";
+"The Azurite development account (devstoreaccount1 and its well-known key) works; credentials aren't validated. Cosmos DB, Key Vault and the other services answer under per-service paths of the same endpoint." = "Azurite の開発用アカウント（devstoreaccount1 と既知のキー）が使えます。認証情報は検証されません。Cosmos DB、Key Vault などのサービスは同じエンドポイントのサービス別パスで応答します。";
+"No credentials needed once the emulator variables are set; the default project is floci-local." = "エミュレータの環境変数を設定すれば認証情報は不要です。デフォルトのプロジェクトは floci-local です。";
+"Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1." = "任意の RSA キーを持つ任意の OCI プロファイルが使えます（署名は解析されますが検証されません）。デフォルトのテナンシーは ocid1.tenancy.oc1..flocilocal…、リージョンは us-ashburn-1 です。";
+"State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort." = "状態はクラスタのデフォルトストレージクラスに保持されます。コンテナを起動するサービス（%@）はノードの Docker を使い、ベストエフォートで動作します。";
+"%@ version: a tag such as 2.1.0 or a full image reference." = "%@ のバージョン: 2.1.0 のようなタグ、または完全なイメージ参照を指定してください。";

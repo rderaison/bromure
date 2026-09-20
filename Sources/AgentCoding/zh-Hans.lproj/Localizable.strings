@@ -2075,7 +2075,6 @@
 "Twenty addresses at the top of the VM subnet are reserved for MetalLB when the cluster is set up. Workspaces reach them directly; the Mac does through the VM network interface." = "设置集群时，虚拟机子网末尾的二十个地址将为 MetalLB 预留。工作区可直接访问它们；Mac 通过虚拟机网络接口访问。";
 "k3s's bundled ingress. With the LAN load balancer it publishes ports 80 and 443 on this Mac." = "k3s 自带的入口。配合局域网负载均衡器，它会在这台 Mac 上发布 80 和 443 端口。";
 "AWS emulator (floci)" = "AWS 模拟器 (floci)";
-"A local AWS inside the cluster: S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge and 100+ more services, with data kept on the cluster's storage. Published as a LoadBalancer Service on port 4566; the dashboard and the agents' infrastructure MCP hand out the endpoint and the test credentials (AWS_ENDPOINT_URL, any access key). Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers, such as Lambda and RDS, use the node's Docker and are best effort." = "集群内的本地 AWS：S3、DynamoDB、SQS、SNS、Lambda、API Gateway、Step Functions、EventBridge 等 100 多项服务，数据保存在集群的存储上。以 LoadBalancer 服务发布在 4566 端口；仪表板和代理的基础设施 MCP 会提供端点和测试凭据（AWS_ENDPOINT_URL，任意访问密钥）。自由开源 (MIT)，设置时从 Docker Hub 拉取。会生成容器的服务（如 Lambda 和 RDS）使用节点的 Docker，尽力而为。";
 "Workspaces on the list get the cluster in their ~/.kube/config and see it through the infrastructure MCP. You can change this later from the dashboard." = "列表中的工作区会在 ~/.kube/config 中获得集群，并通过基础设施 MCP 看到它。之后可在仪表板中更改。";
 "A private Docker registry in its own VM: build in a workspace, push here, run it in a cluster. Plain HTTP on the VM network; it never leaves this Mac." = "运行在专属虚拟机里的私有 Docker 镜像仓库：在工作区中构建，推送到这里，在集群中运行。虚拟机网络上的明文 HTTP；永远不会离开这台 Mac。";
 "Image storage" = "镜像存储";
@@ -2320,3 +2319,25 @@
 "The peer is on this Mac, reached through its mirror" = "对方在这台 Mac 上，通过其镜像访问";
 "new name" = "新名称";
 "sessions you can ask" = "可提问的会话";
+
+/* Cloud emulators: the floci family (floci-az, floci-gcp, floci-oci), versions from Docker Hub */
+"Azure emulator (floci-az)" = "Azure 模拟器 (floci-az)";
+"Google Cloud emulator (floci-gcp)" = "Google Cloud 模拟器 (floci-gcp)";
+"Oracle Cloud emulator (floci-oci)" = "Oracle Cloud 模拟器 (floci-oci)";
+"Azure emulator" = "Azure 模拟器";
+"Google Cloud emulator" = "Google Cloud 模拟器";
+"Oracle Cloud emulator" = "Oracle Cloud 模拟器";
+"%@ version" = "%@ 版本";
+"latest release" = "最新发布版";
+"Local clouds inside the cluster, from the floci family: each one a LoadBalancer Service on its own port, with data kept on the cluster's storage. The dashboard and the agents' infrastructure MCP hand out the endpoints and the test credentials. Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers use the node's Docker and are best effort." = "集群内的本地云（floci 家族）：每个都是各自端口上的 LoadBalancer Service，数据保存在集群的存储上。仪表板和代理的基础设施 MCP 提供端点和测试凭据。免费开源（MIT），在设置时从 Docker Hub 拉取。会启动容器的服务使用节点的 Docker，尽力而为。";
+"%@ (%@), port %d: %@ and more." = "%@（%@），端口 %d：%@ 等。";
+"Leave a version empty to get the latest release on Docker Hub at setup. A tag (2.1.0) or a full image reference pins it." = "版本留空则在设置时获取 Docker Hub 上的最新发布版。填写标签（2.1.0）或完整镜像引用可固定版本。";
+"%@ ready" = "%@ 就绪";
+"%@ starting" = "%@ 启动中";
+"%@ · port %d" = "%@ · 端口 %d";
+"Any credentials work (a 12-digit access key id selects an account)." = "任何凭据都可用（12 位访问密钥 ID 用于选择账户）。";
+"The Azurite development account (devstoreaccount1 and its well-known key) works; credentials aren't validated. Cosmos DB, Key Vault and the other services answer under per-service paths of the same endpoint." = "Azurite 开发账户（devstoreaccount1 及其公开密钥）可用；凭据不会被验证。Cosmos DB、Key Vault 及其他服务在同一端点的按服务路径下响应。";
+"No credentials needed once the emulator variables are set; the default project is floci-local." = "设置好模拟器变量后无需凭据；默认项目为 floci-local。";
+"Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1." = "任何带任意 RSA 密钥的 OCI 配置都可用（签名会被解析但从不验证）；默认租户为 ocid1.tenancy.oc1..flocilocal…，区域为 us-ashburn-1。";
+"State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort." = "状态保存在集群的默认存储类上。会启动容器的服务（%@）使用节点的 Docker，尽力而为。";
+"%@ version: a tag such as 2.1.0 or a full image reference." = "%@ 版本：请填写 2.1.0 这样的标签或完整镜像引用。";

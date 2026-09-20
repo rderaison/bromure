@@ -86,8 +86,8 @@ final class KubeClusterEngine {
         var direct: KubeDirectCluster?
         /// Services already stamped with the host IP (ns/name).
         var patchedServices: Set<String> = []
-        /// The base URL the AWS emulator was last told to put in the URLs it returns.
-        var flociBaseURL: String?
+        /// The base URL each cloud emulator was last told to put in the URLs it returns.
+        var emulatorBaseURLs: [KubeCloudEmulator: String] = [:]
         /// VM-network addresses applied on the control-plane node for
         /// `bromure.io/scope: vm` Services (ns/name → ip), this boot.
         var vmScopeApplied: [String: String] = [:]
@@ -170,7 +170,7 @@ final class KubeClusterEngine {
         rt.lifecycleTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.runAddons(cluster, server: server, storage: cluster.spec.needsISCSI ? "1" : "0")
+                try await self.runAddons(cluster, server: server, storage: cluster.spec.needsISCSI ? "1" : "0", emulators: false)
                 self.log(id, "✓ Synology CSI credentials updated.")
             } catch {
                 self.log(id, "✗ Synology update failed: \(error.localizedDescription)")
@@ -393,7 +393,7 @@ final class KubeClusterEngine {
         log(id, "Creating “\(cluster.name)”: \(cluster.spec.nodeCount) node(s), \(cluster.spec.cpusPerNode) vCPU / \(cluster.spec.memoryGBPerNode) GB each"
             + (cluster.spec.storageEnabled ? ", Longhorn storage \(cluster.spec.storageDiskGB) GB per node" : "")
             + (cluster.spec.synology?.isConfigured == true ? ", Synology NAS \(cluster.spec.synology?.host ?? "")" : "")
-            + (cluster.spec.awsEmulator ? ", AWS emulator" : "")
+            + cluster.spec.emulators.map { ", \($0.displayName)" }.joined()
             + ", load balancer: \(cluster.spec.loadBalancer.displayName)")
         do {
             try await bootAllNodes(&cluster, rt)
@@ -455,7 +455,7 @@ final class KubeClusterEngine {
             if cluster.spec.storageEnabled { addons.append("Longhorn storage") }
             if cluster.spec.synology?.isConfigured == true { addons.append("the Synology CSI driver") }
             if cluster.spec.loadBalancer == .metallb && cluster.metallbRange != nil { addons.append("MetalLB") }
-            if cluster.spec.awsEmulator { addons.append("the AWS emulator") }
+            addons += cluster.spec.emulators.map { "the \($0.displayName)" }
             if !addons.isEmpty {
                 step(id, "Installing " + addons.joined(separator: ", "))
                 try await runAddons(cluster, server: server, storage: cluster.spec.storageEnabled ? "1" : "0")
@@ -476,10 +476,13 @@ final class KubeClusterEngine {
         }
     }
 
-    /// The add-ons step (Longhorn / MetalLB / Synology). Synology's DSM
-    /// credentials are staged into the control-plane node's meta share
-    /// only for the duration of the step.
-    private func runAddons(_ cluster: KubeCluster, server: KubeNodeRecord, storage: String) async throws {
+    /// The add-ons step (Longhorn / MetalLB / Synology / the cloud
+    /// emulators). Synology's DSM credentials are staged into the
+    /// control-plane node's meta share only for the duration of the step.
+    /// `emulators: false` leaves the emulators alone (a credentials refresh
+    /// must not move them to a newer release).
+    private func runAddons(_ cluster: KubeCluster, server: KubeNodeRecord, storage: String,
+                           emulators: Bool = true) async throws {
         let id = cluster.id
         let metallb = (cluster.spec.loadBalancer == .metallb && cluster.metallbRange != nil) ? "1" : "0"
         var synology = "0"
@@ -509,11 +512,34 @@ final class KubeClusterEngine {
             }
         }
         defer { for url in staged { try? FileManager.default.removeItem(at: url) } }
+        var emulatorArgs: [String] = []
+        if emulators {
+            for kind in cluster.spec.emulators {
+                emulatorArgs.append("\(kind.rawValue)=\(await emulatorImage(kind, for: cluster))")
+            }
+        }
         try await runStep(id, node: server, step: "addons", args: [
             storage, String(cluster.spec.storageReplicas), metallb,
             cluster.metallbRange ?? "-", cluster.spec.loadBalancer.rawValue, synology,
-            cluster.spec.awsEmulator ? "1" : "0",
+            emulatorArgs.isEmpty ? "-" : emulatorArgs.joined(separator: ","),
         ])
+    }
+
+    /// The image a cloud emulator gets: the owner's pin, else the latest
+    /// release on Docker Hub right now, else Docker Hub's `latest` tag.
+    /// Nothing is pinned in bromure itself.
+    private func emulatorImage(_ kind: KubeCloudEmulator, for cluster: KubeCluster) async -> String {
+        let id = cluster.id
+        if let pinned = cluster.spec.emulatorImage(kind) {
+            log(id, "\(kind.displayName): \(pinned) (pinned)")
+            return pinned
+        }
+        if let tag = await KubeEmulatorReleases.latestTag(for: kind) {
+            log(id, "\(kind.displayName): \(kind.project) \(tag), the latest release on Docker Hub")
+            return kind.image(tag: tag)
+        }
+        log(id, "\(kind.displayName): couldn't look up the latest release on Docker Hub — using the latest tag")
+        return kind.image(tag: "latest")
     }
 
     /// Boot an already-provisioned cluster.
@@ -1025,15 +1051,16 @@ final class KubeClusterEngine {
                         log(id, "Published \(key) at \(ip)")
                     }
                 }
-                // The AWS emulator puts a base URL in what it returns (SQS
-                // queue URLs, presigned S3 URLs): make it the published
-                // address, which workspaces, the Mac and the LAN all reach.
-                if svc.namespace == KubeClusterSpec.awsEmulatorNamespace, svc.name == "floci" {
-                    let base = "http://\(ip):\(KubeClusterSpec.awsEmulatorPort)"
-                    if rt.flociBaseURL != base,
-                       (try? await exec(server.id, script("floci-base-url \(base)"), timeout: 60)) != nil {
-                        rt.flociBaseURL = base
-                        log(id, "AWS emulator returns URLs on \(base)")
+                // A cloud emulator puts a base URL in what it returns (SQS
+                // queue URLs, presigned S3 URLs, blob endpoints…): make it
+                // the published address, which workspaces, the Mac and the
+                // LAN all reach.
+                if let kind = KubeCloudEmulator.allCases.first(where: { $0.namespace == svc.namespace && $0.serviceName == svc.name }) {
+                    let base = "http://\(ip):\(kind.port)"
+                    if rt.emulatorBaseURLs[kind] != base,
+                       (try? await exec(server.id, script("emulator-base-url \(kind.rawValue) \(base)"), timeout: 60)) != nil {
+                        rt.emulatorBaseURLs[kind] = base
+                        log(id, "\(kind.displayName) returns URLs on \(base)")
                     }
                 }
             } else if !svc.ingress.isEmpty, rt.patchedServices.contains(key) {

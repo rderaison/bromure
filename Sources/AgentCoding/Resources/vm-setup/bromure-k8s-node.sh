@@ -17,8 +17,11 @@
 #   server  <name> <noproxy> <k3s-flags…>     k3s server; waits for the API
 #   agent   <name> <server-ip> <token> <noproxy>
 #   addons  <longhorn 0|1> <replicas> <metallb 0|1> <range|-> <lb-mode> [synology 0|1]
+#           [emulators: comma list of <aws|azure|gcp|oci>[=<image>], or -]
 #           Synology: reads /mnt/bromure-meta/synology-client-info.yml +
 #           synology-storage-class.yml (staged by the host for this step only)
+#           Emulators: the floci family (floci, floci-az, floci-gcp, floci-oci);
+#           the host picks each image (the latest release, or the owner's pin)
 #   registries <yaml-b64>                     rewrite registries.yaml, restart k3s
 #   repoint <server-ip>                       agent: follow a moved control plane
 #
@@ -38,7 +41,6 @@ export KUBECONFIG=$K3S_YAML
 LONGHORN_VERSION="${BROMURE_LONGHORN_VERSION:-v1.9.1}"
 METALLB_VERSION="${BROMURE_METALLB_VERSION:-v0.15.2}"
 SYNOLOGY_CSI_VERSION="${BROMURE_SYNOLOGY_CSI_VERSION:-v1.2.0}"
-FLOCI_IMAGE="${BROMURE_FLOCI_IMAGE:-floci/floci:2.1.0}"
 REGISTRIES_YAML=/etc/rancher/k3s/registries.yaml
 
 sudo mkdir -p "$STATE" 2>/dev/null
@@ -325,28 +327,62 @@ install_synology() {
     log "Synology CSI configured (storage classes: $(kubectl get storageclass -o name 2>/dev/null | grep -o 'bromure-synology[^ ]*' | tr '\n' ' '))"
 }
 
-install_floci() {
-    # floci (floci-io/floci, MIT): an AWS emulator — S3, DynamoDB, SQS, SNS,
-    # Lambda, API Gateway, … — as one Deployment behind a LoadBalancer
-    # Service on 4566, its state on a volume of the default storage class.
-    # When the node runs Docker, its socket goes into the pod so the
-    # services that spawn containers (Lambda, RDS, …) can.
-    if kubectl get ns floci >/dev/null 2>&1; then
-        log "AWS emulator already present"
+emulator_facts() {
+    # <aws|azure|gcp|oci> → the floci project's facts (kept in step with
+    # KubeCloudEmulator in KubeCluster.swift): EMU_NAME (namespace,
+    # Deployment and Service — also the Docker Hub repository under floci/),
+    # EMU_CLOUD, EMU_PORT, EMU_PREFIX (its environment variables' prefix),
+    # EMU_PATH_VAR (the persistent path variable — floci-az names it
+    # differently) and EMU_EXTRA_ENV (further container env, YAML lines).
+    EMU_EXTRA_ENV=""
+    case "$1" in
+        aws)
+            EMU_NAME=floci; EMU_CLOUD="AWS"; EMU_PORT=4566
+            EMU_PREFIX=FLOCI; EMU_PATH_VAR=FLOCI_STORAGE_PERSISTENT_PATH
+            EMU_EXTRA_ENV='        - name: FLOCI_DEFAULT_REGION
+          value: "us-east-1"' ;;
+        azure)
+            EMU_NAME=floci-az; EMU_CLOUD="Azure"; EMU_PORT=4577
+            EMU_PREFIX=FLOCI_AZ; EMU_PATH_VAR=FLOCI_AZ_STORAGE_PATH ;;
+        gcp)
+            EMU_NAME=floci-gcp; EMU_CLOUD="Google Cloud"; EMU_PORT=4588
+            EMU_PREFIX=FLOCI_GCP; EMU_PATH_VAR=FLOCI_GCP_STORAGE_PERSISTENT_PATH ;;
+        oci)
+            EMU_NAME=floci-oci; EMU_CLOUD="Oracle Cloud"; EMU_PORT=4599
+            EMU_PREFIX=FLOCI_OCI; EMU_PATH_VAR=FLOCI_OCI_STORAGE_PERSISTENT_PATH ;;
+        *) log "unknown emulator '$1'"; return 1 ;;
+    esac
+}
+
+install_emulator() {
+    # <aws|azure|gcp|oci> [image] — one of the floci family (floci-io on
+    # GitHub, MIT): a local cloud — floci emulates AWS (S3, DynamoDB, SQS,
+    # SNS, Lambda, …), floci-az Azure, floci-gcp Google Cloud, floci-oci
+    # Oracle Cloud — as one Deployment behind a LoadBalancer Service on its
+    # own port, its state on a volume of the default storage class. The
+    # image is the host's choice (the latest release on Docker Hub, or the
+    # owner's pin); without one, Docker Hub's `latest` tag. When the node
+    # runs Docker, its socket goes into the pod so the services that spawn
+    # containers (Lambda, Cloud Run, Functions, …) can.
+    local kind="$1" image="${2:-}"
+    emulator_facts "$kind" || return 1
+    local EMU_IMAGE="${image:-floci/$EMU_NAME:latest}"
+    if kubectl get ns "$EMU_NAME" >/dev/null 2>&1; then
+        log "$EMU_CLOUD emulator already present — applying $EMU_IMAGE"
     else
-        log "installing the AWS emulator ($FLOCI_IMAGE)"
+        log "installing the $EMU_CLOUD emulator ($EMU_IMAGE)"
     fi
     kubectl apply -f - 2>&1 <<EOF | tail -n 4
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: floci
+  name: $EMU_NAME
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: floci-data
-  namespace: floci
+  name: $EMU_NAME-data
+  namespace: $EMU_NAME
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
@@ -356,76 +392,77 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: floci
-  namespace: floci
+  name: $EMU_NAME
+  namespace: $EMU_NAME
   labels:
-    app: floci
+    app: $EMU_NAME
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: floci
+      app: $EMU_NAME
   template:
     metadata:
       labels:
-        app: floci
+        app: $EMU_NAME
     spec:
       containers:
-      - name: floci
-        image: $FLOCI_IMAGE
+      - name: $EMU_NAME
+        image: $EMU_IMAGE
         ports:
-        - name: aws
-          containerPort: 4566
+        - name: $kind
+          containerPort: $EMU_PORT
         env:
-        - name: FLOCI_PORT
-          value: "4566"
-        - name: FLOCI_DEFAULT_REGION
-          value: "us-east-1"
-        - name: FLOCI_STORAGE_MODE
+        - name: ${EMU_PREFIX}_PORT
+          value: "$EMU_PORT"
+        - name: ${EMU_PREFIX}_STORAGE_MODE
           value: "persistent"
-        - name: FLOCI_STORAGE_PERSISTENT_PATH
+        - name: $EMU_PATH_VAR
           value: "/data"
-        volumeMounts:
+${EMU_EXTRA_ENV:+$EMU_EXTRA_ENV
+}        volumeMounts:
         - name: data
           mountPath: /data
         readinessProbe:
           tcpSocket:
-            port: 4566
+            port: $EMU_PORT
           periodSeconds: 5
           initialDelaySeconds: 3
       volumes:
       - name: data
         persistentVolumeClaim:
-          claimName: floci-data
+          claimName: $EMU_NAME-data
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: floci
-  namespace: floci
+  name: $EMU_NAME
+  namespace: $EMU_NAME
 spec:
   type: LoadBalancer
   selector:
-    app: floci
+    app: $EMU_NAME
   ports:
-  - name: aws
-    port: 4566
-    targetPort: 4566
+  - name: $kind
+    port: $EMU_PORT
+    targetPort: $EMU_PORT
 EOF
     if [ -S /var/run/docker.sock ]; then
-        log "floci: the node's Docker socket is shared for container-backed services"
-        kubectl -n floci patch deploy floci --type=strategic -p '{"spec":{"template":{"spec":{"securityContext":{"runAsUser":0},"volumes":[{"name":"docker","hostPath":{"path":"/var/run/docker.sock","type":"Socket"}}],"containers":[{"name":"floci","volumeMounts":[{"name":"docker","mountPath":"/var/run/docker.sock"}]}]}}}}' 2>&1 | tail -n 1
+        log "$EMU_NAME: the node's Docker socket is shared for container-backed services"
+        kubectl -n "$EMU_NAME" patch deploy "$EMU_NAME" --type=strategic -p '{"spec":{"template":{"spec":{"securityContext":{"runAsUser":0},"volumes":[{"name":"docker","hostPath":{"path":"/var/run/docker.sock","type":"Socket"}}],"containers":[{"name":"'"$EMU_NAME"'","volumeMounts":[{"name":"docker","mountPath":"/var/run/docker.sock"}]}]}}}}' 2>&1 | tail -n 1
     fi
-    log "waiting for floci"
-    kubectl -n floci rollout status deploy/floci --timeout=420s 2>&1 | tail -n 1 || true
-    log "AWS emulator installed (Service floci/floci, port 4566)"
+    log "waiting for $EMU_NAME"
+    kubectl -n "$EMU_NAME" rollout status "deploy/$EMU_NAME" --timeout=420s 2>&1 | tail -n 1 || true
+    log "$EMU_CLOUD emulator installed (Service $EMU_NAME/$EMU_NAME, port $EMU_PORT)"
 }
 
 do_addons() {
-    local longhorn="$1" replicas="$2" metallb="$3" range="$4" lbmode="${5:-bromure}" synology="${6:-0}" floci="${7:-0}"
-    log "addons: longhorn=$longhorn replicas=$replicas metallb=$metallb range=$range lb=$lbmode synology=$synology floci=$floci"
+    local longhorn="$1" replicas="$2" metallb="$3" range="$4" lbmode="${5:-bromure}" synology="${6:-0}" emulators="${7:--}"
+    # The seventh argument used to be floci alone (0|1).
+    case "$emulators" in 1) emulators=aws ;; 0|"") emulators=- ;; esac
+    log "addons: longhorn=$longhorn replicas=$replicas metallb=$metallb range=$range lb=$lbmode synology=$synology emulators=$emulators"
     wait_api 60 || { log "API not ready"; return 1; }
 
     if [ "$longhorn" = "1" ]; then
@@ -512,8 +549,14 @@ EOF
     if [ "$synology" = "1" ]; then
         install_synology || return 1
     fi
-    if [ "$floci" = "1" ]; then
-        install_floci || return 1
+    if [ "$emulators" != "-" ]; then
+        # Each entry is <kind> or <kind>=<image>.
+        local entry kind image
+        for entry in ${emulators//,/ }; do
+            kind="${entry%%=*}"
+            image="${entry#*=}"; [ "$image" = "$entry" ] && image=""
+            install_emulator "$kind" "$image" || return 1
+        done
     fi
     log "addons: done"
 }
@@ -556,11 +599,13 @@ cmd_clear_lb_vm() {
     kubectl -n "$1" patch svc "$2" --subresource=status --type=merge \
         -p '{"status":{"loadBalancer":{}}}' 2>&1 || true
 }
-cmd_floci_base_url() {
-    # floci-base-url <url> — the base the AWS emulator puts in the URLs it
-    # returns (SQS queue URLs, presigned S3 URLs): the address its Service
-    # is published on. `set env` only rolls the pod when the value changes.
-    kubectl -n floci set env deploy/floci FLOCI_BASE_URL="$1" 2>&1
+cmd_emulator_base_url() {
+    # emulator-base-url <aws|azure|gcp|oci> <url> — the base an emulator
+    # puts in the URLs it returns (SQS queue URLs, presigned S3 URLs, blob
+    # endpoints…): the address its Service is published on. `set env` only
+    # rolls the pod when the value changes.
+    emulator_facts "$1" || exit 2
+    kubectl -n "$EMU_NAME" set env "deploy/$EMU_NAME" "${EMU_PREFIX}_BASE_URL=$2" 2>&1
 }
 
 case "${1:-}" in
@@ -579,7 +624,7 @@ case "${1:-}" in
     wait-nodes)  shift; cmd_wait_nodes "$@" ;;
     patch-lb)    shift; cmd_patch_lb "$@" ;;
     clear-lb)    shift; cmd_clear_lb "$@" ;;
-    floci-base-url) shift; cmd_floci_base_url "$@" ;;
+    emulator-base-url) shift; cmd_emulator_base_url "$@" ;;
     patch-lb-vm) shift; cmd_patch_lb_vm "$@" ;;
     clear-lb-vm) shift; cmd_clear_lb_vm "$@" ;;
     *) echo "usage: $0 start|poll|token|kubeconfig|ip|ready|wait-nodes|patch-lb|clear-lb" >&2; exit 2 ;;

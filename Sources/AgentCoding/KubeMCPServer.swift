@@ -110,6 +110,11 @@ final class KubeMCPServer: MCPLineHandler {
                 "lanPool": ["type": "string", "description": "bromure load balancer: spare LAN addresses to give Services, e.g. \"10.0.0.20-10.0.0.29\". Empty = share the Mac's own address by port."],
                 "ingress": ["type": "boolean", "description": "Keep k3s's Traefik ingress controller (default true)."],
                 "awsEmulator": ["type": "boolean", "description": "Install floci, a local AWS emulator (S3, DynamoDB, SQS, SNS, Lambda, API Gateway, …) reachable from every workspace (default false)."],
+                "azureEmulator": ["type": "boolean", "description": "Install floci-az, a local Azure emulator (Blob/Queue/Table Storage, Cosmos DB, Key Vault, Service Bus, Event Hubs, Functions, …) reachable from every workspace (default false)."],
+                "gcpEmulator": ["type": "boolean", "description": "Install floci-gcp, a local Google Cloud emulator (Cloud Storage, Pub/Sub, Firestore, Secret Manager, Cloud Run, Cloud Functions, BigQuery, …) reachable from every workspace (default false)."],
+                "ociEmulator": ["type": "boolean", "description": "Install floci-oci, a local Oracle Cloud emulator (Object Storage, Queue, Streaming, Vault, KMS, Functions, …) reachable from every workspace (default false)."],
+                "emulatorVersions": ["type": "object", "additionalProperties": ["type": "string"],
+                                     "description": "Pin an emulator's version instead of the latest release on Docker Hub at setup: keys aws, azure, gcp, oci; values a tag (\"2.1.0\") or a full image reference."],
             ], "required": ["name"]],
         ],
         [
@@ -185,7 +190,18 @@ final class KubeMCPServer: MCPLineHandler {
                 spec.lanPool = v
             }
             if let v = args["ingress"] as? Bool { spec.ingress = v }
-            if let v = args["awsEmulator"] as? Bool { spec.awsEmulator = v }
+            for kind in KubeCloudEmulator.allCases {
+                if let v = args[kind.rawValue + "Emulator"] as? Bool { spec[kind] = v }
+            }
+            if let pins = args["emulatorVersions"] as? [String: Any] {
+                for kind in KubeCloudEmulator.allCases {
+                    guard let v = pins[kind.rawValue] as? String else { continue }
+                    guard KubeCloudEmulator.isValidPin(v) else {
+                        return errorResult("emulatorVersions.\(kind.rawValue) must be a tag such as 2.1.0 or a full image reference")
+                    }
+                    spec.setEmulatorVersion(v, for: kind)
+                }
+            }
             let created = engine.create(name: name, spec: spec.clamped, access: .all, autoStart: true)
             BACDebug.log("k8s", "cluster “\(created.name)” created via MCP")
             return textResult("Creating cluster “\(created.name)” (\(created.spec.nodeCount) node(s), \(created.spec.cpusPerNode) vCPU / \(created.spec.memoryGBPerNode) GB each). Provisioning takes a few minutes; poll cluster_status \"\(created.name)\" until phase is running. Its kubeconfig context will be “\(created.contextName)”.")
@@ -279,20 +295,21 @@ final class KubeMCPServer: MCPLineHandler {
         }
     }
 
-    /// The AWS emulator line: where it answers from a workspace and how to
-    /// point the AWS CLI/SDKs at it.
-    static func awsEmulatorText(_ cluster: KubeCluster, status: KubeClusterStatus) -> String {
-        let eps = status.awsEmulatorEndpoints(for: cluster)
+    /// A cloud emulator's line: where it answers from a workspace and how
+    /// to point that cloud's CLI/SDKs at it.
+    static func emulatorText(_ kind: KubeCloudEmulator, cluster: KubeCluster, status: KubeClusterStatus) -> String {
+        let eps = status.emulatorEndpoints(kind, for: cluster)
+        let addon = status.probe?.emulator(kind)
         guard let ep = eps.vmNetwork ?? eps.lan else {
-            let ready = status.probe?.floci?.ready == true
             return status.phase == .running
-                ? (ready ? "installed, its address is being published — call cluster_status in a moment." : "installed and starting — call cluster_status in a moment.")
+                ? (addon?.ready == true ? "installed, its address is being published — call cluster_status in a moment." : "installed and starting — call cluster_status in a moment.")
                 : "starts with the cluster."
         }
         var s = "\(ep) from this workspace"
-        if let lan = eps.lan, lan != ep { s += " (\(lan) from the Mac and its LAN — also reachable from here, and the base of the URLs the emulator returns, such as SQS queue URLs)" }
-        s += ". Point the AWS CLI and SDKs at it: `export AWS_ENDPOINT_URL=\(ep) AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1` (any credentials work; a 12-digit access key id selects an account). Emulates S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge, Cognito and 100+ more; state persists on the cluster's storage. Services that spawn containers (Lambda, RDS, …) are best effort. Never point real AWS work at it."
-        if status.probe?.floci?.ready == false { s += " (Its pod is still starting.)" }
+        if let lan = eps.lan, lan != ep { s += " (\(lan) from the Mac and its LAN — also reachable from here, and the base of the URLs the emulator returns)" }
+        s += ". Point the \(kind.cloudName) CLI and SDKs at it: `\(kind.clientSetup(endpoint: ep))`. \(kind.credentialsNote) Emulates \(kind.services) and more; state persists on the cluster's storage. Services that spawn containers (\(kind.containerBackedServices)) are best effort. Never point real \(kind.cloudName) work at it."
+        if let tag = addon?.imageTag { s += " Version: \(kind.project) \(tag)." }
+        if addon?.ready == false { s += " (Its pod is still starting.)" }
         return s
     }
 
@@ -327,8 +344,8 @@ final class KubeMCPServer: MCPLineHandler {
             out += c.spec.ingress
                 ? "- Ingress: Traefik (k3s bundled) is a LoadBalancer Service in kube-system on ports 80/443; Ingress resources are served there.\n"
                 : "- Ingress: none installed (Traefik was left out).\n"
-            if c.spec.awsEmulator {
-                out += "- AWS emulator (floci): " + awsEmulatorText(c, status: st) + "\n"
+            for kind in c.spec.emulators {
+                out += "- \(kind.displayName) (\(kind.project)): " + emulatorText(kind, cluster: c, status: st) + "\n"
             }
             if !registries.isEmpty {
                 out += "- Images: the cluster pulls from the registries below without extra configuration (containerd mirrors are set up); reference them as <address>/<repo>:<tag>.\n"
@@ -374,7 +391,9 @@ final class KubeMCPServer: MCPLineHandler {
             "spec": ["nodeCount": c.spec.nodeCount, "cpusPerNode": c.spec.cpusPerNode, "memoryGBPerNode": c.spec.memoryGBPerNode,
                      "longhorn": c.spec.storageEnabled, "synology": c.spec.synology?.isConfigured == true,
                      "loadBalancer": c.spec.loadBalancer.rawValue, "lanPool": c.spec.lanPool ?? "", "ingress": c.spec.ingress,
-                     "awsEmulator": c.spec.awsEmulator],
+                     "awsEmulator": c.spec.awsEmulator, "azureEmulator": c.spec.azureEmulator,
+                     "gcpEmulator": c.spec.gcpEmulator, "ociEmulator": c.spec.ociEmulator,
+                     "emulatorVersions": c.spec.emulatorVersions],
             "storageClasses": storageClasses(of: c).map { ["name": $0.name, "default": $0.isDefault, "backing": $0.backing] },
         ]
         if let m = st.message { d["message"] = m }
@@ -391,10 +410,15 @@ final class KubeMCPServer: MCPLineHandler {
             if let syn = p.synology { d["synologyDriver"] = ["ready": syn.ready, "pods": syn.pods] }
             if !p.warnings.isEmpty { d["recentWarnings"] = p.warnings.prefix(6).map { "\($0.reason) \($0.namespace)/\($0.object): \($0.message)" } }
         }
-        if c.spec.awsEmulator {
-            let eps = st.awsEmulatorEndpoints(for: c)
-            d["awsEmulator"] = ["ready": st.probe?.floci?.ready ?? false, "endpointFromWorkspace": eps.vmNetwork ?? "",
-                                "endpointLAN": eps.lan ?? "", "credentials": "any, e.g. test/test, region us-east-1"]
+        for kind in c.spec.emulators {
+            let eps = st.emulatorEndpoints(kind, for: c)
+            let addon = st.probe?.emulator(kind)
+            var e: [String: Any] = ["project": kind.project, "ready": addon?.ready ?? false,
+                                    "endpointFromWorkspace": eps.vmNetwork ?? "", "endpointLAN": eps.lan ?? "",
+                                    "credentials": kind.credentialsNote]
+            if let ep = eps.vmNetwork ?? eps.lan { e["clientSetup"] = kind.clientSetup(endpoint: ep) }
+            if let image = addon?.image { e["image"] = image }
+            d[kind.rawValue + "Emulator"] = e
         }
         if !st.lbEndpoints.isEmpty {
             d["loadBalancerEndpoints"] = st.lbEndpoints.map { ["service": "\($0.namespace)/\($0.service)", "address": ($0.ip ?? st.hostIP ?? "") + ":\($0.port)", "protocol": $0.protocolName, "bound": $0.bound, "error": $0.error ?? "", "scope": $0.isVMScoped ? "vm (private)" : "lan (public)"] }

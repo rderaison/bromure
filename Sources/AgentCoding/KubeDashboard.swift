@@ -212,7 +212,7 @@ struct KubeDashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 statStrip(cluster)
-                awsEmulatorCard(cluster)
+                ForEach(cluster.spec.emulators) { emulatorCard($0, cluster) }
                 nodesCard(cluster)
                 if cluster.spec.loadBalancer == .bromure { loadBalancerCard }
                 if let warnings = probe?.warnings, !warnings.isEmpty { warningsCard(warnings) }
@@ -266,42 +266,47 @@ struct KubeDashboardView: View {
         }
     }
 
-    @ViewBuilder private func awsEmulatorCard(_ cluster: KubeCluster) -> some View {
-        if cluster.spec.awsEmulator {
-            KubeCard(title: "AWS emulator", systemImage: "cloud.fill") {
-                let addon = probe?.floci
-                let eps = status.awsEmulatorEndpoints(for: cluster)
-                HStack(spacing: 6) {
-                    Circle().fill(addon?.ready == true ? Color.green : (addon == nil ? Color.secondary.opacity(0.4) : Color.orange))
-                        .frame(width: 8, height: 8)
-                    Text(addon == nil ? (status.phase == .running ? "Not installed" : "Starts with the cluster")
-                         : addon?.ready == true ? "floci ready" : "floci starting")
-                        .font(.system(size: 12))
-                    Spacer()
-                    Text("floci · port \(String(KubeClusterSpec.awsEmulatorPort))").font(.system(size: 10.5)).foregroundStyle(.tertiary)
-                }
-                if let lan = eps.lan {
-                    HStack(spacing: 6) {
-                        Text("From this Mac and the LAN").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 170, alignment: .leading)
-                        Text(lan).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-                    }
-                }
-                if let vm = eps.vmNetwork {
-                    HStack(spacing: 6) {
-                        Text("From the workspaces").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 170, alignment: .leading)
-                        Text(vm).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-                    }
-                }
-                if let ep = eps.vmNetwork ?? eps.lan {
-                    Text("export AWS_ENDPOINT_URL=\(ep) AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1")
-                        .font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
-                }
-                Text("Any credentials work (a 12-digit access key id selects an account). State persists on the cluster's default storage class. Services that spawn containers — Lambda, RDS… — use the node's Docker and are best effort.")
-                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+    /// One cloud emulator (floci, floci-az, …): state, the version it runs,
+    /// where it answers, how to point that cloud's tools at it.
+    private func emulatorCard(_ kind: KubeCloudEmulator, _ cluster: KubeCluster) -> some View {
+        let addon = probe?.emulator(kind)
+        let eps = status.emulatorEndpoints(kind, for: cluster)
+        let running = [kind.project, addon?.imageTag].compactMap { $0 }.joined(separator: " ")
+        return KubeCard(title: LocalizedStringKey(kind.displayName), systemImage: "cloud.fill") {
+            HStack(spacing: 6) {
+                Circle().fill(addon?.ready == true ? Color.green : (addon == nil ? Color.secondary.opacity(0.4) : Color.orange))
+                    .frame(width: 8, height: 8)
+                Text(addon == nil
+                     ? NSLocalizedString(status.phase == .running ? "Not installed" : "Starts with the cluster", comment: "k8s")
+                     : String(format: NSLocalizedString(addon?.ready == true ? "%@ ready" : "%@ starting", comment: "k8s"), kind.project))
+                    .font(.system(size: 12))
+                Spacer()
+                Text(String(format: NSLocalizedString("%@ · port %d", comment: "k8s"), running, kind.port))
+                    .font(.system(size: 10.5)).foregroundStyle(.tertiary)
             }
+            if let lan = eps.lan {
+                HStack(spacing: 6) {
+                    Text("From this Mac and the LAN").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 170, alignment: .leading)
+                    Text(lan).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                }
+            }
+            if let vm = eps.vmNetwork {
+                HStack(spacing: 6) {
+                    Text("From the workspaces").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 170, alignment: .leading)
+                    Text(vm).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                }
+            }
+            if let ep = eps.vmNetwork ?? eps.lan {
+                Text(kind.clientSetup(endpoint: ep))
+                    .font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+            }
+            Text(NSLocalizedString(kind.credentialsNote, comment: "k8s") + " "
+                 + String(format: NSLocalizedString("State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort.", comment: "k8s"),
+                          kind.containerBackedServices))
+                .font(.system(size: 10.5)).foregroundStyle(.secondary)
         }
     }
 
@@ -824,6 +829,9 @@ struct NewKubeClusterSheet: View {
             if !synology.isConfigured { return NSLocalizedString("Synology: address and user are required.", comment: "k8s") }
             if synologyPassword.isEmpty { return NSLocalizedString("Synology: password is required.", comment: "k8s") }
         }
+        for kind in spec.emulators where !KubeCloudEmulator.isValidPin(spec.emulatorVersions[kind.rawValue]) {
+            return String(format: NSLocalizedString("%@ version: a tag such as 2.1.0 or a full image reference.", comment: "k8s"), kind.project)
+        }
         return nil
     }
     private var canCreate: Bool { blocker == nil }
@@ -835,7 +843,7 @@ struct NewKubeClusterSheet: View {
         if synologyOn { parts.append("Synology") }
         if spec.storageEnabled { parts.append("Longhorn") }
         parts.append(spec.loadBalancer == .bromure ? "LAN LB" : spec.loadBalancer == .metallb ? "MetalLB" : "no LB")
-        if spec.awsEmulator { parts.append("AWS") }
+        parts += spec.emulators.map(\.shortName)
         return parts.joined(separator: " · ")
     }
 
@@ -979,7 +987,7 @@ struct NewKubeClusterSheet: View {
     private var addOnsSummary: String {
         var parts: [String] = []
         if spec.ingress { parts.append("Traefik") }
-        if spec.awsEmulator { parts.append(NSLocalizedString("AWS emulator", comment: "k8s")) }
+        parts += spec.emulators.map { NSLocalizedString($0.displayName, comment: "k8s") }
         return parts.isEmpty ? NSLocalizedString("None", comment: "k8s") : parts.joined(separator: " · ")
     }
 
@@ -1103,9 +1111,27 @@ struct NewKubeClusterSheet: View {
     private var addOnsPane: some View {
         pane {
             Section {
-                Toggle(NSLocalizedString("AWS emulator (floci)", comment: "k8s"), isOn: $spec.awsEmulator)
+                // The floci family: one toggle per cloud, and once on, the
+                // version — empty for the latest release at setup.
+                ForEach(KubeCloudEmulator.allCases) { kind in
+                    Toggle(NSLocalizedString(kind.toggleLabel, comment: "k8s"),
+                           isOn: Binding(get: { spec[kind] }, set: { spec[kind] = $0 }))
+                    if spec[kind] {
+                        TextField(String(format: NSLocalizedString("%@ version", comment: "k8s"), kind.project),
+                                  text: Binding(get: { spec.emulatorVersions[kind.rawValue] ?? "" },
+                                                set: { spec.setEmulatorVersion($0, for: kind) }),
+                                  prompt: Text(NSLocalizedString("latest release", comment: "k8s")))
+                    }
+                }
             } footer: {
-                caption(NSLocalizedString("A local AWS inside the cluster: S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge and 100+ more services, with data kept on the cluster's storage. Published as a LoadBalancer Service on port 4566; the dashboard and the agents' infrastructure MCP hand out the endpoint and the test credentials (AWS_ENDPOINT_URL, any access key). Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers, such as Lambda and RDS, use the node's Docker and are best effort.", comment: "k8s"))
+                VStack(alignment: .leading, spacing: 4) {
+                    caption(NSLocalizedString("Local clouds inside the cluster, from the floci family: each one a LoadBalancer Service on its own port, with data kept on the cluster's storage. The dashboard and the agents' infrastructure MCP hand out the endpoints and the test credentials. Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers use the node's Docker and are best effort.", comment: "k8s"))
+                    ForEach(KubeCloudEmulator.allCases) { kind in
+                        caption(String(format: NSLocalizedString("%@ (%@), port %d: %@ and more.", comment: "k8s"),
+                                       kind.cloudName, kind.project, kind.port, kind.services))
+                    }
+                    caption(NSLocalizedString("Leave a version empty to get the latest release on Docker Hub at setup. A tag (2.1.0) or a full image reference pins it.", comment: "k8s"))
+                }
             }
         }
     }

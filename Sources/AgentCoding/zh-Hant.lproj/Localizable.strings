@@ -2078,7 +2078,6 @@
 "Twenty addresses at the top of the VM subnet are reserved for MetalLB when the cluster is set up. Workspaces reach them directly; the Mac does through the VM network interface." = "設定叢集時，虛擬機器子網路末尾的二十個位址將為 MetalLB 保留。工作區可直接存取它們；Mac 透過虛擬機器網路介面存取。";
 "k3s's bundled ingress. With the LAN load balancer it publishes ports 80 and 443 on this Mac." = "k3s 隨附的入口。搭配區域網路負載平衡器，它會在這台 Mac 上發布 80 和 443 連接埠。";
 "AWS emulator (floci)" = "AWS 模擬器 (floci)";
-"A local AWS inside the cluster: S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge and 100+ more services, with data kept on the cluster's storage. Published as a LoadBalancer Service on port 4566; the dashboard and the agents' infrastructure MCP hand out the endpoint and the test credentials (AWS_ENDPOINT_URL, any access key). Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers, such as Lambda and RDS, use the node's Docker and are best effort." = "叢集內的本機 AWS：S3、DynamoDB、SQS、SNS、Lambda、API Gateway、Step Functions、EventBridge 等 100 多項服務，資料保存在叢集的儲存空間上。以 LoadBalancer 服務發布在 4566 連接埠；儀表板和代理程式的基礎架構 MCP 會提供端點和測試憑證（AWS_ENDPOINT_URL，任意存取金鑰）。自由開源 (MIT)，設定時從 Docker Hub 拉取。會產生容器的服務（如 Lambda 和 RDS）使用節點的 Docker，盡力而為。";
 "Workspaces on the list get the cluster in their ~/.kube/config and see it through the infrastructure MCP. You can change this later from the dashboard." = "列表中的工作區會在 ~/.kube/config 中取得叢集，並透過基礎架構 MCP 看到它。之後可在儀表板中更改。";
 "A private Docker registry in its own VM: build in a workspace, push here, run it in a cluster. Plain HTTP on the VM network; it never leaves this Mac." = "在專屬虛擬機器裡執行的私人 Docker 登錄：在工作區中建置，推送到這裡，在叢集中執行。虛擬機器網路上的明文 HTTP；永遠不會離開這台 Mac。";
 "Image storage" = "映像檔儲存空間";
@@ -2323,3 +2322,25 @@
 "The peer is on this Mac, reached through its mirror" = "對方在這台 Mac 上，透過其鏡像存取";
 "new name" = "新名稱";
 "sessions you can ask" = "可提問的工作階段";
+
+/* Cloud emulators: the floci family (floci-az, floci-gcp, floci-oci), versions from Docker Hub */
+"Azure emulator (floci-az)" = "Azure 模擬器 (floci-az)";
+"Google Cloud emulator (floci-gcp)" = "Google Cloud 模擬器 (floci-gcp)";
+"Oracle Cloud emulator (floci-oci)" = "Oracle Cloud 模擬器 (floci-oci)";
+"Azure emulator" = "Azure 模擬器";
+"Google Cloud emulator" = "Google Cloud 模擬器";
+"Oracle Cloud emulator" = "Oracle Cloud 模擬器";
+"%@ version" = "%@ 版本";
+"latest release" = "最新發行版";
+"Local clouds inside the cluster, from the floci family: each one a LoadBalancer Service on its own port, with data kept on the cluster's storage. The dashboard and the agents' infrastructure MCP hand out the endpoints and the test credentials. Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers use the node's Docker and are best effort." = "叢集內的本機雲端（floci 家族）：每一個都是各自連接埠上的 LoadBalancer Service，資料保存在叢集的儲存空間。儀表板與代理程式的基礎架構 MCP 會提供端點與測試憑證。免費開源（MIT），設定時從 Docker Hub 取得。會啟動容器的服務使用節點的 Docker，盡力而為。";
+"%@ (%@), port %d: %@ and more." = "%@（%@），連接埠 %d：%@ 等。";
+"Leave a version empty to get the latest release on Docker Hub at setup. A tag (2.1.0) or a full image reference pins it." = "版本留空則在設定時取得 Docker Hub 上的最新發行版。填入標籤（2.1.0）或完整映像檔參照可固定版本。";
+"%@ ready" = "%@ 就緒";
+"%@ starting" = "%@ 啟動中";
+"%@ · port %d" = "%@ · 連接埠 %d";
+"Any credentials work (a 12-digit access key id selects an account)." = "任何憑證皆可用（12 位數存取金鑰 ID 用來選擇帳戶）。";
+"The Azurite development account (devstoreaccount1 and its well-known key) works; credentials aren't validated. Cosmos DB, Key Vault and the other services answer under per-service paths of the same endpoint." = "Azurite 開發帳戶（devstoreaccount1 及其公開金鑰）可用；憑證不會被驗證。Cosmos DB、Key Vault 與其他服務在同一端點的各服務路徑下回應。";
+"No credentials needed once the emulator variables are set; the default project is floci-local." = "設定好模擬器變數後不需憑證；預設專案為 floci-local。";
+"Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1." = "任何搭配任意 RSA 金鑰的 OCI 設定檔皆可用（簽章會被解析但從不驗證）；預設租用戶為 ocid1.tenancy.oc1..flocilocal…，區域為 us-ashburn-1。";
+"State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort." = "狀態保存在叢集的預設儲存類別上。會啟動容器的服務（%@）使用節點的 Docker，盡力而為。";
+"%@ version: a tag such as 2.1.0 or a full image reference." = "%@ 版本：請填入 2.1.0 這樣的標籤或完整映像檔參照。";

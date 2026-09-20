@@ -144,6 +144,147 @@ public struct KubeSynologySpec: Codable, Equatable, Sendable {
     }
 }
 
+/// The local cloud emulators a cluster can host: the floci family
+/// (floci-io on GitHub, MIT), one Deployment each behind a LoadBalancer
+/// Service on its own port, state on the cluster's default storage class.
+/// The node script installs them by `rawValue`; the probe reports them
+/// under the same key.
+public enum KubeCloudEmulator: String, Codable, CaseIterable, Sendable, Identifiable {
+    case aws, azure, gcp, oci
+
+    public var id: String { rawValue }
+
+    /// The floci project (also the image, namespace, Deployment and
+    /// Service name in the cluster).
+    public var project: String {
+        switch self {
+        case .aws:   return "floci"
+        case .azure: return "floci-az"
+        case .gcp:   return "floci-gcp"
+        case .oci:   return "floci-oci"
+        }
+    }
+    public var namespace: String { project }
+    public var serviceName: String { project }
+
+    /// The Docker Hub repository ("floci/floci-az").
+    public var repository: String { "floci/" + project }
+
+    /// "floci/floci-az:0.13.0"
+    public func image(tag: String) -> String { repository + ":" + tag }
+
+    /// A pin as the owner typed it — a bare tag ("2.1.0") or a full image
+    /// reference (anything with a "/") — as the image to run; nil when
+    /// empty (or malformed), meaning the latest release at setup.
+    public func imageReference(pin: String?) -> String? {
+        guard let pin = pin?.trimmingCharacters(in: .whitespaces), !pin.isEmpty, Self.isValidPin(pin) else { return nil }
+        return pin.contains("/") ? pin : image(tag: pin)
+    }
+
+    /// A pin is a tag or an image reference: ASCII letters, digits and
+    /// `. _ - : / @` only — no spaces, commas or "=" (the node script gets
+    /// the emulators as a `kind=image` comma list). Empty is fine.
+    public static func isValidPin(_ pin: String?) -> Bool {
+        guard let pin = pin?.trimmingCharacters(in: .whitespaces), !pin.isEmpty else { return true }
+        return pin.unicodeScalars.allSatisfy {
+            $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "._-:/@".unicodeScalars.contains($0))
+        }
+    }
+
+    /// The port the emulator answers on (floci's upstream defaults).
+    public var port: Int {
+        switch self {
+        case .aws:   return 4566
+        case .azure: return 4577
+        case .gcp:   return 4588
+        case .oci:   return 4599
+        }
+    }
+
+    /// The cloud, as people name it.
+    public var cloudName: String {
+        switch self {
+        case .aws:   return "AWS"
+        case .azure: return "Azure"
+        case .gcp:   return "Google Cloud"
+        case .oci:   return "Oracle Cloud"
+        }
+    }
+
+    /// "AWS emulator" — the add-on's name in the UI (a localization key).
+    public var displayName: String { cloudName + " emulator" }
+
+    /// "AWS emulator (floci)" — the sheet's toggle (a localization key).
+    public var toggleLabel: String { displayName + " (" + project + ")" }
+
+    /// Short tag for one-line summaries.
+    public var shortName: String {
+        switch self {
+        case .aws:   return "AWS"
+        case .azure: return "Azure"
+        case .gcp:   return "GCP"
+        case .oci:   return "OCI"
+        }
+    }
+
+    /// The headline services it emulates (there are more) — product names,
+    /// so not localized.
+    public var services: String {
+        switch self {
+        case .aws:   return "S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge, Cognito"
+        case .azure: return "Blob, Queue and Table Storage, Cosmos DB, Key Vault, Service Bus, Event Hubs, Event Grid, Functions, Azure SQL, App Configuration"
+        case .gcp:   return "Cloud Storage, Pub/Sub, Firestore, Datastore, Secret Manager, Cloud KMS, Cloud Run, Cloud Functions, Cloud Tasks, Cloud SQL, BigQuery"
+        case .oci:   return "Object Storage, Queue, Streaming, Vault, KMS, Secrets, Functions, Identity, OKE"
+        }
+    }
+
+    /// The services that spawn containers on the node's Docker (best effort).
+    public var containerBackedServices: String {
+        switch self {
+        case .aws:   return "Lambda, RDS, …"
+        case .azure: return "Functions, Event Hubs, Cosmos DB engines, …"
+        case .gcp:   return "Cloud Run, Cloud SQL, Managed Kafka, …"
+        case .oci:   return "Functions, OKE, …"
+        }
+    }
+
+    /// Shell line that points the cloud's CLI and SDKs at `endpoint`.
+    public func clientSetup(endpoint: String) -> String {
+        switch self {
+        case .aws:
+            return "export AWS_ENDPOINT_URL=\(endpoint) AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1"
+        case .azure:
+            return "export AZURE_STORAGE_CONNECTION_STRING=\"DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=\(Self.azuriteKey);BlobEndpoint=\(endpoint)/devstoreaccount1;QueueEndpoint=\(endpoint)/devstoreaccount1;TableEndpoint=\(endpoint)/devstoreaccount1\""
+        case .gcp:
+            let host = Self.hostPort(endpoint)
+            return "export STORAGE_EMULATOR_HOST=\(endpoint) PUBSUB_EMULATOR_HOST=\(host) FIRESTORE_EMULATOR_HOST=\(host) DATASTORE_EMULATOR_HOST=\(host) SECRET_MANAGER_EMULATOR_HOST=\(host) FIREBASE_AUTH_EMULATOR_HOST=\(host) GOOGLE_CLOUD_PROJECT=floci-local"
+        case .oci:
+            return "oci --endpoint \(endpoint) os ns get   # any ~/.oci profile with any RSA key; region us-ashburn-1, namespace floci-local"
+        }
+    }
+
+    /// The credentials story, one sentence (a localization key).
+    public var credentialsNote: String {
+        switch self {
+        case .aws:   return "Any credentials work (a 12-digit access key id selects an account)."
+        case .azure: return "The Azurite development account (devstoreaccount1 and its well-known key) works; credentials aren't validated. Cosmos DB, Key Vault and the other services answer under per-service paths of the same endpoint."
+        case .gcp:   return "No credentials needed once the emulator variables are set; the default project is floci-local."
+        case .oci:   return "Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1."
+        }
+    }
+
+    /// Azurite's well-known development storage key, which floci-az accepts.
+    static let azuriteKey = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMh0=="
+
+    /// "host:port" of an http(s) URL — what the Google emulator variables want.
+    static func hostPort(_ url: String) -> String {
+        var s = url
+        for prefix in ["http://", "https://"] where s.hasPrefix(prefix) { s = String(s.dropFirst(prefix.count)) }
+        if let slash = s.firstIndex(of: "/") { s = String(s[..<slash]) }
+        return s
+    }
+}
+
 /// What the user tunes when creating a cluster.
 public struct KubeClusterSpec: Codable, Equatable, Sendable {
     /// Total nodes. Node 1 is the control plane (and schedules workloads
@@ -171,18 +312,58 @@ public struct KubeClusterSpec: Codable, Equatable, Sendable {
     /// Persistent volumes on a Synology NAS (Synology CSI). When set, its
     /// storage class becomes the default; Longhorn stays available by name.
     public var synology: KubeSynologySpec? = nil
-    /// floci, a local AWS emulator (S3, DynamoDB, SQS, SNS, Lambda, …), as a
-    /// Deployment behind a LoadBalancer Service on `awsEmulatorPort`.
+    /// The local cloud emulators (`KubeCloudEmulator`): floci for AWS,
+    /// floci-az for Azure, floci-gcp for Google Cloud, floci-oci for Oracle
+    /// Cloud — each a Deployment behind a LoadBalancer Service on its port.
     public var awsEmulator: Bool = false
-
-    public static let awsEmulatorNamespace = "floci"
-    public static let awsEmulatorPort = 4566
+    public var azureEmulator: Bool = false
+    public var gcpEmulator: Bool = false
+    public var ociEmulator: Bool = false
+    /// Per-emulator pin (`KubeCloudEmulator.rawValue` → a tag such as
+    /// "2.1.0", or a full image reference). Absent = the latest release on
+    /// Docker Hub, looked up when the cluster is set up; nothing is pinned
+    /// in bromure itself.
+    public var emulatorVersions: [String: String] = [:]
 
     public init() {}
 
+    /// The emulators switched on, in `KubeCloudEmulator.allCases` order.
+    public var emulators: [KubeCloudEmulator] { KubeCloudEmulator.allCases.filter { self[$0] } }
+
+    /// The image an emulator is pinned to; nil = the latest release.
+    public func emulatorImage(_ kind: KubeCloudEmulator) -> String? {
+        kind.imageReference(pin: emulatorVersions[kind.rawValue])
+    }
+
+    /// Pin (or, with an empty string, unpin) an emulator's version.
+    public mutating func setEmulatorVersion(_ version: String?, for kind: KubeCloudEmulator) {
+        let v = version?.trimmingCharacters(in: .whitespaces) ?? ""
+        emulatorVersions[kind.rawValue] = v.isEmpty ? nil : v
+    }
+
+    public subscript(emulator: KubeCloudEmulator) -> Bool {
+        get {
+            switch emulator {
+            case .aws:   return awsEmulator
+            case .azure: return azureEmulator
+            case .gcp:   return gcpEmulator
+            case .oci:   return ociEmulator
+            }
+        }
+        set {
+            switch emulator {
+            case .aws:   awsEmulator = newValue
+            case .azure: azureEmulator = newValue
+            case .gcp:   gcpEmulator = newValue
+            case .oci:   ociEmulator = newValue
+            }
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case nodeCount, cpusPerNode, memoryGBPerNode, storageEnabled, storageDiskGB,
-             loadBalancer, ingress, lanPool, synology, awsEmulator
+             loadBalancer, ingress, lanPool, synology, awsEmulator, azureEmulator, gcpEmulator, ociEmulator,
+             emulatorVersions
     }
 
     /// Every field has a default so specs saved before a field existed (and
@@ -199,6 +380,10 @@ public struct KubeClusterSpec: Codable, Equatable, Sendable {
         lanPool = try c.decodeIfPresent(String.self, forKey: .lanPool)
         synology = try c.decodeIfPresent(KubeSynologySpec.self, forKey: .synology)
         awsEmulator = try c.decodeIfPresent(Bool.self, forKey: .awsEmulator) ?? false
+        azureEmulator = try c.decodeIfPresent(Bool.self, forKey: .azureEmulator) ?? false
+        gcpEmulator = try c.decodeIfPresent(Bool.self, forKey: .gcpEmulator) ?? false
+        ociEmulator = try c.decodeIfPresent(Bool.self, forKey: .ociEmulator) ?? false
+        emulatorVersions = try c.decodeIfPresent([String: String].self, forKey: .emulatorVersions) ?? [:]
     }
 
     /// Any storage add-on that needs the iSCSI initiator on the nodes.
@@ -693,8 +878,9 @@ public struct KubeProbe: Codable, Equatable, Sendable {
     public var longhorn: Longhorn?
     /// Synology CSI driver state (present once its namespace exists).
     public var synology: AddOn?
-    /// The AWS emulator's namespace, when the cluster has one.
-    public var floci: AddOn?
+    /// The cloud emulators' namespaces, keyed by `KubeCloudEmulator`
+    /// rawValue ("aws", "azure", …), for those the cluster has.
+    public var emulators: [String: AddOn]
     public var pods: [Pod]
     public var pvcs: [PVC]
     public var warnings: [Warning]
@@ -704,12 +890,26 @@ public struct KubeProbe: Codable, Equatable, Sendable {
         public var installed: Bool
         public var ready: Bool
         public var pods: Int
+        /// The Deployment's image (cloud emulators), e.g. "floci/floci:2.1.0".
+        public var image: String?
+
+        /// The tag of `image` ("2.1.0"), if it carries one.
+        public var imageTag: String? {
+            guard let image, let colon = image.lastIndex(of: ":") else { return nil }
+            let tag = image[image.index(after: colon)...]
+            return tag.isEmpty || tag.contains("/") ? nil : String(tag)
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
         case at, reachable, version, full, nodes, podSummary, podsByNamespace, services,
-             deployments, longhorn, synology, floci, pods, pvcs, warnings, probeMillis
+             deployments, longhorn, synology, emulators, pods, pvcs, warnings, probeMillis
     }
+    /// Probes from before the emulator family reported floci alone.
+    private enum LegacyKeys: String, CodingKey { case floci }
+
+    /// The emulator's state, if its namespace exists.
+    public func emulator(_ kind: KubeCloudEmulator) -> AddOn? { emulators[kind.rawValue] }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -724,7 +924,11 @@ public struct KubeProbe: Codable, Equatable, Sendable {
         deployments = try c.decodeIfPresent(Deployments.self, forKey: .deployments) ?? Deployments()
         longhorn = try c.decodeIfPresent(Longhorn.self, forKey: .longhorn)
         synology = try c.decodeIfPresent(AddOn.self, forKey: .synology)
-        floci = try c.decodeIfPresent(AddOn.self, forKey: .floci)
+        emulators = try c.decodeIfPresent([String: AddOn].self, forKey: .emulators) ?? [:]
+        if emulators.isEmpty,
+           let legacy = try decoder.container(keyedBy: LegacyKeys.self).decodeIfPresent(AddOn.self, forKey: .floci) {
+            emulators[KubeCloudEmulator.aws.rawValue] = legacy
+        }
         pods = try c.decodeIfPresent([Pod].self, forKey: .pods) ?? []
         pvcs = try c.decodeIfPresent([PVC].self, forKey: .pvcs) ?? []
         warnings = try c.decodeIfPresent([Warning].self, forKey: .warnings) ?? []
@@ -800,21 +1004,21 @@ public struct KubeClusterStatus: Codable, Equatable, Sendable {
 /// The clusters the app knows about + their live status. Locally the
 /// engine writes `status`; on a fat client both come from `/state` via
 public extension KubeClusterStatus {
-    /// Where the AWS emulator answers, once its Service has an address.
+    /// Where a cloud emulator answers, once its Service has an address.
     /// `lan`: the load balancer's address (this Mac and its LAN — or the VM
     /// network under MetalLB). `vmNetwork`: the Service's NodePort on the
     /// control-plane node, which every workspace reaches directly.
-    func awsEmulatorEndpoints(for cluster: KubeCluster) -> (lan: String?, vmNetwork: String?) {
-        guard cluster.spec.awsEmulator else { return (nil, nil) }
-        let ns = KubeClusterSpec.awsEmulatorNamespace
-        let port = KubeClusterSpec.awsEmulatorPort
+    func emulatorEndpoints(_ kind: KubeCloudEmulator, for cluster: KubeCluster) -> (lan: String?, vmNetwork: String?) {
+        guard cluster.spec[kind] else { return (nil, nil) }
+        let ns = kind.namespace
+        let port = kind.port
         var lan: String?
         if let ep = lbEndpoints.first(where: { $0.namespace == ns && $0.port == port && $0.bound }),
            let ip = ep.ip ?? hostIP {
             lan = "http://\(ip):\(ep.port)"
         }
         var vm: String?
-        if let svc = probe?.services.first(where: { $0.namespace == ns && $0.name == "floci" }) {
+        if let svc = probe?.services.first(where: { $0.namespace == ns && $0.name == kind.serviceName }) {
             if lan == nil, let ip = svc.ingress.first, !ip.isEmpty { lan = "http://\(ip):\(port)" }
             if let np = svc.ports.first(where: { $0.port == port })?.nodePort, np > 0, let node = cluster.serverIP {
                 vm = "http://\(node):\(np)"

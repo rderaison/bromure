@@ -275,8 +275,9 @@ def probe_longhorn(full):
     return info
 
 
-def probe_addon(namespace):
-    """Presence + readiness of an add-on namespace (all pods Running & ready)."""
+def probe_addon(namespace, deployment=None):
+    """Presence + readiness of an add-on namespace (all pods Running & ready);
+    with `deployment`, the image that Deployment runs too."""
     if not kubectl_json("get", "ns", namespace):
         return None
     pods = (kubectl_json("get", "pods", "-n", namespace) or {}).get("items", [])
@@ -285,7 +286,14 @@ def probe_addon(namespace):
         cs = (p.get("status") or {}).get("containerStatuses") or []
         if cs and all(c.get("ready") for c in cs):
             ready += 1
-    return {"installed": True, "ready": bool(pods) and ready == len(pods), "pods": len(pods)}
+    out = {"installed": True, "ready": bool(pods) and ready == len(pods), "pods": len(pods)}
+    if deployment:
+        d = kubectl_json("get", "deploy", "-n", namespace, deployment) or {}
+        containers = ((((d.get("spec") or {}).get("template") or {}).get("spec") or {})
+                      .get("containers") or [])
+        if containers and containers[0].get("image"):
+            out["image"] = containers[0]["image"]
+    return out
 
 
 def probe_events():
@@ -343,9 +351,16 @@ def main():
         syn = probe_addon("synology-csi")
         if syn:
             result["synology"] = syn
-        fl = probe_addon("floci")
-        if fl:
-            result["floci"] = fl
+        # The cloud emulators (KubeCloudEmulator in KubeCluster.swift), keyed
+        # by kind; each lives in a namespace named after its floci project.
+        emulators = {}
+        for kind, ns in (("aws", "floci"), ("azure", "floci-az"),
+                         ("gcp", "floci-gcp"), ("oci", "floci-oci")):
+            st = probe_addon(ns, deployment=ns)
+            if st:
+                emulators[kind] = st
+        if emulators:
+            result["emulators"] = emulators
         if full:
             result["pods"] = pods
             result["pvcs"] = probe_pvcs()

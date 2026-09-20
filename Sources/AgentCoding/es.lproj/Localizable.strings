@@ -2077,7 +2077,6 @@
 "Twenty addresses at the top of the VM subnet are reserved for MetalLB when the cluster is set up. Workspaces reach them directly; the Mac does through the VM network interface." = "Veinte direcciones al final de la subred de las VM se reservan para MetalLB al configurar el clúster. Los espacios de trabajo llegan a ellas directamente; el Mac, a través de la interfaz de red de las VM.";
 "k3s's bundled ingress. With the LAN load balancer it publishes ports 80 and 443 on this Mac." = "El ingress incluido en k3s. Con el balanceador de carga LAN publica los puertos 80 y 443 en este Mac.";
 "AWS emulator (floci)" = "Emulador de AWS (floci)";
-"A local AWS inside the cluster: S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge and 100+ more services, with data kept on the cluster's storage. Published as a LoadBalancer Service on port 4566; the dashboard and the agents' infrastructure MCP hand out the endpoint and the test credentials (AWS_ENDPOINT_URL, any access key). Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers, such as Lambda and RDS, use the node's Docker and are best effort." = "Un AWS local dentro del clúster: S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge y más de 100 servicios, con los datos guardados en el almacenamiento del clúster. Publicado como servicio LoadBalancer en el puerto 4566; el panel y el MCP de infraestructura de los agentes entregan el endpoint y las credenciales de prueba (AWS_ENDPOINT_URL, cualquier clave de acceso). Libre y de código abierto (MIT), obtenido de Docker Hub durante la configuración. Los servicios que lanzan contenedores, como Lambda y RDS, usan el Docker del nodo y funcionan según lo posible.";
 "Workspaces on the list get the cluster in their ~/.kube/config and see it through the infrastructure MCP. You can change this later from the dashboard." = "Los espacios de trabajo de la lista reciben el clúster en su ~/.kube/config y lo ven a través del MCP de infraestructura. Puedes cambiarlo más tarde desde el panel.";
 "A private Docker registry in its own VM: build in a workspace, push here, run it in a cluster. Plain HTTP on the VM network; it never leaves this Mac." = "Un registro Docker privado en su propia VM: construye en un espacio de trabajo, súbelo aquí, ejecútalo en un clúster. HTTP sin cifrar en la red de las VM; nunca sale de este Mac.";
 "Image storage" = "Almacenamiento de imágenes";
@@ -2322,3 +2321,25 @@
 "The peer is on this Mac, reached through its mirror" = "El interlocutor está en este Mac, alcanzado a través de su espejo";
 "new name" = "nombre nuevo";
 "sessions you can ask" = "sesiones a las que puedes preguntar";
+
+/* Cloud emulators: the floci family (floci-az, floci-gcp, floci-oci), versions from Docker Hub */
+"Azure emulator (floci-az)" = "Emulador de Azure (floci-az)";
+"Google Cloud emulator (floci-gcp)" = "Emulador de Google Cloud (floci-gcp)";
+"Oracle Cloud emulator (floci-oci)" = "Emulador de Oracle Cloud (floci-oci)";
+"Azure emulator" = "Emulador de Azure";
+"Google Cloud emulator" = "Emulador de Google Cloud";
+"Oracle Cloud emulator" = "Emulador de Oracle Cloud";
+"%@ version" = "Versión de %@";
+"latest release" = "última versión";
+"Local clouds inside the cluster, from the floci family: each one a LoadBalancer Service on its own port, with data kept on the cluster's storage. The dashboard and the agents' infrastructure MCP hand out the endpoints and the test credentials. Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers use the node's Docker and are best effort." = "Nubes locales dentro del clúster, de la familia floci: cada una como servicio LoadBalancer en su propio puerto, con los datos guardados en el almacenamiento del clúster. El panel y el MCP de infraestructura de los agentes entregan los endpoints y las credenciales de prueba. Libre y de código abierto (MIT), obtenido de Docker Hub durante la configuración. Los servicios que lanzan contenedores usan el Docker del nodo y funcionan según lo posible.";
+"%@ (%@), port %d: %@ and more." = "%@ (%@), puerto %d: %@ y más.";
+"Leave a version empty to get the latest release on Docker Hub at setup. A tag (2.1.0) or a full image reference pins it." = "Deja la versión vacía para obtener la última versión de Docker Hub durante la configuración. Una etiqueta (2.1.0) o una referencia de imagen completa la fija.";
+"%@ ready" = "%@ listo";
+"%@ starting" = "%@ iniciando";
+"%@ · port %d" = "%@ · puerto %d";
+"Any credentials work (a 12-digit access key id selects an account)." = "Cualquier credencial funciona (un ID de clave de acceso de 12 dígitos selecciona una cuenta).";
+"The Azurite development account (devstoreaccount1 and its well-known key) works; credentials aren't validated. Cosmos DB, Key Vault and the other services answer under per-service paths of the same endpoint." = "La cuenta de desarrollo de Azurite (devstoreaccount1 y su clave conocida) funciona; las credenciales no se validan. Cosmos DB, Key Vault y los demás servicios responden en rutas por servicio del mismo endpoint.";
+"No credentials needed once the emulator variables are set; the default project is floci-local." = "No hacen falta credenciales una vez definidas las variables del emulador; el proyecto predeterminado es floci-local.";
+"Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1." = "Cualquier perfil de OCI con cualquier clave RSA funciona (las firmas se analizan, nunca se verifican); el tenancy predeterminado es ocid1.tenancy.oc1..flocilocal…, región us-ashburn-1.";
+"State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort." = "El estado persiste en la clase de almacenamiento predeterminada del clúster. Los servicios que lanzan contenedores — %@ — usan el Docker del nodo y funcionan según lo posible.";
+"%@ version: a tag such as 2.1.0 or a full image reference." = "Versión de %@: una etiqueta como 2.1.0 o una referencia de imagen completa.";
