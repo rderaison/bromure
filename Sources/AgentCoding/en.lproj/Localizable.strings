@@ -2273,3 +2273,10 @@
 "Enable local models for a workspace and open a session — the on-device MLX engine starts on demand." = "Enable local models for a workspace and open a session — the on-device MLX engine starts on demand.";
 "Model load, \"serving\", and any load/serve errors (unsupported architecture, out-of-memory, …) appear here live." = "Model load, \"serving\", and any load/serve errors (unsupported architecture, out-of-memory, …) appear here live.";
 "The engine runs out-of-process; if it's OOM-killed and restarts, you'll see that here too." = "The engine runs out-of-process; if it's OOM-killed and restarts, you'll see that here too.";
+
+/* Unattended workspace starts */
+"“%@” is still downloading — the workspace can't start until it has." = "“%@” is still downloading — the workspace can't start until it has.";
+"The workspace is marked compromised — start it yourself to confirm the wipe." = "The workspace is marked compromised — start it yourself to confirm the wipe.";
+"The workspace's suspended state couldn't be restored — start it yourself to boot it fresh." = "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh.";
+"Couldn't start the VM: %@" = "Couldn't start the VM: %@";
+"try again." = "try again.";

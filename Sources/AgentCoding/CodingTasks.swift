@@ -691,30 +691,35 @@ final class CodingTaskEngine {
         }
     }
 
+    /// The workspace answering, booting it first when it isn't: nil once it
+    /// answers, else why it won't — a start the app refused, with its reason
+    /// (nobody was there to answer its prompt), or the boot timeout.
+    private func ensureWorkspaceUp(_ profileID: UUID, delegate: ACAppDelegate,
+                                   detached: Bool = false) async -> String? {
+        if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
+            return nil
+        }
+        if !pendingBoots.contains(profileID) {
+            pendingBoots.insert(profileID)
+            delegate.startProfileForAutomation(profileID, detached: detached)
+        }
+        defer { pendingBoots.remove(profileID) }
+        let deadline = Date().addingTimeInterval(Self.bootTimeout)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: Self.bootPollInterval)
+            if let why = delegate.unattendedLaunchRefusal(profileID) { return why }
+            if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
+                return nil
+            }
+        }
+        return NSLocalizedString("The workspace did not boot in time", comment: "task start")
+    }
+
     private func runValidation(delegate: ACAppDelegate, profileID: UUID,
                                guestPath: String, prompt: String) async -> String {
         // Make sure the workspace is up (same boot courtesy as start()).
-        if (try? await delegate.guestExec(profileID: profileID,
-                                          command: "true", timeout: 5)) == nil {
-            if !pendingBoots.contains(profileID) {
-                pendingBoots.insert(profileID)
-                delegate.startProfileForAutomation(profileID)
-            }
-            let deadline = Date().addingTimeInterval(Self.bootTimeout)
-            var up = false
-            while Date() < deadline {
-                try? await Task.sleep(nanoseconds: Self.bootPollInterval)
-                if (try? await delegate.guestExec(profileID: profileID,
-                                                  command: "true", timeout: 5)) != nil {
-                    up = true; break
-                }
-            }
-            pendingBoots.remove(profileID)
-            guard up else {
-                return NSLocalizedString(
-                    "⚠️ The workspace did not boot in time — try again.",
-                    comment: "plan validation")
-            }
+        if let why = await ensureWorkspaceUp(profileID, delegate: delegate) {
+            return "⚠️ " + why + " — " + NSLocalizedString("try again.", comment: "plan validation")
         }
         // Headless reviewer. `bash -ilc` — INTERACTIVE login shell — because
         // the generated .bashrc that exports the agent's auth env (the
@@ -817,27 +822,9 @@ final class CodingTaskEngine {
         Task { [weak self] in
             guard let self, let delegate = self.delegate else { return }
             // Make sure the workspace is reachable (boot when it isn't).
-            var up = (try? await delegate.guestExec(profileID: profileID,
-                                                    command: "true", timeout: 5)) != nil
-            if !up {
-                BACDebug.log("tasks", "“\(title)”: workspace not running — starting")
-                if !self.pendingBoots.contains(profileID) {
-                    self.pendingBoots.insert(profileID)
-                    delegate.startProfileForAutomation(profileID)
-                }
-                let deadline = Date().addingTimeInterval(Self.bootTimeout)
-                while Date() < deadline {
-                    try? await Task.sleep(nanoseconds: Self.bootPollInterval)
-                    if (try? await delegate.guestExec(profileID: profileID,
-                                                      command: "true", timeout: 5)) != nil {
-                        up = true; break
-                    }
-                }
-                self.pendingBoots.remove(profileID)
-            }
-            guard up else {
-                revert(NSLocalizedString("The workspace did not boot in time",
-                                         comment: "task start"))
+            if let why = await self.ensureWorkspaceUp(profileID, delegate: delegate) {
+                BACDebug.log("tasks", "“\(title)”: \(why)")
+                revert(why)
                 return
             }
             // The board's whole lifecycle — done-signal matching, diff
@@ -919,28 +906,10 @@ final class CodingTaskEngine {
         }
         Task { [weak self] in
             guard let self, let delegate = self.delegate else { return }
-            var up = (try? await delegate.guestExec(profileID: profileID,
-                                                    command: "true", timeout: 5)) != nil
-            if !up {
-                if !self.pendingBoots.contains(profileID) {
-                    self.pendingBoots.insert(profileID)
-                    // Headless: the plan window is the surface for this
-                    // session — raising the terminal would bury it.
-                    delegate.startProfileForAutomation(profileID, detached: true)
-                }
-                let deadline = Date().addingTimeInterval(Self.bootTimeout)
-                while Date() < deadline {
-                    try? await Task.sleep(nanoseconds: Self.bootPollInterval)
-                    if (try? await delegate.guestExec(profileID: profileID,
-                                                      command: "true", timeout: 5)) != nil {
-                        up = true; break
-                    }
-                }
-                self.pendingBoots.remove(profileID)
-            }
-            guard up else {
-                revert(NSLocalizedString("The workspace did not boot in time",
-                                         comment: "task plan"))
+            // Headless: the plan window is the surface for this session —
+            // raising the terminal would bury it.
+            if let why = await self.ensureWorkspaceUp(profileID, delegate: delegate, detached: true) {
+                revert(why)
                 return
             }
             // Planning happens IN the configured directory (no worktree —
@@ -1345,26 +1314,8 @@ final class CodingTaskEngine {
         BACDebug.log("tasks", "“\(task.title)”: restarting session (\(branch))")
         Task { [weak self] in
             guard let self, let delegate = self.delegate else { return }
-            var up = (try? await delegate.guestExec(profileID: profileID,
-                                                    command: "true", timeout: 5)) != nil
-            if !up {
-                if !self.pendingBoots.contains(profileID) {
-                    self.pendingBoots.insert(profileID)
-                    delegate.startProfileForAutomation(profileID)
-                }
-                let deadline = Date().addingTimeInterval(Self.bootTimeout)
-                while Date() < deadline {
-                    try? await Task.sleep(nanoseconds: Self.bootPollInterval)
-                    if (try? await delegate.guestExec(profileID: profileID,
-                                                      command: "true", timeout: 5)) != nil {
-                        up = true; break
-                    }
-                }
-                self.pendingBoots.remove(profileID)
-            }
-            guard up else {
-                self.store.mutate(taskID) { $0.lastError = NSLocalizedString(
-                    "The workspace did not boot in time", comment: "task resume") }
+            if let why = await self.ensureWorkspaceUp(profileID, delegate: delegate) {
+                self.store.mutate(taskID) { $0.lastError = why }
                 return
             }
             // Relaunch the agent on the task's branch (a fresh tab) — only

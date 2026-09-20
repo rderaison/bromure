@@ -2241,3 +2241,10 @@
 "Enable local models for a workspace and open a session — the on-device MLX engine starts on demand." = "為某個工作區啟用本機模型並打開工作階段 — 裝置上的 MLX 引擎會按需啟動。";
 "Model load, \"serving\", and any load/serve errors (unsupported architecture, out-of-memory, …) appear here live." = "模型載入、\"serving\" 以及任何載入/服務錯誤（不支援的架構、記憶體不足、…）都會即時顯示在這裡。";
 "The engine runs out-of-process; if it's OOM-killed and restarts, you'll see that here too." = "引擎在處理程序外執行；如果它因記憶體不足被終止並重新啟動，你也會在這裡看到。";
+
+/* Unattended workspace starts */
+"“%@” is still downloading — the workspace can't start until it has." = "「%@」仍在下載 — 下載完成前工作區無法啟動。";
+"The workspace is marked compromised — start it yourself to confirm the wipe." = "工作區已被標記為已遭入侵 — 請自行啟動它以確認清除。";
+"The workspace's suspended state couldn't be restored — start it yourself to boot it fresh." = "無法恢復工作區的暫停狀態 — 請自行啟動它以重新開機。";
+"Couldn't start the VM: %@" = "無法啟動虛擬機器：%@";
+"try again." = "請重試。";

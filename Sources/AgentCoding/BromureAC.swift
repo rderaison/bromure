@@ -1131,7 +1131,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// window over it. The terminal can be attached later on demand.
     func startProfileForAutomation(_ id: Profile.ID, detached: Bool = false) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
-        launch(profile, detached: detached, freshBootFallback: false)
+        launch(profile, detached: detached, freshBootFallback: false, unattended: true)
+    }
+
+    /// Why an unattended start (an automation firing, a task starting) was
+    /// refused, by workspace — nobody is there to answer a prompt, so the
+    /// gates that would ask one decline instead, and the engines read the
+    /// reason here to fail at once rather than wait out the boot timeout.
+    private var unattendedLaunchRefusals: [Profile.ID: String] = [:]
+
+    func unattendedLaunchRefusal(_ id: Profile.ID) -> String? { unattendedLaunchRefusals[id] }
+
+    private func refuseUnattendedLaunch(_ profile: Profile, _ reason: String) {
+        unattendedLaunchRefusals[profile.id] = reason
+        FileHandle.standardError.write(Data(
+            "[ac] unattended start of '\(profile.name)' refused: \(reason)\n".utf8))
     }
 
     /// Duplicate a workspace for a clone-first automation run: settings,
@@ -2567,7 +2581,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.imageManager.baseImageNeedsUpdate || catalogIsNewer {
                     // A full update re-applies every catalog step, so
                     // don't also nag about new steps underneath it.
-                    self.promptBaseImageUpdate(
+                    await self.promptBaseImageUpdate(
                         catalogVersion: catalogIsNewer ? catalogMajor : nil)
                     return
                 }
@@ -2575,7 +2589,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let applied = self.imageManager.loadImageState()?.appliedStepUUIDs ?? []
                 let pending = catalog.pendingSteps(appliedUUIDs: applied)
                 if !pending.isEmpty {
-                    self.promptNewPostinstallSteps(pending)
+                    await self.promptNewPostinstallSteps(pending)
                 }
             }
         } else if ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"] != nil {
@@ -6381,7 +6395,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// (`catalogVersion`). "Later" dismisses for this launch only — we'll
     /// ask again next time the app starts so the user keeps the option
     /// without being blocked from running stale images.
-    private func promptBaseImageUpdate(catalogVersion: String? = nil) {
+    private func promptBaseImageUpdate(catalogVersion: String? = nil) async {
         let alert = NSAlert()
         let installed = imageManager.installedImageVersion ?? "?"
         let target = catalogVersion ?? UbuntuImageManager.imageVersion
@@ -6393,16 +6407,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             installed, target)
         alert.addButton(withTitle: NSLocalizedString("Update Now", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
-        if alert.runModal() == .alertFirstButtonReturn {
+        if await presentStartupPrompt(alert) == .alertFirstButtonReturn {
             startInit(force: true)
         }
+    }
+
+    /// A prompt raised at startup, as a sheet on the home window and never a
+    /// modal run from a main-actor task: a modal loop entered from inside the
+    /// main queue holds every other main-queue job — the control socket, an
+    /// automation's or a task's boot of a workspace — until someone at the
+    /// Mac dismisses it, and a server nobody is looking at then reads as
+    /// "the workspace did not boot in time". Headless: nobody to ask, so
+    /// "Later".
+    private func presentStartupPrompt(_ alert: NSAlert) async -> NSApplication.ModalResponse {
+        guard !headless else { return .alertSecondButtonReturn }
+        let window: NSWindow = (unifiedWindow as NSWindow?) ?? mainWindow ?? ensureUnifiedWindow()
+        return await alert.beginSheetModal(for: window)
     }
 
     /// Consent gate for postinstall steps published in img-catalog.json
     /// after this image was installed. They run as root inside the base
     /// image, so nothing executes until the user explicitly accepts.
     /// "Later" asks again next launch.
-    private func promptNewPostinstallSteps(_ steps: [PostinstallStep]) {
+    private func promptNewPostinstallSteps(_ steps: [PostinstallStep]) async {
         let alert = NSAlert()
         let list = steps.map { "• \($0.description)" }.joined(separator: "\n")
         alert.messageText = NSLocalizedString("New recommended packages", comment: "")
@@ -6413,7 +6440,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             list)
         alert.addButton(withTitle: NSLocalizedString("Install", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
-        if alert.runModal() == .alertFirstButtonReturn {
+        if await presentStartupPrompt(alert) == .alertFirstButtonReturn {
             startPostinstall(steps)
         }
     }
@@ -7826,9 +7853,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// by a fat client: its decision prompts (wipe / drift / storage upgrade)
     /// are routed to that client via `PendingPromptBroker` instead of a local
     /// NSAlert — the interface that interacted last gets the question.
+    /// `unattended`: an automation or a task is starting the workspace and
+    /// nobody is at the Mac to answer a prompt — the gates below that would
+    /// ask one take the safe answer (a base-image drift launches as-is) or
+    /// refuse with a reason (`unattendedLaunchRefusal`) instead of blocking
+    /// on a modal until the caller's boot timeout reads as "did not boot".
     func launch(_ profile: Profile, detached: Bool = false,
                 freshBootFallback: Bool = true, remoteInitiated: Bool = false,
-                preflightResolved: Bool = false) {
+                preflightResolved: Bool = false, unattended: Bool = false) {
+        if unattended { unattendedLaunchRefusals[profile.id] = nil }
         // Already shown → just focus + select it (unless we were asked to detach,
         // in which case drop the window and leave the VM running headless).
         if isAttached(profile.id) {
@@ -7862,6 +7895,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // downloading — the agent would come up pointed at an engine that
         // can't load yet, producing a wall of connection errors.
         if let dl = downloadingModel(for: profile) {
+            if unattended {
+                refuseUnattendedLaunch(profile, String(
+                    format: NSLocalizedString("“%@” is still downloading — the workspace can't start until it has.",
+                                              comment: "unattended start refused"), dl.name))
+                return
+            }
             // Remote-initiated: the client sees the refusal in its own UI
             // (the create call reports it); never modal-alert the server.
             if !remoteInitiated {
@@ -7887,6 +7926,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // and may legitimately hold the user's source); the alert
         // surfaces this so the user knows where to look next.
         if SessionDisk.isCompromised(profile: profile, store: store) {
+            // Nobody is there to confirm the wipe: the workspace stays as it
+            // is until its owner starts it by hand.
+            if unattended {
+                refuseUnattendedLaunch(profile, NSLocalizedString(
+                    "The workspace is marked compromised — start it yourself to confirm the wipe.",
+                    comment: "unattended start refused"))
+                return
+            }
             // Local NSAlert only: a remote-initiated launch resolved (and
             // performed) the wipe in the async preflight, so this gate is
             // already clear when it re-enters.
@@ -7905,23 +7952,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
            let recorded = profile.baseImageVersionAtClone,
            let current = currentBaseVersion,
            recorded != current {
-            // Local NSAlert only: a remote-initiated launch resolved this in
-            // the async preflight above and re-entered with preflightResolved.
-            let (title, message) = Self.driftPromptParts(recorded: recorded, current: current)
-            let alert = NSAlert()
-            alert.messageText = title
-            alert.informativeText = message
-            alert.addButton(withTitle: "Reset and launch")
-            alert.addButton(withTitle: "Launch as-is")
-            alert.addButton(withTitle: "Cancel")
-            switch alert.runModal() {
-            case .alertFirstButtonReturn:
-                try? store.resetDisk(for: profile)
-                emitDiskResetEvent(profile: profile, reason: "base_image_drift")
-            case .alertThirdButtonReturn:
-                return
-            default:
-                break
+            if unattended {
+                // Nobody to ask: launch as-is — the disk is kept, the way the
+                // prompt's "Launch as-is" keeps it; a reset is the owner's call.
+                FileHandle.standardError.write(Data(
+                    "[ac] '\(profile.name)' is on base v\(recorded), current v\(current) — unattended start launches as-is\n".utf8))
+            } else {
+                // Local NSAlert only: a remote-initiated launch resolved this in
+                // the async preflight above and re-entered with preflightResolved.
+                let (title, message) = Self.driftPromptParts(recorded: recorded, current: current)
+                let alert = NSAlert()
+                alert.messageText = title
+                alert.informativeText = message
+                alert.addButton(withTitle: "Reset and launch")
+                alert.addButton(withTitle: "Launch as-is")
+                alert.addButton(withTitle: "Cancel")
+                switch alert.runModal() {
+                case .alertFirstButtonReturn:
+                    try? store.resetDisk(for: profile)
+                    emitDiskResetEvent(profile: profile, reason: "base_image_drift")
+                case .alertThirdButtonReturn:
+                    return
+                default:
+                    break
+                }
             }
         }
 
@@ -8287,6 +8341,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                             // state file for a manual resume and abort.
                             FileHandle.standardError.write(Data(
                                 "[ac] restore failed (\(error)) — automation start aborted to protect the suspended session\n".utf8))
+                            self.unattendedLaunchRefusals[profile.id] = NSLocalizedString(
+                                "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh.",
+                                comment: "unattended start refused")
                             self.unifiedWindow?.removePane(profile.id)
                             self.unregisterPane(profile.id, ifMatches: win)
                             return
@@ -8311,6 +8368,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     try await sandbox.start()
                 }
             } catch {
+                if unattended {
+                    self.unattendedLaunchRefusals[profile.id] = String(
+                        format: NSLocalizedString("Couldn't start the VM: %@", comment: "unattended start refused"),
+                        error.localizedDescription)
+                }
                 self.showError(error, message: "Couldn't start the VM for “\(profile.name)”.")
                 self.unifiedWindow?.removePane(profile.id)
                 self.unregisterPane(profile.id, ifMatches: win)

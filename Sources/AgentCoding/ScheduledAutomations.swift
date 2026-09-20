@@ -1473,6 +1473,8 @@ final class ScheduledAutomationEngine {
         }
         let deadline = now.addingTimeInterval(Self.bootTimeout)
         Task { [weak self] in
+            var why = NSLocalizedString("The workspace did not boot in time",
+                                        comment: "failed automation run")
             while Date() < deadline {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 guard let self, let delegate = self.delegate else { return }
@@ -1485,13 +1487,18 @@ final class ScheduledAutomationEngine {
                         detail: detail, branchSlug: slug, itemKey: itemKey))
                     return
                 }
+                // The start was refused (nobody to answer its prompt): say
+                // why now rather than after the timeout.
+                if let refusal = delegate.unattendedLaunchRefusal(a.profileID) {
+                    why = refusal; break
+                }
             }
             guard let self else { return }
             self.pendingBoots.remove(a.profileID)
+            BACDebug.log("automation", "“\(a.name)”: \(why)")
             self.store.record(AutomationRunRecord(
-                automationID: a.id, firedAt: now, outcome: .failed,
-                detail: NSLocalizedString("The workspace did not boot in time",
-                                          comment: "failed automation run")))
+                automationID: a.id, firedAt: now, outcome: .failed, detail: why,
+                itemKey: itemKey))
         }
     }
 
@@ -1518,6 +1525,8 @@ final class ScheduledAutomationEngine {
             BACDebug.log("automation", "“\(a.name)”: cloned workspace → “\(clone.name)” — booting")
             delegate.startProfileForAutomation(clone.id)
             let deadline = now.addingTimeInterval(Self.bootTimeout)
+            var why = NSLocalizedString("The cloned workspace did not boot in time",
+                                        comment: "failed automation run")
             while Date() < deadline {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 guard let delegate = self.delegate else { return }
@@ -1530,11 +1539,13 @@ final class ScheduledAutomationEngine {
                         runProfileID: clone.id))
                     return
                 }
+                if let refusal = delegate.unattendedLaunchRefusal(clone.id) {
+                    why = refusal; break
+                }
             }
+            BACDebug.log("automation", "“\(a.name)”: \(why)")
             self.store.record(AutomationRunRecord(
-                automationID: a.id, firedAt: now, outcome: .failed,
-                detail: NSLocalizedString("The cloned workspace did not boot in time",
-                                          comment: "failed automation run"),
+                automationID: a.id, firedAt: now, outcome: .failed, detail: why,
                 itemKey: itemKey))
             self.delegate?.destroyAutomationClone(clone.id)
         }
