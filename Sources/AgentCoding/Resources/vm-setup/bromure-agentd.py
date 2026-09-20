@@ -4570,6 +4570,24 @@ def _apply_docker_config(restart_if_unchanged):
     return False
 
 
+_APT_FORCE_IPV4_PATH = "/etc/apt/apt.conf.d/99force-ipv4"
+_APT_FORCE_IPV4 = 'Acquire::ForceIPv4 "true";\n'
+
+
+def task_apt_force_ipv4():
+    """apt over IPv4 only. Newer images bake this in; an older one gets it
+    here, since a LAN can hand the VM a v6 address and route with no v6
+    egress behind them, and apt then waits on every mirror's AAAA record."""
+    try:
+        with open(_APT_FORCE_IPV4_PATH, encoding="utf-8") as f:
+            if f.read() == _APT_FORCE_IPV4:
+                return
+    except OSError:
+        pass
+    _sudo_write(_APT_FORCE_IPV4_PATH, _APT_FORCE_IPV4)
+    log("session", "apt pinned to IPv4")
+
+
 def task_apt_and_docker_proxy():
     """Drop stale bake-time apt proxy config; wire dockerd through the bridge
     (proxy env + freshly installed CA + the bromure registries) and restart it."""
@@ -4782,6 +4800,7 @@ def main():
     _run_once("mtu", task_set_mtu)
     _run_once("ca", task_install_ca)
     _run_once("docker-proxy", task_apt_and_docker_proxy)
+    _run_once("apt-ipv4", task_apt_force_ipv4)
     _run_once("timezone", task_set_timezone)
     # Home storage BEFORE anything that touches ~ (folder-share symlinks,
     # the tmux session): on ext4/migrate boots this mounts the real home.

@@ -276,6 +276,12 @@ Acquire::https::Proxy::$_proxy_host DIRECT;
 APTCONF
 fi
 
+# apt over IPv4 only, in the shipped image too: a LAN can hand the VM a
+# v6 address and route with no v6 egress behind them, and apt then sits
+# on a mirror's AAAA record until it times out, fetch after fetch.
+mkdir -p /etc/apt/apt.conf.d
+echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
+
 log() { printf '[ac-chroot] %s (t+%ss)\n' "$*" "$SECONDS"; }
 fail() { printf 'SANDBOX_SETUP_FAILED: %s\n' "$*"; exit 1; }
 
