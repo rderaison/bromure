@@ -1410,6 +1410,11 @@ struct BeautifiedSessionView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 16)
                 }
+                // Keep the tail anchored through content-size changes: a
+                // shorter transcript swapped in, or a re-wrap when the pane
+                // narrows, used to leave the offset past the end — a blank
+                // view until the user scrolled.
+                .defaultScrollAnchor(.bottom)
                 .onChange(of: model.commandOutput) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.revision) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.working) { _, _ in scrollToTail(proxy) }
@@ -1463,8 +1468,14 @@ struct BeautifiedSessionView: View {
     }
 
     private func scrollToTail(_ proxy: ScrollViewProxy) {
-        withAnimation(.easeOut(duration: 0.15)) {
-            proxy.scrollTo(Self.tailID, anchor: .bottom)
+        // Twice: once now, once after the lazy rows have been measured — a
+        // single animated scroll against estimated row heights could stop
+        // short of, or past, the real tail.
+        proxy.scrollTo(Self.tailID, anchor: .bottom)
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.15)) {
+                proxy.scrollTo(Self.tailID, anchor: .bottom)
+            }
         }
     }
 
