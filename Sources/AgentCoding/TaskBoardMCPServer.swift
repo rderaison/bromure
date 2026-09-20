@@ -10,8 +10,16 @@ import Foundation
 // (re)connect is "bromure-hello <branch>", which binds the connection to the
 // task whose worktree branch that is.
 
+/// A line-oriented MCP handler a `TaskMCPVsockBridge` can serve: one
+/// JSON-RPC request line in, one response line out (nil for notifications).
+/// `branch` is what the shim announced with "bromure-hello", if anything.
 @MainActor
-final class TaskBoardMCPServer {
+protocol MCPLineHandler: AnyObject {
+    func handle(line: String, branch: String?) async -> String?
+}
+
+@MainActor
+final class TaskBoardMCPServer: MCPLineHandler {
     private let profileID: Profile.ID
     private let store: () -> CodingTaskStore?
     private let engine: () -> CodingTaskEngine?
@@ -363,31 +371,35 @@ final class TaskBoardMCPServer {
 
 // MARK: - Vsock bridge
 
-/// Host-side vsock listener for the task-board MCP (port 5831) — the
-/// browser bridge's pattern minus the fat-client splicing. Each connection
-/// remembers the branch its shim announced with "bromure-hello <branch>".
+/// Host-side vsock listener for a line-oriented MCP — the task board on
+/// port 5831, the automations MCP on 5833 — the browser bridge's pattern
+/// minus the fat-client splicing. Each connection remembers the branch its
+/// shim announced with "bromure-hello <branch>" (the board binds on it).
 @MainActor
 final class TaskMCPVsockBridge: NSObject {
     static let vsockPort = SessionDisk.taskBoardMCPVsockPort
 
     private weak var socketDevice: VZVirtioSocketDevice?
     private var listenerDelegate: TaskMCPListenerDelegate?
-    private let server: TaskBoardMCPServer
+    private let server: any MCPLineHandler
+    private let port: UInt32
     private var connections: [ObjectIdentifier: Connection] = [:]
 
-    init(socketDevice: VZVirtioSocketDevice, server: TaskBoardMCPServer) {
+    init(socketDevice: VZVirtioSocketDevice, server: any MCPLineHandler,
+         port: UInt32 = TaskMCPVsockBridge.vsockPort) {
         self.socketDevice = socketDevice
         self.server = server
+        self.port = port
         super.init()
         let delegate = TaskMCPListenerDelegate { [weak self] conn in self?.adopt(conn) }
         listenerDelegate = delegate
         let listener = VZVirtioSocketListener()
         listener.delegate = delegate
-        socketDevice.setSocketListener(listener, forPort: Self.vsockPort)
+        socketDevice.setSocketListener(listener, forPort: port)
     }
 
     func stop() {
-        socketDevice?.removeSocketListener(forPort: Self.vsockPort)
+        socketDevice?.removeSocketListener(forPort: port)
         for (_, c) in connections { c.cancel() }
         connections.removeAll()
     }
@@ -403,14 +415,14 @@ final class TaskMCPVsockBridge: NSObject {
     private final class Connection {
         private let conn: VZVirtioSocketConnection
         private let fd: Int32
-        private let server: TaskBoardMCPServer
+        private let server: any MCPLineHandler
         private let onClose: (Connection) -> Void
         private var readSource: DispatchSourceRead?
         private var pending = Data()
         /// The worktree branch the shim announced — binds tool calls to a task.
         private var branch: String?
 
-        init(conn: VZVirtioSocketConnection, server: TaskBoardMCPServer,
+        init(conn: VZVirtioSocketConnection, server: any MCPLineHandler,
              onClose: @escaping (Connection) -> Void) {
             self.conn = conn
             self.fd = conn.fileDescriptor

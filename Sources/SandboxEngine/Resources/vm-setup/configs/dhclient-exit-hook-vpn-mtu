@@ -1,0 +1,26 @@
+# Bromure: keep the VPN NIC MTU above the DHCP-advertised floor.
+#
+# Sourced by /sbin/dhclient-script at the end of every lease event. dhclient
+# requests interface-mtu and re-applies the host's DHCP option 26 (a
+# conservative 1280 floor) on every BOUND / RENEW / REBIND, which clobbers any
+# one-shot `ip link set` config-agent does. VPN traffic tunnels over eth0
+# (WARP MASQUE, WireGuard, OpenVPN, IKEv2) and collapses or loses throughput
+# at 1280 — WARP hits 65-90% packet loss under load ("connects but no page
+# loads"). config-agent writes the desired MTU into the marker below for VPN
+# profiles; we re-assert it here, AFTER dhclient has set the DHCP MTU, so it
+# wins every lease event. Plain profiles (no marker) keep dhclient's floor.
+# Only ever RAISES the MTU: a larger value a user pinned via vm.mtu (delivered
+# as a larger DHCP option 26) is left alone. Sourced, so no `exit`.
+_bromure_marker=/tmp/bromure/nic-mtu
+if [ -r "$_bromure_marker" ]; then
+    _bromure_want=$(cat "$_bromure_marker" 2>/dev/null)
+    _bromure_if=${interface:-eth0}
+    _bromure_cur=$(cat "/sys/class/net/$_bromure_if/mtu" 2>/dev/null)
+    case "$_bromure_want" in
+        [1-9][0-9][0-9]*)
+            if [ -n "$_bromure_cur" ] && [ "$_bromure_cur" -lt "$_bromure_want" ] 2>/dev/null; then
+                ip link set dev "$_bromure_if" mtu "$_bromure_want" 2>/dev/null || true
+            fi
+            ;;
+    esac
+fi

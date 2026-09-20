@@ -1,6 +1,7 @@
 import AppKit
 import SandboxEngine
 import SwiftUI
+import UniformTypeIdentifiers
 @preconcurrency import Virtualization
 
 /// How a session pane presents the running agent: the raw libghostty terminal,
@@ -112,6 +113,8 @@ final class SessionPane {
     /// read as "all tabs closed" and power the fresh VM straight back off.
     func resetBootDetection() {
         sawTabList = false
+        knownWindowIndices = nil
+        model.rosterLive = false
         beginBootOverlay()   // reboot → show the dive screen again
     }
 
@@ -301,8 +304,137 @@ final class SessionPane {
     /// lossless. `beautifiedModel` drives the live poll + composer.
     private(set) var viewMode: SessionViewMode =
         UserDefaults.standard.bool(forKey: "ui.beautifiedTranscript") ? .beautified : .terminal
+    /// Pins the pane to the raw terminal: the beautified transcript is never
+    /// mounted and `setViewMode(.beautified)` is ignored. Set for the
+    /// "Register with …" throwaway VM, whose interactive OAuth login (the
+    /// sign-in URL, the CLI's prompts) the beautified view would hide. Flips
+    /// only this pane — the app-global default is left untouched.
+    var beautifierLocked = false {
+        didSet {
+            guard beautifierLocked, viewMode != .terminal else { return }
+            viewMode = .terminal   // deliberately no UserDefaults write
+            updateNativeTerminalMount()
+        }
+    }
     private var mountedBeautifiedHost: NSHostingView<BeautifiedSessionView>?
     private var beautifiedModel: BeautifiedSessionModel?
+    /// tmux window indices known to host a coding agent regardless of what
+    /// their title says yet — a task's worktree tab is an agent tab by
+    /// construction, but its OSC title only names the agent once the agent
+    /// is past its startup prompts (folder trust, login). Lets the
+    /// beautified view mount from the first frame, where those prompts are
+    /// surfaced as cards instead of a raw TUI.
+    var agentWindows: Set<Int> = []
+    /// Opening messages to echo into the beautified view of a window the
+    /// moment it mounts (keyed by tmux window index; consumed once) — a
+    /// session started with a message shows it, with the thinking cue, before
+    /// the agent has written a word.
+    var beautifiedSeeds: [Int: String] = [:]
+    /// Which agent a window runs (by tmux window index), told by whoever
+    /// started it — the "/" palette's catalog before the tab's title says.
+    var agentHints: [Int: String] = [:]
+    /// Per window: where the chat's transcript reads are copied (the
+    /// session's local cache), set by the window before the tab is shown.
+    var transcriptSinks: [Int: (Data) -> Void] = [:]
+
+    /// Debug hook: send what's in the chat composer (the Return key).
+    func debugSendComposer() -> Bool {
+        guard let m = beautifiedModel else { return false }
+        m.send()
+        return true
+    }
+    /// Debug: type into the composer the way a person does — through the
+    /// field editor AppKit attaches to the focused text field — so layout
+    /// trouble that only shows while editing can be reproduced headlessly.
+    /// Focuses the field first when it isn't; appends at the end.
+    func debugTypeComposer(_ text: String) -> [String: Any] {
+        guard let host = mountedBeautifiedHost else { return ["error": "no beautified view on stage"] }
+        guard let editor = Self.composerTextView(in: host) else { return ["error": "no composer in the beautified view"] }
+        if host.window?.firstResponder !== editor { host.window?.makeFirstResponder(editor) }
+        editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+        editor.insertText(text, replacementRange: editor.selectedRange())
+        return debugComposerGeometry()
+    }
+    /// Debug: the composer's text view against its wrap width — a container
+    /// that no longer matches the view is the stale-layout tell.
+    func debugComposerGeometry() -> [String: Any] {
+        guard let host = mountedBeautifiedHost else { return ["error": "no beautified view on stage"] }
+        guard let editor = Self.composerTextView(in: host) else { return ["error": "no composer in the beautified view"] }
+        return [
+            "ok": true,
+            "hostWidth": host.bounds.width,
+            "editorWidth": editor.bounds.width,
+            "editorHeight": editor.enclosingScrollView?.bounds.height ?? editor.bounds.height,
+            "containerWidth": editor.textContainer?.containerSize.width ?? -1,
+            "usedWidth": editor.layoutManager.flatMap { lm in
+                editor.textContainer.map { lm.usedRect(for: $0).width } } ?? -1,
+            "editing": host.window?.firstResponder === editor,
+            "textLength": (editor.string as NSString).length,
+        ]
+    }
+    /// Debug: attach a host file to the composer, as a drop on the window would.
+    func debugDropFile(_ hostPath: String) -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        let url = URL(fileURLWithPath: (hostPath as NSString).expandingTildeInPath)
+        guard let data = try? Data(contentsOf: url) else { return ["error": "unreadable: \(hostPath)"] }
+        let isImage = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
+        m.drop([DroppedFile(name: url.lastPathComponent, data: data, isImage: isImage)])
+        return ["ok": true, "pending": m.pendingAttachments.count, "bytes": data.count, "image": isImage]
+    }
+    /// Debug: the chat's command card — its state, or fold/dismiss it.
+    func debugCommandCard(_ action: String) -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        switch action {
+        case "dismiss": m.dismissCommandOutput()
+        case "toggle":  m.toggleLiveCommand()
+        default: break
+        }
+        guard let out = m.commandOutput else { return ["ok": true, "card": false] }
+        return ["ok": true, "card": true, "command": out.command, "live": out.live,
+                "menu": out.menu, "settled": out.settled, "lines": out.lines.count]
+    }
+    /// Debug: the drop images the chat holds, by guest path.
+    func debugDropImages() -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        return ["ok": true, "images": m.imagesByPath.mapValues { $0.count }]
+    }
+    /// Debug: press one of the composer's routed keys (return, option-return,
+    /// escape, up, down, tab) — the same path a keystroke takes.
+    func debugComposerKey(_ name: String) -> [String: Any] {
+        guard let host = mountedBeautifiedHost else { return ["error": "no beautified view on stage"] }
+        guard let editor = Self.composerTextView(in: host) else { return ["error": "no composer in the beautified view"] }
+        let selector: Selector
+        switch name {
+        case "return":        selector = #selector(NSResponder.insertNewline(_:))
+        case "option-return": selector = #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))
+        case "escape":        selector = #selector(NSResponder.cancelOperation(_:))
+        case "up":            selector = #selector(NSResponder.moveUp(_:))
+        case "down":          selector = #selector(NSResponder.moveDown(_:))
+        case "tab":           selector = #selector(NSResponder.insertTab(_:))
+        default: return ["error": "unknown key \(name)"]
+        }
+        if host.window?.firstResponder !== editor { host.window?.makeFirstResponder(editor) }
+        editor.doCommand(by: selector)
+        return ["ok": true, "text": editor.string]
+    }
+    private static func composerTextView(in view: NSView) -> ComposerNSTextView? {
+        if let t = view as? ComposerNSTextView { return t }
+        for sub in view.subviews { if let t = composerTextView(in: sub) { return t } }
+        return nil
+    }
+    /// Debug: press the sign-in card's button (a host-run sign-in).
+    func debugStartSignIn() -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        guard m.signInProvider != nil else { return ["error": "no account for \(m.agentKind ?? "?")"] }
+        m.startHostSignIn()
+        return ["ok": true, "prompt": m.prompt?.kind == .login, "status": m.hostSignInStatus ?? ""]
+    }
+    /// Debug: the sign-in card's state.
+    func debugSignInState() -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        return ["prompt": m.prompt.map { "\($0.kind)" } ?? "", "failure": m.failure?.detail ?? "",
+                "status": m.hostSignInStatus ?? "", "agent": m.agentKind ?? ""]
+    }
     /// The tmux window index the mounted beautified host is currently showing.
     /// The model re-targets whichever tab is active, so when the active tab
     /// changes to a *different* index we rebuild the host (reusing it would show
@@ -317,10 +449,15 @@ final class SessionPane {
 
     /// Flip between the raw terminal and the beautified transcript view, live.
     /// Remembers the choice app-globally as the default for subsequent panes.
-    func setViewMode(_ mode: SessionViewMode) {
+    /// `persist: false` flips this pane only — the tasks-first "under the hood"
+    /// toggle uses it so peeking at the terminal doesn't change the default.
+    func setViewMode(_ mode: SessionViewMode, persist: Bool = true) {
         guard mode != viewMode else { return }
+        if beautifierLocked, mode == .beautified { return }   // registration VM: terminal only
         viewMode = mode
-        UserDefaults.standard.set(mode == .beautified, forKey: "ui.beautifiedTranscript")
+        if persist {
+            UserDefaults.standard.set(mode == .beautified, forKey: "ui.beautifiedTranscript")
+        }
         updateNativeTerminalMount()
     }
 
@@ -336,8 +473,9 @@ final class SessionPane {
         // show, so it stays the raw terminal even while the mode is toggled on.
         // The active tab's foreground program (its tmux label) is the same
         // signal the sidebar badges agent tabs with.
-        let activeIsAgent = BromureIcons.agentKind(
-            forLabel: model.tabs[model.activeIndex].shownLabel) != nil
+        let activeTab = model.tabs[model.activeIndex]
+        let activeIsAgent = BromureIcons.agentKind(forLabel: activeTab.shownLabel) != nil
+            || agentWindows.contains(activeTab.index)
         if viewMode == .beautified && activeIsAgent { mountBeautified(); return }
         unmountBeautified()
         // Restore the profile's window translucency for the terminal.
@@ -394,6 +532,103 @@ final class SessionPane {
         let m = BeautifiedSessionModel(provider: LocalTranscriptProvider(pane: self))
         beautifiedModel = m
         beautifiedTabIndex = windowIndex
+        if let seed = beautifiedSeeds.removeValue(forKey: windowIndex) { m.seedOpening(seed) }
+        m.transcriptSink = transcriptSinks[windowIndex]
+        // The tab's own terminal surface, for an interactive slash command
+        // shown inline in the chat (same tmux client the Linux view uses).
+        m.inlineTerminal = { [weak self] in
+            guard let self else { return nil }
+            if self.terminalController == nil {
+                self.terminalController = TerminalSessionController(profile: self.profile)
+            }
+            return self.terminalController?.view(forWindow: windowIndex)
+        }
+        m.inlineTerminalSession = { [weak self] in
+            self?.terminalController?.tmuxSessionName(forWindow: windowIndex)
+        }
+        // Delegations this session is part of, for the panel above the
+        // composer; the user can answer a delegate's question for the agent.
+        m.delegationStore = acDelegate?.delegationStore
+        m.sessionStore = acDelegate?.agentSessionStore
+        m.currentSession = { [weak self] in
+            guard let self, let d = self.acDelegate else { return nil }
+            return d.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
+        }
+        m.openSession = { [weak self] id in
+            self?.acDelegate?.ensureUnifiedWindow().selectSession(id)
+        }
+        m.workspaceName = { [weak self] pid in self?.acDelegate?.profile(for: pid)?.name ?? "" }
+        m.peerMentions = { [weak self] in
+            guard let self, let d = self.acDelegate else { return [] }
+            let me = d.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)?.id
+            // Every session here — nicknamed as it is, the rest with the
+            // name it would get — then, when the workspace's reach isn't
+            // pinned to named workspaces, the nicknamed ones on the remote
+            // hosts this Mac mirrors.
+            let links = d.profile(for: self.profile.id)?.agentReach == nil ? d.remoteDelegationLinks() : []
+            var taken: Set<String> = []
+            for link in links {
+                for s in link.remoteSessions.sessions { if let n = s.nickname { taken.insert(n.lowercased()) } }
+            }
+            var out = PeerMention.candidates(d.agentSessionStore.sessions, excluding: me,
+                                             workspace: { d.profile(for: $0)?.name ?? "" }, taken: taken)
+            for link in links {
+                out += link.remoteSessions.sessions
+                    .filter { $0.nickname != nil && !$0.isDeleted && !$0.isArchived }
+                    .map { PeerMention(sessionID: $0.id, nick: $0.nickname ?? "", title: $0.title,
+                                       workspace: link.hostName + " · " + link.remoteWorkspaceName($0.profileID)) }
+            }
+            return out
+        }
+        m.assignNickname = { [weak self] id, nick in
+            self?.acDelegate?.agentSessionStore.setNickname(id, nick)
+        }
+        // Requests this session made to sessions on other hosts — their
+        // records live there; the panel shows them next to the local ones.
+        m.remoteDelegations = { [weak self] in
+            guard let self, let d = self.acDelegate,
+                  let s = d.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
+            else { return [] }
+            return d.delegationEngine.delegationsAsParent(s.id).compactMap { pair in pair.1.map { (pair.0, $0) } }
+        }
+        m.answerDelegation = { [weak self] delegationID, askID, text in
+            guard let engine = self?.acDelegate?.delegationEngine else { return }
+            Task { _ = try? await engine.post(delegationID, from: .user, kind: .answer, text: text, answering: askID) }
+        }
+        let tab = model.tabs[model.activeIndex]
+        // Which agent's commands: the session's own tool, else the tab's
+        // label, else the workspace's main agent — the palette always has
+        // something to show (the label reads "bash" for agents under an
+        // interpreter, and a tab opened by hand carries no session hint).
+        m.loadSlashCommands(
+            agent: agentHints[windowIndex] ?? BromureIcons.agentKind(forLabel: tab.shownLabel)
+                ?? profile.tool.rawValue,
+            cwd: tab.cwd)
+        // Sign-in on the host: a throwaway machine does the OAuth and the
+        // credential never enters this workspace; the agent then restarts
+        // on the stand-in key. The sidebar hears about a sign-in screen too.
+        m.hostSignIn = { [weak self] provider, events in
+            guard let self, let delegate = self.acDelegate else { return }
+            delegate.beginProxySignIn(provider: provider, profileID: self.profile.id,
+                                      windowIndex: windowIndex, events: events)
+        }
+        m.relaunchAfterSignIn = { [weak self, weak m] in
+            guard let self, let delegate = self.acDelegate, let provider = m?.signInProvider else { return }
+            delegate.applyRegisteredSubscription(provider: provider, profileID: self.profile.id)
+            if let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex) {
+                delegate.agentSessionEngine.relaunchAfterSignIn(s.id)
+            }
+        }
+        m.loginPromptChanged = { [weak self] needs in
+            guard let self, let delegate = self.acDelegate,
+                  let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
+            else { return }
+            delegate.agentSessionStore.setNeedsSignIn(s.id, needs)
+        }
+        m.openProviderSettings = { [weak self] in
+            guard let self else { return }
+            self.acDelegate?.sidebarEditProfile(self.profile.id)
+        }
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -406,6 +641,14 @@ final class SessionPane {
             host.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
         ])
         containerView.window?.makeFirstResponder(host)
+    }
+
+    /// E2E/doc-shot hook: put text in the mounted beautified composer (to
+    /// render the "/" palette, say). No-op without a beautified view.
+    func debugSetComposer(_ text: String) -> Bool {
+        guard let m = beautifiedModel else { return false }
+        m.composerText = text
+        return true
     }
 
     private func unmountBeautified() {
@@ -449,6 +692,10 @@ final class SessionPane {
     /// instantly. The resumed VM's tmux session still holds its windows, so the
     /// next roster tick (`applyTabList`) reconciles this to the truth.
     func rehydrateTabs(from state: SessionDisk.TabsState) {
+        // Labels only, every pill at index 0: a picture, not a roster. The
+        // session store must not bind to (or adopt) these — it did once, and
+        // every pill became a session at window 0 (see reconcile).
+        model.rosterLive = false
         model.tabs = state.tabs.map { TabsModel.Tab(label: $0.label, id: $0.id) }
         model.activeIndex = max(0, min(state.activeIndex, model.tabs.count - 1))
     }
@@ -511,6 +758,7 @@ final class SessionPane {
             // tmux is gone — the last window closed (or the VM is shutting
             // down). Only act once we've seen a populated list this session so
             // a still-booting VM (tmux not up yet) isn't powered off early.
+            knownWindowIndices = nil
             if sawTabList {
                 retireNativeTerminals()
                 acDelegate?.requestStopSession(profile.id, action: .shutdown)
@@ -521,6 +769,16 @@ final class SessionPane {
         // attaching. Retire the boot screen.
         if !sawTabList { endBootOverlay() }
         sawTabList = true
+        model.rosterLive = true
+        // Windows that weren't in the last live roster were created since
+        // (an agent tab, a worktree, a plain terminal) — the grid's auto-fill
+        // wants them. The first roster after a boot is the baseline, not
+        // news; container tabs aren't tmux windows the grid can show.
+        let indices = Set(tabs.map(\.index))
+        let created: [GuestTab] = knownWindowIndices.map { known in
+            tabs.filter { !known.contains($0.index) && $0.containerID == nil }
+        } ?? []
+        knownWindowIndices = indices
         if model.tabs.count > tabs.count {
             model.tabs.removeLast(model.tabs.count - tabs.count)
         }
@@ -564,7 +822,19 @@ final class SessionPane {
         // surfaces; then make sure the active tab has a live surface.
         terminalController?.retire(windowsNotIn: Set(tabs.map(\.index)))
         updateNativeTerminalMount()
+        if !created.isEmpty, let onNewTerminals {
+            let fresh = Set(created.map(\.index))
+            onNewTerminals(model.tabs.filter { fresh.contains($0.index) })
+        }
     }
+
+    /// The tmux window indices of the last live roster; nil until one has
+    /// landed since the last boot, so the windows a boot restores don't
+    /// count as created.
+    private var knownWindowIndices: Set<Int>?
+    /// Terminals created since the previous roster (model tabs, so their
+    /// labels are the shown ones). The window feeds the grid's auto-fill.
+    var onNewTerminals: (([TabsModel.Tab]) -> Void)?
 
     /// Last per-container CPU/mem from `docker stats`, kept so a fresh container
     /// list (published more often than we may get stats) re-merges the numbers.

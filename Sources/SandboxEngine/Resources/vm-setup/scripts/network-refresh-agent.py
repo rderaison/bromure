@@ -15,8 +15,9 @@ Refresh steps:
   3. Flush the neighbor cache (old gateway's MAC is no longer valid).
   4. Run udhcpc once to pick up a new lease. Alpine's default udhcpc
      script regenerates /etc/resolv.conf as a side effect.
-  5. SIGHUP dnsmasq (if present) so ad-blocking resolvers also pick up
-     the new upstream DNS servers.
+  5. SIGHUP dnsmasq (if present) to flush answers cached on the old
+     network. Its upstreams are pinned in /etc/dnsmasq.d/upstream.conf
+     (not resolv.conf), so this does not re-point them.
 
 Protocol: newline-delimited JSON on vsock port 5703.
 
@@ -90,9 +91,11 @@ def do_refresh():
     if rc != 0:
         return False, f"udhcpc failed (rc={rc})"
 
-    # 5. Nudge dnsmasq (used by Pi-hole / ad-blocking path) to reload
-    # upstream servers from the new resolv.conf. No-op if not running.
-    run("pkill -HUP dnsmasq", quiet=True)
+    # 5. SIGHUP dnsmasq (ad-blocking / VPN profiles) to flush answers cached
+    # on the old network. Its upstreams come from /etc/dnsmasq.d/upstream.conf
+    # (a resolv-file SIGHUP re-reads), not resolv.conf, so they stay pinned.
+    # No-op if not running.
+    run("pkill -HUP -x dnsmasq", quiet=True)
 
     log("refresh: done")
     return True, None

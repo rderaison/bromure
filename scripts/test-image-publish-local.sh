@@ -85,10 +85,14 @@ rm -f "$STAGING/verify.img"
 echo "=== [publisher] Compressing + assembling local CDN dir ==="
 UUID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 CDN="$STAGING/cdn"
-mkdir -p "$CDN/images/$UUID"
+# Same per-major channel layout as publish-image.sh (and the client's
+# ImageDistribution.agentCoding): images/<major>/…
+IMAGE_VERSION=$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version||""))' "$BUILD_INFO")
+CHANNEL="images/${IMAGE_VERSION%%.*}"
+mkdir -p "$CDN/$CHANNEL/$UUID"
 
 UNCOMPRESSED_BYTES=$(stat -f%z "$BASE_IMG")
-GZ="$CDN/images/$UUID/base.img.gz"
+GZ="$CDN/$CHANNEL/$UUID/base.img.gz"
 if command -v pigz >/dev/null 2>&1; then
     pigz -9 -c "$BASE_IMG" > "$GZ"
 else
@@ -104,15 +108,15 @@ node tools/make-img-catalog.mjs \
     --baseline "Sources/AgentCoding/Resources/img-catalog.json" \
     --build-info "$BUILD_INFO" \
     --uuid "$UUID" \
-    --disk-key "images/$UUID/base.img.gz" \
+    --disk-key "$CHANNEL/$UUID/base.img.gz" \
     --sha256 "$SHA256" \
     --compressed-bytes "$COMPRESSED_BYTES" \
     --uncompressed-bytes "$UNCOMPRESSED_BYTES" \
     --allow-unsigned \
-    --out "$CDN/images/img-catalog.json"
+    --out "$CDN/$CHANNEL/img-catalog.json"
 
 # Sanity: the inspect mode must read back the uuid we just wrote.
-ROUND_TRIP=$(node tools/make-img-catalog.mjs --print-image-uuid "$CDN/images/img-catalog.json")
+ROUND_TRIP=$(node tools/make-img-catalog.mjs --print-image-uuid "$CDN/$CHANNEL/img-catalog.json")
 [ "$ROUND_TRIP" = "$UUID" ] || { echo "ERROR: catalog round-trip uuid mismatch"; exit 1; }
 
 # --- 3. Client side: real install against the local CDN -------------------

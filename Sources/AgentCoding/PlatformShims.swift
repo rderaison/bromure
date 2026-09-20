@@ -42,13 +42,70 @@ extension PlatformColor {
     }
 }
 
+// MARK: - Palette
+//
+// The light appearance is warm paper rather than white-on-white: the values
+// are claude.ai's light theme (sidebar #FBFBF9, canvas #FCFCFB, cards pure
+// white behind a #E3E3E1 hairline, a warm-grey selection #EDECE8). Dark
+// stays the system's. One place to tune.
+extension PlatformColor {
+    #if os(macOS)
+    private static func paper(light: (Int, Int, Int), dark: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? dark
+                : NSColor(srgbRed: CGFloat(light.0) / 255, green: CGFloat(light.1) / 255, blue: CGFloat(light.2) / 255, alpha: 1)
+        }
+    }
+    /// The content canvas: stage surfaces, headers, the titlebar backing.
+    static let acCanvas = paper(light: (0xFC, 0xFC, 0xFB), dark: .windowBackgroundColor)
+    /// The sidebar, a touch warmer than the canvas.
+    static let acSidebar = paper(light: (0xFB, 0xFB, 0xF9), dark: .windowBackgroundColor)
+    /// The titlebar backing. The unified toolbar's strip renders white in the
+    /// light appearance whatever sits under it, so the backing is white too —
+    /// one uniform titlebar over the paper below.
+    static let acTitlebar = paper(light: (0xFF, 0xFF, 0xFF), dark: .windowBackgroundColor)
+    /// Card edges (composer, sheets) instead of a shadow.
+    static let acHairline = paper(light: (0xE3, 0xE3, 0xE1), dark: NSColor.separatorColor)
+    /// The selected sidebar row.
+    static let acSelection = paper(light: (0xED, 0xEC, 0xE8), dark: NSColor.controlAccentColor.withAlphaComponent(0.16))
+    #endif
+}
+
 extension Color {
     /// `NSColor.windowBackgroundColor` / iOS system background.
     static var platformWindowBackground: Color {
         #if os(macOS)
-        Color(nsColor: .windowBackgroundColor)
+        Color(nsColor: .acCanvas)
         #else
         Color(uiColor: .systemBackground)
+        #endif
+    }
+
+    /// The sidebar's ground (macOS: warm paper in light, system in dark).
+    static var acSidebar: Color {
+        #if os(macOS)
+        Color(nsColor: .acSidebar)
+        #else
+        Color(uiColor: .systemBackground)
+        #endif
+    }
+
+    /// Card edge hairline.
+    static var acHairline: Color {
+        #if os(macOS)
+        Color(nsColor: .acHairline)
+        #else
+        Color.primary.opacity(0.10)
+        #endif
+    }
+
+    /// The selected row's fill.
+    static var acSelection: Color {
+        #if os(macOS)
+        Color(nsColor: .acSelection)
+        #else
+        Color.accentColor.opacity(0.16)
         #endif
     }
 
@@ -172,6 +229,35 @@ extension View {
         self.menuStyle(.borderlessButton)
         #else
         self
+        #endif
+    }
+
+    /// `.onExitCommand` (Escape) exists on macOS only; touch platforms
+    /// dismiss with their own gestures, so the action is simply not wired.
+    @ViewBuilder func platformExitCommand(_ action: @escaping () -> Void) -> some View {
+        #if os(macOS)
+        self.onExitCommand(perform: action)
+        #else
+        self
+        #endif
+    }
+
+    /// Popover content that stays a popover on a compact iPhone instead of
+    /// turning into a sheet (the content is sized for an anchored bubble).
+    @ViewBuilder func platformCompactPopover() -> some View {
+        #if os(iOS) || os(visionOS)
+        self.presentationCompactAdaptation(.popover)
+        #else
+        self
+        #endif
+    }
+
+    /// A fixed popover width, narrowed on a phone so the bubble fits.
+    @ViewBuilder func platformPopoverWidth(_ width: CGFloat) -> some View {
+        #if os(iOS)
+        self.frame(width: UIDevice.current.userInterfaceIdiom == .phone ? min(width, 340) : width)
+        #else
+        self.frame(width: width)
         #endif
     }
 

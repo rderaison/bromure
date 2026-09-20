@@ -32,6 +32,7 @@ SHARED = [
     "ControlClient.swift",
     # Models + stores (the mirror reconciles /state into these)
     "SessionModels.swift",
+    "KubeCluster.swift",        # Kubernetes cluster records/status + mirror store
     "Profile.swift",
     "CodingTasks.swift",
     "ScheduledAutomations.swift",
@@ -51,6 +52,9 @@ SHARED = [
     # Controller + connect flow (models; iOS provides the views)
     "FatClientController.swift",
     "FatClientConnect.swift",
+    "AgentSessions.swift",      # session model/store + shared row/section views (sessions home)
+    "AgentDelegation.swift",    # delegation records + store + notice text (the engine/MCP stay macOS-only)
+    "SessionStageViews.swift",  # header / launch / rest / new-session screens (AppKit bits #if'd)
     "ConsolePresence.swift",  # console-seat arbitration; AppKit monitor #if'd out, iOS reports always-active
     # Workspace editor (ProfileEditorView) + its data-only helpers. The panes
     # that manage host-machine state (Local Models, Automation, browser image,
@@ -68,17 +72,18 @@ SHARED = [
     "TerminalAppDefaults.swift",
     "FileExplorer.swift",
     "FileExplorerViews.swift",
-    "FileBrowserView.swift",
     "AutomationKanbanView.swift",
     "CodingKanbanView.swift",
     "ScheduledAutomationViews.swift",
     "AutomationRunWindow.swift",
     "AutomationRunArchive.swift",
     "ClaudeTranscriptView.swift",
+    "MermaidFence.swift",  # ```mermaid fences; web view is #if AppKit/UIKit, iOS has no bundle → code-fence fallback
     "PushCrypto.swift",  # HPKE seal/open — shared by the Mac sender + iOS NSE
     "ConversationView.swift",
     "VMDashboard.swift",
     "DockerDashboard.swift",
+    "KubeDashboard.swift",      # cluster dashboard + creation sheet (AppKit-only styles #if'd)
     "TaskReviewWindow.swift",
     "TaskTranscriptWindow.swift",
     "TaskTranscriptArchive.swift",

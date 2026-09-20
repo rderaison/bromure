@@ -12,6 +12,7 @@
 		C568C6135B3C91ED6EE4F4C3 /* BromureRemoteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */; };
 		028E121AD6D6119EC7D9FEE0 /* ConnectFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */; };
 		A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */; };
+		93BEDC8DDB743D6C3C72D568 /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02C6BC928850C2DEEF31FAB6 /* FileBrowserView.swift */; };
 		C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */; };
 		555114C355A323E29739E1E8 /* MobileBrowserMCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */; };
 		2ED4C4DCC04A62F04C1D3E62 /* MobileForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB7A8036C2F4D1B840537F79 /* MobileForward.swift */; };
@@ -20,12 +21,15 @@
 		817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CD0F2B2F2F6347A584824B /* PushKeypair.swift */; };
 		53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */; };
 		4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */; };
+		7EC1B722671DA37559798C32 /* SessionScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DA48C14DC93D09A6939B13A /* SessionScreens.swift */; };
 		95973F70B7D437345CD94939 /* SignInWebSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F318FD1C356FA5300DB74E7 /* SignInWebSheet.swift */; };
 		DFA9952B65FAE0782AD6D79F /* VisionGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8078F914F8C902B789A224E /* VisionGrid.swift */; };
 		CDF818D2CB4FFE21FF6F242B /* VisionScenes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 891E17FE47B164B5A25F2306 /* VisionScenes.swift */; };
 		B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */; };
 		64C326ED21AF5A80372F4E20 /* WorkspaceEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */; };
 		D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */; };
+		1795F4EECEDD9CEFC5CDEAEA /* AgentDelegation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4581313AD4A13B6B9066CFDD /* AgentDelegation.swift */; };
+		087EB159035EEDA04E10A581 /* AgentSessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 735794571677984E7702FEF3 /* AgentSessions.swift */; };
 		A605D8611294971B8BA65260 /* AutomationKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */; };
 		78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */; };
 		B58C6697BB7653D0D9519480 /* AutomationRunWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */; };
@@ -48,11 +52,13 @@
 		FBE3201FC08C6D5C1C4ACBF9 /* FatClientSSHDial.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABE5CAB976DE6C9935CAF22D /* FatClientSSHDial.swift */; };
 		8C4CC9D03A1E2C57D87BF88E /* FatClientTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EBA74ECEBD0D6CDAA9CBFBE /* FatClientTypes.swift */; };
 		9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A054E65FF7AFB16A80708D8 /* FatForward.swift */; };
-		68BD7714F7DA70C829916D36 /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6B76893030184C6F587C237 /* FileBrowserView.swift */; };
 		CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 057EC22F78972A50849C0EEF /* FileExplorer.swift */; };
 		7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */; };
 		A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */; };
 		FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */; };
+		10A3ACDB90C2C0DA80497153 /* KubeCluster.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DD18B9BFD8961799C389C4D /* KubeCluster.swift */; };
+		C22000EE6F92FE9C79B2529F /* KubeDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */; };
+		E91B787E2C9DBFF12D604A3C /* MermaidFence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 475294421C25AAB556D7138F /* MermaidFence.swift */; };
 		B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */; };
 		61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */; };
 		A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */; };
@@ -85,6 +91,7 @@
 		B47EFB48B64411BF181D2140 /* ScheduledAutomationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */; };
 		332BE05FECAFCE5409388316 /* ScheduledAutomations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */; };
 		B8BCF82DBF631DEFA8A1849A /* SessionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C45F1F9D11A980D236BD970D /* SessionModels.swift */; };
+		465BC25D7D2C8913821F4960 /* SessionStageViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 507FB4D8B393F7A6B19CD1A8 /* SessionStageViews.swift */; };
 		435FC51F11B11F312B92DAC5 /* SharedStatusViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */; };
 		A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */; };
 		4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */; };
@@ -141,6 +148,7 @@
 		EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BromureRemoteApp.swift"; path = "Sources/BromureRemote/BromureRemoteApp.swift"; sourceTree = "<group>"; };
 		B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectFlow.swift"; path = "Sources/BromureRemote/ConnectFlow.swift"; sourceTree = "<group>"; };
 		DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectScreen.swift"; path = "Sources/BromureRemote/ConnectScreen.swift"; sourceTree = "<group>"; };
+		02C6BC928850C2DEEF31FAB6 /* FileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileBrowserView.swift"; path = "Sources/BromureRemote/FileBrowserView.swift"; sourceTree = "<group>"; };
 		CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "HostMirrorScreen.swift"; path = "Sources/BromureRemote/HostMirrorScreen.swift"; sourceTree = "<group>"; };
 		DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MobileBrowserMCP.swift"; path = "Sources/BromureRemote/MobileBrowserMCP.swift"; sourceTree = "<group>"; };
 		EB7A8036C2F4D1B840537F79 /* MobileForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MobileForward.swift"; path = "Sources/BromureRemote/MobileForward.swift"; sourceTree = "<group>"; };
@@ -149,12 +157,15 @@
 		74CD0F2B2F2F6347A584824B /* PushKeypair.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushKeypair.swift"; path = "Sources/BromureRemote/PushKeypair.swift"; sourceTree = "<group>"; };
 		D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushNotifications.swift"; path = "Sources/BromureRemote/PushNotifications.swift"; sourceTree = "<group>"; };
 		0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RemoteTransportMobile.swift"; path = "Sources/BromureRemote/RemoteTransportMobile.swift"; sourceTree = "<group>"; };
+		9DA48C14DC93D09A6939B13A /* SessionScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SessionScreens.swift"; path = "Sources/BromureRemote/SessionScreens.swift"; sourceTree = "<group>"; };
 		1F318FD1C356FA5300DB74E7 /* SignInWebSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SignInWebSheet.swift"; path = "Sources/BromureRemote/SignInWebSheet.swift"; sourceTree = "<group>"; };
 		C8078F914F8C902B789A224E /* VisionGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "VisionGrid.swift"; path = "Sources/BromureRemote/VisionGrid.swift"; sourceTree = "<group>"; };
 		891E17FE47B164B5A25F2306 /* VisionScenes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "VisionScenes.swift"; path = "Sources/BromureRemote/VisionScenes.swift"; sourceTree = "<group>"; };
 		5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WebBrowserPane.swift"; path = "Sources/BromureRemote/WebBrowserPane.swift"; sourceTree = "<group>"; };
 		C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceEditor.swift"; path = "Sources/BromureRemote/WorkspaceEditor.swift"; sourceTree = "<group>"; };
 		0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkspaceScreen.swift"; path = "Sources/BromureRemote/WorkspaceScreen.swift"; sourceTree = "<group>"; };
+		4581313AD4A13B6B9066CFDD /* AgentDelegation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AgentDelegation.swift"; path = "Sources/BromureRemote/_shared/AgentDelegation.swift"; sourceTree = "<group>"; };
+		735794571677984E7702FEF3 /* AgentSessions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AgentSessions.swift"; path = "Sources/BromureRemote/_shared/AgentSessions.swift"; sourceTree = "<group>"; };
 		F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationKanbanView.swift"; path = "Sources/BromureRemote/_shared/AutomationKanbanView.swift"; sourceTree = "<group>"; };
 		C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunArchive.swift"; path = "Sources/BromureRemote/_shared/AutomationRunArchive.swift"; sourceTree = "<group>"; };
 		0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunWindow.swift"; path = "Sources/BromureRemote/_shared/AutomationRunWindow.swift"; sourceTree = "<group>"; };
@@ -177,11 +188,13 @@
 		ABE5CAB976DE6C9935CAF22D /* FatClientSSHDial.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientSSHDial.swift"; path = "Sources/BromureRemote/_shared/FatClientSSHDial.swift"; sourceTree = "<group>"; };
 		5EBA74ECEBD0D6CDAA9CBFBE /* FatClientTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientTypes.swift"; path = "Sources/BromureRemote/_shared/FatClientTypes.swift"; sourceTree = "<group>"; };
 		1A054E65FF7AFB16A80708D8 /* FatForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatForward.swift"; path = "Sources/BromureRemote/_shared/FatForward.swift"; sourceTree = "<group>"; };
-		C6B76893030184C6F587C237 /* FileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileBrowserView.swift"; path = "Sources/BromureRemote/_shared/FileBrowserView.swift"; sourceTree = "<group>"; };
 		057EC22F78972A50849C0EEF /* FileExplorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorer.swift"; path = "Sources/BromureRemote/_shared/FileExplorer.swift"; sourceTree = "<group>"; };
 		C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorerViews.swift"; path = "Sources/BromureRemote/_shared/FileExplorerViews.swift"; sourceTree = "<group>"; };
 		D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Icons.swift"; path = "Sources/BromureRemote/_shared/Icons.swift"; sourceTree = "<group>"; };
 		C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Inference__ModelCatalog.swift"; path = "Sources/BromureRemote/_shared/Inference__ModelCatalog.swift"; sourceTree = "<group>"; };
+		8DD18B9BFD8961799C389C4D /* KubeCluster.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "KubeCluster.swift"; path = "Sources/BromureRemote/_shared/KubeCluster.swift"; sourceTree = "<group>"; };
+		8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "KubeDashboard.swift"; path = "Sources/BromureRemote/_shared/KubeDashboard.swift"; sourceTree = "<group>"; };
+		475294421C25AAB556D7138F /* MermaidFence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MermaidFence.swift"; path = "Sources/BromureRemote/_shared/MermaidFence.swift"; sourceTree = "<group>"; };
 		D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__ConsentCredentialID.swift"; path = "Sources/BromureRemote/_shared/Mitm__ConsentCredentialID.swift"; sourceTree = "<group>"; };
 		6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__GuardrailsPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__GuardrailsPolicy.swift"; sourceTree = "<group>"; };
 		323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__OnePasswordCLI.swift"; path = "Sources/BromureRemote/_shared/Mitm__OnePasswordCLI.swift"; sourceTree = "<group>"; };
@@ -214,6 +227,7 @@
 		9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ScheduledAutomationViews.swift"; path = "Sources/BromureRemote/_shared/ScheduledAutomationViews.swift"; sourceTree = "<group>"; };
 		6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ScheduledAutomations.swift"; path = "Sources/BromureRemote/_shared/ScheduledAutomations.swift"; sourceTree = "<group>"; };
 		C45F1F9D11A980D236BD970D /* SessionModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SessionModels.swift"; path = "Sources/BromureRemote/_shared/SessionModels.swift"; sourceTree = "<group>"; };
+		507FB4D8B393F7A6B19CD1A8 /* SessionStageViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SessionStageViews.swift"; path = "Sources/BromureRemote/_shared/SessionStageViews.swift"; sourceTree = "<group>"; };
 		17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SharedStatusViews.swift"; path = "Sources/BromureRemote/_shared/SharedStatusViews.swift"; sourceTree = "<group>"; };
 		39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SubscriptionTokenSwapState.swift"; path = "Sources/BromureRemote/_shared/SubscriptionTokenSwapState.swift"; sourceTree = "<group>"; };
 		11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskReviewWindow.swift"; path = "Sources/BromureRemote/_shared/TaskReviewWindow.swift"; sourceTree = "<group>"; };
@@ -294,6 +308,7 @@
 				EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */,
 				B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */,
 				DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */,
+				02C6BC928850C2DEEF31FAB6 /* FileBrowserView.swift */,
 				CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */,
 				DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */,
 				EB7A8036C2F4D1B840537F79 /* MobileForward.swift */,
@@ -302,12 +317,15 @@
 				74CD0F2B2F2F6347A584824B /* PushKeypair.swift */,
 				D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */,
 				0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */,
+				9DA48C14DC93D09A6939B13A /* SessionScreens.swift */,
 				1F318FD1C356FA5300DB74E7 /* SignInWebSheet.swift */,
 				C8078F914F8C902B789A224E /* VisionGrid.swift */,
 				891E17FE47B164B5A25F2306 /* VisionScenes.swift */,
 				5EB442F3E4243AFC296CE988 /* WebBrowserPane.swift */,
 				C71C2F3ACFD08CFB326201FE /* WorkspaceEditor.swift */,
 				0CB6C67C34698090E8B39F6F /* WorkspaceScreen.swift */,
+				4581313AD4A13B6B9066CFDD /* AgentDelegation.swift */,
+				735794571677984E7702FEF3 /* AgentSessions.swift */,
 				F490890F4362E185D7F577C2 /* AutomationKanbanView.swift */,
 				C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */,
 				0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */,
@@ -330,11 +348,13 @@
 				ABE5CAB976DE6C9935CAF22D /* FatClientSSHDial.swift */,
 				5EBA74ECEBD0D6CDAA9CBFBE /* FatClientTypes.swift */,
 				1A054E65FF7AFB16A80708D8 /* FatForward.swift */,
-				C6B76893030184C6F587C237 /* FileBrowserView.swift */,
 				057EC22F78972A50849C0EEF /* FileExplorer.swift */,
 				C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */,
 				D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */,
 				C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */,
+				8DD18B9BFD8961799C389C4D /* KubeCluster.swift */,
+				8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */,
+				475294421C25AAB556D7138F /* MermaidFence.swift */,
 				D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */,
 				6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */,
 				323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */,
@@ -367,6 +387,7 @@
 				9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */,
 				6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */,
 				C45F1F9D11A980D236BD970D /* SessionModels.swift */,
+				507FB4D8B393F7A6B19CD1A8 /* SessionStageViews.swift */,
 				17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */,
 				39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */,
 				11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */,
@@ -500,6 +521,7 @@
 				C568C6135B3C91ED6EE4F4C3 /* BromureRemoteApp.swift in Sources */,
 				028E121AD6D6119EC7D9FEE0 /* ConnectFlow.swift in Sources */,
 				A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */,
+				93BEDC8DDB743D6C3C72D568 /* FileBrowserView.swift in Sources */,
 				C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */,
 				555114C355A323E29739E1E8 /* MobileBrowserMCP.swift in Sources */,
 				2ED4C4DCC04A62F04C1D3E62 /* MobileForward.swift in Sources */,
@@ -508,12 +530,15 @@
 				817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */,
 				53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */,
 				4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */,
+				7EC1B722671DA37559798C32 /* SessionScreens.swift in Sources */,
 				95973F70B7D437345CD94939 /* SignInWebSheet.swift in Sources */,
 				DFA9952B65FAE0782AD6D79F /* VisionGrid.swift in Sources */,
 				CDF818D2CB4FFE21FF6F242B /* VisionScenes.swift in Sources */,
 				B9E71949BFB332B92FB9CECE /* WebBrowserPane.swift in Sources */,
 				64C326ED21AF5A80372F4E20 /* WorkspaceEditor.swift in Sources */,
 				D825B18A42D2660497B7FBF9 /* WorkspaceScreen.swift in Sources */,
+				1795F4EECEDD9CEFC5CDEAEA /* AgentDelegation.swift in Sources */,
+				087EB159035EEDA04E10A581 /* AgentSessions.swift in Sources */,
 				A605D8611294971B8BA65260 /* AutomationKanbanView.swift in Sources */,
 				78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */,
 				B58C6697BB7653D0D9519480 /* AutomationRunWindow.swift in Sources */,
@@ -536,11 +561,13 @@
 				FBE3201FC08C6D5C1C4ACBF9 /* FatClientSSHDial.swift in Sources */,
 				8C4CC9D03A1E2C57D87BF88E /* FatClientTypes.swift in Sources */,
 				9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */,
-				68BD7714F7DA70C829916D36 /* FileBrowserView.swift in Sources */,
 				CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */,
 				7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */,
 				A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */,
 				FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */,
+				10A3ACDB90C2C0DA80497153 /* KubeCluster.swift in Sources */,
+				C22000EE6F92FE9C79B2529F /* KubeDashboard.swift in Sources */,
+				E91B787E2C9DBFF12D604A3C /* MermaidFence.swift in Sources */,
 				B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */,
 				61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */,
 				A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */,
@@ -573,6 +600,7 @@
 				B47EFB48B64411BF181D2140 /* ScheduledAutomationViews.swift in Sources */,
 				332BE05FECAFCE5409388316 /* ScheduledAutomations.swift in Sources */,
 				B8BCF82DBF631DEFA8A1849A /* SessionModels.swift in Sources */,
+				465BC25D7D2C8913821F4960 /* SessionStageViews.swift in Sources */,
 				435FC51F11B11F312B92DAC5 /* SharedStatusViews.swift in Sources */,
 				A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */,
 				4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */,

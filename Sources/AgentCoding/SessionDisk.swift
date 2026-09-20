@@ -38,6 +38,16 @@ public final class SessionDisk {
     /// agent (to start its OAuth login). Normal sessions leave this false and
     /// land at a plain shell.
     public var registrationMode = false
+    /// Extra NO_PROXY entries for proxy.env — the VM subnet and the node
+    /// addresses of the Kubernetes clusters this workspace may use. kubectl
+    /// honours HTTPS_PROXY, and the host MITM can't dial into the VM LAN, so
+    /// those destinations must bypass the cooperative proxy.
+    public var extraNoProxy: [String] = []
+    /// Plain-HTTP registries ("<ip>:<port>") this workspace may push to —
+    /// the bromure registries its access lists allow. Staged as
+    /// docker-registries.txt for the guest agent's dockerd config; the first
+    /// one is also exported as BROMURE_REGISTRY for agents and scripts.
+    public var extraInsecureRegistries: [String] = []
 
     public struct MitmSessionAssets: Sendable {
         public let caCertificatePEM: String
@@ -627,9 +637,10 @@ public final class SessionDisk {
                 "export HTTP_PROXY=http://127.0.0.1:8080",
                 "export HTTPS_PROXY=http://127.0.0.1:8080",
             ]
+            let noProxy = (["localhost", "127.0.0.1", "::1"] + extraNoProxy).joined(separator: ",")
             proxyLines += [
-                "export NO_PROXY=localhost,127.0.0.1,::1",
-                "export no_proxy=localhost,127.0.0.1,::1",
+                "export NO_PROXY=\(noProxy)",
+                "export no_proxy=\(noProxy)",
                 "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/bromure-ca.pem",
                 "export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
                 "export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
@@ -654,6 +665,14 @@ public final class SessionDisk {
                 "export SSH_AUTH_SOCK=/tmp/bromure-agent.sock",
             ]
             proxyLines.append(contentsOf: ghEnv)
+            if let first = extraInsecureRegistries.first {
+                proxyLines.append("export BROMURE_REGISTRY=\(shellQuote(first))")
+            }
+            // The registries dockerd may talk plain HTTP to (guest agent →
+            // /etc/docker/daemon.json). Always written so a removal lands too.
+            try (extraInsecureRegistries.joined(separator: "\n") + "\n").write(
+                to: tmp.appendingPathComponent("docker-registries.txt"),
+                atomically: true, encoding: .utf8)
 
             // Local inference (Path 1, vLLM.md §3.3). For each tool the user
             // set to "Local model", pin it at the on-host engine via the
@@ -839,6 +858,21 @@ public final class SessionDisk {
         // for board tasks.
         try Self.taskMCPShimScript.write(
             to: tmp.appendingPathComponent("bromure-task-mcp.py"),
+            atomically: true, encoding: .utf8)
+        // Automations MCP shim — always on, for every agent (it's declared in
+        // the user-scope MCP configs next to the browser server).
+        try Self.automationMCPShimScript.write(
+            to: tmp.appendingPathComponent("bromure-automations-mcp.py"),
+            atomically: true, encoding: .utf8)
+        // Infrastructure MCP shim — the clusters and registries this
+        // workspace may use, with the documentation to use them.
+        try Self.kubeMCPShimScript.write(
+            to: tmp.appendingPathComponent("bromure-infra-mcp.py"),
+            atomically: true, encoding: .utf8)
+        // Delegation MCP shim — every agent tab: hand work to another
+        // agent's session, hear back from it.
+        try Self.delegationMCPShimScript.write(
+            to: tmp.appendingPathComponent("bromure-delegation-mcp.py"),
             atomically: true, encoding: .utf8)
 
         // Plan-stream driver assets — staged unconditionally, like the task
@@ -1109,6 +1143,73 @@ public final class SessionDisk {
     /// task tools coding-task agents get (set plan, create subtasks, hand to
     /// review). Sibling of the browser MCP, one port over.
     public static let taskBoardMCPVsockPort: UInt32 = 5831
+    /// The automations MCP (AutomationMCPServer): every agent in the
+    /// workspace can list / create / edit / delete / run ITS automations.
+    public static let automationMCPVsockPort: UInt32 = 5833
+    static let automationMCPShimGuestPath = "/mnt/bromure-meta/bromure-automations-mcp.py"
+    /// The infrastructure MCP (KubeMCPServer): what clusters / registries
+    /// this workspace can use and how, plus creating new ones.
+    public static let kubeMCPVsockPort: UInt32 = 5834
+    static let kubeMCPShimGuestPath = "/mnt/bromure-meta/bromure-infra-mcp.py"
+    static var kubeMCPClaudeEntry: [String: Any] {
+        ["command": "python3", "args": [kubeMCPShimGuestPath]]
+    }
+    static var kubeMCPShimScript: String {
+        taskMCPShimScript
+            .replacingOccurrences(of: "PORT = \(taskBoardMCPVsockPort)", with: "PORT = \(kubeMCPVsockPort)")
+            .replacingOccurrences(of: "bromure-task-mcp", with: "bromure-infra-mcp")
+            .replacingOccurrences(of: "task-board MCP", with: "infrastructure MCP")
+    }
+    /// The delegation MCP (DelegationMCPServer): an agent hands work to
+    /// another agent's session and hears back. Every agent tab gets it.
+    public static let delegationMCPVsockPort: UInt32 = 5835
+    static let delegationMCPShimGuestPath = "/mnt/bromure-meta/bromure-delegation-mcp.py"
+    static var delegationMCPClaudeEntry: [String: Any] {
+        ["command": "python3", "args": [delegationMCPShimGuestPath]]
+    }
+    /// The task shim on the delegation port, announcing not a branch but
+    /// the tmux window it runs in — read from its own $TMUX_PANE, so the
+    /// host binds the connection to the session shown in that window and
+    /// the agent can't claim to be another.
+    static var delegationMCPShimScript: String {
+        taskMCPShimScript
+            .replacingOccurrences(of: "PORT = \(taskBoardMCPVsockPort)", with: "PORT = \(delegationMCPVsockPort)")
+            .replacingOccurrences(of: "bromure-task-mcp", with: "bromure-delegation-mcp")
+            .replacingOccurrences(of: "task-board MCP", with: "delegation MCP")
+            .replacingOccurrences(of: "import socket, sys, threading, time",
+                                  with: "import os, socket, subprocess, sys, threading, time")
+            .replacingOccurrences(of: "HELLO = sys.argv[1] if len(sys.argv) > 1 else \"\"",
+                                  with: delegationMCPHelloBlock)
+    }
+    static let delegationMCPHelloBlock = """
+    def _hello():
+        # Who am I: the tmux window this agent runs in (its pane is in the
+        # environment), so the host binds the connection to the session
+        # shown there. An explicit argv[1] wins (tests).
+        if len(sys.argv) > 1 and sys.argv[1]:
+            return sys.argv[1]
+        pane = os.environ.get("TMUX_PANE", "")
+        if not pane:
+            return ""
+        try:
+            out = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "w#{window_index}"],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+        except Exception:
+            return ""
+        return out if out.startswith("w") and out[1:].isdigit() else ""
+    HELLO = _hello()
+    """
+    static var automationMCPClaudeEntry: [String: Any] {
+        ["command": "python3", "args": [automationMCPShimGuestPath]]
+    }
+    /// The task shim, pointed at the automations port (same reconnecting
+    /// stdio↔vsock pump; no branch to announce).
+    static var automationMCPShimScript: String {
+        taskMCPShimScript
+            .replacingOccurrences(of: "PORT = \(taskBoardMCPVsockPort)", with: "PORT = \(automationMCPVsockPort)")
+            .replacingOccurrences(of: "bromure-task-mcp", with: "bromure-automations-mcp")
+            .replacingOccurrences(of: "task-board MCP", with: "automations MCP")
+    }
     static let taskMCPShimGuestPath = "/mnt/bromure-meta/bromure-task-mcp.py"
     /// Host vsock port for the plan-stream channel (plan-stream protocol
     /// v1): guest plan drivers connect here and exchange NDJSON events/
@@ -1333,7 +1434,12 @@ public final class SessionDisk {
         servers: [MCPServer],
         fakes: [String: (envVar: String, fake: String)] = [:]
     ) -> String {
-        var mcpServers: [String: Any] = ["browser": browserMCPClaudeEntry]
+        var mcpServers: [String: Any] = [
+            "browser": browserMCPClaudeEntry,
+            "automations": automationMCPClaudeEntry,
+            "infrastructure": kubeMCPClaudeEntry,
+            "delegation": delegationMCPClaudeEntry,
+        ]
         for server in servers {
             // Raw JSON mode: parse and use as-is (allows OAuth blocks,
             // custom fields, or any config shape the form can't express).
@@ -1549,6 +1655,18 @@ public final class SessionDisk {
             "[mcp_servers.browser]",
             "command = \"python3\"",
             "args = [\(tomlQuote(browserMCPShimGuestPath))]",
+            "",
+            "[mcp_servers.automations]",
+            "command = \"python3\"",
+            "args = [\(tomlQuote(automationMCPShimGuestPath))]",
+            "",
+            "[mcp_servers.infrastructure]",
+            "command = \"python3\"",
+            "args = [\(tomlQuote(kubeMCPShimGuestPath))]",
+            "",
+            "[mcp_servers.delegation]",
+            "command = \"python3\"",
+            "args = [\(tomlQuote(delegationMCPShimGuestPath))]",
         ]
         for server in servers {
             // Raw JSON servers are written to Claude Code config only;

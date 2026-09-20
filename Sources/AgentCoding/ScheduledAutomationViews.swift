@@ -37,9 +37,100 @@ struct SidebarAttentionBadge: View {
     }
 }
 
-/// "Automations" — a board-first sidebar section: header (title and icon
-/// open the board, "+" creates) plus ONE status row with the pulse — count,
-/// running, soonest next fire — and a red badge when runs need the user.
+/// The one shape every sidebar section header has — Sessions, Archived,
+/// Tasks, Automations, Virtual Machines, Kubernetes, Registries:
+///
+///   [›] TITLE [attention badges]  ………………  count  [+]
+///
+/// A foldable section shows the chevron and its title toggles the fold; a
+/// board section's title opens the board (tinted while it's on stage).
+/// Badges right after the title are what needs the user (red), what's
+/// waiting for a review (orange) or what's alive (green); the count at the
+/// right is the section's size, plain; "+" creates, when the section can.
+struct SidebarSectionHeader: View {
+    let title: String
+    /// A shorter title for a narrowed sidebar ("VMs"), tried second.
+    var narrowTitle: String? = nil
+    /// nil = not foldable (no chevron); else the fold's state.
+    var expanded: Bool? = nil
+    /// Tint the title (a board that is the stage surface).
+    var selected = false
+    /// (count, tint) pills after the title; zero counts are skipped.
+    var badges: [(Int, Color)] = []
+    var count: Int? = nil
+    var help: String = ""
+    let onTitle: () -> Void
+    var onAdd: (() -> Void)? = nil
+    var addHelp: String = ""
+    var topPadding: CGFloat = 12
+
+    private func titleText(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(selected ? Color.accentColor : .secondary)
+            .textCase(.uppercase)
+            .tracking(0.7)
+            .lineLimit(1)
+            .fixedSize()
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: onTitle) {
+                HStack(spacing: 6) {
+                    if let expanded {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 10)
+                    }
+                    if let narrowTitle {
+                        ViewThatFits(in: .horizontal) {
+                            titleText(title)
+                            titleText(narrowTitle)
+                        }
+                    } else {
+                        titleText(title)
+                    }
+                    ForEach(Array(badges.enumerated()), id: \.offset) { _, b in
+                        SidebarAttentionBadge(count: b.0, tint: b.1)
+                    }
+                    Spacer(minLength: 0)
+                    if let count, count > 0 {
+                        Text("\(count)")
+                            .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(help)
+            if let onAdd {
+                Button(action: onAdd) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(addHelp)
+            } else {
+                // Keep the count column aligned with the sections that have "+".
+                Color.clear.frame(width: 16, height: 16)
+            }
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 6)
+        .padding(.top, topPadding)
+        .padding(.bottom, 4)
+    }
+}
+
+/// "Automations" — a board-first sidebar section: header (title opens the
+/// board, "+" creates) plus ONE status row with the pulse — running, soonest
+/// next fire — and a red badge by the title when runs need the user.
 /// The per-automation rows are gone: they duplicated the board's Scheduled
 /// column, and the board is one click (or ⇧⌘A) away.
 struct AutomationsSection: View {
@@ -82,11 +173,9 @@ struct AutomationsSection: View {
         return parked + liveRuns.filter { $0 == .needsInput }.count
     }
 
+    /// The pulse (the header carries the count): running, soonest next fire.
     private var statusLine: String {
-        guard !store.automations.isEmpty else {
-            return NSLocalizedString("Open the board", comment: "automations sidebar")
-        }
-        var parts = ["\(store.automations.count)"]
+        var parts: [String] = []
         let running = liveRuns.count
         if running > 0 {
             parts.append(String(format: NSLocalizedString("%d running", comment: ""), running))
@@ -96,37 +185,23 @@ struct AutomationsSection: View {
             parts.append(String(format: NSLocalizedString("next %@", comment: ""),
                                 Self.fireFormatter.string(from: next)))
         }
-        return parts.joined(separator: " · ")
+        return parts.isEmpty
+            ? NSLocalizedString("Open the board", comment: "automations sidebar")
+            : parts.joined(separator: " · ")
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            HStack {
-                // The title itself opens the board — the icon alone was easy
-                // to miss.
-                Button(action: onShowBoard) {
-                    Text("Automations")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(model.automationBoardSelected
-                                         ? Color.accentColor : .secondary)
-                        .textCase(.uppercase)
-                        .tracking(0.7)
-                }
-                .buttonStyle(.plain)
-                .help(NSLocalizedString("Open the automation board (⇧⌘A)", comment: ""))
-                Spacer()
-                Button(action: onNew) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help(NSLocalizedString("New automation", comment: ""))
-            }
-            .padding(.leading, 8)
-            .padding(.trailing, 6)
-            .padding(.top, 14)
-            .padding(.bottom, 4)
+            // The title itself opens the board — the icon alone was easy
+            // to miss.
+            SidebarSectionHeader(title: NSLocalizedString("Automations", comment: "sidebar section"),
+                                 selected: model.automationBoardSelected,
+                                 badges: [(attentionCount, .red)],
+                                 count: store.automations.count,
+                                 help: NSLocalizedString("Open the automation board (⇧⌘A)", comment: ""),
+                                 onTitle: onShowBoard,
+                                 onAdd: onNew,
+                                 addHelp: NSLocalizedString("New automation", comment: ""))
 
             Button(action: onShowBoard) {
                 HStack(spacing: 8) {
@@ -138,7 +213,6 @@ struct AutomationsSection: View {
                         .foregroundStyle(model.automationBoardSelected ? .primary : .secondary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    SidebarAttentionBadge(count: attentionCount)
                 }
                 .padding(.vertical, 4)
                 .padding(.horizontal, 6)

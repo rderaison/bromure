@@ -81,6 +81,10 @@ final class ClaudeRegistrationState {
     /// True once the host has kicked (or confirmed) the agent launch in the
     /// guest's tmux window, so the roster ticks don't retry it.
     var agentLaunchStarted = false
+    /// A sign-in card drives this flow: no explainer or completion alerts,
+    /// the throwaway VM stays off screen, and progress goes here instead.
+    var quiet = false
+    var onEvent: ((HostSignInEvent) -> Void)?
 
     init(provider: SubscriptionProvider, scope: SubscriptionRegistrationScope,
          scratchProfile: Profile, scratchDir: URL) {
@@ -143,23 +147,32 @@ extension ACAppDelegate {
     /// `remoteInitiated`: a fat client asked for this, so skip the local
     /// explainer alert (nobody is at this screen) and route the sign-in URL to
     /// the client instead of this Mac's browser.
+    /// `quiet` + `events`: a session's sign-in card is driving — no alerts,
+    /// the throwaway VM's window stays hidden, and the card hears progress
+    /// (`.status`) and the outcome (`.finished`).
     @MainActor
     func beginSubscriptionRegistration(provider: SubscriptionProvider,
                                        scope: SubscriptionRegistrationScope,
-                                       remoteInitiated: Bool = false) {
+                                       remoteInitiated: Bool = false,
+                                       quiet: Bool = false,
+                                       events: ((HostSignInEvent) -> Void)? = nil) {
         // One at a time — bring an in-flight registration forward instead
         // (only locally; a remote-initiated flow has no window to show here).
         if let existing = claudeRegistration {
-            if !remoteInitiated { existing.window?.makeKeyAndOrderFront(nil) }
+            if !remoteInitiated, !quiet { existing.window?.makeKeyAndOrderFront(nil) }
+            events?(.finished(success: false, message: NSLocalizedString(
+                "Another sign-in is already in progress.", comment: "sign-in")))
             return
         }
         guard let engine = mitmEngine else {
-            if !remoteInitiated {
+            if !remoteInitiated, !quiet {
                 registrationAlert(title: NSLocalizedString("Proxy unavailable", comment: ""),
                                   text: NSLocalizedString(
                                     "The Bromure proxy isn't running, so registration can't capture your tokens.",
                                     comment: ""))
             }
+            events?(.finished(success: false, message: NSLocalizedString(
+                "The Bromure proxy isn't running, so the sign-in can't be captured.", comment: "sign-in")))
             return
         }
 
@@ -173,8 +186,9 @@ extension ACAppDelegate {
         explainer.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
         explainer.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         // Remote-initiated: nobody is sitting at this Mac to answer, and the
-        // client already showed its own confirmation before calling.
-        if !remoteInitiated {
+        // client already showed its own confirmation before calling. A
+        // sign-in card explained itself already.
+        if !remoteInitiated, !quiet {
             guard explainer.runModal() == .alertFirstButtonReturn else { return }
         }
         if remoteInitiated { RemoteRegistrationBroker.shared.begin(provider: provider.displayName) }
@@ -189,7 +203,10 @@ extension ACAppDelegate {
         let scratchDir = store.profileDirectory(for: scratch)
         let state = ClaudeRegistrationState(provider: provider, scope: scope,
                                             scratchProfile: scratch, scratchDir: scratchDir)
+        state.quiet = quiet
+        state.onEvent = events
         claudeRegistration = state
+        events?(.status(NSLocalizedString("Setting up a private sign-in machine…", comment: "sign-in")))
 
         // Session disk with NO token plan and (below) NO swap map — the real
         // OAuth handshake must reach upstream untouched. We still ship the CA +
@@ -216,6 +233,10 @@ extension ACAppDelegate {
         }
 
         let win = TabbedSessionWindow(profile: scratch, acDelegate: self)
+        // The login is interactive (sign-in URL, the CLI's prompts) and the
+        // beautified transcript hides exactly those, so this window is pinned to
+        // the raw terminal regardless of the user's usual view preference.
+        win.pane.beautifierLocked = true
         win.delegate = self
         win.title = String(format: NSLocalizedString("Register with %@", comment: ""),
                            provider.displayName)
@@ -227,7 +248,7 @@ extension ACAppDelegate {
         // server. Nobody is sitting here to see it, and showing it pops a window
         // on the wrong machine. The VM still boots and the login agent runs; the
         // sign-in page opens on the CLIENT via RemoteRegistrationBroker.
-        if !remoteInitiated {
+        if !remoteInitiated, !quiet {
             win.makeKeyAndOrderFront(nil)
         }
         win.isReleasedWhenClosed = false
@@ -248,10 +269,13 @@ extension ACAppDelegate {
                 try sandbox.prepare()
                 try await sandbox.start()
             } catch {
-                if !remoteInitiated {
+                if !remoteInitiated, !quiet {
                     self.showError(error, message: NSLocalizedString(
                         "Couldn't start the registration VM.", comment: ""))
                 }
+                state.onEvent?(.finished(success: false, message: NSLocalizedString(
+                    "Couldn't start the sign-in machine.", comment: "sign-in")))
+                state.onEvent = nil
                 self.teardownClaudeRegistration(reason: .failure)
                 return
             }
@@ -352,6 +376,8 @@ extension ACAppDelegate {
                     self.loopbackForwarders.removeAll { !$0.isRunning }
                     self.loopbackForwarders.append(fwd)
                 }
+                self?.claudeRegistration?.onEvent?(.status(NSLocalizedString(
+                    "Finish signing in in your browser…", comment: "sign-in")))
                 ACAppDelegate.openGuestRelayedURL(url)
             }
         }
@@ -367,12 +393,18 @@ extension ACAppDelegate {
         guard let state = claudeRegistration, !state.finished,
               !state.agentLaunchStarted else { return }
         state.agentLaunchStarted = true
-        // The command that starts the provider's login. Bare tool name for
-        // the agents whose first run performs OAuth itself; kimi's TUI would
-        // just sit at a prompt waiting for `/login`, so use its dedicated
-        // non-interactive device-code subcommand instead.
-        let rawTool = state.provider.scratchTool.rawValue  // claude|codex|grok|kimi
-        let tool = state.provider == .kimi ? "'kimi login'" : rawTool
+        // Each CLI's dedicated login subcommand: it goes straight to the
+        // browser hand-off with no wizard in between — Claude's TUI would
+        // otherwise sit at its prompt ("Not logged in · Run /login") once
+        // onboarding is pre-answered, and Codex's would wait on its
+        // "Sign in with ChatGPT" picker; nobody is at this terminal.
+        let tool: String
+        switch state.provider {
+        case .claude: tool = "'claude auth login --claudeai'"
+        case .codex:  tool = "'codex login'"
+        case .grok:   tool = "'grok login'"
+        case .kimi:   tool = "'kimi login'"
+        }
         let pid = state.scratchProfile.id
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -411,7 +443,11 @@ extension ACAppDelegate {
                 for _ in 0..<240 {
                     if Task.isCancelled { return }
                     let isUp = state.claudeBridge?.isConnected ?? state.codexBridge?.isConnected ?? false
-                    if isUp { break }
+                    if isUp {
+                        state.onEvent?(.status(NSLocalizedString(
+                            "Almost there — your browser will open in a moment…", comment: "sign-in")))
+                        break
+                    }
                     try? await Task.sleep(nanoseconds: 500_000_000)
                 }
             }
@@ -448,7 +484,11 @@ extension ACAppDelegate {
             // freeze the control loop until it's answered. Teardown clears the
             // relay so the client learns the sign-in didn't land. Only show the
             // alert when a local user started the registration.
-            if RemoteRegistrationBroker.shared.pending == nil {
+            state.onEvent?(.finished(success: false, message: String(format: NSLocalizedString(
+                "Bromure didn't receive a %@ sign-in in time. You can try again.",
+                comment: ""), state.provider.displayName)))
+            state.onEvent = nil
+            if RemoteRegistrationBroker.shared.pending == nil, !state.quiet {
                 self.registrationAlert(
                     title: NSLocalizedString("Registration timed out", comment: ""),
                     text: String(format: NSLocalizedString(
@@ -617,6 +657,9 @@ extension ACAppDelegate {
         let providerName = state.provider.displayName
         // Let any open profile editor flip its inline Register → Re-register.
         NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+        // The sign-in card: done — it restarts the agent on the stand-in key.
+        state.onEvent?(.finished(success: true, message: nil))
+        state.onEvent = nil
 
         // Don't stop the VM out from under the OAuth callback: tokens land
         // while the CLI's 127.0.0.1 server may still be answering the host
@@ -637,8 +680,9 @@ extension ACAppDelegate {
 
             // Remote flow: the client already sees success (the subscription
             // store change flips its editor's Register → Re-register via /state).
-            // Don't block the headless server with a completion modal.
-            guard !wasRemote else { return }
+            // Don't block the headless server with a completion modal. A
+            // sign-in card said it itself.
+            guard !wasRemote, !state.quiet else { return }
             let done = NSAlert()
             done.messageText = String(format: NSLocalizedString("Registered with %@", comment: ""), providerName)
             done.informativeText = sharedEverywhere
@@ -654,6 +698,12 @@ extension ACAppDelegate {
     func teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason) {
         guard let state = claudeRegistration, !state.finished else { return }
         state.finished = true
+        // A card still listening only hears from here when the flow died
+        // (cancelled, window closed, failure): success reported itself.
+        if reason != .success, let ev = state.onEvent {
+            ev(.finished(success: false, message: nil))
+            state.onEvent = nil
+        }
 
         // Clear the remote-registration relay so a fat client's /state stops
         // advertising this flow and tears down its sign-in page + callback

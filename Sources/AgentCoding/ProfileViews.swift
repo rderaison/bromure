@@ -77,6 +77,13 @@ public extension Notification.Name {
         Notification.Name("bromureSubscriptionStoresChanged")
 }
 
+/// Another workspace, as the editor lists it (the reach policy picks
+/// among these).
+struct WorkspaceRef: Identifiable, Hashable {
+    let id: UUID
+    let name: String
+}
+
 enum EditorCategory: String, CaseIterable, Identifiable {
     case general     = "General"
     case localModels = "Models"
@@ -363,6 +370,8 @@ struct ProfileEditorView: View {
     /// from `draft` — whose secrets are blanked on the wire, which would otherwise
     /// hide every secret-bearing credential. nil = local editor: derive from the draft.
     private let remoteCredentialRefs: [CredentialRef]?
+    /// The other workspaces on this host, for the agents' reach policy.
+    private let siblingWorkspaces: [WorkspaceRef]
 
     /// "Generate SSH key" toggle is decoupled from the model — only used
     /// to decide whether to call ssh-keygen on save.
@@ -480,6 +489,7 @@ struct ProfileEditorView: View {
         terminalDefaults: TerminalAppDefaults,
         storageContext: ProfileStorageContext?,
         remoteCredentialRefs: [CredentialRef]? = nil,
+        siblingWorkspaces: [WorkspaceRef] = [],
         onSave: @escaping (Profile, _ generateSSH: Bool) -> Void,
         onCancel: @escaping () -> Void,
         onTitleChange: ((String) -> Void)? = nil,
@@ -545,6 +555,7 @@ struct ProfileEditorView: View {
         self.terminalDefaults = terminalDefaults
         self.storageContext = storageContext
         self.remoteCredentialRefs = remoteCredentialRefs
+        self.siblingWorkspaces = siblingWorkspaces
         self.onSave = onSave
         self.onCancel = onCancel
         self.onTitleChange = onTitleChange
@@ -1143,6 +1154,9 @@ struct ProfileEditorView: View {
                     onForgetSubscription: sub.onForget
                 )
             }
+
+            Divider().padding(.vertical, 4)
+            agentReachSection
         }
         // Re-read registration status when a register/forget completes (it runs
         // in a separate window), so the inline controls flip without reopening.
@@ -1169,6 +1183,49 @@ struct ProfileEditorView: View {
                               onRegisterKimi, onForgetKimi)
         // omp is API-key only (no OAuth subscription) — nothing to register.
         case .omp:    return (nil, nil, nil, nil)
+        }
+    }
+
+    /// Which workspaces the agents here may reach: every one (the default),
+    /// or only the ones ticked. Directional — the other workspace's own
+    /// setting says whether its agents can reach back.
+    @ViewBuilder
+    private var agentReachSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Reach")
+                .font(.headline)
+            Text("Agents in this workspace can hand work to agents elsewhere (a delegation runs in the other workspace) and ask a session there by its @nickname; files travel along. Which workspaces they may reach:")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle(isOn: Binding(
+                get: { draft.agentReach == nil },
+                set: { draft.agentReach = $0 ? nil : [] })) {
+                Text("Every workspace")
+            }
+            .toggleStyle(.switch)
+            if draft.agentReach != nil {
+                if siblingWorkspaces.isEmpty {
+                    Text("No other workspace yet — agents here can only reach each other.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    ForEach(siblingWorkspaces) { w in
+                        Toggle(isOn: Binding(
+                            get: { draft.agentReach?.contains(w.id) ?? false },
+                            set: { on in
+                                var set = draft.agentReach ?? []
+                                if on { if !set.contains(w.id) { set.append(w.id) } }
+                                else { set.removeAll { $0 == w.id } }
+                                draft.agentReach = set
+                            })) {
+                            Text(w.name)
+                        }
+                        .toggleStyle(.switch)
+                        .padding(.leading, 12)
+                    }
+                }
+            }
         }
     }
 

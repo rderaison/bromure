@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
 // The iOS fat client compiles this file without SandboxEngine (macOS-only:
 // Virtualization et al.) — PlatformStubs.swift supplies the EgressPolicy
 // stand-in there.
@@ -1582,6 +1585,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// disk was clonefile()'d from base.img. Used to detect when the base
     /// has been rebuilt since the clone (so we can offer to reset).
     public var baseImageVersionAtClone: String?
+    /// Which workspaces agents here may reach — delegate work into, ask a
+    /// session of by @nickname. nil = every workspace (the default); a list
+    /// names the only ones (empty = none but this one).
+    public var agentReach: [UUID]?
 
     /// Visual color in the picker sidebar. Optional in JSON for forward
     /// compat — older profile files don't have this field.
@@ -1815,6 +1822,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
         baseImageVersionAtClone: String? = nil,
+        agentReach: [UUID]? = nil,
         color: ProfileColor = .blue,
         comments: String = "",
         memoryGB: Int = Profile.defaultMemoryGB(),
@@ -1894,6 +1902,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.baseImageVersionAtClone = baseImageVersionAtClone
+        self.agentReach = agentReach
         self.color = color
         self.comments = comments
         self.memoryGB = memoryGB
@@ -1927,7 +1936,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case ompProvider, ompBaseURL, ompModel
         case folderPath  // legacy: single folder, migrated to folderPaths
         case folderPaths
-        case createdAt, lastUsedAt, baseImageVersionAtClone, color, comments
+        case createdAt, lastUsedAt, baseImageVersionAtClone, agentReach, color, comments
         case memoryGB, nativeTerminal, gitUserName, gitUserEmail, importedConfigFiles
         case useTerminalAppDefaults, customFontFamily, customFontSize
         case customBackgroundHex, customForegroundHex, fontLigatures
@@ -2008,6 +2017,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         createdAt       = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         lastUsedAt      = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         baseImageVersionAtClone = try c.decodeIfPresent(String.self, forKey: .baseImageVersionAtClone)
+        agentReach      = try c.decodeIfPresent([UUID].self, forKey: .agentReach)
         color           = try c.decodeIfPresent(ProfileColor.self, forKey: .color) ?? .blue
         comments        = try c.decodeIfPresent(String.self, forKey: .comments) ?? ""
         memoryGB        = try c.decodeIfPresent(Int.self, forKey: .memoryGB) ?? 8
@@ -2117,6 +2127,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(createdAt, forKey: .createdAt)
         try c.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)
         try c.encodeIfPresent(baseImageVersionAtClone, forKey: .baseImageVersionAtClone)
+        try c.encodeIfPresent(agentReach, forKey: .agentReach)
         try c.encode(color, forKey: .color)
         try c.encode(comments, forKey: .comments)
         try c.encode(memoryGB, forKey: .memoryGB)
@@ -4115,6 +4126,18 @@ public final class ProfileStore {
             [ -n "$idx" ] || exit 0
             printf '%s' "${1:-}" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
               && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
+            # Claude hands the hook its JSON on stdin, naming the transcript
+            # file. Remember it per tab: the host then reads THIS agent's
+            # transcript even when another agent in the same folder (a
+            # delegate) writes newer files there. A /clear records the new
+            # file on the next prompt. Not a terminal → nothing to read.
+            if [ ! -t 0 ]; then
+              tp=$(sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' 2>/dev/null | head -1)
+              if [ -n "$tp" ]; then
+                printf '%s' "$tp" > "$HOME/.bromure/.transcript-$idx.tmp" 2>/dev/null \
+                  && mv -f "$HOME/.bromure/.transcript-$idx.tmp" "$HOME/.bromure/transcript-$idx.path" 2>/dev/null || true
+              fi
+            fi
             exit 0
             """#
             let scriptURL = bromureDir.appendingPathComponent("agent-status.sh")
@@ -4409,6 +4432,10 @@ public final class ProfileStore {
         let usesClaude = profile.tool == .claude
             || profile.additionalTools.contains { $0.tool == .claude }
         var spec: [String: Any] = ["usesClaude": usesClaude]
+        // Claude Code's first-run wizard asks for a text style: the guest
+        // answers with the host's appearance (and marks onboarding done) so a
+        // session opens on the conversation — agentd `_preonboard`.
+        spec["claudeTheme"] = Self.claudeThemeForHostAppearance()
         if usesClaude, let key = anthropicEnvKey, !key.isEmpty {
             // Claude Code stores approvals as the key's last 20 characters.
             spec["approvedApiKeySuffix"] = String(key.suffix(20))
@@ -4428,6 +4455,18 @@ public final class ProfileStore {
             withJSONObject: spec, options: [.prettyPrinted, .sortedKeys])
         try specData.write(to: seedDir.appendingPathComponent("claude-settings.spec.json"),
                            options: .atomic)
+    }
+
+    /// "dark" or "light" for Claude Code's `theme`, following the app's
+    /// effective appearance (dark when there is no app, e.g. the CLI).
+    static func claudeThemeForHostAppearance() -> String {
+        #if canImport(AppKit)
+        if let app = NSApp,
+           app.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .aqua {
+            return "light"
+        }
+        #endif
+        return "dark"
     }
 
     /// Percent-encode a string for use in the userinfo portion of a URL
@@ -5004,11 +5043,15 @@ public final class ProfileStore {
             # would have to type /login); its `kimi login` subcommand drives
             # the device-code flow directly, which is exactly what a
             # registration VM exists for.
-            if [ "$BROMURE_AC_TOOL" = "kimi" ]; then
-                kimi login
-            else
-                "$BROMURE_AC_TOOL"
-            fi
+            # Each CLI's login subcommand goes straight to the browser
+            # hand-off — no wizard in between (see launchRegistrationAgentIfNeeded).
+            case "$BROMURE_AC_TOOL" in
+                claude) claude auth login --claudeai ;;
+                codex)  codex login ;;
+                grok)   grok login ;;
+                kimi)   kimi login ;;
+                *)      "$BROMURE_AC_TOOL" ;;
+            esac
         fi
     fi
     unset _bromure_marker
@@ -5076,6 +5119,7 @@ public final class ProfileStore {
     Description=Bromure guest agent daemon
     After=mnt-bromure\x2dmeta.mount network.target
     StartLimitIntervalSec=0
+    ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
     [Service]
     Type=simple
     User=ubuntu

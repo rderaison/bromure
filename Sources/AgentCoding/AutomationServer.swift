@@ -94,6 +94,23 @@ final class ACAutomationServer {
     /// A finished task's raw session transcript (vsock or ext4) — nil when
     /// none exists.
     var onTaskTranscript: ((_ id: UUID) async -> String?)?
+    /// Sessions-first home over the wire (fat client): the session records
+    /// with their live verdicts, the verbs that drive one, and its transcript.
+    var onListAgentSessions: (() -> [[String: Any]])?
+    /// Delegations between sessions, mirrored next to them.
+    var onListDelegations: (() -> [[String: Any]])?
+    var onAgentSessionCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
+    var onAgentSessionTranscript: ((_ id: UUID) async -> Data?)?
+    /// Delegations across hosts — a fat client's own session asking one of
+    /// ours: open the request, feed it files, act on the parent's side
+    /// (send / answer / steer / close / cancel / read / noticed), and fetch
+    /// what the peer attached.
+    var onDelegationRequest: (@MainActor (_ body: [String: Any]) async -> [String: Any])?
+    var onDelegationCommand: (@MainActor (_ id: UUID, _ action: String, _ body: [String: Any]) async -> [String: Any])?
+    var onDelegationFile: (@MainActor (_ id: UUID, _ path: String, _ offset: Int64, _ length: Int) async -> [String: Any])?
+    /// The subfolders of a folder on a workspace (by id or name), for the
+    /// new-session folder browser over the fat client. nil: unreadable now.
+    var onAgentSessionFolders: ((_ profile: String, _ path: String) async -> [String]?)?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -188,6 +205,14 @@ final class ACAutomationServer {
     /// watch) for the VM — validated host-side, then sent over the same
     /// outbox verb protocol the local GUI uses.
     var onDockerCommand: ((_ idOrName: String, _ doc: [String: Any]) -> [String: Any])?
+    /// Kubernetes clusters: records + live status (rides /state), and the
+    /// verbs — `id == nil` + action "create" makes one; otherwise
+    /// start/stop/restart/delete/access/autostart/watch/kubeconfig.
+    var onListKubeClusters: (() -> [String: Any])?
+    var onKubeCommand: ((_ id: String?, _ doc: [String: Any]) -> [String: Any])?
+    /// Container registries: `id == nil` + "create", else start/stop/restart/
+    /// delete/access/autostart/watch.
+    var onRegistryCommand: ((_ id: String?, _ doc: [String: Any]) -> [String: Any])?
     /// Decision prompts pending for a remote client (fat client), + answer.
     var onListPendingPrompts: (() -> [[String: Any]])?
     /// In-flight remote subscription registration (provider, sign-in URL, and
@@ -770,6 +795,133 @@ final class ACAutomationServer {
             }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
+        // Agent sessions (the sessions-first home, over the wire):
+        // POST /sessions/start {profile, tool, cwd?, cloneURL?, message?}
+        // POST /sessions/{id}/{resume|close|rename|forget} (resume: {message?},
+        // rename: {title}) and GET /sessions/{id}/transcript (base64 JSONL —
+        // the server's local copy, or the live file when the machine is up).
+        case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/transcript"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return
+            }
+            let idStr = String(p.dropFirst("/agent-sessions/".count).dropLast("/transcript".count))
+                .removingPercentEncoding ?? ""
+            guard let sid = UUID(uuidString: idStr) else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad session id"]); return
+            }
+            let sem = DispatchSemaphore(value: 0)
+            var b64: String?
+            Task { @MainActor [weak self] in
+                if let data = await self?.onAgentSessionTranscript?(sid) { b64 = data.base64EncodedString() }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 90)
+            if let b64 {
+                sendResponse(fd: fd, status: 200, body: ["transcript": b64])
+            } else {
+                sendResponse(fd: fd, status: 404, body: ["error": "No transcript"])
+            }
+
+        // Delegations across hosts. A fat client's own session asks one of
+        // ours: POST /delegations/request {to, text, parent_session,
+        // parent_label, parent_host} → {id}; then POST /delegations/{id}/
+        // {files|send|answer|steer|close|cancel|read|noticed}, and
+        // GET /delegations/{id}/file?path=&offset=&length= for what the
+        // peer attached (a chunk: {data, size, eof}).
+        case ("POST", "/delegations/request"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let sem = DispatchSemaphore(value: 0)
+            var r: [String: Any] = ["error": "no handler"]
+            Task { @MainActor [weak self] in
+                if let h = self?.onDelegationRequest { r = await h(bodyJSON) }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 120)
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case ("GET", let p) where p.hasPrefix("/delegations/") && p.contains("/file"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let parts = p.split(separator: "?", maxSplits: 1).map(String.init)
+            let idStr = String(parts[0].dropFirst("/delegations/".count)).split(separator: "/").first.map(String.init) ?? ""
+            var query: [String: String] = [:]
+            if parts.count > 1 {
+                for kv in parts[1].split(separator: "&") {
+                    let pair = kv.split(separator: "=", maxSplits: 1).map(String.init)
+                    if pair.count == 2 { query[pair[0]] = pair[1].removingPercentEncoding ?? pair[1] }
+                }
+            }
+            guard let did = UUID(uuidString: idStr), let filePath = query["path"], !filePath.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad delegation id or path"]); return
+            }
+            let offset = Int64(query["offset"] ?? "0") ?? 0
+            let length = Int(query["length"] ?? "4194304") ?? 4_194_304
+            let sem = DispatchSemaphore(value: 0)
+            var r: [String: Any] = ["error": "no handler"]
+            Task { @MainActor [weak self] in
+                if let h = self?.onDelegationFile { r = await h(did, filePath, offset, length) }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 120)
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case ("POST", let p) where p.hasPrefix("/delegations/"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let rest = String(p.dropFirst("/delegations/".count))
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            guard let did = parts.first.flatMap({ $0.removingPercentEncoding }).flatMap(UUID.init(uuidString:)),
+                  parts.count > 1 else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad delegation id or action"]); return
+            }
+            let sem = DispatchSemaphore(value: 0)
+            var r: [String: Any] = ["error": "no handler"]
+            Task { @MainActor [weak self] in
+                if let h = self?.onDelegationCommand { r = await h(did, parts[1], bodyJSON) }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 240)
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case ("POST", "/agent-sessions/folders"):
+            // {profile, path} → {folders: [name…]}: what the new-session
+            // browser walks; 404 when the machine can't be read right now.
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard let profileKey = bodyJSON["profile"] as? String, !profileKey.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "profile required"]); return
+            }
+            let path = bodyJSON["path"] as? String ?? "~"
+            let sem = DispatchSemaphore(value: 0)
+            var folders: [String]?
+            Task { @MainActor [weak self] in
+                folders = await self?.onAgentSessionFolders?(profileKey, path)
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 30)
+            if let folders {
+                sendResponse(fd: fd, status: 200, body: ["folders": folders])
+            } else {
+                sendResponse(fd: fd, status: 404, body: ["error": "The machine's folders can't be read right now"])
+            }
+
+        case ("POST", "/agent-sessions/start"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let r = DispatchQueue.main.sync {
+                self.onAgentSessionCommand?(nil, "start", bodyJSON) ?? ["error": "no handler"]
+            }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case ("POST", let p) where p.hasPrefix("/agent-sessions/"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let rest = String(p.dropFirst("/agent-sessions/".count))
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            guard let sid = parts.first.flatMap({ $0.removingPercentEncoding })
+                .flatMap(UUID.init(uuidString:)), parts.count > 1 else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad session id or action"]); return
+            }
+            let r = DispatchQueue.main.sync {
+                self.onAgentSessionCommand?(sid, parts[1], bodyJSON) ?? ["error": "no handler"]
+            }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
         // Fat-client automation RUN actions (id is a run id, not an
         // automation id): POST /automation-runs/{id}/acknowledge dismisses a
         // failed/blocked run from the board's Needs Attention column;
@@ -816,6 +968,56 @@ final class ACAutomationServer {
                 sendResponse(fd: fd, status: 404, body: ["error": "Not found", "path": path]); return
             }
             sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
+
+        case ("GET", "/k8s"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let list = DispatchQueue.main.sync { self.onListKubeClusters?() ?? ["clusters": [], "status": [:]] }
+            sendResponse(fd: fd, status: 200, body: list)
+
+        case ("POST", "/k8s"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            var doc = bodyJSON
+            if doc["action"] == nil { doc["action"] = "create" }
+            let result = DispatchQueue.main.sync { self.onKubeCommand?(nil, doc) } ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: result)
+
+        // POST /k8s/{id}/{action} (fat-client cluster verbs).
+        case (let m, let p) where p.hasPrefix("/k8s/"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let rest = String(p.dropFirst("/k8s/".count))
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            let id = parts.first.flatMap { $0.removingPercentEncoding } ?? ""
+            var doc = bodyJSON
+            if parts.count > 1, !parts[1].isEmpty { doc["action"] = parts[1] }
+            if m == "DELETE" { doc["action"] = "delete" }
+            guard m == "POST" || m == "DELETE" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let result = DispatchQueue.main.sync { self.onKubeCommand?(id, doc) } ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: result)
+
+        case ("POST", "/registries"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            var doc = bodyJSON
+            if doc["action"] == nil { doc["action"] = "create" }
+            let result = DispatchQueue.main.sync { self.onRegistryCommand?(nil, doc) } ?? ["ok": false, "error": "unavailable"]
+            sendResponse(fd: fd, status: (result["ok"] as? Bool) == true ? 200 : 400, body: result)
+
+        case (let m, let p) where p.hasPrefix("/registries/"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let rest = String(p.dropFirst("/registries/".count))
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            let id = parts.first.flatMap { $0.removingPercentEncoding } ?? ""
+            var doc = bodyJSON
+            if parts.count > 1, !parts[1].isEmpty { doc["action"] = parts[1] }
+            if m == "DELETE" { doc["action"] = "delete" }
+            guard m == "POST" || m == "DELETE" else {
+                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
+            }
+            let result = DispatchQueue.main.sync { self.onRegistryCommand?(id, doc) } ?? ["ok": false, "error": "unavailable"]
+            sendResponse(fd: fd, status: (result["ok"] as? Bool) == true ? 200 : 400, body: result)
 
         case (let m, let p) where p.hasPrefix("/vms/"):
             handleVMRoute(fd: fd, method: m, path: p, bodyJSON: bodyJSON)
@@ -1750,9 +1952,15 @@ final class ACAutomationServer {
                 "subscriptions": self.onSubscriptionStatus?(nil) ?? [:],
                 "securityTimeline": self.onSecurityTimeline?() ?? [],
                 "localModels": self.onLocalModels?() ?? [:],
+                "kubeClusters": self.onListKubeClusters?() ?? ["clusters": [], "status": [:]],
             ]
             // Only present while a client-initiated registration is in flight.
             if let reg = self.onPendingRegistration?() { d["pendingRegistration"] = reg }
+            // Only present on a server with the sessions-first home: an older
+            // client ignores it, a newer client falls back to the classic
+            // layout when it's missing.
+            if let sessions = self.onListAgentSessions?() { d["agentSessions"] = sessions }
+            if let delegations = self.onListDelegations?() { d["delegations"] = delegations }
             return d
         }
         // The workspace VM subnet, so a fat client can route/tunnel to it. nil

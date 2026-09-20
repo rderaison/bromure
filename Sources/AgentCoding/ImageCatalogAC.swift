@@ -13,14 +13,22 @@ import SandboxEngine
 
 extension ImageDistribution {
     /// The Bromure Agentic Coding Ubuntu image (single EFI-bootable disk
-    /// artifact under https://dl.bromure.io/images/).
+    /// artifact under https://dl.bromure.io/images/<major>/).
+    ///
+    /// One catalog per image major, at `images/<major>/img-catalog.json`
+    /// (scripts/publish-image.sh derives the same path from the version
+    /// it just built): an app only ever sees images of the major it was
+    /// built for, so a newer major — which may need the newer app, as
+    /// 201 (baked agent unit) does — can't be offered to an older app.
+    /// Apps before 5.0.0 read the unversioned `images/img-catalog.json`,
+    /// which stays frozen at the last 200.x publish.
     ///
     /// `signingMagic` predates the multi-channel split — it MUST stay
     /// "bromure-img-catalog-v1" so already-published AC catalogs keep
     /// verifying; the browser channel uses its own magic so a validly
     /// signed catalog can never be replayed across channels.
     public static let agentCoding = ImageDistribution(
-        catalogPrefix: "images",
+        catalogPrefix: "images/\(UbuntuImageManager.imageVersion)",
         signingMagic: "bromure-img-catalog-v1",
         cacheFileName: "img-catalog.json",
         defaultSupportDirName: "BromureAC",

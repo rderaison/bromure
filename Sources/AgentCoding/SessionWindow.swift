@@ -116,10 +116,6 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
                 guard let self else { return }
                 self.acDelegate?.requestReboot(for: self.pane)
             },
-            onFiles: { [weak self] in
-                guard let self else { return }
-                self.acDelegate?.openFileBrowser(for: self)
-            },
             onEditProfile: { [weak self] in
                 guard let self else { return }
                 self.acDelegate?.openEditorWindow(editing: self.pane.profile)
@@ -232,7 +228,6 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
     let onNew:    () -> Void
     let onInspectTrace: () -> Void
     let onReboot: () -> Void
-    let onFiles:  () -> Void
     let onEditProfile: () -> Void
     let onToggleFusion: (Bool) -> Void
     let onRedock: () -> Void
@@ -244,7 +239,6 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
          onNew:    @escaping () -> Void,
          onInspectTrace: @escaping () -> Void,
          onReboot: @escaping () -> Void,
-         onFiles:  @escaping () -> Void,
          onEditProfile: @escaping () -> Void,
          onToggleFusion: @escaping (Bool) -> Void,
          onRedock: @escaping () -> Void) {
@@ -255,7 +249,6 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
         self.onNew = onNew
         self.onInspectTrace = onInspectTrace
         self.onReboot = onReboot
-        self.onFiles = onFiles
         self.onEditProfile = onEditProfile
         self.onToggleFusion = onToggleFusion
         self.onRedock = onRedock
@@ -285,7 +278,6 @@ final class TabsToolbarDelegate: NSObject, NSToolbarDelegate {
             onNew:    onNew,
             onInspectTrace: onInspectTrace,
             onReboot: onReboot,
-            onFiles:  onFiles,
             onEditProfile: onEditProfile,
             onToggleFusion: onToggleFusion,
             onRedock: onRedock
@@ -327,7 +319,6 @@ private struct TabsBar: View {
     let onNew:    () -> Void
     let onInspectTrace: () -> Void
     let onReboot: () -> Void
-    let onFiles:  () -> Void
     let onEditProfile: () -> Void
     let onToggleFusion: (Bool) -> Void
     let onRedock: () -> Void
@@ -428,17 +419,6 @@ private struct TabsBar: View {
                     SharedFoldersList(paths: sharedFolderPaths)
                 }
             }
-
-            // File browser — Finder-like panel over the guest's
-            // /home/ubuntu (and shared folders), for dragging files in
-            // and out of the VM.
-            Button(action: onFiles) {
-                Image(systemName: "externaldrive")
-                    .frame(width: 24, height: 22)
-            }
-            .buttonStyle(.borderless)
-            .help(NSLocalizedString("Browse files in the VM (drag to copy in/out)",
-                                     comment: ""))
 
             // Reboot — opens a confirm dialog (soft via `sudo reboot`
             // inside the guest, hard via `vm.stop()` on the host).

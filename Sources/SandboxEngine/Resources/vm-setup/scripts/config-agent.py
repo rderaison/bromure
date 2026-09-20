@@ -23,6 +23,13 @@ import time
 VSOCK_PORT = 5000
 HOST_CID = 2
 
+# VPN NIC MTU. VPN traffic tunnels over eth0 and needs headroom the default
+# 1280 DHCP floor denies it (WARP MASQUE collapses at 1280). config-agent
+# writes NIC_MTU_MARKER for VPN profiles; the dhclient exit-hook re-asserts
+# this after dhclient re-applies the DHCP MTU on each lease event.
+VPN_NIC_MTU = 1400
+NIC_MTU_MARKER = "/tmp/bromure/nic-mtu"
+
 # Non-default user-data-dir for ephemeral (non-persistent) Google Chrome
 # sessions. Branded Chrome refuses --remote-debugging-port on the default
 # dir; a persistent profile already supplies its own dir. Lives only for
@@ -792,7 +799,8 @@ def write_ikev2_config(cfg):
     updown_script = """#!/bin/sh
 # strongSwan updown script — handles routing + DNS for Bromure IKEv2
 USE_DNS={use_dns}
-DNSMASQ_VPN_CONF="/etc/dnsmasq.d/vpn-dns.conf"
+DNSMASQ_UPSTREAM="/etc/dnsmasq.d/upstream.conf"
+DNSMASQ_UPSTREAM_BACKUP="/tmp/bromure/upstream.conf.ikev2-backup"
 GW_FILE="/tmp/bromure/ikev2-orig-gw"
 
 case "$PLUTO_VERB" in
@@ -855,14 +863,20 @@ case "$PLUTO_VERB" in
         # Kill Squid so resilient-launch.sh restarts it with new routes/DNS
         pkill -f "squid -N" 2>/dev/null
 
-        # DNS
+        # DNS. With dnsmasq up (ad-blocking / VPN profiles) squid resolves
+        # through it: swap its upstream file (resolv-file) and SIGHUP —
+        # dnsmasq re-reads that file on SIGHUP and flushes its cache. (This
+        # used to write server= lines into a drop-in dnsmasq never read.)
+        # Without dnsmasq, squid reads /etc/resolv.conf at startup and was
+        # just restarted above, so rewrite that instead.
         if [ "$USE_DNS" = "true" ] && [ -n "$PLUTO_DNS" ]; then
-            : > "$DNSMASQ_VPN_CONF"
-            for dns in $PLUTO_DNS; do
-                echo "server=$dns" >> "$DNSMASQ_VPN_CONF"
-            done
-            if [ -f /var/run/dnsmasq.pid ]; then
-                kill -HUP $(cat /var/run/dnsmasq.pid) 2>/dev/null
+            if pgrep -x dnsmasq >/dev/null 2>&1; then
+                [ -f "$DNSMASQ_UPSTREAM_BACKUP" ] || cp "$DNSMASQ_UPSTREAM" "$DNSMASQ_UPSTREAM_BACKUP" 2>/dev/null
+                : > "$DNSMASQ_UPSTREAM"
+                for dns in $PLUTO_DNS; do
+                    echo "nameserver $dns" >> "$DNSMASQ_UPSTREAM"
+                done
+                pkill -HUP -x dnsmasq 2>/dev/null
             else
                 cp /etc/resolv.conf /etc/resolv.conf.bak.ikev2 2>/dev/null
                 : > /etc/resolv.conf
@@ -904,10 +918,11 @@ case "$PLUTO_VERB" in
         pkill -f "squid -N" 2>/dev/null
 
         # Restore DNS
-        rm -f "$DNSMASQ_VPN_CONF"
-        if [ -f /var/run/dnsmasq.pid ]; then
-            kill -HUP $(cat /var/run/dnsmasq.pid) 2>/dev/null
-        elif [ -f /etc/resolv.conf.bak.ikev2 ]; then
+        if [ -f "$DNSMASQ_UPSTREAM_BACKUP" ]; then
+            mv "$DNSMASQ_UPSTREAM_BACKUP" "$DNSMASQ_UPSTREAM"
+            pkill -HUP -x dnsmasq 2>/dev/null
+        fi
+        if [ -f /etc/resolv.conf.bak.ikev2 ]; then
             mv /etc/resolv.conf.bak.ikev2 /etc/resolv.conf
         fi
         ;;
@@ -1030,11 +1045,224 @@ def write_dynamic_policy(cfg):
         json.dump(policy, f)
 
 
+# ---------------------------------------------------------------------------
+# DNS upstream hijack probe
+# ---------------------------------------------------------------------------
+#
+# dnsmasq's upstream is pinned to Cloudflare (`no-resolv` + server=1.1.1.1 /
+# 1.0.0.1, or 1.1.1.2 / 1.0.0.2 for malware blocking). Some networks —
+# corporate FortiGate "DNS filter" deployments, hotel captive portals —
+# intercept UDP/53 to third-party resolvers and answer EVERY name with a
+# sinkhole IP (or drop the query). Every ad-blocking / malware-blocking /
+# WARP / WireGuard profile then resolves every site to the sinkhole, squid
+# tunnels the CONNECT to a box presenting a self-signed cert, and Chromium
+# shows NET::ERR_CERT_AUTHORITY_INVALID on every page — while the VPN
+# button says "Connected", so it reads as a VPN bug. The plain path (squid →
+# resolv.conf → host stub) is immune because the host resolver is the LAN's
+# own.
+#
+# So before dnsmasq starts, ask the pinned upstream a canary whose answer is
+# known and fall back to the host stub's nameservers when the answer is wrong
+# or missing. The upstreams live in dnsmasq's resolv-file (upstream.conf, see
+# pihole.conf) — the one thing dnsmasq re-reads on SIGHUP — so this rewrite
+# would also take effect at runtime; at boot we simply do it before launch.
+DNS_CANARY = "one.one.one.one"
+DNS_CANARY_ANSWERS = {"1.1.1.1", "1.0.0.1"}
+DNS_PROBE_TIMEOUT = 2.0
+DNSMASQ_UPSTREAM = "/etc/dnsmasq.d/upstream.conf"   # dnsmasq resolv-file
+DNS_FALLBACK_MARKER = "/tmp/bromure/dns-upstream-fallback"
+
+
+def _dns_a_query(name):
+    """Minimal recursive A query. Returns (id, packet)."""
+    qid = int.from_bytes(os.urandom(2), "big")
+    qname = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\x00"
+    return qid, struct.pack("!HHHHHH", qid, 0x0100, 1, 0, 0, 0) + qname + struct.pack("!HH", 1, 1)
+
+
+def _dns_skip_name(pkt, i):
+    """Index just past the (possibly compressed) name starting at pkt[i]."""
+    while True:
+        length = pkt[i]
+        if length == 0:
+            return i + 1
+        if length & 0xC0 == 0xC0:
+            return i + 2
+        i += length + 1
+
+
+def _dns_a_answers(pkt):
+    """A records in a DNS response. Best-effort: [] on anything malformed."""
+    try:
+        qdcount, ancount = struct.unpack("!HH", pkt[4:8])
+        i = 12
+        for _ in range(qdcount):
+            i = _dns_skip_name(pkt, i) + 4
+        out = []
+        for _ in range(ancount):
+            i = _dns_skip_name(pkt, i)
+            rtype, _rclass, _ttl, rdlen = struct.unpack("!HHIH", pkt[i:i + 10])
+            i += 10
+            if rtype == 1 and rdlen == 4:
+                out.append(".".join(str(b) for b in pkt[i:i + 4]))
+            i += rdlen
+        return out
+    except (struct.error, IndexError):
+        return []
+
+
+def probe_dns_upstreams(servers, timeout=DNS_PROBE_TIMEOUT):
+    """Send the canary to every server at once. Returns (server, None) for the
+    first one whose answer is right, else (None, details) — `details` says
+    what each server did, for the boot log."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    pending = {}   # query id → server
+    bad = {}       # server → wrong answers
+    for srv in servers:
+        qid, pkt = _dns_a_query(DNS_CANARY)
+        try:
+            sock.sendto(pkt, (srv, 53))
+            pending[qid] = srv
+        except OSError as e:
+            bad[srv] = f"send failed ({e})"
+    deadline = time.monotonic() + timeout
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        sock.settimeout(remaining)
+        try:
+            data, _ = sock.recvfrom(512)
+        except socket.timeout:
+            break
+        except OSError:
+            continue
+        if len(data) < 12:
+            continue
+        srv = pending.pop(struct.unpack("!H", data[:2])[0], None)
+        if srv is None:
+            continue
+        answers = _dns_a_answers(data)
+        if set(answers) & DNS_CANARY_ANSWERS:
+            sock.close()
+            return srv, None
+        bad[srv] = f"answered {', '.join(answers) or 'no A record'}"
+    sock.close()
+    for srv in pending.values():
+        bad[srv] = "no reply"
+    details = "; ".join(f"{srv} {what}" for srv, what in bad.items())
+    return None, f"{DNS_CANARY} → {details}"
+
+
+def resolv_conf_nameservers():
+    """IPv4 nameservers from /etc/resolv.conf (the host stub, normally)."""
+    out = []
+    try:
+        with open("/etc/resolv.conf") as f:
+            for line in f:
+                parts = line.split()
+                if (len(parts) >= 2 and parts[0] == "nameserver"
+                        and ":" not in parts[1] and not parts[1].startswith("127.")):
+                    out.append(parts[1])
+    except OSError:
+        pass
+    return out
+
+
+def ensure_dnsmasq_upstream_usable(block_malware):
+    """Swap dnsmasq's pinned upstreams (upstream.conf) for the host stub when
+    the pinned resolver is hijacked or unreachable on this network. Called
+    before dnsmasq starts; comments in the file are kept."""
+    try:
+        with open(DNSMASQ_UPSTREAM) as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        print(f"config-agent: WARNING: cannot read {DNSMASQ_UPSTREAM}: {e}", file=sys.stderr)
+        return
+    pinned = [l.split()[1] for l in lines
+              if l.startswith("nameserver") and len(l.split()) >= 2]
+    if not pinned:
+        return
+    good, details = probe_dns_upstreams(pinned)
+    if good:
+        return
+    fallback = resolv_conf_nameservers()
+    if not fallback:
+        print(f"config-agent: WARNING: DNS upstream unusable ({details}) and "
+              "resolv.conf has no nameserver to fall back to", file=sys.stderr)
+        return
+    kept = [l for l in lines if not l.startswith("nameserver")]
+    kept += [f"nameserver {ns}" for ns in fallback]
+    try:
+        with open(DNSMASQ_UPSTREAM, "w") as f:
+            f.write("\n".join(kept) + "\n")
+    except OSError as e:
+        print(f"config-agent: WARNING: cannot rewrite {DNSMASQ_UPSTREAM}: {e}", file=sys.stderr)
+        return
+    note = (" — malware-blocking DNS (1.1.1.2) is unavailable on this network"
+            if block_malware else "")
+    msg = ("this network intercepts DNS to public resolvers "
+           f"({details}); dnsmasq will use the host resolver {', '.join(fallback)} "
+           f"instead{note}")
+    print(f"config-agent: WARNING: {msg}", file=sys.stderr)
+    # Marker for diagnostics and the E2E suite (a missing 1.1.1.2 upstream is
+    # expected on such a network, not a regression).
+    try:
+        with open(DNS_FALLBACK_MARKER, "w") as f:
+            f.write(msg + "\n")
+    except OSError:
+        pass
+
+
 def configure_services(cfg, ca_count):
     """Start DNS/proxy/WARP services. Returns list of background PIDs to wait on."""
     bg_pids = []
     # PIDs we don't need to wait for before Chrome starts
     fire_and_forget = []
+
+    # VPN NIC MTU. Every VPN tunnels over eth0 and needs headroom the default
+    # 1280 floor denies it: WARP's MASQUE tunnel collapses to 65-90% packet
+    # loss under load ("connects but no page loads"), and WireGuard / OpenVPN /
+    # IKEv2 lose throughput or fragment (the 1280 clamp is the suspected cause
+    # of the slow IKE_AUTH handshake). Measured on a 1500 LAN: WARP eth0=1280 →
+    # 0 B/s, 65-87% loss; eth0=1400 → ~20 MB/s, 0.01% loss. 1400 (not 1500)
+    # keeps headroom for a reduced-MTU host uplink — the same reason the global
+    # default stays 1280 (VMConfig.resolvedNICMTU). It can't be set via the host
+    # DHCP server because the pre-warm VMPool leases the VM at 1280 before any
+    # profile claims it, so the host can't know a VPN is wanted at DHCP time.
+    #
+    # We only DROP A MARKER here; two consumers actually set the MTU, because
+    # two things clamp eth0 back to 1280 after config-agent runs:
+    #   • xinitrc is the LAST setter at boot (`doas ip link set … mtu $MTU`,
+    #     default 1280) — it reads this marker and raises $MTU to it.
+    #   • dhclient re-applies DHCP option 26 (1280) on every lease event — its
+    #     exit-hook (/etc/dhcp/dhclient-exit-hooks.d/bromure-vpn-mtu) re-asserts
+    #     this marker after each renewal, which xinitrc never sees.
+    # A direct `ip link set` here is pointless — xinitrc clobbers it. Only VPN
+    # profiles get the marker; plain profiles keep the 1280 floor. Both
+    # consumers only ever RAISE, so a larger vm.mtu the user pinned is safe.
+    vpn_enabled = bool(
+        cfg.get("enableWarp") or cfg.get("wireGuardConfig")
+        or cfg.get("openVPNConfig") or cfg.get("enableIKEv2"))
+    if vpn_enabled:
+        os.makedirs("/tmp/bromure", exist_ok=True)
+        try:
+            with open(NIC_MTU_MARKER, "w") as f:
+                f.write(f"{VPN_NIC_MTU}\n")
+        except OSError as e:
+            print(f"config-agent: WARNING: cannot write {NIC_MTU_MARKER}: {e}",
+                  file=sys.stderr)
+        # Also set it directly. xinitrc (which reads the marker) is normally the
+        # last setter at boot, but the pre-warm pool makes the config-agent vs
+        # xinitrc ordering unguaranteed; this covers the case where xinitrc's
+        # `ip link set` already ran (marker still absent → it used 1280) before
+        # this point. Only raises; a larger pinned vm.mtu is left alone.
+        try:
+            cur_mtu = int(open("/sys/class/net/eth0/mtu").read().strip())
+        except (OSError, ValueError):
+            cur_mtu = 0
+        if 0 < cur_mtu < VPN_NIC_MTU:
+            run(f"ip link set dev eth0 mtu {VPN_NIC_MTU}")
 
     # WARP: write markers for warp-agent.  When WARP is enabled, we start
     # dbus + warp-svc now so the VPN can connect during boot.  The
@@ -1163,13 +1391,16 @@ def configure_services(cfg, ca_count):
     has_wireguard = bool(cfg.get("wireGuardConfig"))
 
     if cfg.get("blockMalware"):
-        run("sed -i 's/^server=1\\.1\\.1\\.1/server=1.1.1.2/' /etc/dnsmasq.d/pihole.conf")
-        run("sed -i 's/^server=1\\.0\\.0\\.1/server=1.0.0.2/' /etc/dnsmasq.d/pihole.conf")
+        # Cloudflare's malware-blocking resolvers go into dnsmasq's upstream
+        # file (its resolv-file; pihole.conf carries no server= lines).
+        run(f"sed -i 's/^nameserver 1\\.1\\.1\\.1$/nameserver 1.1.1.2/' {DNSMASQ_UPSTREAM}")
+        run(f"sed -i 's/^nameserver 1\\.0\\.0\\.1$/nameserver 1.0.0.2/' {DNSMASQ_UPSTREAM}")
 
     # For WireGuard profiles without ad-blocking: strip addn-hosts so dnsmasq
-    # acts as a pure DNS forwarder.  wireguard-agent will swap the server= lines
-    # at connect/disconnect time via SIGHUP.  We don't strip for other profiles
-    # (WARP, ad-blocking) to preserve their existing DNS behaviour.
+    # acts as a pure DNS forwarder.  wireguard-agent swaps the upstream file
+    # at connect/disconnect time and SIGHUPs dnsmasq.  We don't strip for
+    # other profiles (WARP, ad-blocking) to preserve their existing DNS
+    # behaviour.
     if has_wireguard and not cfg.get("adBlocking"):
         run("sed -i '/^addn-hosts/d' /etc/dnsmasq.d/pihole.conf")
 
@@ -1180,6 +1411,10 @@ def configure_services(cfg, ca_count):
     needs_dnsmasq = (cfg.get("adBlocking") or cfg.get("blockMalware")
                      or cfg.get("enableWarp") or has_wireguard)
     if needs_dnsmasq and not has_custom_proxy:
+        # On a DNS-hijacking LAN the pinned Cloudflare upstream answers every
+        # name with a sinkhole; swap in the host stub before launch (see the
+        # probe above).
+        ensure_dnsmasq_upstream_usable(bool(cfg.get("blockMalware")))
         run("dnsmasq -C /etc/dnsmasq.d/pihole.conf")
 
     # Configure squid DNS.

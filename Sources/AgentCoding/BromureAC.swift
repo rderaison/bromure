@@ -119,6 +119,28 @@ struct BromureAC: ParsableCommand {
             renderEnrollmentSheet(to: filtered.count > 1 ? filtered[1] : "/tmp/bromure-enrollment.png")
             return
         }
+        // Hidden verification hook: render a mermaid fence exactly as the
+        // beautified transcript does and snapshot it to a PNG. Sibling of the
+        // enrollment shot — standalone, no servers or VMs.
+        //   bromure-ac __shot-mermaid [out.png] [source-file] [--dark]
+        if filtered.first == "__shot-mermaid" {
+            let args = Array(filtered.dropFirst())
+            let out = args.first { !$0.hasPrefix("--") } ?? "/tmp/bromure-mermaid.png"
+            let srcPath = args.filter { !$0.hasPrefix("--") }.dropFirst().first
+            let source = srcPath.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
+                ?? "flowchart LR\n    A[start] --> B[(store)]\n    A --> C[end]"
+            MermaidFence<EmptyView>.renderSnapshot(source: source, dark: args.contains("--dark"), to: out)
+        }
+        // End-to-end sibling: markdown (with a ```mermaid fence) through the real
+        // transcript theme, captured as composited window pixels.
+        //   bromure-ac __shot-transcript-md [out.png] [markdown-file]
+        if filtered.first == "__shot-transcript-md" {
+            let args = Array(filtered.dropFirst())
+            let out = args.first ?? "/tmp/bromure-transcript-md.png"
+            let md = (args.count > 1 ? (try? String(contentsOfFile: args[1], encoding: .utf8)) : nil)
+                ?? "Some prose before.\n\n```mermaid\nflowchart LR\n    A[start] --> B[(store)]\n```\n\nSome prose after."
+            MermaidFence<EmptyView>.renderTranscriptSnapshot(markdown: md, to: out)
+        }
         Self.main(filtered)
     }
 
@@ -419,6 +441,11 @@ struct Run: ParsableCommand {
     var headless = false
 
     func run() throws {
+        // First: a durable copy of stderr + launch/quit/fatal-signal stamps
+        // (~/Library/Logs/BromureAC/bromure-ac.log), so a quit that leaves
+        // no crash report is still explained when we weren't started
+        // from a terminal.
+        AppLog.install()
         let imageManager = try makeImageManager()
         // No base-image gate here. `ACAppDelegate.applicationDidFinishLaunching`
         // checks `imageManager.hasBaseImage` and routes to the in-app
@@ -511,6 +538,14 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     let wsMenu = NSMenu(title: L("Workspaces"))
     wsMenuItem.submenu = wsMenu
 
+    // Sessions first: the thing a user does most — start an agent — leads.
+    let newSessionItem = NSMenuItem(title: L("New Session…"),
+                                    action: #selector(ACAppDelegate.newSessionAction(_:)),
+                                    keyEquivalent: "n")
+    newSessionItem.target = delegate
+    wsMenu.addItem(newSessionItem)
+    wsMenu.addItem(NSMenuItem.separator())
+
     let newWsItem = NSMenuItem(title: L("New Workspace…"),
                                action: #selector(ACAppDelegate.newWorkspaceAction(_:)),
                                keyEquivalent: "n")
@@ -529,6 +564,23 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     newWsFromConfigs.isAlternate = true
     newWsFromConfigs.target = delegate
     wsMenu.addItem(newWsFromConfigs)
+
+    // Infrastructure: the shared machines next to the workspaces — a
+    // Kubernetes cluster of node VMs, a container registry.
+    let infraMenu = NSMenu(title: L("Infrastructure"))
+    let newClusterItem = NSMenuItem(title: L("Create Kubernetes Cluster…"),
+                                    action: #selector(ACAppDelegate.newKubeClusterAction(_:)),
+                                    keyEquivalent: "")
+    newClusterItem.target = delegate
+    infraMenu.addItem(newClusterItem)
+    let newRegistryItem = NSMenuItem(title: L("Create Registry…"),
+                                     action: #selector(ACAppDelegate.newRegistryAction(_:)),
+                                     keyEquivalent: "")
+    newRegistryItem.target = delegate
+    infraMenu.addItem(newRegistryItem)
+    let infraItem = NSMenuItem(title: L("Infrastructure"), action: nil, keyEquivalent: "")
+    infraItem.submenu = infraMenu
+    wsMenu.addItem(infraItem)
 
     // Fat client: mirror a remote bromure-ac (its grid, workspaces, tabs,
     // automations) 1:1 over SSH. A peer of "New Workspace…" — both bring a
@@ -564,12 +616,20 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     autoBoardItem.target = delegate
     wsMenu.addItem(autoBoardItem)
 
-    let taskBoardItem = NSMenuItem(title: L("Coding Board"),
+    let taskBoardItem = NSMenuItem(title: L("Tasks"),
                                    action: #selector(ACAppDelegate.showTaskBoardAction(_:)),
                                    keyEquivalent: "t")
     taskBoardItem.keyEquivalentModifierMask = [.command, .shift]
     taskBoardItem.target = delegate
     wsMenu.addItem(taskBoardItem)
+
+    // The Linux machine behind the selected session: terminal, files, containers.
+    let hoodItem = NSMenuItem(title: L("Linux"),
+                              action: #selector(ACAppDelegate.toggleUnderTheHoodAction(_:)),
+                              keyEquivalent: "u")
+    hoodItem.keyEquivalentModifierMask = [.command, .option]
+    hoodItem.target = delegate
+    wsMenu.addItem(hoodItem)
 
     let deleteWsItem = NSMenuItem(title: L("Delete"),
                                   action: #selector(ACAppDelegate.deleteWorkspaceAction(_:)),
@@ -717,6 +777,9 @@ final class RunningSession {
     /// The VM. Strong owner — this is what keeps the VZVirtualMachine alive
     /// independent of any window.
     var sandbox: UbuntuSandboxVM
+    /// Set for a Kubernetes node VM (owned by `KubeClusterEngine`, never a
+    /// workspace): hidden from the status item and the fat-client sidebar.
+    var kubeClusterID: UUID?
     /// When the VM booted — surfaced as uptime in `vm ls`.
     let startedAt: Date
     /// Last tab snapshot, captured on detach so a reattaching window can
@@ -1051,12 +1114,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return true
     }
 
-    /// File browser opened from the unified window's header (per selected VM).
-    func openFileBrowserForUnified(_ id: Profile.ID) {
-        guard let pane = panes[id] else { return }
-        openFileBrowser(profile: pane.profile)
-    }
-
     /// Boot (or focus) the profile with this id — wired to the dropdown.
     func startProfile(_ id: Profile.ID) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
@@ -1074,7 +1131,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// window over it. The terminal can be attached later on demand.
     func startProfileForAutomation(_ id: Profile.ID, detached: Bool = false) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
-        launch(profile, detached: detached, freshBootFallback: false)
+        launch(profile, detached: detached, freshBootFallback: false, unattended: true)
+    }
+
+    /// An agent's start (a delegate in another workspace, a peer woken for
+    /// a notice): unattended like an automation's, and the booted workspace
+    /// joins the sidebar without taking the stage from what the user is
+    /// reading — the reported bug was a delegation into another workspace
+    /// swapping the delegator's chat for the new session's.
+    func startProfileQuietly(_ id: Profile.ID) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        launch(profile, freshBootFallback: false, unattended: true, quiet: true)
+    }
+
+    /// Why an unattended start (an automation firing, a task starting) was
+    /// refused, by workspace — nobody is there to answer a prompt, so the
+    /// gates that would ask one decline instead, and the engines read the
+    /// reason here to fail at once rather than wait out the boot timeout.
+    private var unattendedLaunchRefusals: [Profile.ID: String] = [:]
+
+    func unattendedLaunchRefusal(_ id: Profile.ID) -> String? { unattendedLaunchRefusals[id] }
+
+    private func refuseUnattendedLaunch(_ profile: Profile, _ reason: String) {
+        unattendedLaunchRefusals[profile.id] = reason
+        FileHandle.standardError.write(Data(
+            "[ac] unattended start of '\(profile.name)' refused: \(reason)\n".utf8))
     }
 
     /// Duplicate a workspace for a clone-first automation run: settings,
@@ -1261,6 +1342,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 state: runState(for: p),
                 compromised: SessionDisk.isCompromised(profile: p, store: store))
         }
+        // The new-session screen holds the workspaces by value: rebuild it
+        // when they changed (the first one just saved from the editor).
+        w.workspacesDidChange()
+        // A pane came or went: the selected session's tab may have appeared
+        // (boot landed) or the workspace gone to sleep.
+        agentSessionStore.reconcile(entries: w.listModel.entries)
+        w.sessionStageDidChange()
     }
 
     /// Coarse run state for a profile, for the source-list badge: a live VM is
@@ -1481,8 +1569,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Coding kanban (sidebar "Tasks"): agent-driven tasks flowing Backlog →
     /// In Progress → Testing → Done through git worktrees.
     let codingTaskStore = CodingTaskStore()
+    /// Agent sessions — the unit the home screen is built around.
+    let agentSessionStore = AgentSessionStore()
+    private(set) lazy var agentSessionEngine =
+        AgentSessionEngine(store: agentSessionStore, delegate: self)
+    /// Delegations between sessions: one agent handing work to another.
+    let delegationStore = DelegationStore()
+    private(set) lazy var delegationEngine: DelegationEngine = {
+        let e = DelegationEngine(store: delegationStore, sessions: agentSessionStore,
+                                 sessionEngine: agentSessionEngine, delegate: self)
+        // Workspace names and each one's reach policy.
+        e.profiles = { [weak self] in self?.profiles ?? [] }
+        // The remote hosts mirrored here: their sessions are peers too.
+        e.remoteLinks = { [weak self] in self?.remoteDelegationLinks() ?? [] }
+        return e
+    }()
+
+    /// The connected remote-host mirrors, as the delegation engine reaches
+    /// them.
+    func remoteDelegationLinks() -> [RemoteDelegationLink] {
+        remoteHostWindows.values.map(\.controller).filter(\.connected)
+    }
     private(set) lazy var codingTaskEngine =
         CodingTaskEngine(store: codingTaskStore, delegate: self)
+    /// Kubernetes clusters — shared machines (node VMs) next to the
+    /// workspaces; see KubeCluster.swift / KubeClusterEngine.swift.
+    let kubeClusterStore = KubeClusterStore()
+    private(set) lazy var kubeClusterEngine =
+        KubeClusterEngine(app: self, store: kubeClusterStore)
 
     /// Profiles created with `vm run --rm`: deleted (profile + disk) when their
     /// VM stops, mirroring `docker run --rm`.
@@ -1677,6 +1791,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         acResourceBundle.url(forResource: "vm-setup/loopback-relay-agent",
                              withExtension: "py")
     }()
+    /// Kubernetes node provisioning script + status probe, staged into each
+    /// node VM's meta share by the cluster engine.
+    lazy var kubeNodeScriptURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/bromure-k8s-node", withExtension: "sh")
+    }()
+    lazy var kubeProbeScriptURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/bromure-k8s-probe", withExtension: "py")
+    }()
+    lazy var kubeRegistryScriptURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/bromure-registry", withExtension: "sh")
+    }()
 
     /// Live host→guest loopback forwarders, one per detected OAuth login.
     /// They auto-expire (5 min); we also prune stopped ones on each new login.
@@ -1685,6 +1810,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// window-close handler can route to its teardown instead of the normal
     /// session cleanup, and to guard against launching two at once.
     var claudeRegistration: ClaudeRegistrationState?
+    /// Sign-ins captured at the proxy, one per workspace (SessionSignIn.swift).
+    var proxySignIns: [UUID: ProxySignIn] = [:]
     /// First-run wizard state (welcome → install → scan → pick → done). Non-nil
     /// only while the setup window is showing it.
     var onboarding: OnboardingWizardModel?
@@ -1993,6 +2120,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var browserMCPBridges: [Profile.ID: BrowserMCPVsockBridge] = [:]
     /// Coding-board MCP listeners (vsock 5831), one per running workspace.
     var taskMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
+    /// Automations MCP listeners (vsock 5833), one per running workspace.
+    var automationMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
+    /// Per-workspace infrastructure MCP listeners (vsock 5834): the clusters
+    /// and registries this workspace may use, and creating new ones.
+    var kubeMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
+    var delegationMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
     /// Plan-stream listeners (vsock 5832), one per running workspace — the
     /// streamed planning drivers connect here (see PlanEventBridge).
     var planEventBridges: [Profile.ID: PlanEventBridge] = [:]
@@ -2196,6 +2329,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Sessions-first UI + the beautified transcript are the defaults; a
+        // user who flipped either off before keeps their choice (register
+        // only fills in missing keys).
+        UserDefaults.standard.register(defaults: [
+            "ui.beautifiedTranscript": true,
+            "ui.sessionsFirst": true,
+        ])
+        // Design/E2E hook: pin the app's appearance regardless of the system
+        // setting (BROMURE_AC_APPEARANCE=dark|light) for dark-mode shots.
+        switch ProcessInfo.processInfo.environment["BROMURE_AC_APPEARANCE"] {
+        case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        default: break
+        }
         profiles = store.loadAll()
         // First launch after the model-management redesign: seed the global
         // ModelSettings from what the user already configured per-workspace so
@@ -2310,6 +2457,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // routes fires missed while the app was quit through each
         // automation's missed-run policy.
         scheduledAutomationEngine.start()
+        // Kubernetes clusters flagged to start with the app boot a few
+        // seconds in, once the switch + control plane are settled.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.kubeClusterEngine.startAutoStartClusters()
+        }
         // Planning sessions that were in flight when the app last quit must
         // not spin forever — re-arm their watchdogs (which abort with a
         // clear reason if the session is gone).
@@ -2483,7 +2635,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.imageManager.baseImageNeedsUpdate || catalogIsNewer {
                     // A full update re-applies every catalog step, so
                     // don't also nag about new steps underneath it.
-                    self.promptBaseImageUpdate(
+                    await self.promptBaseImageUpdate(
                         catalogVersion: catalogIsNewer ? catalogMajor : nil)
                     return
                 }
@@ -2491,7 +2643,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let applied = self.imageManager.loadImageState()?.appliedStepUUIDs ?? []
                 let pending = catalog.pendingSteps(appliedUUIDs: applied)
                 if !pending.isEmpty {
-                    self.promptNewPostinstallSteps(pending)
+                    await self.promptNewPostinstallSteps(pending)
                 }
             }
         } else if ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"] != nil {
@@ -2950,6 +3102,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // Coding-task board as the stage surface.
                     self.ensureUnifiedWindow().showTaskBoard()
                     window = self.unifiedWindow
+                case "newsession":
+                    // Sessions-first: the new-session screen as the stage surface.
+                    self.ensureUnifiedWindow().showNewSession()
+                    window = self.unifiedWindow
+                case let w where w.hasPrefix("session:"):
+                    // Sessions-first: a session's own stage ("session:<uuid>") —
+                    // live chat, launch surface, or the ended/asleep page.
+                    guard let sid = UUID(uuidString: String(w.dropFirst(8))),
+                          self.agentSessionStore.session(sid) != nil
+                    else { return ["error": "unknown session"] }
+                    self.ensureUnifiedWindow().selectSession(sid)
+                    window = self.unifiedWindow
                 case "timeline":
                     // Security Timeline window (E2E / doc-shot hook).
                     self.openSecurityTimelineAction(nil)
@@ -2968,6 +3132,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     else { return ["error": "unknown task"] }
                     self.taskReviewWindows.open(taskID: taskID)
                     window = self.taskReviewWindows.window(for: taskID)
+                case "machines":
+                    // The sidebar with its Machines fold open (doc/E2E hook).
+                    let w = self.ensureUnifiedWindow()
+                    w.dismissInfrastructureSheet()
+                    w.expandMachines()
+                    window = w
+                case "newcluster", "newregistry":
+                    // The Infrastructure creation sheets (doc/E2E hook): open
+                    // one on the unified window and render the sheet itself.
+                    let w = self.ensureUnifiedWindow()
+                    w.dismissInfrastructureSheet()
+                    if which == "newcluster" { w.showNewKubeCluster() } else { w.showNewRegistry() }
+                    window = w.attachedSheet ?? w
+                case let w where w.hasPrefix("rewind:"):
+                    // The Rewind-home sheet for a workspace ("rewind:<name or id>").
+                    guard let profile = self.profileByNameOrID(String(w.dropFirst(7)))
+                    else { return ["error": "unknown workspace"] }
+                    let win = self.ensureUnifiedWindow()
+                    win.showRewindHome(profile.id)
+                    window = win.attachedSheet ?? win
                 default:       window = self.unifiedWindow
                 }
                 return self.debugRenderWindow(window, to: path)
@@ -2982,6 +3166,224 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return ["error": "no app"] }
                 let action = params["action"] as? String ?? ""
                 switch action {
+                case "wizard":
+                    // First-run wizard (doc/E2E hook): press its primary or
+                    // secondary button, and report the step it's on.
+                    guard let wizard = self.onboarding else { return ["error": "no wizard on screen"] }
+                    switch params["button"] as? String ?? "" {
+                    case "primary":
+                        switch wizard.step {
+                        case .welcome:
+                            wizard.advanceFromWelcome()
+                            if wizard.step == .installing { self.startInit(fromWizard: true) }
+                        case .installing: break
+                        case .scanOffer: wizard.beginScan()
+                        case .pick: self.finishOnboarding(wizard.findings.filter(\.include))
+                        case .done: self.leaveOnboarding()
+                        }
+                    case "secondary":
+                        switch wizard.step {
+                        case .scanOffer, .pick: self.finishOnboarding([])
+                        default: break
+                        }
+                    default: break
+                    }
+                    let w = self.onboarding
+                    return ["ok": true, "step": "\(w?.step ?? wizard.step)",
+                            "findings": w?.findings.count ?? 0, "scanning": w?.scanning ?? false]
+                case "start-session":
+                    // E2E/doc hook for the home screen: start an agent session
+                    // the way the New Session screen would.
+                    guard let profileName = params["profile"] as? String,
+                          let profile = self.profiles.first(where: {
+                              $0.name.lowercased() == profileName.lowercased() }),
+                          let toolRaw = params["tool"] as? String,
+                          let tool = Profile.Tool(rawValue: toolRaw)
+                    else { return ["error": "profile and tool required"] }
+                    let id = self.agentSessionEngine.start(.init(
+                        profileID: profile.id, tool: tool,
+                        cwd: params["cwd"] as? String ?? "~",
+                        cloneURL: params["cloneURL"] as? String,
+                        openingMessage: params["message"] as? String))
+                    self.ensureUnifiedWindow().selectSession(id)
+                    return ["ok": true, "id": id.uuidString]
+                case "resume-session":
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          self.agentSessionStore.session(id) != nil
+                    else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.resume(id, message: params["message"] as? String)
+                    return ["ok": true]
+                case "worktree-session":
+                    // {id, name, tool?, message?} → the new session's id.
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          let parent = self.agentSessionStore.session(id),
+                          let name = params["name"] as? String
+                    else { return ["error": "id and name required"] }
+                    let tool = (params["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) ?? parent.tool
+                    guard let newID = self.agentSessionEngine.startWorktree(
+                        from: id, name: name, tool: tool, message: params["message"] as? String)
+                    else { return ["error": "the session has no folder to branch"] }
+                    self.ensureUnifiedWindow().selectSession(newID)
+                    return ["ok": true, "id": newID.uuidString]
+                case "archive-session", "unarchive-session":
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          self.agentSessionStore.session(id) != nil
+                    else { return ["error": "unknown session"] }
+                    if action == "archive-session" { self.agentSessionEngine.archive(id) }
+                    else { self.agentSessionEngine.unarchive(id) }
+                    self.unifiedWindow?.sessionStageDidChange()
+                    return ["ok": true, "archived": self.agentSessionStore.session(id)?.isArchived ?? false]
+                case "delete-session":
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          self.agentSessionStore.session(id) != nil
+                    else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.delete(id)
+                    if self.unifiedWindow?.selectedID != nil { self.unifiedWindow?.sessionStageDidChange() }
+                    return ["ok": true, "present": self.agentSessionStore.session(id) != nil,
+                            "deleted": self.agentSessionStore.session(id)?.isDeleted ?? false]
+                case "hood":
+                    // Toggle "Under the hood" for the selected session.
+                    self.unifiedWindow?.toggleUnderTheHood(nil)
+                    return ["ok": true, "underTheHood": self.unifiedWindow?.listModel.underTheHood ?? false]
+                case "sidebar":
+                    // Collapse the sidebar to the rail, or expand it (⌃⌘S).
+                    self.unifiedWindow?.toggleSidebar(nil)
+                    return ["ok": true, "collapsed": self.unifiedWindow?.sidebarCollapsed ?? false]
+                case "end-sheet":
+                    // Dismiss the sheet on the home window as its second
+                    // button would ("Later"/"Cancel") — a startup prompt
+                    // otherwise sits in front of the next sheet.
+                    guard let w = self.unifiedWindow, let sheet = w.attachedSheet
+                    else { return ["ok": true, "ended": false] }
+                    w.endSheet(sheet, returnCode: .alertSecondButtonReturn)
+                    return ["ok": true, "ended": true]
+                case "card":
+                    // The chat's command card: {do: state|dismiss|toggle}.
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugCommandCard(params["do"] as? String ?? "state")
+                case "send":
+                    // Press Return in the selected session's chat composer.
+                    guard let id = self.unifiedWindow?.selectedID,
+                          let pane = self.pane(for: id), pane.debugSendComposer()
+                    else { return ["error": "no beautified composer on stage"] }
+                    return ["ok": true]
+                case "signin":
+                    // Press the sign-in card's button on the selected session.
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugStartSignIn()
+                case "signin-state":
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugSignInState()
+                case "files":
+                    // Toggle the Files pane (⌃⌘E).
+                    self.unifiedWindow?.toggleFilePane(nil)
+                    return ["ok": true, "filePaneOpen": self.unifiedWindow?.filePaneOpen ?? false]
+                case "browser":
+                    // Toggle the agentic browser pane (⌃⌘B) for the selected workspace.
+                    self.unifiedWindow?.toggleBrowserPane(nil)
+                    return ["ok": true, "browserPaneOpen": self.unifiedWindow?.browserPaneOpen ?? false]
+                case "compose":
+                    // Type into the selected session's chat composer (palette shots).
+                    guard let text = params["text"] as? String,
+                          let id = self.unifiedWindow?.selectedID,
+                          let pane = self.pane(for: id), pane.debugSetComposer(text)
+                    else { return ["error": "no beautified composer on stage"] }
+                    return ["ok": true]
+                case "type":
+                    // Type through the composer's field editor, as a person would.
+                    guard let text = params["text"] as? String,
+                          let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugTypeComposer(text)
+                case "composer-geometry":
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugComposerGeometry()
+                case "key":
+                    // One of the composer's routed keys, by name.
+                    guard let name = params["key"] as? String,
+                          let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugComposerKey(name)
+                case "drop":
+                    // Attach a host file to the composer, as a drop would.
+                    guard let path = params["path"] as? String,
+                          let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugDropFile(path)
+                case "drop-images":
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugDropImages()
+                case "sessions":
+                    let model = self.unifiedWindow?.listModel
+                    return ["filePaneOpen": self.unifiedWindow?.filePaneOpen ?? false,
+                            "sessions": self.agentSessionStore.sessions.map { s -> [String: Any] in
+                        ["id": s.id.uuidString, "title": s.title, "tool": s.tool.rawValue,
+                         "cwd": s.cwd, "windowIndex": s.windowIndex ?? -1,
+                         "ended": s.endedAt != nil, "launching": s.isLaunching,
+                         "archived": s.isArchived, "deleted": s.isDeleted,
+                         "agentAlive": s.agentAlive ?? false,
+                         "changes": s.changesSeenAt != nil,
+                         "nickname": s.nickname ?? "",
+                         "transcript": s.agentTranscriptID ?? "",
+                         // What the sidebar shows (Ended is often computed, not stored).
+                         "bucket": model.map { SessionHome.bucket(for: s, in: $0).title } ?? "",
+                         "error": s.lastError ?? ""]
+                    }]
+                case "nickname":
+                    // {id, nickname} — "" clears. The refusal, if any.
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          self.agentSessionStore.session(id) != nil
+                    else { return ["error": "unknown session"] }
+                    if let why = self.agentSessionStore.setNickname(id, params["nickname"] as? String) {
+                        return ["error": why]
+                    }
+                    return ["ok": true, "nickname": self.agentSessionStore.session(id)?.nickname ?? ""]
+                case "delegations":
+                    // Every delegation as recorded, with its messages.
+                    return ["delegations": self.delegationStore.delegations.compactMap(Self.codableToDict),
+                            "engine": self.delegationEngine.debugState]
+                case "delegate":
+                    // {id (parent session), title, brief, contract?, scope?, tool?, worktree?}
+                    // — what the parent's `delegate` tool does, minus the agent.
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          self.agentSessionStore.session(id) != nil,
+                          let title = params["title"] as? String, let brief = params["brief"] as? String
+                    else { return ["error": "id, title and brief required"] }
+                    let tool = (params["tool"] as? String).flatMap(Profile.Tool.init(rawValue:))
+                    let scope = params["scope"] as? [String] ?? []
+                    let worktree = params["worktree"] as? Bool
+                    let workspace = params["workspace"] as? String
+                    let files = params["files"] as? [String] ?? []
+                    Task { [weak self] in
+                        guard let self else { return }
+                        do {
+                            let d = try await self.delegationEngine.delegate(
+                                from: id, title: title, brief: brief, contract: params["contract"] as? String,
+                                scope: scope, tool: tool, worktree: worktree, workspace: workspace, files: files)
+                            BACDebug.log("delegation", "debug delegate → \(d.id.uuidString)")
+                        } catch {
+                            BACDebug.log("delegation", "debug delegate refused: \(error)")
+                        }
+                    }
+                    return ["ok": true, "queued": true]
+                case "delegation-post":
+                    // {id (delegation), from: parent|child|user, kind, text, answers?}
+                    guard let s = params["id"] as? String, let d = self.delegationStore.delegation(matching: s),
+                          let from = (params["from"] as? String).flatMap(DelegationMessage.Party.init(rawValue:)),
+                          let kind = (params["kind"] as? String).flatMap(DelegationMessage.Kind.init(rawValue:)),
+                          let text = params["text"] as? String
+                    else { return ["error": "id, from, kind and text required"] }
+                    let answers = (params["answers"] as? String).flatMap { self.delegationStore.message(matching: $0, in: [d])?.1.id }
+                    Task { [weak self] in
+                        do { _ = try await self?.delegationEngine.post(d.id, from: from, kind: kind, text: text, answering: answers) }
+                        catch { BACDebug.log("delegation", "debug post refused: \(error)") }
+                    }
+                    return ["ok": true, "queued": true]
                 case "seed-security-timeline":
                     // Screenshot/demo fixture for the Security Timeline window:
                     // a representative spread of engines + outcomes, staggered
@@ -3359,6 +3761,162 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ["tasks": self?.codingTaskStore.tasks.compactMap(Self.codableToDict) ?? []]
             }
         }
+        // Sessions-first home for a fat client: the records as stored (the
+        // client recomputes buckets from them against its own mirror of the
+        // machines and tabs, exactly as the local sidebar does).
+        server.onListAgentSessions = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.agentSessionStore.sessions.compactMap(Self.codableToDict) ?? []
+            }
+        }
+        server.onListDelegations = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.delegationStore.delegations.compactMap(Self.codableToDict) ?? []
+            }
+        }
+        server.onAgentSessionCommand = { [weak self] id, action, body in
+            MainActor.assumeIsolated {
+                guard let self else { return ["error": "no app"] }
+                switch (id, action) {
+                case (nil, "start"):
+                    guard let profileKey = body["profile"] as? String,
+                          let profile = self.profiles.first(where: {
+                              $0.id.uuidString == profileKey
+                                  || $0.name.lowercased() == profileKey.lowercased() }),
+                          let toolRaw = body["tool"] as? String,
+                          let tool = Profile.Tool(rawValue: toolRaw)
+                    else { return ["error": "profile and tool required"] }
+                    let sid = self.agentSessionEngine.start(.init(
+                        profileID: profile.id, tool: tool,
+                        cwd: body["cwd"] as? String ?? "~",
+                        cloneURL: body["cloneURL"] as? String,
+                        openingMessage: body["message"] as? String))
+                    return ["ok": true, "id": sid.uuidString]
+                case (let sid?, "resume"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.resume(sid, message: body["message"] as? String)
+                    return ["ok": true]
+                case (let sid?, "close"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.close(sid)
+                    return ["ok": true]
+                case (let sid?, "worktree"):
+                    // {name, tool, message?} → a new session in a git worktree
+                    // off this session's folder.
+                    guard let parent = self.agentSessionStore.session(sid) else { return ["error": "unknown session"] }
+                    guard let name = (body["name"] as? String)?.trimmingCharacters(in: .whitespaces), !name.isEmpty
+                    else { return ["error": "name required"] }
+                    let tool = (body["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) ?? parent.tool
+                    guard let newID = self.agentSessionEngine.startWorktree(
+                        from: sid, name: name, tool: tool, message: body["message"] as? String)
+                    else { return ["error": "the session has no folder to branch"] }
+                    return ["ok": true, "id": newID.uuidString]
+                case (let sid?, "rename"):
+                    guard self.agentSessionStore.session(sid) != nil,
+                          let title = body["title"] as? String else { return ["error": "unknown session or no title"] }
+                    self.agentSessionEngine.rename(sid, to: title)
+                    return ["ok": true]
+                case (let sid?, "nickname"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    if let why = self.agentSessionStore.setNickname(sid, body["nickname"] as? String) {
+                        return ["error": why]
+                    }
+                    return ["ok": true]
+                case (let sid?, "forget"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.transcripts.remove(sid)
+                    self.agentSessionStore.remove(sid)
+                    return ["ok": true]
+                case (let sid?, "archive"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.archive(sid)
+                    return ["ok": true]
+                case (let sid?, "unarchive"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.unarchive(sid)
+                    return ["ok": true]
+                case (let sid?, "delete"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.delete(sid)
+                    self.unifiedWindow?.sessionStageDidChange()
+                    return ["ok": true]
+                case (let sid?, "signin"):
+                    // A fat client's sign-in card: the throwaway machine runs
+                    // here, the client opens the page (RemoteRegistrationBroker
+                    // via /state) and tunnels the callback; once the credential
+                    // lands, the session's agent restarts on the stand-in key.
+                    guard let s = self.agentSessionStore.session(sid) else { return ["error": "unknown session"] }
+                    guard let provider = SubscriptionProvider(rawValue: s.tool.rawValue) else {
+                        return ["error": "no account sign-in for \(s.tool.rawValue)"]
+                    }
+                    guard self.claudeRegistration == nil else { return ["error": "a sign-in is already in progress"] }
+                    let pid = s.profileID
+                    self.beginSubscriptionRegistration(
+                        provider: provider, scope: .alwaysShared, remoteInitiated: true, quiet: true,
+                        events: { [weak self] event in
+                            guard case .finished(true, _) = event else { return }
+                            Task { @MainActor in
+                                guard let self else { return }
+                                self.applyRegisteredSubscription(provider: provider, profileID: pid)
+                                self.agentSessionEngine.relaunchAfterSignIn(sid)
+                            }
+                        })
+                    return ["ok": true]
+                default:
+                    return ["error": "unknown action \(action)"]
+                }
+            }
+        }
+        server.onAgentSessionTranscript = { [weak self] sid in
+            guard let self, let s = await MainActor.run(body: { self.agentSessionStore.session(sid) }) else { return nil }
+            // The live file when the machine can be read (fresher), else the
+            // local copy — the same order the local Ended page uses.
+            if let live = await self.fetchSessionTranscript(s), !live.isEmpty { return Data(live.utf8) }
+            return await MainActor.run { self.agentSessionEngine.transcripts.load(s.id) }
+        }
+        server.onAgentSessionFolders = { [weak self] key, path in
+            guard let self else { return nil }
+            return await self.listGuestFolders(profileKey: key, path: path)
+        }
+        // A fat client's session asking one of ours (see RemoteDelegationLink).
+        server.onDelegationRequest = { [weak self] body in
+            guard let self else { return ["error": "no app"] }
+            guard let to = body["to"] as? String, let text = body["text"] as? String,
+                  let ps = body["parent_session"] as? String, let pid = UUID(uuidString: ps)
+            else { return ["error": "to, text and parent_session required"] }
+            let party = RemoteParty(host: body["parent_host"] as? String ?? "a client",
+                                    label: body["parent_label"] as? String ?? "a session")
+            do {
+                let d = try await self.delegationEngine.requestFromRemote(parentSessionID: pid, parent: party, to: to, text: text)
+                return ["ok": true, "id": d.id.uuidString]
+            } catch {
+                return ["error": "\(error)"]
+            }
+        }
+        server.onDelegationCommand = { [weak self] id, action, body in
+            guard let self else { return ["error": "no app"] }
+            do {
+                if action == "files" {
+                    guard let name = body["name"] as? String, let b64 = body["data"] as? String,
+                          let data = Data(base64Encoded: b64) else { return ["error": "name and data required"] }
+                    try await self.delegationEngine.receiveRemoteFile(
+                        delegationID: id, name: name, data: data,
+                        append: body["append"] as? Bool ?? false, extract: body["extract"] as? Bool ?? false)
+                    return ["ok": true]
+                }
+                return try await self.delegationEngine.remoteCommand(delegationID: id, action: action, body: body)
+            } catch {
+                return ["error": "\(error)"]
+            }
+        }
+        server.onDelegationFile = { [weak self] id, path, offset, length in
+            guard let self else { return ["error": "no app"] }
+            do {
+                return try await self.delegationEngine.readRemoteFile(delegationID: id, path: path, offset: offset, length: length)
+            } catch {
+                return ["error": "\(error)"]
+            }
+        }
         server.onSecurityTimeline = {
             MainActor.assumeIsolated { SecurityTimeline.shared.mirrorRows() }
         }
@@ -3432,6 +3990,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.moveToTesting(id)
                 case "to-in-progress":
                     self.codingTaskEngine.moveToInProgress(id)
+                case "resume":
+                    // Relaunch (or nudge) the agent on the task's branch.
+                    self.codingTaskEngine.resumeSession(id)
+                case "start-over":
+                    // Fresh run on a new branch (repo/branch gone).
+                    self.codingTaskEngine.startOver(id)
                 case "close-no-merge":
                     self.codingTaskEngine.closeWithoutMerge(id)
                 case "comment":
@@ -3527,6 +4091,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             MainActor.assumeIsolated {
                 self?.automationDockerCommand(idOrName: idOrName, doc: doc)
                     ?? ["ok": false, "error": "unavailable"]
+            }
+        }
+        // Kubernetes clusters: the records + live status ride /state; the
+        // verbs (create / start / stop / restart / delete / access / watch /
+        // kubeconfig) are validated here and executed by the engine.
+        server.onListKubeClusters = { [weak self] in
+            MainActor.assumeIsolated { self?.kubeClusterStore.snapshot() ?? ["clusters": [], "status": [:]] }
+        }
+        server.onKubeCommand = { [weak self] id, doc in
+            MainActor.assumeIsolated {
+                self?.automationKubeCommand(id: id, doc: doc) ?? ["ok": false, "error": "unavailable"]
+            }
+        }
+        server.onRegistryCommand = { [weak self] id, doc in
+            MainActor.assumeIsolated {
+                self?.automationRegistryCommand(id: id, doc: doc) ?? ["ok": false, "error": "unavailable"]
             }
         }
         server.onListPendingPrompts = {
@@ -3842,6 +4422,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "name": s.profile.name,
                 "tool": s.profile.tool.rawValue,
                 "state": stateStr,
+                // A Kubernetes node VM (not a workspace): clients skip it in
+                // the machines list; the CLI can still `vm exec` it.
+                "kubeClusterID": s.kubeClusterID?.uuidString ?? "",
                 "attached": isAttached(s.profileID),
                 "uptimeSeconds": Int(now.timeIntervalSince(s.startedAt)),
                 "ip": s.lastIP ?? "",
@@ -3945,7 +4528,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let cells: [[String: Any]] = gridStore.cells.map {
             ["profileID": $0.profileID.uuidString, "windowIndex": $0.windowIndex, "label": $0.label]
         }
-        var out: [String: Any] = ["cells": cells]
+        var out: [String: Any] = ["cells": cells, "autoFill": gridStore.autoFill]
         if let f = gridStore.focusedCellID { out["focusedCellID"] = f }
         if let z = gridStore.zoomedCellID { out["zoomedCellID"] = z }
         return out
@@ -3984,6 +4567,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         })
         gridStore.focusedCellID = doc["focusedCellID"] as? String
         gridStore.zoomedCellID = doc["zoomedCellID"] as? String
+        if let auto = doc["autoFill"] as? Bool { gridStore.setAutoFill(auto) }
         return true
     }
 
@@ -4529,6 +5113,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        AppLog.stamp("applicationWillTerminate (clean quit)")
         // Discard the ephemeral browser VM (if any) so we don't orphan it.
         unifiedWindow?.teardownBrowserVM()
         // Nuke every workspace's ssh-agent. The orphaned-process risk is
@@ -4917,10 +5502,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             enrollmentWindow = nil
             return
         }
-        if let key = fileBrowserWindows.first(where: { $0.value === win })?.key {
-            fileBrowserWindows[key] = nil
-            return
-        }
         if win === unifiedWindow {
             // The ephemeral browser VM is window-scoped and disposable — tear
             // it down (unlike the workspace VMs, which detach and keep running).
@@ -5073,9 +5654,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // when the new image is fully in place.
         initProgress.reset()
         ensureInstallWindow()
-        renderInitializing()
+        // Driven by the wizard, the install runs inside its Install step (the
+        // rail keeps the user oriented); the standalone installer view is for
+        // rebuilds and CLI-started installs.
+        if !fromWizard { renderInitializing() }
 
-        // No SSH front door while the image is being installed — a remote
+        // No SSH front door while the base image is being installed — a remote
         // session could otherwise launch workspaces against a base that's
         // absent or mid-swap. Resumed (when still enabled) by the defer.
         if RemoteAccessServer.shared.isRunning {
@@ -5358,9 +5942,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var remoteAccessWindow: NSWindow?
     private var securityTimelineWindow: NSWindow?
     private var inferenceLogWindow: NSWindow?
-    /// File-browser panels, one per profile (keyed by profile id) so each
-    /// session window gets its own, reused on subsequent clicks.
-    private var fileBrowserWindows: [UUID: NSWindow] = [:]
 
     /// Wired to the "Trace Inspector…" menu item (⇧⌘I).
     /// Opens the inspector with no profile pre-filter.
@@ -5652,6 +6233,40 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         w.showTaskBoard()
     }
 
+    /// The fat-client window that has the focus, if one does: a "create"
+    /// from the menu bar then means the machine it mirrors — the cluster or
+    /// registry is provisioned there, on that Mac.
+    private var keyRemoteWindow: RemoteHostWindow? { NSApp.keyWindow as? RemoteHostWindow }
+
+    @objc func newKubeClusterAction(_ sender: Any?) {
+        if let rw = keyRemoteWindow { rw.showNewKubeCluster(); return }
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showNewKubeCluster()
+    }
+
+    @objc func newRegistryAction(_ sender: Any?) {
+        if let rw = keyRemoteWindow { rw.showNewRegistry(); return }
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showNewRegistry()
+    }
+
+    /// ⌘N — the new-session screen as the stage surface.
+    @objc func newSessionAction(_ sender: Any?) {
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showNewSession()
+    }
+
+    /// ⌥⌘U — flip the selected task between its chat and the raw terminal.
+    @objc func toggleUnderTheHoodAction(_ sender: Any?) {
+        unifiedWindow?.toggleUnderTheHood(nil)
+    }
+
     @objc func deleteWorkspaceAction(_ sender: Any?) {
         if let id = unifiedWindow?.selectedID, let p = profiles.first(where: { $0.id == id }) {
             deleteProfile(p)
@@ -5744,13 +6359,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSApp.setActivationPolicy(.regular)
         let w = ensureUnifiedWindow()
         refreshSidebar()
-        // Pick a sensible initial selection so the stage isn't blank: a running
-        // attached pane keeps its own; otherwise show the first profile's card.
-        if w.selectedID == nil, let first = w.listModel.profileRows.first {
+        if !w.listModel.sessionsFirst, w.selectedID == nil,
+           let first = w.listModel.profileRows.first {
+            // Pick a sensible initial selection so the stage isn't blank: a
+            // running attached pane keeps its own; otherwise the first
+            // profile's card.
             w.selectRow(first.id)
         }
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // Sessions first: land on the session that needs the user (or the
+        // new-session screen when there's none yet). AFTER the window is on
+        // screen, so the stage surface is laid out against the real frame —
+        // presented earlier it kept the pre-show geometry. Once per window
+        // life, so reopening never yanks the user off a machine they picked.
+        if w.listModel.sessionsFirst, !w.didShowHome { w.selectInitialSession() }
+    }
+
+    /// The agent's last conversation in a session's folder, read from the
+    /// workspace (nil when it isn't running or nothing is there).
+    func fetchSessionTranscript(_ s: AgentSession) async -> String? {
+        let cwd = ScheduledAutomationEngine.guestPath(s.cwd)
+        guard let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: 0,
+                                                               agent: s.tool.rawValue),
+              let out = try? await guestExec(profileID: s.profileID, command: cmd, timeout: 20),
+              !out.isEmpty else { return nil }
+        return out
     }
 
     /// Open (or focus) the Trace Inspector window. Pass a profile to
@@ -5801,66 +6435,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Keep the attached window's title-bar toggle in sync (e.g. when the
         // change came from the CLI rather than the toggle itself).
         pane(for: profile.id)?.model.fusionEngaged = engaged
-    }
-
-    func openFileBrowser(for window: TabbedSessionWindow) {
-        openFileBrowser(profile: window.profile)
-    }
-
-    func openFileBrowser(profile: Profile) {
-        if let win = fileBrowserWindows[profile.id] {
-            win.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        // Home browses the guest's REAL /home/ubuntu over the vsock file
-        // service — required for ext4-model homes (they live inside
-        // home.img, invisible to macOS) and used for legacy virtiofs
-        // workspaces too so there's one code path that always shows what
-        // the guest sees.
-        var locations: [FileBrowserLocation] = [
-            FileBrowserLocation(
-                name: NSLocalizedString("Home", comment: ""),
-                backing: .guest,
-                guestPath: "/home/ubuntu",
-                symbol: "house")
-        ]
-        // Shared folders are symlinked to ~/<basename> inside the guest
-        // on first boot — they're real host dirs, so browse them directly
-        // (drag-out hands Finder the actual file; Reveal works).
-        for path in profile.folderPaths.prefix(8) {
-            let base = (path as NSString).lastPathComponent
-            locations.append(FileBrowserLocation(
-                name: base,
-                backing: .host(URL(fileURLWithPath: path)),
-                guestPath: "/home/ubuntu/\(base)",
-                symbol: "folder"))
-        }
-
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
-            backing: .buffered, defer: false)
-        win.title = String(
-            format: NSLocalizedString("Files — %@", comment: "file browser title"),
-            profile.name)
-        win.center()
-        win.animationBehavior = .none
-        let profileID = profile.id
-        win.contentView = NSHostingView(rootView: FileBrowserView(
-            model: FileBrowserModel(
-                locations: locations,
-                cacheKey: profileID.uuidString,
-                guestOp: { [weak self] op in
-                    guard let self else {
-                        throw GuestExecError.vmNotRunning
-                    }
-                    return try await self.guestFileOp(profileID: profileID, op: op)
-                })))
-        win.delegate = self
-        win.isReleasedWhenClosed = false
-        win.makeKeyAndOrderFront(nil)
-        fileBrowserWindows[profile.id] = win
     }
 
     @objc func openPreferencesAction(_ sender: Any?) {
@@ -5992,7 +6566,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// (`catalogVersion`). "Later" dismisses for this launch only — we'll
     /// ask again next time the app starts so the user keeps the option
     /// without being blocked from running stale images.
-    private func promptBaseImageUpdate(catalogVersion: String? = nil) {
+    private func promptBaseImageUpdate(catalogVersion: String? = nil) async {
         let alert = NSAlert()
         let installed = imageManager.installedImageVersion ?? "?"
         let target = catalogVersion ?? UbuntuImageManager.imageVersion
@@ -6004,16 +6578,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             installed, target)
         alert.addButton(withTitle: NSLocalizedString("Update Now", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
-        if alert.runModal() == .alertFirstButtonReturn {
+        if await presentStartupPrompt(alert) == .alertFirstButtonReturn {
             startInit(force: true)
         }
+    }
+
+    /// A prompt raised at startup, as a sheet on the home window and never a
+    /// modal run from a main-actor task: a modal loop entered from inside the
+    /// main queue holds every other main-queue job — the control socket, an
+    /// automation's or a task's boot of a workspace — until someone at the
+    /// Mac dismisses it, and a server nobody is looking at then reads as
+    /// "the workspace did not boot in time". Headless: nobody to ask, so
+    /// "Later".
+    private func presentStartupPrompt(_ alert: NSAlert) async -> NSApplication.ModalResponse {
+        guard !headless else { return .alertSecondButtonReturn }
+        let window: NSWindow = (unifiedWindow as NSWindow?) ?? mainWindow ?? ensureUnifiedWindow()
+        return await alert.beginSheetModal(for: window)
     }
 
     /// Consent gate for postinstall steps published in img-catalog.json
     /// after this image was installed. They run as root inside the base
     /// image, so nothing executes until the user explicitly accepts.
     /// "Later" asks again next launch.
-    private func promptNewPostinstallSteps(_ steps: [PostinstallStep]) {
+    private func promptNewPostinstallSteps(_ steps: [PostinstallStep]) async {
         let alert = NSAlert()
         let list = steps.map { "• \($0.description)" }.joined(separator: "\n")
         alert.messageText = NSLocalizedString("New recommended packages", comment: "")
@@ -6024,7 +6611,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             list)
         alert.addButton(withTitle: NSLocalizedString("Install", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
-        if alert.runModal() == .alertFirstButtonReturn {
+        if await presentStartupPrompt(alert) == .alertFirstButtonReturn {
             startPostinstall(steps)
         }
     }
@@ -6215,6 +6802,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             isNew: editing == nil,
             terminalDefaults: terminalDefaults,
             storageContext: makeStorageContext(for: editing),
+            siblingWorkspaces: profiles.filter { $0.id != editing?.id }
+                .map { WorkspaceRef(id: $0.id, name: $0.name) },
             onSave: { profile, generateSSH in
                 self.handleEditorSave(profile: profile, generateSSH: generateSSH, editing: editing)
             },
@@ -6436,6 +7025,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.alertStyle = .informational
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
         alert.runModal()
+    }
+
+    /// A workspace's home rollback points, newest first — the sidebar's
+    /// Rewind sheet.
+    func homeCheckpoints(for id: Profile.ID) -> [HomeCheckpoint] {
+        guard let p = profiles.first(where: { $0.id == id }) else { return [] }
+        return store.listHomeCheckpoints(for: p)
+            .map { HomeCheckpoint(id: $0.id, createdAt: $0.createdAt, allocatedBytes: $0.allocatedBytes) }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    /// Roll a workspace's home back to one of its checkpoints, the home as
+    /// it is now checkpointed first. nil when done, else why not.
+    func rewindHome(_ id: Profile.ID, to checkpointID: String) -> String? {
+        guard let p = profiles.first(where: { $0.id == id }) else {
+            return NSLocalizedString("Workspace not found.", comment: "rewind home")
+        }
+        guard p.homeModel == .ext4 else {
+            return NSLocalizedString("This machine keeps its home on the Mac, not in an image — nothing to rewind.", comment: "rewind home")
+        }
+        guard runningSessions[p.id] == nil else {
+            return NSLocalizedString("Shut the machine down first — its home can't be swapped while it's in use.", comment: "rewind home")
+        }
+        do {
+            _ = try store.snapshotHomeImage(for: p, at: Date())
+            try store.revertHomeImage(for: p, to: checkpointID)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     /// Editor "Restore home…" for an ext4-home workspace: pick one of the
@@ -6686,6 +7305,38 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor
     /// Apply an already-persisted profile edit to its running session in place
     /// (host-side cosmetic + live-swap surfaces — env, credentials, guardrails,
+    /// A host sign-in just landed for `provider`: make sure the workspace's
+    /// spec for that agent runs in subscription mode (a workspace created
+    /// without a key defaults to a token it doesn't have), save, and push
+    /// the stand-in key into the running machine so a relaunched agent picks
+    /// it up from its shell env — no reboot.
+    func applyRegisteredSubscription(provider: SubscriptionProvider, profileID: UUID) {
+        guard var p = profiles.first(where: { $0.id == profileID }) else { return }
+        let tool = provider.scratchTool
+        var changed = false
+        if p.tool == tool, p.authMode != .subscription { p.authMode = .subscription; changed = true }
+        for i in p.additionalTools.indices
+        where p.additionalTools[i].tool == tool && p.additionalTools[i].authMode != .subscription {
+            p.additionalTools[i].authMode = .subscription; changed = true
+        }
+        // An agent the workspace never had (the new-session screen offers
+        // every agent): the sign-in makes it one of the workspace's tools,
+        // so its credentials get staged and seeded like the others'.
+        if p.tool != tool, !p.additionalTools.contains(where: { $0.tool == tool }) {
+            p.additionalTools.append(Profile.ToolSpec(tool: tool, authMode: .subscription))
+            changed = true
+        }
+        if changed {
+            do { try store.save(p) } catch { NSLog("[bromure-ac] sign-in: couldn't save profile: \(error)") }
+            if let i = profiles.firstIndex(where: { $0.id == p.id }) { profiles[i] = p }
+            applyLiveEditToRunningSession(p)
+        } else {
+            runningSessions[p.id]?.profile = p
+            pushLiveCredentials(for: p, terminalDefaults: terminalDefaults,
+                                sandbox: runningSessions[p.id]?.sandbox)
+        }
+    }
+
     /// transparent-interception toggle), matching the GUI save path but without
     /// the restart prompt. Call after ANY path that writes a profile out of band
     /// — `automationUpsertProfile`, and the `set profile json` / `set profile
@@ -7122,7 +7773,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         guard sessionRefreshAffectingChange(from: old, to: new) else { return }
+        pushLiveCredentials(for: new, terminalDefaults: terminalDefaults, sandbox: sandbox)
+    }
 
+    /// The credential half of a live refresh: mint the token plan (the
+    /// stand-in keys, incl. a subscription's bogus key), push the swap map,
+    /// rewrite the guest-side credential files and the meta-share env. Also
+    /// what a fresh host sign-in needs with NO profile change at all — the
+    /// A Kubernetes cluster came up, went away, or changed its access list:
+    /// re-materialize `~/.kube/config` (+ proxy.env's NO_PROXY) in every
+    /// running workspace so `kubectl` sees the current set of clusters —
+    /// the same live restage an editor save triggers.
+    @MainActor func refreshKubeAccessForRunningWorkspaces() {
+        for session in runningSessions.values where session.kubeClusterID == nil {
+            guard let profile = profiles.first(where: { $0.id == session.profileID }) else { continue }
+            session.profile = profile
+            pushLiveCredentials(for: profile, terminalDefaults: terminalDefaults, sandbox: session.sandbox)
+        }
+    }
+
+    /// plan changed because a credential now exists.
+    private func pushLiveCredentials(for new: Profile, terminalDefaults: TerminalAppDefaults,
+                                     sandbox: UbuntuSandboxVM?) {
         // Guardrail config is consulted live on every proxied request —
         // update it unconditionally so a mode change lands even when no
         // credential moved.
@@ -7153,7 +7825,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // same composition the launch path builds.
             var fresh = plan.tokenMap()
             let kubeMat = KubeconfigMaterializer().materialize(
-                profile: profile, bromureCAPEM: engine.ca.certificatePEM)
+                profile: profile, bromureCAPEM: engine.ca.certificatePEM,
+                directClusters: kubeClusterEngine.directClusters(for: profile.id))
             kubeYAML = kubeMat.yaml
             for swap in kubeMat.bearerSwaps {
                 fresh.entries.append(TokenMap.Entry(
@@ -7187,11 +7860,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                             terminalDefaults: terminalDefaults,
                                             tokenPlan: plan,
                                             kubeconfigYAML: kubeYAML)
+            // A subscription that arrived while the machine runs: its
+            // stand-in credential files, straight into the live home.
+            seedCodexAuthFile(for: profile)
+            seedGrokAuthFile(for: profile)
+            seedKimiAuthFile(for: profile)
         }
 
         // Rewrite api_key.env / proxy.env / MCP configs into the stable
         // meta-share dir and bump env.generation for the guest's
         // PROMPT_COMMAND hook.
+        sandbox?.sessionDisk?.extraNoProxy = kubeClusterEngine.extraNoProxy(for: profile.id)
+        sandbox?.sessionDisk?.extraInsecureRegistries = kubeClusterEngine.registryAddresses(for: profile.id)
         do {
             try sandbox?.sessionDisk?.refreshMetadataShare(
                 profile: profile, tokenPlan: plan)
@@ -7370,6 +8050,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         do {
             try store.delete(profile)
             profiles = store.loadAll()
+            kubeClusterEngine.workspaceDeleted(profile.id)
             refreshSidebar()
         } catch {
             showError(error, message: "Couldn't delete the workspace.")
@@ -7398,13 +8079,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// by a fat client: its decision prompts (wipe / drift / storage upgrade)
     /// are routed to that client via `PendingPromptBroker` instead of a local
     /// NSAlert — the interface that interacted last gets the question.
+    /// `unattended`: an automation or a task is starting the workspace and
+    /// nobody is at the Mac to answer a prompt — the gates below that would
+    /// ask one take the safe answer (a base-image drift launches as-is) or
+    /// refuse with a reason (`unattendedLaunchRefusal`) instead of blocking
+    /// on a modal until the caller's boot timeout reads as "did not boot".
     func launch(_ profile: Profile, detached: Bool = false,
                 freshBootFallback: Bool = true, remoteInitiated: Bool = false,
-                preflightResolved: Bool = false) {
+                preflightResolved: Bool = false, unattended: Bool = false,
+                quiet: Bool = false) {
+        if unattended { unattendedLaunchRefusals[profile.id] = nil }
         // Already shown → just focus + select it (unless we were asked to detach,
         // in which case drop the window and leave the VM running headless).
+        // `quiet`: an agent set this off (a delegate in another workspace, a
+        // peer woken for a notice) — the workspace comes up, but the stage
+        // stays on whatever the user is looking at.
         if isAttached(profile.id) {
-            if detached { detachSession(profile.id) } else { revealSession(profile.id) }
+            if detached { detachSession(profile.id) } else if !quiet { revealSession(profile.id) }
             return
         }
         // Remote-initiated launches arrive on a main-queue callout (the control
@@ -7426,7 +8117,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // detach → it already is, nothing to do. Otherwise reattach a fresh
         // window onto the live VM, with its tabs intact.
         if let session = runningSessions[profile.id] {
-            if !detached { attachWindow(to: session) }
+            if !detached { attachWindow(to: session, quiet: quiet) }
             return
         }
 
@@ -7434,6 +8125,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // downloading — the agent would come up pointed at an engine that
         // can't load yet, producing a wall of connection errors.
         if let dl = downloadingModel(for: profile) {
+            if unattended {
+                refuseUnattendedLaunch(profile, String(
+                    format: NSLocalizedString("“%@” is still downloading — the workspace can't start until it has.",
+                                              comment: "unattended start refused"), dl.name))
+                return
+            }
             // Remote-initiated: the client sees the refusal in its own UI
             // (the create call reports it); never modal-alert the server.
             if !remoteInitiated {
@@ -7459,6 +8156,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // and may legitimately hold the user's source); the alert
         // surfaces this so the user knows where to look next.
         if SessionDisk.isCompromised(profile: profile, store: store) {
+            // Nobody is there to confirm the wipe: the workspace stays as it
+            // is until its owner starts it by hand.
+            if unattended {
+                refuseUnattendedLaunch(profile, NSLocalizedString(
+                    "The workspace is marked compromised — start it yourself to confirm the wipe.",
+                    comment: "unattended start refused"))
+                return
+            }
             // Local NSAlert only: a remote-initiated launch resolved (and
             // performed) the wipe in the async preflight, so this gate is
             // already clear when it re-enters.
@@ -7477,23 +8182,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
            let recorded = profile.baseImageVersionAtClone,
            let current = currentBaseVersion,
            recorded != current {
-            // Local NSAlert only: a remote-initiated launch resolved this in
-            // the async preflight above and re-entered with preflightResolved.
-            let (title, message) = Self.driftPromptParts(recorded: recorded, current: current)
-            let alert = NSAlert()
-            alert.messageText = title
-            alert.informativeText = message
-            alert.addButton(withTitle: "Reset and launch")
-            alert.addButton(withTitle: "Launch as-is")
-            alert.addButton(withTitle: "Cancel")
-            switch alert.runModal() {
-            case .alertFirstButtonReturn:
-                try? store.resetDisk(for: profile)
-                emitDiskResetEvent(profile: profile, reason: "base_image_drift")
-            case .alertThirdButtonReturn:
-                return
-            default:
-                break
+            if unattended {
+                // Nobody to ask: launch as-is — the disk is kept, the way the
+                // prompt's "Launch as-is" keeps it; a reset is the owner's call.
+                FileHandle.standardError.write(Data(
+                    "[ac] '\(profile.name)' is on base v\(recorded), current v\(current) — unattended start launches as-is\n".utf8))
+            } else {
+                // Local NSAlert only: a remote-initiated launch resolved this in
+                // the async preflight above and re-entered with preflightResolved.
+                let (title, message) = Self.driftPromptParts(recorded: recorded, current: current)
+                let alert = NSAlert()
+                alert.messageText = title
+                alert.informativeText = message
+                alert.addButton(withTitle: "Reset and launch")
+                alert.addButton(withTitle: "Launch as-is")
+                alert.addButton(withTitle: "Cancel")
+                switch alert.runModal() {
+                case .alertFirstButtonReturn:
+                    try? store.resetDisk(for: profile)
+                    emitDiskResetEvent(profile: profile, reason: "base_image_drift")
+                case .alertThirdButtonReturn:
+                    return
+                default:
+                    break
+                }
             }
         }
 
@@ -7547,9 +8259,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var kubeYAMLForVM: String?
         if let engine = mitmEngine {
             // Materialize the synthetic kubeconfig + extract bearer
-            // swaps + client identities + exec contexts.
+            // swaps + client identities + exec contexts. Bromure-run
+            // clusters this workspace may use ride along as direct contexts.
             let kubeMat = KubeconfigMaterializer().materialize(
-                profile: profile, bromureCAPEM: engine.ca.certificatePEM)
+                profile: profile, bromureCAPEM: engine.ca.certificatePEM,
+                directClusters: kubeClusterEngine.directClusters(for: profile.id))
             kubeYAMLForVM = kubeMat.yaml
 
             // Token map = the profile-derived plan + the kubeconfig
@@ -7749,9 +8463,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Reattach via the menu-bar item or `vm attach`.
         } else {
             let unified = ensureUnifiedWindow()
-            unified.addPane(win)
-            NSApp.setActivationPolicy(.regular)
-            unified.makeKeyAndOrderFront(nil)
+            unified.addPane(win, select: !quiet)
+            if !quiet {
+                NSApp.setActivationPolicy(.regular)
+                unified.makeKeyAndOrderFront(nil)
+            }
         }
         // Newly-registered window — sync its streaming indicator
         // with the current enrollment + privateMode state.
@@ -7777,6 +8493,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Fresh boot: show one placeholder pill while VZ + tmux come up.
             // The agent auto-creates tmux window 0; the roster reconciles this
             // placeholder to the real window list within a tick.
+            win.model.rosterLive = false
             win.model.tabs = [TabsModel.Tab(label: "shell")]
         }
 
@@ -7788,6 +8505,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             )
             sessionDisk.tokenPlan = plan
             sessionDisk.migrateHomeThisBoot = migrateHomeThisBoot
+            sessionDisk.extraNoProxy = kubeClusterEngine.extraNoProxy(for: profile.id)
+            sessionDisk.extraInsecureRegistries = kubeClusterEngine.registryAddresses(for: profile.id)
             if let engine = mitmEngine, let scriptURL = bridgeScriptURL {
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
                     caCertificatePEM: engine.ca.certificatePEM,
@@ -7859,6 +8578,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                             // state file for a manual resume and abort.
                             FileHandle.standardError.write(Data(
                                 "[ac] restore failed (\(error)) — automation start aborted to protect the suspended session\n".utf8))
+                            self.unattendedLaunchRefusals[profile.id] = NSLocalizedString(
+                                "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh.",
+                                comment: "unattended start refused")
                             self.unifiedWindow?.removePane(profile.id)
                             self.unregisterPane(profile.id, ifMatches: win)
                             return
@@ -7875,6 +8597,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         // Restore failed → this is now a fresh boot. Drop the
                         // rehydrated pills; the agent creates tmux window 0 and
                         // the roster repopulates the bar.
+                        win.model.rosterLive = false
                         win.model.tabs = [TabsModel.Tab(label: "shell")]
                         win.model.activeIndex = 0
                     }
@@ -7882,6 +8605,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     try await sandbox.start()
                 }
             } catch {
+                if unattended {
+                    self.unattendedLaunchRefusals[profile.id] = String(
+                        format: NSLocalizedString("Couldn't start the VM: %@", comment: "unattended start refused"),
+                        error.localizedDescription)
+                }
                 self.showError(error, message: "Couldn't start the VM for “\(profile.name)”.")
                 self.unifiedWindow?.removePane(profile.id)
                 self.unregisterPane(profile.id, ifMatches: win)
@@ -7930,6 +8658,40 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         profileID: pid,
                         store: { [weak self] in self?.codingTaskStore },
                         engine: { [weak self] in self?.codingTaskEngine }))
+                // Automations MCP listener (vsock 5833): every agent in this
+                // workspace can list / create / edit / delete / run the
+                // workspace's OWN automations — the bridge is per machine,
+                // so the scope is the VM the call came from, not an argument.
+                self.automationMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: AutomationMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.scheduledAutomationStore },
+                        profile: { [weak self] in self?.profiles.first { $0.id == pid } },
+                        save: { [weak self] a in self?.saveAutomation(a) },
+                        remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
+                        runNow: { [weak self] id in self?.runAutomationNow(id) }),
+                    port: SessionDisk.automationMCPVsockPort)
+                // Infrastructure MCP listener (vsock 5834): the Kubernetes
+                // clusters and container registries this workspace may use,
+                // with the docs to use them; agents can create new ones.
+                self.kubeMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: KubeMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.kubeClusterStore },
+                        engine: { [weak self] in self?.kubeClusterEngine }),
+                    port: SessionDisk.kubeMCPVsockPort)
+                // Delegation MCP listener (vsock 5835): an agent hands work
+                // to another agent's session and hears back; the caller is
+                // the session bound to the tmux window the shim announces.
+                self.delegationMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: DelegationMCPServer(
+                        profileID: pid,
+                        sessions: { [weak self] in self?.agentSessionStore },
+                        engine: { [weak self] in self?.delegationEngine }),
+                    port: SessionDisk.delegationMCPVsockPort)
                 // Plan-stream listener (vsock 5832): streamed planning
                 // drivers (claude SDK / codex app-server / grok ACP).
                 let planBridge = PlanEventBridge(socketDevice: dev)
@@ -8125,6 +8887,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sendCommand("close-tab \(index)", in: pane)
     }
 
+    /// A run is over and its tab is on its way out — a coding task handed to
+    /// review, an automation run that finished with closeWhenDone, a
+    /// planning interview that filed its phases: the session that tab was
+    /// showing goes to the Archived fold by itself, readable as ever,
+    /// instead of lingering under Ended. Resolved off the live roster (or
+    /// the mirrored one, for a detached session), so it must run before
+    /// the tab is killed.
+    func archiveFinishedSession(profileID: Profile.ID, worktreeBranch: String) {
+        let tabs: [(index: Int, branch: String?)] =
+            pane(for: profileID)?.model.tabs.map { ($0.index, $0.worktreeBranch) }
+            ?? runningSessions[profileID]?.tabs.map { ($0.index, $0.worktreeBranch) }
+            ?? []
+        for tab in tabs where tab.branch == worktreeBranch {
+            guard let s = agentSessionStore.session(profileID: profileID, windowIndex: tab.index),
+                  !s.isArchived, !s.isDeleted else { continue }
+            BACDebug.log("sessions", "archiving finished “\(s.title)” (\(worktreeBranch))")
+            agentSessionStore.setArchived(s.id, true)
+        }
+    }
+
     // MARK: - Git worktrees
     //
     // All args are base64 (space-joined; base64 has no spaces) so paths and
@@ -8195,7 +8977,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt]
             name = "worktree-create"
             let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
+            // Optional 6th, raw: "background" — the tab opens behind the
+            // current one (a delegate's; the user is looking at its delegator).
             encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
+                + (args.count >= 6 && args[5] == "background" ? ["background"] : [])
         case "run":
             // Automation fire: same layout as "create", but the guest falls
             // back to a plain agent tab when cwd isn't a git repo. Optional
@@ -8215,6 +9000,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             name = "task-resume"
             let prompt = args[5].isEmpty ? "-" : b64(args[5])
             encoded = args.prefix(5).map(b64) + [prompt]
+        case "agent-tab":
+            // Home-screen session: an interactive agent tab in a folder (no
+            // worktree, no yolo). cwd, display, tool, prompt[, flags].
+            guard args.count >= 4 else { return false }
+            name = "agent-tab"
+            let prompt = args[3].isEmpty ? "-" : b64(args[3])
+            // Optional 6th, raw: "background" (see "create"). The guest
+            // splits on whitespace, so empty flags become "-" to hold the
+            // slot (it decodes to nothing).
+            let background = args.count >= 6 && args[5] == "background"
+            let flags: [String] = (args.count >= 5 && !args[4].isEmpty) ? [b64(args[4])] : (background ? ["-"] : [])
+            encoded = args.prefix(3).map(b64) + [prompt] + flags + (background ? ["background"] : [])
         case "merge":
             // src, target, mainRoot, display, tool[, mode ("merge"/"squash")
             // [, autonomy ("ask"/"auto" — board merges commit without asking)]]
@@ -8396,6 +9193,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         let controller = RemoteHostController(host: host)
+        // What that host holds for sessions of ours (a peer's reply to a
+        // request from here) is taken the moment its mirror shows it.
+        controller.onDelegationsMirrored = { [weak self] c in self?.delegationEngine.remoteMirrorChanged(c) }
         let window = RemoteHostWindow(controller: controller)
         window.center()
         remoteHostWindows[host.id] = window
@@ -8641,6 +9441,79 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return await Task.detached(priority: .userInitiated) {
             Self.ext4Transcript(imagePath: img.path, slug: slug, guestCwd: guestCwd)
         }.value
+    }
+
+    /// The folders inside `path` ("~", "~/proj", an absolute guest path)
+    /// on a workspace, for the new-session folder browser: asked of the
+    /// guest when it runs (what's there this second), read straight out
+    /// of the home image (or the legacy host home dir) when it's off.
+    /// Dotfolders are left out. nil when the machine can't be read right
+    /// now — no agent yet, or a path outside the home of a machine that
+    /// is off.
+    func listGuestFolders(profileID: UUID, path: String) async -> [String]? {
+        guard let profile = profiles.first(where: { $0.id == profileID }) else { return nil }
+        let guestPath = SessionHome.guestPath(path)
+        let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        // Only a machine that is actually up answers; a suspended one still
+        // holds a session entry (sandbox stopped, state saved) and would
+        // just time out — its home image is the source then.
+        if runState(for: profile) == .running,
+           let out = try? await guestExec(
+                profileID: profileID,
+                command: "if [ -d \(q) ]; then find \(q) -mindepth 1 -maxdepth 1 -type d "
+                    + "! -name '.*' -printf '%f\\n' 2>/dev/null | sort -f; fi; true",
+                timeout: 10) {
+            return out.split(whereSeparator: \.isNewline).map(String.init)
+        }
+        let home = "/home/ubuntu"
+        guard guestPath == home || guestPath.hasPrefix(home + "/") else { return nil }
+        let rel = guestPath == home ? "/" : String(guestPath.dropFirst(home.count))
+        switch profile.homeModel {
+        case .virtiofs:
+            let dir = store.homeDirectory(for: profile).appendingPathComponent(String(rel.dropFirst()))
+            return Self.hostFolders(in: dir)
+        case .ext4:
+            // Read-only; safe even if a VM has the disk attached — same
+            // tolerance as the ext4 browser and the transcript read below.
+            let img = store.homeImageURL(for: profile).path
+            guard FileManager.default.fileExists(atPath: img) else { return nil }
+            return await Task.detached(priority: .userInitiated) {
+                Self.ext4Folders(imagePath: img, path: rel)
+            }.value
+        }
+    }
+
+    /// `listGuestFolders` for the fat client, which names the workspace
+    /// by id or name.
+    func listGuestFolders(profileKey: String, path: String) async -> [String]? {
+        guard let p = profiles.first(where: {
+            $0.id.uuidString == profileKey || $0.name.lowercased() == profileKey.lowercased() })
+        else { return nil }
+        return await listGuestFolders(profileID: p.id, path: path)
+    }
+
+    nonisolated static func hostFolders(in dir: URL) -> [String]? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return nil }
+        return names.filter { name in
+            var isDir: ObjCBool = false
+            return !name.hasPrefix(".")
+                && FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path,
+                                                  isDirectory: &isDir)
+                && isDir.boolValue
+        }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// Subfolder names of a directory inside a home.img (home-relative
+    /// path, "/" for the home). Pure file IO — run detached.
+    nonisolated static func ext4Folders(imagePath: String, path: String) -> [String]? {
+        guard let vol = try? Ext4Volume(path: imagePath),
+              let dirIno = try? vol.resolve(path),
+              let entries = try? vol.listDir(dirIno) else { return nil }
+        var names: [String] = []
+        for e in entries where e.name != "." && e.name != ".." && !e.name.hasPrefix(".") {
+            if e.isDir || ((try? vol.inode(e.ino))?.isDir ?? false) { names.append(e.name) }
+        }
+        return names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     /// Locate + read the newest session transcript for a task inside a
@@ -9298,6 +10171,97 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return ["ok": true]
     }
 
+    /// Handle a fat-client Kubernetes verb (`POST /k8s` with action "create",
+    /// or `POST /k8s/{id}/{action}`). Mirrors what the local dashboard does
+    /// through `kubeClusterEngine` directly.
+    @MainActor func automationKubeCommand(id: String?, doc: [String: Any]) -> [String: Any] {
+        let action = (doc["action"] as? String) ?? ""
+        func decodeAccess(_ raw: Any?) -> KubeWorkspaceAccess? {
+            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
+        }
+        if id == nil {
+            guard action == "create" else { return ["ok": false, "error": "unknown action: \(action)"] }
+            guard let name = doc["name"] as? String, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+                return ["ok": false, "error": "missing name"]
+            }
+            var spec = KubeClusterSpec()
+            if let raw = doc["spec"], let data = try? JSONSerialization.data(withJSONObject: raw),
+               let decoded = try? JSONDecoder().decode(KubeClusterSpec.self, from: data) {
+                spec = decoded
+            }
+            let access = decodeAccess(doc["access"]) ?? .all
+            let cluster = kubeClusterEngine.create(name: name, spec: spec, access: access,
+                                                   autoStart: (doc["autoStart"] as? Bool) ?? true,
+                                                   synologyPassword: doc["synologyPassword"] as? String)
+            return ["ok": true, "id": cluster.id.uuidString]
+        }
+        guard let id, let uuid = UUID(uuidString: id), kubeClusterStore.cluster(uuid) != nil else {
+            return ["ok": false, "error": "no such cluster"]
+        }
+        switch action {
+        case "start":   kubeClusterEngine.start(uuid)
+        case "stop":    Task { await self.kubeClusterEngine.stop(uuid) }
+        case "restart": kubeClusterEngine.restart(uuid)
+        case "delete":  Task { await self.kubeClusterEngine.delete(uuid) }
+        case "access":
+            guard let access = decodeAccess(doc["access"]) else { return ["ok": false, "error": "bad access"] }
+            kubeClusterEngine.setAccess(uuid, access)
+        case "autostart":
+            kubeClusterEngine.setAutoStart(uuid, (doc["on"] as? Bool) ?? true)
+        case "watch":
+            kubeClusterEngine.setWatch(uuid, (doc["on"] as? Bool) ?? false)
+        case "kubeconfig":
+            guard let yaml = kubeClusterEngine.kubeconfigYAML(uuid) else {
+                return ["ok": false, "error": "no kubeconfig yet"]
+            }
+            return ["ok": true, "kubeconfig": yaml]
+        default:
+            return ["ok": false, "error": "unknown kube action: \(action)"]
+        }
+        return ["ok": true]
+    }
+
+    /// Handle a fat-client registry verb (`POST /registries` "create", or
+    /// `POST /registries/{id}/{action}`).
+    @MainActor func automationRegistryCommand(id: String?, doc: [String: Any]) -> [String: Any] {
+        let action = (doc["action"] as? String) ?? ""
+        func decodeAccess(_ raw: Any?) -> KubeWorkspaceAccess? {
+            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
+        }
+        if id == nil {
+            guard action == "create" else { return ["ok": false, "error": "unknown action: \(action)"] }
+            guard let name = doc["name"] as? String, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+                return ["ok": false, "error": "missing name"]
+            }
+            let registry = kubeClusterEngine.createRegistry(
+                name: name, access: decodeAccess(doc["access"]) ?? .all,
+                memoryGB: (doc["memoryGB"] as? Int) ?? 1, diskGB: (doc["diskGB"] as? Int) ?? 40,
+                autoStart: (doc["autoStart"] as? Bool) ?? true)
+            return ["ok": true, "id": registry.id.uuidString]
+        }
+        guard let id, let uuid = UUID(uuidString: id), kubeClusterStore.registry(uuid) != nil else {
+            return ["ok": false, "error": "no such registry"]
+        }
+        switch action {
+        case "start":   kubeClusterEngine.startRegistry(uuid)
+        case "stop":    Task { await self.kubeClusterEngine.stopRegistry(uuid) }
+        case "restart": kubeClusterEngine.restartRegistry(uuid)
+        case "delete":  Task { await self.kubeClusterEngine.deleteRegistry(uuid) }
+        case "access":
+            guard let access = decodeAccess(doc["access"]) else { return ["ok": false, "error": "bad access"] }
+            kubeClusterEngine.setRegistryAccess(uuid, access)
+        case "autostart":
+            kubeClusterEngine.setRegistryAutoStart(uuid, (doc["on"] as? Bool) ?? true)
+        case "watch":
+            kubeClusterEngine.setWatch(uuid, (doc["on"] as? Bool) ?? false)
+        default:
+            return ["ok": false, "error": "unknown registry action: \(action)"]
+        }
+        return ["ok": true]
+    }
+
     /// Handle a fat-client `POST /vms/{id}/file` op — the remote file browser's
     /// data plane, bridged to the same vsock `{"file": …}` channel the local
     /// one uses.
@@ -9923,6 +10887,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     FileHandle.standardError.write(Data(
                         "[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
                 }
+                // A sign-in card is waiting on this very page.
+                if let self, let signIn = self.proxySignIns[pid], !signIn.finished {
+                    signIn.onEvent?(.status(NSLocalizedString(
+                        "Finish signing in in your browser…", comment: "sign-in")))
+                }
                 Self.openGuestRelayedURL(url)
             }
         }
@@ -10121,6 +11090,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         browserMCPBridges.removeValue(forKey: profile.id)
         taskMCPBridges[profile.id]?.stop()
         taskMCPBridges.removeValue(forKey: profile.id)
+        automationMCPBridges[profile.id]?.stop()
+        automationMCPBridges.removeValue(forKey: profile.id)
+        kubeMCPBridges[profile.id]?.stop()
+        kubeMCPBridges.removeValue(forKey: profile.id)
+        delegationMCPBridges[profile.id]?.stop()
+        delegationMCPBridges.removeValue(forKey: profile.id)
         planEventBridges[profile.id]?.stop()
         planEventBridges.removeValue(forKey: profile.id)
         planStreamHub.removeSessions(profileID: profile.id)
@@ -10457,10 +11432,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// VZVirtualMachineView to its live VM. Used to reattach after a detach
     /// (window closed, VM kept running) and by the control plane's attach.
     @MainActor
-    func attachWindow(to session: RunningSession) {
-        // Already shown somewhere → focus + select it.
+    func attachWindow(to session: RunningSession, quiet: Bool = false) {
+        // Already shown somewhere → focus + select it (unless quiet: the
+        // workspace is wanted up, not on stage).
         if isAttached(session.profileID) {
-            revealSession(session.profileID)
+            if !quiet { revealSession(session.profileID) }
             return
         }
         let profile = session.profile
@@ -10479,8 +11455,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                               parentBranch: $0.parentBranch, rootRepo: $0.rootRepo,
                               display: $0.display, repoRoot: $0.repoRoot)
             }
+            pane.model.rosterLive = true   // the guest's own roster, cached
             pane.model.activeIndex = session.tabs.firstIndex(where: { $0.active }) ?? 0
         } else {
+            pane.model.rosterLive = false
             pane.model.tabs = [TabsModel.Tab(label: "shell")]
             pane.model.activeIndex = 0
         }
@@ -10489,10 +11467,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         pane.model.fusionConfigurable = profile.fusionConfigurable
         pane.model.fusionEngaged = session.fusionEngaged
         let unified = ensureUnifiedWindow()
-        unified.addPane(pane)
-        NSApp.setActivationPolicy(.regular)
-        unified.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        unified.addPane(pane, select: !quiet)
+        if !quiet {
+            NSApp.setActivationPolicy(.regular)
+            unified.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         refreshStreamingState()
         refreshSidebar()
         updateStatusMenu()
@@ -10562,7 +11542,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu = NSMenu()
             menu.delegate = self
         }
-        let sessions = runningSessions.values.sorted { $0.profile.name < $1.profile.name }
+        let sessions = runningSessions.values
+            .filter { $0.kubeClusterID == nil }   // cluster nodes have their own dashboard
+            .sorted { $0.profile.name < $1.profile.name }
         if sessions.isEmpty {
             let none = NSMenuItem(title: NSLocalizedString("No running VMs", comment: ""),
                                   action: nil, keyEquivalent: "")
@@ -10694,6 +11676,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.resetBootDetection()
         // Placeholder pill while the fresh VM boots; the agent creates tmux
         // window 0 and the roster repopulates the bar.
+        win.model.rosterLive = false
         win.model.tabs = [TabsModel.Tab(label: "shell")]
 
         Task { @MainActor in
@@ -10831,6 +11814,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         profileID: pid,
                         store: { [weak self] in self?.codingTaskStore },
                         engine: { [weak self] in self?.codingTaskEngine }))
+                // Automations MCP listener (vsock 5833): every agent in this
+                // workspace can list / create / edit / delete / run the
+                // workspace's OWN automations — the bridge is per machine,
+                // so the scope is the VM the call came from, not an argument.
+                self.automationMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: AutomationMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.scheduledAutomationStore },
+                        profile: { [weak self] in self?.profiles.first { $0.id == pid } },
+                        save: { [weak self] a in self?.saveAutomation(a) },
+                        remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
+                        runNow: { [weak self] id in self?.runAutomationNow(id) }),
+                    port: SessionDisk.automationMCPVsockPort)
+                // Infrastructure MCP listener (vsock 5834): the Kubernetes
+                // clusters and container registries this workspace may use,
+                // with the docs to use them; agents can create new ones.
+                self.kubeMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: KubeMCPServer(
+                        profileID: pid,
+                        store: { [weak self] in self?.kubeClusterStore },
+                        engine: { [weak self] in self?.kubeClusterEngine }),
+                    port: SessionDisk.kubeMCPVsockPort)
+                // Delegation MCP listener (vsock 5835) — see the matching
+                // block on the warm-boot path.
+                self.delegationMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: DelegationMCPServer(
+                        profileID: pid,
+                        sessions: { [weak self] in self?.agentSessionStore },
+                        engine: { [weak self] in self?.delegationEngine }),
+                    port: SessionDisk.delegationMCPVsockPort)
                 // Plan-stream listener (vsock 5832) — see the matching block
                 // on the warm-boot path.
                 let planBridge = PlanEventBridge(socketDevice: dev)

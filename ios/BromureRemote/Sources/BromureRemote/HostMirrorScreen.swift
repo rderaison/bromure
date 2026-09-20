@@ -30,6 +30,15 @@ struct HostMirrorScreen: View {
     /// The workspace editor sheet (the desktop's ProfileEditorView): "+" opens
     /// a fresh draft, a card's context menu opens the existing profile.
     @State private var workspaceEdit: WorkspaceEdit?
+    /// Sessions-first (a server that reports agent sessions): the tapped
+    /// session pushes its stage; "+" presents the new-session composer and
+    /// the session it started opens once the sheet is down.
+    @State private var openSessionID: UUID?
+    @State private var newSession = false
+    @State private var pendingSessionID: UUID?
+    #if DEBUG
+    @State private var didDebugRoute = false
+    #endif
 
     init(controller: RemoteHostController, host: RemoteHost,
          openWorkspace: WorkspaceDeepLink? = nil) {
@@ -52,14 +61,40 @@ struct HostMirrorScreen: View {
         controller.listModel.profileRows.filter { $0.state == .running }.count
     }
 
+    #if DEBUG
+    /// Headless screenshot runs (no taps on a simulator without Simulator.app):
+    /// `BROMURE_DEBUG_OPEN_SESSION=<id>` pushes that session once the mirror
+    /// reports it; `BROMURE_DEBUG_NEW_SESSION=1` presents the composer.
+    private func debugRoute() {
+        guard !didDebugRoute, controller.supportsSessions else { return }
+        let env = ProcessInfo.processInfo.environment
+        if let id = env["BROMURE_DEBUG_OPEN_SESSION"].flatMap(UUID.init(uuidString:)),
+           controller.sessionStore.session(id) != nil {
+            didDebugRoute = true
+            openSessionID = id
+        } else if env["BROMURE_DEBUG_NEW_SESSION"] == "1" {
+            didDebugRoute = true
+            newSession = true
+        }
+    }
+    #endif
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if !controller.connected { reconnectBanner }
 
+                if controller.supportsSessions {
+                    MobileSessionsSection(controller: controller,
+                                          onSelect: { openSessionID = $0 },
+                                          onNew: { newSession = true })
+                }
+
                 boardsRow
 
-                if !waitingAgents.isEmpty { waitingSection }
+                // The sessions list already surfaces agents waiting for a
+                // reply ("Needs you"); the tab-level list is for older servers.
+                if !controller.supportsSessions, !waitingAgents.isEmpty { waitingSection }
 
                 workspacesSection
             }
@@ -84,10 +119,34 @@ struct HostMirrorScreen: View {
         .onChange(of: waitingAgents.count) { AppBadge.set($0) }
         // Once the mirror connects and the workspaces load, a tapped
         // notification pushes straight to the waiting agent's window.
-        .onChange(of: controller.revision) { tryDeepLink() }
+        .onChange(of: controller.revision) {
+            tryDeepLink()
+            #if DEBUG
+            debugRoute()
+            #endif
+        }
         .navigationDestination(item: $deepWorkspace) { link in
             WorkspaceScreen(controller: controller, profileID: link.profileID,
                             initialWindow: link.window)
+        }
+        .navigationDestination(item: $openSessionID) { id in
+            MobileSessionScreen(controller: controller, sessionID: id,
+                                onForget: { openSessionID = nil },
+                                onOpen: { openSessionID = $0 })
+        }
+        .sheet(isPresented: $newSession, onDismiss: {
+            if let id = pendingSessionID { pendingSessionID = nil; openSessionID = id }
+        }) {
+            NavigationStack {
+                MobileNewSessionScreen(controller: controller,
+                                       onStarted: { id in pendingSessionID = id; newSession = false },
+                                       onCancel: { newSession = false })
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { newSession = false }
+                        }
+                    }
+            }
         }
         // Snap the mirror back to life when the app returns to the foreground.
         // After a long absence the P2P path is almost certainly dead — tear it

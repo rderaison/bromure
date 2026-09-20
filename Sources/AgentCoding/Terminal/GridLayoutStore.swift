@@ -32,6 +32,13 @@ final class GridLayoutStore {
     var focusedCellID: String?
     /// Cell temporarily maximized inside the grid (⌘↩ / header double-click).
     var zoomedCellID: String?
+    /// Every terminal created while the app watches a workspace joins the
+    /// grid on its own (`autoAdd`), newest last; a full grid drops its
+    /// oldest cell to make room. Off by itself the moment the user
+    /// rearranges the grid by hand (a drag, a move, a reordered layout
+    /// from a fat client) — an arrangement is theirs from then on. The
+    /// Grid node's menu turns it back on.
+    private(set) var autoFill = true
 
     private let saveURL: URL
 
@@ -55,6 +62,30 @@ final class GridLayoutStore {
         return true
     }
 
+    /// A terminal that just appeared: in it goes, last — unless the user
+    /// has taken the arrangement over. A full grid lets its oldest cell go
+    /// first (everything shifts up by one). False when nothing changed.
+    @discardableResult
+    func autoAdd(profileID: UUID, windowIndex: Int, label: String) -> Bool {
+        guard autoFill else { return false }
+        let id = GridCell.id(profileID: profileID, windowIndex: windowIndex)
+        guard !cells.contains(where: { $0.id == id }) else { return false }
+        while cells.count >= Self.maxCells {
+            let gone = cells.removeFirst()
+            if focusedCellID == gone.id { focusedCellID = nil }
+            if zoomedCellID == gone.id { zoomedCellID = nil }
+        }
+        cells.append(GridCell(profileID: profileID, windowIndex: windowIndex, label: label))
+        save()
+        return true
+    }
+
+    func setAutoFill(_ on: Bool) {
+        guard autoFill != on else { return }
+        autoFill = on
+        save()
+    }
+
     func remove(id: String) {
         cells.removeAll { $0.id == id }
         if focusedCellID == id { focusedCellID = nil }
@@ -64,15 +95,28 @@ final class GridLayoutStore {
 
     /// Replace the whole cell list wholesale (fat-client "layout set":
     /// last-writer-wins, no partial-merge state). Clamped to `maxCells`.
+    /// A layout that reorders cells we already hold is a rearrangement by
+    /// hand — auto-fill stands down, as for a local drag.
     func replaceAll(_ newCells: [GridCell]) {
-        cells = Array(newCells.prefix(Self.maxCells))
+        let incoming = Array(newCells.prefix(Self.maxCells))
+        if Self.reorders(cells, into: incoming) { autoFill = false }
+        cells = incoming
         save()
+    }
+
+    /// True when the cells common to both lists sit in a different order.
+    nonisolated static func reorders(_ old: [GridCell], into new: [GridCell]) -> Bool {
+        let newIDs = Set(new.map(\.id)), oldIDs = Set(old.map(\.id))
+        let before = old.map(\.id).filter { newIDs.contains($0) }
+        let after = new.map(\.id).filter { oldIDs.contains($0) }
+        return before != after
     }
 
     func move(id: String, toIndex: Int) {
         guard let from = cells.firstIndex(where: { $0.id == id }),
               (0..<cells.count).contains(toIndex) else { return }
         cells.insert(cells.remove(at: from), at: toIndex)
+        autoFill = false
         save()
     }
 
@@ -83,6 +127,7 @@ final class GridLayoutStore {
               let a = cells.firstIndex(where: { $0.id == idA }),
               let b = cells.firstIndex(where: { $0.id == idB }) else { return }
         cells.swapAt(a, b)
+        autoFill = false
         save()
     }
 
@@ -139,18 +184,21 @@ final class GridLayoutStore {
 
     private struct Snapshot: Codable {
         var cells: [GridCell]
+        /// Absent in files from before auto-fill existed → on.
+        var autoFill: Bool?
     }
 
     private func load() {
         guard let data = try? Data(contentsOf: saveURL),
               let snap = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
         cells = Array(snap.cells.prefix(Self.maxCells))
+        autoFill = snap.autoFill ?? true
     }
 
     private func save() {
         let dir = saveURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(Snapshot(cells: cells)) {
+        if let data = try? JSONEncoder().encode(Snapshot(cells: cells, autoFill: autoFill)) {
             try? data.write(to: saveURL, options: .atomic)
         }
     }

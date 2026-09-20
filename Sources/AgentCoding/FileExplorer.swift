@@ -1,5 +1,9 @@
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
+#if os(macOS)
+import AppKit
+#endif
 
 // The file-explorer pane's data layer: git status / file tree / diff / file
 // contents for the active tab's repo, all sourced from INSIDE the guest.
@@ -68,6 +72,9 @@ final class FileNode: Identifiable {
     /// A descendant has a status — lets folders carry the "something changed
     /// in here" dot even while collapsed.
     var containsChanges = false
+    /// False for a folder listed lazily whose contents haven't been fetched
+    /// yet (they are, the moment it's unfolded).
+    var childrenLoaded = true
 
     var id: String { path }
 
@@ -184,13 +191,39 @@ struct DiffDocument {
 @MainActor
 @Observable
 final class FileExplorerModel {
-    /// Guest-side absolute path of the repo being shown (nil = no repo).
+    /// The git top level the shown folder sits in (nil = not a repo). Found
+    /// by the guest on every refresh, so it's right wherever the user browses.
     private(set) var repoRoot: String?
+    /// The folder on show (absolute guest path). Defaults to the tab's repo
+    /// root when it sits in one, else the tab's own folder; ".." and entering
+    /// a folder move it by hand until the tab's context changes.
+    private(set) var root: String?
+    private var manualRoot: String?
+    private var contextCwd: String?
+    private var contextRepo: String?
+    /// Folders unfolded in the tree (root-relative); each is listed on refresh.
+    private(set) var expandedDirs: Set<String> = []
+    /// An upload or download in flight — the progress pill.
+    private(set) var transferText: String?
+    /// Injected by the window: the guest file service (read/write/mkdir) —
+    /// what makes dragging a file out and dropping one in work.
+    var fileOpProvider: ((_ profileID: Profile.ID, _ op: [String: Any]) async throws -> [String: Any])?
+    private static let chunkBytes = 6 * 1024 * 1024
+    private let downloadRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bromure-files", isDirectory: true)
+        .appendingPathComponent("explorer", isDirectory: true)
+
+    var canGoUp: Bool { (root ?? "/") != "/" }
+    var canTransfer: Bool { fileOpProvider != nil && root != nil && profileID != nil }
     /// The profile whose guest the queries run in — changing VMs swaps this.
     private(set) var profileID: Profile.ID?
 
     private(set) var rootNodes: [FileNode] = []
     private(set) var statuses: [String: GitFileStatus] = [:]
+    /// Where each status came from: the repository (absolute guest path)
+    /// and the path inside it — what `git diff` needs, since a folder on
+    /// show may hold several repositories (the home with a project in it).
+    private(set) var statusOrigins: [String: (repo: String, path: String)] = [:]
     private(set) var loadError: String?
     /// True until the first listing for the current repo lands.
     private(set) var loading = false
@@ -282,52 +315,145 @@ final class FileExplorerModel {
         return try await execProvider(profileID, command, timeout)
     }
 
-    /// Point the pane at (profile, repoRoot). Clears immediately on change so
-    /// stale trees never show against a new repo; a nil root empties the pane
-    /// (also used to park the model while the pane is closed).
-    func setRepo(profileID: Profile.ID?, root: String?) {
-        guard profileID != self.profileID || root != repoRoot else { return }
-        reviewDrafts.removeAll()
+    /// Point the pane at the active tab: its folder, and the repo it sits in
+    /// when it does. A hand-picked folder ("..", entering one) survives
+    /// refreshes and is dropped when the tab's context changes. A nil cwd
+    /// empties the pane (also used to park the model while the pane is
+    /// closed).
+    func setLocation(profileID: Profile.ID?, cwd: String?, repoRoot hint: String?) {
+        let contextChanged = profileID != self.profileID || cwd != contextCwd || hint != contextRepo
+        if contextChanged { manualRoot = nil }
+        contextCwd = cwd
+        contextRepo = hint
+        let newRoot = manualRoot ?? hint ?? cwd
+        guard contextChanged || newRoot != root else { return }
         self.profileID = profileID
-        self.repoRoot = root
+        show(newRoot, repoHint: hint)
+    }
+
+    /// Compatibility: a repo root as both the folder and the repo.
+    func setRepo(profileID: Profile.ID?, root: String?) {
+        setLocation(profileID: profileID, cwd: root, repoRoot: root)
+    }
+
+    /// Up one folder — all the way to "/" if the user insists.
+    func goUp() {
+        guard let r = root, r != "/" else { return }
+        let parent = (r as NSString).deletingLastPathComponent
+        manualRoot = parent.isEmpty ? "/" : parent
+        show(manualRoot, repoHint: contextRepo)
+    }
+
+    /// Make a folder of the tree the one on show.
+    func enter(_ dir: String) {
+        guard let r = root else { return }
+        manualRoot = (r as NSString).appendingPathComponent(dir)
+        show(manualRoot, repoHint: contextRepo)
+    }
+
+    func toggleExpanded(_ dir: String) {
+        if expandedDirs.contains(dir) {
+            expandedDirs.remove(dir)
+        } else {
+            expandedDirs.insert(dir)
+            Task { await refresh() }
+        }
+    }
+
+    func expand(_ dirs: Set<String>) {
+        let new = dirs.subtracting(expandedDirs)
+        guard !new.isEmpty else { return }
+        expandedDirs.formUnion(new)
+        Task { await refresh() }
+    }
+
+    private func show(_ newRoot: String?, repoHint: String?) {
+        reviewDrafts.removeAll()
+        root = newRoot
+        repoRoot = newRoot.flatMap { r in
+            repoHint.flatMap { r == $0 || r.hasPrefix($0 + "/") ? $0 : nil }
+        }
         refreshGeneration += 1   // orphan any in-flight refresh
         detailGeneration += 1
         shownDetailKey = nil
         rootNodes = []
         statuses = [:]
+        statusOrigins = [:]
+        expandedDirs = []
         selectedPath = nil
         detail = .none
         loadError = nil
         truncated = false
-        loading = root != nil
-        guard root != nil else { return }
+        loading = newRoot != nil
+        guard newRoot != nil else { return }
         Task { await refresh() }
     }
 
-    /// Re-list the tree + statuses. Safe to call on a timer; cheap in the
-    /// guest (git ls-files + git status) and diffed into the UI by SwiftUI.
-    /// The whole payload is base64-wrapped in the guest: filenames are raw
-    /// bytes, and one non-UTF-8 name must not poison the channel.
+    /// Re-list the folder (one level, plus every unfolded folder), find the
+    /// repositories in play and their git status — one guest round-trip,
+    /// safe on a timer. "In play" = the repo the folder sits in, plus the
+    /// repo of every unfolded folder: browsing the home and unfolding a
+    /// project in it shows that project's changes. The whole payload is
+    /// base64-wrapped in the guest: filenames are raw bytes, and one
+    /// non-UTF-8 name must not poison the channel.
     func refresh() async {
-        guard let root = repoRoot else { return }
+        guard let root else { return }
         refreshGeneration += 1
         let generation = refreshGeneration
+        let dirs = [root] + expandedDirs.sorted().map { (root as NSString).appendingPathComponent($0) }
+        // Each folder: "\002<path>\001<type><name>\0…" — `find -L` so a
+        // symlinked folder (a shared folder) reads as a folder; .git hidden.
+        let listing = dirs.map { d in
+            let q = shellQuote(d)
+            return "printf '\\002%s\\001' \(q); find -L \(q) -mindepth 1 -maxdepth 1 ! -name .git "
+                + "-printf '%y%f\\0' 2>/dev/null"
+        }.joined(separator: "; ")
         let q = shellQuote(root)
+        // Then, per distinct repository among those folders:
+        // "\002<toplevel>\001<status --porcelain -z>".
+        let probe = dirs.map(shellQuote).joined(separator: " ")
+        let cmd = "{ t=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); printf '%s\\003' \"$t\"; "
+            + "\(listing); printf '\\003'; "
+            + "for d in \(probe); do git -C \"$d\" rev-parse --show-toplevel 2>/dev/null; done | sort -u "
+            + "| while IFS= read -r r; do [ -n \"$r\" ] || continue; printf '\\002%s\\001' \"$r\"; "
+            + "git -C \"$r\" status --porcelain -z 2>/dev/null; done; true; } | base64 -w0"
         do {
-            let out = try await exec(
-                "{ git -C \(q) ls-files -co --exclude-standard -z; printf '\\001'; " +
-                "git -C \(q) status --porcelain -z; } | base64 -w0")
-            guard generation == refreshGeneration else { return }
+            let out = try await exec(cmd)
+            guard generation == refreshGeneration, root == self.root else { return }
             let data = Data(base64Encoded: out.filter { !$0.isWhitespace }) ?? Data()
-            let halves = data.split(separator: UInt8(0x01), maxSplits: 1,
-                                    omittingEmptySubsequences: false)
-            let files = halves.first.map(Self.nulSeparatedStrings) ?? []
-            let newStatuses = halves.count > 1
-                ? Self.parsePorcelain(String(decoding: halves[1], as: UTF8.self)) : [:]
-            truncated = files.count > Self.maxFiles
-            statuses = newStatuses
-            rootNodes = FileNode.tree(paths: Array(files.prefix(Self.maxFiles)),
-                                      statuses: newStatuses)
+            let parts = data.split(separator: UInt8(0x03), maxSplits: 2, omittingEmptySubsequences: false)
+            let toplevel = parts.first.map {
+                String(decoding: $0, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            } ?? ""
+            repoRoot = toplevel.isEmpty ? nil : toplevel
+            // Statuses come repo-relative; the tree is root-relative.
+            var sections: [(toplevel: String, porcelain: String)] = []
+            if parts.count > 2 {
+                for section in parts[2].split(separator: UInt8(0x02), omittingEmptySubsequences: true) {
+                    let kv = section.split(separator: UInt8(0x01), maxSplits: 1, omittingEmptySubsequences: false)
+                    guard let first = kv.first else { continue }
+                    let top = String(decoding: first, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                    sections.append((top, kv.count > 1 ? String(decoding: kv[1], as: UTF8.self) : ""))
+                }
+            }
+            let (mapped, origins) = Self.mapStatuses(root: root, sections: sections)
+            statuses = mapped
+            statusOrigins = origins
+            var byDir: [String: [(name: String, isDir: Bool)]] = [:]
+            if parts.count > 1 {
+                for section in parts[1].split(separator: UInt8(0x02), omittingEmptySubsequences: true) {
+                    let kv = section.split(separator: UInt8(0x01), maxSplits: 1, omittingEmptySubsequences: false)
+                    guard let first = kv.first else { continue }
+                    let dpath = String(decoding: first, as: UTF8.self)
+                    let entries = kv.count > 1 ? kv[1].split(separator: UInt8(0)) : []
+                    byDir[dpath] = entries.compactMap { e in
+                        guard let t = e.first else { return nil }
+                        return (String(decoding: e.dropFirst(), as: UTF8.self), t == UInt8(ascii: "d"))
+                    }
+                }
+            }
+            rootNodes = Self.buildTree(root: root, listings: byDir, expanded: expandedDirs, statuses: mapped)
+            truncated = false
             loadError = nil
             loading = false
             // The selected file's change state may have moved under us (the
@@ -338,6 +464,228 @@ final class FileExplorerModel {
             loadError = error.localizedDescription
             loading = false
         }
+    }
+
+    /// Each repository's statuses (toplevel-relative, as porcelain reports
+    /// them) as paths relative to the folder on show: the folder may sit
+    /// inside the repository (keep what's under it, strip the way down) or
+    /// hold it (prefix the way in). Repositories elsewhere are ignored.
+    /// Also where each mapped path came from, for `git diff`.
+    static func mapStatuses(root: String, sections: [(toplevel: String, porcelain: String)])
+        -> (statuses: [String: GitFileStatus], origins: [String: (repo: String, path: String)]) {
+        var statuses: [String: GitFileStatus] = [:]
+        var origins: [String: (repo: String, path: String)] = [:]
+        let rootPrefix = root.hasSuffix("/") ? root : root + "/"
+        for (top, raw) in sections where !top.isEmpty {
+            let parsed = parsePorcelain(raw)
+            if top == root {
+                for (k, v) in parsed { statuses[k] = v; origins[k] = (top, k) }
+            } else if root.hasPrefix(top + "/") {
+                let prefix = String(root.dropFirst(top.count + 1)) + "/"
+                for (k, v) in parsed where k.hasPrefix(prefix) {
+                    let rel = String(k.dropFirst(prefix.count))
+                    statuses[rel] = v; origins[rel] = (top, k)
+                }
+            } else if top.hasPrefix(rootPrefix) {
+                let prefix = String(top.dropFirst(rootPrefix.count)) + "/"
+                for (k, v) in parsed { statuses[prefix + k] = v; origins[prefix + k] = (top, k) }
+            }
+        }
+        return (statuses, origins)
+    }
+
+    /// The tree from per-folder listings: folders first, then files, both
+    /// alphabetical; a folder carries the "changed inside" dot from the
+    /// statuses whether or not it's been unfolded.
+    static func buildTree(root: String, listings: [String: [(name: String, isDir: Bool)]],
+                          expanded: Set<String>, statuses: [String: GitFileStatus]) -> [FileNode] {
+        var dirty = Set<String>()
+        for k in statuses.keys {
+            var p = k
+            while let i = p.lastIndex(of: "/") { p = String(p[..<i]); dirty.insert(p) }
+        }
+        func nodes(dirAbs: String, rel: String) -> [FileNode] {
+            var out: [FileNode] = []
+            for e in listings[dirAbs] ?? [] {
+                let path = rel.isEmpty ? e.name : rel + "/" + e.name
+                let n = FileNode(name: e.name, path: path, isDirectory: e.isDir)
+                if e.isDir {
+                    n.containsChanges = dirty.contains(path)
+                    if expanded.contains(path) {
+                        n.children = nodes(dirAbs: (dirAbs as NSString).appendingPathComponent(e.name), rel: path)
+                    } else {
+                        n.childrenLoaded = false
+                    }
+                } else {
+                    n.status = statuses[path]
+                }
+                out.append(n)
+            }
+            out.sort {
+                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+            return out
+        }
+        return nodes(dirAbs: root, rel: "")
+    }
+
+    // MARK: Transfers (the guest file service)
+
+    private func fileOp(_ op: [String: Any]) async throws -> [String: Any] {
+        guard let profileID, let fileOpProvider else { throw ACAppDelegate.GuestExecError.vmNotRunning }
+        return try await fileOpProvider(profileID, op)
+    }
+
+    /// Pull a file (root-relative) into the local cache; returns the local URL.
+    func download(_ relPath: String) async throws -> URL {
+        guard let root, let profileID else { throw CocoaError(.fileNoSuchFile) }
+        let guestPath = (root as NSString).appendingPathComponent(relPath)
+        let local = downloadRoot
+            .appendingPathComponent(profileID.uuidString, isDirectory: true)
+            .appendingPathComponent(String(guestPath.drop(while: { $0 == "/" })))
+        // The guest is untrusted: a crafted name must never steer the write
+        // outside the cache root.
+        let rootPath = downloadRoot.standardizedFileURL.path
+        guard local.standardizedFileURL.path.hasPrefix(rootPath + "/") else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        try FileManager.default.createDirectory(at: local.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: local.path, contents: nil)
+        guard let handle = FileHandle(forWritingAtPath: local.path) else { throw CocoaError(.fileWriteUnknown) }
+        defer { try? handle.close() }
+        let name = (relPath as NSString).lastPathComponent
+        var offset: Int64 = 0
+        while true {
+            let resp = try await fileOp(["op": "read", "path": guestPath,
+                                         "offset": offset, "length": Self.chunkBytes])
+            guard let b64 = resp["data"] as? String, let data = Data(base64Encoded: b64) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            handle.write(data)
+            offset += Int64(data.count)
+            transferText = String(format: NSLocalizedString("Copying %@ out… %@", comment: ""),
+                                  name, ByteCountFormatter.string(fromByteCount: offset, countStyle: .file))
+            let eof = (resp["eof"] as? Bool) ?? (resp["eof"] as? Int).map { $0 != 0 } ?? data.isEmpty
+            if eof || data.isEmpty { break }
+        }
+        transferText = nil
+        return local
+    }
+
+    /// Download, then put a copy in ~/Downloads and show it in the Finder.
+    func saveToDownloads(_ relPath: String) {
+        Task { @MainActor in
+            do {
+                let local = try await download(relPath)
+                let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                    ?? FileManager.default.temporaryDirectory
+                var dst = downloads.appendingPathComponent(local.lastPathComponent)
+                var n = 2
+                while FileManager.default.fileExists(atPath: dst.path) {
+                    let stem = local.deletingPathExtension().lastPathComponent
+                    let ext = local.pathExtension
+                    dst = downloads.appendingPathComponent(ext.isEmpty ? "\(stem) \(n)" : "\(stem) \(n).\(ext)")
+                    n += 1
+                }
+                try FileManager.default.copyItem(at: local, to: dst)
+#if os(macOS)
+                NSWorkspace.shared.activateFileViewerSelecting([dst])
+#endif
+            } catch {
+                loadError = error.localizedDescription
+                transferText = nil
+            }
+        }
+    }
+
+    /// Copy files dropped from the Finder into the folder on show (or the
+    /// given root-relative folder), folders whole, chunked.
+    func receive(_ urls: [URL], into dir: String? = nil) {
+        guard let root, canTransfer else { return }
+        let base = dir.map { (root as NSString).appendingPathComponent($0) } ?? root
+        Task { @MainActor in
+            for src in urls {
+                var isDir: ObjCBool = false
+                FileManager.default.fileExists(atPath: src.path, isDirectory: &isDir)
+                do {
+                    try await uploadItem(at: src, to: (base as NSString).appendingPathComponent(src.lastPathComponent),
+                                         isDirectory: isDir.boolValue)
+                } catch {
+                    loadError = error.localizedDescription
+                }
+            }
+            transferText = nil
+            await refresh()
+        }
+    }
+
+    private func uploadItem(at src: URL, to guestPath: String, isDirectory: Bool) async throws {
+        if isDirectory {
+            _ = try await fileOp(["op": "mkdir", "path": guestPath])
+            let children = (try? FileManager.default.contentsOfDirectory(
+                at: src, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+            for child in children {
+                let childIsDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                try await uploadItem(at: child, to: (guestPath as NSString).appendingPathComponent(child.lastPathComponent),
+                                     isDirectory: childIsDir)
+            }
+            return
+        }
+        guard let handle = try? FileHandle(forReadingFrom: src) else { return }
+        defer { try? handle.close() }
+        var first = true
+        var sent: Int64 = 0
+        while true {
+            let data = handle.readData(ofLength: Self.chunkBytes)
+            if data.isEmpty && !first { break }
+            _ = try await fileOp(["op": "write", "path": guestPath,
+                                  "data": data.base64EncodedString(), "append": !first])
+            sent += Int64(data.count)
+            transferText = String(format: NSLocalizedString("Copying %@ in… %@", comment: ""),
+                                  src.lastPathComponent,
+                                  ByteCountFormatter.string(fromByteCount: sent, countStyle: .file))
+            first = false
+            if data.count < Self.chunkBytes { break }
+        }
+    }
+
+#if os(macOS)
+    /// Drag-out: a lazy file representation that downloads on drop, so a
+    /// row can be dragged to the Finder, Mail, or any other app.
+    nonisolated static func dragProvider(for relPath: String, model: FileExplorerModel) -> NSItemProvider {
+        let provider = NSItemProvider()
+        let name = (relPath as NSString).lastPathComponent
+        let type = Self.dragType(forFileName: name)
+        // The receiver names the file suggestedName + the type's preferred
+        // extension — hand it an extension-less base.
+        provider.suggestedName = type.preferredFilenameExtension != nil
+            ? (name as NSString).deletingPathExtension : name
+        provider.registerFileRepresentation(forTypeIdentifier: type.identifier,
+                                            fileOptions: [], visibility: .all) { completion in
+            Task { @MainActor in
+                do { completion(try await model.download(relPath), false, nil) }
+                catch { completion(nil, false, error) }
+            }
+            return nil
+        }
+        return provider
+    }
+#endif
+
+    /// The type a dragged-out file travels as. The receiver names the copy
+    /// after the type's preferred extension, which for some types isn't the
+    /// file's own — ".yaml" is "yml" to the system, ".jpg" is "jpeg" — and
+    /// that renamed the copy. Such a file travels as plain data under its
+    /// full name instead; a file whose extension IS the preferred one keeps
+    /// its type, so images still drop into image wells.
+    nonisolated static func dragType(forFileName name: String) -> UTType {
+        let ext = (name as NSString).pathExtension
+        guard !ext.isEmpty, let declared = UTType(filenameExtension: ext),
+              declared.preferredFilenameExtension?.lowercased() == ext.lowercased()
+        else { return .data }
+        return declared
     }
 
     static func nulSeparatedStrings(_ data: Data.SubSequence) -> [String] {
@@ -392,7 +740,7 @@ final class FileExplorerModel {
     }
 
     private func loadDetail() async {
-        guard let root = repoRoot, let path = selectedPath else {
+        guard let root, let path = selectedPath else {
             detail = .none
             shownDetailKey = nil
             return
@@ -408,10 +756,14 @@ final class FileExplorerModel {
         let qpath = shellQuote(path)
         do {
             if detailMode == .diff && selectionHasDiff {
+                // In the file's own repository — the folder on show may not
+                // be one (the home, with the project unfolded in it).
+                let (qrepo, qfile) = statusOrigins[path].map { (shellQuote($0.repo), shellQuote($0.path)) }
+                    ?? (qroot, qpath)
                 // base64 for the same reason as refresh(): the diff body is
                 // whatever bytes the file contains.
                 let out = try await exec(
-                    "git -C \(qroot) diff HEAD --no-color --no-ext-diff -- \(qpath) " +
+                    "git -C \(qrepo) diff HEAD --no-color --no-ext-diff -- \(qfile) " +
                     "| head -c \(Self.maxDiffBytes) | base64 -w0")
                 guard generation == detailGeneration else { return }
                 let data = Data(base64Encoded: out.filter { !$0.isWhitespace }) ?? Data()

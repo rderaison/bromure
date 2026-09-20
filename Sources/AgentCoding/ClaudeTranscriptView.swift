@@ -106,6 +106,12 @@ enum ClaudeTranscriptParser {
             // content is either a bare string or an array of typed blocks.
             if let s = message["content"] as? String {
                 let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if type == "user", isLocalRecord(trimmed) {
+                    // `/clear` empties the conversation on screen; older
+                    // Claude Codes kept writing to the same file after it.
+                    if isClearCommand(trimmed) { items.removeAll() }
+                    continue
+                }
                 if !trimmed.isEmpty {
                     add(type == "user" ? .userText(trimmed) : .assistantText(trimmed))
                 }
@@ -118,6 +124,10 @@ enum ClaudeTranscriptParser {
                     let s = (block["text"] as? String ?? "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !s.isEmpty else { continue }
+                    if type == "user", isLocalRecord(s) {
+                        if isClearCommand(s) { items.removeAll() }
+                        continue
+                    }
                     add(type == "user" ? .userText(s) : .assistantText(s))
                 case "thinking":
                     let s = (block["thinking"] as? String ?? "")
@@ -162,6 +172,28 @@ enum ClaudeTranscriptParser {
             }
         }
         return items
+    }
+
+    /// Claude Code records what happened in the terminal as user turns
+    /// wrapped in its own tags — a slash command (`<command-name>`), what
+    /// it printed (`<local-command-stdout>`), a `!` shell line and its
+    /// output (`<bash-input>`, `<bash-stdout>`), plus the reminders it
+    /// slips in for the model (`<system-reminder>`). None of it is
+    /// something the user said; the chat has its own command card.
+    private static let localTags = [
+        "<command-name>", "<command-message>", "<command-args>",
+        "<local-command-stdout>", "<local-command-caveat>",
+        "<bash-input>", "<bash-stdout>", "<bash-stderr>",
+        "<system-reminder>",
+    ]
+    static func isLocalRecord(_ text: String) -> Bool {
+        localTags.contains { text.hasPrefix($0) }
+    }
+
+    /// The `/clear` record — the point where the conversation on screen
+    /// starts over.
+    static func isClearCommand(_ text: String) -> Bool {
+        text.contains("<command-name>/clear</command-name>")
     }
 
     /// The one-liner shown on a collapsed tool call — the command for shells,
@@ -947,6 +979,11 @@ struct ClaudeTranscriptPane: View {
 /// One transcript element. Prompts get a tinted bubble, assistant prose is
 /// plain text, thinking and tool traffic collapse behind disclosures so the
 /// narrative reads top-to-bottom without the plumbing in the way.
+/// Keys the composer's text area offers its host before acting on them
+/// itself, so a completion palette can take the arrows, Tab, Return and
+/// Escape (macOS; see ComposerTextView).
+enum ComposerKey { case up, down, tab, enter, escape }
+
 /// A modern chat composer, Codex-Desktop style: the text area rides on
 /// top, a slim utility bar with the key hint and the send control sits
 /// beneath it, all in one elevated rounded container that glows with the
@@ -955,6 +992,9 @@ struct ChatComposer: View {
     let placeholder: String
     @Binding var text: String
     var disabled = false
+    /// macOS: the text area takes the keyboard when it appears, unless
+    /// another control in the window already has it.
+    var autofocus = false
     var busy = false
     var accent: Color = .accentColor
     /// Allow sending with empty text (the beautified composer with pending
@@ -964,9 +1004,20 @@ struct ChatComposer: View {
     /// runaway turn can be interrupted without hunting for the hidden terminal.
     var working = false
     var onStop: () -> Void = {}
+    /// macOS: keys the text area offers the host before acting on them
+    /// itself — a "/" palette takes the arrows, Tab, Return and Escape.
+    var onKey: ((ComposerKey) -> Bool)? = nil
     let onSend: () -> Void
 
+    #if os(macOS)
+    // A real text view (see ComposerTextView): SwiftUI's vertical field
+    // stops re-wrapping once editing has begun and the pane changes width.
+    @State private var editorHeight: CGFloat = 24
+    @State private var editorFocused = false
+    private var focused: Bool { editorFocused }
+    #else
     @FocusState private var focused: Bool
+    #endif
 
     private var sendable: Bool {
         !disabled && !busy
@@ -976,6 +1027,13 @@ struct ChatComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            #if os(macOS)
+            ComposerTextView(text: $text, placeholder: placeholder, disabled: disabled,
+                             autofocus: autofocus, height: $editorHeight, focused: $editorFocused,
+                             onKey: onKey, onSubmit: { if sendable { onSend() } })
+                .frame(maxWidth: .infinity)
+                .frame(height: editorHeight)
+            #else
             TextField(placeholder, text: $text, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13.5))
@@ -985,6 +1043,7 @@ struct ChatComposer: View {
                 .onSubmit { if sendable { onSend() } }
                 .disabled(disabled)
                 .frame(minHeight: 22)
+            #endif
             HStack(spacing: 8) {
                 Text(working
                      ? NSLocalizedString("⎋ stop   ⏎ send", comment: "composer hint")
@@ -1031,12 +1090,45 @@ struct ChatComposer: View {
         .padding(.bottom, 10)
         .background(RoundedRectangle(cornerRadius: 14)
             .fill(Color.platformTextBackground)
-            .shadow(color: .black.opacity(0.10), radius: 6, y: 2))
+            .shadow(color: .black.opacity(0.04), radius: 8, y: 2))
         .overlay(RoundedRectangle(cornerRadius: 14)
             .strokeBorder(focused ? accent.opacity(0.55)
-                                  : Color.primary.opacity(0.12),
+                                  : Color.acHairline,
                           lineWidth: focused ? 1.5 : 1))
         .animation(.easeOut(duration: 0.12), value: focused)
+    }
+}
+
+/// The pictures of a user turn, inside its bubble: each at its own shape,
+/// no taller than a few lines of text, side by side and scrolling
+/// sideways when there are several.
+struct DropPictureStrip: View {
+    let images: [Data]
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(images.indices, id: \.self) { i in
+                    if let img = PlatformImage(data: images[i]) {
+                        picture(img)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: 360, maxHeight: 240)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.12)))
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func picture(_ img: PlatformImage) -> Image {
+        #if os(macOS)
+        Image(nsImage: img)
+        #else
+        Image(uiImage: img)
+        #endif
     }
 }
 
@@ -1328,6 +1420,11 @@ struct TranscriptQuestionBatchCard: View {
 
 struct TranscriptItemView: View {
     let item: TranscriptItem
+    /// Pictures shown inside a user turn's bubble, under its words (the
+    /// chat's dropped images), and the paths they stand for — left out of
+    /// the words, since the picture says it.
+    var attachments: [Data] = []
+    var hiddenPaths: [String] = []
     @Environment(\.colorScheme) private var colorScheme
 
     #if os(iOS) || os(visionOS)
@@ -1336,16 +1433,40 @@ struct TranscriptItemView: View {
     private static let userTextSize: CGFloat = 13
     #endif
 
+    /// `text` without `paths`, the whitespace around them folded.
+    static func withoutPaths(_ text: String, _ paths: [String]) -> String {
+        guard !paths.isEmpty else { return text }
+        var out = text
+        for p in paths { out = out.replacingOccurrences(of: p, with: "") }
+        return out.split(whereSeparator: \.isNewline)
+            .map { $0.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ") }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
     var body: some View {
         switch item.kind {
         case .userText(let text):
             // No role label — the filled card (against the assistant's plain
             // flowing prose) and the accent spine already read as "your turn",
             // the way Codex/Claude desktop distinguish input from output.
-            Text(text)
-                .font(.system(size: Self.userTextSize))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            // A task prompt shows the brief only — the operating notes the
+            // engine appends are plumbing, not conversation.
+            // A line the host typed for a delegation (a delegate asked,
+            // delivered…) is the host's aside, not the user's words.
+            if let notice = DelegationNotice.strip(text) {
+                DelegationNoticeRow(text: notice)
+            } else {
+                let words = Self.withoutPaths(CodingTask.displayPrompt(text), hiddenPaths)
+                VStack(alignment: .leading, spacing: 8) {
+                    if !words.isEmpty {
+                        Text(words)
+                            .font(.system(size: Self.userTextSize))
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !attachments.isEmpty { DropPictureStrip(images: attachments) }
+                }
                 .padding(.vertical, 10)
                 .padding(.horizontal, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1356,6 +1477,7 @@ struct TranscriptItemView: View {
                         .frame(width: 3)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
         case .assistantText(let text):
             assistantText(text)
         case .question(let q):
@@ -2316,19 +2438,22 @@ private struct CommandCard: View {
 private struct ShellLine: View {
     let command: String
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .top, spacing: 8) {
-                Text(verbatim: "$").foregroundStyle(TranscriptStyle.toolTint("bash"))
-                Text(command).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        // The copy button sits BESIDE the scroller, never over it: a long
+        // command scrolls under nothing.
+        HStack(alignment: .top, spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(verbatim: "$").foregroundStyle(TranscriptStyle.toolTint("bash"))
+                    Text(command).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.system(size: TranscriptStyle.monoSize, design: .monospaced))
+                .padding(.horizontal, 10).padding(.vertical, 8)
             }
-            .font(.system(size: TranscriptStyle.monoSize, design: .monospaced))
-            .padding(.horizontal, 10).padding(.vertical, 8)
-            .padding(.trailing, 22)          // clear of the copy button
+            #if os(macOS)
+            CopyButton(text: command).padding(.vertical, 6).padding(.trailing, 8)
+            #endif
         }
         .transcriptCard()
-        #if os(macOS)
-        .overlay(alignment: .topTrailing) { CopyButton(text: command).padding(6) }
-        #endif
     }
 }
 
@@ -2549,11 +2674,55 @@ private extension MarkdownUI.Theme {
                 .markdownMargin(top: .em(0.3), bottom: .em(0.85))
         }
         t = t.codeBlock { c in
-            TranscriptCodeFence(configuration: c, bodySize: bodySize)
-                .markdownMargin(top: .em(0.4), bottom: .em(0.85))
+            Group {
+                // A ```mermaid fence is a diagram, not code: render it with the
+                // bundled mermaid.js, falling back to the plain fence if it
+                // can't (no bundle on iOS, or a parse error).
+                if (c.language ?? "").trimmingCharacters(in: .whitespaces).lowercased() == "mermaid" {
+                    MermaidFence(source: c.content, bodySize: bodySize) {
+                        TranscriptCodeFence(configuration: c, bodySize: bodySize)
+                    }
+                } else {
+                    TranscriptCodeFence(configuration: c, bodySize: bodySize)
+                }
+            }
+            .markdownMargin(top: .em(0.4), bottom: .em(0.85))
+        }
+        // Tables: a card, not a spreadsheet — rows parted by hairlines, the
+        // header set off by a tint, cells with room around the words, one
+        // rounded border around the whole.
+        t = t.table { c in
+            c.label
+                .fixedSize(horizontal: false, vertical: true)
+                .markdownTableBorderStyle(.init(.insideHorizontalBorders,
+                                                color: Color.primary.opacity(0.10)))
+                .markdownTableBackgroundStyle(.alternatingRows(
+                    Color.clear, Color.primary.opacity(0.025),
+                    header: Color.primary.opacity(0.06)))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.14)))
+                .markdownMargin(top: .em(0.5), bottom: .em(0.9))
+        }
+        t = t.tableCell { c in
+            c.label
+                .markdownTextStyle {
+                    FontSize(bodySize * 0.95)
+                    if c.row == 0 { FontWeight(.semibold) }
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .relativeLineSpacing(.em(0.2))
+                .padding(.vertical, 7)
+                .padding(.horizontal, 12)
         }
         return t
     }
+}
+
+/// Internal accessor for the (private) reader theme, so the standalone
+/// snapshot hooks can render markdown exactly as the transcript does.
+func transcriptReaderTheme(bodySize: CGFloat, serif: Bool) -> MarkdownUI.Theme {
+    .claudeReader(bodySize: bodySize, serif: serif)
 }
 
 // MARK: - Syntax-highlighted code fences (beautified transcript)

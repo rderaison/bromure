@@ -263,6 +263,12 @@ Acquire::https::Proxy::$_proxy_host DIRECT;
 APTCONF
 fi
 
+# apt over IPv4 only, in the shipped image too: a LAN can hand the VM a
+# v6 address and route with no v6 egress behind them, and apt then sits
+# on a mirror's AAAA record until it times out, fetch after fetch.
+mkdir -p /etc/apt/apt.conf.d
+echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
+
 # Locales: the browser session locale plus en_US as the baseline.
 sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
 grep -q "^${LOCALE}.UTF-8" /etc/locale.gen || echo "${LOCALE}.UTF-8 UTF-8" >> /etc/locale.gen
@@ -672,6 +678,14 @@ done
 touch /mnt/etc/pihole/local.list /mnt/etc/pihole/custom.list
 install_config configs/pihole-setupVars.conf /mnt/etc/pihole/setupVars.conf
 install_config configs/dnsmasq-pihole.conf   /mnt/etc/dnsmasq.d/pihole.conf
+install_config configs/dnsmasq-upstream.conf /mnt/etc/dnsmasq.d/upstream.conf
+
+# dhclient exit-hook: re-assert the VPN NIC MTU after dhclient re-applies the
+# DHCP option-26 floor (1280) on every lease event. config-agent drops the
+# marker for VPN profiles; without this hook the higher MTU WARP/WireGuard/
+# OpenVPN/IKEv2 need is clobbered by dhclient. Sourced by dhclient-script.
+mkdir -p /mnt/etc/dhcp/dhclient-exit-hooks.d
+install_config configs/dhclient-exit-hook-vpn-mtu /mnt/etc/dhcp/dhclient-exit-hooks.d/bromure-vpn-mtu 644
 
 # Chromium policies
 mkdir -p /mnt/etc/chromium/policies/managed

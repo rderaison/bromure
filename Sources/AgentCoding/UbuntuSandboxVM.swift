@@ -239,6 +239,13 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
 
     /// CPU count for the runtime VM. RAM is per-profile (Profile.memoryGB).
     public static let runtimeCPUs: Int = 4
+    /// Per-VM vCPU override (Kubernetes node VMs size their own). nil = the
+    /// workspace default above.
+    public var cpuCountOverride: Int?
+    /// Extra raw disk images attached as additional virtio-blk devices after
+    /// the boot (and home) disks — a Kubernetes node's Longhorn data disk.
+    /// The guest sees them as /dev/vdb, /dev/vdc, … in this order.
+    public var extraDiskURLs: [URL] = []
 
     /// Session-less init for legacy callers. Boots base.img directly
     /// (no per-profile disk) — kept so tools / smoke tests still work.
@@ -291,7 +298,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
 
         let config = VZVirtualMachineConfiguration()
-        config.cpuCount = Self.runtimeCPUs
+        config.cpuCount = cpuCountOverride.map { max(1, min($0, VZVirtualMachineConfiguration.maximumAllowedCPUCount)) }
+            ?? Self.runtimeCPUs
         // Per-profile RAM. Default 8 GB if no profile (legacy CLI mode).
         let memGB = sessionDisk?.profile.memoryGB ?? 8
         config.memorySize = UInt64(memGB) * 1024 * 1024 * 1024
@@ -325,6 +333,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 url: session.homeImageURL, readOnly: false)
             config.storageDevices.append(
                 VZVirtioBlockDeviceConfiguration(attachment: homeAttachment))
+        }
+        for url in extraDiskURLs {
+            let attachment = try VZDiskImageStorageDeviceAttachment(url: url, readOnly: false)
+            config.storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: attachment))
         }
 
         let net = VZVirtioNetworkDeviceConfiguration()
@@ -455,24 +467,35 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             // - .virtiofs (legacy): the full persistent host-side home.
             // - .migrate: same — this boot's guest agent copies it into
             //   the blank home image, then mounts the image on top.
-            // - .ext4: a tiny bootstrap dir holding just the managed
-            //   .bash_profile. tty1's autologin shell sources it, which
-            //   installs/starts the guest agent even on a freshly-cloned
-            //   system disk (Reset Disk); the agent then mounts the ext4
-            //   image OVER /home/ubuntu, shadowing this share entirely.
-            let homeShareURL: URL
+            // - .ext4 on an image older than 201: a tiny bootstrap dir
+            //   holding just the managed .bash_profile. tty1's autologin
+            //   shell sources it, which installs/starts the guest agent
+            //   even on a freshly-cloned system disk (Reset Disk); the
+            //   agent then mounts the ext4 image OVER /home/ubuntu,
+            //   shadowing this share entirely.
+            // - .ext4 on an image that bakes the agent's unit: nothing.
+            //   systemd starts the agent from the meta share, the agent
+            //   mounts the home image over the system disk's empty
+            //   /home/ubuntu (fstab's nofail lets the missing tag pass),
+            //   and the home is one filesystem, not a virtiofs share with
+            //   an ext4 stacked on it.
+            let homeShareURL: URL?
             switch session.homeAttachMode {
             case .virtiofs, .migrate:
                 homeShareURL = session.homeDirectory
+            case .ext4 where imageManager.baseImageStartsAgentItself:
+                homeShareURL = nil
             case .ext4:
                 try session.prepareBootstrapHomeDirectory()
                 homeShareURL = session.bootstrapHomeDirectory
             }
-            let homeFS = VZVirtioFileSystemDeviceConfiguration(tag: "bromure-home")
-            homeFS.share = VZSingleDirectoryShare(
-                directory: VZSharedDirectory(url: homeShareURL, readOnly: false)
-            )
-            sharingDevices.append(homeFS)
+            if let homeShareURL {
+                let homeFS = VZVirtioFileSystemDeviceConfiguration(tag: "bromure-home")
+                homeFS.share = VZSingleDirectoryShare(
+                    directory: VZSharedDirectory(url: homeShareURL, readOnly: false)
+                )
+                sharingDevices.append(homeFS)
+            }
 
             // On restore, preserve directory inodes — see comments
             // in SessionDisk for why.

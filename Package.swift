@@ -78,12 +78,15 @@ let package = Package(
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
             ],
             path: "Sources/AgentCoding",
-            exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef"],
+            exclude: ["Info.plist", "BromureAC.entitlements", "BromureAC.sdef",
+                      // Vendored Highlightr's license text: not a source, not a resource.
+                      "Vendor/Highlightr/LICENSE"],
             resources: [.copy("Resources/vm-setup"), .copy("Resources/icons"),
                         .copy("Resources/ac"),
                         .copy("Resources/catalog.json"),
                         .copy("Resources/img-catalog.json"),
-                        .copy("Resources/highlightr")],
+                        .copy("Resources/highlightr"),
+                        .copy("Resources/mermaid")],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("OpenDirectory"),

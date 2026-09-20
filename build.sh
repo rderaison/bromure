@@ -42,6 +42,31 @@ if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
     "$SCRIPT_DIR/tools/build-ghostty.sh"
 fi
 
+# Force SwiftPM to regenerate resource bundles from current source.
+# `swift build` recompiles the binary but does NOT reliably re-copy changed
+# resource FILES into a target's .bundle when only resources changed (or a
+# git checkout reset their mtimes) — it leaves whatever the bundle already
+# held. Editing vm-setup guest scripts (config-agent.py, dnsmasq configs,
+# bromure-hostkey, …) then building would ship a stale bundle: binary fresh,
+# guest scripts days old. A `bromure init` bake reads those scripts, so the
+# image silently lacks the fixes. Deleting the bundles first makes the copy
+# step re-run (SPM recreates a missing resource bundle from source). Matters
+# most on a warm build-server cache, where this trap is otherwise invisible.
+# Xcode 26 / Swift 6.4 made the `swiftbuild` backend the default; it dies in
+# macro packages with "unable to open dependencies file (…-primary.d)"
+# (seen in Jinja and MLXHuggingFaceMacros) and tries to compile MLX's Metal
+# kernels. The native backend does neither and keeps the
+# .build/arm64-apple-macosx cache this script (and package.sh) rely on.
+SWIFT_BUILD_SYSTEM="${SWIFT_BUILD_SYSTEM:-native}"
+swift_build() {
+    swift build --build-system "$SWIFT_BUILD_SYSTEM" "$@"
+}
+
+BUILD_DIR=$(swift_build -c release --arch arm64 --show-bin-path 2>/dev/null || true)
+if [ -n "$BUILD_DIR" ]; then
+    rm -rf "$BUILD_DIR"/*.bundle 2>/dev/null || true
+fi
+
 # Build the requested product in release mode.
 # Dev-loop build: disable whole-module optimization so files compile in
 # parallel across all cores instead of one long single-core job per module
@@ -49,10 +74,10 @@ fi
 # which is fine here — package.sh does its own WMO build for shipped
 # binaries. Note the flag difference means alternating build.sh/package.sh
 # invalidates the shared .build cache and triggers a full rebuild.
-swift build -c release --arch arm64 --product "$PRODUCT_NAME" \
+swift_build -c release --arch arm64 --product "$PRODUCT_NAME" \
     -Xswiftc -no-whole-module-optimization 2>&1
 
-BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
+BUILD_DIR=$(swift_build -c release --arch arm64 --show-bin-path 2>/dev/null)
 BINARY="$BUILD_DIR/$PRODUCT_NAME"
 
 if [ ! -f "$BINARY" ]; then
@@ -60,7 +85,21 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
-echo "Binary built at: $BINARY"
+# The Mach-O must carry the SDK it was built against (LC_BUILD_VERSION
+# "sdk"). A binary stamped with the deployment target instead (14.0) makes
+# AppKit on macOS 26 render the legacy look — grey window fill, taller
+# title bar, no glass. That happens when the toolchain's swift is run
+# outside its Xcode context (no DEVELOPER_DIR / xcrun); going through
+# /usr/bin/swift, as this script does, records the real SDK (27.0 today).
+SDK_STAMP=$(otool -l "$BINARY" | awk '/LC_BUILD_VERSION/{f=1} f && /^ *sdk /{print $2; exit}')
+MINOS_STAMP=$(otool -l "$BINARY" | awk '/LC_BUILD_VERSION/{f=1} f && /^ *minos /{print $2; exit}')
+if [ -z "$SDK_STAMP" ] || [ "$SDK_STAMP" = "$MINOS_STAMP" ]; then
+    echo "ERROR: $BINARY is stamped sdk=${SDK_STAMP:-?} (deployment target ${MINOS_STAMP:-?}):" >&2
+    echo "       it would get the legacy AppKit look. Build through /usr/bin/swift (xcrun context)." >&2
+    exit 1
+fi
+
+echo "Binary built at: $BINARY (SDK $SDK_STAMP, min macOS $MINOS_STAMP)"
 
 # Signing identity: use CODESIGN_IDENTITY env var, or fall back to ad-hoc (-)
 SIGN_ID="${CODESIGN_IDENTITY:--}"
