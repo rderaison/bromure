@@ -813,10 +813,34 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The tab's native terminal surface, for the inline card (nil when the
     /// pane has none — a fat-client mirror, say).
     var inlineTerminal: (() -> NSView?)?
+    /// The tmux session behind the inline surface (a "view-…" grouped
+    /// session of its own), so tmux's mouse mode can go on for that view
+    /// alone while the terminal is inline — the wheel and clicks then act
+    /// in the TUI on show — and off again when it folds.
+    var inlineTerminalSession: (() -> String?)?
+
+    private func setInlineMouse(_ on: Bool) {
+        guard let name = inlineTerminalSession?() else { return }
+        let quoted = "'" + name.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        Task { [weak self] in
+            _ = await self?.provider.execGuest(
+                "tmux set-option -t \(quoted) mouse \(on ? "on" : "off") 2>/dev/null; true", timeout: 10)
+        }
+    }
+
+    /// The TUI's menu is still up as its card goes away or folds: close it
+    /// there too (Esc, which every TUI honours), so the chat and the agent
+    /// agree on where the conversation stands.
+    private func closeTUIMenuIfOpen(_ out: CommandOutput?) {
+        guard let out, out.live || out.menu else { return }
+        Task { [weak self] in await self?.provider.pressKeys(["Escape"]) }
+    }
 
     func dismissCommandOutput() {
         commandWatch?.cancel(); commandWatch = nil
         liveWatch?.cancel(); liveWatch = nil
+        closeTUIMenuIfOpen(commandOutput)
+        if commandOutput?.live == true { setInlineMouse(false) }
         if commandOutput != nil {
             withAnimation(.easeOut(duration: 0.15)) { commandOutput = nil }
         }
@@ -828,7 +852,14 @@ final class BeautifiedSessionModel: ObservableObject {
         out.live.toggle()
         commandWatch?.cancel(); commandWatch = nil
         withAnimation(.easeOut(duration: 0.15)) { commandOutput = out }
-        if out.live { watchLive(out.command) } else { liveWatch?.cancel(); liveWatch = nil }
+        setInlineMouse(out.live)
+        if out.live {
+            watchLive(out.command)
+        } else {
+            liveWatch?.cancel(); liveWatch = nil
+            // Folded by hand with the menu still up: the agent would sit in it.
+            closeTUIMenuIfOpen(out)
+        }
     }
 
     private func watchCommand(_ command: String, before: String?) {
@@ -853,6 +884,7 @@ final class BeautifiedSessionModel: ObservableObject {
                     if out.menu, self.inlineTerminal != nil {
                         out.live = true
                         withAnimation(.easeOut(duration: 0.15)) { self.commandOutput = out }
+                        self.setInlineMouse(true)
                         self.watchLive(command)
                         return
                     }
@@ -898,6 +930,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 out.live = false
                 out.menu = false
                 out.settled = true
+                self.setInlineMouse(false)
                 out.lines = Self.commandLines(screen, excluding: self.commandBaseline, command: command)
                 withAnimation(.easeOut(duration: 0.15)) { self.commandOutput = out }
                 return

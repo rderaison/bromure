@@ -231,6 +231,11 @@ final class TerminalSessionController {
     /// sanitization in bromure-agentd's `_view_attach_command`).
     private func viewName(forWindow index: Int) -> String { "v\(viewToken)w\(index)" }
 
+    /// The guest tmux session a window's surface is attached as ("view-…"),
+    /// for options set on that one view — tmux's mouse mode while the
+    /// surface sits inline in the chat, say.
+    func tmuxSessionName(forWindow index: Int) -> String { "view-" + viewName(forWindow: index) }
+
     private func startSizeAuthorityEngineIfNeeded() {
         guard authorityTimer == nil else { return }
         let timer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] timer in

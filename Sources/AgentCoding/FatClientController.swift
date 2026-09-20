@@ -4923,6 +4923,9 @@ final class RemoteHostWindow: NSWindow {
                 }()
                 return ctl.view(forWindow: w)
             }
+            m.inlineTerminalSession = { [weak self] in
+                self?.termControllers[id]?.tmuxSessionName(forWindow: w)
+            }
         }
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))

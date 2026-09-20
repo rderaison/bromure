@@ -531,6 +531,9 @@ final class SessionPane {
             }
             return self.terminalController?.view(forWindow: windowIndex)
         }
+        m.inlineTerminalSession = { [weak self] in
+            self?.terminalController?.tmuxSessionName(forWindow: windowIndex)
+        }
         let tab = model.tabs[model.activeIndex]
         // Which agent's commands: the session's own tool, else the tab's
         // label, else the workspace's main agent — the palette always has
