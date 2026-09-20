@@ -2593,6 +2593,8 @@ final class RemoteHostWindow: NSWindow {
                 terminalDefaults: TerminalAppDefaults.load(),
                 storageContext: nil,
                 remoteCredentialRefs: credentialRefs,
+                siblingWorkspaces: controller.profiles.filter { $0.id != profile.id }
+                    .map { WorkspaceRef(id: $0.id, name: $0.name) },
                 // Subscription registration works remotely: the throwaway VM
                 // and credential store stay on the remote, while the sign-in
                 // page opens in THIS Mac's browser and the OAuth callback
@@ -2816,6 +2818,7 @@ final class RemoteHostWindow: NSWindow {
             isNew: true,
             terminalDefaults: TerminalAppDefaults.load(),
             storageContext: nil,
+            siblingWorkspaces: controller.profiles.map { WorkspaceRef(id: $0.id, name: $0.name) },
             onSave: { [weak self] edited, generateSSH in
                 self?.createWorkspaceFromEditor(edited, generateSSH: generateSSH)
             },
@@ -3383,6 +3386,12 @@ final class RemoteHostWindow: NSWindow {
             close: { [weak self] id in self?.controller.sessionCommand(id, "close") },
             rename: { [weak self] id, title in
                 self?.controller.sessionCommand(id, "rename", body: ["title": title])
+            },
+            setNickname: { [weak self] id, nick in
+                // The server checks uniqueness; a refusal shows on the next poll
+                // (the name simply doesn't take).
+                self?.controller.sessionCommand(id, "nickname", body: ["nickname": nick])
+                return nil
             },
             resumeWith: { [weak self] id, text in
                 self?.controller.sessionCommand(id, "resume", body: ["message": text])
@@ -4974,6 +4983,14 @@ final class RemoteHostWindow: NSWindow {
             }
         }
         m.openSession = { [weak self] sid in self?.selectSession(sid) }
+        m.workspaceName = { [weak controller] pid in controller?.profile(for: pid)?.name ?? "" }
+        m.peerMentions = { [weak controller] in
+            guard let c = controller else { return [] }
+            return c.sessionStore.sessions
+                .filter { $0.nickname != nil && !$0.isDeleted && !$0.isArchived }
+                .map { PeerMention(nick: $0.nickname ?? "", title: $0.title,
+                                   workspace: c.profile(for: $0.profileID)?.name ?? "") }
+        }
         // The "/" palette and the composer's name: the tab's agent, else the
         // workspace's main one (the label reads "bash" for agents under an
         // interpreter).

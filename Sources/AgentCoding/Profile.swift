@@ -1590,6 +1590,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// disk was clonefile()'d from base.img. Used to detect when the base
     /// has been rebuilt since the clone (so we can offer to reset).
     public var baseImageVersionAtClone: String?
+    /// Which workspaces agents here may reach — delegate work into, ask a
+    /// session of by @nickname. nil = every workspace (the default); a list
+    /// names the only ones (empty = none but this one).
+    public var agentReach: [UUID]?
 
     /// Visual color in the picker sidebar. Optional in JSON for forward
     /// compat — older profile files don't have this field.
@@ -1826,6 +1830,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
         baseImageVersionAtClone: String? = nil,
+        agentReach: [UUID]? = nil,
         color: ProfileColor = .blue,
         comments: String = "",
         memoryGB: Int = Profile.defaultMemoryGB(),
@@ -1908,6 +1913,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.baseImageVersionAtClone = baseImageVersionAtClone
+        self.agentReach = agentReach
         self.color = color
         self.comments = comments
         self.memoryGB = memoryGB
@@ -1941,7 +1947,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case ompProvider, ompBaseURL, ompModel
         case folderPath  // legacy: single folder, migrated to folderPaths
         case folderPaths
-        case createdAt, lastUsedAt, baseImageVersionAtClone, color, comments
+        case createdAt, lastUsedAt, baseImageVersionAtClone, agentReach, color, comments
         case memoryGB, nativeTerminal, gitUserName, gitUserEmail, importedConfigFiles
         case useTerminalAppDefaults, customFontFamily, customFontSize
         case customBackgroundHex, customForegroundHex, fontLigatures
@@ -2024,6 +2030,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         createdAt       = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         lastUsedAt      = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         baseImageVersionAtClone = try c.decodeIfPresent(String.self, forKey: .baseImageVersionAtClone)
+        agentReach      = try c.decodeIfPresent([UUID].self, forKey: .agentReach)
         color           = try c.decodeIfPresent(ProfileColor.self, forKey: .color) ?? .blue
         comments        = try c.decodeIfPresent(String.self, forKey: .comments) ?? ""
         memoryGB        = try c.decodeIfPresent(Int.self, forKey: .memoryGB) ?? 8
@@ -2135,6 +2142,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(createdAt, forKey: .createdAt)
         try c.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)
         try c.encodeIfPresent(baseImageVersionAtClone, forKey: .baseImageVersionAtClone)
+        try c.encodeIfPresent(agentReach, forKey: .agentReach)
         try c.encode(color, forKey: .color)
         try c.encode(comments, forKey: .comments)
         try c.encode(memoryGB, forKey: .memoryGB)

@@ -100,6 +100,9 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// delegation the two share.
     var parentSessionID: UUID?
     var delegationID: UUID?
+    /// The name agents and the composer reach this session by ("@nick"):
+    /// set by the user, unique on this host, stored without the "@".
+    var nickname: String?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -227,6 +230,35 @@ final class AgentSessionStore {
               sessions[i].isArchived != archived else { return }
         sessions[i].archivedAt = archived ? now : nil
         save()
+    }
+
+    /// Give a session the name agents and the composer reach it by
+    /// ("@nick"); nil or nothing usable clears it. Refuses a name another
+    /// session holds — the reason, else nil.
+    @discardableResult
+    func setNickname(_ id: UUID, _ raw: String?) -> String? {
+        guard let i = sessions.firstIndex(where: { $0.id == id }) else {
+            return NSLocalizedString("Unknown session.", comment: "nickname")
+        }
+        guard let raw, let nick = DelegationNotice.normalizeNickname(raw) else {
+            sessions[i].nickname = nil
+            save()
+            return nil
+        }
+        if let other = sessions.first(where: {
+            $0.id != id && !$0.isDeleted && $0.nickname?.lowercased() == nick.lowercased()
+        }) {
+            return String(format: NSLocalizedString("@%@ is already “%@”.", comment: "nickname"), nick, other.title)
+        }
+        sessions[i].nickname = nick
+        save()
+        return nil
+    }
+
+    /// The session called "@nick", if any (case-insensitive).
+    func session(nickname: String) -> AgentSession? {
+        guard let nick = DelegationNotice.normalizeNickname(nickname)?.lowercased() else { return nil }
+        return sessions.first { !$0.isDeleted && $0.nickname?.lowercased() == nick }
     }
 
     /// Mark a session deleted: gone from every list now, purged once its
@@ -996,6 +1028,13 @@ struct SessionRowView: View {
                     }
                 }
                 HStack(spacing: 4) {
+                    if let nick = session.nickname, !nick.isEmpty {
+                        Text("@" + nick)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Color.accentColor)
+                            .lineLimit(1)
+                        Text("·").foregroundStyle(.tertiary)
+                    }
                     if !workspaceName.isEmpty {
                         RoundedRectangle(cornerRadius: 1.5)
                             .fill(Color(hex: accentHex))
@@ -1050,15 +1089,19 @@ struct SessionSectionsView: View {
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
     /// The session a "New worktree…" sheet is open for.
     @State private var worktreeFor: AgentSession?
+    /// The session a "Nickname…" sheet is open for.
+    @State private var nicknameFor: AgentSession?
 
     private var matching: [AgentSession] {
         var sessions = store.sessions
         let q = filter.trimmingCharacters(in: .whitespaces)
         if !q.isEmpty {
+            let bare = q.hasPrefix("@") ? String(q.dropFirst()) : q
             sessions = sessions.filter {
                 $0.title.localizedCaseInsensitiveContains(q)
                     || ($0.openingMessage ?? "").localizedCaseInsensitiveContains(q)
                     || $0.cwd.localizedCaseInsensitiveContains(q)
+                    || (!bare.isEmpty && ($0.nickname ?? "").localizedCaseInsensitiveContains(bare))
             }
         }
         return sessions
@@ -1156,6 +1199,9 @@ struct SessionSectionsView: View {
         }
         .onAppear { revealSelectedArchived(model.selectedSessionID) }
         .onChange(of: model.selectedSessionID) { _, id in revealSelectedArchived(id) }
+        .sheet(item: $nicknameFor) { s in
+            NicknameSheet(session: s) { actions.setNickname(s.id, $0) }
+        }
         .sheet(item: $worktreeFor) { parent in
             NewWorktreeSheet(parent: parent) { name, tool, message in
                 actions.newWorktree(parent.id, name, tool, message)
@@ -1218,8 +1264,9 @@ struct SessionSectionsView: View {
                 if s.windowIndex != nil, !s.hasEnded {
                     Button(NSLocalizedString("End session", comment: "session menu")) { actions.close(s.id) }
                 }
+                Divider()
+                Button(NSLocalizedString("Nickname…", comment: "session menu")) { nicknameFor = s }
                 if SessionHome.hasFolder(s) {
-                    Divider()
                     Button(NSLocalizedString("New worktree…", comment: "session menu")) { worktreeFor = s }
                 }
             } else if s.isArchived {

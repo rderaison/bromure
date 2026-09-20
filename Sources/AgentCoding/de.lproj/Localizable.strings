@@ -2295,3 +2295,23 @@
 "steered" = "hat nachgesteuert";
 "withheld — prompt injection" = "zurückgehalten – Prompt-Injection";
 "relayed" = "weitergeleitet";
+
+/* Agents across workspaces: nicknames, requests to peers, the reach policy */
+"@%@ is already “%@”." = "@%@ heißt bereits „%@“.";
+"Agents in this workspace can hand work to agents elsewhere (a delegation runs in the other workspace) and ask a session there by its @nickname; files travel along. Which workspaces they may reach:" = "Agenten in diesem Workspace können Arbeit an Agenten anderswo übergeben (die Delegation läuft im anderen Workspace) und eine dortige Sitzung über ihren @Spitznamen fragen; Dateien reisen mit. Welche Workspaces sie erreichen dürfen:";
+"Delegated by %@" = "Delegiert von %@";
+"How agents and the composer reach this session" = "So erreichen Agenten und der Editor diese Sitzung";
+"How other agents reach “%@”: they ask it with request(to: \"@name\"), and you can write @name in any composer. Letters, digits, dots, dashes and underscores." = "So erreichen andere Agenten „%@“: Sie fragen es mit request(to: \"@name\"), und Sie können @name in jedem Editor schreiben. Buchstaben, Ziffern, Punkte, Binde- und Unterstriche.";
+"Nickname" = "Spitzname";
+"Nickname…" = "Spitzname…";
+"No other workspace yet — agents here can only reach each other." = "Noch kein anderer Workspace – Agenten hier erreichen nur einander.";
+"Open the peer's session" = "Sitzung des Gegenübers öffnen";
+"Reach" = "Reichweite";
+"Request from %@" = "Anfrage von %@";
+"Set" = "Festlegen";
+"Show requester" = "Anfragenden anzeigen";
+"Unknown session." = "Unbekannte Sitzung.";
+"Will be @%@" = "Wird @%@";
+"e.g. seclio" = "z. B. seclio";
+"request" = "Anfrage";
+"sessions with a nickname" = "Sitzungen mit Spitznamen";

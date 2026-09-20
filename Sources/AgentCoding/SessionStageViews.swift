@@ -21,6 +21,9 @@ struct SessionStageActions {
     var resume: (UUID) -> Void = { _ in }
     var close: (UUID) -> Void = { _ in }
     var rename: (UUID, String) -> Void = { _, _ in }
+    /// Give the session the name agents reach it by ("@nick"; empty
+    /// clears). Returns why not, or nil.
+    var setNickname: (UUID, String) -> String? = { _, _ in nil }
     /// Resume and say this — wakes the machine and the agent if need be.
     var resumeWith: (UUID, String) -> Void = { _, _ in }
     var forget: (UUID) -> Void = { _ in }
@@ -109,6 +112,7 @@ struct SessionHeaderView: View {
     @State private var renaming = false
     @State private var draftTitle = ""
     @State private var worktreeSheet = false
+    @State private var nicknameSheet = false
 
     private var session: AgentSession? { model.selectedSessionID.flatMap { store.session($0) } }
 
@@ -145,8 +149,16 @@ struct SessionHeaderView: View {
                                 }
                                 .help(gone ? "" : NSLocalizedString("Double-click to rename", comment: "session header"))
                         }
-                        // One quiet line: status · agent · machine · folder.
+                        // One quiet line: @nick · status · agent · machine · folder.
                         HStack(spacing: 7) {
+                            if let nick = s.nickname, !nick.isEmpty {
+                                Text("@" + nick)
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(Color.accentColor)
+                                    .fixedSize()
+                                    .help(NSLocalizedString("How agents and the composer reach this session", comment: "session header"))
+                                metaDot
+                            }
                             HStack(spacing: 5) {
                                 if let st = SessionHome.dot(for: s, in: model) {
                                     AgentStatusDot(status: st).scaleEffect(1.15)   // breathes while working
@@ -228,6 +240,7 @@ struct SessionHeaderView: View {
                             Button(NSLocalizedString("Rename…", comment: "session menu")) {
                                 draftTitle = s.title; renaming = true
                             }
+                            Button(NSLocalizedString("Nickname…", comment: "session menu")) { nicknameSheet = true }
                             if s.isArchived {
                                 Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
                             } else {
@@ -293,6 +306,9 @@ struct SessionHeaderView: View {
             .overlay(alignment: .bottom) { Divider().opacity(0.6) }
             .onChange(of: live) { _, _ in actions.represent(s.id) }
             .onChange(of: bucket) { _, _ in actions.represent(s.id) }
+            .sheet(isPresented: $nicknameSheet) {
+                NicknameSheet(session: s) { actions.setNickname(s.id, $0) }
+            }
             .sheet(isPresented: $worktreeSheet) {
                 NewWorktreeSheet(parent: s) { name, tool, message in
                     actions.newWorktree(s.id, name, tool, message)
@@ -1127,6 +1143,79 @@ struct NewSessionView: View {
 /// wt/<slug>), the agent to run there, an optional opening message. The
 /// guest branches the session's folder at its current commit into
 /// ~/.bromure/worktrees/<repo>/<slug> and the new session starts there.
+/// "Nickname…": the name other agents (and the composer's @ palette) reach
+/// this session by. Letters, digits, dots, dashes, underscores; unique on
+/// this host. Empty clears it.
+struct NicknameSheet: View {
+    let session: AgentSession
+    /// Returns why the name was refused, or nil once it's set.
+    let onSet: (String) -> String?
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @State private var error: String?
+    @FocusState private var focused: Bool
+
+    init(session: AgentSession, onSet: @escaping (String) -> String?) {
+        self.session = session
+        self.onSet = onSet
+        _name = State(initialValue: session.nickname ?? "")
+    }
+
+    private var normalized: String? { DelegationNotice.normalizeNickname(name) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(NSLocalizedString("Nickname", comment: "nickname sheet"))
+                    .font(.system(size: 15, weight: .semibold))
+                Text(String(format: NSLocalizedString("How other agents reach “%@”: they ask it with request(to: \"@name\"), and you can write @name in any composer. Letters, digits, dots, dashes and underscores.", comment: "nickname sheet"),
+                            session.title))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 6) {
+                Text("@")
+                    .font(.system(size: 14, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                TextField(NSLocalizedString("e.g. seclio", comment: "nickname sheet"), text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13, design: .monospaced))
+                    .focused($focused)
+                    .onSubmit { save() }
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11.5)).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let n = normalized, n != name.trimmingCharacters(in: .whitespaces) {
+                Text(String(format: NSLocalizedString("Will be @%@", comment: "nickname sheet"), n))
+                    .font(.system(size: 11)).foregroundStyle(.tertiary)
+            }
+            HStack {
+                if session.nickname != nil {
+                    Button(NSLocalizedString("Clear", comment: "nickname sheet")) {
+                        _ = onSet(""); dismiss()
+                    }
+                }
+                Spacer()
+                Button(NSLocalizedString("Cancel", comment: "")) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(NSLocalizedString("Set", comment: "nickname sheet")) { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(normalized == nil)
+            }
+        }
+        .padding(18)
+        .frame(width: 420)
+        .onAppear { focused = true }
+    }
+
+    private func save() {
+        guard normalized != nil else { return }
+        if let why = onSet(name) { error = why } else { dismiss() }
+    }
+}
+
 struct NewWorktreeSheet: View {
     let parent: AgentSession
     let onCreate: (String, Profile.Tool, String?) -> Void

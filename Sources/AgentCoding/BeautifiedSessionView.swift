@@ -367,6 +367,10 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The user answers a delegate's question on the agent's behalf:
     /// (delegation, ask, text). nil = read-only (a mirror).
     var answerDelegation: ((UUID, UUID, String) -> Void)?
+    /// A workspace's name, for the panel (a delegate elsewhere).
+    var workspaceName: ((UUID) -> String)?
+    /// The sessions with a nickname, for the composer's "@" palette.
+    var peerMentions: (() -> [PeerMention])?
 
     var accent: Color { provider.accent }
 
@@ -1100,7 +1104,31 @@ struct BeautifiedSessionView: View {
         guard t.hasPrefix("/"), !t.contains(" "), !t.contains("\n") else { return nil }
         return String(t.dropFirst())
     }
+    /// "@…" being typed as the last word: the sessions with a nickname
+    /// that match, for the composer to complete ("Ask @seclio to…"). Never
+    /// inside a slash command; gone once the word is closed with a space.
+    private var mentionQuery: String? {
+        let t = model.composerText
+        guard !t.hasPrefix("/"), !t.isEmpty, model.peerMentions != nil else { return nil }
+        let word = t[Self.lastWordStart(of: t)...]
+        guard word.hasPrefix("@") else { return nil }
+        return String(word.dropFirst())
+    }
+    private static func lastWordStart(of t: String) -> String.Index {
+        t.lastIndex(where: { $0 == " " || $0.isNewline }).map { t.index(after: $0) } ?? t.startIndex
+    }
+    private var mentionMatches: [SlashCommand] {
+        guard let q = mentionQuery?.lowercased(), let peers = model.peerMentions?() else { return [] }
+        return peers
+            .filter { q.isEmpty || $0.nick.lowercased().hasPrefix(q) }
+            .sorted { $0.nick.lowercased() < $1.nick.lowercased() }
+            .map { SlashCommand(name: $0.nick,
+                                description: $0.title + ($0.workspace.isEmpty ? "" : " · " + $0.workspace),
+                                source: .builtIn) }
+    }
+    private var mentionMode: Bool { paletteQuery == nil && mentionQuery != nil }
     private var paletteCommands: [SlashCommand] {
+        if mentionMode { return mentionMatches }
         guard let q = paletteQuery, !model.slashCommands.isEmpty else { return [] }
         return SlashCommandCatalog.matches(q, in: model.slashCommands)
     }
@@ -1112,8 +1140,14 @@ struct BeautifiedSessionView: View {
 
     /// Put the command into the composer. One that takes text gets a trailing
     /// space (the palette closes, the user types on); a bare one stays exact
-    /// so ↩ sends it.
+    /// so ↩ sends it. A mention replaces the "@…" being typed, plus a space
+    /// to go on with the sentence.
     private func complete(_ c: SlashCommand) {
+        if mentionMode {
+            let t = model.composerText
+            model.composerText = String(t[..<Self.lastWordStart(of: t)]) + "@" + c.name + " "
+            return
+        }
         model.composerText = "/" + c.name + (c.takesArgument ? " " : "")
     }
 
@@ -1133,11 +1167,20 @@ struct BeautifiedSessionView: View {
             guard paletteVisible, let c = paletteCurrent else { return false }
             complete(c); return true
         case .enter:
-            guard paletteVisible, let c = paletteCurrent, c.name != paletteQuery else { return false }
+            guard paletteVisible, let c = paletteCurrent else { return false }
+            if mentionMode { complete(c); return true }
+            guard c.name != paletteQuery else { return false }
             complete(c); return true
         case .escape:
             guard paletteVisible else { return false }
-            model.composerText = ""; return true
+            if mentionMode {
+                // Drop just the "@…" being typed; the sentence stays.
+                let t = model.composerText
+                model.composerText = String(t[..<Self.lastWordStart(of: t)])
+            } else {
+                model.composerText = ""
+            }
+            return true
         }
     }
 
@@ -1153,19 +1196,25 @@ struct BeautifiedSessionView: View {
             if let store = model.delegationStore, let me = model.currentSession?() {
                 DelegationPanel(store: store, sessions: model.sessionStore, session: me,
                                 accent: model.accent,
+                                workspaceName: model.workspaceName,
                                 open: { model.openSession?($0) },
                                 answer: model.answerDelegation)
             }
             if paletteVisible {
                 SlashCommandPalette(
                     commands: paletteCommands,
-                    agentName: model.agentDisplayName,
+                    agentName: mentionMode
+                        ? NSLocalizedString("sessions with a nickname", comment: "mention palette")
+                        : model.agentDisplayName,
                     highlighted: paletteIndex,
                     onPick: { c in
+                        let mention = mentionMode
                         complete(c)
-                        if !c.takesArgument { model.send() }
+                        if !mention && !c.takesArgument { model.send() }
                     },
-                    onHover: { paletteIndex = $0 })
+                    onHover: { paletteIndex = $0 },
+                    prefix: mentionMode ? "@" : "/",
+                    title: mentionMode ? NSLocalizedString("Sessions", comment: "mention palette") : nil)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -2104,6 +2153,8 @@ struct DelegationPanel: View {
     let sessions: AgentSessionStore?
     let session: AgentSession
     let accent: Color
+    /// A workspace's name — a delegate or peer elsewhere says where it is.
+    let workspaceName: ((UUID) -> String)?
     let open: (UUID) -> Void
     /// nil = read-only (a fat client's mirror).
     let answer: ((UUID, UUID, String) -> Void)?
@@ -2112,13 +2163,13 @@ struct DelegationPanel: View {
 
     var body: some View {
         let mine = store.delegations(parent: session.id)
-        let asChild = store.delegation(child: session.id)
-        if mine.isEmpty && asChild == nil {
+        let asChild = store.openAsChild(session.id)
+        if mine.isEmpty && asChild.isEmpty {
             EmptyView()
         } else {
             VStack(spacing: 0) {
                 Divider().opacity(0.5)
-                if let d = asChild { delegateStrip(d) }
+                ForEach(asChild) { delegateStrip($0) }
                 if !mine.isEmpty { delegatorList(mine) }
             }
             .background(Color.platformTextBackground)
@@ -2127,19 +2178,37 @@ struct DelegationPanel: View {
 
     // MARK: Delegate: whom I answer to
 
+    /// "@nick" or “title” for the other end of a delegation.
+    private func who(_ sessionID: UUID, label: String?) -> String {
+        if let label, !label.isEmpty { return label }
+        if let t = title(of: sessionID) { return "“\(t)”" }
+        return NSLocalizedString("another session", comment: "delegation panel")
+    }
+
     private func delegateStrip(_ d: Delegation) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "arrow.triangle.branch")
+            Image(systemName: d.isRequest ? "bubble.left.and.text.bubble.right" : "arrow.triangle.branch")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text(String(format: NSLocalizedString("Delegated by “%@”", comment: "delegation panel"),
-                        title(of: d.parentSessionID)
-                            ?? NSLocalizedString("another session", comment: "delegation panel")))
+            Text(d.isRequest
+                 ? String(format: NSLocalizedString("Request from %@", comment: "delegation panel"),
+                          who(d.parentSessionID, label: d.parentLabel))
+                 : String(format: NSLocalizedString("Delegated by %@", comment: "delegation panel"),
+                          who(d.parentSessionID, label: d.parentLabel)))
                 .font(.system(size: 11.5, weight: .medium))
                 .lineLimit(1)
+            if d.isRequest {
+                Text(DelegationNotice.oneLine(d.brief, max: 120))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
             statusPill(d)
             Spacer(minLength: 0)
-            Button(NSLocalizedString("Show delegator", comment: "delegation panel")) { open(d.parentSessionID) }
+            Button(d.isRequest
+                   ? NSLocalizedString("Show requester", comment: "delegation panel")
+                   : NSLocalizedString("Show delegator", comment: "delegation panel")) { open(d.parentSessionID) }
                 .buttonStyle(.link)
                 .font(.system(size: 11))
         }
@@ -2211,14 +2280,30 @@ struct DelegationPanel: View {
             HStack(spacing: 8) {
                 AgentAvatar(tool: child?.tool ?? session.tool, size: 20, status: dot(d))
                 Button { open(d.childSessionID) } label: {
-                    Text(d.title)
+                    Text(d.isRequest ? (d.childLabel ?? d.title) : d.title)
                         .font(.system(size: 12, weight: .medium))
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
                 .buttonStyle(.plain)
-                .help(NSLocalizedString("Open the delegate's session", comment: "delegation panel"))
+                .help(d.isRequest
+                      ? NSLocalizedString("Open the peer's session", comment: "delegation panel")
+                      : NSLocalizedString("Open the delegate's session", comment: "delegation panel"))
+                if d.isRequest {
+                    Text(NSLocalizedString("request", comment: "delegation panel tag"))
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5).padding(.vertical, 1.5)
+                        .background(Capsule().fill(Color.primary.opacity(0.07)))
+                }
                 statusPill(d)
+                if let pid = child?.profileID, pid != session.profileID,
+                   let ws = workspaceName?(pid), !ws.isEmpty {
+                    Text(ws)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 0)
                 if let b = child?.worktreeBranch, !b.isEmpty {
                     Text(b)
@@ -2245,6 +2330,7 @@ struct DelegationPanel: View {
         .padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
         .opacity(d.status.isOpen ? 1 : 0.6)
+        .help(d.brief)
     }
 
     private func askBox(_ d: Delegation, _ ask: DelegationMessage) -> some View {

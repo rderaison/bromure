@@ -2298,3 +2298,23 @@
 "steered" = "指示";
 "withheld — prompt injection" = "已攔截 — 提示注入";
 "relayed" = "已轉達";
+
+/* Agents across workspaces: nicknames, requests to peers, the reach policy */
+"@%@ is already “%@”." = "@%@ 已是「%@」。";
+"Agents in this workspace can hand work to agents elsewhere (a delegation runs in the other workspace) and ask a session there by its @nickname; files travel along. Which workspaces they may reach:" = "此工作區的代理程式可以把工作交給其他工作區的代理程式（委派在對方工作區執行），並透過 @暱稱 向那裡的工作階段提問；檔案會一併傳送。允許它們存取的工作區：";
+"Delegated by %@" = "由 %@ 委派";
+"How agents and the composer reach this session" = "代理程式和輸入框用來指向此工作階段的名稱";
+"How other agents reach “%@”: they ask it with request(to: \"@name\"), and you can write @name in any composer. Letters, digits, dots, dashes and underscores." = "其他代理程式指向「%@」的名稱：它們用 request(to: \"@name\") 提問，你也可以在任何輸入框裡寫 @name。可用字母、數字、點、連字號和底線。";
+"Nickname" = "暱稱";
+"Nickname…" = "暱稱…";
+"No other workspace yet — agents here can only reach each other." = "還沒有其他工作區 — 這裡的代理程式只能互相存取。";
+"Open the peer's session" = "開啟對方的工作階段";
+"Reach" = "存取範圍";
+"Request from %@" = "來自 %@ 的請求";
+"Set" = "設定";
+"Show requester" = "顯示請求方";
+"Unknown session." = "未知的工作階段。";
+"Will be @%@" = "將為 @%@";
+"e.g. seclio" = "例如 seclio";
+"request" = "請求";
+"sessions with a nickname" = "有暱稱的工作階段";

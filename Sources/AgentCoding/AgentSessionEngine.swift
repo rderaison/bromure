@@ -54,9 +54,12 @@ final class AgentSessionEngine {
         let message = req.openingMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
         var cwd = req.cwd.trimmingCharacters(in: .whitespaces)
         // No folder named: every session gets a fresh one of its own in the
-        // home, named after the message — never the shared home itself.
+        // home, named after the title when there is one (a delegate's brief
+        // opens with boilerplate), else the message — never the shared home
+        // itself.
         if cwd.isEmpty || cwd == "~" || cwd == "~/" {
-            cwd = "~/" + Self.syntheticFolderName(message: message, tool: req.tool)
+            let named = req.title?.trimmingCharacters(in: .whitespaces).nonEmpty
+            cwd = "~/" + Self.syntheticFolderName(message: named ?? message, tool: req.tool)
         }
         let title = req.title?.trimmingCharacters(in: .whitespaces).nonEmpty
             ?? (message?.nonEmpty).map(AgentSession.title(fromMessage:))
@@ -716,7 +719,7 @@ final class AgentSessionEngine {
     /// The workspace is reachable — booting or resuming it first when it
     /// isn't (the interactive start, alerts and all: this is the user's own
     /// click, not an unattended automation).
-    private func ensureUp(_ profileID: UUID) async -> Bool {
+    func ensureUp(_ profileID: UUID) async -> Bool {
         guard let delegate else { return false }
         if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
             return true

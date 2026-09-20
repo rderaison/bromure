@@ -2295,3 +2295,23 @@
 "steered" = "指示";
 "withheld — prompt injection" = "保留 — プロンプトインジェクション";
 "relayed" = "中継済み";
+
+/* Agents across workspaces: nicknames, requests to peers, the reach policy */
+"@%@ is already “%@”." = "@%@ はすでに「%@」です。";
+"Agents in this workspace can hand work to agents elsewhere (a delegation runs in the other workspace) and ask a session there by its @nickname; files travel along. Which workspaces they may reach:" = "このワークスペースのエージェントは、他のワークスペースのエージェントに作業を委任し（委任先で実行されます）、@ニックネームでそこのセッションに質問できます。ファイルも一緒に送られます。到達できるワークスペース：";
+"Delegated by %@" = "%@ から委任";
+"How agents and the composer reach this session" = "エージェントや入力欄がこのセッションを指す名前";
+"How other agents reach “%@”: they ask it with request(to: \"@name\"), and you can write @name in any composer. Letters, digits, dots, dashes and underscores." = "他のエージェントが「%@」に届く名前です。request(to: \"@name\") で質問でき、どの入力欄でも @name と書けます。英数字、ドット、ハイフン、アンダースコアが使えます。";
+"Nickname" = "ニックネーム";
+"Nickname…" = "ニックネーム…";
+"No other workspace yet — agents here can only reach each other." = "他のワークスペースはまだありません。ここのエージェントは互いにのみ到達できます。";
+"Open the peer's session" = "相手のセッションを開く";
+"Reach" = "到達範囲";
+"Request from %@" = "%@ からの依頼";
+"Set" = "設定";
+"Show requester" = "依頼元を表示";
+"Unknown session." = "不明なセッションです。";
+"Will be @%@" = "@%@ になります";
+"e.g. seclio" = "例：seclio";
+"request" = "依頼";
+"sessions with a nickname" = "ニックネーム付きのセッション";

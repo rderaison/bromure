@@ -240,6 +240,10 @@ struct SlashCommandPalette: View {
     let highlighted: Int
     let onPick: (SlashCommand) -> Void
     let onHover: (Int) -> Void
+    /// What each entry starts with: "/" for commands, "@" for sessions.
+    var prefix = "/"
+    /// The header, when it isn't "Commands".
+    var title: String? = nil
 
     private static let rowHeight: CGFloat = 36
     private static let visibleRows = 7
@@ -247,7 +251,7 @@ struct SlashCommandPalette: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
-                Text(NSLocalizedString("Commands", comment: "slash palette"))
+                Text(title ?? NSLocalizedString("Commands", comment: "slash palette"))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
@@ -306,7 +310,7 @@ struct SlashCommandPalette: View {
 
     private func row(_ c: SlashCommand, selected: Bool) -> some View {
         HStack(spacing: 10) {
-            Text("/" + c.name)
+            Text(prefix + c.name)
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
                 .foregroundStyle(selected ? Color.accentColor : .primary)
                 .lineLimit(1)

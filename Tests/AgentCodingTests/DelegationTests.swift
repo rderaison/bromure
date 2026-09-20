@@ -91,7 +91,7 @@ struct DelegationTests {
         #expect(((ini["result"] as? [String: Any])?["serverInfo"] as? [String: Any])?["name"] as? String == "bromure-delegation")
         let list = parse(await f.server.handle(line: rpc("tools/list"), branch: "w3"))
         let names = ((list["result"] as? [String: Any])?["tools"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
-        #expect(Set(names) == ["delegate", "list_delegations", "read_inbox", "wait", "ask", "report",
+        #expect(Set(names) == ["delegate", "request", "list_peers", "list_delegations", "read_inbox", "wait", "ask", "report",
                                "deliver", "answer", "steer", "close_delegation", "cancel"])
     }
 
@@ -176,7 +176,7 @@ struct DelegationTests {
         #expect(isError(ask))
         let list = json(parse(await f.server.handle(line: call("list_delegations"), branch: "w5")))
         #expect((list["as_delegator"] as? [Any])?.isEmpty == true)
-        #expect(list["as_delegate"] == nil)
+        #expect((list["as_delegate"] as? [Any])?.isEmpty == true)
         // Nothing was recorded for it.
         #expect(f.store.delegation(d.id)?.messages.count == 1)
     }
@@ -205,10 +205,15 @@ struct DelegationTests {
         let rep = parse(await f.server.handle(line: call("report", ["text": "halfway"]), branch: "w7"))
         #expect(!isError(rep))
         #expect(f.store.delegation(d.id)?.status == .working)
-        let del = parse(await f.server.handle(line: call("deliver", ["summary": "Done: empty hunks skipped", "files": ["src/diff.c"]]), branch: "w7"))
-        #expect(!isError(del))
+        // Files need the machines — none here — and the refusal says so
+        // before anything is recorded.
+        let noMachines = parse(await f.server.handle(line: call("deliver", ["summary": "Done", "files": ["src/diff.c"]]), branch: "w7"))
+        #expect(isError(noMachines) && text(noMachines).contains("machines"))
+        #expect(f.store.delegation(d.id)?.status == .working)
+        let del = parse(await f.server.handle(line: call("deliver", ["summary": "Done: empty hunks skipped"]), branch: "w7"))
+        #expect(!isError(del), Comment(rawValue: text(del)))
         #expect(f.store.delegation(d.id)?.status == .delivered)
-        #expect(f.store.delegation(d.id)?.delivery?.text.contains("Files: src/diff.c") == true)
+        #expect(f.store.delegation(d.id)?.delivery?.text == "Done: empty hunks skipped")
         let inbox = json(parse(await f.server.handle(line: call("read_inbox"), branch: "w3")))
         let kinds = (inbox["messages"] as? [[String: Any]] ?? []).compactMap { $0["kind"] as? String }
         #expect(kinds == ["report", "deliver"])
@@ -278,7 +283,9 @@ struct DelegationTests {
         d.messages = [ask, report]
         store.upsert(d)
         #expect(store.unnoticed(for: d.parentSessionID).map { $0.1.id } == [ask.id, report.id])
-        #expect(DelegationEngine.interrupts(.ask) && !DelegationEngine.interrupts(.report))
+        #expect(DelegationNotice.interrupts(.ask, request: false) && !DelegationNotice.interrupts(.report, request: false))
+        // A request's brief is the request: the peer has to hear it.
+        #expect(!DelegationNotice.interrupts(.brief, request: false) && DelegationNotice.interrupts(.brief, request: true))
         store.markNoticed([ask.id])
         #expect(store.unnoticed(for: d.parentSessionID).map { $0.1.id } == [report.id])
         // Still unread: a notice is a pointer, read_inbox has the text.
@@ -365,6 +372,163 @@ struct DelegationTests {
         #expect(claude.contains("bromure-delegation-mcp.py"))
         let codex = SessionDisk.codexMCPConfig(servers: [])
         #expect(codex.contains("[mcp_servers.delegation]"))
+    }
+
+    // MARK: Peers across workspaces
+
+    /// A workspace, as the engine's `profiles` lists it.
+    private func ws(_ id: UUID, _ name: String, reach: [UUID]? = nil) -> Profile {
+        var p = Profile(id: id, name: name, tool: .claude, authMode: .token)
+        p.agentReach = reach
+        return p
+    }
+
+    /// A nicknamed peer in a workspace.
+    private func peer(in f: Fixture, workspace: UUID, nick: String, window: Int, title: String = "Peer") -> AgentSession {
+        var s = AgentSession(profileID: workspace, tool: .codex, title: title, cwd: "~/other", windowIndex: window)
+        s.agentAlive = true
+        s.nickname = nick
+        f.sessions.upsert(s)
+        return s
+    }
+
+    @Test("nicknames: normalized, unique on the host, found case-insensitively")
+    func nicknames() {
+        let f = fixture()
+        #expect(DelegationNotice.normalizeNickname("@Fable-seclio ") == "Fable-seclio")
+        #expect(DelegationNotice.normalizeNickname("@@ hi there!") == "hithere")
+        #expect(DelegationNotice.normalizeNickname("@") == nil)
+        #expect(f.sessions.setNickname(f.parentID, "@Parent.1") == nil)
+        #expect(f.sessions.session(f.parentID)?.nickname == "Parent.1")
+        let other = AgentSession(profileID: f.profileID, tool: .grok, title: "Other", cwd: "~/o", windowIndex: 9)
+        f.sessions.upsert(other)
+        #expect(f.sessions.setNickname(other.id, "parent.1") != nil)      // taken, whatever the case
+        #expect(f.sessions.session(other.id)?.nickname == nil)
+        #expect(f.sessions.session(nickname: "@PARENT.1")?.id == f.parentID)
+        #expect(f.sessions.setNickname(f.parentID, "") == nil)
+        #expect(f.sessions.session(f.parentID)?.nickname == nil)
+    }
+
+    @Test("a request reaches a peer in another workspace as a notice; its deliver is the reply")
+    func requestRoundTrip() async throws {
+        let f = fixture()
+        let elsewhere = UUID()
+        f.engine.profiles = { [ws(f.profileID, "Dev"), ws(elsewhere, "Sec lab")] }
+        let seclio = peer(in: f, workspace: elsewhere, nick: "seclio", window: 4)
+        f.sessions.setNickname(f.parentID, "dev")
+        // The peer answers from ITS workspace: a server bound to that VM.
+        let peerServer = DelegationMCPServer(profileID: elsewhere, sessions: { f.sessions }, engine: { f.engine })
+        let asking = Task {
+            parse(await f.server.handle(line: call("request", ["to": "@SecLio", "text": "Run the binary and tell me what it finds.", "timeout_seconds": 30]), branch: "w3"))
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        // On the record: a request from @dev to @seclio, its brief owed to the peer as a notice.
+        let d = try #require(f.store.delegations(parent: f.parentID).first)
+        #expect(d.isRequest)
+        #expect(d.childSessionID == seclio.id)
+        #expect(d.parentLabel == "@dev" && d.childLabel == "@seclio")
+        #expect(d.status == .working)
+        let owed = f.store.unnoticed(for: seclio.id)
+        #expect(owed.count == 1 && owed.first?.1.kind == .brief)
+        let line = DelegationNotice.toChild(owed[0].1, in: d)
+        #expect(line.contains("@dev asks you (request \(DelegationNotice.shortID(d.id)))"))
+        #expect(line.contains("deliver(delegation_id:"))
+        // The peer sees it in list_delegations and its inbox, and replies.
+        let mine = json(parse(await peerServer.handle(line: call("list_delegations"), branch: "w4")))
+        let theirs = mine["as_delegate"] as? [[String: Any]] ?? []
+        #expect(theirs.count == 1 && theirs.first?["request"] as? Bool == true && theirs.first?["from"] as? String == "@dev")
+        let reply = parse(await peerServer.handle(line: call("deliver", ["summary": "It phones home to 10.0.0.9:4444."]), branch: "w4"))
+        #expect(!isError(reply), Comment(rawValue: text(reply)))
+        let got = json(await asking.value)
+        #expect(got["replied"] as? Bool == true)
+        #expect(got["reply"] as? String == "It phones home to 10.0.0.9:4444.")
+        #expect(got["peer"] as? String == "@seclio")
+        #expect(f.store.delegation(d.id)?.status == .delivered)
+        // Closing a request leaves the peer's session alone.
+        let closed = parse(await f.server.handle(line: call("close_delegation", ["delegation_id": d.id.uuidString, "verdict": "accepted"]), branch: "w3"))
+        #expect(!isError(closed))
+        #expect(f.sessions.session(seclio.id)?.isArchived == false)
+        #expect(f.sessions.session(seclio.id)?.windowIndex == 4)
+    }
+
+    @Test("the reach policy is the workspace's word: only the workspaces it names, and none of the rest")
+    func reachPolicy() async {
+        let f = fixture()
+        let lab = UUID(), prod = UUID()
+        var dev = ws(f.profileID, "Dev")
+        dev.agentReach = [lab]
+        f.engine.profiles = { [dev, ws(lab, "Lab"), ws(prod, "Prod")] }
+        _ = peer(in: f, workspace: lab, nick: "lab", window: 4)
+        _ = peer(in: f, workspace: prod, nick: "prod", window: 6)
+        _ = peer(in: f, workspace: f.profileID, nick: "home", window: 8)
+        #expect(f.engine.canReach(from: f.profileID, to: lab))
+        #expect(!f.engine.canReach(from: f.profileID, to: prod))
+        #expect(f.engine.canReach(from: f.profileID, to: f.profileID))
+        // Prod isn't the caller's to reach; Lab is; the caller's own is always.
+        let peers = json(parse(await f.server.handle(line: call("list_peers"), branch: "w3")))
+        let nicks = (peers["peers"] as? [[String: Any]] ?? []).compactMap { $0["nickname"] as? String }
+        #expect(Set(nicks) == ["@lab", "@home"])
+        let workspaces = (peers["workspaces"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+        #expect(Set(workspaces) == ["Dev", "Lab"])
+        let denied = parse(await f.server.handle(line: call("request", ["to": "@prod", "text": "hi", "timeout_seconds": 1]), branch: "w3"))
+        #expect(isError(denied))
+        #expect(text(denied).contains("Prod"))
+        #expect(f.store.delegations(parent: f.parentID).isEmpty)
+        let unknown = parse(await f.server.handle(line: call("request", ["to": "@nobody", "text": "hi"]), branch: "w3"))
+        #expect(isError(unknown) && text(unknown).contains("list_peers"))
+        let intoProd = parse(await f.server.handle(line: call("delegate", ["title": "x", "brief": "y", "workspace": "Prod"]), branch: "w3"))
+        #expect(isError(intoProd))
+        // Open by default: no policy, every workspace.
+        f.engine.profiles = { [ws(f.profileID, "Dev"), ws(prod, "Prod")] }
+        #expect(f.engine.canReach(from: f.profileID, to: prod))
+    }
+
+    @Test("a delegate in another workspace gets a folder of its own there, briefed with the files' inbox")
+    func delegateElsewhere() async {
+        let f = fixture()
+        let lab = UUID()
+        f.engine.profiles = { [ws(f.profileID, "Dev"), ws(lab, "Lab")] }
+        let resp = parse(await f.server.handle(line: call("delegate", [
+            "title": "Scan the build", "brief": "Run the scanner on the tarball.", "workspace": "lab"]), branch: "w3"))
+        #expect(!isError(resp), Comment(rawValue: text(resp)))
+        #expect(json(resp)["workspace"] as? String == "Lab")
+        let id = UUID(uuidString: json(resp)["delegation_id"] as? String ?? "")!
+        let child = f.sessions.session(f.store.delegation(id)!.childSessionID)!
+        #expect(child.profileID == lab)
+        #expect(child.parentSessionID == f.parentID)
+        #expect(child.cwd.hasPrefix("~/scan-the-build"))
+        #expect(child.worktreeOf == nil)
+    }
+
+    @Test("a session that is the child of several says which one a bare deliver means")
+    func whichDelegation() async throws {
+        let f = fixture()
+        let (d1, childID) = await delegated(f)
+        // Somebody else asks the same child something too.
+        let other = peer(in: f, workspace: f.profileID, nick: "other", window: 12, title: "Other")
+        f.sessions.mutate(childID) { $0.nickname = "kid" }
+        let req = try await f.engine.request(from: other.id, to: "@kid", text: "Also this?")
+        #expect(f.store.openAsChild(childID).count == 2)
+        let bare = parse(await f.server.handle(line: call("deliver", ["summary": "done"]), branch: "w7"))
+        #expect(isError(bare))
+        #expect(text(bare).contains(DelegationNotice.shortID(d1.id)) && text(bare).contains(DelegationNotice.shortID(req.id)))
+        let named = parse(await f.server.handle(line: call("deliver", ["summary": "done", "delegation_id": DelegationNotice.shortID(req.id)]), branch: "w7"))
+        #expect(!isError(named), Comment(rawValue: text(named)))
+        #expect(f.store.delegation(req.id)?.status == .delivered)
+        #expect(f.store.delegation(d1.id)?.status != .delivered)
+        // Now only one is open: a bare deliver means it.
+        let again = parse(await f.server.handle(line: call("deliver", ["summary": "and done"]), branch: "w7"))
+        #expect(!isError(again), Comment(rawValue: text(again)))
+        #expect(f.store.delegation(d1.id)?.status == .delivered)
+    }
+
+    @Test("paths a message names resolve against the sender's folder")
+    func pathResolution() {
+        #expect(DelegationEngine.resolve("build/out.bin", cwd: "~/proj") == "/home/ubuntu/proj/build/out.bin")
+        #expect(DelegationEngine.resolve("./notes.md", cwd: "~/proj") == "/home/ubuntu/proj/notes.md")
+        #expect(DelegationEngine.resolve("/tmp/x", cwd: "~/proj") == "/tmp/x")
+        #expect(DelegationEngine.resolve("~/a b", cwd: "~/proj") == "/home/ubuntu/a b")
+        #expect(DelegationEngine.q("it's") == "'it'\\''s'")
     }
 
     @Test("every message is a Security Timeline row; a withheld one reads blocked")

@@ -2330,3 +2330,23 @@
 "steered" = "steered";
 "withheld — prompt injection" = "withheld — prompt injection";
 "relayed" = "relayed";
+
+/* Agents across workspaces: nicknames, requests to peers, the reach policy */
+"@%@ is already “%@”." = "@%@ is already “%@”.";
+"Agents in this workspace can hand work to agents elsewhere (a delegation runs in the other workspace) and ask a session there by its @nickname; files travel along. Which workspaces they may reach:" = "Agents in this workspace can hand work to agents elsewhere (a delegation runs in the other workspace) and ask a session there by its @nickname; files travel along. Which workspaces they may reach:";
+"Delegated by %@" = "Delegated by %@";
+"How agents and the composer reach this session" = "How agents and the composer reach this session";
+"How other agents reach “%@”: they ask it with request(to: \"@name\"), and you can write @name in any composer. Letters, digits, dots, dashes and underscores." = "How other agents reach “%@”: they ask it with request(to: \"@name\"), and you can write @name in any composer. Letters, digits, dots, dashes and underscores.";
+"Nickname" = "Nickname";
+"Nickname…" = "Nickname…";
+"No other workspace yet — agents here can only reach each other." = "No other workspace yet — agents here can only reach each other.";
+"Open the peer's session" = "Open the peer's session";
+"Reach" = "Reach";
+"Request from %@" = "Request from %@";
+"Set" = "Set";
+"Show requester" = "Show requester";
+"Unknown session." = "Unknown session.";
+"Will be @%@" = "Will be @%@";
+"e.g. seclio" = "e.g. seclio";
+"request" = "request";
+"sessions with a nickname" = "sessions with a nickname";

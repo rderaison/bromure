@@ -1341,6 +1341,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             rename: { [weak self] id, title in
                 self?.acDelegate?.agentSessionEngine.rename(id, to: title)
             },
+            setNickname: { [weak self] id, nick in
+                self?.acDelegate?.agentSessionStore.setNickname(id, nick)
+            },
             resumeWith: { [weak self] id, text in
                 self?.acDelegate?.agentSessionEngine.resume(id, message: text)
                 self?.sessionStageDidChange()

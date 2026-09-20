@@ -557,6 +557,14 @@ final class SessionPane {
         m.openSession = { [weak self] id in
             self?.acDelegate?.ensureUnifiedWindow().selectSession(id)
         }
+        m.workspaceName = { [weak self] pid in self?.acDelegate?.profile(for: pid)?.name ?? "" }
+        m.peerMentions = { [weak self] in
+            guard let d = self?.acDelegate else { return [] }
+            return d.agentSessionStore.sessions
+                .filter { $0.nickname != nil && !$0.isDeleted && !$0.isArchived }
+                .map { PeerMention(nick: $0.nickname ?? "", title: $0.title,
+                                   workspace: d.profile(for: $0.profileID)?.name ?? "") }
+        }
         m.answerDelegation = { [weak self] delegationID, askID, text in
             guard let engine = self?.acDelegate?.delegationEngine else { return }
             Task { _ = try? await engine.post(delegationID, from: .user, kind: .answer, text: text, answering: askID) }

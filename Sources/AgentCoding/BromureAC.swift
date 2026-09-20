@@ -1565,9 +1565,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         AgentSessionEngine(store: agentSessionStore, delegate: self)
     /// Delegations between sessions: one agent handing work to another.
     let delegationStore = DelegationStore()
-    private(set) lazy var delegationEngine =
-        DelegationEngine(store: delegationStore, sessions: agentSessionStore,
-                         sessionEngine: agentSessionEngine, delegate: self)
+    private(set) lazy var delegationEngine: DelegationEngine = {
+        let e = DelegationEngine(store: delegationStore, sessions: agentSessionStore,
+                                 sessionEngine: agentSessionEngine, delegate: self)
+        // Workspace names and each one's reach policy.
+        e.profiles = { [weak self] in self?.profiles ?? [] }
+        return e
+    }()
     private(set) lazy var codingTaskEngine =
         CodingTaskEngine(store: codingTaskStore, delegate: self)
     /// Kubernetes clusters — shared machines (node VMs) next to the
@@ -3284,6 +3288,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                          "bucket": model.map { SessionHome.bucket(for: s, in: $0).title } ?? "",
                          "error": s.lastError ?? ""]
                     }]
+                case "nickname":
+                    // {id, nickname} — "" clears. The refusal, if any.
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          self.agentSessionStore.session(id) != nil
+                    else { return ["error": "unknown session"] }
+                    if let why = self.agentSessionStore.setNickname(id, params["nickname"] as? String) {
+                        return ["error": why]
+                    }
+                    return ["ok": true, "nickname": self.agentSessionStore.session(id)?.nickname ?? ""]
                 case "delegations":
                     // Every delegation as recorded, with its messages.
                     return ["delegations": self.delegationStore.delegations.compactMap(Self.codableToDict),
@@ -3754,6 +3767,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard self.agentSessionStore.session(sid) != nil,
                           let title = body["title"] as? String else { return ["error": "unknown session or no title"] }
                     self.agentSessionEngine.rename(sid, to: title)
+                    return ["ok": true]
+                case (let sid?, "nickname"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    if let why = self.agentSessionStore.setNickname(sid, body["nickname"] as? String) {
+                        return ["error": why]
+                    }
                     return ["ok": true]
                 case (let sid?, "forget"):
                     guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
@@ -6705,6 +6724,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             isNew: editing == nil,
             terminalDefaults: terminalDefaults,
             storageContext: makeStorageContext(for: editing),
+            siblingWorkspaces: profiles.filter { $0.id != editing?.id }
+                .map { WorkspaceRef(id: $0.id, name: $0.name) },
             onSave: { profile, generateSSH in
                 self.handleEditorSave(profile: profile, generateSSH: generateSSH, editing: editing)
             },
