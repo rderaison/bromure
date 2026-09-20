@@ -560,21 +560,28 @@ final class SessionPane {
         m.workspaceName = { [weak self] pid in self?.acDelegate?.profile(for: pid)?.name ?? "" }
         m.peerMentions = { [weak self] in
             guard let self, let d = self.acDelegate else { return [] }
-            var out = d.agentSessionStore.sessions
-                .filter { $0.nickname != nil && !$0.isDeleted && !$0.isArchived }
-                .map { PeerMention(nick: $0.nickname ?? "", title: $0.title,
-                                   workspace: d.profile(for: $0.profileID)?.name ?? "") }
-            // Sessions on the remote hosts this Mac mirrors, when the
-            // workspace's reach isn't pinned to named workspaces.
-            if d.profile(for: self.profile.id)?.agentReach == nil {
-                for link in d.remoteDelegationLinks() {
-                    out += link.remoteSessions.sessions
-                        .filter { $0.nickname != nil && !$0.isDeleted && !$0.isArchived }
-                        .map { PeerMention(nick: $0.nickname ?? "", title: $0.title,
-                                           workspace: link.hostName + " · " + link.remoteWorkspaceName($0.profileID)) }
-                }
+            let me = d.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)?.id
+            // Every session here — nicknamed as it is, the rest with the
+            // name it would get — then, when the workspace's reach isn't
+            // pinned to named workspaces, the nicknamed ones on the remote
+            // hosts this Mac mirrors.
+            let links = d.profile(for: self.profile.id)?.agentReach == nil ? d.remoteDelegationLinks() : []
+            var taken: Set<String> = []
+            for link in links {
+                for s in link.remoteSessions.sessions { if let n = s.nickname { taken.insert(n.lowercased()) } }
+            }
+            var out = PeerMention.candidates(d.agentSessionStore.sessions, excluding: me,
+                                             workspace: { d.profile(for: $0)?.name ?? "" }, taken: taken)
+            for link in links {
+                out += link.remoteSessions.sessions
+                    .filter { $0.nickname != nil && !$0.isDeleted && !$0.isArchived }
+                    .map { PeerMention(sessionID: $0.id, nick: $0.nickname ?? "", title: $0.title,
+                                       workspace: link.hostName + " · " + link.remoteWorkspaceName($0.profileID)) }
             }
             return out
+        }
+        m.assignNickname = { [weak self] id, nick in
+            self?.acDelegate?.agentSessionStore.setNickname(id, nick)
         }
         // Requests this session made to sessions on other hosts — their
         // records live there; the panel shows them next to the local ones.

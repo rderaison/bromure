@@ -2353,3 +2353,5 @@
 
 /* Cross-host peers */
 "The peer is on this Mac, reached through its mirror" = "The peer is on this Mac, reached through its mirror";
+"new name" = "new name";
+"sessions you can ask" = "sessions you can ask";

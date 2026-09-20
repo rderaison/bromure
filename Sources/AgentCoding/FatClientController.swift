@@ -4992,10 +4992,12 @@ final class RemoteHostWindow: NSWindow {
         m.workspaceName = { [weak controller] pid in controller?.profile(for: pid)?.name ?? "" }
         m.peerMentions = { [weak controller] in
             guard let c = controller else { return [] }
-            return c.sessionStore.sessions
-                .filter { $0.nickname != nil && !$0.isDeleted && !$0.isArchived }
-                .map { PeerMention(nick: $0.nickname ?? "", title: $0.title,
-                                   workspace: c.profile(for: $0.profileID)?.name ?? "") }
+            let me = tabIndex.flatMap { c.sessionStore.session(profileID: id, windowIndex: $0) }?.id
+            return PeerMention.candidates(c.sessionStore.sessions, excluding: me,
+                                          workspace: { c.profile(for: $0)?.name ?? "" })
+        }
+        m.assignNickname = { [weak controller] sid, nick in
+            controller?.sessionCommand(sid, "nickname", body: ["nickname": nick])
         }
         // The "/" palette and the composer's name: the tab's agent, else the
         // workspace's main one (the label reads "bash" for agents under an

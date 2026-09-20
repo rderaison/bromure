@@ -2318,3 +2318,5 @@
 
 /* Cross-host peers */
 "The peer is on this Mac, reached through its mirror" = "Das Gegenüber ist auf diesem Mac, erreicht über seinen Spiegel";
+"new name" = "neuer Name";
+"sessions you can ask" = "Sitzungen, die Sie fragen können";

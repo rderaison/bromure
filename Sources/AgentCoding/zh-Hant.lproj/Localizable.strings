@@ -2321,3 +2321,5 @@
 
 /* Cross-host peers */
 "The peer is on this Mac, reached through its mirror" = "對方在這台 Mac 上，透過其鏡像存取";
+"new name" = "新名稱";
+"sessions you can ask" = "可提問的工作階段";

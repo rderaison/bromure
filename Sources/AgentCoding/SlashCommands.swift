@@ -17,6 +17,9 @@ struct SlashCommand: Identifiable, Hashable {
     /// The command expects text after it ("/model opus") — completion
     /// leaves a space so the user keeps typing.
     var takesArgument = false
+    /// A tag of the row's own, shown instead of the source's ("new name"
+    /// on a session the @ palette would nickname on the spot).
+    var tag: String? = nil
     var id: String { source.rawValue + ":" + name }
 }
 
@@ -321,7 +324,14 @@ struct SlashCommandPalette: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
-            if c.source != .builtIn {
+            if let tag = c.tag {
+                Text(tag)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.primary.opacity(0.07)))
+            } else if c.source != .builtIn {
                 Text(c.source == .skill
                      ? NSLocalizedString("skill", comment: "slash palette tag")
                      : NSLocalizedString("yours", comment: "slash palette tag"))

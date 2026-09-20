@@ -378,12 +378,36 @@ final class DelegationStore {
     }
 }
 
-/// A session the composer's "@" palette can complete to.
+/// A session the composer's "@" palette can complete to: its nickname, or
+/// the one it would be given on the spot (`assigned` false) — derived
+/// from its title, unique on this host.
 struct PeerMention: Identifiable, Hashable, Sendable {
+    let sessionID: UUID
     let nick: String
     let title: String
     let workspace: String
-    var id: String { nick.lowercased() }
+    var assigned = true
+    var id: UUID { sessionID }
+
+    /// Every session but `me`, nicknamed ones as they are, the rest with a
+    /// proposed name that doesn't collide with anything taken.
+    static func candidates(_ sessions: [AgentSession], excluding me: UUID?, workspace: (UUID) -> String,
+                           taken: Set<String> = []) -> [PeerMention] {
+        var taken = Set(taken.map { $0.lowercased() })
+        let usable = sessions.filter { $0.id != me && !$0.isDeleted && !$0.isArchived && $0.folderMissing != true }
+        for s in usable { if let n = s.nickname { taken.insert(n.lowercased()) } }
+        var out: [PeerMention] = []
+        for s in usable {
+            if let n = s.nickname, !n.isEmpty {
+                out.append(PeerMention(sessionID: s.id, nick: n, title: s.title, workspace: workspace(s.profileID)))
+            } else {
+                let n = DelegationNotice.proposedNickname(for: s.title, taken: taken)
+                taken.insert(n.lowercased())
+                out.append(PeerMention(sessionID: s.id, nick: n, title: s.title, workspace: workspace(s.profileID), assigned: false))
+            }
+        }
+        return out
+    }
 }
 
 /// The far end of a delegation when it lives on another host: how that
@@ -466,6 +490,26 @@ enum DelegationNotice {
         case .brief: return request
         case .report, .cancel: return false
         }
+    }
+
+    /// A nickname from a session's title ("Fix the login redirect" →
+    /// "fix-the-login-redirect"), cut at a word so it stays readable, and
+    /// numbered past anything in `taken` (lowercased).
+    static func proposedNickname(for title: String, taken: Set<String>) -> String {
+        let words = title.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+        var base = ""
+        for w in words {
+            let next = base.isEmpty ? w : base + "-" + w
+            if next.count > 28 { break }
+            base = next
+        }
+        if base.isEmpty { base = "session" }
+        guard taken.contains(base) else { return base }
+        var n = 2
+        while taken.contains("\(base)-\(n)") { n += 1 }
+        return "\(base)-\(n)"
     }
 
     /// "@nick" from what the user typed, or nil when there's nothing usable:

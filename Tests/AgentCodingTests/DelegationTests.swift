@@ -409,6 +409,26 @@ struct DelegationTests {
         #expect(f.sessions.session(f.parentID)?.nickname == nil)
     }
 
+    @Test("the @ palette offers every session, naming the unnamed ones from their titles")
+    func mentionCandidates() {
+        #expect(DelegationNotice.proposedNickname(for: "Fix the login redirect loop!", taken: []) == "fix-the-login-redirect-loop")
+        #expect(DelegationNotice.proposedNickname(for: "Claude Code in drift-task-260919-2243", taken: []) == "claude-code-in-drift-task")
+        #expect(DelegationNotice.proposedNickname(for: "Say hi", taken: ["say-hi", "say-hi-2"]) == "say-hi-3")
+        #expect(DelegationNotice.proposedNickname(for: "!!!", taken: []) == "session")
+        let pid = UUID()
+        var named = AgentSession(profileID: pid, tool: .claude, title: "Scanner", cwd: "~/s", windowIndex: 1)
+        named.nickname = "seclio"
+        let me = AgentSession(profileID: pid, tool: .claude, title: "Me", cwd: "~/m", windowIndex: 2)
+        let plain = AgentSession(profileID: pid, tool: .codex, title: "Say hi and stop.", cwd: "~/p", windowIndex: 3)
+        let twin = AgentSession(profileID: pid, tool: .codex, title: "Say hi and stop.", cwd: "~/q", windowIndex: 4)
+        var gone = AgentSession(profileID: pid, tool: .grok, title: "Old", cwd: "~/o")
+        gone.archivedAt = Date()
+        let list = PeerMention.candidates([named, me, plain, twin, gone], excluding: me.id, workspace: { _ in "Dev" }, taken: ["say-hi-and-stop-2"])
+        #expect(list.map(\.nick) == ["seclio", "say-hi-and-stop", "say-hi-and-stop-3"])
+        #expect(list.map(\.assigned) == [true, false, false])
+        #expect(list.allSatisfy { $0.workspace == "Dev" })
+    }
+
     @Test("a request reaches a peer in another workspace as a notice; its deliver is the reply")
     func requestRoundTrip() async throws {
         let f = fixture()

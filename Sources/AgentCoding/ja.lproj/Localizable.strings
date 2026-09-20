@@ -2318,3 +2318,5 @@
 
 /* Cross-host peers */
 "The peer is on this Mac, reached through its mirror" = "相手はこの Mac 上にあり、そのミラー経由で到達しています";
+"new name" = "新しい名前";
+"sessions you can ask" = "質問できるセッション";

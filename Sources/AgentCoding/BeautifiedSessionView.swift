@@ -369,8 +369,11 @@ final class BeautifiedSessionModel: ObservableObject {
     var answerDelegation: ((UUID, UUID, String) -> Void)?
     /// A workspace's name, for the panel (a delegate elsewhere).
     var workspaceName: ((UUID) -> String)?
-    /// The sessions with a nickname, for the composer's "@" palette.
+    /// The sessions the composer's "@" palette can complete to — the
+    /// nicknamed ones as they are, the rest with the name they'd get.
     var peerMentions: (() -> [PeerMention])?
+    /// Give a session the nickname the palette proposed, as it's picked.
+    var assignNickname: ((UUID, String) -> Void)?
     /// Requests this session made to sessions on other hosts (their records
     /// live there), with the host's name, for the panel.
     var remoteDelegations: (() -> [(Delegation, String)])?
@@ -1120,14 +1123,26 @@ struct BeautifiedSessionView: View {
     private static func lastWordStart(of t: String) -> String.Index {
         t.lastIndex(where: { $0 == " " || $0.isNewline }).map { t.index(after: $0) } ?? t.startIndex
     }
+    /// Every session but this one: by its nickname, or by the name it
+    /// would get (tagged so), matched on the name or the title. Named
+    /// sessions first.
     private var mentionMatches: [SlashCommand] {
         guard let q = mentionQuery?.lowercased(), let peers = model.peerMentions?() else { return [] }
+        func rank(_ p: PeerMention) -> (Int, Int, String) {
+            // A name that starts with what's typed beats a title that merely
+            // contains it; a session already named beats one that would be.
+            (q.isEmpty || p.nick.lowercased().hasPrefix(q) ? 0 : 1, p.assigned ? 0 : 1, p.nick.lowercased())
+        }
         return peers
-            .filter { q.isEmpty || $0.nick.lowercased().hasPrefix(q) }
-            .sorted { $0.nick.lowercased() < $1.nick.lowercased() }
-            .map { SlashCommand(name: $0.nick,
-                                description: $0.title + ($0.workspace.isEmpty ? "" : " · " + $0.workspace),
-                                source: .builtIn) }
+            .filter { q.isEmpty || $0.nick.lowercased().hasPrefix(q) || $0.title.lowercased().contains(q) }
+            .sorted { rank($0) < rank($1) }
+            .map { p in
+                var c = SlashCommand(name: p.nick,
+                                     description: p.title + (p.workspace.isEmpty ? "" : " · " + p.workspace),
+                                     source: .builtIn)
+                if !p.assigned { c.tag = NSLocalizedString("new name", comment: "mention palette tag") }
+                return c
+            }
     }
     private var mentionMode: Bool { paletteQuery == nil && mentionQuery != nil }
     private var paletteCommands: [SlashCommand] {
@@ -1147,6 +1162,11 @@ struct BeautifiedSessionView: View {
     /// to go on with the sentence.
     private func complete(_ c: SlashCommand) {
         if mentionMode {
+            // A session without a nickname gets the proposed one now, so
+            // the "@name" being typed is one an agent can resolve.
+            if let peer = model.peerMentions?().first(where: { $0.nick == c.name }), !peer.assigned {
+                model.assignNickname?(peer.sessionID, peer.nick)
+            }
             let t = model.composerText
             model.composerText = String(t[..<Self.lastWordStart(of: t)]) + "@" + c.name + " "
             return
@@ -1208,7 +1228,7 @@ struct BeautifiedSessionView: View {
                 SlashCommandPalette(
                     commands: paletteCommands,
                     agentName: mentionMode
-                        ? NSLocalizedString("sessions with a nickname", comment: "mention palette")
+                        ? NSLocalizedString("sessions you can ask", comment: "mention palette")
                         : model.agentDisplayName,
                     highlighted: paletteIndex,
                     onPick: { c in
