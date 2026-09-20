@@ -2978,10 +2978,40 @@ private struct CompactRail: View {
     @Bindable var model: SessionListModel
     let onSelectGrid: () -> Void
     let onSelectTab: (Profile.ID, Int) -> Void
+    /// Sessions-first: the sessions come first on the rail — one avatar
+    /// each, the way the full sidebar leads with them — over the machines'
+    /// terminals.
+    var sessionStore: AgentSessionStore? = nil
+    var onSelectSession: (UUID) -> Void = { _ in }
+    var onNewSession: () -> Void = {}
 
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 5) {
+                if let sessionStore {
+                    Button(action: onNewSession) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(model.newSessionSelected ? Color.accentColor : .secondary)
+                            .frame(width: 30, height: 26)
+                            .background(RoundedRectangle(cornerRadius: 6)
+                                .fill(model.newSessionSelected ? Color.accentColor.opacity(0.16) : .clear))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(NSLocalizedString("New session (⌘N)", comment: "rail"))
+                    ForEach(SessionHome.orderedAll(sessionStore.sessions, in: model)) { s in
+                        RailSessionButton(
+                            session: s,
+                            bucket: SessionHome.bucket(for: s, in: model),
+                            statusLine: SessionHome.statusLine(for: s, in: model),
+                            accentHex: model.profileRows.first { $0.id == s.profileID }?.accentHex ?? "#888888",
+                            isActive: model.selectedSessionID == s.id
+                                && !model.gridSelected && !model.newSessionSelected,
+                            onSelect: { onSelectSession(s.id) })
+                    }
+                    Divider().padding(.horizontal, 10)
+                }
                 Button(action: onSelectGrid) {
                     Image(systemName: "square.grid.2x2")
                         .font(.system(size: 13, weight: .semibold))
@@ -3020,6 +3050,43 @@ private struct CompactRail: View {
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
         }
+    }
+}
+
+/// One session on the rail: its agent's avatar with the dot its bucket
+/// earns (red needs you, orange working, green ready), the machine's
+/// accent behind the one on stage; the title and status as the tooltip.
+private struct RailSessionButton: View {
+    let session: AgentSession
+    let bucket: SessionBucket
+    let statusLine: String
+    let accentHex: String
+    let isActive: Bool
+    let onSelect: () -> Void
+    @State private var hovering = false
+
+    private var dot: AgentStatus? {
+        switch bucket {
+        case .needsYou: return .needsInput
+        case .working:  return .working
+        case .idle:     return .done
+        case .asleep, .ended: return nil
+        }
+    }
+
+    var body: some View {
+        Button(action: onSelect) {
+            AgentAvatar(tool: session.tool, size: 22, status: dot)
+                .opacity(bucket == .ended || bucket == .asleep ? 0.55 : 1)
+                .frame(width: 30, height: 26)
+                .background(RoundedRectangle(cornerRadius: 6)
+                    .fill(isActive ? Color(hex: accentHex).opacity(0.16)
+                                   : (hovering ? Color.primary.opacity(0.05) : .clear)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("\(session.title) — \(statusLine)")
     }
 }
 

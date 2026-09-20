@@ -381,6 +381,18 @@ final class SessionPane {
         m.drop([DroppedFile(name: url.lastPathComponent, data: data, isImage: isImage)])
         return ["ok": true, "pending": m.pendingAttachments.count, "bytes": data.count, "image": isImage]
     }
+    /// Debug: the chat's command card — its state, or fold/dismiss it.
+    func debugCommandCard(_ action: String) -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        switch action {
+        case "dismiss": m.dismissCommandOutput()
+        case "toggle":  m.toggleLiveCommand()
+        default: break
+        }
+        guard let out = m.commandOutput else { return ["ok": true, "card": false] }
+        return ["ok": true, "card": true, "command": out.command, "live": out.live,
+                "menu": out.menu, "settled": out.settled, "lines": out.lines.count]
+    }
     /// Debug: the drop images the chat holds, by guest path.
     func debugDropImages() -> [String: Any] {
         guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }

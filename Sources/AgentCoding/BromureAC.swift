@@ -3184,6 +3184,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // Toggle "Under the hood" for the selected session.
                     self.unifiedWindow?.toggleUnderTheHood(nil)
                     return ["ok": true, "underTheHood": self.unifiedWindow?.listModel.underTheHood ?? false]
+                case "sidebar":
+                    // Collapse the sidebar to the rail, or expand it (⌃⌘S).
+                    self.unifiedWindow?.toggleSidebar(nil)
+                    return ["ok": true, "collapsed": self.unifiedWindow?.sidebarCollapsed ?? false]
+                case "end-sheet":
+                    // Dismiss the sheet on the home window as its second
+                    // button would ("Later"/"Cancel") — a startup prompt
+                    // otherwise sits in front of the next sheet.
+                    guard let w = self.unifiedWindow, let sheet = w.attachedSheet
+                    else { return ["ok": true, "ended": false] }
+                    w.endSheet(sheet, returnCode: .alertSecondButtonReturn)
+                    return ["ok": true, "ended": true]
+                case "card":
+                    // The chat's command card: {do: state|dismiss|toggle}.
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugCommandCard(params["do"] as? String ?? "state")
                 case "send":
                     // Press Return in the selected session's chat composer.
                     guard let id = self.unifiedWindow?.selectedID,
