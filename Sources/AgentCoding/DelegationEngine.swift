@@ -486,7 +486,7 @@ final class DelegationEngine {
         }
         let safe = (name as NSString).lastPathComponent
         guard !safe.isEmpty, safe != ".", safe != "..", !name.contains("/") else { throw DelegationRefusal("Bad file name.") }
-        guard await sessionEngine.ensureUp(peer.profileID) else {
+        guard await sessionEngine.ensureUp(peer.profileID, quietly: true) else {
             throw DelegationRefusal("The peer's workspace didn't start in time.")
         }
         let dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))"
@@ -623,7 +623,7 @@ final class DelegationEngine {
     private func landRemoteFiles(_ link: RemoteDelegationLink, _ d: Delegation, _ m: DelegationMessage) async -> [String] {
         guard let delegate, let parent = sessions.session(d.parentSessionID), let files = m.files else { return m.files ?? [] }
         let dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))"
-        guard await sessionEngine.ensureUp(parent.profileID),
+        guard await sessionEngine.ensureUp(parent.profileID, quietly: true),
               (try? await delegate.guestExec(profileID: parent.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)) != nil
         else { return files }
         var out: [String] = []
@@ -970,7 +970,7 @@ final class DelegationEngine {
         guard paths.count <= Self.transferMaxFiles else {
             throw DelegationRefusal("At most \(Self.transferMaxFiles) files per message — send a folder, or an archive.")
         }
-        guard await sessionEngine.ensureUp(toProfile) else {
+        guard await sessionEngine.ensureUp(toProfile, quietly: true) else {
             throw DelegationRefusal("The recipient's workspace didn't start in time.")
         }
         let dest = "\(Self.inboxBase)/\(inbox)"
@@ -1120,7 +1120,7 @@ final class DelegationEngine {
             // that was asleep wakes to the request.
             markNoticed()
             BACDebug.log("delegation", "resuming “\(s.title)” with \(items.count) notice(s)")
-            sessionEngine.resume(sessionID, message: line)
+            sessionEngine.resume(sessionID, message: line, quietly: true)
             return
         }
         guard let w = s.windowIndex else { return }

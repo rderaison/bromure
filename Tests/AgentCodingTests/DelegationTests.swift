@@ -542,6 +542,45 @@ struct DelegationTests {
         #expect(f.store.delegation(d1.id)?.status == .delivered)
     }
 
+    @Test("a tab's own transcript, as its hook named it, beats the newest file in a shared folder")
+    func transcriptPin() {
+        let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: "/home/ubuntu/proj", since: 1_758_300_000,
+                                                         agent: nil, pinnedWindow: 3)!
+        #expect(cmd.hasPrefix("f=\"\"; pp=\"$HOME/.bromure/transcript-3.path\"; "))
+        // Only a file this process could have written; else the folder's newest.
+        #expect(cmd.contains("find \"$c\" -newermt @1758300000"))
+        #expect(cmd.contains("if [ -z \"$f\" ]; then d='/home/ubuntu/proj'"))
+        #expect(cmd.contains("tail -c 300000 \"$f\""))
+        let plain = CodingTaskEngine.planTranscriptCommand(guestCwd: "/home/ubuntu/proj", since: 0, agent: "claude")!
+        #expect(!plain.contains("transcript-"))
+        #expect(plain.hasPrefix("f=\"\"; if [ -z \"$f\" ]; then "))
+    }
+
+    @Test("a resume targets the session's own conversation once its id is known")
+    func resumeByID() {
+        // The probe carries the id the hook recorded per window; old guests
+        // answer without it.
+        let lines = AgentSessionEngine.parseProbe(
+            "1\tclaude\t60fb3816-3c57-4774-99e4-0508ff1ca840\tFix the parser\n"
+            + "2\tnone\t\t\n"
+            + "3\tcodex\tnot-a-uuid\tOther\n"
+            + "4\tclaude\tLegacy three fields\n")
+        #expect(lines.count == 4)
+        #expect(lines[0].alive && lines[0].transcriptID == "60fb3816-3c57-4774-99e4-0508ff1ca840" && lines[0].title == "Fix the parser")
+        #expect(!lines[1].alive && lines[1].transcriptID == nil && lines[1].title == "")
+        #expect(lines[2].transcriptID == nil && lines[2].title == "Other")
+        #expect(lines[3].transcriptID == nil && lines[3].title == "Legacy three fields")
+        var s = AgentSession(profileID: UUID(), tool: .claude, title: "A", cwd: "~/proj")
+        #expect(AgentSessionEngine.resumeFlags(for: s) == Profile.Tool.claude.resumeFlags)
+        s.agentTranscriptID = "60fb3816-3c57-4774-99e4-0508ff1ca840"
+        #expect(AgentSessionEngine.resumeFlags(for: s) == "--resume 60fb3816-3c57-4774-99e4-0508ff1ca840")
+        s.agentTranscriptID = "junk; rm -rf /"
+        #expect(AgentSessionEngine.resumeFlags(for: s) == Profile.Tool.claude.resumeFlags)
+        var c = AgentSession(profileID: UUID(), tool: .codex, title: "B", cwd: "~/proj")
+        c.agentTranscriptID = "60fb3816-3c57-4774-99e4-0508ff1ca840"
+        #expect(AgentSessionEngine.resumeFlags(for: c) == Profile.Tool.codex.resumeFlags)
+    }
+
     @Test("paths a message names resolve against the sender's folder")
     func pathResolution() {
         #expect(DelegationEngine.resolve("build/out.bin", cwd: "~/proj") == "/home/ubuntu/proj/build/out.bin")

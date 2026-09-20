@@ -4150,6 +4150,18 @@ public final class ProfileStore {
             [ -n "$idx" ] || exit 0
             printf '%s' "${1:-}" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
               && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
+            # Claude hands the hook its JSON on stdin, naming the transcript
+            # file. Remember it per tab: the host then reads THIS agent's
+            # transcript even when another agent in the same folder (a
+            # delegate) writes newer files there. A /clear records the new
+            # file on the next prompt. Not a terminal → nothing to read.
+            if [ ! -t 0 ]; then
+              tp=$(sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' 2>/dev/null | head -1)
+              if [ -n "$tp" ]; then
+                printf '%s' "$tp" > "$HOME/.bromure/.transcript-$idx.tmp" 2>/dev/null \
+                  && mv -f "$HOME/.bromure/.transcript-$idx.tmp" "$HOME/.bromure/transcript-$idx.path" 2>/dev/null || true
+              fi
+            fi
             exit 0
             """#
             let scriptURL = bromureDir.appendingPathComponent("agent-status.sh")

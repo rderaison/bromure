@@ -103,6 +103,10 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// The name agents and the composer reach this session by ("@nick"):
     /// set by the user, unique on this host, stored without the "@".
     var nickname: String?
+    /// The agent's own id for this conversation (Claude: the transcript
+    /// file's name), as its hook reported it while it ran — what a resume
+    /// targets, so two agents in one folder never pick up each other's.
+    var agentTranscriptID: String?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -253,6 +257,13 @@ final class AgentSessionStore {
         sessions[i].nickname = nick
         save()
         return nil
+    }
+
+    /// The conversation id the agent's hook reported for this session.
+    func setTranscriptID(_ id: UUID, _ tid: String) {
+        guard let i = sessions.firstIndex(where: { $0.id == id }), sessions[i].agentTranscriptID != tid else { return }
+        sessions[i].agentTranscriptID = tid
+        save()
     }
 
     /// The session called "@nick", if any (case-insensitive).

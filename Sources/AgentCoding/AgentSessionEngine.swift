@@ -138,7 +138,7 @@ final class AgentSessionEngine {
     /// Reopen the agent's last conversation — and say `message`, when there
     /// is one, the moment the agent can hear it: right away if it's alive,
     /// else once the relaunch has it running.
-    func resume(_ id: UUID, message: String? = nil) {
+    func resume(_ id: UUID, message: String? = nil, quietly: Bool = false) {
         guard let s = store.session(id), let delegate else { return }
         if s.folderMissing == true {
             store.mutate(id) { $0.lastError = NSLocalizedString(
@@ -151,7 +151,7 @@ final class AgentSessionEngine {
         BACDebug.log("sessions", "resume “\(s.title)”\(message == nil ? "" : " with a message")")
         Task { [weak self] in
             guard let self else { return }
-            guard await self.ensureUp(s.profileID) else {
+            guard await self.ensureUp(s.profileID, quietly: quietly) else {
                 self.store.mutate(id) { $0.lastError = NSLocalizedString(
                     "The workspace did not start in time", comment: "session resume") }
                 return
@@ -181,7 +181,7 @@ final class AgentSessionEngine {
                 } else {
                     // The agent exited, its shell is still there: relaunch
                     // in place so the conversation history is right at hand.
-                    let cmd = ([s.tool.rawValue] + s.tool.resumeFlags.split(separator: " ").map(String.init))
+                    let cmd = ([s.tool.rawValue] + Self.resumeFlags(for: s).split(separator: " ").map(String.init))
                         .joined(separator: " ")
                     _ = try? await delegate.guestExec(
                         profileID: s.profileID,
@@ -217,7 +217,7 @@ final class AgentSessionEngine {
             // to their resume flag; Codex and Kimi don't, so it's typed once
             // they're up.
             let inline = message != nil && (s.tool == .claude || s.tool == .omp)
-            self.launch(id, prompt: inline ? (message ?? "") : "", flags: s.tool.resumeFlags, alreadyUp: true)
+            self.launch(id, prompt: inline ? (message ?? "") : "", flags: Self.resumeFlags(for: s), alreadyUp: true)
             if !inline, let message { self.deliverWhenAlive(id, message) }
         }
     }
@@ -347,7 +347,10 @@ final class AgentSessionEngine {
                 self.store.mutate(id) { $0.launchingSince = nil; $0.lastError = reason }
             }
             if !alreadyUp {
-                guard await self.ensureUp(s.profileID) else {
+                // A delegate's workspace is booted by an agent, not by a
+                // click: quietly, with the user's stage left where it is.
+                let quietly = self.store.session(id)?.parentSessionID != nil
+                guard await self.ensureUp(s.profileID, quietly: quietly) else {
                     fail(NSLocalizedString("The workspace did not start in time", comment: "session start"))
                     return
                 }
@@ -492,9 +495,12 @@ final class AgentSessionEngine {
     /// nil when the guest can't be asked.
     static let agentNames = "(claude|codex|kimi|grok|omp|aider|goose|amp|opencode|gemini|cursor)"
     private static let shellNames = "^-?(bash|sh|zsh|dash|login|tmux)( |$)"
-    /// One line per window: `index<TAB>agent-or-none<TAB>pane title`. The
-    /// title is what the agent set on its terminal (OSC 2) — Claude Code and
-    /// Oh My Pi both write a summary of the conversation there.
+    /// One line per window: `index<TAB>agent-or-none<TAB>transcript id<TAB>
+    /// pane title`. The title is what the agent set on its terminal (OSC 2)
+    /// — Claude Code and Oh My Pi both write a summary of the conversation
+    /// there. The transcript id is the file the agent's own hook named for
+    /// this window (agent-status.sh; Claude only), sans path and extension:
+    /// what a resume targets.
     private static func probeCommand(window: String) -> String {
         // A fresh shell's title is the hostname until the agent speaks up —
         // never a session name.
@@ -505,17 +511,43 @@ final class AgentSessionEngine {
             + "a=$(ps -t \"${t#/dev/}\" -o args= 2>/dev/null "
             + "| grep -v -E '\(shellNames)' "
             + "| grep -E -o -m1 '\(agentNames)' "
-            + "| head -1); printf '%s\\t%s\\t%s\\n' \"$i\" \"${a:-none}\" \"$title\"; done"
+            + "| head -1); "
+            + "tp=$(cat \"$HOME/.bromure/transcript-$i.path\" 2>/dev/null); tid=\"${tp##*/}\"; tid=\"${tid%.jsonl}\"; "
+            + "printf '%s\\t%s\\t%s\\t%s\\n' \"$i\" \"${a:-none}\" \"$tid\" \"$title\"; done"
     }
 
-    private struct ProbeLine { let index: Int; let alive: Bool; let title: String }
-    private static func parseProbe(_ out: String) -> [ProbeLine] {
+    struct ProbeLine: Equatable {
+        let index: Int
+        let alive: Bool
+        var transcriptID: String? = nil
+        let title: String
+    }
+    static func parseProbe(_ out: String) -> [ProbeLine] {
         out.split(whereSeparator: \.isNewline).compactMap { line in
-            let parts = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+            let parts = line.split(separator: "\t", maxSplits: 3, omittingEmptySubsequences: false)
             guard parts.count >= 2, let idx = Int(parts[0]) else { return nil }
+            // Older guests answer with three fields (no transcript id).
+            let tid = parts.count == 4 ? String(parts[2]) : ""
+            let title = parts.count == 4 ? String(parts[3]) : (parts.count == 3 ? String(parts[2]) : "")
             return ProbeLine(index: idx, alive: parts[1] != "none",
-                             title: parts.count == 3 ? String(parts[2]) : "")
+                             transcriptID: Self.isTranscriptID(tid) ? tid : nil, title: title)
         }
+    }
+
+    /// A Claude session id as the transcript file is named: a UUID.
+    static func isTranscriptID(_ s: String) -> Bool {
+        s.count == 36 && UUID(uuidString: s) != nil
+    }
+
+    /// How the agent picks its conversation back up: by id when we know
+    /// which conversation is this session's — two agents in one folder (a
+    /// delegate beside its delegator) would otherwise `--continue` into
+    /// each other's — else the tool's own "the latest".
+    static func resumeFlags(for s: AgentSession) -> String {
+        if s.tool == .claude, let id = s.agentTranscriptID, isTranscriptID(id) {
+            return "--resume \(id)"
+        }
+        return s.tool.resumeFlags
     }
 
     /// Apply one probe line to the session bound to that window.
@@ -525,6 +557,7 @@ final class AgentSessionEngine {
         if p.alive, let title = SessionHome.cleanAgentTitle(p.title, agent: s.tool.rawValue, cwd: s.cwd) {
             store.setAgentTitle(s.id, title)
         }
+        if p.alive, let tid = p.transcriptID { store.setTranscriptID(s.id, tid) }
         // Keep the local copy fresh while it runs; take its last words when
         // it stops.
         let now = Date()
@@ -717,16 +750,18 @@ final class AgentSessionEngine {
     }
 
     /// The workspace is reachable — booting or resuming it first when it
-    /// isn't (the interactive start, alerts and all: this is the user's own
-    /// click, not an unattended automation).
-    func ensureUp(_ profileID: UUID) async -> Bool {
+    /// isn't. The interactive start, alerts and all, when this is the user's
+    /// own click; `quietly` for what an agent set off (a delegate elsewhere,
+    /// a peer woken for a notice): no prompts, and the booted workspace
+    /// stays off the stage — the user is looking at something else.
+    func ensureUp(_ profileID: UUID, quietly: Bool = false) async -> Bool {
         guard let delegate else { return false }
         if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
             return true
         }
         if !pendingBoots.contains(profileID) {
             pendingBoots.insert(profileID)
-            delegate.startProfile(profileID)
+            if quietly { delegate.startProfileQuietly(profileID) } else { delegate.startProfile(profileID) }
         }
         defer { pendingBoots.remove(profileID) }
         let deadline = Date().addingTimeInterval(Self.bootTimeout)
@@ -735,6 +770,9 @@ final class AgentSessionEngine {
             if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
                 return true
             }
+            // A quiet start that hit a gate nobody's there to answer says so
+            // at once rather than after the timeout.
+            if quietly, delegate.unattendedLaunchRefusal(profileID) != nil { return false }
         }
         return false
     }

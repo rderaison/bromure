@@ -1468,11 +1468,25 @@ final class CodingTaskEngine {
     /// newest match, so a tab whose label hasn't resolved yet still reads.
     /// Nil return when the path has characters we won't quote.
     nonisolated static func planTranscriptCommand(guestCwd: String, since: Int,
-                                                  agent: String? = nil) -> String? {
+                                                  agent: String? = nil,
+                                                  pinnedWindow: Int? = nil) -> String? {
         guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
         else { return nil }
-        var cmd = AgentSessionLocator.locateBlock(path: path, since: since,
-                                                  agent: agent)
+        var cmd = "f=\"\"; "
+        // The transcript the tab's agent itself named (its hook records the
+        // path per window — see agent-status.sh) wins over "the newest file
+        // in the folder": two agents in one folder (a delegate beside its
+        // delegator) would otherwise take turns owning each other's view.
+        // Still floored: a file older than this process is another's.
+        if let w = pinnedWindow {
+            cmd += "pp=\"$HOME/.bromure/transcript-\(w).path\"; "
+                + "if [ -f \"$pp\" ]; then c=$(cat \"$pp\" 2>/dev/null); "
+                + "if [ -n \"$c\" ] && [ -f \"$c\" ] && [ -n \"$(find \"$c\" -newermt @\(since) 2>/dev/null)\" ]; "
+                + "then f=\"$c\"; fi; fi; "
+        }
+        cmd += "if [ -z \"$f\" ]; then "
+            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
+            + "fi; "
         // iconv -c drops the orphan bytes a byte-cap cut can leave mid
         // UTF-8 sequence — a strict decode downstream used to collapse the
         // whole response.
@@ -2292,11 +2306,25 @@ enum CodingTaskEngine {
     /// last few minutes (one plan runs at a time per VM), so a live planning
     /// question still surfaces.
     nonisolated static func planTranscriptCommand(guestCwd: String, since: Int,
-                                                  agent: String? = nil) -> String? {
+                                                  agent: String? = nil,
+                                                  pinnedWindow: Int? = nil) -> String? {
         guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
         else { return nil }
-        var cmd = AgentSessionLocator.locateBlock(path: path, since: since,
-                                                  agent: agent)
+        var cmd = "f=\"\"; "
+        // The transcript the tab's agent itself named (its hook records the
+        // path per window — see agent-status.sh) wins over "the newest file
+        // in the folder": two agents in one folder (a delegate beside its
+        // delegator) would otherwise take turns owning each other's view.
+        // Still floored: a file older than this process is another's.
+        if let w = pinnedWindow {
+            cmd += "pp=\"$HOME/.bromure/transcript-\(w).path\"; "
+                + "if [ -f \"$pp\" ]; then c=$(cat \"$pp\" 2>/dev/null); "
+                + "if [ -n \"$c\" ] && [ -f \"$c\" ] && [ -n \"$(find \"$c\" -newermt @\(since) 2>/dev/null)\" ]; "
+                + "then f=\"$c\"; fi; fi; "
+        }
+        cmd += "if [ -z \"$f\" ]; then "
+            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
+            + "fi; "
         cmd += "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
         if agent == nil || agent == "claude" {
             // The pq dump is Claude's pending AskUserQuestion — no other

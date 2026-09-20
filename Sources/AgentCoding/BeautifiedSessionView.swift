@@ -95,7 +95,8 @@ extension BeautifiedTranscriptProvider {
         let since = Int(lines[1].trimmingCharacters(in: .whitespaces)) ?? 0
         guard !cwd.isEmpty,
               // agent: nil → probe every store, newest match wins + sniff.
-              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since, agent: nil),
+              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since, agent: nil,
+                                                               pinnedWindow: idx),
               let out = await execGuest(cmd, timeout: 15)
         else { return nil }
         return Data(out.utf8)

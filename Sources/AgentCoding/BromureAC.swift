@@ -1134,6 +1134,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         launch(profile, detached: detached, freshBootFallback: false, unattended: true)
     }
 
+    /// An agent's start (a delegate in another workspace, a peer woken for
+    /// a notice): unattended like an automation's, and the booted workspace
+    /// joins the sidebar without taking the stage from what the user is
+    /// reading — the reported bug was a delegation into another workspace
+    /// swapping the delegator's chat for the new session's.
+    func startProfileQuietly(_ id: Profile.ID) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        launch(profile, freshBootFallback: false, unattended: true, quiet: true)
+    }
+
     /// Why an unattended start (an automation firing, a task starting) was
     /// refused, by workspace — nobody is there to answer a prompt, so the
     /// gates that would ask one decline instead, and the engines read the
@@ -3292,6 +3302,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                          "archived": s.isArchived, "deleted": s.isDeleted,
                          "agentAlive": s.agentAlive ?? false,
                          "changes": s.changesSeenAt != nil,
+                         "nickname": s.nickname ?? "",
+                         "transcript": s.agentTranscriptID ?? "",
                          // What the sidebar shows (Ended is often computed, not stored).
                          "bucket": model.map { SessionHome.bucket(for: s, in: $0).title } ?? "",
                          "error": s.lastError ?? ""]
@@ -3319,12 +3331,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     let tool = (params["tool"] as? String).flatMap(Profile.Tool.init(rawValue:))
                     let scope = params["scope"] as? [String] ?? []
                     let worktree = params["worktree"] as? Bool
+                    let workspace = params["workspace"] as? String
+                    let files = params["files"] as? [String] ?? []
                     Task { [weak self] in
                         guard let self else { return }
                         do {
                             let d = try await self.delegationEngine.delegate(
                                 from: id, title: title, brief: brief, contract: params["contract"] as? String,
-                                scope: scope, tool: tool, worktree: worktree)
+                                scope: scope, tool: tool, worktree: worktree, workspace: workspace, files: files)
                             BACDebug.log("delegation", "debug delegate → \(d.id.uuidString)")
                         } catch {
                             BACDebug.log("delegation", "debug delegate refused: \(error)")
@@ -8032,12 +8046,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// on a modal until the caller's boot timeout reads as "did not boot".
     func launch(_ profile: Profile, detached: Bool = false,
                 freshBootFallback: Bool = true, remoteInitiated: Bool = false,
-                preflightResolved: Bool = false, unattended: Bool = false) {
+                preflightResolved: Bool = false, unattended: Bool = false,
+                quiet: Bool = false) {
         if unattended { unattendedLaunchRefusals[profile.id] = nil }
         // Already shown → just focus + select it (unless we were asked to detach,
         // in which case drop the window and leave the VM running headless).
+        // `quiet`: an agent set this off (a delegate in another workspace, a
+        // peer woken for a notice) — the workspace comes up, but the stage
+        // stays on whatever the user is looking at.
         if isAttached(profile.id) {
-            if detached { detachSession(profile.id) } else { revealSession(profile.id) }
+            if detached { detachSession(profile.id) } else if !quiet { revealSession(profile.id) }
             return
         }
         // Remote-initiated launches arrive on a main-queue callout (the control
@@ -8059,7 +8077,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // detach → it already is, nothing to do. Otherwise reattach a fresh
         // window onto the live VM, with its tabs intact.
         if let session = runningSessions[profile.id] {
-            if !detached { attachWindow(to: session) }
+            if !detached { attachWindow(to: session, quiet: quiet) }
             return
         }
 
@@ -8400,9 +8418,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Reattach via the menu-bar item or `vm attach`.
         } else {
             let unified = ensureUnifiedWindow()
-            unified.addPane(win)
-            NSApp.setActivationPolicy(.regular)
-            unified.makeKeyAndOrderFront(nil)
+            unified.addPane(win, select: !quiet)
+            if !quiet {
+                NSApp.setActivationPolicy(.regular)
+                unified.makeKeyAndOrderFront(nil)
+            }
         }
         // Newly-registered window — sync its streaming indicator
         // with the current enrollment + privateMode state.
@@ -11367,10 +11387,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// VZVirtualMachineView to its live VM. Used to reattach after a detach
     /// (window closed, VM kept running) and by the control plane's attach.
     @MainActor
-    func attachWindow(to session: RunningSession) {
-        // Already shown somewhere → focus + select it.
+    func attachWindow(to session: RunningSession, quiet: Bool = false) {
+        // Already shown somewhere → focus + select it (unless quiet: the
+        // workspace is wanted up, not on stage).
         if isAttached(session.profileID) {
-            revealSession(session.profileID)
+            if !quiet { revealSession(session.profileID) }
             return
         }
         let profile = session.profile
@@ -11401,10 +11422,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         pane.model.fusionConfigurable = profile.fusionConfigurable
         pane.model.fusionEngaged = session.fusionEngaged
         let unified = ensureUnifiedWindow()
-        unified.addPane(pane)
-        NSApp.setActivationPolicy(.regular)
-        unified.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        unified.addPane(pane, select: !quiet)
+        if !quiet {
+            NSApp.setActivationPolicy(.regular)
+            unified.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         refreshStreamingState()
         refreshSidebar()
         updateStatusMenu()
