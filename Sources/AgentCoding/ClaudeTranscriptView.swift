@@ -2679,6 +2679,33 @@ private extension MarkdownUI.Theme {
             }
             .markdownMargin(top: .em(0.4), bottom: .em(0.85))
         }
+        // Tables: a card, not a spreadsheet — rows parted by hairlines, the
+        // header set off by a tint, cells with room around the words, one
+        // rounded border around the whole.
+        t = t.table { c in
+            c.label
+                .fixedSize(horizontal: false, vertical: true)
+                .markdownTableBorderStyle(.init(.insideHorizontalBorders,
+                                                color: Color.primary.opacity(0.10)))
+                .markdownTableBackgroundStyle(.alternatingRows(
+                    Color.clear, Color.primary.opacity(0.025),
+                    header: Color.primary.opacity(0.06)))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.14)))
+                .markdownMargin(top: .em(0.5), bottom: .em(0.9))
+        }
+        t = t.tableCell { c in
+            c.label
+                .markdownTextStyle {
+                    FontSize(bodySize * 0.95)
+                    if c.row == 0 { FontWeight(.semibold) }
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .relativeLineSpacing(.em(0.2))
+                .padding(.vertical, 7)
+                .padding(.horizontal, 12)
+        }
         return t
     }
 }
