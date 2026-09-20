@@ -731,7 +731,6 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // ---- Window toolbar: per-selected-VM controls + IP ----
         let toolbarBar = UnifiedToolbarBar(
             model: listModel,
-            onFiles:     { [weak self] id in self?.acDelegate?.openFileBrowserForUnified(id) },
             onReboot:    { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.requestReboot(for: p) } },
             onTrace:     { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.openTraceInspector(for: p.profile) } },
             onSettings:  { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.openEditorWindow(editing: p.profile) } },
@@ -3489,7 +3488,6 @@ final class UnifiedToolbarDelegate: NSObject, NSToolbarDelegate {
 /// The toolbar's trailing control cluster for the selected VM.
 struct UnifiedToolbarBar: View {
     @Bindable var model: SessionListModel
-    let onFiles: (Profile.ID) -> Void
     let onReboot: (Profile.ID) -> Void
     let onTrace: (Profile.ID) -> Void
     let onSettings: (Profile.ID) -> Void

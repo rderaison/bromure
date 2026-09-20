@@ -1645,7 +1645,6 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
 struct RemoteToolbarBar: View {
     @Bindable var model: SessionListModel
     let controller: RemoteHostController
-    let onFiles: (Profile.ID) -> Void
     let onReboot: (Profile.ID) -> Void
     let onTrace: (Profile.ID) -> Void
     let onSettings: (Profile.ID) -> Void
@@ -1703,7 +1702,6 @@ struct RemoteToolbarBar: View {
                     UnderTheHoodToggle(active: model.underTheHood, action: onToggleLinux)
                 }
                 if showMachineControls {
-                    HeaderIcon(system: "folder", help: "Browse files") { onFiles(entry.id) }
                     HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
                     HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
                 }
@@ -1816,7 +1814,6 @@ final class RemoteHostWindow: NSWindow {
     private static let filePaneMinWidth: CGFloat = 200
     private static let filePaneMaxWidth: CGFloat = 1000
     private static let filePaneWidthKey = "ac.remote.filePaneWidth"
-    private var fileBrowserWindows: [Profile.ID: NSWindow] = [:]
 
     // Sessions-first home (mirrored from a server that has it): the header
     // strip above the stage, the session surfaces on the stage, and what
@@ -1980,8 +1977,6 @@ final class RemoteHostWindow: NSWindow {
     override func close() {
         refreshTimer?.invalidate(); refreshTimer = nil
         clearDockerDashboard()
-        for (_, w) in fileBrowserWindows { w.close() }
-        fileBrowserWindows.removeAll()
         for (_, w) in settingsWindows { w.close() }
         settingsWindows.removeAll()
         traceInspectorWindow?.close()   // willClose → reapTraceInspector stops polling
@@ -2344,7 +2339,6 @@ final class RemoteHostWindow: NSWindow {
         let bar = RemoteToolbarBar(
             model: controller.listModel,
             controller: controller,
-            onFiles: { [weak self] id in self?.openFileBrowser(id) },
             onReboot: { [weak self] id in self?.confirmReboot(id) },
             onTrace: { [weak self] id in self?.openTraceInspector(for: id) },
             onSettings: { [weak self] id in self?.openWorkspaceSettings(id) },
@@ -2390,49 +2384,6 @@ final class RemoteHostWindow: NSWindow {
     /// guest-backed (the workspace's shared folders are host dirs on the
     /// REMOTE Mac), so browsing and drag-in/drag-out transfer ride the
     /// `/vms/{id}/file` op channel over the tunnel.
-    private func openFileBrowser(_ id: Profile.ID) {
-        if let win = fileBrowserWindows[id] {
-            win.makeKeyAndOrderFront(nil)
-            return
-        }
-        guard let profile = controller.profile(for: id) else { return }
-        var locations: [FileBrowserLocation] = [
-            FileBrowserLocation(
-                name: NSLocalizedString("Home", comment: ""),
-                backing: .guest,
-                guestPath: "/home/ubuntu",
-                symbol: "house")
-        ]
-        for path in (controller.mounts[id] ?? []).prefix(8) {
-            let base = (path as NSString).lastPathComponent
-            locations.append(FileBrowserLocation(
-                name: base,
-                backing: .guest,
-                guestPath: "/home/ubuntu/\(base)",
-                symbol: "folder"))
-        }
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
-            backing: .buffered, defer: false)
-        win.title = String(
-            format: NSLocalizedString("Files — %@ (%@)", comment: "remote file browser title"),
-            profile.name, controller.host.name)
-        win.center()
-        win.animationBehavior = .none
-        win.isReleasedWhenClosed = false
-        let c = controller
-        win.contentView = NSHostingView(rootView: FileBrowserView(
-            model: FileBrowserModel(
-                locations: locations,
-                cacheKey: "\(c.host.id.uuidString)-\(id.uuidString)",
-                guestOp: { op in
-                    try await c.guestFileOp(id, op: op)
-                })))
-        win.makeKeyAndOrderFront(nil)
-        fileBrowserWindows[id] = win
-    }
-
     /// Local soft/hard reboot chooser (the decision belongs to the interacting
     /// client), then the verb rides the tunnel.
     private func confirmReboot(_ id: Profile.ID) {
@@ -4712,7 +4663,7 @@ final class RemoteHostWindow: NSWindow {
                         switch action {
                         case "settings": self.openWorkspaceSettings(id)
                         case "popout":   self.popOutWorkspace(id)
-                        case "files":    self.openFileBrowser(id)
+                        case "files":    self.setFilePaneOpen(true)
                         default: break
                         }
                     }

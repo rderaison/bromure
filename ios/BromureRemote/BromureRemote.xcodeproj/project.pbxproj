@@ -12,6 +12,7 @@
 		C568C6135B3C91ED6EE4F4C3 /* BromureRemoteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */; };
 		028E121AD6D6119EC7D9FEE0 /* ConnectFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */; };
 		A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */; };
+		93BEDC8DDB743D6C3C72D568 /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02C6BC928850C2DEEF31FAB6 /* FileBrowserView.swift */; };
 		C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */; };
 		555114C355A323E29739E1E8 /* MobileBrowserMCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */; };
 		2ED4C4DCC04A62F04C1D3E62 /* MobileForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB7A8036C2F4D1B840537F79 /* MobileForward.swift */; };
@@ -50,7 +51,6 @@
 		FBE3201FC08C6D5C1C4ACBF9 /* FatClientSSHDial.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABE5CAB976DE6C9935CAF22D /* FatClientSSHDial.swift */; };
 		8C4CC9D03A1E2C57D87BF88E /* FatClientTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EBA74ECEBD0D6CDAA9CBFBE /* FatClientTypes.swift */; };
 		9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A054E65FF7AFB16A80708D8 /* FatForward.swift */; };
-		68BD7714F7DA70C829916D36 /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6B76893030184C6F587C237 /* FileBrowserView.swift */; };
 		CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 057EC22F78972A50849C0EEF /* FileExplorer.swift */; };
 		7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */; };
 		A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */; };
@@ -145,6 +145,7 @@
 		EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BromureRemoteApp.swift"; path = "Sources/BromureRemote/BromureRemoteApp.swift"; sourceTree = "<group>"; };
 		B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectFlow.swift"; path = "Sources/BromureRemote/ConnectFlow.swift"; sourceTree = "<group>"; };
 		DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConnectScreen.swift"; path = "Sources/BromureRemote/ConnectScreen.swift"; sourceTree = "<group>"; };
+		02C6BC928850C2DEEF31FAB6 /* FileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileBrowserView.swift"; path = "Sources/BromureRemote/FileBrowserView.swift"; sourceTree = "<group>"; };
 		CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "HostMirrorScreen.swift"; path = "Sources/BromureRemote/HostMirrorScreen.swift"; sourceTree = "<group>"; };
 		DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MobileBrowserMCP.swift"; path = "Sources/BromureRemote/MobileBrowserMCP.swift"; sourceTree = "<group>"; };
 		EB7A8036C2F4D1B840537F79 /* MobileForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MobileForward.swift"; path = "Sources/BromureRemote/MobileForward.swift"; sourceTree = "<group>"; };
@@ -183,7 +184,6 @@
 		ABE5CAB976DE6C9935CAF22D /* FatClientSSHDial.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientSSHDial.swift"; path = "Sources/BromureRemote/_shared/FatClientSSHDial.swift"; sourceTree = "<group>"; };
 		5EBA74ECEBD0D6CDAA9CBFBE /* FatClientTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatClientTypes.swift"; path = "Sources/BromureRemote/_shared/FatClientTypes.swift"; sourceTree = "<group>"; };
 		1A054E65FF7AFB16A80708D8 /* FatForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatForward.swift"; path = "Sources/BromureRemote/_shared/FatForward.swift"; sourceTree = "<group>"; };
-		C6B76893030184C6F587C237 /* FileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileBrowserView.swift"; path = "Sources/BromureRemote/_shared/FileBrowserView.swift"; sourceTree = "<group>"; };
 		057EC22F78972A50849C0EEF /* FileExplorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorer.swift"; path = "Sources/BromureRemote/_shared/FileExplorer.swift"; sourceTree = "<group>"; };
 		C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorerViews.swift"; path = "Sources/BromureRemote/_shared/FileExplorerViews.swift"; sourceTree = "<group>"; };
 		D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Icons.swift"; path = "Sources/BromureRemote/_shared/Icons.swift"; sourceTree = "<group>"; };
@@ -302,6 +302,7 @@
 				EC15291AB11B334DD91BC950 /* BromureRemoteApp.swift */,
 				B81D5E837A2006E2CF0E33FE /* ConnectFlow.swift */,
 				DB3461E71A5CBCE0C56EBEF3 /* ConnectScreen.swift */,
+				02C6BC928850C2DEEF31FAB6 /* FileBrowserView.swift */,
 				CAAB60FA31C06B8931045334 /* HostMirrorScreen.swift */,
 				DEEE888C396F89001DA372EC /* MobileBrowserMCP.swift */,
 				EB7A8036C2F4D1B840537F79 /* MobileForward.swift */,
@@ -340,7 +341,6 @@
 				ABE5CAB976DE6C9935CAF22D /* FatClientSSHDial.swift */,
 				5EBA74ECEBD0D6CDAA9CBFBE /* FatClientTypes.swift */,
 				1A054E65FF7AFB16A80708D8 /* FatForward.swift */,
-				C6B76893030184C6F587C237 /* FileBrowserView.swift */,
 				057EC22F78972A50849C0EEF /* FileExplorer.swift */,
 				C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */,
 				D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */,
@@ -512,6 +512,7 @@
 				C568C6135B3C91ED6EE4F4C3 /* BromureRemoteApp.swift in Sources */,
 				028E121AD6D6119EC7D9FEE0 /* ConnectFlow.swift in Sources */,
 				A34189CD6FFD304702B9C963 /* ConnectScreen.swift in Sources */,
+				93BEDC8DDB743D6C3C72D568 /* FileBrowserView.swift in Sources */,
 				C3637B56805E141A0A65CC0F /* HostMirrorScreen.swift in Sources */,
 				555114C355A323E29739E1E8 /* MobileBrowserMCP.swift in Sources */,
 				2ED4C4DCC04A62F04C1D3E62 /* MobileForward.swift in Sources */,
@@ -550,7 +551,6 @@
 				FBE3201FC08C6D5C1C4ACBF9 /* FatClientSSHDial.swift in Sources */,
 				8C4CC9D03A1E2C57D87BF88E /* FatClientTypes.swift in Sources */,
 				9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */,
-				68BD7714F7DA70C829916D36 /* FileBrowserView.swift in Sources */,
 				CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */,
 				7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */,
 				A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */,

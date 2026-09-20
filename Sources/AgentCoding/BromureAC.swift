@@ -1094,12 +1094,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return true
     }
 
-    /// File browser opened from the unified window's header (per selected VM).
-    func openFileBrowserForUnified(_ id: Profile.ID) {
-        guard let pane = panes[id] else { return }
-        openFileBrowser(profile: pane.profile)
-    }
-
     /// Boot (or focus) the profile with this id — wired to the dropdown.
     func startProfile(_ id: Profile.ID) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
@@ -5219,10 +5213,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             enrollmentWindow = nil
             return
         }
-        if let key = fileBrowserWindows.first(where: { $0.value === win })?.key {
-            fileBrowserWindows[key] = nil
-            return
-        }
         if win === unifiedWindow {
             // The ephemeral browser VM is window-scoped and disposable — tear
             // it down (unlike the workspace VMs, which detach and keep running).
@@ -5663,9 +5653,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var remoteAccessWindow: NSWindow?
     private var securityTimelineWindow: NSWindow?
     private var inferenceLogWindow: NSWindow?
-    /// File-browser panels, one per profile (keyed by profile id) so each
-    /// session window gets its own, reused on subsequent clicks.
-    private var fileBrowserWindows: [UUID: NSWindow] = [:]
 
     /// Wired to the "Trace Inspector…" menu item (⇧⌘I).
     /// Opens the inspector with no profile pre-filter.
@@ -6138,66 +6125,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Keep the attached window's title-bar toggle in sync (e.g. when the
         // change came from the CLI rather than the toggle itself).
         pane(for: profile.id)?.model.fusionEngaged = engaged
-    }
-
-    func openFileBrowser(for window: TabbedSessionWindow) {
-        openFileBrowser(profile: window.profile)
-    }
-
-    func openFileBrowser(profile: Profile) {
-        if let win = fileBrowserWindows[profile.id] {
-            win.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        // Home browses the guest's REAL /home/ubuntu over the vsock file
-        // service — required for ext4-model homes (they live inside
-        // home.img, invisible to macOS) and used for legacy virtiofs
-        // workspaces too so there's one code path that always shows what
-        // the guest sees.
-        var locations: [FileBrowserLocation] = [
-            FileBrowserLocation(
-                name: NSLocalizedString("Home", comment: ""),
-                backing: .guest,
-                guestPath: "/home/ubuntu",
-                symbol: "house")
-        ]
-        // Shared folders are symlinked to ~/<basename> inside the guest
-        // on first boot — they're real host dirs, so browse them directly
-        // (drag-out hands Finder the actual file; Reveal works).
-        for path in profile.folderPaths.prefix(8) {
-            let base = (path as NSString).lastPathComponent
-            locations.append(FileBrowserLocation(
-                name: base,
-                backing: .host(URL(fileURLWithPath: path)),
-                guestPath: "/home/ubuntu/\(base)",
-                symbol: "folder"))
-        }
-
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 480),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
-            backing: .buffered, defer: false)
-        win.title = String(
-            format: NSLocalizedString("Files — %@", comment: "file browser title"),
-            profile.name)
-        win.center()
-        win.animationBehavior = .none
-        let profileID = profile.id
-        win.contentView = NSHostingView(rootView: FileBrowserView(
-            model: FileBrowserModel(
-                locations: locations,
-                cacheKey: profileID.uuidString,
-                guestOp: { [weak self] op in
-                    guard let self else {
-                        throw GuestExecError.vmNotRunning
-                    }
-                    return try await self.guestFileOp(profileID: profileID, op: op)
-                })))
-        win.delegate = self
-        win.isReleasedWhenClosed = false
-        win.makeKeyAndOrderFront(nil)
-        fileBrowserWindows[profile.id] = win
     }
 
     @objc func openPreferencesAction(_ sender: Any?) {

@@ -37,7 +37,7 @@ enum TerminalImagePaste {
     /// survives a VM reboot (agent conversations may re-read it later).
     static let pastesDir = "/home/ubuntu/.bromure/pastes"
 
-    /// Same rationale as FileBrowserModel: 6 MB raw ≈ 8 MB base64, inside
+    /// Same rationale as the file pane's upload cap: 6 MB raw ≈ 8 MB base64, inside
     /// the guest agent's 10 MB request cap with room to spare.
     static let chunkBytes = 6 * 1024 * 1024
 

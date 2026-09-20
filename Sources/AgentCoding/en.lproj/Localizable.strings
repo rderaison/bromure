@@ -867,7 +867,6 @@
 "The workspace must be running to browse its files." = "The workspace must be running to browse its files.";
 "Copying %@ in… %@" = "Copying %@ in… %@";
 "Copying %@ out… %@" = "Copying %@ out… %@";
-"Files — %@" = "Files — %@";
 "Home" = "Home";
 "Locations" = "Locations";
 "Enclosing folder" = "Enclosing folder";

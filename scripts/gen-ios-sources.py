@@ -70,7 +70,6 @@ SHARED = [
     "TerminalAppDefaults.swift",
     "FileExplorer.swift",
     "FileExplorerViews.swift",
-    "FileBrowserView.swift",
     "AutomationKanbanView.swift",
     "CodingKanbanView.swift",
     "ScheduledAutomationViews.swift",
