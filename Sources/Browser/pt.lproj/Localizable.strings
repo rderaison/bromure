@@ -733,3 +733,29 @@
 "Download Latest" = "Transferir a mais recente";
 "Not Now" = "Agora não";
 "Never ask me again" = "Não perguntar novamente";
+
+/* Added 2026-09-20 — profile chip + File menu (windows-first launch), site isolation */
+"New Window" = "Nova janela";
+"New Private Window" = "Nova janela privada";
+"New Window With Profile" = "Nova janela com perfil";
+"New Profile\U2026" = "Novo perfil\U2026";
+"Edit Profile\U2026" = "Editar perfil\U2026";
+"Delete Profile\U2026" = "Apagar perfil\U2026";
+"New %@ Window" = "Nova janela de %@";
+"Show %@ Window" = "Mostrar janela de %@";
+"%@ (open)" = "%@ (aberto)";
+"Edit \U201C%@\U201D\U2026" = "Editar \U201C%@\U201D\U2026";
+"View \U201C%@\U201D Settings\U2026" = "Ver defini\U00E7\U00F5es de \U201C%@\U201D\U2026";
+"Delete \U201C%@\U201D\U2026" = "Apagar \U201C%@\U201D\U2026";
+"Delete \U201C%@\U201D?" = "Apagar \U201C%@\U201D?";
+"\U201C%@\U201D is open" = "\U201C%@\U201D est\U00E1 aberto";
+"Close its window before deleting the profile." = "Feche a respetiva janela antes de apagar o perfil.";
+"Profile: %@" = "Perfil: %@";
+"Restart session?" = "Reiniciar a sess\U00E3o?";
+"Restart" = "Reiniciar";
+"Later" = "Mais tarde";
+"Settings have changed. Restart the browser session to apply them?" = "As defini\U00E7\U00F5es foram alteradas. Reiniciar a sess\U00E3o do navegador para as aplicar?";
+"Settings have changed. Restart %lld browser sessions to apply them?" = "As defini\U00E7\U00F5es foram alteradas. Reiniciar %lld sess\U00F5es do navegador para as aplicar?";
+"Strict Site Isolation" = "Isolamento estrito de sites";
+"Runs every website in its own process, which protects sites from each other but costs a lot of memory on ad-heavy pages (dozens of processes for one tab). Off keeps a separate process only for sites you sign in to." = "Executa cada site no seu pr\U00F3prio processo, o que protege os sites uns dos outros, mas consome muita mem\U00F3ria em p\U00E1ginas cheias de an\U00FAncios (dezenas de processos para um \U00FAnico separador). Desativado, apenas os sites em que inicia sess\U00E3o t\U00EAm um processo pr\U00F3prio.";
+"Animates mouse-wheel scrolling for a smoother feel. Trackpad scrolling always follows your fingers exactly." = "Anima o deslocamento com a roda do rato para uma sensa\U00E7\U00E3o mais suave. O deslocamento no trackpad segue sempre exatamente os seus dedos.";

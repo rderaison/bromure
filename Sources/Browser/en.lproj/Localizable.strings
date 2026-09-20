@@ -733,3 +733,29 @@
 "Download Latest" = "Download Latest";
 "Not Now" = "Not Now";
 "Never ask me again" = "Never ask me again";
+
+/* Added 2026-09-20 — profile chip + File menu (windows-first launch), site isolation */
+"New Window" = "New Window";
+"New Private Window" = "New Private Window";
+"New Window With Profile" = "New Window With Profile";
+"New Profile\U2026" = "New Profile\U2026";
+"Edit Profile\U2026" = "Edit Profile\U2026";
+"Delete Profile\U2026" = "Delete Profile\U2026";
+"New %@ Window" = "New %@ Window";
+"Show %@ Window" = "Show %@ Window";
+"%@ (open)" = "%@ (open)";
+"Edit \U201C%@\U201D\U2026" = "Edit \U201C%@\U201D\U2026";
+"View \U201C%@\U201D Settings\U2026" = "View \U201C%@\U201D Settings\U2026";
+"Delete \U201C%@\U201D\U2026" = "Delete \U201C%@\U201D\U2026";
+"Delete \U201C%@\U201D?" = "Delete \U201C%@\U201D?";
+"\U201C%@\U201D is open" = "\U201C%@\U201D is open";
+"Close its window before deleting the profile." = "Close its window before deleting the profile.";
+"Profile: %@" = "Profile: %@";
+"Restart session?" = "Restart session?";
+"Restart" = "Restart";
+"Later" = "Later";
+"Settings have changed. Restart the browser session to apply them?" = "Settings have changed. Restart the browser session to apply them?";
+"Settings have changed. Restart %lld browser sessions to apply them?" = "Settings have changed. Restart %lld browser sessions to apply them?";
+"Strict Site Isolation" = "Strict Site Isolation";
+"Runs every website in its own process, which protects sites from each other but costs a lot of memory on ad-heavy pages (dozens of processes for one tab). Off keeps a separate process only for sites you sign in to." = "Runs every website in its own process, which protects sites from each other but costs a lot of memory on ad-heavy pages (dozens of processes for one tab). Off keeps a separate process only for sites you sign in to.";
+"Animates mouse-wheel scrolling for a smoother feel. Trackpad scrolling always follows your fingers exactly." = "Animates mouse-wheel scrolling for a smoother feel. Trackpad scrolling always follows your fingers exactly.";

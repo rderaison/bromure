@@ -733,3 +733,29 @@
 "Download Latest" = "Télécharger la dernière version";
 "Not Now" = "Pas maintenant";
 "Never ask me again" = "Ne plus me demander";
+
+/* Added 2026-09-20 — profile chip + File menu (windows-first launch), site isolation */
+"New Window" = "Nouvelle fen\U00EAtre";
+"New Private Window" = "Nouvelle fen\U00EAtre priv\U00E9e";
+"New Window With Profile" = "Nouvelle fen\U00EAtre avec un profil";
+"New Profile\U2026" = "Nouveau profil\U2026";
+"Edit Profile\U2026" = "Modifier le profil\U2026";
+"Delete Profile\U2026" = "Supprimer le profil\U2026";
+"New %@ Window" = "Nouvelle fen\U00EAtre %@";
+"Show %@ Window" = "Afficher la fen\U00EAtre %@";
+"%@ (open)" = "%@ (ouvert)";
+"Edit \U201C%@\U201D\U2026" = "Modifier \U00AB\U00A0%@\U00A0\U00BB\U2026";
+"View \U201C%@\U201D Settings\U2026" = "Afficher les r\U00E9glages de \U00AB\U00A0%@\U00A0\U00BB\U2026";
+"Delete \U201C%@\U201D\U2026" = "Supprimer \U00AB\U00A0%@\U00A0\U00BB\U2026";
+"Delete \U201C%@\U201D?" = "Supprimer \U00AB\U00A0%@\U00A0\U00BB\U00A0?";
+"\U201C%@\U201D is open" = "\U00AB\U00A0%@\U00A0\U00BB est ouvert";
+"Close its window before deleting the profile." = "Fermez sa fen\U00EAtre avant de supprimer le profil.";
+"Profile: %@" = "Profil\U00A0: %@";
+"Restart session?" = "Red\U00E9marrer la session\U00A0?";
+"Restart" = "Red\U00E9marrer";
+"Later" = "Plus tard";
+"Settings have changed. Restart the browser session to apply them?" = "Les r\U00E9glages ont chang\U00E9. Red\U00E9marrer la session du navigateur pour les appliquer\U00A0?";
+"Settings have changed. Restart %lld browser sessions to apply them?" = "Les r\U00E9glages ont chang\U00E9. Red\U00E9marrer %lld sessions du navigateur pour les appliquer\U00A0?";
+"Strict Site Isolation" = "Isolation stricte des sites";
+"Runs every website in its own process, which protects sites from each other but costs a lot of memory on ad-heavy pages (dozens of processes for one tab). Off keeps a separate process only for sites you sign in to." = "Ex\U00E9cute chaque site web dans son propre processus, ce qui prot\U00E8ge les sites les uns des autres mais consomme beaucoup de m\U00E9moire sur les pages charg\U00E9es de publicit\U00E9s (des dizaines de processus pour un seul onglet). D\U00E9sactiv\U00E9, seuls les sites sur lesquels vous vous connectez ont un processus d\U00E9di\U00E9.";
+"Animates mouse-wheel scrolling for a smoother feel. Trackpad scrolling always follows your fingers exactly." = "Anime le d\U00E9filement \U00E0 la molette pour une sensation plus fluide. Le d\U00E9filement au trackpad suit toujours exactement vos doigts.";

@@ -168,6 +168,10 @@ public struct VMConfig {
     /// Whether smooth scrolling is enabled.
     public var enableSmoothScrolling: Bool
 
+    /// Chromium strict site isolation (one renderer per site). False adds
+    /// `--disable-site-isolation-trials`: far fewer renderer processes.
+    public var strictSiteIsolation: Bool
+
     /// Whether to block known malware sites via Cloudflare DNS (1.1.1.2/1.0.0.2).
     public var blockMalwareSites: Bool
 
@@ -374,6 +378,7 @@ public struct VMConfig {
         enableWebGL: Bool = false,
         enableZeroCopy: Bool = true,
         enableSmoothScrolling: Bool = true,
+        strictSiteIsolation: Bool = true,
         blockMalwareSites: Bool = false,
         enableFileTransfer: Bool = false,
         phishingWarning: Bool = false,
@@ -464,6 +469,7 @@ public struct VMConfig {
         self.enableWebGL = enableWebGL
         self.enableZeroCopy = enableZeroCopy
         self.enableSmoothScrolling = enableSmoothScrolling
+        self.strictSiteIsolation = strictSiteIsolation
         self.blockMalwareSites = blockMalwareSites
         self.enableFileTransfer = enableFileTransfer
         self.phishingWarning = phishingWarning

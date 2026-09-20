@@ -108,6 +108,31 @@ final class NativeTabBarModel {
     /// Called when the user clicks the forward button.
     var onForward: ((String) -> Void)?
 
+    // MARK: Profile chip (Safari-style "Personal ⌄" pill)
+
+    /// The profile this window runs. nil for profile-less (automation)
+    /// sessions, which show no chip.
+    var profileName: String?
+    var profileColor: ProfileColor?
+    var profileIsManaged = false
+
+    /// Bumped by the app delegate whenever the profile roster or the set
+    /// of open windows changes, so the chip's menu re-renders with fresh
+    /// entries from ``profileEntries``.
+    var profileVersion = 0
+
+    /// Live roster for the chip menu, evaluated when the menu renders —
+    /// a closure rather than a stored array so a stale copy can never
+    /// outlive a create/delete.
+    @ObservationIgnored var profileEntries: () -> [ProfileMenuEntry] = { [] }
+
+    /// Chip menu actions. All resolve through the app delegate; the
+    /// session only forwards.
+    var onOpenProfile: ((UUID) -> Void)?
+    var onNewProfile: (() -> Void)?
+    var onEditProfile: (() -> Void)?
+    var onDeleteProfile: (() -> Void)?
+
     init() {}
 
     var activeTab: TabInfo? { tabs.first(where: { $0.active }) }
@@ -250,22 +275,26 @@ final class NativeTabBarModel {
 struct NativeCompactBarView: View {
     @Bindable var model: NativeTabBarModel
 
+    /// Natural widths of the leading (profile chip + nav) and trailing
+    /// (new tab + share) groups. The wider one sets the width of BOTH
+    /// side columns so the tab capsule stays centred in the window, the
+    /// way Safari centres its address field regardless of how many
+    /// toolbar buttons sit on either side.
+    @State private var leadingWidth: CGFloat = 0
+    @State private var trailingWidth: CGFloat = 0
+
     var body: some View {
+        let side = max(leadingWidth, trailingWidth)
         HStack(spacing: 6) {
-            // Safari Compact has only back/forward in the global nav area;
-            // reload moved inside the active tab (it's URL-scoped, not
-            // window-scoped, so it travels with the focused tab).
-            navButton("chevron.backward", help: "Back (⌘[)") {
-                if let id = model.activeTab?.id { model.onBack?(id) }
-            }
-            navButton("chevron.forward", help: "Forward (⌘])") {
-                if let id = model.activeTab?.id { model.onForward?(id) }
-            }
+            leadingGroup
+                .background(WidthReader(width: $leadingWidth))
+                .frame(width: side > 0 ? side : nil, alignment: .leading)
 
             // The outer grey capsule sizes to its content (no maxWidth on
-            // the HStack), and trailing Spacers in the OUTER row push the
-            // capsule + new-tab button towards the centre/right. Each tab
-            // pill shares space equally inside the capsule via
+            // the HStack), and the Spacers on both sides of it split the
+            // remaining width evenly — with equal-width side columns that
+            // puts the capsule at the window's centre. Each tab pill
+            // shares space equally inside the capsule via
             // `frame(maxWidth: .infinity)` with low minWidths so they
             // shrink as more tabs open; once an inactive pill is too
             // narrow for its title, its `ViewThatFits` collapses to a
@@ -292,6 +321,37 @@ struct NativeCompactBarView: View {
 
             Spacer(minLength: 0)
 
+            trailingGroup
+                .background(WidthReader(width: $trailingWidth))
+                .frame(width: side > 0 ? side : nil, alignment: .trailing)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private var leadingGroup: some View {
+        HStack(spacing: 6) {
+            // Safari puts the profile pill ("Personal ⌄") ahead of the nav
+            // buttons: it's window-scoped, and the menu behind it is where
+            // you jump to another profile or manage them.
+            if model.profileName != nil {
+                ProfileChip(model: model)
+            }
+
+            // Safari Compact has only back/forward in the global nav area;
+            // reload moved inside the active tab (it's URL-scoped, not
+            // window-scoped, so it travels with the focused tab).
+            navButton("chevron.backward", help: "Back (⌘[)") {
+                if let id = model.activeTab?.id { model.onBack?(id) }
+            }
+            navButton("chevron.forward", help: "Forward (⌘])") {
+                if let id = model.activeTab?.id { model.onForward?(id) }
+            }
+        }
+        .fixedSize()
+    }
+
+    private var trailingGroup: some View {
+        HStack(spacing: 6) {
             Button(action: { model.onNewTab?() }) {
                 Image(systemName: "plus")
                     .frame(width: 22, height: 22)
@@ -301,7 +361,7 @@ struct NativeCompactBarView: View {
 
             shareButton
         }
-        .padding(.horizontal, 8)
+        .fixedSize()
     }
 
     /// Standard macOS share menu (Mail, Messages, AirDrop, Safari Reading
@@ -329,6 +389,20 @@ struct NativeCompactBarView: View {
         .buttonStyle(.plain)
         .help(help)
         .disabled(model.activeTab == nil && model.tabs.isEmpty)
+    }
+}
+
+/// Reports a view's laid-out width into a binding (GeometryReader in the
+/// background so it never influences the measured view's own size).
+private struct WidthReader: View {
+    @Binding var width: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            Color.clear
+                .onAppear { width = geo.size.width }
+                .onChange(of: geo.size.width) { _, w in width = w }
+        }
     }
 }
 

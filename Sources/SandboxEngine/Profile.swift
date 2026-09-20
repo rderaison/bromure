@@ -220,6 +220,11 @@ public struct ProfileSettings: Codable, Equatable {
     public var enableWebGL: Bool = false
     public var enableZeroCopy: Bool = true
     public var enableSmoothScrolling: Bool = true
+    /// One renderer process per site (Chromium's strict site isolation).
+    /// Off = Chromium's partial isolation (sites you log into still get
+    /// their own process). Measured on an ad-heavy page: 70 renderer
+    /// processes and ~2.1 GB used with it on, 5 and ~1.4 GB with it off.
+    public var strictSiteIsolation: Bool = true
     /// Custom User-Agent override. Empty = present as Chrome on macOS
     /// (the guest builds the string from its real Chromium version so the
     /// platform reads "Macintosh" instead of leaking the Linux VM, while
@@ -367,7 +372,7 @@ public struct ProfileSettings: Codable, Equatable {
     public init() {}
 
     enum CodingKeys: String, CodingKey {
-        case homePage, enableGPU, enableWebGL, enableZeroCopy, enableSmoothScrolling, userAgent, browser
+        case homePage, enableGPU, enableWebGL, enableZeroCopy, enableSmoothScrolling, strictSiteIsolation, userAgent, browser
         case enableAdBlocking, enableWarp, warpAutoConnect
         case vpnMode, wireGuardConfig, wireGuardAutoConnect
         case ikev2Server, ikev2RemoteID, ikev2AuthMethod, ikev2Username, ikev2UseDNS, ikev2AutoConnect
@@ -398,6 +403,7 @@ public struct ProfileSettings: Codable, Equatable {
         enableWebGL = try c.decodeIfPresent(Bool.self, forKey: .enableWebGL) ?? defaults.enableWebGL
         enableZeroCopy = try c.decodeIfPresent(Bool.self, forKey: .enableZeroCopy) ?? defaults.enableZeroCopy
         enableSmoothScrolling = try c.decodeIfPresent(Bool.self, forKey: .enableSmoothScrolling) ?? defaults.enableSmoothScrolling
+        strictSiteIsolation = try c.decodeIfPresent(Bool.self, forKey: .strictSiteIsolation) ?? defaults.strictSiteIsolation
         userAgent = try c.decodeIfPresent(String.self, forKey: .userAgent) ?? defaults.userAgent
         browser = try c.decodeIfPresent(BrowserChoice.self, forKey: .browser) ?? defaults.browser
         enableAdBlocking = try c.decodeIfPresent(Bool.self, forKey: .enableAdBlocking) ?? defaults.enableAdBlocking
@@ -481,6 +487,7 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encode(enableWebGL, forKey: .enableWebGL)
         try c.encode(enableZeroCopy, forKey: .enableZeroCopy)
         try c.encode(enableSmoothScrolling, forKey: .enableSmoothScrolling)
+        try c.encode(strictSiteIsolation, forKey: .strictSiteIsolation)
         try c.encode(userAgent, forKey: .userAgent)
         try c.encode(browser, forKey: .browser)
         try c.encode(enableAdBlocking, forKey: .enableAdBlocking)
@@ -615,6 +622,7 @@ public struct ProfileSettings: Codable, Equatable {
             enableWebGL: enableGPU ? enableWebGL : false,  // WebGL requires GPU
             enableZeroCopy: enableZeroCopy,
             enableSmoothScrolling: enableSmoothScrolling,
+            strictSiteIsolation: strictSiteIsolation,
             blockMalwareSites: blockMalwareSites,
             enableFileTransfer: canUpload || canDownload,
             phishingWarning: phishingWarning,

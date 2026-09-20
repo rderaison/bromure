@@ -41,7 +41,8 @@ Controls how the browser uses your Mac's hardware.
 | **GPU Acceleration** | Uses your Mac's graphics chip (via Virtio GPU) to accelerate page rendering, CSS animations, and video playback. Enabled by default. Turn it off if you experience visual glitches or display corruption. |
 | **WebGL** | Allows websites to use 3D graphics APIs. Required by some games, mapping services (Google Maps 3D), and data visualization tools. Disabled by default to reduce attack surface -- WebGL exposes GPU driver interfaces to web content. Automatically disabled when GPU Acceleration is off. |
 | **Zero-Copy Rasterization** | Reduces memory copies during page rendering by allowing the GPU to rasterize directly into shared memory. Improves performance on most systems. Enabled by default. |
-| **Smooth Scrolling** | Animates scrolling for a smoother, more fluid feel. Disable for instant, jump-style scrolling. Enabled by default. |
+| **Smooth Scrolling** | Animates mouse-wheel scrolling for a smoother feel. Trackpad scrolling is delivered to the page exactly as macOS reports it (pixel deltas and momentum), independent of this setting. Enabled by default. |
+| **Strict Site Isolation** | Runs every website in its own renderer process (Chromium's site-per-process). Strong protection between sites, but ad-heavy pages spawn dozens of processes for a single tab (measured: 70 renderers and ~2.1 GB used on one page). Off keeps a dedicated process only for sites you sign in to (Chromium's partial isolation) — the same page then runs in ~5 renderers and ~1.4 GB. Enabled by default. |
 
 ### Media
 
