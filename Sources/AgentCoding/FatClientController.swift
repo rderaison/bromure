@@ -1553,9 +1553,13 @@ final class RemoteHostController {
         try checkGuestReachable(id)
         let host = self.host
         let path = "/vms/\(seg(id))/exec"
+        // The read budget must cover the command's own (the client's 12s
+        // default lost any exec slower than that — a first transcript load
+        // over a WAN, say).
         let resp = try await Task.detached(priority: .userInitiated) {
             try RemoteTransport.client(for: host)
-                .request("POST", path, body: ["command": command, "timeout": timeout])
+                .request("POST", path, body: ["command": command, "timeout": timeout],
+                         recvTimeoutSeconds: timeout + 15)
         }.value
         guard resp.status == 200 else {
             throw ACAppDelegate.GuestExecError.commandFailed(

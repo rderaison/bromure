@@ -28,6 +28,21 @@ struct TranscriptItem: Identifiable, Equatable {
     var timestamp: Date?
 }
 
+extension TranscriptItem.Kind {
+    /// The case alone, for identity (see `AgentTranscript.stableIDs`).
+    var stableTag: Int {
+        switch self {
+        case .userText: 1
+        case .assistantText: 2
+        case .thinking: 3
+        case .toolUse: 4
+        case .toolResult: 5
+        case .question: 6
+        case .todo: 7
+        }
+    }
+}
+
 /// A parsed AskUserQuestion call: what the agent wants to know.
 struct TranscriptQuestion: Equatable {
     struct Option: Equatable {
@@ -242,12 +257,37 @@ enum AgentTranscript {
         } else {
             kind = sniff(data)
         }
+        let items: [TranscriptItem]
         switch kind {
-        case "codex": return CodexTranscriptParser.parse(data)
-        case "grok": return GrokTranscriptParser.parse(data)
-        case "kimi": return KimiTranscriptParser.parse(data)
-        case "omp": return OmpTranscriptParser.parse(data)
-        default: return ClaudeTranscriptParser.parse(data)
+        case "codex": items = CodexTranscriptParser.parse(data)
+        case "grok": items = GrokTranscriptParser.parse(data)
+        case "kimi": items = KimiTranscriptParser.parse(data)
+        case "omp": items = OmpTranscriptParser.parse(data)
+        default: items = ClaudeTranscriptParser.parse(data)
+        }
+        return stableIDs(items)
+    }
+
+    /// Re-key items so an item keeps its id when the bytes in front of it
+    /// change — the parsers number items by position, and a transcript read
+    /// as a moving window (or trimmed at the head) renumbered every row: the
+    /// list lost its identity, the lazy stack rebuilt from estimates, and the
+    /// scroll offset was left past the end (a blank page). The key is what
+    /// the item IS (kind + when it was written) plus its rank among equals,
+    /// not what it says — a streaming assistant turn keeps its id as it grows.
+    static func stableIDs(_ items: [TranscriptItem]) -> [TranscriptItem] {
+        var rank: [Int: Int] = [:]
+        return items.map { item in
+            var h = Hasher()
+            h.combine(item.kind.stableTag)
+            h.combine(item.timestamp?.timeIntervalSince1970 ?? -1)
+            let key = h.finalize()
+            let n = rank[key, default: 0]
+            rank[key] = n + 1
+            var h2 = Hasher()
+            h2.combine(key)
+            h2.combine(n)
+            return TranscriptItem(id: h2.finalize(), kind: item.kind, timestamp: item.timestamp)
         }
     }
 

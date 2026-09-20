@@ -337,6 +337,54 @@ final class SessionPane {
     /// session's local cache), set by the window before the tab is shown.
     var transcriptSinks: [Int: (Data) -> Void] = [:]
 
+    /// Debug hook: the beautified view's transcript history — how much of
+    /// the file it holds, whether earlier conversation is fetchable — and
+    /// `{do: earlier}` fetches it (the "Load earlier conversation" button).
+    func debugTranscriptHistory(_ what: String) async -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        if what == "earlier" { await m.loadEarlier() }
+        return m.debugHistoryState()
+    }
+    /// Debug: the AppKit tree under the beautified host — every scroll
+    /// view's document frame and clip bounds, to see where the transcript
+    /// is scrolled when the stage looks blank.
+    func debugBeautifiedViewTree() -> [String: Any] {
+        guard let host = mountedBeautifiedHost else { return ["error": "no beautified view on stage"] }
+        var lines: [String] = []
+        func walk(_ v: NSView, _ depth: Int) {
+            let f = v.frame
+            var line = String(repeating: "  ", count: depth)
+                + "\(type(of: v)) \(Int(f.origin.x)),\(Int(f.origin.y)) \(Int(f.width))x\(Int(f.height))"
+            if v.isHidden { line += " hidden" }
+            if let sv = v as? NSScrollView {
+                let b = sv.contentView.bounds
+                let d = sv.documentView?.frame ?? .zero
+                line += " [clip \(Int(b.origin.x)),\(Int(b.origin.y)) \(Int(b.width))x\(Int(b.height)) doc \(Int(d.width))x\(Int(d.height))]"
+            }
+            lines.append(line)
+            if depth < 14 { for c in v.subviews { walk(c, depth + 1) } }
+        }
+        walk(host, 0)
+        return ["hostFrame": "\(host.frame)", "tree": lines]
+    }
+    /// Debug: scroll the transcript's AppKit clip to `y` (0 = top), as a
+    /// person reading history would, and report the clip after.
+    func debugBeautifiedScroll(y: CGFloat) -> [String: Any] {
+        guard let host = mountedBeautifiedHost else { return ["error": "no beautified view on stage"] }
+        func find(_ v: NSView) -> NSScrollView? {
+            if let sv = v as? NSScrollView, "\(type(of: sv))".hasPrefix("HostingScrollView") { return sv }
+            for c in v.subviews { if let f = find(c) { return f } }
+            return nil
+        }
+        guard let sv = find(host) else { return ["error": "no transcript scroll view"] }
+        sv.contentView.scroll(to: NSPoint(x: 0, y: y))
+        sv.reflectScrolledClipView(sv.contentView)
+        let b = sv.contentView.bounds
+        return ["clipY": b.origin.y, "clipH": b.height, "docH": sv.documentView?.frame.height ?? 0]
+    }
+    func debugTranscriptHistoryState() -> [String: Any] {
+        beautifiedModel?.debugHistoryState() ?? ["error": "no beautified view on stage"]
+    }
     /// Debug hook: send what's in the chat composer (the Return key).
     func debugSendComposer() -> Bool {
         guard let m = beautifiedModel else { return false }

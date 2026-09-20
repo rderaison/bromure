@@ -946,13 +946,47 @@ final class SessionTranscriptCache {
     func save(_ id: UUID, _ data: Data) {
         guard !data.isEmpty else { return }
         let u = url(id)
-        if let old = try? Data(contentsOf: u), old.count == data.count, old == data { return }
+        let old = try? Data(contentsOf: u)
+        if let old, old.count == data.count, old == data { return }
+        // Two writers feed this: the beautified view (the whole history it
+        // holds) and the engine's periodic snapshot (a short tail). A shorter
+        // snapshot must not throw away the history — splice it in where its
+        // first whole line already sits; only an unrelated transcript replaces.
+        var merged = data
+        if let old, old.count > data.count, let spliced = Self.splice(history: old, tail: data) {
+            merged = spliced
+            if merged == old { return }
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try? data.write(to: u, options: .atomic)
+        try? merged.write(to: u, options: .atomic)
         var v = u
         var rv = URLResourceValues()
         rv.isExcludedFromBackup = true
         try? v.setResourceValues(rv)
+    }
+
+    /// `history` with `tail` laid over its end: the tail's first complete
+    /// line is found (last occurrence) in the history and everything from
+    /// there is replaced by the tail. nil when the tail doesn't belong to
+    /// this history.
+    static func splice(history: Data, tail: Data) -> Data? {
+        // The tail may start mid-line (a byte-cap cut): the first COMPLETE
+        // line is the one after the first newline — unless the tail starts
+        // at a line boundary, when its first line is already whole.
+        guard let nl = tail.firstIndex(of: 0x0A) else { return nil }
+        let lineStart: Data.Index
+        if let last = history.last, last == 0x0A, history.count > tail.count,
+           history[(history.endIndex - tail.count)...] == tail {
+            return history   // an exact suffix: nothing new
+        }
+        lineStart = tail.index(after: nl)
+        guard lineStart < tail.endIndex,
+              let nl2 = tail[lineStart...].firstIndex(of: 0x0A) else { return nil }
+        let probe = tail[lineStart...nl2]
+        guard probe.count > 16, let r = history.range(of: probe, options: .backwards) else { return nil }
+        var out = Data(history[..<r.lowerBound])
+        out.append(tail[lineStart...])
+        return out
     }
 
     func load(_ id: UUID) -> Data? { try? Data(contentsOf: url(id)) }

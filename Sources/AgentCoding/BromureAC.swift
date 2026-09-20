@@ -3334,6 +3334,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
                     else { return ["error": "no session on stage"] }
                     return pane.debugCommandCard(params["do"] as? String ?? "state")
+                case "beautified-scroll":
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugBeautifiedScroll(y: CGFloat((params["y"] as? Double) ?? 0))
+                case "beautified-views":
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugBeautifiedViewTree()
+                case "transcript-history":
+                    // {do: state|earlier} — the beautified view's history.
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    // "earlier" only starts the fetch (the route holds the
+                    // main thread); poll "state" for the result.
+                    if params["do"] as? String == "earlier" {
+                        Task { @MainActor in _ = await pane.debugTranscriptHistory("earlier") }
+                    }
+                    return pane.debugTranscriptHistoryState()
                 case "send":
                     // Press Return in the selected session's chat composer.
                     guard let id = self.unifiedWindow?.selectedID,

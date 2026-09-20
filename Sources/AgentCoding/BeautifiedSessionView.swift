@@ -42,6 +42,50 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     func guestFileOp(_ op: [String: Any]) async -> [String: Any]?
 }
 
+/// Where the host's copy of a transcript file ends: the file path and the
+/// offset the next read continues from.
+typealias TranscriptCursor = (path: String, offset: Int)
+
+enum TranscriptFetchMode { case tail, earlier }
+
+/// One answer from `CodingTaskEngine.transcriptChunkCommand`.
+struct TranscriptFetch {
+    let path: String
+    /// A pending AskUserQuestion dump (Claude), or empty. Transient: parsed
+    /// with the history, never stored in it.
+    let pq: Data
+    let size: Int
+    /// File offsets of `chunk`. `end` is the file offset to continue from —
+    /// file bytes, which can exceed `chunk.count` when the transfer dropped
+    /// invalid ones.
+    let start: Int
+    let end: Int
+    let chunk: Data
+
+    /// Header = 5 newline-terminated lines (path, pq, size, start, end),
+    /// then the bytes. nil for empty output (no transcript file).
+    static func parse(_ data: Data) -> TranscriptFetch? {
+        var cuts: [Data.Index] = []
+        var i = data.startIndex
+        while cuts.count < 5, i < data.endIndex, let nl = data[i...].firstIndex(of: 0x0A) {
+            cuts.append(nl)
+            i = data.index(after: nl)
+        }
+        guard cuts.count == 5 else { return nil }
+        func field(_ k: Int) -> Data {
+            let s = k == 0 ? data.startIndex : data.index(after: cuts[k - 1])
+            return data[s..<cuts[k]]
+        }
+        func int(_ k: Int) -> Int? {
+            Int(String(decoding: field(k), as: UTF8.self).trimmingCharacters(in: .whitespaces))
+        }
+        let path = String(decoding: field(0), as: UTF8.self)
+        guard !path.isEmpty, let size = int(2), let start = int(3), let end = int(4) else { return nil }
+        return TranscriptFetch(path: path, pq: Data(field(1)), size: size, start: start, end: end,
+                               chunk: Data(data[data.index(after: cuts[4])...]))
+    }
+}
+
 extension BeautifiedTranscriptProvider {
     /// The active tab's transcript as raw JSONL bytes. Resolves the tab's cwd
     /// AND a session floor in one guest round-trip, then tails the newest store.
@@ -58,7 +102,7 @@ extension BeautifiedTranscriptProvider {
     /// so the process-start floor would hide it until the next turn bumps its
     /// mtime. When the foreground command line looks like a resume, drop the
     /// floor to 0 so the reattached transcript shows immediately.
-    func fetchTranscript() async -> Data? {
+    func fetchTranscript(known: TranscriptCursor?, mode: TranscriptFetchMode) async -> TranscriptFetch? {
         guard let idx = activeTabIndex() else { return nil }
         let meta = await execGuest(
             "i=\(idx); "
@@ -95,11 +139,15 @@ extension BeautifiedTranscriptProvider {
         let since = Int(lines[1].trimmingCharacters(in: .whitespaces)) ?? 0
         guard !cwd.isEmpty,
               // agent: nil → probe every store, newest match wins + sniff.
-              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since, agent: nil,
-                                                               pinnedWindow: idx),
-              let out = await execGuest(cmd, timeout: 15)
+              let cmd = CodingTaskEngine.transcriptChunkCommand(
+                  guestCwd: cwd, since: since, agent: nil, pinnedWindow: idx,
+                  knownPath: known?.path, knownOffset: known?.offset ?? -1,
+                  bytes: mode == .earlier ? BeautifiedSessionModel.earlierHistoryBytes
+                                          : BeautifiedSessionModel.initialHistoryBytes,
+                  earlier: mode == .earlier),
+              let out = await execGuest(cmd, timeout: 30)
         else { return nil }
-        return Data(out.utf8)
+        return TranscriptFetch.parse(Data(out.utf8))
     }
 
     /// Type `text` into the running agent (base64 → tmux send-keys + Enter).
@@ -485,6 +533,71 @@ final class BeautifiedSessionModel: ObservableObject {
     /// conversation being cleared. Tolerate a few before believing it.
     private var emptyParseStreak = 0
     private static let maxEmptyParseStreak = 4   // ~6s at the 1.5s cadence
+
+    // MARK: Transcript history
+    //
+    // The view keeps the WHOLE conversation it has seen: the first read
+    // takes the last `initialHistoryBytes` of the file, every poll after
+    // appends only what the file gained (`transcriptChunkCommand`), and
+    // "load earlier" prepends the bytes before that. Buffers are kept per
+    // file — the session-floor probe can momentarily resolve another (or
+    // no) file, and coming back must not cost a full reload.
+
+    /// The bytes held for one transcript file: `data` starts at file offset
+    /// `base`; `end` is the file offset the next tail read continues from.
+    private struct TranscriptBuffer {
+        var data = Data()
+        var base = 0
+        var end = 0
+        /// Head-trim threshold; raised by "load earlier" so what the user
+        /// asked for is never trimmed away again.
+        var budget = BeautifiedSessionModel.historyBudget
+    }
+    private var buffers: [String: TranscriptBuffer] = [:]
+    /// Most recently used last; the oldest is dropped past `maxBuffers`.
+    private var bufferOrder: [String] = []
+    private static let maxBuffers = 3
+    private var currentPath: String?
+    private var pqLine = Data()
+    /// The history changed since the last parse.
+    private var parseDirty = false
+    private var lastParseAt = Date.distantPast
+    private var lastParseDuration: TimeInterval = 0
+    /// The local copy (`transcriptSink`) is behind the history.
+    private var sinkDirty = false
+    private var sinkAt = Date.distantPast
+    /// How much of the file the first read takes (24 MB — most transcripts
+    /// come whole), how much "load earlier" adds, and the size past which
+    /// the head is trimmed. `BROMURE_TRANSCRIPT_HISTORY_BYTES` scales all
+    /// three down for tests, so trims and "load earlier" can be exercised
+    /// on a small transcript.
+    nonisolated static let initialHistoryBytes: Int = {
+        let env = ProcessInfo.processInfo.environment["BROMURE_TRANSCRIPT_HISTORY_BYTES"]
+        return max(4_096, env.flatMap(Int.init) ?? 24_000_000)
+    }()
+    nonisolated static let earlierHistoryBytes = max(4_096, initialHistoryBytes / 3)
+    nonisolated static let historyBudget = initialHistoryBytes + initialHistoryBytes * 2 / 3
+    /// The history doesn't start at the file's beginning: earlier
+    /// conversation can be fetched.
+    @Published private(set) var canLoadEarlier = false
+    @Published private(set) var loadingEarlier = false
+    /// Bumped when the USER changed the transcript (sent a turn, the
+    /// conversation on show was swapped): the view goes to the tail even if
+    /// it was scrolled up reading. `revision` alone only follows the tail
+    /// while the view is already there.
+    @Published var localRevision = 0
+    /// How many of the newest items the view lays out. The rows are eager
+    /// (a lazy stack left the stage blank once a single row — a long
+    /// answer — outgrew the viewport several times over, whatever the
+    /// scroll offset), so the window bounds the cost; "show earlier
+    /// messages" widens it, from the history already held.
+    @Published var renderLimit = BeautifiedSessionModel.renderStep
+    nonisolated static let renderStep: Int = {
+        let env = ProcessInfo.processInfo.environment["BROMURE_TRANSCRIPT_RENDER_STEP"]
+        return max(1, env.flatMap(Int.init) ?? 300)
+    }()
+    /// The view's last measured scroll geometry, for the debug hook.
+    var debugGeometry: [String: Double] = [:]
     /// Throttle for the terminal-state scan (capture-pane). It runs on its own
     /// cadence, independent of the transcript poll and of `isWorking` — a trust
     /// dialog and a `/login` menu both appear when the agent is NOT "working" and
@@ -513,6 +626,7 @@ final class BeautifiedSessionModel: ObservableObject {
                                added: Date(), ttl: 180))
         nextOptimisticID -= 1
         rebuild()
+        localRevision &+= 1
         seededUntil = Date().addingTimeInterval(120)
         loading = false
         setWorking(true)
@@ -548,6 +662,7 @@ final class BeautifiedSessionModel: ObservableObject {
                                added: Date()))
         nextOptimisticID -= 1
         rebuild()
+        localRevision &+= 1
     }
 
     /// Drop pending echoes the real transcript now contains (matched by text),
@@ -580,6 +695,7 @@ final class BeautifiedSessionModel: ObservableObject {
     func stop() {
         pollTask?.cancel()
         pollTask = nil
+        flushSink(force: true)
     }
 
     /// Set `working`, tracking when a working spell begins (for the elapsed
@@ -604,36 +720,158 @@ final class BeautifiedSessionModel: ObservableObject {
         // an auth error) can be on screen before any transcript store exists, so
         // it must not sit behind the transcript fetch's early return.
         await scanTerminal()
-        guard let data = await provider.fetchTranscript() else { setWorking(isWorking); loading = false; return }
-        loading = false
-        if !data.isEmpty { transcriptSink?(data) }   // the session's local copy
-        let parsed = AgentTranscript.parse(data)
-        // Don't blank a populated transcript on a transient empty read (see
-        // `emptyParseStreak`) — that's the "beautified view goes all white" bug.
-        // Keep the last good items until either real content returns or the
-        // empties persist long enough to be a genuinely cleared session.
-        if parsed.isEmpty, !parsedItems.isEmpty {
-            emptyParseStreak += 1
-            if emptyParseStreak < Self.maxEmptyParseStreak {
-                setWorking(isWorking)
-                return
-            }
+        let known: TranscriptCursor? = currentPath.flatMap { p in buffers[p].map { (p, $0.end) } }
+        guard let fetch = await provider.fetchTranscript(known: known, mode: .tail) else {
+            setWorking(isWorking); loading = false; return
         }
-        emptyParseStreak = 0
-        if parsed != parsedItems {
-            parsedItems = parsed
-            ensureDropImages()
-            // Real transcript progress ⇒ any earlier terminal card is stale.
-            if failure != nil || prompt != nil {
-                let wasLogin = prompt?.kind == .login
-                withAnimation(.easeOut(duration: 0.2)) { failure = nil; prompt = nil }
-                if wasLogin { loginPromptChanged?(false) }
-                hostSignInStatus = nil
+        loading = false
+        ingest(fetch)
+        flushSink(force: false)
+        // Nothing new: nothing to parse. A long history parses off the main
+        // actor, and once a parse takes a while it runs at most every couple
+        // of seconds — polls in between still bank the file's growth.
+        if parseDirty, !(lastParseDuration > 0.25 && Date().timeIntervalSince(lastParseAt) < 2) {
+            let parsed = await parseCurrent()
+            // Don't blank a populated transcript on a transient empty read (see
+            // `emptyParseStreak`) — that's the "beautified view goes all white" bug.
+            // Keep the last good items until either real content returns or the
+            // empties persist long enough to be a genuinely cleared session.
+            if parsed.isEmpty, !parsedItems.isEmpty {
+                emptyParseStreak += 1
+                if emptyParseStreak < Self.maxEmptyParseStreak {
+                    parseDirty = true   // re-check next poll even if nothing grows
+                    setWorking(isWorking)
+                    return
+                }
             }
+            emptyParseStreak = 0
+            applyParsed(parsed)
         }
         reconcilePending()
         rebuild()
         setWorking(provider.isWorking() || seedHolds())
+    }
+
+    /// Bank one read into the per-file history: append when it continues
+    /// where the host's copy ends, else start over from what came back.
+    private func ingest(_ f: TranscriptFetch) {
+        if f.pq != pqLine { pqLine = f.pq; parseDirty = true }
+        var buf = buffers[f.path] ?? TranscriptBuffer()
+        if buffers[f.path] != nil, f.start == buf.end {
+            if !f.chunk.isEmpty {
+                buf.data.append(f.chunk)
+                buf.end = f.end
+                parseDirty = true
+                sinkDirty = true
+            }
+        } else {
+            buf = TranscriptBuffer(data: f.chunk, base: f.start, end: f.end)
+            parseDirty = true
+            sinkDirty = true
+        }
+        if buf.data.count > buf.budget { Self.trimHead(&buf) }
+        if currentPath != f.path {
+            currentPath = f.path
+            parseDirty = true
+            renderLimit = Self.renderStep
+            localRevision &+= 1   // another conversation: show its tail
+        }
+        buffers[f.path] = buf
+        bufferOrder.removeAll { $0 == f.path }
+        bufferOrder.append(f.path)
+        while bufferOrder.count > Self.maxBuffers {
+            buffers.removeValue(forKey: bufferOrder.removeFirst())
+        }
+        canLoadEarlier = buf.base > 0
+    }
+
+    /// Drop the oldest lines so the buffer is back to `initialHistoryBytes`
+    /// (whole lines only; the base offset follows). Rare — a session has to
+    /// write tens of MB while on show.
+    private static func trimHead(_ buf: inout TranscriptBuffer) {
+        let cut = buf.data.startIndex + (buf.data.count - initialHistoryBytes)
+        // Keep from the start of the line the cut lands in (never skip
+        // forward: one giant last line would then be the whole history).
+        guard cut > buf.data.startIndex, let nl = buf.data[..<cut].lastIndex(of: 0x0A) else { return }
+        let keepFrom = buf.data.index(after: nl)
+        guard keepFrom > buf.data.startIndex else { return }
+        buf.base += keepFrom - buf.data.startIndex
+        buf.data = Data(buf.data[keepFrom...])
+    }
+
+    /// Parse the history on show (plus the pending-question line) off the
+    /// main actor.
+    private func parseCurrent() async -> [TranscriptItem] {
+        parseDirty = false
+        var input = currentPath.flatMap { buffers[$0]?.data } ?? Data()
+        if !pqLine.isEmpty {
+            input.append(0x0A)
+            input.append(pqLine)
+            input.append(0x0A)
+        }
+        let t0 = Date()
+        let items = await Task.detached(priority: .userInitiated) { AgentTranscript.parse(input) }.value
+        lastParseAt = Date()
+        lastParseDuration = lastParseAt.timeIntervalSince(t0)
+        return items
+    }
+
+    private func applyParsed(_ parsed: [TranscriptItem]) {
+        guard parsed != parsedItems else { return }
+        parsedItems = parsed
+        ensureDropImages()
+        // Real transcript progress ⇒ any earlier terminal card is stale.
+        if failure != nil || prompt != nil {
+            let wasLogin = prompt?.kind == .login
+            withAnimation(.easeOut(duration: 0.2)) { failure = nil; prompt = nil }
+            if wasLogin { loginPromptChanged?(false) }
+            hostSignInStatus = nil
+        }
+    }
+
+    /// Hand the history to the session's local copy — at most every few
+    /// seconds while it grows, and when the view goes away.
+    private func flushSink(force: Bool) {
+        guard sinkDirty, let p = currentPath, let d = buffers[p]?.data, !d.isEmpty else { return }
+        guard force || Date().timeIntervalSince(sinkAt) > 5 else { return }
+        sinkAt = Date()
+        sinkDirty = false
+        transcriptSink?(d)
+    }
+
+    /// Debug: the history on show, for the E2E hook.
+    func debugHistoryState() -> [String: Any] {
+        let buf = currentPath.flatMap { buffers[$0] }
+        return ["path": currentPath ?? "", "base": buf?.base ?? -1, "end": buf?.end ?? -1,
+                "held": buf?.data.count ?? 0, "budget": buf?.budget ?? 0,
+                "canLoadEarlier": canLoadEarlier, "items": items.count,
+                "buffers": buffers.count, "lastParseMs": Int(lastParseDuration * 1000),
+                "geometry": debugGeometry]
+    }
+
+    /// Fetch the conversation before what's held (`earlierHistoryBytes` at a
+    /// time) and put it in front.
+    func loadEarlier() async {
+        guard !loadingEarlier, let path = currentPath, let held = buffers[path], held.base > 0 else { return }
+        loadingEarlier = true
+        defer { loadingEarlier = false }
+        guard let fetch = await provider.fetchTranscript(known: (path, held.base), mode: .earlier),
+              fetch.path == path, var buf = buffers[path], fetch.end == buf.base, !fetch.chunk.isEmpty
+        else { return }
+        var data = fetch.chunk
+        data.append(buf.data)
+        buf.data = data
+        buf.base = fetch.start
+        buf.budget = max(buf.budget, buf.data.count + Self.earlierHistoryBytes * 2)
+        buffers[path] = buf
+        canLoadEarlier = buf.base > 0
+        sinkDirty = true
+        parseDirty = true
+        let parsed = await parseCurrent()
+        emptyParseStreak = 0
+        applyParsed(parsed)
+        reconcilePending()
+        rebuild()
     }
 
     /// Sniff the tab's terminal for a state the transcript can't carry — a
@@ -1133,6 +1371,13 @@ struct BeautifiedSessionView: View {
     @State private var dropTargeted = false
     /// Keyboard highlight in the "/" palette.
     @State private var paletteIndex = 0
+    /// The view shows the tail (within a small slack): new content keeps
+    /// it there. Scrolled up to read, it stays put — only the user's own
+    /// turn (`localRevision`) or a card needing them pulls it back down.
+    @State private var pinnedToBottom = true
+    @State private var viewportHeight: CGFloat = 0
+    @State private var contentHeight: CGFloat = 0
+    private static let scrollSpace = "beautified-scroll"
 
     /// What's typed after a leading "/" — the palette shows for it until a
     /// space (the command is chosen) or a newline.
@@ -1349,12 +1594,58 @@ struct BeautifiedSessionView: View {
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        let visible = Array(model.items.suffix(model.renderLimit))
+                        let hidden = model.items.count - visible.count
+                        if hidden > 0 || model.canLoadEarlier {
+                            HStack {
+                                Spacer()
+                                Button {
+                                    // Keep the reading position: the first row
+                                    // on show stays where it is after rows land
+                                    // above it.
+                                    let anchor = visible.first(where: { !Self.isTodo($0) })?.id
+                                    if hidden > 0 {
+                                        model.renderLimit += BeautifiedSessionModel.renderStep
+                                        DispatchQueue.main.async {
+                                            if let anchor { proxy.scrollTo(anchor, anchor: .top) }
+                                        }
+                                    } else {
+                                        Task {
+                                            await model.loadEarlier()
+                                            if let anchor { proxy.scrollTo(anchor, anchor: .top) }
+                                        }
+                                    }
+                                } label: {
+                                    if model.loadingEarlier {
+                                        ProgressView().controlSize(.small)
+                                    } else if hidden > 0 {
+                                        let n = min(hidden, BeautifiedSessionModel.renderStep)
+                                        Label(n == 1
+                                              ? NSLocalizedString("Show 1 earlier message",
+                                                                  comment: "beautified history")
+                                              : String(format: NSLocalizedString("Show %d earlier messages",
+                                                                                 comment: "beautified history"), n),
+                                              systemImage: "arrow.up.circle")
+                                    } else {
+                                        Label(NSLocalizedString("Load earlier conversation",
+                                                                comment: "beautified history"),
+                                              systemImage: "arrow.up.circle")
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .disabled(model.loadingEarlier)
+                                Spacer()
+                            }
+                            .id("beautified-load-earlier")
+                        }
                         // The round the agent is waiting on is one live card
                         // (pick, then Submit) instead of its static questions.
                         let live = model.pendingQuestionItems
                         let liveIDs = Set(live.map(\.id))
-                        ForEach(model.items) { item in
+                        ForEach(visible) { item in
                             // The consolidated todo is shown pinned above the
                             // composer, not inline (where it scrolls away).
                             if !Self.isTodo(item), !liveIDs.contains(item.id) { itemRow(item) }
@@ -1404,20 +1695,56 @@ struct BeautifiedSessionView: View {
                             liveCue.id("beautified-thinking")
                         }
                         Color.clear.frame(height: 1).id(Self.tailID)
+                            .background(GeometryReader { g in
+                                Color.clear.preference(
+                                    key: TailOffsetKey.self,
+                                    value: g.frame(in: .named(Self.scrollSpace)).maxY)
+                            })
                     }
                     .frame(maxWidth: 900, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 16)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                        contentHeight = h
+                        model.debugGeometry["content"] = h
+                    }
                 }
                 // Keep the tail anchored through content-size changes: a
                 // shorter transcript swapped in, or a re-wrap when the pane
                 // narrows, used to leave the offset past the end — a blank
                 // view until the user scrolled.
                 .defaultScrollAnchor(.bottom)
+                .coordinateSpace(name: Self.scrollSpace)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                    viewportHeight = h
+                    model.debugGeometry["viewport"] = h
+                }
+                .onPreferenceChange(TailOffsetKey.self) { tailY in
+                    // Within a screen's worth of slack of the end counts as
+                    // "at the tail"; only flips write state.
+                    let pinned = viewportHeight <= 0 || tailY <= viewportHeight + 160
+                    if pinned != pinnedToBottom { pinnedToBottom = pinned }
+                    model.debugGeometry["tailY"] = tailY
+                    model.debugGeometry["pinned"] = pinned ? 1 : 0
+                    // Overshot: the content is taller than the view, yet its
+                    // end sits above the view's bottom edge — the offset is
+                    // past the content (rows re-measured shorter than their
+                    // estimate, or trimmed away) and what shows is blank.
+                    // Snap back to the tail.
+                    if viewportHeight > 0, contentHeight > viewportHeight, tailY < viewportHeight - 40 {
+                        proxy.scrollTo(Self.tailID, anchor: .bottom)
+                    }
+                }
                 .onChange(of: model.commandOutput) { _, _ in scrollToTail(proxy) }
-                .onChange(of: model.revision) { _, _ in scrollToTail(proxy) }
-                .onChange(of: model.working) { _, _ in scrollToTail(proxy) }
+                // `revision` is read off the publisher (it fires before the
+                // rows re-lay out), so "was it at the tail" is judged on the
+                // content BEFORE the append — a big answer landing would
+                // otherwise push the marker out of the slack first and read
+                // as "scrolled up".
+                .onReceive(model.$revision.dropFirst()) { _ in if pinnedToBottom { scrollToTail(proxy) } }
+                .onChange(of: model.localRevision) { _, _ in scrollToTail(proxy) }
+                .onChange(of: model.working) { _, _ in if pinnedToBottom { scrollToTail(proxy) } }
                 .onChange(of: model.failure) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.prompt) { _, _ in scrollToTail(proxy) }
                 .onAppear { proxy.scrollTo(Self.tailID, anchor: .bottom) }
@@ -1536,6 +1863,11 @@ struct BeautifiedSessionView: View {
     }
 
     private static let tailID = "beautified-tail"
+
+    private struct TailOffsetKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    }
 }
 
 /// Pending-attachment chips above the composer: image thumbnails / file chips,

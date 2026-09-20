@@ -1472,21 +1472,8 @@ final class CodingTaskEngine {
                                                   pinnedWindow: Int? = nil) -> String? {
         guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
         else { return nil }
-        var cmd = "f=\"\"; "
-        // The transcript the tab's agent itself named (its hook records the
-        // path per window — see agent-status.sh) wins over "the newest file
-        // in the folder": two agents in one folder (a delegate beside its
-        // delegator) would otherwise take turns owning each other's view.
-        // Still floored: a file older than this process is another's.
-        if let w = pinnedWindow {
-            cmd += "pp=\"$HOME/.bromure/transcript-\(w).path\"; "
-                + "if [ -f \"$pp\" ]; then c=$(cat \"$pp\" 2>/dev/null); "
-                + "if [ -n \"$c\" ] && [ -f \"$c\" ] && [ -n \"$(find \"$c\" -newermt @\(since) 2>/dev/null)\" ]; "
-                + "then f=\"$c\"; fi; fi; "
-        }
-        cmd += "if [ -z \"$f\" ]; then "
-            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
-            + "fi; "
+        var cmd = transcriptLocatePrefix(path: path, since: since, agent: agent,
+                                         pinnedWindow: pinnedWindow)
         // iconv -c drops the orphan bytes a byte-cap cut can leave mid
         // UTF-8 sequence — a strict decode downstream used to collapse the
         // whole response.
@@ -1506,6 +1493,112 @@ final class CodingTaskEngine {
             cmd += "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
                 + "then echo; tr -d '\\n' < \(pq); echo; fi"
         }
+        return cmd
+    }
+
+    /// The shell that resolves `$f` — the transcript file a tab's agent is
+    /// writing (its own pinned path first, else the newest store in the
+    /// folder, floored by `since`). Shared by the one-shot tail and the
+    /// beautified view's incremental reader.
+    private nonisolated static func transcriptLocatePrefix(
+        path: String, since: Int, agent: String?, pinnedWindow: Int?) -> String {
+        var cmd = "f=\"\"; "
+        // The transcript the tab's agent itself named (its hook records the
+        // path per window — see agent-status.sh) wins over "the newest file
+        // in the folder": two agents in one folder (a delegate beside its
+        // delegator) would otherwise take turns owning each other's view.
+        // Still floored: a file older than this process is another's.
+        if let w = pinnedWindow {
+            cmd += "pp=\"$HOME/.bromure/transcript-\(w).path\"; "
+                + "if [ -f \"$pp\" ]; then c=$(cat \"$pp\" 2>/dev/null); "
+                + "if [ -n \"$c\" ] && [ -f \"$c\" ] && [ -n \"$(find \"$c\" -newermt @\(since) 2>/dev/null)\" ]; "
+                + "then f=\"$c\"; fi; fi; "
+        }
+        cmd += "if [ -z \"$f\" ]; then "
+            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
+            + "fi; "
+        return cmd
+    }
+
+    /// The beautified view's transcript reader: one round-trip that resolves
+    /// the file and returns only what the host doesn't hold yet, so the view
+    /// can keep the WHOLE conversation instead of re-reading a small tail on
+    /// every poll. Output (empty when no transcript exists):
+    ///
+    ///     <file path>\n<pending-question line or empty>\n<file size>\n<start>\n<end>\n<bytes…>
+    ///
+    /// `tail` mode: when `$f` is `knownPath`, bytes from file offset
+    /// `knownOffset` to the last complete line; otherwise (first read, another
+    /// file, a truncated one) the last `bytes` of the file, aligned to a line.
+    /// `earlier` mode: the `bytes` before `knownOffset` (the history's start),
+    /// line-aligned, for "load earlier conversation". `start`/`end` are file
+    /// offsets of the returned bytes; whole JSONL lines only, so the chunk is
+    /// valid UTF-8 (the shell agent decodes stdout strictly) and the host can
+    /// simply concatenate chunks.
+    nonisolated static func transcriptChunkCommand(
+        guestCwd: String, since: Int, agent: String? = nil, pinnedWindow: Int? = nil,
+        knownPath: String?, knownOffset: Int, bytes: Int, earlier: Bool) -> String? {
+        guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
+        else { return nil }
+        var cmd = transcriptLocatePrefix(path: path, since: since, agent: agent,
+                                         pinnedWindow: pinnedWindow)
+        cmd += "if [ -n \"$f\" ]; then printf '%s\\n' \"$f\"; "
+        if agent == nil || agent == "claude" {
+            // Same pending-AskUserQuestion dump as `planTranscriptCommand`,
+            // on its own header line (it isn't part of the file, so it must
+            // not land in the accumulated history).
+            let enc2 = path.replacingOccurrences(of: ".", with: "-")
+                .replacingOccurrences(of: "/", with: "-")
+            let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
+            cmd += "if [ -n \"$(find \(pq) -newermt @\(since) 2>/dev/null)\" ]; "
+                + "then tr -d '\\n' < \(pq); fi; "
+        }
+        cmd += "echo; "
+        let py = #"""
+        import sys, os
+        f, known, off, want, mode = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+        try:
+            size = os.path.getsize(f)
+        except OSError:
+            sys.exit(0)
+        with open(f, 'rb') as fh:
+            if mode == 'earlier':
+                end = min(max(off, 0), size)
+                start = max(0, end - want)
+                fh.seek(start)
+                b = fh.read(end - start)
+                if start > 0:
+                    i = b.find(b'\n')
+                    if i < 0:
+                        b = b''
+                        start = end
+                    else:
+                        b = b[i + 1:]
+                        start += i + 1
+            else:
+                fresh = (f != known) or off < 0 or off > size
+                start = max(0, size - want) if fresh else off
+                fh.seek(start)
+                b = fh.read(size - start)
+                if fresh and start > 0:
+                    # Begin at the line the window starts in — back to its
+                    # start, so a last line bigger than the window still shows.
+                    fh.seek(0)
+                    head = fh.read(start)
+                    j = head.rfind(b'\n')
+                    start = j + 1 if j >= 0 else 0
+                    fh.seek(start)
+                    b = fh.read(size - start)
+                i = b.rfind(b'\n')
+                b = b[:i + 1] if i >= 0 else b''
+                end = start + len(b)
+        sys.stdout.write('%d\n%d\n%d\n' % (size, start, end))
+        sys.stdout.flush()
+        sys.stdout.buffer.write(b)
+        """#
+        cmd += "python3 - \"$f\" \(shellQuote(knownPath ?? "")) \(knownOffset) \(bytes) "
+            + (earlier ? "earlier" : "tail")
+            + " <<'BROMURE_PY' | iconv -f UTF-8 -t UTF-8 -c\n" + py + "\nBROMURE_PY\nfi"
         return cmd
     }
 
