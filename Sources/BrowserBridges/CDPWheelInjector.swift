@@ -346,7 +346,9 @@ public final class CDPWheelInjector {
         for i in 0..<4 { mask[i] = UInt8.random(in: 0...255) }
         out.append(contentsOf: mask)
         var masked = [UInt8](repeating: 0, count: len)
-        payload.withUnsafeBytes { src in
+        // Typed: the untyped closure is ambiguous between Data's two
+        // `withUnsafeBytes` overloads on some toolchains (CI's).
+        payload.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
             for i in 0..<len { masked[i] = src[i] ^ mask[i & 3] }
         }
         out.append(contentsOf: masked)
