@@ -38,6 +38,16 @@ public final class SessionDisk {
     /// agent (to start its OAuth login). Normal sessions leave this false and
     /// land at a plain shell.
     public var registrationMode = false
+    /// Extra NO_PROXY entries for proxy.env — the VM subnet and the node
+    /// addresses of the Kubernetes clusters this workspace may use. kubectl
+    /// honours HTTPS_PROXY, and the host MITM can't dial into the VM LAN, so
+    /// those destinations must bypass the cooperative proxy.
+    public var extraNoProxy: [String] = []
+    /// Plain-HTTP registries ("<ip>:<port>") this workspace may push to —
+    /// the bromure registries its access lists allow. Staged as
+    /// docker-registries.txt for the guest agent's dockerd config; the first
+    /// one is also exported as BROMURE_REGISTRY for agents and scripts.
+    public var extraInsecureRegistries: [String] = []
 
     public struct MitmSessionAssets: Sendable {
         public let caCertificatePEM: String
@@ -627,9 +637,10 @@ public final class SessionDisk {
                 "export HTTP_PROXY=http://127.0.0.1:8080",
                 "export HTTPS_PROXY=http://127.0.0.1:8080",
             ]
+            let noProxy = (["localhost", "127.0.0.1", "::1"] + extraNoProxy).joined(separator: ",")
             proxyLines += [
-                "export NO_PROXY=localhost,127.0.0.1,::1",
-                "export no_proxy=localhost,127.0.0.1,::1",
+                "export NO_PROXY=\(noProxy)",
+                "export no_proxy=\(noProxy)",
                 "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/bromure-ca.pem",
                 "export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
                 "export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
@@ -654,6 +665,14 @@ public final class SessionDisk {
                 "export SSH_AUTH_SOCK=/tmp/bromure-agent.sock",
             ]
             proxyLines.append(contentsOf: ghEnv)
+            if let first = extraInsecureRegistries.first {
+                proxyLines.append("export BROMURE_REGISTRY=\(shellQuote(first))")
+            }
+            // The registries dockerd may talk plain HTTP to (guest agent →
+            // /etc/docker/daemon.json). Always written so a removal lands too.
+            try (extraInsecureRegistries.joined(separator: "\n") + "\n").write(
+                to: tmp.appendingPathComponent("docker-registries.txt"),
+                atomically: true, encoding: .utf8)
 
             // Local inference (Path 1, vLLM.md §3.3). For each tool the user
             // set to "Local model", pin it at the on-host engine via the
@@ -844,6 +863,11 @@ public final class SessionDisk {
         // the user-scope MCP configs next to the browser server).
         try Self.automationMCPShimScript.write(
             to: tmp.appendingPathComponent("bromure-automations-mcp.py"),
+            atomically: true, encoding: .utf8)
+        // Infrastructure MCP shim — the clusters and registries this
+        // workspace may use, with the documentation to use them.
+        try Self.kubeMCPShimScript.write(
+            to: tmp.appendingPathComponent("bromure-infra-mcp.py"),
             atomically: true, encoding: .utf8)
 
         // Plan-stream driver assets — staged unconditionally, like the task
@@ -1118,6 +1142,19 @@ public final class SessionDisk {
     /// workspace can list / create / edit / delete / run ITS automations.
     public static let automationMCPVsockPort: UInt32 = 5833
     static let automationMCPShimGuestPath = "/mnt/bromure-meta/bromure-automations-mcp.py"
+    /// The infrastructure MCP (KubeMCPServer): what clusters / registries
+    /// this workspace can use and how, plus creating new ones.
+    public static let kubeMCPVsockPort: UInt32 = 5834
+    static let kubeMCPShimGuestPath = "/mnt/bromure-meta/bromure-infra-mcp.py"
+    static var kubeMCPClaudeEntry: [String: Any] {
+        ["command": "python3", "args": [kubeMCPShimGuestPath]]
+    }
+    static var kubeMCPShimScript: String {
+        taskMCPShimScript
+            .replacingOccurrences(of: "PORT = \(taskBoardMCPVsockPort)", with: "PORT = \(kubeMCPVsockPort)")
+            .replacingOccurrences(of: "bromure-task-mcp", with: "bromure-infra-mcp")
+            .replacingOccurrences(of: "task-board MCP", with: "infrastructure MCP")
+    }
     static var automationMCPClaudeEntry: [String: Any] {
         ["command": "python3", "args": [automationMCPShimGuestPath]]
     }
@@ -1356,6 +1393,7 @@ public final class SessionDisk {
         var mcpServers: [String: Any] = [
             "browser": browserMCPClaudeEntry,
             "automations": automationMCPClaudeEntry,
+            "infrastructure": kubeMCPClaudeEntry,
         ]
         for server in servers {
             // Raw JSON mode: parse and use as-is (allows OAuth blocks,
@@ -1576,6 +1614,10 @@ public final class SessionDisk {
             "[mcp_servers.automations]",
             "command = \"python3\"",
             "args = [\(tomlQuote(automationMCPShimGuestPath))]",
+            "",
+            "[mcp_servers.infrastructure]",
+            "command = \"python3\"",
+            "args = [\(tomlQuote(kubeMCPShimGuestPath))]",
         ]
         for server in servers {
             // Raw JSON servers are written to Claude Code config only;

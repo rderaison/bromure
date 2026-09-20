@@ -113,8 +113,9 @@ REFRESH_FAKE_MARKER = "brm-cdX-rfs"
 CLAUDE_CREDS_PATH = os.path.expanduser("~/.claude/.credentials.json")
 CODEX_CREDS_PATH = os.path.expanduser("~/.codex/auth.json")
 
-# loopback-relay
-MAX_PORT_HEADER = 16
+# loopback-relay ("<port>\n", "UDP\n", or "<ipv4>:<port>\n" — the last form is
+# how the host's Kubernetes load balancer reaches a NodePort from a node VM)
+MAX_PORT_HEADER = 32
 
 # hot-upgrade
 UPGRADE_POLL_SECONDS = 3.0
@@ -1231,12 +1232,15 @@ def _loopback_pipe(src, dst, label=None):
             pass
 
 
-def _loopback_handle_udp(vs, rest):
-    """UDP tunnel mode (fat-client system-wide utun). The host multiplexes all
-    UDP to this guest over one vsock connection; each datagram is framed
+def _loopback_handle_udp(vs, rest, target_host="127.0.0.1"):
+    """UDP tunnel mode (fat-client system-wide utun, and the Kubernetes load
+    balancer's UDP Services). The host multiplexes all UDP to this guest over
+    one vsock connection; each datagram is framed
         [u16 bodyLen][u32 srcIP][u16 srcPort][u16 dstPort][payload]
     We keep one UDP socket per (srcIP, srcPort, dstPort) connected to
-    127.0.0.1:<dstPort>, send the payload, and frame replies back the same way.
+    <target_host>:<dstPort> (127.0.0.1 unless the "UDP <ipv4>" header form
+    named another address, e.g. this node's own IP for a NodePort), send the
+    payload, and frame replies back the same way.
     """
     import struct
     socks = {}          # (srcIP, srcPort, dstPort) -> connected UDP socket
@@ -1293,9 +1297,9 @@ def _loopback_handle_udp(vs, rest):
                 try:
                     ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                     ns.settimeout(120)
-                    ns.connect(("127.0.0.1", dstport))
+                    ns.connect((target_host, dstport))
                 except OSError as exc:
-                    _loopback_log("udp socket 127.0.0.1:%d failed: %s" % (dstport, exc))
+                    _loopback_log("udp socket %s:%d failed: %s" % (target_host, dstport, exc))
                     if ns is not None:
                         try:
                             ns.close()
@@ -1347,20 +1351,52 @@ def _loopback_handle(vs):
         return
 
     line, _, rest = buf.partition(b"\n")
-    if line.strip() == b"UDP":
-        _loopback_handle_udp(vs, rest)
+    if line.strip().startswith(b"UDP"):
+        # "UDP\n" → 127.0.0.1 targets; "UDP <ipv4>\n" → that address.
+        parts = line.strip().split()
+        udp_host = "127.0.0.1"
+        if len(parts) > 1:
+            try:
+                ipaddress.IPv4Address(parts[1].decode("ascii", "replace"))
+                udp_host = parts[1].decode("ascii")
+            except (ValueError, ipaddress.AddressValueError):
+                vs.close()
+                return
+        _loopback_handle_udp(vs, rest, udp_host)
         return
-    try:
-        port = int(line.strip())
-    except ValueError:
-        vs.close()
-        return
+    target_host = None
+    header = line.strip().decode("ascii", "replace")
+    if ":" in header:
+        # "<ipv4>:<port>" — relay to an arbitrary address reachable from this
+        # guest (the Kubernetes load balancer: host LAN listener → this node →
+        # a Service's NodePort). Only dotted-quad targets, never names.
+        host_part, _, port_part = header.rpartition(":")
+        try:
+            ipaddress.IPv4Address(host_part)
+            port = int(port_part)
+        except (ValueError, ipaddress.AddressValueError):
+            vs.close()
+            return
+        target_host = host_part
+    else:
+        try:
+            port = int(header)
+        except ValueError:
+            vs.close()
+            return
     if not (1 <= port <= 65535):
         vs.close()
         return
 
     try:
-        tcp, host = _loopback_connect(port)
+        if target_host is not None:
+            tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            tcp.settimeout(10)
+            tcp.connect((target_host, port))
+            tcp.settimeout(None)
+            host = target_host
+        else:
+            tcp, host = _loopback_connect(port)
     except OSError as exc:
         # Nothing is listening on 127.0.0.1:<port>. Two very different cases:
         #
@@ -4442,29 +4478,131 @@ def task_install_ca():
     log("session", "installed MITM CA")
 
 
+DOCKER_REGISTRIES_FILE = os.path.join(META, "docker-registries.txt")
+DOCKER_DAEMON_JSON = "/etc/docker/daemon.json"
+
+
+def _meta_no_proxy():
+    """NO_PROXY as the host wrote it into proxy.env (VM subnet, cluster
+    nodes, registries) — dockerd must skip the proxy for those too, or a
+    `docker push` to a registry on the VM LAN would be sent to the host
+    proxy, which can't reach the guests."""
+    try:
+        with open(os.path.join(META, "proxy.env")) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export NO_PROXY="):
+                    return line.split("=", 1)[1].strip().strip("'\"")
+    except OSError:
+        pass
+    return "localhost,127.0.0.1,::1"
+
+
+def _docker_registries():
+    """Insecure (plain-HTTP) registries the host lists for this workspace."""
+    try:
+        with open(DOCKER_REGISTRIES_FILE) as f:
+            return [l.strip() for l in f if l.strip() and not l.startswith("#")]
+    except OSError:
+        return []
+
+
+def _docker_daemon_json_text(registries):
+    current = {}
+    try:
+        with open(DOCKER_DAEMON_JSON) as f:
+            current = json.load(f) or {}
+    except (OSError, ValueError):
+        current = {}
+    if registries:
+        current["insecure-registries"] = sorted(set(registries))
+    else:
+        current.pop("insecure-registries", None)
+    return json.dumps(current, indent=2, sort_keys=True) + "\n"
+
+
+def _docker_proxy_fragment():
+    return (DOCKER_PROXY_FRAGMENT.replace(
+        'Environment="NO_PROXY=localhost,127.0.0.1,::1"',
+        'Environment="NO_PROXY=%s"' % _meta_no_proxy()))
+
+
+def _apply_docker_config(restart_if_unchanged):
+    """Write the proxy drop-in + daemon.json; restart dockerd when anything
+    changed (or unconditionally on the boot pass). Returns True when it
+    restarted."""
+    changed = restart_if_unchanged
+    frag = _docker_proxy_fragment()
+    frag_path = "/etc/systemd/system/docker.service.d/bromure-proxy.conf"
+    try:
+        with open(frag_path) as f:
+            if f.read() != frag:
+                changed = True
+    except OSError:
+        changed = True
+    _sudo(["mkdir", "-p", "/etc/systemd/system/docker.service.d"])
+    try:
+        subprocess.run(["sudo", "tee", frag_path], input=frag, text=True,
+                       stdout=_DEVNULL, stderr=_DEVNULL)
+    except Exception:
+        return False
+    daemon = _docker_daemon_json_text(_docker_registries())
+    try:
+        with open(DOCKER_DAEMON_JSON) as f:
+            if f.read() != daemon:
+                changed = True
+    except OSError:
+        changed = True
+    _sudo(["mkdir", "-p", "/etc/docker"])
+    try:
+        subprocess.run(["sudo", "tee", DOCKER_DAEMON_JSON], input=daemon, text=True,
+                       stdout=_DEVNULL, stderr=_DEVNULL)
+    except Exception:
+        return False
+    if not changed:
+        return False
+    _sudo(["systemctl", "daemon-reload"])
+    if _sudo(["systemctl", "restart", "docker"]).returncode == 0:
+        log("session", "docker restarted (proxy + CA + %d insecure registr%s)"
+            % (len(_docker_registries()), "y" if len(_docker_registries()) == 1 else "ies"))
+        return True
+    log("session", "docker restart failed (non-fatal)")
+    return False
+
+
 def task_apt_and_docker_proxy():
     """Drop stale bake-time apt proxy config; wire dockerd through the bridge
-    (proxy env + freshly installed CA) and restart it."""
+    (proxy env + freshly installed CA + the bromure registries) and restart it."""
     stale = "/etc/apt/apt.conf.d/99-bromure-proxy"
     if os.path.isfile(stale):
         _sudo(["rm", "-f", stale])
         log("session", "removed stale bake-time apt proxy config")
     if not shutil.which("docker"):
         return
-    _sudo(["mkdir", "-p", "/etc/systemd/system/docker.service.d"])
-    try:
-        subprocess.run(
-            ["sudo", "tee",
-             "/etc/systemd/system/docker.service.d/bromure-proxy.conf"],
-            input=DOCKER_PROXY_FRAGMENT, text=True, stdout=_DEVNULL,
-            stderr=_DEVNULL)
-    except Exception:
-        return
-    _sudo(["systemctl", "daemon-reload"])
-    if _sudo(["systemctl", "restart", "docker"]).returncode == 0:
-        log("session", "docker restarted with bromure proxy + CA")
-    else:
-        log("session", "docker restart failed (non-fatal)")
+    _apply_docker_config(restart_if_unchanged=True)
+
+
+def docker_registries_watcher_service():
+    """A registry appeared or went away while the workspace runs: the host
+    rewrites docker-registries.txt (and proxy.env's NO_PROXY); re-apply and
+    bounce dockerd only when the effective config changed."""
+    if not shutil.which("docker"):
+        while True:
+            time.sleep(3600)
+    last = None
+    while True:
+        time.sleep(5)
+        try:
+            sig = (os.stat(DOCKER_REGISTRIES_FILE).st_mtime if os.path.exists(DOCKER_REGISTRIES_FILE) else 0,
+                   os.stat(os.path.join(META, "proxy.env")).st_mtime if os.path.exists(os.path.join(META, "proxy.env")) else 0)
+        except OSError:
+            continue
+        if last is None:
+            last = sig
+            continue
+        if sig != last:
+            last = sig
+            _apply_docker_config(restart_if_unchanged=False)
 
 
 def task_set_timezone():
@@ -4674,6 +4812,7 @@ def main():
         ("ip", ip_reporter_service),
         ("session-monitor", session_monitor_service),
         ("seed", seed_watcher_service),
+        ("docker-registries", docker_registries_watcher_service),
         ("upgrade", upgrade_watcher),
     ]
     for name, fn in services:

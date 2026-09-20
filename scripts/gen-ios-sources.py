@@ -32,6 +32,7 @@ SHARED = [
     "ControlClient.swift",
     # Models + stores (the mirror reconciles /state into these)
     "SessionModels.swift",
+    "KubeCluster.swift",        # Kubernetes cluster records/status + mirror store
     "Profile.swift",
     "CodingTasks.swift",
     "ScheduledAutomations.swift",
@@ -81,6 +82,7 @@ SHARED = [
     "ConversationView.swift",
     "VMDashboard.swift",
     "DockerDashboard.swift",
+    "KubeDashboard.swift",      # cluster dashboard + creation sheet (AppKit-only styles #if'd)
     "TaskReviewWindow.swift",
     "TaskTranscriptWindow.swift",
     "TaskTranscriptArchive.swift",

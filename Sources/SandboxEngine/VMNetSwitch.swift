@@ -166,6 +166,10 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// MAC (packed) → leased IPv4, so a client's REQUEST and later renewals get
     /// the same address its DISCOVER was offered. Guarded by `lock`.
     private var dhcpLeases: [UInt64: UInt32] = [:]
+    /// Addresses the DHCP allocator must never hand out — reserved by the
+    /// host for things that live on the segment without leasing (a MetalLB
+    /// pool for a Kubernetes cluster). Guarded by `lock`.
+    private var reservedIPs: Set<UInt32> = []
     /// Optional sqlite backing for `dhcpLeases` so a MAC keeps its IP across
     /// agent restarts (set via `enablePersistentLeases(at:)`, opened when the
     /// interface starts). nil = in-memory only.
@@ -724,13 +728,14 @@ public final class VMNetSwitch: @unchecked Sendable {
         // off it if it's taken or no longer inside the current subnet's pool.
         if let persisted = leaseStore?.ip(forMAC: mac),
            persisted >= dhcpPoolStart, persisted <= dhcpPoolEnd,
-           persisted != gatewayIP, !taken.contains(persisted) {
+           persisted != gatewayIP, !taken.contains(persisted),
+           !reservedIPs.contains(persisted) {
             dhcpLeases[mac] = persisted
             return persisted
         }
         var ip = dhcpPoolStart
         while ip <= dhcpPoolEnd {
-            if ip != gatewayIP && !taken.contains(ip) {
+            if ip != gatewayIP && !taken.contains(ip) && !reservedIPs.contains(ip) {
                 dhcpLeases[mac] = ip
                 leaseStore?.record(mac: mac, ip: ip)
                 return ip
@@ -821,7 +826,25 @@ public final class VMNetSwitch: @unchecked Sendable {
         b[o] = UInt8((v >> 24) & 0xFF); b[o + 1] = UInt8((v >> 16) & 0xFF)
         b[o + 2] = UInt8((v >> 8) & 0xFF); b[o + 3] = UInt8(v & 0xFF)
     }
-    private static func ipString(_ v: UInt32) -> String {
+    /// Keep `ips` (host-order IPv4) out of the DHCP pool from now on. An
+    /// address already leased stays with its VM until released.
+    public func reserveIPs(_ ips: Set<UInt32>) {
+        lock.lock(); defer { lock.unlock() }
+        reservedIPs.formUnion(ips)
+    }
+
+    public func unreserveIPs(_ ips: Set<UInt32>) {
+        lock.lock(); defer { lock.unlock() }
+        reservedIPs.subtract(ips)
+    }
+
+    /// Parse a dotted quad into host-order IPv4.
+    public static func parseIPv4(_ string: String) -> UInt32? {
+        HostNetworkInfo.parseIPv4(string)
+    }
+
+    /// Dotted quad of a host-order IPv4.
+    public static func ipString(_ v: UInt32) -> String {
         "\((v >> 24) & 0xFF).\((v >> 16) & 0xFF).\((v >> 8) & 0xFF).\(v & 0xFF)"
     }
 

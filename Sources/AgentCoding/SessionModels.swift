@@ -389,6 +389,10 @@ final class SessionListModel {
     var newSessionSelected = false
     /// "Machines" disclosure in the session sidebar.
     var machinesExpanded = false
+    /// The Kubernetes cluster whose dashboard is the active stage surface.
+    var kubeSelectedID: UUID?
+    /// The container registry whose dashboard is the active stage surface.
+    var registrySelectedID: UUID?
     /// "Under the hood": the raw terminal instead of the chat for the
     /// selected session, plus the machine shortcuts and the geekier toolbar
     /// controls.

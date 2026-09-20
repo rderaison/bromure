@@ -31,4 +31,23 @@ enum HostNetwork {
         }
         return fallback
     }
+
+    /// The interface that owns `primaryIPv4()` (en0 preferred) — where a
+    /// bridged vmnet tap must sit to be on the same LAN.
+    static func primaryInterfaceName() -> String? {
+        guard let ip = primaryIPv4() else { return nil }
+        var addrs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addrs) == 0 else { return nil }
+        defer { freeifaddrs(addrs) }
+        var ptr = addrs
+        while let p = ptr {
+            defer { ptr = p.pointee.ifa_next }
+            guard let sa = p.pointee.ifa_addr, sa.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0
+            else { continue }
+            if String(cString: host) == ip { return String(cString: p.pointee.ifa_name) }
+        }
+        return nil
+    }
 }
