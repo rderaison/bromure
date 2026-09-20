@@ -2844,6 +2844,16 @@ struct SessionSidebar: View {
         }
     }
 
+    private func machinesTitle(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .textCase(.uppercase)
+            .tracking(0.7)
+            .lineLimit(1)
+            .fixedSize()
+    }
+
     /// "Virtual Machines" — the workspaces (VMs) behind the tasks, folded
     /// away by default. Expanded, it's the classic source list: Grid, each VM
     /// with its terminals and Docker, the control menus, and "+" for a new one.
@@ -2859,11 +2869,12 @@ struct SessionSidebar: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)
                     .frame(width: 10)
-                Text(NSLocalizedString("Virtual Machines", comment: "sidebar section"))
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.7)
+                // The full name while the sidebar has room for it on one
+                // line next to the counts; "VMs" once it has been narrowed.
+                ViewThatFits(in: .horizontal) {
+                    machinesTitle(NSLocalizedString("Virtual Machines", comment: "sidebar section"))
+                    machinesTitle(NSLocalizedString("VMs", comment: "sidebar section, when narrow"))
+                }
                 Spacer()
                 HStack(spacing: 4) {
                     if running > 0 {
