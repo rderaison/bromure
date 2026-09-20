@@ -1133,37 +1133,13 @@ struct SessionSectionsView: View {
         let needsYou = list.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
         let open = expanded || !filter.isEmpty
         VStack(alignment: .leading, spacing: 1) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 10)
-                    Text(NSLocalizedString("Sessions", comment: "sidebar section"))
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
-                        .tracking(0.7)
-                    if needsYou > 0 {
-                        SidebarAttentionBadge(count: needsYou, tint: SessionBucket.needsYou.tint)
-                    }
-                    Spacer()
-                    if !list.isEmpty {
-                        Text("\(list.count)")
-                            .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.leading, 8)
-            .padding(.trailing, 8)
-            .padding(.top, 8)
-            .padding(.bottom, 4)
-            .help(NSLocalizedString("Your conversations with agents — click to fold the list", comment: "sidebar"))
+            SidebarSectionHeader(title: NSLocalizedString("Sessions", comment: "sidebar section"),
+                                 expanded: open,
+                                 badges: [(needsYou, SessionBucket.needsYou.tint)],
+                                 count: list.count,
+                                 help: NSLocalizedString("Your conversations with agents — click to fold the list", comment: "sidebar"),
+                                 onTitle: { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } },
+                                 topPadding: 8)
 
             if open {
                 if list.isEmpty { emptyHint }
@@ -1177,32 +1153,11 @@ struct SessionSectionsView: View {
                 // (see `revealSelectedArchived`), so the caret still folds
                 // it away with an archived session on stage.
                 let openArchived = archivedExpanded || !filter.isEmpty
-                Button {
-                    withAnimation(.easeInOut(duration: 0.15)) { archivedExpanded.toggle() }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: openArchived ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 10)
-                        Text(NSLocalizedString("Archived", comment: "sidebar section"))
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .textCase(.uppercase)
-                            .tracking(0.7)
-                        Spacer()
-                        Text("\(put.count)")
-                            .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.leading, 8)
-                .padding(.trailing, 8)
-                .padding(.top, 10)
-                .padding(.bottom, 4)
-                .help(NSLocalizedString("Conversations you put away — still readable, back with one message", comment: "sidebar"))
+                SidebarSectionHeader(title: NSLocalizedString("Archived", comment: "sidebar section"),
+                                     expanded: openArchived,
+                                     count: put.count,
+                                     help: NSLocalizedString("Conversations you put away — still readable, back with one message", comment: "sidebar"),
+                                     onTitle: { withAnimation(.easeInOut(duration: 0.15)) { archivedExpanded.toggle() } })
                 if openArchived {
                     ForEach(put) { row($0) }
                 }

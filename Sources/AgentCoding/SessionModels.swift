@@ -353,6 +353,9 @@ final class SessionListModel {
     var automationBoardSelected = false
     /// True when the coding-task kanban board is the active stage surface.
     var taskBoardSelected = false
+    /// The sidebar's Tasks "+" was clicked: the board opens a blank task's
+    /// editor and clears this.
+    var newTaskRequested = false
     /// True when the sidebar is collapsed to the icon rail.
     var sidebarCollapsed = false
     /// True when the right-hand file-explorer pane is open. Drives the

@@ -396,6 +396,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
             taskStore: acDelegate.codingTaskStore,
             onShowTaskBoard: { [weak self] in self?.showTaskBoard() },
+            onNewTask: { [weak self] in
+                guard let self else { return }
+                self.showTaskBoard()
+                self.listModel.newTaskRequested = true
+            },
             sessionStore: acDelegate.agentSessionStore,
             onNewSession: { [weak self] in self?.showNewSession() },
             onSelectSession: { [weak self] id in self?.selectSession(id) },
@@ -2719,6 +2724,8 @@ struct SessionSidebar: View {
     /// Coding-task board (host window only — nil hides the Tasks section).
     var taskStore: CodingTaskStore? = nil
     var onShowTaskBoard: () -> Void = {}
+    /// The Tasks "+": the board with a blank task's editor open.
+    var onNewTask: () -> Void = {}
     /// Agent sessions (host window only) — the sessions-first sidebar's list.
     var sessionStore: AgentSessionStore? = nil
     /// Sessions-first sidebar (host window only): the new-session screen + selection.
@@ -2792,29 +2799,20 @@ struct SessionSidebar: View {
                     CodingTasksSection(
                         store: taskStore,
                         model: model,
-                        onShowBoard: onShowTaskBoard)
+                        onShowBoard: onShowTaskBoard,
+                        onNew: onNewTask)
                 }
-                HStack {
-                    Text("Workspaces")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
-                        .tracking(0.7)
-                    Spacer()
-                }
-                .padding(.leading, 8)
-                .padding(.trailing, 6)
-                .padding(.top, 14)
-                .padding(.bottom, 4)
+                SidebarSectionHeader(title: NSLocalizedString("Workspaces", comment: "sidebar section"),
+                                     count: model.profileRows.count,
+                                     onTitle: {},
+                                     onAdd: onNewProfile,
+                                     addHelp: NSLocalizedString("New workspace", comment: ""))
                 workspaceRows
                 kubeSection
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
         }
-
-        Divider().opacity(0.5)
-        PlusButton(onNewProfile: onNewProfile)
     }
 
     private var searchField: some View {
@@ -2875,7 +2873,8 @@ struct SessionSidebar: View {
                 CodingTasksSection(
                     store: taskStore,
                     model: model,
-                    onShowBoard: onShowTaskBoard)
+                    onShowBoard: onShowTaskBoard,
+                    onNew: onNewTask)
                 AutomationsSection(
                     store: automationStore,
                     model: model,
@@ -2888,67 +2887,25 @@ struct SessionSidebar: View {
         }
     }
 
-    private func machinesTitle(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .textCase(.uppercase)
-            .tracking(0.7)
-            .lineLimit(1)
-            .fixedSize()
-    }
-
     /// "Virtual Machines" — the workspaces (VMs) behind the tasks, folded
     /// away by default. Expanded, it's the classic source list: Grid, each VM
-    /// with its terminals and Docker, the control menus, and "+" for a new one.
+    /// with its terminals and Docker, and the control menus. The header's
+    /// green badge is how many are up; "+" makes a new one (Option-click
+    /// runs the credential wizard first).
     @ViewBuilder
     private var machinesSection: some View {
         let running = model.profileRows.filter { $0.state == .running || $0.state == .booting }.count
-        let asleep = model.profileRows.count - running
-        Button {
-            withAnimation(.easeInOut(duration: 0.15)) { model.machinesExpanded.toggle() }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: model.machinesExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 10)
-                // The full name while the sidebar has room for it on one
-                // line next to the counts; "VMs" once it has been narrowed.
-                ViewThatFits(in: .horizontal) {
-                    machinesTitle(NSLocalizedString("Virtual Machines", comment: "sidebar section"))
-                    machinesTitle(NSLocalizedString("VMs", comment: "sidebar section, when narrow"))
-                }
-                Spacer()
-                HStack(spacing: 4) {
-                    if running > 0 {
-                        Circle().fill(.green).frame(width: 6, height: 6)
-                        Text("\(running)")
-                    }
-                    if asleep > 0 {
-                        Circle().fill(Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
-                            .padding(.leading, running > 0 ? 4 : 0)
-                        Text("\(asleep)")
-                    }
-                }
-                .font(.system(size: 10.5).monospacedDigit())
-                .foregroundStyle(.tertiary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .padding(.leading, 8)
-        .padding(.trailing, 6)
-        .padding(.top, 16)
-        .padding(.bottom, 4)
-        .help(NSLocalizedString("The isolated machines your sessions run in", comment: "sidebar"))
+        SidebarSectionHeader(title: NSLocalizedString("Virtual Machines", comment: "sidebar section"),
+                             narrowTitle: NSLocalizedString("VMs", comment: "sidebar section, when narrow"),
+                             expanded: model.machinesExpanded,
+                             badges: [(running, .green)],
+                             count: model.profileRows.count,
+                             help: NSLocalizedString("The isolated machines your sessions run in", comment: "sidebar"),
+                             onTitle: { withAnimation(.easeInOut(duration: 0.15)) { model.machinesExpanded.toggle() } },
+                             onAdd: onNewProfile,
+                             addHelp: NSLocalizedString("New workspace", comment: ""))
         if model.machinesExpanded {
             workspaceRows
-            HStack {
-                Spacer()
-                PlusButton(onNewProfile: onNewProfile)
-                Spacer()
-            }
             kubeSection
         }
     }
@@ -3320,25 +3277,11 @@ private struct KubeClustersSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            HStack {
-                Text(NSLocalizedString("Kubernetes", comment: "sidebar section"))
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.7)
-                Spacer()
-                Button(action: onNew) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help(NSLocalizedString("New Kubernetes cluster", comment: "sidebar"))
-            }
-            .padding(.leading, 8)
-            .padding(.trailing, 6)
-            .padding(.top, 12)
-            .padding(.bottom, 4)
+            SidebarSectionHeader(title: NSLocalizedString("Kubernetes", comment: "sidebar section"),
+                                 count: store.clusters.count,
+                                 onTitle: {},
+                                 onAdd: onNew,
+                                 addHelp: NSLocalizedString("New Kubernetes cluster", comment: "sidebar"))
             ForEach(store.clusters) { c in
                 KubeClusterRow(cluster: c, status: store.status(c.id),
                                isSelected: model.kubeSelectedID == c.id,
@@ -3359,25 +3302,11 @@ private struct KubeRegistriesSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            HStack {
-                Text(NSLocalizedString("Registries", comment: "sidebar section"))
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.7)
-                Spacer()
-                Button(action: onNew) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help(NSLocalizedString("New container registry", comment: "sidebar"))
-            }
-            .padding(.leading, 8)
-            .padding(.trailing, 6)
-            .padding(.top, 12)
-            .padding(.bottom, 4)
+            SidebarSectionHeader(title: NSLocalizedString("Registries", comment: "sidebar section"),
+                                 count: store.registries.count,
+                                 onTitle: {},
+                                 onAdd: onNew,
+                                 addHelp: NSLocalizedString("New container registry", comment: "sidebar"))
             ForEach(store.registries) { r in
                 let st = store.status(r.id)
                 KubeMachineRow(name: r.name, status: st, icon: "shippingbox.and.arrow.backward",
@@ -3596,29 +3525,6 @@ private struct KubeClusterRow: View {
             Divider()
             Button(NSLocalizedString("Delete cluster…", comment: ""), role: .destructive) { onAction(.delete) }
         }
-    }
-}
-
-private struct PlusButton: View {
-    let onNewProfile: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: onNewProfile) {
-            Image(systemName: "plus")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 26, height: 26)
-                .background(
-                    Circle()
-                        .fill(Color.black.opacity(hovering ? 0.7 : 1.0))
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 1)))
-        }
-        .buttonStyle(.plain)
-        .help("New workspace")
-        .onHover { hovering = $0 }
-        .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.vertical, 8)
     }
 }
 

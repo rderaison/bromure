@@ -4376,6 +4376,11 @@ final class RemoteHostWindow: NSWindow {
             onShowAutomationBoard: { [weak self] in self?.showAutomationBoard() },
             taskStore: c.taskStore,
             onShowTaskBoard: { [weak self] in self?.showTaskBoard() },
+            onNewTask: { [weak self] in
+                guard let self else { return }
+                self.showTaskBoard()
+                self.controller.listModel.newTaskRequested = true
+            },
             sessionStore: c.sessionStore,
             onNewSession: { [weak self] in self?.showNewSession() },
             onSelectSession: { [weak self] id in self?.selectSession(id) },
