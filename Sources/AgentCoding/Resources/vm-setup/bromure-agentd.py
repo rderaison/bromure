@@ -2177,8 +2177,65 @@ def _task_mcp_setup(branch, tool, workdir):
     return ""
 
 
+_DELEGATION_MCP_SHIM = "/mnt/bromure-meta/bromure-delegation-mcp.py"
+
+
+def _git_exclude(workdir, pattern):
+    """Add `pattern` to the checkout's local git exclude (never to a
+    tracked .gitignore), so a settings file we drop in the tree can't
+    dirty its diff or get committed. No-op outside a repository."""
+    ex = _capture(["git", "-C", workdir, "rev-parse",
+                   "--git-path", "info/exclude"]).strip()
+    if not ex:
+        return
+    path = ex if os.path.isabs(ex) else os.path.join(workdir, ex)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    current = ""
+    if os.path.exists(path):
+        with open(path) as f:
+            current = f.read()
+    if pattern not in current:
+        with open(path, "a") as f:
+            f.write("\n" + pattern + "\n")
+
+
+def _delegation_mcp_setup(tool, workdir):
+    """Every agent tab gets the delegation MCP (hand work to another agent,
+    hear back from it). Claude and Codex find it in the user-scope configs
+    the host writes; grok, kimi and omp only read project-scope files, so
+    those get the entry MERGED into the same files the board MCP uses
+    (after it, so a task tab keeps both), git-excluded. Nothing to
+    announce: the shim reads its own tmux window."""
+    if tool not in ("grok", "kimi", "omp") or not os.path.exists(_DELEGATION_MCP_SHIM):
+        return
+    if tool == "omp":
+        path, exclude = os.path.join(workdir, ".mcp.json"), ".mcp.json"
+    else:
+        subdir, fname = ((".grok", "settings.json") if tool == "grok"
+                         else (".kimi-code", "mcp.json"))
+        path, exclude = os.path.join(workdir, subdir, fname), subdir + "/"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        existing = {}
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    existing = json.load(f)
+            except (OSError, ValueError):
+                existing = {}
+        servers = existing.get("mcpServers", {}) or {}
+        servers["bromure-delegation"] = {
+            "command": "python3", "args": [_DELEGATION_MCP_SHIM]}
+        existing["mcpServers"] = servers
+        with open(path, "w") as f:
+            json.dump(existing, f, indent=2)
+        _git_exclude(workdir, exclude)
+    except OSError as e:
+        log("worktree", "%s delegation-mcp setup failed: %s" % (tool, e))
+
+
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
-                     task=False):
+                     task=False, background=False):
     _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
@@ -2226,13 +2283,14 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
     flags = _YOLO_FLAGS.get(tool, "") if yolo else ""
     if task:
         flags += _task_mcp_setup(branch, tool, wt_dir)
+    _delegation_mcp_setup(tool, wt_dir)
     if flags:
         _env["BROMURE_AC_WT_FLAGS"] = flags
     if yolo and _YOLO_FLAGS.get(tool):
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
         _preonboard(tool, wt_dir)
-    win = _new_window(command="bash -l", cwd=wt_dir, env=_env)
+    win = _new_window(command="bash -l", cwd=wt_dir, env=_env, background=background)
     if not win:
         worktree_err("worktree: could not open a tab (created %s at %s)"
                      % (branch, wt_dir))
@@ -2314,13 +2372,15 @@ def _automation_tab(cwd, display, tool, prompt_b64, slug=""):
         _set_window_option(win, "@worktree", "wt/" + slug)
 
 
-def _agent_tab(cwd, display, tool, prompt_b64, flags=""):
+def _agent_tab(cwd, display, tool, prompt_b64, flags="", background=False):
     """Session-first home: an INTERACTIVE agent tab in a folder the user
     chose — the launch env of a worktree tab (tool, optional opening
     message) without a worktree and without yolo flags, so the agent asks
     its permission questions like it would in a terminal. `flags` carries
     a resume flag when the host reopens a conversation. Folder trust is
-    pre-seeded: the user picked the folder."""
+    pre-seeded: the user picked the folder. `background`: the tab opens
+    behind the current one (a delegate another agent started — the user
+    is looking at the delegator)."""
     _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""
@@ -2331,7 +2391,8 @@ def _agent_tab(cwd, display, tool, prompt_b64, flags=""):
         env["BROMURE_AC_WT_FLAGS"] = flags
     _pretrust(tool, cwd)
     _preonboard(tool, cwd)
-    win = _new_window(command="bash -l", cwd=cwd, env=env)
+    _delegation_mcp_setup(tool, cwd)
+    win = _new_window(command="bash -l", cwd=cwd, env=env, background=background)
     if not win:
         worktree_err("session: could not open a tab at %s" % cwd)
         return
@@ -3529,9 +3590,11 @@ def _dispatch_command(action, arg):
         _tmux_ok("kill-window", "-t", "%s:%s" % (TMUX_S, arg))
     elif action == "worktree-create":
         # Fields 1-4 are base64; field 5 (tool) is passed RAW (matches "$5").
-        f = _fields(arg, 5)
+        # Optional 6th, raw: "background" opens the tab behind the current
+        # one (a delegate's tab — the user is looking at the delegator).
+        f = _fields(arg, 6)
         _bg(_worktree_create, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), f[4])
+            _b64d(f[3]), f[4], False, False, f[5] == "background")
     elif action == "automation-run":
         # Same field layout as worktree-create; falls back to a plain agent
         # tab when the path isn't a git repo. Optional 6th field: run mode
@@ -3545,10 +3608,12 @@ def _dispatch_command(action, arg):
     elif action == "agent-tab":
         # Home screen session: an interactive agent tab in a folder. Fields
         # 1-3 base64 (cwd, display, tool); 4 the raw prompt b64 or "-";
-        # optional 5 base64 flags (a resume flag).
-        f = _fields(arg, 5)
+        # optional 5 base64 flags (a resume flag); optional 6 raw
+        # "background" (see worktree-create).
+        f = _fields(arg, 6)
         _bg(_agent_tab, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            f[3] if f[3] else "-", _b64d(f[4]) if f[4] else "")
+            f[3] if f[3] else "-", _b64d(f[4]) if f[4] else "",
+            f[5] == "background")
     elif action == "task-resume":
         # Coding board: reopen the agent in an existing worktree with a
         # follow-up prompt. Fields 1-5 base64, field 6 the raw prompt b64.

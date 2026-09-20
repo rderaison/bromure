@@ -1452,26 +1452,32 @@ struct TranscriptItemView: View {
             // the way Codex/Claude desktop distinguish input from output.
             // A task prompt shows the brief only — the operating notes the
             // engine appends are plumbing, not conversation.
-            let words = Self.withoutPaths(CodingTask.displayPrompt(text), hiddenPaths)
-            VStack(alignment: .leading, spacing: 8) {
-                if !words.isEmpty {
-                    Text(words)
-                        .font(.system(size: Self.userTextSize))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+            // A line the host typed for a delegation (a delegate asked,
+            // delivered…) is the host's aside, not the user's words.
+            if let notice = DelegationNotice.strip(text) {
+                DelegationNoticeRow(text: notice)
+            } else {
+                let words = Self.withoutPaths(CodingTask.displayPrompt(text), hiddenPaths)
+                VStack(alignment: .leading, spacing: 8) {
+                    if !words.isEmpty {
+                        Text(words)
+                            .font(.system(size: Self.userTextSize))
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !attachments.isEmpty { DropPictureStrip(images: attachments) }
                 }
-                if !attachments.isEmpty { DropPictureStrip(images: attachments) }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.10))
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.accentColor.opacity(0.5))
+                        .frame(width: 3)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-            .padding(.vertical, 10)
-            .padding(.horizontal, 14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.secondary.opacity(0.10))
-            .overlay(alignment: .leading) {
-                Rectangle()
-                    .fill(Color.accentColor.opacity(0.5))
-                    .frame(width: 3)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         case .assistantText(let text):
             assistantText(text)
         case .question(let q):

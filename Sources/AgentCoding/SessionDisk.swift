@@ -869,6 +869,11 @@ public final class SessionDisk {
         try Self.kubeMCPShimScript.write(
             to: tmp.appendingPathComponent("bromure-infra-mcp.py"),
             atomically: true, encoding: .utf8)
+        // Delegation MCP shim — every agent tab: hand work to another
+        // agent's session, hear back from it.
+        try Self.delegationMCPShimScript.write(
+            to: tmp.appendingPathComponent("bromure-delegation-mcp.py"),
+            atomically: true, encoding: .utf8)
 
         // Plan-stream driver assets — staged unconditionally, like the task
         // MCP shim. bromure-plan-driver.py adapts codex/grok (and bridges
@@ -1155,6 +1160,45 @@ public final class SessionDisk {
             .replacingOccurrences(of: "bromure-task-mcp", with: "bromure-infra-mcp")
             .replacingOccurrences(of: "task-board MCP", with: "infrastructure MCP")
     }
+    /// The delegation MCP (DelegationMCPServer): an agent hands work to
+    /// another agent's session and hears back. Every agent tab gets it.
+    public static let delegationMCPVsockPort: UInt32 = 5835
+    static let delegationMCPShimGuestPath = "/mnt/bromure-meta/bromure-delegation-mcp.py"
+    static var delegationMCPClaudeEntry: [String: Any] {
+        ["command": "python3", "args": [delegationMCPShimGuestPath]]
+    }
+    /// The task shim on the delegation port, announcing not a branch but
+    /// the tmux window it runs in — read from its own $TMUX_PANE, so the
+    /// host binds the connection to the session shown in that window and
+    /// the agent can't claim to be another.
+    static var delegationMCPShimScript: String {
+        taskMCPShimScript
+            .replacingOccurrences(of: "PORT = \(taskBoardMCPVsockPort)", with: "PORT = \(delegationMCPVsockPort)")
+            .replacingOccurrences(of: "bromure-task-mcp", with: "bromure-delegation-mcp")
+            .replacingOccurrences(of: "task-board MCP", with: "delegation MCP")
+            .replacingOccurrences(of: "import socket, sys, threading, time",
+                                  with: "import os, socket, subprocess, sys, threading, time")
+            .replacingOccurrences(of: "HELLO = sys.argv[1] if len(sys.argv) > 1 else \"\"",
+                                  with: delegationMCPHelloBlock)
+    }
+    static let delegationMCPHelloBlock = """
+    def _hello():
+        # Who am I: the tmux window this agent runs in (its pane is in the
+        # environment), so the host binds the connection to the session
+        # shown there. An explicit argv[1] wins (tests).
+        if len(sys.argv) > 1 and sys.argv[1]:
+            return sys.argv[1]
+        pane = os.environ.get("TMUX_PANE", "")
+        if not pane:
+            return ""
+        try:
+            out = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "w#{window_index}"],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+        except Exception:
+            return ""
+        return out if out.startswith("w") and out[1:].isdigit() else ""
+    HELLO = _hello()
+    """
     static var automationMCPClaudeEntry: [String: Any] {
         ["command": "python3", "args": [automationMCPShimGuestPath]]
     }
@@ -1394,6 +1438,7 @@ public final class SessionDisk {
             "browser": browserMCPClaudeEntry,
             "automations": automationMCPClaudeEntry,
             "infrastructure": kubeMCPClaudeEntry,
+            "delegation": delegationMCPClaudeEntry,
         ]
         for server in servers {
             // Raw JSON mode: parse and use as-is (allows OAuth blocks,
@@ -1618,6 +1663,10 @@ public final class SessionDisk {
             "[mcp_servers.infrastructure]",
             "command = \"python3\"",
             "args = [\(tomlQuote(kubeMCPShimGuestPath))]",
+            "",
+            "[mcp_servers.delegation]",
+            "command = \"python3\"",
+            "args = [\(tomlQuote(delegationMCPShimGuestPath))]",
         ]
         for server in servers {
             // Raw JSON servers are written to Claude Code config only;

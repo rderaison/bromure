@@ -355,6 +355,19 @@ final class BeautifiedSessionModel: ObservableObject {
     /// the agent may have changed.
     @Published var imagesByPath: [String: Data] = [:]
 
+    /// The delegations this session is part of — the panel above the
+    /// composer. nil where the window keeps no such records (a bare tab).
+    var delegationStore: DelegationStore?
+    var sessionStore: AgentSessionStore?
+    /// The session this chat is, as of now (a tab binds to its record a
+    /// beat after launch).
+    var currentSession: (() -> AgentSession?)?
+    /// Put another session on stage (the other end of a delegation).
+    var openSession: ((UUID) -> Void)?
+    /// The user answers a delegate's question on the agent's behalf:
+    /// (delegation, ask, text). nil = read-only (a mirror).
+    var answerDelegation: ((UUID, UUID, String) -> Void)?
+
     var accent: Color { provider.accent }
 
     /// The agent's slash commands for the "/" palette: built-ins at once,
@@ -1135,6 +1148,14 @@ struct BeautifiedSessionView: View {
             // card otherwise scrolls up out of view (the transcript auto-sticks
             // to the tail). Pin the current todo here, above the composer.
             if let todo = pinnedTodo { todoPinPanel(todo) }
+            // What this session delegated (and to whom it answers), kept
+            // in sight the same way.
+            if let store = model.delegationStore, let me = model.currentSession?() {
+                DelegationPanel(store: store, sessions: model.sessionStore, session: me,
+                                accent: model.accent,
+                                open: { model.openSession?($0) },
+                                answer: model.answerDelegation)
+            }
             if paletteVisible {
                 SlashCommandPalette(
                     commands: paletteCommands,
@@ -2069,5 +2090,249 @@ private struct PromptCard: View {
         guard !c.isEmpty else { return }
         onSubmitCode(c)
         code = ""
+    }
+}
+
+// MARK: - Delegations panel
+
+/// Above the composer: what this session delegated — each delegate's
+/// state, its last word, a question waiting for an answer — or, when this
+/// session is itself a delegate, whom it answers to. Folds to a line;
+/// nothing at all when the session is on neither end.
+struct DelegationPanel: View {
+    let store: DelegationStore
+    let sessions: AgentSessionStore?
+    let session: AgentSession
+    let accent: Color
+    let open: (UUID) -> Void
+    /// nil = read-only (a fat client's mirror).
+    let answer: ((UUID, UUID, String) -> Void)?
+    @AppStorage("sessions.delegationsExpanded") private var expanded = true
+    @State private var drafts: [UUID: String] = [:]
+
+    var body: some View {
+        let mine = store.delegations(parent: session.id)
+        let asChild = store.delegation(child: session.id)
+        if mine.isEmpty && asChild == nil {
+            EmptyView()
+        } else {
+            VStack(spacing: 0) {
+                Divider().opacity(0.5)
+                if let d = asChild { delegateStrip(d) }
+                if !mine.isEmpty { delegatorList(mine) }
+            }
+            .background(Color.platformTextBackground)
+        }
+    }
+
+    // MARK: Delegate: whom I answer to
+
+    private func delegateStrip(_ d: Delegation) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(String(format: NSLocalizedString("Delegated by “%@”", comment: "delegation panel"),
+                        title(of: d.parentSessionID)
+                            ?? NSLocalizedString("another session", comment: "delegation panel")))
+                .font(.system(size: 11.5, weight: .medium))
+                .lineLimit(1)
+            statusPill(d)
+            Spacer(minLength: 0)
+            Button(NSLocalizedString("Show delegator", comment: "delegation panel")) { open(d.parentSessionID) }
+                .buttonStyle(.link)
+                .font(.system(size: 11))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .help(d.brief)
+    }
+
+    // MARK: Delegator: my delegates
+
+    private func delegatorList(_ list: [Delegation]) -> some View {
+        let waiting = list.filter { $0.status == .waitingForParent }.count
+        let delivered = list.filter { $0.status == .delivered }.count
+        return VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 10)
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(NSLocalizedString("Delegations", comment: "delegation panel"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text("\(list.count)")
+                        .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                    if waiting > 0 {
+                        Text(waiting == 1
+                             ? NSLocalizedString("1 question", comment: "delegation panel")
+                             : String(format: NSLocalizedString("%d questions", comment: "delegation panel"), waiting))
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.orange)
+                    }
+                    if delivered > 0 {
+                        Text(delivered == 1
+                             ? NSLocalizedString("1 delivery", comment: "delegation panel")
+                             : String(format: NSLocalizedString("%d deliveries", comment: "delegation panel"), delivered))
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.green)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            if expanded {
+                ScrollView {
+                    VStack(spacing: 4) {
+                        ForEach(list) { row($0) }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                }
+                .frame(maxHeight: 220)
+            }
+        }
+    }
+
+    private func row(_ d: Delegation) -> some View {
+        let child = sessions?.session(d.childSessionID)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                AgentAvatar(tool: child?.tool ?? session.tool, size: 20, status: dot(d))
+                Button { open(d.childSessionID) } label: {
+                    Text(d.title)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("Open the delegate's session", comment: "delegation panel"))
+                statusPill(d)
+                Spacer(minLength: 0)
+                if let b = child?.worktreeBranch, !b.isEmpty {
+                    Text(b)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            if d.status == .waitingForParent, let ask = d.pendingAsk {
+                askBox(d, ask)
+            } else if let why = d.failure {
+                Text(why)
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            } else if let last = d.lastMessage {
+                Text(lastLine(last))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+        .opacity(d.status.isOpen ? 1 : 0.6)
+    }
+
+    private func askBox(_ d: Delegation, _ ask: DelegationMessage) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(ask.text)
+                .font(.system(size: 11.5))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            if answer != nil {
+                HStack(spacing: 6) {
+                    TextField(NSLocalizedString("Answer for the agent…", comment: "delegation panel"),
+                              text: Binding(get: { drafts[ask.id] ?? "" }, set: { drafts[ask.id] = $0 }))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11.5))
+                        .onSubmit { send(d, ask) }
+                    Button(NSLocalizedString("Send", comment: "delegation panel")) { send(d, ask) }
+                        .controlSize(.small)
+                        .disabled((drafts[ask.id] ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                Text(NSLocalizedString("Your agent can answer it too — this sends yours in its place.",
+                                       comment: "delegation panel"))
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.orange.opacity(0.08)))
+    }
+
+    private func send(_ d: Delegation, _ ask: DelegationMessage) {
+        let t = (drafts[ask.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        answer?(d.id, ask.id, t)
+        drafts[ask.id] = nil
+    }
+
+    // MARK: Bits
+
+    private func title(of sessionID: UUID) -> String? { sessions?.session(sessionID)?.title }
+
+    private func dot(_ d: Delegation) -> AgentStatus? {
+        switch d.status {
+        case .starting, .working: return .working
+        case .waitingForParent, .delivered: return .needsInput
+        case .done: return .done
+        case .cancelled, .failed: return nil
+        }
+    }
+
+    private func statusPill(_ d: Delegation) -> some View {
+        let (label, tint): (String, Color) = {
+            switch d.status {
+            case .starting: return (NSLocalizedString("Starting", comment: "delegation status"), .secondary)
+            case .working: return (NSLocalizedString("Working", comment: "delegation status"), .blue)
+            case .waitingForParent: return (NSLocalizedString("Asked a question", comment: "delegation status"), .orange)
+            case .delivered: return (NSLocalizedString("Delivered", comment: "delegation status"), .green)
+            case .done:
+                return (d.verdict == "rejected"
+                        ? NSLocalizedString("Rejected", comment: "delegation status")
+                        : NSLocalizedString("Accepted", comment: "delegation status"), .secondary)
+            case .cancelled: return (NSLocalizedString("Cancelled", comment: "delegation status"), .secondary)
+            case .failed: return (NSLocalizedString("Failed", comment: "delegation status"), .red)
+            }
+        }()
+        return Text(label)
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Capsule().fill(tint.opacity(0.12)))
+    }
+
+    private func lastLine(_ m: DelegationMessage) -> String {
+        let who: String
+        switch m.from {
+        case .child: who = NSLocalizedString("Delegate", comment: "delegation panel")
+        case .parent: who = NSLocalizedString("Your agent", comment: "delegation panel")
+        case .user: who = NSLocalizedString("You", comment: "delegation panel")
+        case .host: who = "Bromure"
+        }
+        let verb: String
+        switch m.kind {
+        case .ask: verb = NSLocalizedString("asked", comment: "delegation panel")
+        case .answer: verb = NSLocalizedString("answered", comment: "delegation panel")
+        case .report: verb = NSLocalizedString("reported", comment: "delegation panel")
+        case .deliver: verb = NSLocalizedString("delivered", comment: "delegation panel")
+        case .steer: verb = NSLocalizedString("steered", comment: "delegation panel")
+        case .cancel: verb = NSLocalizedString("cancelled", comment: "delegation panel")
+        case .note, .brief: verb = NSLocalizedString("noted", comment: "delegation panel")
+        }
+        return "\(who) \(verb): " + DelegationNotice.oneLine(m.text, max: 200)
     }
 }

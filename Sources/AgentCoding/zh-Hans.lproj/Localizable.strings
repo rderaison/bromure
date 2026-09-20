@@ -2262,3 +2262,36 @@
 
 /* Default cluster name */
 "Kube cluster" = "Kube 集群";
+
+/* Agent delegation (one agent handing work to another): the panel above the composer, the Security Timeline rows */
+"%d deliveries" = "%d 项交付";
+"%d questions" = "%d 个问题";
+"1 delivery" = "1 项交付";
+"1 question" = "1 个问题";
+"Accepted" = "已接受";
+"Agent delegation" = "代理委派";
+"Answer for the agent…" = "替代理回答…";
+"Asked a question" = "提出了问题";
+"Cancelled" = "已取消";
+"Delegate" = "受委派方";
+"Delegated by “%@”" = "由“%@”委派";
+"Delegations" = "委派";
+"Delivered" = "已交付";
+"Failed" = "失败";
+"Open the delegate's session" = "打开受委派方的会话";
+"Rejected" = "已拒绝";
+"Show delegator" = "显示委派方";
+"Starting" = "正在启动";
+"You" = "你";
+"Your agent" = "你的代理";
+"Your agent can answer it too — this sends yours in its place." = "你的代理也可以回答；这里会以你的回答代替它的。";
+"another session" = "另一个会话";
+"answered" = "已回答";
+"asked" = "提问";
+"cancelled" = "已取消";
+"delivered" = "已交付";
+"noted" = "备注";
+"reported" = "汇报";
+"steered" = "指示";
+"withheld — prompt injection" = "已拦截 — 提示注入";
+"relayed" = "已转达";

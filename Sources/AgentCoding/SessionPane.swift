@@ -546,6 +546,21 @@ final class SessionPane {
         m.inlineTerminalSession = { [weak self] in
             self?.terminalController?.tmuxSessionName(forWindow: windowIndex)
         }
+        // Delegations this session is part of, for the panel above the
+        // composer; the user can answer a delegate's question for the agent.
+        m.delegationStore = acDelegate?.delegationStore
+        m.sessionStore = acDelegate?.agentSessionStore
+        m.currentSession = { [weak self] in
+            guard let self, let d = self.acDelegate else { return nil }
+            return d.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
+        }
+        m.openSession = { [weak self] id in
+            self?.acDelegate?.ensureUnifiedWindow().selectSession(id)
+        }
+        m.answerDelegation = { [weak self] delegationID, askID, text in
+            guard let engine = self?.acDelegate?.delegationEngine else { return }
+            Task { _ = try? await engine.post(delegationID, from: .user, kind: .answer, text: text, answering: askID) }
+        }
         let tab = model.tabs[model.activeIndex]
         // Which agent's commands: the session's own tool, else the tab's
         // label, else the workspace's main agent — the palette always has

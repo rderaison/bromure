@@ -392,7 +392,7 @@ final class AgentSessionEngine {
                 self.store.mutate(id) { $0.launchBaselineIndex = baseline; $0.launchDisplay = display }
                 guard delegate.automationWorktreeCommand(
                     profileNameOrID: s.profileID.uuidString, action: "create",
-                    args: [guestPath, worktreeSlug, display, s.tool.rawValue, prompt]) else {
+                    args: [guestPath, worktreeSlug, display, s.tool.rawValue, prompt] + self.backgroundArg(id)) else {
                     fail(NSLocalizedString("Couldn't reach the workspace — is it running?", comment: "task start"))
                     return
                 }
@@ -429,12 +429,20 @@ final class AgentSessionEngine {
             self.store.mutate(id) { $0.launchBaselineIndex = baseline; $0.launchDisplay = display }
             guard delegate.automationWorktreeCommand(
                 profileNameOrID: s.profileID.uuidString, action: "agent-tab",
-                args: [guestPath, display, s.tool.rawValue, prompt, flags]) else {
+                args: [guestPath, display, s.tool.rawValue, prompt, flags] + self.backgroundArg(id)) else {
                 fail(NSLocalizedString("Couldn't reach the workspace — is it running?", comment: "task start"))
                 return
             }
             BACDebug.log("sessions", "“\(s.title)”: agent-tab sent (baseline \(baseline))")
         }
+    }
+
+    /// A delegate's tab opens behind the current one: another agent
+    /// started it, and the user is looking at that agent, not at it. Read
+    /// at launch time — the delegation engine links the child right after
+    /// starting it.
+    private func backgroundArg(_ id: UUID) -> [String] {
+        store.session(id)?.parentSessionID != nil ? ["background"] : []
     }
 
     /// Which tabs are there before a launch, so the new one can be told

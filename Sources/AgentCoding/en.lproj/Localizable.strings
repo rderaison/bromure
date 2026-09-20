@@ -2297,3 +2297,36 @@
 
 /* Default cluster name */
 "Kube cluster" = "Kube cluster";
+
+/* Agent delegation (one agent handing work to another): the panel above the composer, the Security Timeline rows */
+"%d deliveries" = "%d deliveries";
+"%d questions" = "%d questions";
+"1 delivery" = "1 delivery";
+"1 question" = "1 question";
+"Accepted" = "Accepted";
+"Agent delegation" = "Agent delegation";
+"Answer for the agent…" = "Answer for the agent…";
+"Asked a question" = "Asked a question";
+"Cancelled" = "Cancelled";
+"Delegate" = "Delegate";
+"Delegated by “%@”" = "Delegated by “%@”";
+"Delegations" = "Delegations";
+"Delivered" = "Delivered";
+"Failed" = "Failed";
+"Open the delegate's session" = "Open the delegate's session";
+"Rejected" = "Rejected";
+"Show delegator" = "Show delegator";
+"Starting" = "Starting";
+"You" = "You";
+"Your agent" = "Your agent";
+"Your agent can answer it too — this sends yours in its place." = "Your agent can answer it too — this sends yours in its place.";
+"another session" = "another session";
+"answered" = "answered";
+"asked" = "asked";
+"cancelled" = "cancelled";
+"delivered" = "delivered";
+"noted" = "noted";
+"reported" = "reported";
+"steered" = "steered";
+"withheld — prompt injection" = "withheld — prompt injection";
+"relayed" = "relayed";

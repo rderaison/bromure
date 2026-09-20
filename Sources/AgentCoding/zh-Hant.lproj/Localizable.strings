@@ -2265,3 +2265,36 @@
 
 /* Default cluster name */
 "Kube cluster" = "Kube 叢集";
+
+/* Agent delegation (one agent handing work to another): the panel above the composer, the Security Timeline rows */
+"%d deliveries" = "%d 項交付";
+"%d questions" = "%d 個問題";
+"1 delivery" = "1 項交付";
+"1 question" = "1 個問題";
+"Accepted" = "已接受";
+"Agent delegation" = "代理程式委派";
+"Answer for the agent…" = "替代理程式回答…";
+"Asked a question" = "提出了問題";
+"Cancelled" = "已取消";
+"Delegate" = "受委派方";
+"Delegated by “%@”" = "由「%@」委派";
+"Delegations" = "委派";
+"Delivered" = "已交付";
+"Failed" = "失敗";
+"Open the delegate's session" = "開啟受委派方的工作階段";
+"Rejected" = "已拒絕";
+"Show delegator" = "顯示委派方";
+"Starting" = "正在啟動";
+"You" = "你";
+"Your agent" = "你的代理程式";
+"Your agent can answer it too — this sends yours in its place." = "你的代理程式也可以回答；這裡會以你的回答代替它的。";
+"another session" = "另一個工作階段";
+"answered" = "已回答";
+"asked" = "提問";
+"cancelled" = "已取消";
+"delivered" = "已交付";
+"noted" = "備註";
+"reported" = "回報";
+"steered" = "指示";
+"withheld — prompt injection" = "已攔截 — 提示注入";
+"relayed" = "已轉達";

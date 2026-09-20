@@ -97,6 +97,8 @@ final class ACAutomationServer {
     /// Sessions-first home over the wire (fat client): the session records
     /// with their live verdicts, the verbs that drive one, and its transcript.
     var onListAgentSessions: (() -> [[String: Any]])?
+    /// Delegations between sessions, mirrored next to them.
+    var onListDelegations: (() -> [[String: Any]])?
     var onAgentSessionCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
     var onAgentSessionTranscript: ((_ id: UUID) async -> Data?)?
     /// The subfolders of a folder on a workspace (by id or name), for the
@@ -1892,6 +1894,7 @@ final class ACAutomationServer {
             // client ignores it, a newer client falls back to the classic
             // layout when it's missing.
             if let sessions = self.onListAgentSessions?() { d["agentSessions"] = sessions }
+            if let delegations = self.onListDelegations?() { d["delegations"] = delegations }
             return d
         }
         // The workspace VM subnet, so a fat client can route/tunnel to it. nil

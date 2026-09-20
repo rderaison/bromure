@@ -2262,3 +2262,36 @@
 
 /* Default cluster name */
 "Kube cluster" = "Kube クラスタ";
+
+/* Agent delegation (one agent handing work to another): the panel above the composer, the Security Timeline rows */
+"%d deliveries" = "%d 件の納品";
+"%d questions" = "%d 件の質問";
+"1 delivery" = "1 件の納品";
+"1 question" = "1 件の質問";
+"Accepted" = "承認済み";
+"Agent delegation" = "エージェント間の委任";
+"Answer for the agent…" = "エージェントの代わりに回答…";
+"Asked a question" = "質問中";
+"Cancelled" = "キャンセル済み";
+"Delegate" = "委任先";
+"Delegated by “%@”" = "「%@」から委任";
+"Delegations" = "委任";
+"Delivered" = "納品済み";
+"Failed" = "失敗";
+"Open the delegate's session" = "委任先のセッションを開く";
+"Rejected" = "却下";
+"Show delegator" = "委任元を表示";
+"Starting" = "開始中";
+"You" = "あなた";
+"Your agent" = "あなたのエージェント";
+"Your agent can answer it too — this sends yours in its place." = "エージェント自身も回答できます。ここからはあなたの回答を代わりに送ります。";
+"another session" = "別のセッション";
+"answered" = "回答";
+"asked" = "質問";
+"cancelled" = "キャンセル";
+"delivered" = "納品";
+"noted" = "メモ";
+"reported" = "報告";
+"steered" = "指示";
+"withheld — prompt injection" = "保留 — プロンプトインジェクション";
+"relayed" = "中継済み";

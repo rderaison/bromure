@@ -40,6 +40,8 @@ final class RemoteHostController {
     let automationStore: ScheduledAutomationStore
     /// Mirror of the remote Kubernetes clusters (records + live status).
     let kubeStore = KubeClusterStore(mirror: true)
+    /// Mirror of the server's delegations between sessions.
+    let delegationStore = DelegationStore(mirror: true)
 
     /// Connection health, surfaced in the window chrome.
     var connected = false
@@ -582,6 +584,7 @@ final class RemoteHostController {
         // Only when present: a partial snapshot must not wipe the clusters.
         if let kube = snapshot["kubeClusters"] as? [String: Any] { applyKubeClusters(kube) }
         applySessions(snapshot["agentSessions"] as? [[String: Any]])
+        applyDelegations(snapshot["delegations"] as? [[String: Any]])
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
@@ -1001,6 +1004,18 @@ final class RemoteHostController {
             return try? dec.decode(AgentSession.self, from: data)
         }
         sessionStore.applyMirror(sessions)
+    }
+
+    /// Only when present: an older server sends none, and the mirror keeps
+    /// what it has rather than reading that as "none".
+    private func applyDelegations(_ list: [[String: Any]]?) {
+        guard let list else { return }
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let items = list.compactMap { dict -> Delegation? in
+            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+            return try? dec.decode(Delegation.self, from: data)
+        }
+        delegationStore.applyMirror(items)
     }
 
     /// POST /sessions/start — the new session's id once the server has it.
@@ -4948,6 +4963,17 @@ final class RemoteHostWindow: NSWindow {
         beautifiedModel = m
         beautifiedWorkspace = id
         beautifiedTabIndex = tabIndex
+        // Delegations this session is part of (read-only here: answering
+        // for the agent is done on the server's own window), and the jump
+        // to the other end's session.
+        m.delegationStore = controller.delegationStore
+        m.sessionStore = controller.sessionStore
+        if let w = tabIndex {
+            m.currentSession = { [weak controller] in
+                controller?.sessionStore.session(profileID: id, windowIndex: w)
+            }
+        }
+        m.openSession = { [weak self] sid in self?.selectSession(sid) }
         // The "/" palette and the composer's name: the tab's agent, else the
         // workspace's main one (the label reads "bash" for agents under an
         // interpreter).

@@ -1563,6 +1563,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     let agentSessionStore = AgentSessionStore()
     private(set) lazy var agentSessionEngine =
         AgentSessionEngine(store: agentSessionStore, delegate: self)
+    /// Delegations between sessions: one agent handing work to another.
+    let delegationStore = DelegationStore()
+    private(set) lazy var delegationEngine =
+        DelegationEngine(store: delegationStore, sessions: agentSessionStore,
+                         sessionEngine: agentSessionEngine, delegate: self)
     private(set) lazy var codingTaskEngine =
         CodingTaskEngine(store: codingTaskStore, delegate: self)
     /// Kubernetes clusters — shared machines (node VMs) next to the
@@ -2076,6 +2081,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Per-workspace infrastructure MCP listeners (vsock 5834): the clusters
     /// and registries this workspace may use, and creating new ones.
     var kubeMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
+    var delegationMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
     /// Plan-stream listeners (vsock 5832), one per running workspace — the
     /// streamed planning drivers connect here (see PlanEventBridge).
     var planEventBridges: [Profile.ID: PlanEventBridge] = [:]
@@ -3278,6 +3284,45 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                          "bucket": model.map { SessionHome.bucket(for: s, in: $0).title } ?? "",
                          "error": s.lastError ?? ""]
                     }]
+                case "delegations":
+                    // Every delegation as recorded, with its messages.
+                    return ["delegations": self.delegationStore.delegations.compactMap(Self.codableToDict),
+                            "engine": self.delegationEngine.debugState]
+                case "delegate":
+                    // {id (parent session), title, brief, contract?, scope?, tool?, worktree?}
+                    // — what the parent's `delegate` tool does, minus the agent.
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          self.agentSessionStore.session(id) != nil,
+                          let title = params["title"] as? String, let brief = params["brief"] as? String
+                    else { return ["error": "id, title and brief required"] }
+                    let tool = (params["tool"] as? String).flatMap(Profile.Tool.init(rawValue:))
+                    let scope = params["scope"] as? [String] ?? []
+                    let worktree = params["worktree"] as? Bool
+                    Task { [weak self] in
+                        guard let self else { return }
+                        do {
+                            let d = try await self.delegationEngine.delegate(
+                                from: id, title: title, brief: brief, contract: params["contract"] as? String,
+                                scope: scope, tool: tool, worktree: worktree)
+                            BACDebug.log("delegation", "debug delegate → \(d.id.uuidString)")
+                        } catch {
+                            BACDebug.log("delegation", "debug delegate refused: \(error)")
+                        }
+                    }
+                    return ["ok": true, "queued": true]
+                case "delegation-post":
+                    // {id (delegation), from: parent|child|user, kind, text, answers?}
+                    guard let s = params["id"] as? String, let d = self.delegationStore.delegation(matching: s),
+                          let from = (params["from"] as? String).flatMap(DelegationMessage.Party.init(rawValue:)),
+                          let kind = (params["kind"] as? String).flatMap(DelegationMessage.Kind.init(rawValue:)),
+                          let text = params["text"] as? String
+                    else { return ["error": "id, from, kind and text required"] }
+                    let answers = (params["answers"] as? String).flatMap { self.delegationStore.message(matching: $0, in: [d])?.1.id }
+                    Task { [weak self] in
+                        do { _ = try await self?.delegationEngine.post(d.id, from: from, kind: kind, text: text, answering: answers) }
+                        catch { BACDebug.log("delegation", "debug post refused: \(error)") }
+                    }
+                    return ["ok": true, "queued": true]
                 case "seed-security-timeline":
                     // Screenshot/demo fixture for the Security Timeline window:
                     // a representative spread of engines + outcomes, staggered
@@ -3661,6 +3706,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onListAgentSessions = { [weak self] in
             MainActor.assumeIsolated {
                 self?.agentSessionStore.sessions.compactMap(Self.codableToDict) ?? []
+            }
+        }
+        server.onListDelegations = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.delegationStore.delegations.compactMap(Self.codableToDict) ?? []
             }
         }
         server.onAgentSessionCommand = { [weak self] id, action, body in
@@ -8499,6 +8549,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         store: { [weak self] in self?.kubeClusterStore },
                         engine: { [weak self] in self?.kubeClusterEngine }),
                     port: SessionDisk.kubeMCPVsockPort)
+                // Delegation MCP listener (vsock 5835): an agent hands work
+                // to another agent's session and hears back; the caller is
+                // the session bound to the tmux window the shim announces.
+                self.delegationMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: DelegationMCPServer(
+                        profileID: pid,
+                        sessions: { [weak self] in self?.agentSessionStore },
+                        engine: { [weak self] in self?.delegationEngine }),
+                    port: SessionDisk.delegationMCPVsockPort)
                 // Plan-stream listener (vsock 5832): streamed planning
                 // drivers (claude SDK / codex app-server / grok ACP).
                 let planBridge = PlanEventBridge(socketDevice: dev)
@@ -8764,7 +8824,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard args.count >= 4 else { return false }   // cwd, slug, display, tool[, prompt]
             name = "worktree-create"
             let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
+            // Optional 6th, raw: "background" — the tab opens behind the
+            // current one (a delegate's; the user is looking at its delegator).
             encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
+                + (args.count >= 6 && args[5] == "background" ? ["background"] : [])
         case "run":
             // Automation fire: same layout as "create", but the guest falls
             // back to a plain agent tab when cwd isn't a git repo. Optional
@@ -8790,8 +8853,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard args.count >= 4 else { return false }
             name = "agent-tab"
             let prompt = args[3].isEmpty ? "-" : b64(args[3])
-            encoded = args.prefix(3).map(b64) + [prompt]
-                + (args.count >= 5 && !args[4].isEmpty ? [b64(args[4])] : [])
+            // Optional 6th, raw: "background" (see "create"). The guest
+            // splits on whitespace, so empty flags become "-" to hold the
+            // slot (it decodes to nothing).
+            let background = args.count >= 6 && args[5] == "background"
+            let flags: [String] = (args.count >= 5 && !args[4].isEmpty) ? [b64(args[4])] : (background ? ["-"] : [])
+            encoded = args.prefix(3).map(b64) + [prompt] + flags + (background ? ["background"] : [])
         case "merge":
             // src, target, mainRoot, display, tool[, mode ("merge"/"squash")
             // [, autonomy ("ask"/"auto" — board merges commit without asking)]]
@@ -10871,6 +10938,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         automationMCPBridges.removeValue(forKey: profile.id)
         kubeMCPBridges[profile.id]?.stop()
         kubeMCPBridges.removeValue(forKey: profile.id)
+        delegationMCPBridges[profile.id]?.stop()
+        delegationMCPBridges.removeValue(forKey: profile.id)
         planEventBridges[profile.id]?.stop()
         planEventBridges.removeValue(forKey: profile.id)
         planStreamHub.removeSessions(profileID: profile.id)
@@ -11610,6 +11679,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         store: { [weak self] in self?.kubeClusterStore },
                         engine: { [weak self] in self?.kubeClusterEngine }),
                     port: SessionDisk.kubeMCPVsockPort)
+                // Delegation MCP listener (vsock 5835) — see the matching
+                // block on the warm-boot path.
+                self.delegationMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: DelegationMCPServer(
+                        profileID: pid,
+                        sessions: { [weak self] in self?.agentSessionStore },
+                        engine: { [weak self] in self?.delegationEngine }),
+                    port: SessionDisk.delegationMCPVsockPort)
                 // Plan-stream listener (vsock 5832) — see the matching block
                 // on the warm-boot path.
                 let planBridge = PlanEventBridge(socketDevice: dev)

@@ -95,6 +95,11 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// noticed, cleared once the folder reads clean again (a commit) and
     /// on a resume — the Files pane pops up for each batch.
     var changesSeenAt: Date?
+    /// Started by another session's agent as its delegate (see
+    /// AgentDelegation.swift): listed under that session, and the
+    /// delegation the two share.
+    var parentSessionID: UUID?
+    var delegationID: UUID?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -962,12 +967,19 @@ struct SessionRowView: View {
     var when: String? = nil
     /// Machine or folder gone: dimmed, still readable.
     var gone = false
+    /// A delegate: indented under its delegator, this many levels down.
+    var depth = 0
     let selected: Bool
     let onSelect: () -> Void
     @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 9) {
+            if depth > 0 {
+                Image(systemName: "arrow.turn.down.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
             AgentAvatar(tool: session.tool, size: 26, status: dot)
                 .opacity(session.hasEnded ? 0.55 : 1)
             VStack(alignment: .leading, spacing: 2) {
@@ -1001,7 +1013,7 @@ struct SessionRowView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.leading, 10)
+        .padding(.leading, 10 + CGFloat(min(depth, 3)) * 14)
         .padding(.trailing, 8)
         .frame(height: 44)
         .background(RoundedRectangle(cornerRadius: 7)
@@ -1101,7 +1113,7 @@ struct SessionSectionsView: View {
 
             if open {
                 if list.isEmpty { emptyHint }
-                ForEach(list) { row($0) }
+                ForEach(Self.nested(list), id: \.session.id) { row($0.session, depth: $0.depth) }
             }
 
             let put = archived
@@ -1160,7 +1172,24 @@ struct SessionSectionsView: View {
         withAnimation(.easeInOut(duration: 0.15)) { archivedExpanded = true }
     }
 
-    private func row(_ s: AgentSession) -> some View {
+    /// The list with each delegate placed right under its delegator (as
+    /// deep as the chain goes), when the delegator is listed; a delegate
+    /// whose delegator isn't stands on its own.
+    static func nested(_ list: [AgentSession]) -> [(session: AgentSession, depth: Int)] {
+        let ids = Set(list.map(\.id))
+        var out: [(session: AgentSession, depth: Int)] = []
+        var seen: Set<UUID> = []
+        func walk(_ s: AgentSession, _ depth: Int) {
+            guard seen.insert(s.id).inserted else { return }
+            out.append((s, depth))
+            for c in list where c.parentSessionID == s.id { walk(c, depth + 1) }
+        }
+        for s in list where s.parentSessionID.map({ !ids.contains($0) }) ?? true { walk(s, 0) }
+        for s in list where !seen.contains(s.id) { walk(s, 0) }   // a cycle, somehow
+        return out
+    }
+
+    private func row(_ s: AgentSession, depth: Int = 0) -> some View {
         let gone = SessionHome.isGone(s, in: model)
         return SessionRowView(
             session: s,
@@ -1170,6 +1199,7 @@ struct SessionSectionsView: View {
             statusLine: SessionHome.statusLine(for: s, in: model),
             when: s.isLaunching ? nil : SessionHome.elapsedCompact(since: SessionHome.lastActivity(s)),
             gone: gone,
+            depth: depth,
             selected: model.selectedSessionID == s.id,
             onSelect: { onSelect(s.id) })
         .contextMenu {
