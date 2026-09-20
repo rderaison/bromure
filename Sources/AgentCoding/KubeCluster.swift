@@ -155,8 +155,35 @@ public struct KubeClusterSpec: Codable, Equatable, Sendable {
     /// Persistent volumes on a Synology NAS (Synology CSI). When set, its
     /// storage class becomes the default; Longhorn stays available by name.
     public var synology: KubeSynologySpec? = nil
+    /// floci, a local AWS emulator (S3, DynamoDB, SQS, SNS, Lambda, …), as a
+    /// Deployment behind a LoadBalancer Service on `awsEmulatorPort`.
+    public var awsEmulator: Bool = false
+
+    public static let awsEmulatorNamespace = "floci"
+    public static let awsEmulatorPort = 4566
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case nodeCount, cpusPerNode, memoryGBPerNode, storageEnabled, storageDiskGB,
+             loadBalancer, ingress, lanPool, synology, awsEmulator
+    }
+
+    /// Every field has a default so specs saved before a field existed (and
+    /// partial specs from the API) still decode.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        nodeCount = try c.decodeIfPresent(Int.self, forKey: .nodeCount) ?? 1
+        cpusPerNode = try c.decodeIfPresent(Int.self, forKey: .cpusPerNode) ?? 2
+        memoryGBPerNode = try c.decodeIfPresent(Int.self, forKey: .memoryGBPerNode) ?? 4
+        storageEnabled = try c.decodeIfPresent(Bool.self, forKey: .storageEnabled) ?? true
+        storageDiskGB = try c.decodeIfPresent(Int.self, forKey: .storageDiskGB) ?? 40
+        loadBalancer = try c.decodeIfPresent(KubeLoadBalancerKind.self, forKey: .loadBalancer) ?? .bromure
+        ingress = try c.decodeIfPresent(Bool.self, forKey: .ingress) ?? true
+        lanPool = try c.decodeIfPresent(String.self, forKey: .lanPool)
+        synology = try c.decodeIfPresent(KubeSynologySpec.self, forKey: .synology)
+        awsEmulator = try c.decodeIfPresent(Bool.self, forKey: .awsEmulator) ?? false
+    }
 
     /// Any storage add-on that needs the iSCSI initiator on the nodes.
     public var needsISCSI: Bool { storageEnabled || synology?.isConfigured == true }
@@ -638,6 +665,8 @@ public struct KubeProbe: Codable, Equatable, Sendable {
     public var longhorn: Longhorn?
     /// Synology CSI driver state (present once its namespace exists).
     public var synology: AddOn?
+    /// The AWS emulator's namespace, when the cluster has one.
+    public var floci: AddOn?
     public var pods: [Pod]
     public var pvcs: [PVC]
     public var warnings: [Warning]
@@ -651,7 +680,7 @@ public struct KubeProbe: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case at, reachable, version, full, nodes, podSummary, podsByNamespace, services,
-             deployments, longhorn, synology, pods, pvcs, warnings, probeMillis
+             deployments, longhorn, synology, floci, pods, pvcs, warnings, probeMillis
     }
 
     public init(from decoder: Decoder) throws {
@@ -667,6 +696,7 @@ public struct KubeProbe: Codable, Equatable, Sendable {
         deployments = try c.decodeIfPresent(Deployments.self, forKey: .deployments) ?? Deployments()
         longhorn = try c.decodeIfPresent(Longhorn.self, forKey: .longhorn)
         synology = try c.decodeIfPresent(AddOn.self, forKey: .synology)
+        floci = try c.decodeIfPresent(AddOn.self, forKey: .floci)
         pods = try c.decodeIfPresent([Pod].self, forKey: .pods) ?? []
         pvcs = try c.decodeIfPresent([PVC].self, forKey: .pvcs) ?? []
         warnings = try c.decodeIfPresent([Warning].self, forKey: .warnings) ?? []
@@ -741,6 +771,31 @@ public struct KubeClusterStatus: Codable, Equatable, Sendable {
 
 /// The clusters the app knows about + their live status. Locally the
 /// engine writes `status`; on a fat client both come from `/state` via
+public extension KubeClusterStatus {
+    /// Where the AWS emulator answers, once its Service has an address.
+    /// `lan`: the load balancer's address (this Mac and its LAN — or the VM
+    /// network under MetalLB). `vmNetwork`: the Service's NodePort on the
+    /// control-plane node, which every workspace reaches directly.
+    func awsEmulatorEndpoints(for cluster: KubeCluster) -> (lan: String?, vmNetwork: String?) {
+        guard cluster.spec.awsEmulator else { return (nil, nil) }
+        let ns = KubeClusterSpec.awsEmulatorNamespace
+        let port = KubeClusterSpec.awsEmulatorPort
+        var lan: String?
+        if let ep = lbEndpoints.first(where: { $0.namespace == ns && $0.port == port && $0.bound }),
+           let ip = ep.ip ?? hostIP {
+            lan = "http://\(ip):\(ep.port)"
+        }
+        var vm: String?
+        if let svc = probe?.services.first(where: { $0.namespace == ns && $0.name == "floci" }) {
+            if lan == nil, let ip = svc.ingress.first, !ip.isEmpty { lan = "http://\(ip):\(port)" }
+            if let np = svc.ports.first(where: { $0.port == port })?.nodePort, np > 0, let node = cluster.serverIP {
+                vm = "http://\(node):\(np)"
+            }
+        }
+        return (lan, vm)
+    }
+}
+
 /// `mirror` (no save — a mirror is a read model of another machine).
 @MainActor
 @Observable

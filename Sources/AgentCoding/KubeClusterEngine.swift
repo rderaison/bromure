@@ -86,6 +86,8 @@ final class KubeClusterEngine {
         var direct: KubeDirectCluster?
         /// Services already stamped with the host IP (ns/name).
         var patchedServices: Set<String> = []
+    /// The base URL the AWS emulator was last told to put in the URLs it returns.
+    var flociBaseURL: String?
         var stopping = false
         init(id: UUID) { self.id = id }
     }
@@ -388,6 +390,7 @@ final class KubeClusterEngine {
         log(id, "Creating “\(cluster.name)”: \(cluster.spec.nodeCount) node(s), \(cluster.spec.cpusPerNode) vCPU / \(cluster.spec.memoryGBPerNode) GB each"
             + (cluster.spec.storageEnabled ? ", Longhorn storage \(cluster.spec.storageDiskGB) GB per node" : "")
             + (cluster.spec.synology?.isConfigured == true ? ", Synology NAS \(cluster.spec.synology?.host ?? "")" : "")
+            + (cluster.spec.awsEmulator ? ", AWS emulator" : "")
             + ", load balancer: \(cluster.spec.loadBalancer.displayName)")
         do {
             try await bootAllNodes(&cluster, rt)
@@ -445,12 +448,13 @@ final class KubeClusterEngine {
                 if !out.contains("ok") { throw KubeError.message("Not every node became Ready in time") }
             }
 
-            let wantsAddons = cluster.spec.storageEnabled
-                || cluster.spec.synology?.isConfigured == true
-                || (cluster.spec.loadBalancer == .metallb && cluster.metallbRange != nil)
-            if wantsAddons {
-                step(id, cluster.spec.storageEnabled ? "Installing Longhorn storage"
-                     : cluster.spec.synology?.isConfigured == true ? "Installing the Synology CSI driver" : "Installing MetalLB")
+            var addons: [String] = []
+            if cluster.spec.storageEnabled { addons.append("Longhorn storage") }
+            if cluster.spec.synology?.isConfigured == true { addons.append("the Synology CSI driver") }
+            if cluster.spec.loadBalancer == .metallb && cluster.metallbRange != nil { addons.append("MetalLB") }
+            if cluster.spec.awsEmulator { addons.append("the AWS emulator") }
+            if !addons.isEmpty {
+                step(id, "Installing " + addons.joined(separator: ", "))
                 try await runAddons(cluster, server: server, storage: cluster.spec.storageEnabled ? "1" : "0")
             }
 
@@ -505,6 +509,7 @@ final class KubeClusterEngine {
         try await runStep(id, node: server, step: "addons", args: [
             storage, String(cluster.spec.storageReplicas), metallb,
             cluster.metallbRange ?? "-", cluster.spec.loadBalancer.rawValue, synology,
+            cluster.spec.awsEmulator ? "1" : "0",
         ])
     }
 
@@ -926,6 +931,17 @@ final class KubeClusterEngine {
                     if (try? await exec(server.id, script("patch-lb \(Self.shellQuote(svc.namespace)) \(Self.shellQuote(svc.name)) \(ip)"), timeout: 20)) != nil {
                         rt.patchedServices.insert(key)
                         log(id, "Published \(key) at \(ip)")
+                    }
+                }
+                // The AWS emulator puts a base URL in what it returns (SQS
+                // queue URLs, presigned S3 URLs): make it the published
+                // address, which workspaces, the Mac and the LAN all reach.
+                if svc.namespace == KubeClusterSpec.awsEmulatorNamespace, svc.name == "floci" {
+                    let base = "http://\(ip):\(KubeClusterSpec.awsEmulatorPort)"
+                    if rt.flociBaseURL != base,
+                       (try? await exec(server.id, script("floci-base-url \(base)"), timeout: 60)) != nil {
+                        rt.flociBaseURL = base
+                        log(id, "AWS emulator returns URLs on \(base)")
                     }
                 }
             } else if !svc.ingress.isEmpty, rt.patchedServices.contains(key) {

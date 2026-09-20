@@ -212,6 +212,7 @@ struct KubeDashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 statStrip(cluster)
+                awsEmulatorCard(cluster)
                 nodesCard(cluster)
                 if cluster.spec.loadBalancer == .bromure { loadBalancerCard }
                 if let warnings = probe?.warnings, !warnings.isEmpty { warningsCard(warnings) }
@@ -262,6 +263,45 @@ struct KubeDashboardView: View {
         return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: compact ? 2 : 6),
                          spacing: 12) {
             ForEach(Array(cards.enumerated()), id: \.offset) { $0.element }
+        }
+    }
+
+    @ViewBuilder private func awsEmulatorCard(_ cluster: KubeCluster) -> some View {
+        if cluster.spec.awsEmulator {
+            KubeCard(title: "AWS emulator", systemImage: "cloud.fill") {
+                let addon = probe?.floci
+                let eps = status.awsEmulatorEndpoints(for: cluster)
+                HStack(spacing: 6) {
+                    Circle().fill(addon?.ready == true ? Color.green : (addon == nil ? Color.secondary.opacity(0.4) : Color.orange))
+                        .frame(width: 8, height: 8)
+                    Text(addon == nil ? (status.phase == .running ? "Not installed" : "Starts with the cluster")
+                         : addon?.ready == true ? "floci ready" : "floci starting")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Text("floci · port \(String(KubeClusterSpec.awsEmulatorPort))").font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                }
+                if let lan = eps.lan {
+                    HStack(spacing: 6) {
+                        Text("From this Mac and the LAN").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 170, alignment: .leading)
+                        Text(lan).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                    }
+                }
+                if let vm = eps.vmNetwork {
+                    HStack(spacing: 6) {
+                        Text("From the workspaces").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 170, alignment: .leading)
+                        Text(vm).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                    }
+                }
+                if let ep = eps.vmNetwork ?? eps.lan {
+                    Text("export AWS_ENDPOINT_URL=\(ep) AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1")
+                        .font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+                }
+                Text("Any credentials work (a 12-digit access key id selects an account). State persists on the cluster's default storage class. Services that spawn containers — Lambda, RDS… — use the node's Docker and are best effort.")
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -711,6 +751,40 @@ struct NewKubeClusterSheet: View {
                    _ synologyPassword: String?) -> Void
     let onCancel: () -> Void
 
+    /// The workspace editor's shape: a category sidebar and one pane each.
+    enum Category: String, CaseIterable, Identifiable {
+        case general    = "General"
+        case nodes      = "Nodes"
+        case storage    = "Storage"
+        case networking = "Networking"
+        case addOns     = "Add-ons"
+        case access     = "Access"
+
+        var id: String { rawValue }
+
+        var symbol: String {
+            switch self {
+            case .general:    return "helm"
+            case .nodes:      return "server.rack"
+            case .storage:    return "internaldrive.fill"
+            case .networking: return "network"
+            case .addOns:     return "puzzlepiece.extension.fill"
+            case .access:     return "person.2.fill"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .general:    return KubeDashboardView.kubeBlue
+            case .nodes:      return .indigo
+            case .storage:    return .orange
+            case .networking: return .teal
+            case .addOns:     return .purple
+            case .access:     return .green
+            }
+        }
+    }
+
     @State private var name: String = ""
     @State private var spec = KubeClusterSpec()
     @State private var access: KubeWorkspaceAccess = .all
@@ -718,6 +792,13 @@ struct NewKubeClusterSheet: View {
     @State private var synologyOn = false
     @State private var synology = KubeSynologySpec()
     @State private var synologyPassword = ""
+    @State private var category: Category = .general
+
+    /// Optional-selection bridge for the sidebar List (the non-optional
+    /// initializer is macOS-only); a tap elsewhere keeps the current pane.
+    private var categoryBinding: Binding<Category?> {
+        Binding(get: { category }, set: { if let c = $0 { category = c } })
+    }
 
     private var totalMemoryGB: Int { spec.nodeCount * spec.memoryGBPerNode }
     private var totalDiskGB: Int { spec.storageEnabled ? spec.nodeCount * spec.storageDiskGB : 0 }
@@ -729,138 +810,88 @@ struct NewKubeClusterSheet: View {
         }
         return nil
     }
-    private var canCreate: Bool {
-        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
-        if synologyOn { return synology.isConfigured && !synologyPassword.isEmpty }
-        return true
+    /// Why "Create" is disabled, in a few words — nil when it isn't.
+    private var blocker: String? {
+        if name.trimmingCharacters(in: .whitespaces).isEmpty { return NSLocalizedString("Give the cluster a name.", comment: "k8s") }
+        if synologyOn {
+            if !synology.isConfigured { return NSLocalizedString("Synology: address and user are required.", comment: "k8s") }
+            if synologyPassword.isEmpty { return NSLocalizedString("Synology: password is required.", comment: "k8s") }
+        }
+        return nil
+    }
+    private var canCreate: Bool { blocker == nil }
+
+    /// One line for the button bar: what you're about to get.
+    private var summary: String {
+        var parts = [String(format: NSLocalizedString("%d node(s) · %d vCPU · %d GB each", comment: "k8s"),
+                            spec.nodeCount, spec.cpusPerNode, spec.memoryGBPerNode)]
+        if synologyOn { parts.append("Synology") }
+        if spec.storageEnabled { parts.append("Longhorn") }
+        parts.append(spec.loadBalancer == .bromure ? "LAN LB" : spec.loadBalancer == .metallb ? "MetalLB" : "no LB")
+        if spec.awsEmulator { parts.append("AWS") }
+        return parts.joined(separator: " · ")
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(KubeDashboardView.kubeBlue.opacity(0.15))
-                    .frame(width: 38, height: 38)
-                    .overlay(Image(systemName: "helm").font(.system(size: 18)).foregroundStyle(KubeDashboardView.kubeBlue))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("New Kubernetes cluster").font(.system(size: 16, weight: .semibold))
-                    Text("A k3s cluster in its own VMs, shared by your workspaces.")
-                        .font(.system(size: 11.5)).foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                List(Category.allCases, selection: categoryBinding) { c in
+                    Label {
+                        Text(LocalizedStringKey(c.rawValue))
+                    } icon: {
+                        Image(systemName: c.symbol)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white)
+                            .frame(width: 22, height: 22)
+                            .background(c.color.gradient, in: RoundedRectangle(cornerRadius: 5))
+                    }
+                    .tag(c)
+                }
+                .listStyle(.sidebar)
+                #if os(macOS)
+                .frame(width: 170)
+                #else
+                .frame(width: 230)
+                #endif
+
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(name.trimmingCharacters(in: .whitespaces).isEmpty ? "New Kubernetes cluster" : name)
+                            .font(.title2.bold())
+                        detail(for: category)
+                    }
+                    .padding(24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                if let blocker {
+                    Text(blocker).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-            }
-            .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 12)
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    section("Cluster") {
-                        HStack {
-                            Text("Name").frame(width: 120, alignment: .trailing)
-                            TextField("dev", text: $name).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
-                        }
-                        Text("Nodes will be named k8s-\(KubeCluster.slug(for: name.isEmpty ? "dev" : name))-1, -2, …")
-                            .font(.system(size: 10.5)).foregroundStyle(.tertiary).padding(.leading, 128)
-                    }
-                    section("Nodes") {
-                        stepperRow("Nodes", value: $spec.nodeCount, range: KubeClusterSpec.nodeRange,
-                                   caption: spec.nodeCount == 1 ? "one node: control plane + workloads" : "node 1 is the control plane; the rest join as workers")
-                        stepperRow("vCPUs per node", value: $spec.cpusPerNode, range: KubeClusterSpec.cpuRange, caption: nil)
-                        stepperRow("Memory per node (GB)", value: $spec.memoryGBPerNode, range: KubeClusterSpec.memoryRange,
-                                   caption: "\(totalMemoryGB) GB in total")
-                        if let w = memoryWarning {
-                            Label(w, systemImage: "exclamationmark.triangle.fill")
-                                .font(.system(size: 10.5)).foregroundStyle(.orange).padding(.leading, 128)
-                        }
-                    }
-                    section("Storage") {
-                        Toggle(isOn: $spec.storageEnabled) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Longhorn distributed storage")
-                                Text("Replicated block volumes served over iSCSI (open-iscsi on every node, a dedicated data disk each). Becomes the default storage class.")
-                                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
-                            }
-                        }
-                        .kubeCheckboxStyle()
-                        .padding(.leading, 128)
-                        if spec.storageEnabled {
-                            stepperRow("Data disk per node (GB)", value: $spec.storageDiskGB, range: KubeClusterSpec.storageRange,
-                                       step: 10, caption: "\(totalDiskGB) GB reserved (sparse — only written blocks use space) · \(spec.storageReplicas) replica(s)")
-                        }
-                        Toggle(isOn: $synologyOn) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Synology NAS")
-                                Text("Volumes on your NAS through Synology's CSI driver (iSCSI LUNs or SMB shares on a DSM volume). Becomes the default storage class; the driver's manifests are fetched from Synology's GitHub.")
-                                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
-                            }
-                        }
-                        .kubeCheckboxStyle()
-                        .padding(.leading, 128)
-                        if synologyOn {
-                            KubeSynologyFields(spec: $synology, password: $synologyPassword)
-                                .padding(.leading, 128)
-                        }
-                    }
-                    section("Networking") {
-                        HStack(alignment: .top) {
-                            Text("Load balancer").frame(width: 120, alignment: .trailing)
-                            VStack(alignment: .leading, spacing: 6) {
-                                Picker("", selection: $spec.loadBalancer) {
-                                    ForEach(KubeLoadBalancerKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                                }
-                                .kubeRadioStyle().labelsHidden()
-                                Text(lbHelp).font(.system(size: 10.5)).foregroundStyle(.secondary)
-                                if spec.loadBalancer == .bromure {
-                                    TextField("LAN address pool, e.g. 10.0.0.20-10.0.0.29 (optional)",
-                                              text: Binding(get: { spec.lanPool ?? "" },
-                                                            set: { spec.lanPool = $0.isEmpty ? nil : $0 }))
-                                        .textFieldStyle(.roundedBorder)
-                                        .frame(maxWidth: 360)
-                                    Text("Spare addresses on your LAN: each LoadBalancer Service gets its own, answered by ARP like MetalLB — nothing on this Mac is exposed. Leave empty to share the Mac's address by port.")
-                                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        Toggle(isOn: $spec.ingress) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Traefik ingress controller")
-                                Text("k3s's bundled ingress. With the LAN load balancer it publishes ports 80/443 on this Mac.")
-                                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
-                            }
-                        }
-                        .kubeCheckboxStyle()
-                        .padding(.leading, 128)
-                    }
-                    section("Workspace access") {
-                        HStack(alignment: .top) {
-                            Text("Kubeconfig").frame(width: 120, alignment: .trailing)
-                            KubeAccessPicker(isAll: { if case .all = access { return true } else { return false } }(),
-                                             selected: { if case .only(let ids) = access { return ids } else { return Set(workspaces.map(\.id)) } }(),
-                                             workspaces: workspaces) { access = $0 }
-                        }
-                        Toggle(isOn: $autoStart) { Text("Start with Bromure") }
-                            .kubeCheckboxStyle().padding(.leading, 128)
-                    }
-                }
-                .padding(20)
-            }
-            Divider()
-            HStack {
-                Text("Setup takes a few minutes: the nodes boot, download k3s and pull the add-on images.")
-                    .font(.system(size: 10.5)).foregroundStyle(.tertiary)
-                Spacer()
-                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
-                Button("Create Cluster") {
+                Text(summary).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                Button("Create") {
                     var final = spec.clamped
                     final.synology = synologyOn && synology.isConfigured ? synology : nil
                     onCreate(name.trimmingCharacters(in: .whitespaces), final, access, autoStart,
                              synologyOn ? synologyPassword : nil)
                 }
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canCreate)
             }
-            .padding(.horizontal, 20).padding(.vertical, 14)
+            .padding(12)
         }
-        .frame(width: 620, height: synologyOn ? 760 : 660)
+        #if os(macOS)
+        .frame(width: 720, height: 520)
+        #endif
         .onAppear {
             if name.isEmpty {
                 var candidate = "dev"
@@ -873,6 +904,204 @@ struct NewKubeClusterSheet: View {
         }
     }
 
+    // MARK: Panes
+
+    @ViewBuilder
+    private func detail(for category: Category) -> some View {
+        switch category {
+        case .general:    generalPane
+        case .nodes:      nodesPane
+        case .storage:    storagePane
+        case .networking: networkingPane
+        case .addOns:     addOnsPane
+        case .access:     accessPane
+        }
+    }
+
+    /// macOS: the grouped Form of the workspace editor (one label column,
+    /// one control column). iOS: a Form is a List and collapses inside the
+    /// detail ScrollView, so the same rows stack as labeled content.
+    @ViewBuilder
+    private func pane<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        #if os(macOS)
+        Form { content() }
+            .formStyle(.grouped)
+        #else
+        VStack(alignment: .leading, spacing: 16) { content() }
+        #endif
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var generalPane: some View {
+        pane {
+            Section {
+                TextField(NSLocalizedString("Name", comment: "k8s"), text: $name, prompt: Text("dev"))
+                Toggle(NSLocalizedString("Start with Bromure", comment: "k8s"), isOn: $autoStart)
+            } footer: {
+                caption(String(format: NSLocalizedString("Nodes are named k8s-%@-1, -2, … The cluster is a shared machine: every workspace on its access list gets it in ~/.kube/config, and their agents learn about it through the infrastructure MCP.", comment: "k8s"),
+                               KubeCluster.slug(for: name.isEmpty ? "dev" : name)))
+            }
+            Section(NSLocalizedString("Summary", comment: "k8s")) {
+                LabeledContent(NSLocalizedString("Nodes", comment: "k8s"),
+                               value: String(format: NSLocalizedString("%d × %d vCPU, %d GB", comment: "k8s"), spec.nodeCount, spec.cpusPerNode, spec.memoryGBPerNode))
+                LabeledContent(NSLocalizedString("Storage", comment: "k8s"), value: storageSummary)
+                LabeledContent(NSLocalizedString("Load balancer", comment: "k8s"), value: spec.loadBalancer.displayName)
+                LabeledContent(NSLocalizedString("Add-ons", comment: "k8s"), value: addOnsSummary)
+            }
+        }
+    }
+
+    private var storageSummary: String {
+        var parts: [String] = []
+        if synologyOn { parts.append(NSLocalizedString("Synology NAS (default)", comment: "k8s")) }
+        if spec.storageEnabled {
+            parts.append(String(format: NSLocalizedString("Longhorn, %d GB per node%@", comment: "k8s"),
+                                spec.storageDiskGB, synologyOn ? "" : NSLocalizedString(" (default)", comment: "k8s")))
+        }
+        parts.append("local-path")
+        return parts.joined(separator: " · ")
+    }
+
+    private var addOnsSummary: String {
+        var parts: [String] = []
+        if spec.ingress { parts.append("Traefik") }
+        if spec.awsEmulator { parts.append(NSLocalizedString("AWS emulator", comment: "k8s")) }
+        return parts.isEmpty ? NSLocalizedString("None", comment: "k8s") : parts.joined(separator: " · ")
+    }
+
+    private var nodesPane: some View {
+        pane {
+            Section {
+                LabeledContent(NSLocalizedString("Nodes", comment: "k8s")) {
+                    Stepper(value: $spec.nodeCount, in: KubeClusterSpec.nodeRange) {
+                        Text(String(spec.nodeCount)).monospacedDigit()
+                    }
+                }
+                LabeledContent(NSLocalizedString("vCPUs per node", comment: "k8s")) {
+                    Stepper(value: $spec.cpusPerNode, in: KubeClusterSpec.cpuRange) {
+                        Text(String(spec.cpusPerNode)).monospacedDigit()
+                    }
+                }
+                LabeledContent(NSLocalizedString("Memory per node", comment: "k8s")) {
+                    Stepper(value: $spec.memoryGBPerNode, in: KubeClusterSpec.memoryRange) {
+                        Text(String(format: NSLocalizedString("%d GB", comment: "k8s"), spec.memoryGBPerNode)).monospacedDigit()
+                    }
+                }
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    caption(spec.nodeCount == 1
+                            ? String(format: NSLocalizedString("One node: control plane and workloads together. %d GB of RAM in total.", comment: "k8s"), totalMemoryGB)
+                            : String(format: NSLocalizedString("Node 1 is the control plane and also runs workloads; the others join as workers. %d GB of RAM in total.", comment: "k8s"), totalMemoryGB))
+                    if let w = memoryWarning {
+                        Label(w, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
+        }
+    }
+
+    private var storagePane: some View {
+        pane {
+            Section {
+                Toggle(NSLocalizedString("Longhorn distributed storage", comment: "k8s"), isOn: $spec.storageEnabled)
+                if spec.storageEnabled {
+                    LabeledContent(NSLocalizedString("Data disk per node", comment: "k8s")) {
+                        Stepper(value: $spec.storageDiskGB, in: KubeClusterSpec.storageRange, step: 10) {
+                            Text(String(format: NSLocalizedString("%d GB", comment: "k8s"), spec.storageDiskGB)).monospacedDigit()
+                        }
+                    }
+                }
+            } footer: {
+                caption(spec.storageEnabled
+                        ? String(format: NSLocalizedString("Replicated block volumes served over iSCSI from a dedicated data disk on every node. %d GB reserved in total (sparse: only written blocks use space), %d replica(s). Storage class bromure-longhorn%@.", comment: "k8s"),
+                                 totalDiskGB, spec.storageReplicas, synologyOn ? "" : NSLocalizedString(", the default", comment: "k8s"))
+                        : NSLocalizedString("Off: only k3s's node-local local-path class, which pins a pod to its node.", comment: "k8s"))
+            }
+            Section {
+                Toggle(NSLocalizedString("Synology NAS", comment: "k8s"), isOn: $synologyOn)
+                if synologyOn {
+                    TextField(NSLocalizedString("DSM address", comment: "k8s"), text: $synology.host, prompt: Text("nas.local or 192.168.1.10"))
+                    TextField(NSLocalizedString("Port", comment: "k8s"), value: $synology.port, format: .number)
+                    Toggle(NSLocalizedString("HTTPS", comment: "k8s"), isOn: $synology.https)
+                    TextField(NSLocalizedString("DSM user", comment: "k8s"), text: $synology.username)
+                    SecureField(NSLocalizedString("DSM password", comment: "k8s"), text: $synologyPassword)
+                    TextField(NSLocalizedString("Volumes (optional)", comment: "k8s"), text: $synology.location, prompt: Text("/volume1, /volume3"))
+                    Picker(NSLocalizedString("Protocol", comment: "k8s"), selection: $synology.protocolKind) {
+                        ForEach(KubeSynologySpec.TransportKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                    }
+                    TextField(NSLocalizedString("Filesystem", comment: "k8s"), text: $synology.fsType)
+                }
+            } footer: {
+                if synologyOn {
+                    VStack(alignment: .leading, spacing: 4) {
+                        caption(synology.volumes.isEmpty
+                                ? NSLocalizedString("Leave volumes empty and DSM picks a volume with free space (storage class bromure-synology, the default). Name volumes to get one class each, the first one default.", comment: "k8s")
+                                : String(format: NSLocalizedString("Storage classes: %@ — the first is the default.", comment: "k8s"), synology.storageClassNames.joined(separator: ", ")))
+                        caption(NSLocalizedString("Volumes through Synology's CSI driver (iSCSI LUNs or SMB shares). The password is stored encrypted on this Mac and only lands in the cluster's own Secrets; the DSM account needs storage-manager rights. The driver's manifests are fetched from Synology's GitHub at setup.", comment: "k8s"))
+                    }
+                } else {
+                    caption(NSLocalizedString("Persistent volumes on your NAS through Synology's CSI driver; becomes the default storage class.", comment: "k8s"))
+                }
+            }
+        }
+    }
+
+    private var networkingPane: some View {
+        pane {
+            Section {
+                Picker(NSLocalizedString("Load balancer", comment: "k8s"), selection: $spec.loadBalancer) {
+                    ForEach(KubeLoadBalancerKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                }
+                if spec.loadBalancer == .bromure {
+                    TextField(NSLocalizedString("LAN address pool", comment: "k8s"),
+                              text: Binding(get: { spec.lanPool ?? "" },
+                                            set: { spec.lanPool = $0.isEmpty ? nil : $0 }),
+                              prompt: Text("10.0.0.20-10.0.0.29 (optional)"))
+                }
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    caption(lbHelp)
+                    if spec.loadBalancer == .bromure {
+                        caption(NSLocalizedString("A pool of spare addresses on your LAN gives each LoadBalancer Service its own address, answered by ARP like MetalLB — nothing on this Mac is exposed. Leave it empty to share the Mac's address by port.", comment: "k8s"))
+                    }
+                }
+            }
+            Section {
+                Toggle(NSLocalizedString("Traefik ingress controller", comment: "k8s"), isOn: $spec.ingress)
+            } footer: {
+                caption(NSLocalizedString("k3s's bundled ingress. With the LAN load balancer it publishes ports 80 and 443 on this Mac.", comment: "k8s"))
+            }
+        }
+    }
+
+    private var addOnsPane: some View {
+        pane {
+            Section {
+                Toggle(NSLocalizedString("AWS emulator (floci)", comment: "k8s"), isOn: $spec.awsEmulator)
+            } footer: {
+                caption(NSLocalizedString("A local AWS inside the cluster: S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge and 100+ more services, with data kept on the cluster's storage. Published as a LoadBalancer Service on port 4566; the dashboard and the agents' infrastructure MCP hand out the endpoint and the test credentials (AWS_ENDPOINT_URL, any access key). Free and open source (MIT), pulled from Docker Hub at setup. Services that spawn containers, such as Lambda and RDS, use the node's Docker and are best effort.", comment: "k8s"))
+            }
+        }
+    }
+
+    private var accessPane: some View {
+        pane {
+            Section {
+                KubeAccessPicker(isAll: { if case .all = access { return true } else { return false } }(),
+                                 selected: { if case .only(let ids) = access { return ids } else { return Set(workspaces.map(\.id)) } }(),
+                                 workspaces: workspaces) { access = $0 }
+            } header: {
+                Text(NSLocalizedString("Kubeconfig", comment: "k8s"))
+            } footer: {
+                caption(NSLocalizedString("Workspaces on the list get the cluster in their ~/.kube/config and see it through the infrastructure MCP. You can change this later from the dashboard.", comment: "k8s"))
+            }
+        }
+    }
+
     private var lbHelp: String {
         switch spec.loadBalancer {
         case .bromure:
@@ -881,25 +1110,6 @@ struct NewKubeClusterSheet: View {
             return NSLocalizedString("MetalLB hands out addresses from the VM network (reserved from DHCP). Reachable from the workspaces and this Mac only.", comment: "k8s")
         case .none:
             return NSLocalizedString("Services of type LoadBalancer stay pending; use NodePort or ClusterIP.", comment: "k8s")
-        }
-    }
-
-    @ViewBuilder private func section<Content: View>(_ title: LocalizedStringKey, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary).textCase(.uppercase).tracking(0.6)
-            content()
-        }
-    }
-
-    private func stepperRow(_ label: LocalizedStringKey, value: Binding<Int>, range: ClosedRange<Int>,
-                            step: Int = 1, caption: String?) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).frame(width: 120, alignment: .trailing)
-            Stepper(value: value, in: range, step: step) {
-                Text(String(value.wrappedValue)).font(.system(size: 12).monospacedDigit()).frame(width: 40, alignment: .trailing)
-            }
-            .fixedSize()
-            if let caption { Text(caption).font(.system(size: 10.5)).foregroundStyle(.secondary) }
         }
     }
 }
@@ -1048,41 +1258,6 @@ extension View {
         #else
         self
         #endif
-    }
-}
-
-// MARK: - Synology NAS fields (creation sheet)
-
-struct KubeSynologyFields: View {
-    @Binding var spec: KubeSynologySpec
-    @Binding var password: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                TextField("DSM address (IP or hostname)", text: $spec.host).textFieldStyle(.roundedBorder).frame(width: 200)
-                TextField("Port", value: $spec.port, format: .number).textFieldStyle(.roundedBorder).frame(width: 64)
-                Toggle("HTTPS", isOn: $spec.https).kubeCheckboxStyle()
-            }
-            HStack(spacing: 8) {
-                TextField("DSM user", text: $spec.username).textFieldStyle(.roundedBorder).frame(width: 140)
-                SecureField("DSM password", text: $password).textFieldStyle(.roundedBorder).frame(width: 140)
-            }
-            HStack(spacing: 8) {
-                TextField("Volumes (optional), e.g. /volume1, /volume3", text: $spec.location).textFieldStyle(.roundedBorder).frame(width: 220)
-                Picker("", selection: $spec.protocolKind) {
-                    ForEach(KubeSynologySpec.TransportKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                }
-                .labelsHidden().frame(width: 190)
-                TextField("fs", text: $spec.fsType).textFieldStyle(.roundedBorder).frame(width: 60)
-            }
-            Text(spec.volumes.isEmpty
-                 ? "Leave volumes empty and DSM picks a volume with free space (storage class bromure-synology). Name volumes to get one class each, the first one default."
-                 : "Storage classes: \(spec.storageClassNames.joined(separator: ", ")) — the first is the default.")
-                .font(.system(size: 10.5)).foregroundStyle(.secondary)
-            Text("The password is stored encrypted on this Mac and only lands in the cluster's own Secrets. The DSM account needs storage-manager rights; iSCSI needs open-iscsi on the nodes (installed automatically).")
-                .font(.system(size: 10.5)).foregroundStyle(.secondary)
-        }
     }
 }
 
@@ -1344,64 +1519,88 @@ struct NewRegistrySheet: View {
     @State private var access: KubeWorkspaceAccess = .all
     @State private var autoStart = true
 
+    private var canCreate: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// macOS: the workspace editor's grouped Form; iOS: stacked rows.
+    @ViewBuilder
+    private func pane<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        #if os(macOS)
+        Form { content() }
+            .formStyle(.grouped)
+        #else
+        VStack(alignment: .leading, spacing: 16) { content() }
+        #endif
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(KubeRegistryDashboardView.registryTint.opacity(0.15))
-                    .frame(width: 38, height: 38)
-                    .overlay(Image(systemName: "shippingbox.and.arrow.backward").font(.system(size: 17)).foregroundStyle(KubeRegistryDashboardView.registryTint))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("New container registry").font(.system(size: 16, weight: .semibold))
-                    Text("A private Docker registry in its own VM: build in a workspace, push here, run it in a cluster.")
-                        .font(.system(size: 11.5)).foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "shippingbox.and.arrow.backward")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white)
+                            .frame(width: 22, height: 22)
+                            .background(KubeRegistryDashboardView.registryTint.gradient, in: RoundedRectangle(cornerRadius: 5))
+                        Text(name.trimmingCharacters(in: .whitespaces).isEmpty ? "New container registry" : name)
+                            .font(.title2.bold())
+                    }
+                    pane {
+                        Section {
+                            TextField(NSLocalizedString("Name", comment: "registry"), text: $name, prompt: Text("registry"))
+                            Toggle(NSLocalizedString("Start with Bromure", comment: "registry"), isOn: $autoStart)
+                        } footer: {
+                            caption(NSLocalizedString("A private Docker registry in its own VM: build in a workspace, push here, run it in a cluster. Plain HTTP on the VM network; it never leaves this Mac.", comment: "registry"))
+                        }
+                        Section(NSLocalizedString("Machine", comment: "registry")) {
+                            LabeledContent(NSLocalizedString("Memory", comment: "registry")) {
+                                Stepper(value: $memoryGB, in: KubeRegistry.memoryRange) {
+                                    Text(String(format: NSLocalizedString("%d GB", comment: "registry"), memoryGB)).monospacedDigit()
+                                }
+                            }
+                            LabeledContent(NSLocalizedString("Image storage", comment: "registry")) {
+                                Stepper(value: $diskGB, in: KubeRegistry.diskRange, step: 10) {
+                                    Text(String(format: NSLocalizedString("%d GB", comment: "registry"), diskGB)).monospacedDigit()
+                                }
+                            }
+                        }
+                        Section {
+                            KubeAccessPicker(isAll: { if case .all = access { return true } else { return false } }(),
+                                             selected: { if case .only(let ids) = access { return ids } else { return Set(workspaces.map(\.id)) } }(),
+                                             workspaces: workspaces) { access = $0 }
+                        } header: {
+                            Text(NSLocalizedString("Push access", comment: "registry"))
+                        } footer: {
+                            caption(NSLocalizedString("Every cluster can pull from the registry; pushing is per workspace (docker there trusts it and $BROMURE_REGISTRY holds its address). The image disk is sparse: only pushed layers use space.", comment: "registry"))
+                        }
+                    }
                 }
-                Spacer()
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 12)
-            Divider()
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("Name").frame(width: 120, alignment: .trailing)
-                    TextField("registry", text: $name).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
-                }
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Memory (GB)").frame(width: 120, alignment: .trailing)
-                    Stepper(value: $memoryGB, in: KubeRegistry.memoryRange) {
-                        Text(String(memoryGB)).font(.system(size: 12).monospacedDigit()).frame(width: 40, alignment: .trailing)
-                    }.fixedSize()
-                }
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Image storage (GB)").frame(width: 120, alignment: .trailing)
-                    Stepper(value: $diskGB, in: KubeRegistry.diskRange, step: 10) {
-                        Text(String(diskGB)).font(.system(size: 12).monospacedDigit()).frame(width: 40, alignment: .trailing)
-                    }.fixedSize()
-                    Text("sparse — only pushed layers use space").font(.system(size: 10.5)).foregroundStyle(.secondary)
-                }
-                HStack(alignment: .top) {
-                    Text("Push access").frame(width: 120, alignment: .trailing)
-                    KubeAccessPicker(isAll: { if case .all = access { return true } else { return false } }(),
-                                     selected: { if case .only(let ids) = access { return ids } else { return Set(workspaces.map(\.id)) } }(),
-                                     workspaces: workspaces) { access = $0 }
-                }
-                Toggle(isOn: $autoStart) { Text("Start with Bromure") }.kubeCheckboxStyle().padding(.leading, 128)
-                Text("Every cluster can pull from the registry; push access is per workspace. The address is plain HTTP on the VM network and never leaves this Mac.")
-                    .font(.system(size: 10.5)).foregroundStyle(.tertiary).padding(.leading, 128)
-            }
-            .padding(20)
             Divider()
             HStack {
-                Spacer()
                 Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
-                Button("Create Registry") {
+                Spacer()
+                Text(String(format: NSLocalizedString("%d GB RAM · %d GB for images", comment: "registry"), memoryGB, diskGB))
+                    .font(.caption).foregroundStyle(.tertiary)
+                Button("Create") {
                     onCreate(name.trimmingCharacters(in: .whitespaces), memoryGB, diskGB, access, autoStart)
                 }
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(!canCreate)
             }
-            .padding(.horizontal, 20).padding(.vertical, 14)
+            .padding(12)
         }
-        .frame(width: 560)
+        #if os(macOS)
+        .frame(width: 560, height: 600)
+        #endif
         .onAppear {
             if name.isEmpty {
                 var candidate = "registry"

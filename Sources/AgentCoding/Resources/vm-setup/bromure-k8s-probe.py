@@ -338,6 +338,9 @@ def main():
         syn = probe_addon("synology-csi")
         if syn:
             result["synology"] = syn
+        fl = probe_addon("floci")
+        if fl:
+            result["floci"] = fl
         if full:
             result["pods"] = pods
             result["pvcs"] = probe_pvcs()

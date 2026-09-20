@@ -77,7 +77,9 @@ final class KubeMCPServer: MCPLineHandler {
     commands to build, push and run an image. cluster_status and \
     registry_status give live detail; cluster_create and registry_create \
     make new ones (shared by every workspace; provisioning takes minutes — \
-    poll cluster_status / registry_status until the phase is running).
+    poll cluster_status / registry_status until the phase is running). When \
+    more than one cluster or registry is available, ask the user which one \
+    to deploy to or push to before acting — never choose one silently.
     """
 
     static let toolDefinitions: [[String: Any]] = [
@@ -107,6 +109,7 @@ final class KubeMCPServer: MCPLineHandler {
                                  "description": "How LoadBalancer Services get an address (default bromure: published on this Mac's LAN)."],
                 "lanPool": ["type": "string", "description": "bromure load balancer: spare LAN addresses to give Services, e.g. \"10.0.0.20-10.0.0.29\". Empty = share the Mac's own address by port."],
                 "ingress": ["type": "boolean", "description": "Keep k3s's Traefik ingress controller (default true)."],
+                "awsEmulator": ["type": "boolean", "description": "Install floci, a local AWS emulator (S3, DynamoDB, SQS, SNS, Lambda, API Gateway, …) reachable from every workspace (default false)."],
             ], "required": ["name"]],
         ],
         [
@@ -182,6 +185,7 @@ final class KubeMCPServer: MCPLineHandler {
                 spec.lanPool = v
             }
             if let v = args["ingress"] as? Bool { spec.ingress = v }
+            if let v = args["awsEmulator"] as? Bool { spec.awsEmulator = v }
             let created = engine.create(name: name, spec: spec.clamped, access: .all, autoStart: true)
             BACDebug.log("k8s", "cluster “\(created.name)” created via MCP")
             return textResult("Creating cluster “\(created.name)” (\(created.spec.nodeCount) node(s), \(created.spec.cpusPerNode) vCPU / \(created.spec.memoryGBPerNode) GB each). Provisioning takes a few minutes; poll cluster_status \"\(created.name)\" until phase is running. Its kubeconfig context will be “\(created.contextName)”.")
@@ -261,6 +265,23 @@ final class KubeMCPServer: MCPLineHandler {
         }
     }
 
+    /// The AWS emulator line: where it answers from a workspace and how to
+    /// point the AWS CLI/SDKs at it.
+    static func awsEmulatorText(_ cluster: KubeCluster, status: KubeClusterStatus) -> String {
+        let eps = status.awsEmulatorEndpoints(for: cluster)
+        guard let ep = eps.vmNetwork ?? eps.lan else {
+            let ready = status.probe?.floci?.ready == true
+            return status.phase == .running
+                ? (ready ? "installed, its address is being published — call cluster_status in a moment." : "installed and starting — call cluster_status in a moment.")
+                : "starts with the cluster."
+        }
+        var s = "\(ep) from this workspace"
+        if let lan = eps.lan, lan != ep { s += " (\(lan) from the Mac and its LAN — also reachable from here, and the base of the URLs the emulator returns, such as SQS queue URLs)" }
+        s += ". Point the AWS CLI and SDKs at it: `export AWS_ENDPOINT_URL=\(ep) AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1` (any credentials work; a 12-digit access key id selects an account). Emulates S3, DynamoDB, SQS, SNS, Lambda, API Gateway, Step Functions, EventBridge, Cognito and 100+ more; state persists on the cluster's storage. Services that spawn containers (Lambda, RDS, …) are best effort. Never point real AWS work at it."
+        if status.probe?.floci?.ready == false { s += " (Its pod is still starting.)" }
+        return s
+    }
+
     static func overviewText(clusters: [KubeCluster], registries: [KubeRegistry],
                              status: (UUID) -> KubeClusterStatus, hostIP: String?) -> String {
         var out = "# Bromure infrastructure available to this workspace\n\n"
@@ -292,10 +313,16 @@ final class KubeMCPServer: MCPLineHandler {
             out += c.spec.ingress
                 ? "- Ingress: Traefik (k3s bundled) is a LoadBalancer Service in kube-system on ports 80/443; Ingress resources are served there.\n"
                 : "- Ingress: none installed (Traefik was left out).\n"
+            if c.spec.awsEmulator {
+                out += "- AWS emulator (floci): " + awsEmulatorText(c, status: st) + "\n"
+            }
             if !registries.isEmpty {
                 out += "- Images: the cluster pulls from the registries below without extra configuration (containerd mirrors are set up); reference them as <address>/<repo>:<tag>.\n"
             }
             if st.phase == .error, let m = st.message { out += "- Last error: \(m)\n" }
+        }
+        if clusters.count > 1 {
+            out += "\n**Several clusters are available. Before you deploy, apply manifests or run kubectl against one, ask the user which cluster to use — never pick one silently.**\n"
         }
         if !running.isEmpty && running.count < clusters.count {
             out += "\nStopped clusters can be booted with cluster_start.\n"
@@ -319,6 +346,9 @@ final class KubeMCPServer: MCPLineHandler {
                 out += "- Images held: " + info.repositories.map { "\($0.name) [\($0.tags.joined(separator: ", "))]" }.joined(separator: "; ") + "\n"
             }
         }
+        if registries.count > 1 {
+            out += "\n**Several registries are available. Before you build or push an image, ask the user which registry to use — never pick one silently.**\n"
+        }
         out += "\nAll of this runs in VMs on this Mac; nothing here is reachable from outside its LAN unless a LoadBalancer Service publishes it.\n"
         return out
     }
@@ -329,7 +359,8 @@ final class KubeMCPServer: MCPLineHandler {
             "nodes": c.nodes.map { ["name": $0.name, "role": $0.role.rawValue, "ip": $0.lastIP ?? ""] },
             "spec": ["nodeCount": c.spec.nodeCount, "cpusPerNode": c.spec.cpusPerNode, "memoryGBPerNode": c.spec.memoryGBPerNode,
                      "longhorn": c.spec.storageEnabled, "synology": c.spec.synology?.isConfigured == true,
-                     "loadBalancer": c.spec.loadBalancer.rawValue, "lanPool": c.spec.lanPool ?? "", "ingress": c.spec.ingress],
+                     "loadBalancer": c.spec.loadBalancer.rawValue, "lanPool": c.spec.lanPool ?? "", "ingress": c.spec.ingress,
+                     "awsEmulator": c.spec.awsEmulator],
             "storageClasses": storageClasses(of: c).map { ["name": $0.name, "default": $0.isDefault, "backing": $0.backing] },
         ]
         if let m = st.message { d["message"] = m }
@@ -345,6 +376,11 @@ final class KubeMCPServer: MCPLineHandler {
             if let lh = p.longhorn { d["longhorn"] = ["ready": lh.ready, "availableBytes": lh.storageAvailableBytes, "maximumBytes": lh.storageMaximumBytes] }
             if let syn = p.synology { d["synologyDriver"] = ["ready": syn.ready, "pods": syn.pods] }
             if !p.warnings.isEmpty { d["recentWarnings"] = p.warnings.prefix(6).map { "\($0.reason) \($0.namespace)/\($0.object): \($0.message)" } }
+        }
+        if c.spec.awsEmulator {
+            let eps = st.awsEmulatorEndpoints(for: c)
+            d["awsEmulator"] = ["ready": st.probe?.floci?.ready ?? false, "endpointFromWorkspace": eps.vmNetwork ?? "",
+                                "endpointLAN": eps.lan ?? "", "credentials": "any, e.g. test/test, region us-east-1"]
         }
         if !st.lbEndpoints.isEmpty {
             d["loadBalancerEndpoints"] = st.lbEndpoints.map { ["service": "\($0.namespace)/\($0.service)", "address": ($0.ip ?? st.hostIP ?? "") + ":\($0.port)", "protocol": $0.protocolName, "bound": $0.bound, "error": $0.error ?? ""] }

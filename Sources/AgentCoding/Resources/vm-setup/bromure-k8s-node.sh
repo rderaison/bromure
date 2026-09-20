@@ -38,6 +38,7 @@ export KUBECONFIG=$K3S_YAML
 LONGHORN_VERSION="${BROMURE_LONGHORN_VERSION:-v1.9.1}"
 METALLB_VERSION="${BROMURE_METALLB_VERSION:-v0.15.2}"
 SYNOLOGY_CSI_VERSION="${BROMURE_SYNOLOGY_CSI_VERSION:-v1.2.0}"
+FLOCI_IMAGE="${BROMURE_FLOCI_IMAGE:-floci/floci:2.1.0}"
 REGISTRIES_YAML=/etc/rancher/k3s/registries.yaml
 
 sudo mkdir -p "$STATE" 2>/dev/null
@@ -324,9 +325,107 @@ install_synology() {
     log "Synology CSI configured (storage classes: $(kubectl get storageclass -o name 2>/dev/null | grep -o 'bromure-synology[^ ]*' | tr '\n' ' '))"
 }
 
+install_floci() {
+    # floci (floci-io/floci, MIT): an AWS emulator — S3, DynamoDB, SQS, SNS,
+    # Lambda, API Gateway, … — as one Deployment behind a LoadBalancer
+    # Service on 4566, its state on a volume of the default storage class.
+    # When the node runs Docker, its socket goes into the pod so the
+    # services that spawn containers (Lambda, RDS, …) can.
+    if kubectl get ns floci >/dev/null 2>&1; then
+        log "AWS emulator already present"
+    else
+        log "installing the AWS emulator ($FLOCI_IMAGE)"
+    fi
+    kubectl apply -f - 2>&1 <<EOF | tail -n 4
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: floci
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: floci-data
+  namespace: floci
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: floci
+  namespace: floci
+  labels:
+    app: floci
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: floci
+  template:
+    metadata:
+      labels:
+        app: floci
+    spec:
+      containers:
+      - name: floci
+        image: $FLOCI_IMAGE
+        ports:
+        - name: aws
+          containerPort: 4566
+        env:
+        - name: FLOCI_PORT
+          value: "4566"
+        - name: FLOCI_DEFAULT_REGION
+          value: "us-east-1"
+        - name: FLOCI_STORAGE_MODE
+          value: "persistent"
+        - name: FLOCI_STORAGE_PERSISTENT_PATH
+          value: "/data"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        readinessProbe:
+          tcpSocket:
+            port: 4566
+          periodSeconds: 5
+          initialDelaySeconds: 3
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: floci-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: floci
+  namespace: floci
+spec:
+  type: LoadBalancer
+  selector:
+    app: floci
+  ports:
+  - name: aws
+    port: 4566
+    targetPort: 4566
+EOF
+    if [ -S /var/run/docker.sock ]; then
+        log "floci: the node's Docker socket is shared for container-backed services"
+        kubectl -n floci patch deploy floci --type=strategic -p '{"spec":{"template":{"spec":{"securityContext":{"runAsUser":0},"volumes":[{"name":"docker","hostPath":{"path":"/var/run/docker.sock","type":"Socket"}}],"containers":[{"name":"floci","volumeMounts":[{"name":"docker","mountPath":"/var/run/docker.sock"}]}]}}}}' 2>&1 | tail -n 1
+    fi
+    log "waiting for floci"
+    kubectl -n floci rollout status deploy/floci --timeout=420s 2>&1 | tail -n 1 || true
+    log "AWS emulator installed (Service floci/floci, port 4566)"
+}
+
 do_addons() {
-    local longhorn="$1" replicas="$2" metallb="$3" range="$4" lbmode="${5:-bromure}" synology="${6:-0}"
-    log "addons: longhorn=$longhorn replicas=$replicas metallb=$metallb range=$range lb=$lbmode synology=$synology"
+    local longhorn="$1" replicas="$2" metallb="$3" range="$4" lbmode="${5:-bromure}" synology="${6:-0}" floci="${7:-0}"
+    log "addons: longhorn=$longhorn replicas=$replicas metallb=$metallb range=$range lb=$lbmode synology=$synology floci=$floci"
     wait_api 60 || { log "API not ready"; return 1; }
 
     if [ "$longhorn" = "1" ]; then
@@ -413,6 +512,9 @@ EOF
     if [ "$synology" = "1" ]; then
         install_synology || return 1
     fi
+    if [ "$floci" = "1" ]; then
+        install_floci || return 1
+    fi
     log "addons: done"
 }
 
@@ -438,6 +540,12 @@ cmd_clear_lb() {
     kubectl -n "$1" patch svc "$2" --subresource=status --type=merge \
         -p '{"status":{"loadBalancer":{}}}' 2>&1
 }
+cmd_floci_base_url() {
+    # floci-base-url <url> — the base the AWS emulator puts in the URLs it
+    # returns (SQS queue URLs, presigned S3 URLs): the address its Service
+    # is published on. `set env` only rolls the pod when the value changes.
+    kubectl -n floci set env deploy/floci FLOCI_BASE_URL="$1" 2>&1
+}
 
 case "${1:-}" in
     start)       shift; cmd_start "$@" ;;
@@ -455,5 +563,6 @@ case "${1:-}" in
     wait-nodes)  shift; cmd_wait_nodes "$@" ;;
     patch-lb)    shift; cmd_patch_lb "$@" ;;
     clear-lb)    shift; cmd_clear_lb "$@" ;;
+    floci-base-url) shift; cmd_floci_base_url "$@" ;;
     *) echo "usage: $0 start|poll|token|kubeconfig|ip|ready|wait-nodes|patch-lb|clear-lb" >&2; exit 2 ;;
 esac

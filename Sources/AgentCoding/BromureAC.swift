@@ -560,12 +560,22 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     newWsFromConfigs.target = delegate
     wsMenu.addItem(newWsFromConfigs)
 
-    // Kubernetes: a shared cluster of node VMs the workspaces can reach.
-    let newClusterItem = NSMenuItem(title: L("New Kubernetes Cluster…"),
+    // Infrastructure: the shared machines next to the workspaces — a
+    // Kubernetes cluster of node VMs, a container registry.
+    let infraMenu = NSMenu(title: L("Infrastructure"))
+    let newClusterItem = NSMenuItem(title: L("Create Kubernetes Cluster…"),
                                     action: #selector(ACAppDelegate.newKubeClusterAction(_:)),
                                     keyEquivalent: "")
     newClusterItem.target = delegate
-    wsMenu.addItem(newClusterItem)
+    infraMenu.addItem(newClusterItem)
+    let newRegistryItem = NSMenuItem(title: L("Create Registry…"),
+                                     action: #selector(ACAppDelegate.newRegistryAction(_:)),
+                                     keyEquivalent: "")
+    newRegistryItem.target = delegate
+    infraMenu.addItem(newRegistryItem)
+    let infraItem = NSMenuItem(title: L("Infrastructure"), action: nil, keyEquivalent: "")
+    infraItem.submenu = infraMenu
+    wsMenu.addItem(infraItem)
 
     // Fat client: mirror a remote bromure-ac (its grid, workspaces, tabs,
     // automations) 1:1 over SSH. A peer of "New Workspace…" — both bring a
@@ -3055,6 +3065,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     else { return ["error": "unknown task"] }
                     self.taskReviewWindows.open(taskID: taskID)
                     window = self.taskReviewWindows.window(for: taskID)
+                case "machines":
+                    // The sidebar with its Machines fold open (doc/E2E hook).
+                    let w = self.ensureUnifiedWindow()
+                    w.dismissInfrastructureSheet()
+                    w.expandMachines()
+                    window = w
+                case "newcluster", "newregistry":
+                    // The Infrastructure creation sheets (doc/E2E hook): open
+                    // one on the unified window and render the sheet itself.
+                    let w = self.ensureUnifiedWindow()
+                    w.dismissInfrastructureSheet()
+                    if which == "newcluster" { w.showNewKubeCluster() } else { w.showNewRegistry() }
+                    window = w.attachedSheet ?? w
                 default:       window = self.unifiedWindow
                 }
                 return self.debugRenderWindow(window, to: path)
@@ -5981,6 +6004,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSApp.setActivationPolicy(.regular)
         w.makeKeyAndOrderFront(nil)
         w.showNewKubeCluster()
+    }
+
+    @objc func newRegistryAction(_ sender: Any?) {
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showNewRegistry()
     }
 
     /// ⌘N — the new-session screen as the stage surface.

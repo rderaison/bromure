@@ -257,6 +257,59 @@ struct KubeClusterTests {
         #expect(try JSONDecoder().decode(KubeClusterSpec.self, from: data).synology?.host == "nas.local")
     }
 
+    @Test("specs decode with defaults for fields that didn't exist yet")
+    func specDecodeDefaults() throws {
+        let old = try JSONDecoder().decode(KubeClusterSpec.self, from: Data("{\"nodeCount\":2,\"storageEnabled\":false}".utf8))
+        #expect(old.nodeCount == 2)
+        #expect(old.storageEnabled == false)
+        #expect(old.ingress == true)
+        #expect(old.awsEmulator == false)
+        #expect(old.loadBalancer == .bromure)
+        var spec = KubeClusterSpec(); spec.awsEmulator = true
+        let round = try JSONDecoder().decode(KubeClusterSpec.self, from: JSONEncoder().encode(spec))
+        #expect(round.awsEmulator == true)
+    }
+
+    @Test("the AWS emulator's endpoints come from the load balancer and the NodePort")
+    func awsEmulatorEndpoints() throws {
+        var spec = KubeClusterSpec(); spec.awsEmulator = true
+        var c = KubeCluster(name: "aws", spec: spec)
+        c.nodes = [KubeNodeRecord(name: "k8s-aws-1", role: .server, index: 1, lastIP: "172.28.153.2")]
+        let probeJSON = """
+        {"reachable":true,"version":"v1.36.4+k3s1","services":[{"namespace":"floci","name":"floci","type":"LoadBalancer","clusterIP":"10.43.0.9","ports":[{"name":"aws","port":4566,"nodePort":31566,"protocol":"TCP","targetPort":"4566"}],"ingress":[],"lbClass":""}],"floci":{"installed":true,"ready":true,"pods":1}}
+        """
+        var st = KubeClusterStatus(); st.phase = .running; st.hostIP = "10.163.15.54"
+        st.probe = try JSONDecoder().decode(KubeProbe.self, from: Data(probeJSON.utf8))
+        #expect(st.probe?.floci?.ready == true)
+        // No LB endpoint yet: only the NodePort answers.
+        var eps = st.awsEmulatorEndpoints(for: c)
+        #expect(eps.lan == nil)
+        #expect(eps.vmNetwork == "http://172.28.153.2:31566")
+        st.lbEndpoints = [KubeLBEndpoint(namespace: "floci", service: "floci", port: 4566, nodePort: 31566, protocolName: "TCP", bound: true)]
+        eps = st.awsEmulatorEndpoints(for: c)
+        #expect(eps.lan == "http://10.163.15.54:4566")
+        let text = KubeMCPServer.overviewText(clusters: [c], registries: [], status: { _ in st }, hostIP: "10.163.15.54")
+        #expect(text.contains("AWS emulator (floci): http://172.28.153.2:31566 from this workspace (http://10.163.15.54:4566 from the Mac and its LAN"))
+        #expect(text.contains("AWS_ENDPOINT_URL=http://172.28.153.2:31566"))
+        // Off: nothing.
+        let plain = KubeCluster(name: "p", spec: KubeClusterSpec())
+        #expect(st.awsEmulatorEndpoints(for: plain).vmNetwork == nil)
+    }
+
+    @Test("with several clusters or registries the MCP tells the agent to ask which one")
+    func mcpAsksWhenSeveral() {
+        let a = KubeCluster(name: "a", spec: KubeClusterSpec())
+        let b = KubeCluster(name: "b", spec: KubeClusterSpec())
+        let r1 = KubeRegistry(name: "r1"), r2 = KubeRegistry(name: "r2")
+        let one = KubeMCPServer.overviewText(clusters: [a], registries: [r1], status: { _ in KubeClusterStatus() }, hostIP: nil)
+        #expect(!one.contains("ask the user which cluster"))
+        #expect(!one.contains("ask the user which registry"))
+        let two = KubeMCPServer.overviewText(clusters: [a, b], registries: [r1, r2], status: { _ in KubeClusterStatus() }, hostIP: nil)
+        #expect(two.contains("ask the user which cluster to use"))
+        #expect(two.contains("ask the user which registry to use"))
+        #expect(KubeMCPServer.serverInstructions.contains("ask the user which one"))
+    }
+
     @Test("the infrastructure MCP tells agents what exists and how to use it")
     func mcpOverview() {
         var spec = KubeClusterSpec()

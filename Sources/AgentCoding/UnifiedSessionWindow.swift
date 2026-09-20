@@ -1941,6 +1941,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         registrySlot.isHidden = true
     }
 
+    /// Debug/screenshot hook: unfold the Machines section of the sidebar.
+    func expandMachines() {
+        listModel.machinesExpanded = true
+    }
+
+    /// Debug/screenshot hook: close the cluster / registry creation sheet.
+    func dismissInfrastructureSheet() {
+        dismissKubeSheet()
+    }
+
     func showNewRegistry() {
         guard let delegate = acDelegate, kubeSheetWindow == nil else { return }
         let sheet = NewRegistrySheet(
@@ -2840,11 +2850,17 @@ struct SessionSidebar: View {
     /// under Machines (shared node VMs, one dashboard each).
     @ViewBuilder
     private var kubeSection: some View {
+        // Only once there is something to list: an empty category is noise
+        // (File › Infrastructure creates the first cluster or registry).
         if let kubeStore {
-            KubeClustersSection(store: kubeStore, model: model,
-                                onSelect: onSelectKube, onNew: onNewKube, onAction: onKubeAction)
-            KubeRegistriesSection(store: kubeStore, model: model,
-                                  onSelect: onSelectRegistry, onNew: onNewRegistry, onAction: onRegistryAction)
+            if !kubeStore.clusters.isEmpty {
+                KubeClustersSection(store: kubeStore, model: model,
+                                    onSelect: onSelectKube, onNew: onNewKube, onAction: onKubeAction)
+            }
+            if !kubeStore.registries.isEmpty {
+                KubeRegistriesSection(store: kubeStore, model: model,
+                                      onSelect: onSelectRegistry, onNew: onNewRegistry, onAction: onRegistryAction)
+            }
         }
     }
 
@@ -3139,25 +3155,6 @@ private struct KubeClustersSection: View {
             .padding(.trailing, 6)
             .padding(.top, 12)
             .padding(.bottom, 4)
-            if store.clusters.isEmpty {
-                Button(action: onNew) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "helm")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 18)
-                        Text(NSLocalizedString("Create a cluster…", comment: "sidebar"))
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.vertical, 4)
-                    .padding(.horizontal, 8)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(NSLocalizedString("A k3s cluster in its own VMs, shared by your workspaces", comment: "sidebar"))
-            }
             ForEach(store.clusters) { c in
                 KubeClusterRow(cluster: c, status: store.status(c.id),
                                isSelected: model.kubeSelectedID == c.id,
@@ -3197,25 +3194,6 @@ private struct KubeRegistriesSection: View {
             .padding(.trailing, 6)
             .padding(.top, 12)
             .padding(.bottom, 4)
-            if store.registries.isEmpty {
-                Button(action: onNew) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "shippingbox.and.arrow.backward")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 18)
-                        Text(NSLocalizedString("Create a registry…", comment: "sidebar"))
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.vertical, 4)
-                    .padding(.horizontal, 8)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(NSLocalizedString("A private Docker registry your workspaces push to and your clusters pull from", comment: "sidebar"))
-            }
             ForEach(store.registries) { r in
                 let st = store.status(r.id)
                 KubeMachineRow(name: r.name, status: st, icon: "shippingbox.and.arrow.backward",
@@ -3597,16 +3575,21 @@ private struct VMSection: View {
                             profileID: row.id, windowIndex: tab.index,
                             label: tab.shownLabel))
                     }
-                    DockerSection(
-                        profileID: row.id,
-                        model: entry.model,
-                        accentHex: row.accentHex,
-                        isSelected: isSelected,
-                        isDockerActive: isDockerActive,
-                        onOpen: { onSelectDocker(row.id) },
-                        onOpenContainer: { cid in onOpenContainer(row.id, cid) },
-                        onSelectTab: { idx in onSelectTab(row.id, idx) },
-                        onCloseTab: { idx in onCloseTab(row.id, idx) })
+                    // The Docker node only once something runs in it — a
+                    // "Docker 0" line under every idle workspace is noise (the
+                    // session's Containers button still opens the dashboard).
+                    if entry.model.dockerContainers.contains(where: \.isRunning) {
+                        DockerSection(
+                            profileID: row.id,
+                            model: entry.model,
+                            accentHex: row.accentHex,
+                            isSelected: isSelected,
+                            isDockerActive: isDockerActive,
+                            onOpen: { onSelectDocker(row.id) },
+                            onOpenContainer: { cid in onOpenContainer(row.id, cid) },
+                            onSelectTab: { idx in onSelectTab(row.id, idx) },
+                            onCloseTab: { idx in onCloseTab(row.id, idx) })
+                    }
                 }
                 .overlay(alignment: .leading) {
                     Rectangle()
