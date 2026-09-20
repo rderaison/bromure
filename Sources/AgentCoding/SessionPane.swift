@@ -112,6 +112,7 @@ final class SessionPane {
     /// read as "all tabs closed" and power the fresh VM straight back off.
     func resetBootDetection() {
         sawTabList = false
+        knownWindowIndices = nil
         model.rosterLive = false
         beginBootOverlay()   // reboot → show the dive screen again
     }
@@ -625,6 +626,7 @@ final class SessionPane {
             // tmux is gone — the last window closed (or the VM is shutting
             // down). Only act once we've seen a populated list this session so
             // a still-booting VM (tmux not up yet) isn't powered off early.
+            knownWindowIndices = nil
             if sawTabList {
                 retireNativeTerminals()
                 acDelegate?.requestStopSession(profile.id, action: .shutdown)
@@ -636,6 +638,15 @@ final class SessionPane {
         if !sawTabList { endBootOverlay() }
         sawTabList = true
         model.rosterLive = true
+        // Windows that weren't in the last live roster were created since
+        // (an agent tab, a worktree, a plain terminal) — the grid's auto-fill
+        // wants them. The first roster after a boot is the baseline, not
+        // news; container tabs aren't tmux windows the grid can show.
+        let indices = Set(tabs.map(\.index))
+        let created: [GuestTab] = knownWindowIndices.map { known in
+            tabs.filter { !known.contains($0.index) && $0.containerID == nil }
+        } ?? []
+        knownWindowIndices = indices
         if model.tabs.count > tabs.count {
             model.tabs.removeLast(model.tabs.count - tabs.count)
         }
@@ -679,7 +690,19 @@ final class SessionPane {
         // surfaces; then make sure the active tab has a live surface.
         terminalController?.retire(windowsNotIn: Set(tabs.map(\.index)))
         updateNativeTerminalMount()
+        if !created.isEmpty, let onNewTerminals {
+            let fresh = Set(created.map(\.index))
+            onNewTerminals(model.tabs.filter { fresh.contains($0.index) })
+        }
     }
+
+    /// The tmux window indices of the last live roster; nil until one has
+    /// landed since the last boot, so the windows a boot restores don't
+    /// count as created.
+    private var knownWindowIndices: Set<Int>?
+    /// Terminals created since the previous roster (model tabs, so their
+    /// labels are the shown ones). The window feeds the grid's auto-fill.
+    var onNewTerminals: (([TabsModel.Tab]) -> Void)?
 
     /// Last per-container CPU/mem from `docker stats`, kept so a fresh container
     /// list (published more often than we may get stats) re-merges the numbers.

@@ -4245,7 +4245,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let cells: [[String: Any]] = gridStore.cells.map {
             ["profileID": $0.profileID.uuidString, "windowIndex": $0.windowIndex, "label": $0.label]
         }
-        var out: [String: Any] = ["cells": cells]
+        var out: [String: Any] = ["cells": cells, "autoFill": gridStore.autoFill]
         if let f = gridStore.focusedCellID { out["focusedCellID"] = f }
         if let z = gridStore.zoomedCellID { out["zoomedCellID"] = z }
         return out
@@ -4284,6 +4284,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         })
         gridStore.focusedCellID = doc["focusedCellID"] as? String
         gridStore.zoomedCellID = doc["zoomedCellID"] as? String
+        if let auto = doc["autoFill"] as? Bool { gridStore.setAutoFill(auto) }
         return true
     }
 

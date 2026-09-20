@@ -1041,6 +1041,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if hostedPanes.contains(where: { $0.profile.id == pane.profile.id }) { return }
         pane.host = self
         hostedPanes.append(pane)
+        // Every terminal created from now on joins the grid (until the user
+        // rearranges it by hand — see GridLayoutStore.autoFill).
+        let profileID = pane.profile.id
+        pane.onNewTerminals = { [weak self] tabs in
+            guard let self else { return }
+            for tab in tabs {
+                self.gridStore.autoAdd(profileID: profileID, windowIndex: tab.index, label: tab.shownLabel)
+            }
+        }
         listModel.entries.append(SessionListModel.VMEntry(
             id: pane.profile.id,
             name: pane.profile.name,
@@ -2310,6 +2319,9 @@ struct SessionSidebar: View {
     let onFocusGridCell: (String) -> Void
     /// Drop of a `GridDragPayload` string onto the Grid node.
     let onDropGridPayload: (String) -> Bool
+    /// The Grid node's own setting changed (auto-fill) — a fat client pushes
+    /// the layout so the server keeps the flag.
+    var onGridEdited: () -> Void = {}
     let onAddAllToGrid: (Profile.ID) -> Void
     let onSelect: (Profile.ID) -> Void
     let onSelectTab: (Profile.ID, Int) -> Void
@@ -2558,7 +2570,8 @@ struct SessionSidebar: View {
             onSelect: onSelectGrid,
             onRemoveCell: onRemoveGridCell,
             onFocusCell: onFocusGridCell,
-            onDropPayload: onDropGridPayload)
+            onDropPayload: onDropGridPayload,
+            onSetAutoFill: { on in gridStore.setAutoFill(on); onGridEdited() })
         ForEach(model.profileRows) { row in
             VMSection(
                 row: row,
@@ -2699,6 +2712,8 @@ private struct GridSection: View {
     let onRemoveCell: (String) -> Void
     let onFocusCell: (String) -> Void
     let onDropPayload: (String) -> Bool
+    /// "Add new terminals automatically" — the grid's auto-fill switch.
+    let onSetAutoFill: (Bool) -> Void
 
     @State private var expanded = true
     @State private var dropTargeted = false
@@ -2763,6 +2778,12 @@ private struct GridSection: View {
             .help(store.cells.isEmpty
                   ? "Drag terminals here to watch them side by side"
                   : "Show the terminal grid")
+            .contextMenu {
+                // Every new terminal joins the grid until the user rearranges
+                // it by hand; this is the way back (and the way out).
+                Toggle(NSLocalizedString("Add new terminals automatically", comment: "grid menu"),
+                       isOn: Binding(get: { store.autoFill }, set: { onSetAutoFill($0) }))
+            }
 
             if expanded, !store.cells.isEmpty {
                 VStack(alignment: .leading, spacing: 1) {

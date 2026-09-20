@@ -1698,6 +1698,7 @@
 "Describe what you want done (⌘N)" = "Describe what you want done (⌘N)";
 "Search tasks" = "Search tasks";
 "Virtual Machines" = "Virtual Machines";
+"Add new terminals automatically" = "Add new terminals automatically";
 "The isolated machines your tasks run in" = "The isolated machines your tasks run in";
 "Under the hood" = "Under the hood";
 "Show the terminal, branch and machine behind this task (⌥⌘U)" = "Show the terminal, branch and machine behind this task (⌥⌘U)";

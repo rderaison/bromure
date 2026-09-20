@@ -940,6 +940,9 @@ final class RemoteHostController {
         if gridStore.cells != parsed { gridStore.replaceAll(parsed) }
         gridStore.focusedCellID = grid["focusedCellID"] as? String
         gridStore.zoomedCellID = grid["zoomedCellID"] as? String
+        // The server owns the flag; a reorder it sent must not read as our
+        // own rearrangement (replaceAll would stand auto-fill down).
+        if let auto = grid["autoFill"] as? Bool { gridStore.setAutoFill(auto) }
     }
 
     private func applyAutomations(_ autos: [String: Any]) {
@@ -1140,7 +1143,7 @@ final class RemoteHostController {
         let cells: [[String: Any]] = gridStore.cells.map {
             ["profileID": $0.profileID.uuidString, "windowIndex": $0.windowIndex, "label": $0.label]
         }
-        var body: [String: Any] = ["cells": cells]
+        var body: [String: Any] = ["cells": cells, "autoFill": gridStore.autoFill]
         if let f = gridStore.focusedCellID { body["focusedCellID"] = f }
         if let z = gridStore.zoomedCellID { body["zoomedCellID"] = z }
         send("POST", "/grid-layout", body: body, then: false)
@@ -4178,6 +4181,7 @@ final class RemoteHostWindow: NSWindow {
                 self.controller.pushGridLayout()
                 return true
             },
+            onGridEdited: { [weak self] in self?.controller.pushGridLayout() },
             onAddAllToGrid: { _ in },
             onSelect: { [weak self] id in self?.selectWorkspaceName(id) },
             // The sidebar emits model POSITIONS (row order); the remote API and
