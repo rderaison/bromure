@@ -2318,3 +2318,6 @@
 "e.g. seclio" = "例如 seclio";
 "request" = "請求";
 "sessions with a nickname" = "有暱稱的工作階段";
+
+/* Cross-host peers */
+"The peer is on this Mac, reached through its mirror" = "對方在這台 Mac 上，透過其鏡像存取";

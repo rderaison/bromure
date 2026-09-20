@@ -2350,3 +2350,6 @@
 "e.g. seclio" = "e.g. seclio";
 "request" = "request";
 "sessions with a nickname" = "sessions with a nickname";
+
+/* Cross-host peers */
+"The peer is on this Mac, reached through its mirror" = "The peer is on this Mac, reached through its mirror";

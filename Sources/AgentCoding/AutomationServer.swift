@@ -101,6 +101,13 @@ final class ACAutomationServer {
     var onListDelegations: (() -> [[String: Any]])?
     var onAgentSessionCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
     var onAgentSessionTranscript: ((_ id: UUID) async -> Data?)?
+    /// Delegations across hosts — a fat client's own session asking one of
+    /// ours: open the request, feed it files, act on the parent's side
+    /// (send / answer / steer / close / cancel / read / noticed), and fetch
+    /// what the peer attached.
+    var onDelegationRequest: (@MainActor (_ body: [String: Any]) async -> [String: Any])?
+    var onDelegationCommand: (@MainActor (_ id: UUID, _ action: String, _ body: [String: Any]) async -> [String: Any])?
+    var onDelegationFile: (@MainActor (_ id: UUID, _ path: String, _ offset: Int64, _ length: Int) async -> [String: Any])?
     /// The subfolders of a folder on a workspace (by id or name), for the
     /// new-session folder browser over the fat client. nil: unreadable now.
     var onAgentSessionFolders: ((_ profile: String, _ path: String) async -> [String]?)?
@@ -814,6 +821,65 @@ final class ACAutomationServer {
             } else {
                 sendResponse(fd: fd, status: 404, body: ["error": "No transcript"])
             }
+
+        // Delegations across hosts. A fat client's own session asks one of
+        // ours: POST /delegations/request {to, text, parent_session,
+        // parent_label, parent_host} → {id}; then POST /delegations/{id}/
+        // {files|send|answer|steer|close|cancel|read|noticed}, and
+        // GET /delegations/{id}/file?path=&offset=&length= for what the
+        // peer attached (a chunk: {data, size, eof}).
+        case ("POST", "/delegations/request"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let sem = DispatchSemaphore(value: 0)
+            var r: [String: Any] = ["error": "no handler"]
+            Task { @MainActor [weak self] in
+                if let h = self?.onDelegationRequest { r = await h(bodyJSON) }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 120)
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case ("GET", let p) where p.hasPrefix("/delegations/") && p.contains("/file"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let parts = p.split(separator: "?", maxSplits: 1).map(String.init)
+            let idStr = String(parts[0].dropFirst("/delegations/".count)).split(separator: "/").first.map(String.init) ?? ""
+            var query: [String: String] = [:]
+            if parts.count > 1 {
+                for kv in parts[1].split(separator: "&") {
+                    let pair = kv.split(separator: "=", maxSplits: 1).map(String.init)
+                    if pair.count == 2 { query[pair[0]] = pair[1].removingPercentEncoding ?? pair[1] }
+                }
+            }
+            guard let did = UUID(uuidString: idStr), let filePath = query["path"], !filePath.isEmpty else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad delegation id or path"]); return
+            }
+            let offset = Int64(query["offset"] ?? "0") ?? 0
+            let length = Int(query["length"] ?? "4194304") ?? 4_194_304
+            let sem = DispatchSemaphore(value: 0)
+            var r: [String: Any] = ["error": "no handler"]
+            Task { @MainActor [weak self] in
+                if let h = self?.onDelegationFile { r = await h(did, filePath, offset, length) }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 120)
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        case ("POST", let p) where p.hasPrefix("/delegations/"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let rest = String(p.dropFirst("/delegations/".count))
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            guard let did = parts.first.flatMap({ $0.removingPercentEncoding }).flatMap(UUID.init(uuidString:)),
+                  parts.count > 1 else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad delegation id or action"]); return
+            }
+            let sem = DispatchSemaphore(value: 0)
+            var r: [String: Any] = ["error": "no handler"]
+            Task { @MainActor [weak self] in
+                if let h = self?.onDelegationCommand { r = await h(did, parts[1], bodyJSON) }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 240)
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
         case ("POST", "/agent-sessions/folders"):
             // {profile, path} → {folders: [name…]}: what the new-session

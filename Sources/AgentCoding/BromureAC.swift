@@ -1570,8 +1570,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                  sessionEngine: agentSessionEngine, delegate: self)
         // Workspace names and each one's reach policy.
         e.profiles = { [weak self] in self?.profiles ?? [] }
+        // The remote hosts mirrored here: their sessions are peers too.
+        e.remoteLinks = { [weak self] in self?.remoteDelegationLinks() ?? [] }
         return e
     }()
+
+    /// The connected remote-host mirrors, as the delegation engine reaches
+    /// them.
+    func remoteDelegationLinks() -> [RemoteDelegationLink] {
+        remoteHostWindows.values.map(\.controller).filter(\.connected)
+    }
     private(set) lazy var codingTaskEngine =
         CodingTaskEngine(store: codingTaskStore, delegate: self)
     /// Kubernetes clusters — shared machines (node VMs) next to the
@@ -3829,6 +3837,45 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onAgentSessionFolders = { [weak self] key, path in
             guard let self else { return nil }
             return await self.listGuestFolders(profileKey: key, path: path)
+        }
+        // A fat client's session asking one of ours (see RemoteDelegationLink).
+        server.onDelegationRequest = { [weak self] body in
+            guard let self else { return ["error": "no app"] }
+            guard let to = body["to"] as? String, let text = body["text"] as? String,
+                  let ps = body["parent_session"] as? String, let pid = UUID(uuidString: ps)
+            else { return ["error": "to, text and parent_session required"] }
+            let party = RemoteParty(host: body["parent_host"] as? String ?? "a client",
+                                    label: body["parent_label"] as? String ?? "a session")
+            do {
+                let d = try await self.delegationEngine.requestFromRemote(parentSessionID: pid, parent: party, to: to, text: text)
+                return ["ok": true, "id": d.id.uuidString]
+            } catch {
+                return ["error": "\(error)"]
+            }
+        }
+        server.onDelegationCommand = { [weak self] id, action, body in
+            guard let self else { return ["error": "no app"] }
+            do {
+                if action == "files" {
+                    guard let name = body["name"] as? String, let b64 = body["data"] as? String,
+                          let data = Data(base64Encoded: b64) else { return ["error": "name and data required"] }
+                    try await self.delegationEngine.receiveRemoteFile(
+                        delegationID: id, name: name, data: data,
+                        append: body["append"] as? Bool ?? false, extract: body["extract"] as? Bool ?? false)
+                    return ["ok": true]
+                }
+                return try await self.delegationEngine.remoteCommand(delegationID: id, action: action, body: body)
+            } catch {
+                return ["error": "\(error)"]
+            }
+        }
+        server.onDelegationFile = { [weak self] id, path, offset, length in
+            guard let self else { return ["error": "no app"] }
+            do {
+                return try await self.delegationEngine.readRemoteFile(delegationID: id, path: path, offset: offset, length: length)
+            } catch {
+                return ["error": "\(error)"]
+            }
         }
         server.onSecurityTimeline = {
             MainActor.assumeIsolated { SecurityTimeline.shared.mirrorRows() }
@@ -9081,6 +9128,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         let controller = RemoteHostController(host: host)
+        // What that host holds for sessions of ours (a peer's reply to a
+        // request from here) is taken the moment its mirror shows it.
+        controller.onDelegationsMirrored = { [weak self] c in self?.delegationEngine.remoteMirrorChanged(c) }
         let window = RemoteHostWindow(controller: controller)
         window.center()
         remoteHostWindows[host.id] = window

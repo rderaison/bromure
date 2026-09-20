@@ -2315,3 +2315,6 @@
 "e.g. seclio" = "例：seclio";
 "request" = "依頼";
 "sessions with a nickname" = "ニックネーム付きのセッション";
+
+/* Cross-host peers */
+"The peer is on this Mac, reached through its mirror" = "相手はこの Mac 上にあり、そのミラー経由で到達しています";

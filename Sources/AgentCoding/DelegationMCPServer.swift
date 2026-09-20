@@ -323,10 +323,35 @@ final class DelegationMCPServer: MCPLineHandler {
                 let workspaces = engine.profiles()
                     .filter { engine.canReach(from: me.profileID, to: $0.id) }
                     .map { ["name": $0.name, "id": $0.id.uuidString, "this_one": $0.id == me.profileID] }
-                return textResult(jsonString(["peers": peers, "workspaces": workspaces]))
+                // Sessions on the remote hosts this Mac is connected to, when
+                // the workspace's reach allows other hosts at all.
+                let far = engine.remotePeers(from: me).map { pair -> [String: Any] in
+                    let (link, s) = pair
+                    let state: String
+                    if s.windowIndex != nil, s.agentAlive != false, !s.hasEnded { state = "live" }
+                    else if s.hasEnded || s.agentAlive == false { state = "ended (a request wakes it)" }
+                    else { state = "asleep (a request wakes it)" }
+                    var o: [String: Any] = [
+                        "session_id": s.id.uuidString, "title": s.title, "host": link.hostName,
+                        "workspace": link.remoteWorkspaceName(s.profileID),
+                        "agent": s.tool.rawValue, "state": state, "folder": s.cwd,
+                    ]
+                    if let n = s.nickname { o["nickname"] = "@" + n }
+                    return o
+                }
+                var out: [String: Any] = ["peers": peers + far, "workspaces": workspaces]
+                let hosts = engine.remoteLinks().map(\.hostName)
+                if !hosts.isEmpty {
+                    out["hosts"] = hosts
+                    out["note"] = engine.remotePeersAllowed(from: me)
+                        ? "Peers with a host are on another Mac, reached through this one; request works the same, files travel through the tunnel."
+                        : "Other hosts are out of reach: this workspace's settings name the only workspaces its agents may reach."
+                }
+                return textResult(jsonString(out))
 
             case "list_delegations":
-                let mine = engine.store.delegations(parent: me.id).map { d -> [String: Any] in
+                let mine = engine.delegationsAsParent(me.id).map { pair -> [String: Any] in
+                    let (d, host) = pair
                     var o: [String: Any] = [
                         "delegation_id": d.id.uuidString, "title": d.title, "request": d.isRequest,
                         "status": d.status.rawValue, "created": iso.string(from: d.createdAt),
@@ -334,6 +359,7 @@ final class DelegationMCPServer: MCPLineHandler {
                         "other": d.childLabel ?? "",
                         "agent": engine.sessions.session(d.childSessionID)?.tool.rawValue ?? "",
                     ]
+                    if let host { o["host"] = host }
                     if let ws = engine.sessions.session(d.childSessionID)?.profileID { o["workspace"] = engine.workspaceName(ws) }
                     if let b = engine.sessions.session(d.childSessionID)?.worktreeBranch { o["branch"] = b }
                     if let v = d.verdict { o["verdict"] = v }
@@ -408,7 +434,7 @@ final class DelegationMCPServer: MCPLineHandler {
                 guard let key = args["delegation_id"] as? String, let verdict = args["verdict"] as? String else {
                     return errorResult("delegation_id and verdict are required")
                 }
-                let d = try engine.delegation(key, as: .parent, for: me.id)
+                let d = try engine.parentHandle(key, for: me.id).0
                 try await engine.close(from: me.id, delegationKey: key, verdict: verdict, note: args["note"] as? String)
                 let v = verdict.lowercased() == "rejected" ? "rejected" : "accepted"
                 return textResult(d.isRequest
@@ -417,7 +443,7 @@ final class DelegationMCPServer: MCPLineHandler {
 
             case "cancel":
                 guard let key = args["delegation_id"] as? String else { return errorResult("delegation_id is required") }
-                let d = try engine.delegation(key, as: .parent, for: me.id)
+                let d = try engine.parentHandle(key, for: me.id).0
                 try await engine.cancel(from: me.id, delegationKey: key, reason: (args["reason"] as? String) ?? "")
                 return textResult(d.isRequest ? "Withdrawn." : "Cancelled. The delegate's session has ended.")
 
@@ -435,10 +461,11 @@ final class DelegationMCPServer: MCPLineHandler {
     /// (either end) — a foreign id is simply not found.
     private func scopedID(_ v: Any?, engine: DelegationEngine, me: AgentSession) throws -> UUID? {
         guard let key = v as? String, !key.isEmpty else { return nil }
-        guard let d = engine.store.delegation(matching: key), d.party(of: me.id) != nil else {
-            throw DelegationRefusal("No delegation “\(key)” of yours.")
+        if let d = engine.store.delegation(matching: key), d.party(of: me.id) != nil { return d.id }
+        for link in engine.remoteLinks() {
+            if let d = link.remoteDelegations.delegation(matching: key), d.parentSessionID == me.id { return d.id }
         }
-        return d.id
+        throw DelegationRefusal("No delegation “\(key)” of yours.")
     }
 
     // MARK: JSON helpers (board MCP conventions)

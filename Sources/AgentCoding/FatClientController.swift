@@ -1015,8 +1015,14 @@ final class RemoteHostController {
             guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
             return try? dec.decode(Delegation.self, from: data)
         }
+        let before = delegationStore.delegations
         delegationStore.applyMirror(items)
+        if before != delegationStore.delegations { onDelegationsMirrored?(self) }
     }
+
+    /// The delegations mirror just changed — the local delegation engine
+    /// looks for what the remote holds for sessions of this Mac.
+    var onDelegationsMirrored: ((RemoteHostController) -> Void)?
 
     /// POST /sessions/start — the new session's id once the server has it.
     func startSession(profileID: Profile.ID, tool: Profile.Tool, cwd: String,
@@ -5344,5 +5350,61 @@ final class RegistrationCallbackTunnel: @unchecked Sendable {
             listenFD = -1
             FatClientLog.log("registration-callback: stopped")
         }
+    }
+}
+
+// MARK: - Peers on the remote host, for the local delegation engine
+
+/// The mirrored remote host as a place agents here can reach: its sessions
+/// are peers, the record of a request lives there, and this client acts
+/// on the parent's side through the same tunnel the mirror uses.
+extension RemoteHostController: RemoteDelegationLink {
+    var hostName: String { host.name }
+    var remoteSessions: AgentSessionStore { sessionStore }
+    var remoteDelegations: DelegationStore { delegationStore }
+    func remoteWorkspaceName(_ id: UUID) -> String { profile(for: id)?.name ?? "" }
+
+    private func delegationCall(_ method: String, _ path: String, body: [String: Any]? = nil,
+                                timeout: Int = 90) async throws -> [String: Any] {
+        let host = self.host
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request(method, path, body: body, recvTimeoutSeconds: timeout)
+        }.value
+        if let err = resp.json["error"] as? String { throw RemoteLinkError(err) }
+        guard resp.status == 200 else { throw RemoteLinkError("HTTP \(resp.status) from \(host.name)") }
+        return resp.json
+    }
+
+    func remoteRequest(parentSessionID: UUID, parentLabel: String, parentHost: String,
+                       to: String, text: String) async throws -> UUID {
+        let r = try await delegationCall("POST", "/delegations/request", body: [
+            "to": to, "text": text, "parent_session": parentSessionID.uuidString,
+            "parent_label": parentLabel, "parent_host": parentHost,
+        ])
+        guard let s = r["id"] as? String, let id = UUID(uuidString: s) else { throw RemoteLinkError("no request id") }
+        return id
+    }
+
+    func remoteUpload(delegation: UUID, name: String, data: Data, append: Bool, extract: Bool) async throws {
+        _ = try await delegationCall("POST", "/delegations/\(ControlClient.encodeSegment(delegation.uuidString))/files", body: [
+            "name": name, "data": data.base64EncodedString(), "append": append, "extract": extract,
+        ], timeout: 180)
+    }
+
+    @discardableResult
+    func remoteCommand(delegation: UUID, action: String, body: [String: Any]) async throws -> [String: Any] {
+        let r = try await delegationCall("POST", "/delegations/\(ControlClient.encodeSegment(delegation.uuidString))/\(action)",
+                                         body: body, timeout: 180)
+        pollOnce()
+        return r
+    }
+
+    func remoteDownload(delegation: UUID, path: String, offset: Int64, length: Int) async throws
+        -> (data: Data, size: Int64, eof: Bool) {
+        let q = "path=\(ControlClient.encodeSegment(path))&offset=\(offset)&length=\(length)"
+        let r = try await delegationCall("GET", "/delegations/\(ControlClient.encodeSegment(delegation.uuidString))/file?\(q)", timeout: 180)
+        guard let b64 = r["data"] as? String, let data = Data(base64Encoded: b64) else { throw RemoteLinkError("no data") }
+        let size = (r["size"] as? Int64) ?? Int64((r["size"] as? Int) ?? 0)
+        return (data, size, (r["eof"] as? Bool) ?? data.isEmpty)
     }
 }

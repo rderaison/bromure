@@ -531,6 +531,128 @@ struct DelegationTests {
         #expect(DelegationEngine.q("it's") == "'it'\\''s'")
     }
 
+    // MARK: Peers on another host (through a fat client)
+
+    /// A remote host, as the local engine reaches it through a fat client:
+    /// a second engine with its own stores, the mirrors being those stores.
+    @MainActor
+    private final class FakeLink: RemoteDelegationLink {
+        let hostName: String
+        let engine: DelegationEngine
+        var commands: [String] = []
+        init(hostName: String, engine: DelegationEngine) { self.hostName = hostName; self.engine = engine }
+        var remoteSessions: AgentSessionStore { engine.sessions }
+        var remoteDelegations: DelegationStore { engine.store }
+        func remoteWorkspaceName(_ id: UUID) -> String { engine.workspaceName(id) }
+        func remoteRequest(parentSessionID: UUID, parentLabel: String, parentHost: String,
+                           to: String, text: String) async throws -> UUID {
+            try await engine.requestFromRemote(parentSessionID: parentSessionID,
+                                               parent: RemoteParty(host: parentHost, label: parentLabel),
+                                               to: to, text: text).id
+        }
+        func remoteUpload(delegation: UUID, name: String, data: Data, append: Bool, extract: Bool) async throws {
+            throw RemoteLinkError("no machines in the tests")
+        }
+        func remoteCommand(delegation: UUID, action: String, body: [String: Any]) async throws -> [String: Any] {
+            commands.append(action)
+            return try await engine.remoteCommand(delegationID: delegation, action: action, body: body)
+        }
+        func remoteDownload(delegation: UUID, path: String, offset: Int64, length: Int) async throws
+            -> (data: Data, size: Int64, eof: Bool) {
+            throw RemoteLinkError("no machines in the tests")
+        }
+    }
+
+    @Test("a request reaches a peer on another host; its ask and reply come back through the mirror")
+    func crossHostRequest() async throws {
+        let a = fixture()
+        let b = fixture()
+        a.sessions.setNickname(a.parentID, "dev")
+        let lab = UUID()
+        b.engine.profiles = { [ws(b.profileID, "Home"), ws(lab, "Lab")] }
+        let seclio = peer(in: b, workspace: lab, nick: "seclio", window: 4, title: "Scanner")
+        let bServer = DelegationMCPServer(profileID: lab, sessions: { b.sessions }, engine: { b.engine })
+        let link = FakeLink(hostName: "mini", engine: b.engine)
+        a.engine.profiles = { [ws(a.profileID, "Dev")] }
+        a.engine.remoteLinks = { [link] }
+        a.engine.hostLabel = { "Client Mac" }
+
+        // The client sees the far peer, tagged with its host.
+        let peers = json(parse(await a.server.handle(line: call("list_peers"), branch: "w3")))
+        let far = (peers["peers"] as? [[String: Any]] ?? []).first { $0["nickname"] as? String == "@seclio" }
+        #expect(far?["host"] as? String == "mini")
+        #expect(far?["workspace"] as? String == "Lab")
+
+        // The request opens on the far host, parent marked remote.
+        let asking = Task {
+            parse(await a.server.handle(line: call("request", ["to": "@seclio", "text": "Run the binary and tell me what it finds.", "timeout_seconds": 30]), branch: "w3"))
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let d = try #require(b.store.delegations.first)
+        #expect(d.isRequest && d.childSessionID == seclio.id && d.parentSessionID == a.parentID)
+        #expect(d.parentRemote == RemoteParty(host: "Client Mac", label: "@dev"))
+        #expect(d.parentLabel == "@dev on Client Mac")
+        #expect(d.status == .working)
+        #expect(link.commands == ["send"])
+        #expect(a.store.delegations.isEmpty)   // nothing recorded on the client itself
+        // The peer sees who asks; it asks back first.
+        let theirs = json(parse(await bServer.handle(line: call("list_delegations"), branch: "w4")))["as_delegate"] as? [[String: Any]] ?? []
+        #expect(theirs.first?["from"] as? String == "@dev on Client Mac")
+        let peerAsk = Task {
+            parse(await bServer.handle(line: call("ask", ["question": "Which binary?", "timeout_seconds": 30]), branch: "w4"))
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        // The far host can't type to the client's session; the client takes
+        // it off the mirror: the parked request returns with the ask.
+        a.engine.remoteMirrorChanged(link)
+        let early = json(await asking.value)
+        #expect(early["replied"] as? Bool == false)
+        let msgs = early["messages"] as? [[String: Any]] ?? []
+        #expect(msgs.first?["kind"] as? String == "ask")
+        let askID = try #require(msgs.first?["ask_id"] as? String)
+        #expect(link.commands.contains("read"))
+        #expect(b.store.delegation(d.id)?.messages.last { $0.kind == .ask }?.readAt != nil)
+        // Answered from the client, through the link.
+        let ans = parse(await a.server.handle(line: call("answer", ["ask_id": String(askID.prefix(8)), "text": "/usr/local/bin/probe"]), branch: "w3"))
+        #expect(!isError(ans), Comment(rawValue: text(ans)))
+        let asked = json(await peerAsk.value)
+        #expect(asked["answered"] as? Bool == true && asked["answer"] as? String == "/usr/local/bin/probe")
+        // The reply: the client waits on the far record by id.
+        let waiting = Task {
+            parse(await a.server.handle(line: call("wait", ["delegation_id": d.id.uuidString, "timeout_seconds": 30]), branch: "w3"))
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let reply = parse(await bServer.handle(line: call("deliver", ["summary": "It phones home to 10.0.0.9:4444."]), branch: "w4"))
+        #expect(!isError(reply), Comment(rawValue: text(reply)))
+        a.engine.remoteMirrorChanged(link)
+        let got = json(await waiting.value)["messages"] as? [[String: Any]] ?? []
+        #expect(got.first?["kind"] as? String == "deliver")
+        #expect(got.first?["text"] as? String == "It phones home to 10.0.0.9:4444.")
+        // Listed on the client with its host; closed from the client; the
+        // peer is left alone on its host.
+        let mine = json(parse(await a.server.handle(line: call("list_delegations"), branch: "w3")))["as_delegator"] as? [[String: Any]] ?? []
+        #expect(mine.count == 1 && mine.first?["host"] as? String == "mini" && mine.first?["status"] as? String == "delivered")
+        let closed = parse(await a.server.handle(line: call("close_delegation", ["delegation_id": DelegationNotice.shortID(d.id), "verdict": "accepted"]), branch: "w3"))
+        #expect(!isError(closed), Comment(rawValue: text(closed)))
+        #expect(b.store.delegation(d.id)?.status == .done && b.store.delegation(d.id)?.verdict == "accepted")
+        #expect(b.sessions.session(seclio.id)?.isArchived == false)
+    }
+
+    @Test("a workspace pinned to named workspaces can't reach other hosts")
+    func crossHostReach() async {
+        let a = fixture()
+        let b = fixture()
+        _ = peer(in: b, workspace: b.profileID, nick: "seclio", window: 4)
+        let link = FakeLink(hostName: "mini", engine: b.engine)
+        a.engine.remoteLinks = { [link] }
+        a.engine.profiles = { [ws(a.profileID, "Dev", reach: [])] }
+        let peers = json(parse(await a.server.handle(line: call("list_peers"), branch: "w3")))
+        #expect((peers["peers"] as? [[String: Any]] ?? []).isEmpty)
+        let denied = parse(await a.server.handle(line: call("request", ["to": "@seclio", "text": "hi"]), branch: "w3"))
+        #expect(isError(denied) && text(denied).contains("mini"))
+        #expect(b.store.delegations.isEmpty)
+    }
+
     @Test("every message is a Security Timeline row; a withheld one reads blocked")
     func timelineRows() {
         let pid = UUID()

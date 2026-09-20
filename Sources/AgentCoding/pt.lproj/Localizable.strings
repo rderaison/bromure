@@ -2315,3 +2315,6 @@
 "e.g. seclio" = "ex.: seclio";
 "request" = "pedido";
 "sessions with a nickname" = "sessões com apelido";
+
+/* Cross-host peers */
+"The peer is on this Mac, reached through its mirror" = "O interlocutor está neste Mac, alcançado pelo seu espelho";

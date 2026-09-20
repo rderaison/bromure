@@ -2315,3 +2315,6 @@
 "e.g. seclio" = "例如 seclio";
 "request" = "请求";
 "sessions with a nickname" = "有昵称的会话";
+
+/* Cross-host peers */
+"The peer is on this Mac, reached through its mirror" = "对方在这台 Mac 上，通过其镜像访问";

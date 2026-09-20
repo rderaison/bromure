@@ -134,6 +134,11 @@ struct Delegation: Identifiable, Codable, Equatable, Sendable {
     /// session has one, else its title.
     var parentLabel: String?
     var childLabel: String?
+    /// The parent lives on another host — a fat client's own session that
+    /// reached this host's peer through its tunnel. This host keeps the
+    /// record and serves the peer; the client acts on the parent's side
+    /// through the API and types the parent's notices itself.
+    var parentRemote: RemoteParty?
     var createdAt: Date
     var updatedAt: Date
     var status: Status
@@ -379,6 +384,43 @@ struct PeerMention: Identifiable, Hashable, Sendable {
     let title: String
     let workspace: String
     var id: String { nick.lowercased() }
+}
+
+/// The far end of a delegation when it lives on another host: how that
+/// host is called here, and how the session there names itself.
+struct RemoteParty: Codable, Equatable, Sendable {
+    var host: String
+    var label: String
+}
+
+struct RemoteLinkError: LocalizedError {
+    let why: String
+    init(_ why: String) { self.why = why }
+    var errorDescription: String? { why }
+}
+
+/// A connected remote host, as the delegation engine reaches it: the
+/// mirrors of its sessions and delegations (what the fat client polls), and
+/// the calls that act on the parent's side of a request made to one of its
+/// sessions. The record lives on that host — where the peer's tools run.
+@MainActor
+protocol RemoteDelegationLink: AnyObject {
+    var hostName: String { get }
+    var remoteSessions: AgentSessionStore { get }
+    var remoteDelegations: DelegationStore { get }
+    func remoteWorkspaceName(_ id: UUID) -> String
+    /// Open a request there; the record's id. Files follow with
+    /// `remoteUpload`, then `remoteCommand("send")` hands it to the peer.
+    func remoteRequest(parentSessionID: UUID, parentLabel: String, parentHost: String,
+                       to: String, text: String) async throws -> UUID
+    /// One chunk of a file into the peer's inbox on that host.
+    func remoteUpload(delegation: UUID, name: String, data: Data, append: Bool, extract: Bool) async throws
+    /// send / answer / steer / close / cancel / read / noticed.
+    @discardableResult
+    func remoteCommand(delegation: UUID, action: String, body: [String: Any]) async throws -> [String: Any]
+    /// A chunk of a file the peer attached, read off its machine.
+    func remoteDownload(delegation: UUID, path: String, offset: Int64, length: Int) async throws
+        -> (data: Data, size: Int64, eof: Bool)
 }
 
 // MARK: - The words that cross

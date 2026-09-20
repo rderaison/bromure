@@ -559,11 +559,30 @@ final class SessionPane {
         }
         m.workspaceName = { [weak self] pid in self?.acDelegate?.profile(for: pid)?.name ?? "" }
         m.peerMentions = { [weak self] in
-            guard let d = self?.acDelegate else { return [] }
-            return d.agentSessionStore.sessions
+            guard let self, let d = self.acDelegate else { return [] }
+            var out = d.agentSessionStore.sessions
                 .filter { $0.nickname != nil && !$0.isDeleted && !$0.isArchived }
                 .map { PeerMention(nick: $0.nickname ?? "", title: $0.title,
                                    workspace: d.profile(for: $0.profileID)?.name ?? "") }
+            // Sessions on the remote hosts this Mac mirrors, when the
+            // workspace's reach isn't pinned to named workspaces.
+            if d.profile(for: self.profile.id)?.agentReach == nil {
+                for link in d.remoteDelegationLinks() {
+                    out += link.remoteSessions.sessions
+                        .filter { $0.nickname != nil && !$0.isDeleted && !$0.isArchived }
+                        .map { PeerMention(nick: $0.nickname ?? "", title: $0.title,
+                                           workspace: link.hostName + " · " + link.remoteWorkspaceName($0.profileID)) }
+                }
+            }
+            return out
+        }
+        // Requests this session made to sessions on other hosts — their
+        // records live there; the panel shows them next to the local ones.
+        m.remoteDelegations = { [weak self] in
+            guard let self, let d = self.acDelegate,
+                  let s = d.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
+            else { return [] }
+            return d.delegationEngine.delegationsAsParent(s.id).compactMap { pair in pair.1.map { (pair.0, $0) } }
         }
         m.answerDelegation = { [weak self] delegationID, askID, text in
             guard let engine = self?.acDelegate?.delegationEngine else { return }

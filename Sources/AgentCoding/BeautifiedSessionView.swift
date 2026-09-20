@@ -371,6 +371,9 @@ final class BeautifiedSessionModel: ObservableObject {
     var workspaceName: ((UUID) -> String)?
     /// The sessions with a nickname, for the composer's "@" palette.
     var peerMentions: (() -> [PeerMention])?
+    /// Requests this session made to sessions on other hosts (their records
+    /// live there), with the host's name, for the panel.
+    var remoteDelegations: (() -> [(Delegation, String)])?
 
     var accent: Color { provider.accent }
 
@@ -1197,6 +1200,7 @@ struct BeautifiedSessionView: View {
                 DelegationPanel(store: store, sessions: model.sessionStore, session: me,
                                 accent: model.accent,
                                 workspaceName: model.workspaceName,
+                                remote: model.remoteDelegations?() ?? [],
                                 open: { model.openSession?($0) },
                                 answer: model.answerDelegation)
             }
@@ -2155,14 +2159,21 @@ struct DelegationPanel: View {
     let accent: Color
     /// A workspace's name — a delegate or peer elsewhere says where it is.
     let workspaceName: ((UUID) -> String)?
+    /// Requests of this session's whose records live on other hosts, with
+    /// the host's name.
+    var remote: [(Delegation, String)] = []
     let open: (UUID) -> Void
     /// nil = read-only (a fat client's mirror).
     let answer: ((UUID, UUID, String) -> Void)?
     @AppStorage("sessions.delegationsExpanded") private var expanded = true
     @State private var drafts: [UUID: String] = [:]
 
+    private var remoteHosts: [UUID: String] {
+        Dictionary(remote.map { ($0.0.id, $0.1) }, uniquingKeysWith: { a, _ in a })
+    }
+
     var body: some View {
-        let mine = store.delegations(parent: session.id)
+        let mine = (store.delegations(parent: session.id) + remote.map(\.0)).sorted { $0.createdAt < $1.createdAt }
         let asChild = store.openAsChild(session.id)
         if mine.isEmpty && asChild.isEmpty {
             EmptyView()
@@ -2206,11 +2217,15 @@ struct DelegationPanel: View {
             }
             statusPill(d)
             Spacer(minLength: 0)
-            Button(d.isRequest
-                   ? NSLocalizedString("Show requester", comment: "delegation panel")
-                   : NSLocalizedString("Show delegator", comment: "delegation panel")) { open(d.parentSessionID) }
-                .buttonStyle(.link)
-                .font(.system(size: 11))
+            // The requester is on this host, or on another Mac (a fat client's
+            // own session): only the former can be put on stage.
+            if d.parentRemote == nil {
+                Button(d.isRequest
+                       ? NSLocalizedString("Show requester", comment: "delegation panel")
+                       : NSLocalizedString("Show delegator", comment: "delegation panel")) { open(d.parentSessionID) }
+                    .buttonStyle(.link)
+                    .font(.system(size: 11))
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
@@ -2297,8 +2312,14 @@ struct DelegationPanel: View {
                         .background(Capsule().fill(Color.primary.opacity(0.07)))
                 }
                 statusPill(d)
-                if let pid = child?.profileID, pid != session.profileID,
-                   let ws = workspaceName?(pid), !ws.isEmpty {
+                if let host = remoteHosts[d.id] {
+                    Text(host)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .help(NSLocalizedString("The peer is on this Mac, reached through its mirror", comment: "delegation panel"))
+                } else if let pid = child?.profileID, pid != session.profileID,
+                          let ws = workspaceName?(pid), !ws.isEmpty {
                     Text(ws)
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
