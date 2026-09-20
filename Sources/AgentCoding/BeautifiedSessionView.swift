@@ -995,6 +995,30 @@ struct BeautifiedSessionView: View {
         model.composerText = "/" + c.name + (c.takesArgument ? " " : "")
     }
 
+    /// The palette's keys, offered by the composer before it acts on them.
+    /// Arrows move the highlight, Tab completes, ↩ completes a partial
+    /// command (an exact match falls through and the composer sends it),
+    /// Escape clears. False = not the palette's key, the composer's own.
+    private func handlePaletteKey(_ key: ComposerKey) -> Bool {
+        switch key {
+        case .up:
+            guard paletteVisible else { return false }
+            paletteIndex = max(0, paletteIndex - 1); return true
+        case .down:
+            guard paletteVisible else { return false }
+            paletteIndex = min(paletteCommands.count - 1, paletteIndex + 1); return true
+        case .tab:
+            guard paletteVisible, let c = paletteCurrent else { return false }
+            complete(c); return true
+        case .enter:
+            guard paletteVisible, let c = paletteCurrent, c.name != paletteQuery else { return false }
+            complete(c); return true
+        case .escape:
+            guard paletteVisible else { return false }
+            model.composerText = ""; return true
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             transcript
@@ -1029,41 +1053,19 @@ struct BeautifiedSessionView: View {
                     : String(format: NSLocalizedString("Message %@…  (or drop files)", comment: "beautified composer"),
                              model.agentDisplayName),
                 text: $model.composerText,
+                autofocus: true,
                 busy: model.sending,
                 accent: model.accent,
                 canSendEmpty: !model.pendingAttachments.isEmpty,
                 working: model.working,
                 onStop: { model.interrupt() },
+                onKey: { handlePaletteKey($0) },
                 onSend: { model.send() })
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
         }
         .animation(.easeOut(duration: 0.15), value: paletteVisible)
         .onChange(of: paletteQuery) { _, _ in paletteIndex = 0 }
-        // Palette keys. Arrow/tab/return are answered here only while the
-        // palette is up; otherwise they fall through to the text field.
-        .onKeyPress(.upArrow) {
-            guard paletteVisible else { return .ignored }
-            paletteIndex = max(0, paletteIndex - 1); return .handled
-        }
-        .onKeyPress(.downArrow) {
-            guard paletteVisible else { return .ignored }
-            paletteIndex = min(paletteCommands.count - 1, paletteIndex + 1); return .handled
-        }
-        .onKeyPress(.tab) {
-            guard paletteVisible, let c = paletteCurrent else { return .ignored }
-            complete(c); return .handled
-        }
-        .onKeyPress(.return) {
-            // ↩ completes a partial command; on an exact match it falls
-            // through and the composer sends it.
-            guard paletteVisible, let c = paletteCurrent, c.name != paletteQuery else { return .ignored }
-            complete(c); return .handled
-        }
-        .onKeyPress(.escape) {
-            guard paletteVisible else { return .ignored }
-            model.composerText = ""; return .handled
-        }
         // A chat surface, not a terminal: opaque so it never picks up the
         // window's terminal-translucency (which reads as a gray scrim here).
         .background(Color.platformTextBackground)

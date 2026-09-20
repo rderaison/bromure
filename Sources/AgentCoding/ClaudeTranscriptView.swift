@@ -979,6 +979,11 @@ struct ClaudeTranscriptPane: View {
 /// One transcript element. Prompts get a tinted bubble, assistant prose is
 /// plain text, thinking and tool traffic collapse behind disclosures so the
 /// narrative reads top-to-bottom without the plumbing in the way.
+/// Keys the composer's text area offers its host before acting on them
+/// itself, so a completion palette can take the arrows, Tab, Return and
+/// Escape (macOS; see ComposerTextView).
+enum ComposerKey { case up, down, tab, enter, escape }
+
 /// A modern chat composer, Codex-Desktop style: the text area rides on
 /// top, a slim utility bar with the key hint and the send control sits
 /// beneath it, all in one elevated rounded container that glows with the
@@ -987,6 +992,9 @@ struct ChatComposer: View {
     let placeholder: String
     @Binding var text: String
     var disabled = false
+    /// macOS: the text area takes the keyboard when it appears, unless
+    /// another control in the window already has it.
+    var autofocus = false
     var busy = false
     var accent: Color = .accentColor
     /// Allow sending with empty text (the beautified composer with pending
@@ -996,9 +1004,20 @@ struct ChatComposer: View {
     /// runaway turn can be interrupted without hunting for the hidden terminal.
     var working = false
     var onStop: () -> Void = {}
+    /// macOS: keys the text area offers the host before acting on them
+    /// itself — a "/" palette takes the arrows, Tab, Return and Escape.
+    var onKey: ((ComposerKey) -> Bool)? = nil
     let onSend: () -> Void
 
+    #if os(macOS)
+    // A real text view (see ComposerTextView): SwiftUI's vertical field
+    // stops re-wrapping once editing has begun and the pane changes width.
+    @State private var editorHeight: CGFloat = 24
+    @State private var editorFocused = false
+    private var focused: Bool { editorFocused }
+    #else
     @FocusState private var focused: Bool
+    #endif
 
     private var sendable: Bool {
         !disabled && !busy
@@ -1008,6 +1027,13 @@ struct ChatComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            #if os(macOS)
+            ComposerTextView(text: $text, placeholder: placeholder, disabled: disabled,
+                             autofocus: autofocus, height: $editorHeight, focused: $editorFocused,
+                             onKey: onKey, onSubmit: { if sendable { onSend() } })
+                .frame(maxWidth: .infinity)
+                .frame(height: editorHeight)
+            #else
             TextField(placeholder, text: $text, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13.5))
@@ -1017,6 +1043,7 @@ struct ChatComposer: View {
                 .onSubmit { if sendable { onSend() } }
                 .disabled(disabled)
                 .frame(minHeight: 22)
+            #endif
             HStack(spacing: 8) {
                 Text(working
                      ? NSLocalizedString("⎋ stop   ⏎ send", comment: "composer hint")

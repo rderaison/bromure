@@ -342,6 +342,59 @@ final class SessionPane {
         m.send()
         return true
     }
+    /// Debug: type into the composer the way a person does — through the
+    /// field editor AppKit attaches to the focused text field — so layout
+    /// trouble that only shows while editing can be reproduced headlessly.
+    /// Focuses the field first when it isn't; appends at the end.
+    func debugTypeComposer(_ text: String) -> [String: Any] {
+        guard let host = mountedBeautifiedHost else { return ["error": "no beautified view on stage"] }
+        guard let editor = Self.composerTextView(in: host) else { return ["error": "no composer in the beautified view"] }
+        if host.window?.firstResponder !== editor { host.window?.makeFirstResponder(editor) }
+        editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+        editor.insertText(text, replacementRange: editor.selectedRange())
+        return debugComposerGeometry()
+    }
+    /// Debug: the composer's text view against its wrap width — a container
+    /// that no longer matches the view is the stale-layout tell.
+    func debugComposerGeometry() -> [String: Any] {
+        guard let host = mountedBeautifiedHost else { return ["error": "no beautified view on stage"] }
+        guard let editor = Self.composerTextView(in: host) else { return ["error": "no composer in the beautified view"] }
+        return [
+            "ok": true,
+            "hostWidth": host.bounds.width,
+            "editorWidth": editor.bounds.width,
+            "editorHeight": editor.enclosingScrollView?.bounds.height ?? editor.bounds.height,
+            "containerWidth": editor.textContainer?.containerSize.width ?? -1,
+            "usedWidth": editor.layoutManager.flatMap { lm in
+                editor.textContainer.map { lm.usedRect(for: $0).width } } ?? -1,
+            "editing": host.window?.firstResponder === editor,
+            "textLength": (editor.string as NSString).length,
+        ]
+    }
+    /// Debug: press one of the composer's routed keys (return, option-return,
+    /// escape, up, down, tab) — the same path a keystroke takes.
+    func debugComposerKey(_ name: String) -> [String: Any] {
+        guard let host = mountedBeautifiedHost else { return ["error": "no beautified view on stage"] }
+        guard let editor = Self.composerTextView(in: host) else { return ["error": "no composer in the beautified view"] }
+        let selector: Selector
+        switch name {
+        case "return":        selector = #selector(NSResponder.insertNewline(_:))
+        case "option-return": selector = #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))
+        case "escape":        selector = #selector(NSResponder.cancelOperation(_:))
+        case "up":            selector = #selector(NSResponder.moveUp(_:))
+        case "down":          selector = #selector(NSResponder.moveDown(_:))
+        case "tab":           selector = #selector(NSResponder.insertTab(_:))
+        default: return ["error": "unknown key \(name)"]
+        }
+        if host.window?.firstResponder !== editor { host.window?.makeFirstResponder(editor) }
+        editor.doCommand(by: selector)
+        return ["ok": true, "text": editor.string]
+    }
+    private static func composerTextView(in view: NSView) -> ComposerNSTextView? {
+        if let t = view as? ComposerNSTextView { return t }
+        for sub in view.subviews { if let t = composerTextView(in: sub) { return t } }
+        return nil
+    }
     /// Debug: press the sign-in card's button (a host-run sign-in).
     func debugStartSignIn() -> [String: Any] {
         guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }

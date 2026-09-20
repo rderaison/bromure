@@ -3200,6 +3200,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                           let pane = self.pane(for: id), pane.debugSetComposer(text)
                     else { return ["error": "no beautified composer on stage"] }
                     return ["ok": true]
+                case "type":
+                    // Type through the composer's field editor, as a person would.
+                    guard let text = params["text"] as? String,
+                          let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugTypeComposer(text)
+                case "composer-geometry":
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugComposerGeometry()
+                case "key":
+                    // One of the composer's routed keys, by name.
+                    guard let name = params["key"] as? String,
+                          let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugComposerKey(name)
                 case "sessions":
                     let model = self.unifiedWindow?.listModel
                     return ["filePaneOpen": self.unifiedWindow?.filePaneOpen ?? false,
