@@ -62,6 +62,10 @@ public extension Profile {
         // here, applied to `p` after the per-agent pass (the pass borrows
         // `p`'s fields inout, so it can't touch `p` itself).
         var bedrock: (enabled: Bool, modelID: String)?
+        // Claude Code through an Anthropic-compatible gateway (OpenRouter):
+        // ANTHROPIC_BASE_URL + the gateway's model ids per tier, applied to
+        // `p` after the pass for the same reason.
+        var gateway: (base: String, models: [String: String])?
 
         // Resolve one agent: set its auth (+ return its local model id, if local).
         func applyAgent(tool: Tool, ompProvider: OmpProvider?, ompBaseURL: String?,
@@ -102,13 +106,42 @@ public extension Profile {
                                       (key ?? "").isEmpty ? nil : key)
                 return ref.modelID
             }
+            // A provider that isn't the agent's own: Claude Code goes DIRECT
+            // to a gateway serving the Anthropic Messages API (OpenRouter),
+            // its stand-in key swapped on that host; every other agent goes
+            // through the external-engine route — the host's repair proxy
+            // translates the wire and holds the key (Codex on OpenRouter,
+            // Kimi on xAI…).
+            if let ref, case .provider(let prov) = ref.source,
+               prov != Self.nativeProvider(tool: tool, ompProvider: ompProvider),
+               let cred = settings.credential(prov), cred.isUsable {
+                let key = (cred.apiKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if tool == .claude, let base = prov.anthropicGatewayBase, !key.isEmpty {
+                    authMode = .token
+                    apiKey = key
+                    var models: [String: String] = [:]
+                    for tier in ModelTier.allCases {
+                        if let r = settings.ref(for: .claude, tier: tier),
+                           case .provider(prov) = r.source { models[tier.rawValue] = r.modelID }
+                    }
+                    gateway = (base, models)
+                    bedrock = (false, "")
+                    return nil
+                }
+                if tool != .claude, let base = prov.openAICompatibleBase {
+                    authMode = .local
+                    anyLocal = true
+                    localServerBackend = (base, key.isEmpty ? nil : key)
+                    return ref.modelID
+                }
+            }
             if let (mode, key) = Self.cloudAuth(tool: tool, ompProvider: ompProvider,
                                                 ompBaseURL: ompBaseURL, settings: settings,
                                                 subscribed: subscribed) {
                 authMode = mode
                 apiKey = key
-                // Settings moved Claude off Bedrock: drop the Bedrock env too.
-                if tool == .claude { bedrock = (false, "") }
+                // Settings moved Claude off Bedrock / a gateway: drop their env.
+                if tool == .claude { bedrock = (false, ""); gateway = nil }
             }
             return nil
         }
@@ -128,6 +161,8 @@ public extension Profile {
             p.additionalTools[i].apiKey = key
             if let lid { p.additionalTools[i].localModelID = lid }
         }
+        p.claudeGatewayBaseURL = gateway?.base
+        p.claudeGatewayModels = gateway?.models ?? [:]
         if let bedrock {
             p.bedrockEnabled = bedrock.enabled
             if bedrock.enabled {
@@ -185,12 +220,25 @@ public extension Profile {
                    cred.bedrockUsesAPIKey || awsCredentials.isUsable {
                     ready.insert(tool)
                 }
+            } else if let ref, case .provider(let prov) = ref.source,
+                      prov != Self.nativeProvider(tool: tool, ompProvider: ompProvider),
+                      (tool == .claude ? prov.anthropicGatewayBase : prov.openAICompatibleBase) != nil {
+                // A gateway / non-native provider: its key is all it takes.
+                if let cred = settings.credential(prov), cred.isUsable,
+                   !(cred.apiKey ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
+                    ready.insert(tool)
+                }
             } else if Self.cloudAuth(tool: tool, ompProvider: ompProvider, ompBaseURL: ompBaseURL,
                                      settings: settings, subscribed: subscribed) != nil {
                 ready.insert(tool)
             }
         }
         return ready
+    }
+
+    /// The provider an agent reaches natively (omp: the one it's switched to).
+    static func nativeProvider(tool: Tool, ompProvider: OmpProvider?) -> ModelProvider {
+        tool == .omp ? ModelProvider.from(omp: ompProvider ?? .default) : ModelProvider.native(for: tool)
     }
 
     /// Whether this (launch-time) profile reaches Amazon Bedrock with AWS
@@ -257,7 +305,7 @@ public extension ModelProvider {
         case .openai:    return .codex
         case .xai:       return .grok
         case .moonshot:  return .kimi
-        case .zai, .bedrock, .custom: return nil
+        case .zai, .bedrock, .openrouter, .custom: return nil
         }
     }
 
@@ -271,7 +319,7 @@ public extension ModelProvider {
         case .openai:    return .codex
         case .xai:       return .grok
         case .moonshot:  return .kimi
-        case .zai, .custom: return nil
+        case .zai, .openrouter, .custom: return nil
         }
     }
 }

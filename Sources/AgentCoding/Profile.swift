@@ -1552,6 +1552,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Empty string uses Claude Code's default.
     public var bedrockModelID: String
 
+    /// Claude Code through an Anthropic-compatible gateway (OpenRouter):
+    /// ANTHROPIC_BASE_URL, and the gateway's model id per tier (`small` /
+    /// `medium` / `large`) pinned into its env. Set by the launch-time model
+    /// overlay; nil = Claude talks to Anthropic itself.
+    public var claudeGatewayBaseURL: String?
+    public var claudeGatewayModels: [String: String]
+
     /// Container-registry credentials. One entry per host. Materialized
     /// as ~/.docker/config.json `auths` entries (with FAKE base64 auth
     /// strings); the proxy swaps fake → real on the wire when the
@@ -1813,6 +1820,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         awsCredentials: AWSCredentials = AWSCredentials(),
         bedrockEnabled: Bool = false,
         bedrockModelID: String = "",
+        claudeGatewayBaseURL: String? = nil,
+        claudeGatewayModels: [String: String] = [:],
         dockerRegistries: [DockerRegistryCredential] = [],
         httpDatabases: [HTTPDatabaseEndpoint] = [],
         apiKeyRequiresApproval: Bool = false,
@@ -1893,6 +1902,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.awsCredentials = awsCredentials
         self.bedrockEnabled = bedrockEnabled
         self.bedrockModelID = bedrockModelID
+        self.claudeGatewayBaseURL = claudeGatewayBaseURL
+        self.claudeGatewayModels = claudeGatewayModels
         self.dockerRegistries = dockerRegistries
         self.httpDatabases = httpDatabases
         self.apiKeyRequiresApproval = apiKeyRequiresApproval
@@ -1980,6 +1991,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case twilioCredential
         case awsCredentials
         case bedrockEnabled, bedrockModelID
+        case claudeGatewayBaseURL, claudeGatewayModels
         case dockerRegistries
         case httpDatabases
         case apiKeyRequiresApproval
@@ -2096,6 +2108,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
         bedrockEnabled = try c.decodeIfPresent(Bool.self, forKey: .bedrockEnabled) ?? false
         bedrockModelID = try c.decodeIfPresent(String.self, forKey: .bedrockModelID) ?? ""
+        claudeGatewayBaseURL = try c.decodeIfPresent(String.self, forKey: .claudeGatewayBaseURL)
+        claudeGatewayModels = try c.decodeIfPresent([String: String].self, forKey: .claudeGatewayModels) ?? [:]
         dockerRegistries = try c.decodeIfPresent([DockerRegistryCredential].self, forKey: .dockerRegistries) ?? []
         httpDatabases = try c.decodeIfPresent([HTTPDatabaseEndpoint].self, forKey: .httpDatabases) ?? []
         apiKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .apiKeyRequiresApproval) ?? false
@@ -2263,6 +2277,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if bedrockEnabled { try c.encode(true, forKey: .bedrockEnabled) }
         if !bedrockModelID.isEmpty { try c.encode(bedrockModelID, forKey: .bedrockModelID) }
+        try c.encodeIfPresent(claudeGatewayBaseURL, forKey: .claudeGatewayBaseURL)
+        if !claudeGatewayModels.isEmpty { try c.encode(claudeGatewayModels, forKey: .claudeGatewayModels) }
         if !dockerRegistries.isEmpty {
             try c.encode(dockerRegistries, forKey: .dockerRegistries)
         }

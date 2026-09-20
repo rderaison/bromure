@@ -67,6 +67,20 @@ struct ModelsSettingsView: View {
     private var hostGB: Int { HostMemory.unifiedMemoryGB() }
     private enum SourceProbe: Equatable { case idle, probing, ok(Int), failed(String) }
 
+    /// The live model list of a provider with no agent of its own to ask
+    /// (OpenRouter…): its OpenAI-compatible `/v1/models`, with the pane's key.
+    /// Empty when the provider has no such endpoint or it can't be reached.
+    static func fetchCompatibleModels(_ provider: ModelProvider, apiKey: String?,
+                                      completion: @escaping ([String]) -> Void) {
+        guard let raw = provider.openAICompatibleBase, let base = URL(string: raw) else {
+            completion([]); return
+        }
+        Task {
+            let ids = (try? await ExternalEngine.listModels(base: base, apiKey: apiKey)) ?? []
+            await MainActor.run { completion(ids) }
+        }
+    }
+
     /// Mutate the bound settings in place. The binding's setter persists (global
     /// store) or updates the workspace draft (committed on the editor's Save).
     private func mutate(_ f: (inout ModelSettings) -> Void) {
@@ -930,6 +944,9 @@ enum ProviderModels {
         case .xai:      return ["grok-4", "grok-4-fast", "grok-3"]
         case .zai:      return ["glm-5.3", "glm-5.3-flash", "glm-4.6"]
         case .moonshot: return ["kimi-k2.5", "kimi-k2", "kimi-k2-turbo-preview"]
+        // OpenRouter's catalog is fetched live (its /models endpoint); these
+        // are the ids its API docs use as examples, so the picker is never empty.
+        case .openrouter: return ["anthropic/claude-sonnet-4.6", "openai/gpt-5.2"]
         case .bedrock:
             switch tier {
             case .large:  return ["us.anthropic.claude-opus-4-8", bedrockPlaceholder]
@@ -956,7 +973,7 @@ enum ProviderModels {
 
     static func capabilities(for modelID: String) -> ModelCapabilities? {
         let id = modelID.lowercased()
-        if id.hasPrefix("claude") || id.contains(".anthropic.claude") {
+        if id.hasPrefix("claude") || id.contains("anthropic/claude") || id.contains(".anthropic.claude") {
             return ModelCapabilities(contextWindow: 200_000, reasoning: true, inputs: [.text, .image])
         }
         if id.hasPrefix("gpt-5") || id.hasPrefix("gpt-4") || id.hasPrefix("o4") || id.hasPrefix("o3") {

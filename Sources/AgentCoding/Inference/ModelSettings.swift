@@ -17,7 +17,7 @@ import Foundation
 /// A model provider Bromure can hold credentials for. `.custom` is any
 /// OpenAI-compatible endpoint the user supplies a base URL for.
 public enum ModelProvider: String, Codable, CaseIterable, Sendable {
-    case anthropic, openai, xai, zai, moonshot, bedrock, custom
+    case anthropic, openai, xai, zai, moonshot, bedrock, openrouter, custom
 
     public var displayName: String {
         switch self {
@@ -26,9 +26,33 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         case .xai:       return "xAI (Grok)"
         case .zai:       return "z.ai (GLM)"
         case .moonshot:  return "Moonshot (Kimi)"
-        case .bedrock:   return "Amazon Bedrock (Claude)"
+        case .bedrock:   return "Amazon Bedrock"
+        case .openrouter: return "OpenRouter"
         case .custom:    return "Custom (OpenAI-compatible)"
         }
+    }
+
+    /// The server root the external-engine route appends `v1/chat/completions`
+    /// (and `v1/models`) to, for providers whose OpenAI-compatible API lives
+    /// there — how a NON-native agent reaches them (Codex on OpenRouter, Kimi
+    /// on xAI…): the guest talks to the host's repair proxy, which translates
+    /// the agent's wire and holds the key. nil: no such route (Anthropic and
+    /// OpenAI are only reached natively; z.ai's compatible API isn't under
+    /// `/v1`; Bedrock has its own `Bedrock` helper).
+    public var openAICompatibleBase: String? {
+        switch self {
+        case .openrouter: return "https://openrouter.ai/api"
+        case .xai:        return "https://api.x.ai"
+        case .moonshot:   return "https://api.moonshot.ai"
+        case .anthropic, .openai, .zai, .bedrock, .custom: return nil
+        }
+    }
+
+    /// Claude Code's direct gateway route: OpenRouter serves the Anthropic
+    /// Messages API at `/api/v1/messages`, so Claude points ANTHROPIC_BASE_URL
+    /// there and sends its (stand-in) key as a bearer — no proxy translation.
+    public var anthropicGatewayBase: String? {
+        self == .openrouter ? "https://openrouter.ai/api" : nil
     }
 
     /// The upstream API host the MITM scopes a fake→real key swap to (empty for
@@ -43,6 +67,7 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         case .zai:       return "api.z.ai"
         case .moonshot:  return "api.moonshot.ai"
         case .bedrock:   return ""
+        case .openrouter: return "openrouter.ai"
         case .custom:    return ""
         }
     }
@@ -55,7 +80,7 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         case .anthropic, .bedrock:   return .anthropic
         case .openai:                return .openaiResponses
         case .xai, .zai, .moonshot,
-             .custom:                return .openaiChat
+             .openrouter, .custom:   return .openaiChat
         }
     }
 
@@ -73,7 +98,7 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
     public var supportsSubscription: Bool {
         switch self {
         case .anthropic, .openai, .xai, .moonshot: return true
-        case .zai, .bedrock, .custom:              return false
+        case .zai, .bedrock, .openrouter, .custom: return false
         }
     }
 }

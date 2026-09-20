@@ -51,6 +51,10 @@ public struct SessionTokenPlan: Sendable {
         /// settings env; sent as `Authorization: Bearer` to that region's
         /// bedrock-runtime host, which is the only host the swap applies to.
         case bedrockAPIKey(region: String)
+        /// A gateway's API key Claude Code sends as `Authorization: Bearer`
+        /// (ANTHROPIC_AUTH_TOKEN) to that host — OpenRouter's Anthropic-
+        /// compatible endpoint. Swapped on the gateway host only.
+        case cloudAPIKey(host: String)
         /// HTTPS git credential. Materialized in ~/.git-credentials and
         /// the gh / glab configs.
         case gitHTTPS(host: String, username: String)
@@ -178,6 +182,14 @@ public struct SessionTokenPlan: Sendable {
         return nil
     }
 
+    /// Fake gateway key for `host` (Claude Code's ANTHROPIC_AUTH_TOKEN).
+    public func fakeForCloud(host: String) -> String? {
+        for e in entries {
+            if case .cloudAPIKey(let h) = e.purpose, h == host { return e.fakeValue }
+        }
+        return nil
+    }
+
     /// Fake Bedrock API key for Claude Code's AWS_BEARER_TOKEN_BEDROCK.
     public func fakeForBedrock() -> String? {
         for e in entries {
@@ -205,6 +217,7 @@ public struct SessionTokenPlan: Sendable {
         case .moonshotAPIKey:         return "moonshot.ai"
         case .ompAPIKey(let host):    return host.isEmpty ? nil : host
         case .bedrockAPIKey(let region): return Bedrock.runtimeHost(region: region)
+        case .cloudAPIKey(let host):  return host.isEmpty ? nil : host
         case .gitHTTPS(let host, _):  return host
         case .manual(_, _, let host): return host.isEmpty ? nil : host
         case .digitalOcean:           return "digitalocean.com"
@@ -372,6 +385,17 @@ public extension Profile {
             let displayName = "\(spec.tool.displayName) API key"
             switch spec.tool {
             case .claude:
+                if let base = claudeGatewayBaseURL, let host = URL(string: base)?.host {
+                    // Gateway key: scoped to the gateway, never to anthropic.com.
+                    entries.append(.init(
+                        realValue: real,
+                        fakeValue: SessionTokenPlan.deriveFake(prefix: "sk-or-v1-brm-",
+                                                               real: real, salt: salt),
+                        purpose: .cloudAPIKey(host: host),
+                        consentCredentialID: consentID,
+                        consentDisplayName: "\(host) API key"))
+                    continue
+                }
                 entries.append(.init(
                     realValue: real,
                     fakeValue: SessionTokenPlan.deriveFake(prefix: "sk-ant-api03-brm-",

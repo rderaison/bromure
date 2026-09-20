@@ -50,7 +50,9 @@ enum LiveModelRefresh {
             for spec in new.allToolSpecs where spec.authMode == .local { out.insert(spec.tool) }
         }
         if old.bedrockEnabled != new.bedrockEnabled || old.bedrockModelID != new.bedrockModelID
-            || (new.bedrockEnabled && old.awsCredentials.region != new.awsCredentials.region) {
+            || (new.bedrockEnabled && old.awsCredentials.region != new.awsCredentials.region)
+            || old.claudeGatewayBaseURL != new.claudeGatewayBaseURL
+            || old.claudeGatewayModels != new.claudeGatewayModels {
             out.insert(.claude)
         }
         return out

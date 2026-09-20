@@ -416,6 +416,26 @@ public final class SessionDisk {
             let value: String
             switch spec.tool {
             case .claude:
+                // Through a gateway (OpenRouter): ANTHROPIC_BASE_URL, the
+                // stand-in key as a bearer (swapped on the gateway's host), an
+                // explicitly EMPTY ANTHROPIC_API_KEY so the two never conflict,
+                // and the gateway's model ids pinned per tier.
+                if let base = profile.claudeGatewayBaseURL, let host = URL(string: base)?.host {
+                    let fake = tokenPlan?.fakeForCloud(host: host) ?? real
+                    lines.append("export ANTHROPIC_BASE_URL=\(shellQuote(base))")
+                    lines.append("export ANTHROPIC_AUTH_TOKEN=\(shellQuote(fake))")
+                    lines.append("export ANTHROPIC_API_KEY=''")
+                    let m = profile.claudeGatewayModels
+                    if let main = m["medium"] ?? m["large"] ?? m["small"] {
+                        let small = m["small"] ?? main
+                        lines.append("export ANTHROPIC_MODEL=\(shellQuote(main))")
+                        lines.append("export ANTHROPIC_DEFAULT_SONNET_MODEL=\(shellQuote(m["medium"] ?? main))")
+                        lines.append("export ANTHROPIC_DEFAULT_OPUS_MODEL=\(shellQuote(m["large"] ?? main))")
+                        lines.append("export ANTHROPIC_DEFAULT_HAIKU_MODEL=\(shellQuote(small))")
+                        lines.append("export ANTHROPIC_SMALL_FAST_MODEL=\(shellQuote(small))")
+                    }
+                    continue
+                }
                 value = tokenPlan?.fakeForAnthropic() ?? real
             case .codex:
                 value = tokenPlan?.fakeForOpenAI() ?? real
@@ -439,7 +459,7 @@ public final class SessionDisk {
         // swaps it for a live subscription OAuth Bearer token held on the host.
         // Only present when a subscription credential is registered (see
         // makeTokenPlan); otherwise the guest logs in interactively as before.
-        if let bogus = tokenPlan?.claudeSubscriptionBogusKey {
+        if let bogus = tokenPlan?.claudeSubscriptionBogusKey, profile.claudeGatewayBaseURL == nil {
             lines.append("export ANTHROPIC_API_KEY=\(shellQuote(bogus))")
         }
         // Manual tokens defined in the editor's Advanced section.

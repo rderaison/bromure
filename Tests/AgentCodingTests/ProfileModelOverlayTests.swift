@@ -223,6 +223,49 @@ struct ProfileModelOverlayTests {
         #expect(plan.fakeForAnthropic() == nil)
     }
 
+    /// OpenRouter: Claude Code goes direct to its Anthropic-compatible endpoint
+    /// (base URL + bearer swapped on openrouter.ai, model ids pinned per tier);
+    /// every other agent goes through the external-engine route with the key.
+    @Test("OpenRouter: Claude direct via ANTHROPIC_BASE_URL, Codex through the engine route")
+    func openRouterRoutes() {
+        var s = ModelSettings()
+        s.providers = [ProviderCredential(provider: .openrouter, apiKey: "sk-or-v1-real"),
+                       ProviderCredential(provider: .anthropic, apiKey: "sk-ant")]
+        s.agentTiers[.claude] = [.medium: ModelRef(source: .provider(.openrouter), modelID: "anthropic/claude-sonnet-4.6"),
+                                 .large:  ModelRef(source: .provider(.openrouter), modelID: "anthropic/claude-opus-4.8")]
+        s.agentTiers[.codex] = [.medium: ModelRef(source: .provider(.openrouter), modelID: "openai/gpt-5.2")]
+
+        let p = Profile(name: "t", tool: .claude, authMode: .token, apiKey: "stale")
+        let out = p.overlaidWithGlobalModels(s)
+        #expect(out.authMode == .token)
+        #expect(out.apiKey == "sk-or-v1-real")
+        #expect(out.claudeGatewayBaseURL == "https://openrouter.ai/api")
+        #expect(out.claudeGatewayModels == ["medium": "anthropic/claude-sonnet-4.6",
+                                            "large": "anthropic/claude-opus-4.8"])
+        #expect(!out.bedrockEnabled)
+        // The plan scopes Claude's key to the gateway, not anthropic.com.
+        let plan = out.makeTokenPlan(salt: Data(repeating: 3, count: 32))
+        #expect(plan.fakeForCloud(host: "openrouter.ai")?.hasPrefix("sk-or-v1-brm-") == true)
+        #expect(plan.fakeForAnthropic() == nil)
+        // Codex: external route at OpenRouter's root, keyed.
+        let codex = out.additionalTools.first { $0.tool == .codex }
+        #expect(codex?.authMode == .local)
+        #expect(codex?.localModelID == "openai/gpt-5.2")
+        #expect(out.localEngineURL == "https://openrouter.ai/api")
+        #expect(out.localEngineAPIKey == "sk-or-v1-real")
+        // Both count as ready on the key alone.
+        let ready = p.agentsReadyToStart(s)
+        #expect(ready.contains(.claude) && ready.contains(.codex))
+
+        // Back to Anthropic: the gateway fields clear.
+        s.agentTiers[.claude] = nil
+        let back = out.overlaidWithGlobalModels(s)
+        #expect(back.claudeGatewayBaseURL == nil)
+        #expect(back.claudeGatewayModels.isEmpty)
+        #expect(back.apiKey == "sk-ant")
+        #expect(LiveModelRefresh.agentsNeedingRestart(from: out, to: back).contains(.claude))
+    }
+
     /// A live model change restarts only the agents whose staging moved.
     @Test("Only agents whose credential or model changed restart")
     func agentsNeedingRestart() {

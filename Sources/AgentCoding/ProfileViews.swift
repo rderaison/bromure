@@ -906,7 +906,7 @@ struct ProfileEditorView: View {
                 case .openai:    return codexAccountSavedAt?()
                 case .xai:       return grokAccountSavedAt?()
                 case .moonshot:  return kimiAccountSavedAt?()
-                case .zai, .bedrock, .custom: return nil
+                case .zai, .bedrock, .openrouter, .custom: return nil
                 }
             },
             register: { provider in
@@ -915,7 +915,7 @@ struct ProfileEditorView: View {
                 case .openai:    onRegisterCodex?()
                 case .xai:       onRegisterGrok?()
                 case .moonshot:  onRegisterKimi?()
-                case .zai, .bedrock, .custom: break
+                case .zai, .bedrock, .openrouter, .custom: break
                 }
             },
             forget: { provider in
@@ -924,7 +924,7 @@ struct ProfileEditorView: View {
                 case .openai:    onForgetCodex?()
                 case .xai:       onForgetGrok?()
                 case .moonshot:  onForgetKimi?()
-                case .zai, .bedrock, .custom: break
+                case .zai, .bedrock, .openrouter, .custom: break
                 }
             },
             fetchModels: { provider, useSubscription, apiKey, completion in
@@ -932,8 +932,10 @@ struct ProfileEditorView: View {
                 // with the credential the PANE holds — global or a workspace
                 // override's own. Providers with no matching tool (z.ai, custom)
                 // fall back to the static list — return empty.
-                guard let tool = provider.fusionTool,
-                      let fetch = onFetchFusionModels else { completion([]); return }
+                guard let tool = provider.fusionTool, let fetch = onFetchFusionModels else {
+                    ModelsSettingsView.fetchCompatibleModels(provider, apiKey: apiKey, completion: completion)
+                    return
+                }
                 fetch(tool, useSubscription ? .subscription : .token, apiKey, completion)
             })
     }

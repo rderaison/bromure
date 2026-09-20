@@ -7893,6 +7893,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // A workspace's own model settings (or dropping them to inherit the
             // global ones) change what the overlay stages for every agent.
             || old.modelOverride != new.modelOverride
+            || old.claudeGatewayBaseURL != new.claudeGatewayBaseURL
+            || old.claudeGatewayModels != new.claudeGatewayModels
             // Approval-gate toggles flip a credential's consentCredentialID in the
             // token map, so the live refresh must re-emit it.
             || old.apiKeyRequiresApproval != new.apiKeyRequiresApproval
