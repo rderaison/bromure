@@ -3216,6 +3216,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                           let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
                     else { return ["error": "no session on stage"] }
                     return pane.debugComposerKey(name)
+                case "drop":
+                    // Attach a host file to the composer, as a drop would.
+                    guard let path = params["path"] as? String,
+                          let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugDropFile(path)
+                case "drop-images":
+                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugDropImages()
                 case "sessions":
                     let model = self.unifiedWindow?.listModel
                     return ["filePaneOpen": self.unifiedWindow?.filePaneOpen ?? false,

@@ -5,9 +5,35 @@ import Testing
 /// The beautified view stages dropped files in the guest at a path derived from
 /// the (attacker-influenced) filename. These pin that a malicious name can never
 /// escape the staging dir — `/` and `..` are neutralized, so every drop lands as
-/// a direct child of `/tmp/bromure-drops`.
+/// a direct child of `GuestDrop.baseDir`.
 @Suite("GuestDrop path safety")
 struct GuestDropTests {
+
+    @Test("drops live in the home image, as direct children of the drops dir")
+    func dropsDirInHome() {
+        #expect(GuestDrop.baseDir.hasPrefix("/home/ubuntu/"))
+        let p = GuestDrop.path(index: 0, name: "photo.png")
+        #expect(p == GuestDrop.baseDir + "/0_photo.png")
+    }
+
+    @Test("a send's stamp makes the same name land at a new path each time")
+    func stampsDiffer() {
+        let a = GuestDrop.stamp(), b = GuestDrop.stamp()
+        #expect(a != b)
+        #expect(a.count == "20260919-213000-ab12".count)
+        // The stamp survives the name cleanup, so the path carries it.
+        #expect(GuestDrop.path(index: 0, name: "\(a)_photo.png").contains(a))
+    }
+
+    @Test("imagePaths finds the drop images a turn names, old dir included")
+    func imagePathsInTurn() {
+        let img = GuestDrop.baseDir + "/0_20260919-213000-ab12_photo.png"
+        let doc = GuestDrop.baseDir + "/1_20260919-213000-ab12_notes.pdf"
+        let old = GuestDrop.legacyBaseDir + "/0_b1_shot.JPG"
+        let text = "Look at \(img) and \(doc)\nalso \(old) and \(img) plus /home/ubuntu/other.png"
+        #expect(GuestDrop.imagePaths(in: text) == [img, old])
+        #expect(GuestDrop.imagePaths(in: "no drops here").isEmpty)
+    }
 
     @Test("safeName strips separators and traversal sequences")
     func safeNameNeutralizes() {

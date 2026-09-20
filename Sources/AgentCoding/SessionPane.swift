@@ -1,6 +1,7 @@
 import AppKit
 import SandboxEngine
 import SwiftUI
+import UniformTypeIdentifiers
 @preconcurrency import Virtualization
 
 /// How a session pane presents the running agent: the raw libghostty terminal,
@@ -370,6 +371,20 @@ final class SessionPane {
             "editing": host.window?.firstResponder === editor,
             "textLength": (editor.string as NSString).length,
         ]
+    }
+    /// Debug: attach a host file to the composer, as a drop on the window would.
+    func debugDropFile(_ hostPath: String) -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        let url = URL(fileURLWithPath: (hostPath as NSString).expandingTildeInPath)
+        guard let data = try? Data(contentsOf: url) else { return ["error": "unreadable: \(hostPath)"] }
+        let isImage = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
+        m.drop([DroppedFile(name: url.lastPathComponent, data: data, isImage: isImage)])
+        return ["ok": true, "pending": m.pendingAttachments.count, "bytes": data.count, "image": isImage]
+    }
+    /// Debug: the drop images the chat holds, by guest path.
+    func debugDropImages() -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        return ["ok": true, "images": m.imagesByPath.mapValues { $0.count }]
     }
     /// Debug: press one of the composer's routed keys (return, option-return,
     /// escape, up, down, tab) — the same path a keystroke takes.

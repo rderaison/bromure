@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -182,7 +183,36 @@ enum GuestDrop {
     /// Fixed staging dir. Absolute (no `$HOME` resolution needed), so the guest
     /// paths are deterministic on the host — which lets the drop echo them and
     /// render thumbnails against the same paths the real transcript will show.
-    static let baseDir = "/tmp/bromure-drops"
+    /// Inside the home image, so a drop outlives a reboot of the machine and a
+    /// turn that references it can still be read back later.
+    static let baseDir = "/home/ubuntu/.bromure/drops"
+    /// Where drops landed before they moved into the home: still recognized
+    /// in old turns (the files themselves are gone with the reboot).
+    static let legacyBaseDir = "/tmp/bromure-drops"
+    /// What a dropped file's name is prefixed with per send, so two sends of
+    /// "photo.png" never share a path — the thumbnail of an old turn must not
+    /// turn into the newest drop's picture.
+    static func stamp(now: Date = Date()) -> String {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        return fmt.string(from: now) + "-" + String(UUID().uuidString.prefix(4)).lowercased()
+    }
+    private static let imageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tiff", "tif", "bmp",
+    ]
+    /// The drop paths in a turn's text that name images, in order.
+    static func imagePaths(in text: String) -> [String] {
+        var out: [String] = []
+        for tok in text.split(whereSeparator: { $0.isWhitespace }) {
+            let path = String(tok)
+            guard path.hasPrefix(baseDir + "/") || path.hasPrefix(legacyBaseDir + "/"),
+                  imageExtensions.contains((path as NSString).pathExtension.lowercased()),
+                  !out.contains(path) else { continue }
+            out.append(path)
+        }
+        return out
+    }
     /// Raw bytes per file-op write request — base64 of a chunk stays under the
     /// guest's ~10 MB request cap. (A file-op payload rides base64 inside JSON,
     /// so unlike a shell `printf` it isn't bound by the kernel's 128 KB
@@ -231,6 +261,31 @@ enum GuestDrop {
         return ops
     }
 
+}
+
+/// Dropped images kept on this Mac by their guest path, so a turn that
+/// references one shows its thumbnail after a remount or a relaunch without
+/// asking the guest — which is asked only for images this Mac never saw
+/// (sent from another client, or before the cache). Paths carry a per-send
+/// stamp, so a path names one picture for good.
+enum DropImageCache {
+    private static let dir: URL = {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return base.appendingPathComponent("BromureAC/drop-images", isDirectory: true)
+    }()
+
+    private static func file(for path: String) -> URL {
+        let digest = SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+        return dir.appendingPathComponent(digest)
+    }
+
+    static func load(_ path: String) -> Data? { try? Data(contentsOf: file(for: path)) }
+
+    static func store(_ data: Data, for path: String) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? data.write(to: file(for: path), options: .atomic)
+    }
 }
 
 /// Reconciles the raw `isWorking()` signal with a user interrupt. A plain Esc
@@ -295,7 +350,12 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Dropped image bytes keyed by their (deterministic) guest path, so the
     /// view can render a thumbnail wherever that path appears in the transcript
     /// — persisting across polls (the real user turn carries the same path).
+    /// Filled by a send, from this Mac's cache, or read back from the guest
+    /// (`ensureDropImages`) for turns this view never saw sent.
     @Published var imagesByPath: [String: Data] = [:]
+    private var dropImagesFetching: Set<String> = []
+    private var dropImagesMissing: Set<String> = []
+    private static let maxDropImageBytes = 25 * 1024 * 1024
 
     var accent: Color { provider.accent }
 
@@ -540,6 +600,7 @@ final class BeautifiedSessionModel: ObservableObject {
         emptyParseStreak = 0
         if parsed != parsedItems {
             parsedItems = parsed
+            ensureDropImages()
             // Real transcript progress ⇒ any earlier terminal card is stale.
             if failure != nil || prompt != nil {
                 let wasLogin = prompt?.kind == .login
@@ -648,9 +709,53 @@ final class BeautifiedSessionModel: ObservableObject {
     /// chips) until the user hits Send — TUI parity: the drop attaches, Send
     /// transmits your text plus the staged paths as ONE message.
     @Published var pendingAttachments: [DroppedFile] = []
-    /// Per-send batch counter — prefixes staged names so consecutive sends
-    /// can't overwrite each other's files in the fixed staging dir.
-    private var batchCounter = 0
+
+    /// The images user turns reference by their drop path that this view
+    /// doesn't hold: this Mac's cache first, else read back from the guest
+    /// (a turn sent from another client, or before the cache existed), once
+    /// per path — a file that isn't there stays missing.
+    private func ensureDropImages() {
+        for item in parsedItems {
+            guard case .userText(let text) = item.kind else { continue }
+            for path in GuestDrop.imagePaths(in: text)
+            where imagesByPath[path] == nil && !dropImagesFetching.contains(path)
+                && !dropImagesMissing.contains(path) {
+                if let cached = DropImageCache.load(path) {
+                    imagesByPath[path] = cached
+                    continue
+                }
+                dropImagesFetching.insert(path)
+                Task { [weak self] in
+                    guard let self else { return }
+                    let data = await self.readGuestFile(path, limit: Self.maxDropImageBytes)
+                    self.dropImagesFetching.remove(path)
+                    if let data, !data.isEmpty {
+                        self.imagesByPath[path] = data
+                        DropImageCache.store(data, for: path)
+                    } else {
+                        self.dropImagesMissing.insert(path)
+                    }
+                }
+            }
+        }
+    }
+
+    /// A guest file over the file-op read plane, chunked; nil when it can't
+    /// be read or exceeds `limit`.
+    private func readGuestFile(_ path: String, limit: Int) async -> Data? {
+        var out = Data()
+        let chunk = 4 * 1024 * 1024
+        while true {
+            guard let resp = await provider.guestFileOp(
+                    ["op": "read", "path": path, "offset": out.count, "length": chunk]),
+                  let b64 = resp["data"] as? String, let piece = Data(base64Encoded: b64)
+            else { return nil }
+            out.append(piece)
+            guard out.count <= limit else { return nil }
+            let eof = (resp["eof"] as? Bool) ?? (resp["eof"] as? Int).map { $0 != 0 } ?? piece.isEmpty
+            if eof || piece.isEmpty { return out }
+        }
+    }
 
     /// Drop handler: queue the files as pending attachments. Nothing is sent
     /// until the user hits Send.
@@ -683,14 +788,17 @@ final class BeautifiedSessionModel: ObservableObject {
         sending = true
 
         // Deterministic guest paths for this batch (computed before staging so
-        // the optimistic echo + thumbnails are instant and match what lands).
-        batchCounter += 1
-        let batch = batchCounter
+        // the optimistic echo + thumbnails are instant and match what lands),
+        // stamped so no later send reuses them.
+        let stamp = GuestDrop.stamp()
         let prefixed = atts.map {
-            DroppedFile(name: "b\(batch)_\($0.name)", data: $0.data, isImage: $0.isImage)
+            DroppedFile(name: "\(stamp)_\($0.name)", data: $0.data, isImage: $0.isImage)
         }
         let attPaths = prefixed.enumerated().map { GuestDrop.path(index: $0.offset, name: $0.element.name) }
-        for (i, f) in prefixed.enumerated() where f.isImage { imagesByPath[attPaths[i]] = f.data }
+        for (i, f) in prefixed.enumerated() where f.isImage {
+            imagesByPath[attPaths[i]] = f.data
+            DropImageCache.store(f.data, for: attPaths[i])
+        }
 
         Task { [weak self] in
             guard let self else { return }
@@ -900,11 +1008,12 @@ final class BeautifiedSessionModel: ObservableObject {
         var tokens = Set(text.split(whereSeparator: { " \n\t".contains($0) }).map(String.init))
         tokens.insert(text)   // whole-string case: composer holds just the path
         var hits: [(token: String, file: DroppedFile)] = []
+        let stamp = GuestDrop.stamp()
         for tok in tokens {
             guard let url = Self.hostFileURL(tok),
                   let data = try? Data(contentsOf: url), data.count <= 25 * 1024 * 1024 else { continue }
             let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
-            hits.append((tok, DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg)))
+            hits.append((tok, DroppedFile(name: "\(stamp)_\(url.lastPathComponent)", data: data, isImage: isImg)))
         }
         guard !hits.isEmpty else { return text }
         let staged = await provider.stage(hits.map(\.file))
@@ -912,7 +1021,10 @@ final class BeautifiedSessionModel: ObservableObject {
         var out = text
         for (i, h) in hits.enumerated() {
             out = out.replacingOccurrences(of: h.token, with: staged[i])
-            if h.file.isImage { imagesByPath[staged[i]] = h.file.data }
+            if h.file.isImage {
+                imagesByPath[staged[i]] = h.file.data
+                DropImageCache.store(h.file.data, for: staged[i])
+            }
         }
         return out
     }
