@@ -3949,10 +3949,14 @@ public final class ProfileStore {
         } else if profile.bedrockEnabled {
             try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true,
                                    attributes: [.posixPermissions: NSNumber(value: 0o700)])
-            var env: [String: String] = [
-                "CLAUDE_CODE_USE_BEDROCK": "1",
-                "AWS_PROFILE": "default",
-            ]
+            var env: [String: String] = ["CLAUDE_CODE_USE_BEDROCK": "1"]
+            // A Bedrock API key (fake — swapped on the wire) instead of the
+            // AWS credential chain; Claude Code reads AWS_BEARER_TOKEN_BEDROCK.
+            if let fake = tokenPlan?.fakeForBedrock() {
+                env["AWS_BEARER_TOKEN_BEDROCK"] = fake
+            } else {
+                env["AWS_PROFILE"] = "default"
+            }
             let region = awsCreds.region.trimmingCharacters(in: .whitespaces)
             if !region.isEmpty {
                 env["AWS_REGION"] = region
@@ -4359,7 +4363,8 @@ public final class ProfileStore {
     /// workspaces (whose per-profile bogus key differs from the approval
     /// the base workspace's home carries).
     public func finalizeHomeSeed(for profile: Profile, seedDir: URL,
-                                 anthropicEnvKey: String? = nil) throws {
+                                 anthropicEnvKey: String? = nil,
+                                 bedrockBearerFake: String? = nil) throws {
         let files = seedDir.appendingPathComponent("files", isDirectory: true)
         let importedPaths = Set(profile.importedConfigFiles.map(\.path))
         var dirLines: [String] = []
@@ -4441,10 +4446,9 @@ public final class ProfileStore {
             spec["approvedApiKeySuffix"] = String(key.suffix(20))
         }
         if profile.bedrockEnabled {
-            var env: [String: String] = [
-                "CLAUDE_CODE_USE_BEDROCK": "1",
-                "AWS_PROFILE": "default",
-            ]
+            var env: [String: String] = ["CLAUDE_CODE_USE_BEDROCK": "1"]
+            if let bedrockBearerFake { env["AWS_BEARER_TOKEN_BEDROCK"] = bedrockBearerFake }
+            else { env["AWS_PROFILE"] = "default" }
             let region = profile.awsCredentials.region.trimmingCharacters(in: .whitespaces)
             if !region.isEmpty { env["AWS_REGION"] = region }
             let modelID = profile.bedrockModelID.trimmingCharacters(in: .whitespaces)

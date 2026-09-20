@@ -71,7 +71,9 @@ public extension ModelSettings {
                         registerProvider(prov, apiKey: nil, useSubscription: true)
                     }
                 case .bedrock, .local:
-                    break   // bedrock isn't a global provider; local handled below
+                    // Bedrock stays with its workspace (see
+                    // `Profile.bedrockModelOverride`); local handled below.
+                    break
                 }
             }
 
@@ -89,6 +91,33 @@ public extension ModelSettings {
         }
 
         return settings
+    }
+}
+
+public extension Profile {
+    /// Whether Claude Code in this workspace was set to authenticate through
+    /// Amazon Bedrock under the old per-tool auth picker.
+    var usesBedrockAuth: Bool {
+        allToolSpecs.contains { $0.tool == .claude && $0.authMode == .bedrock }
+    }
+
+    /// The per-workspace override that keeps a Bedrock workspace on Bedrock
+    /// after the redesign: the global settings plus Bedrock registered and
+    /// Claude Code's model pointed at it (its old default model id, or the
+    /// placeholder the picker showed). nil when the workspace isn't Bedrock or
+    /// already has an override of its own.
+    func bedrockModelOverride(global: ModelSettings) -> ModelSettings? {
+        guard modelOverride == nil, usesBedrockAuth else { return nil }
+        var s = global
+        if !(s.credential(.bedrock)?.isUsable ?? false) {
+            s.providers.append(ProviderCredential(provider: .bedrock))
+        }
+        let id = bedrockModelID.trimmingCharacters(in: .whitespaces)
+        var claude = s.agentTiers[.claude] ?? [:]
+        claude[.medium] = ModelRef(source: .provider(.bedrock),
+                                   modelID: id.isEmpty ? ProviderModels.bedrockPlaceholder : id)
+        s.agentTiers[.claude] = claude
+        return s
     }
 }
 

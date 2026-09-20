@@ -28,7 +28,7 @@ extension Profile.Tool {
 
 @MainActor
 final class AgentSessionEngine {
-    private weak var delegate: ACAppDelegate?
+    weak var delegate: ACAppDelegate?
     let store: AgentSessionStore
 
     private var pendingBoots: Set<UUID> = []

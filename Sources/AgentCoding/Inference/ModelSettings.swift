@@ -17,7 +17,7 @@ import Foundation
 /// A model provider Bromure can hold credentials for. `.custom` is any
 /// OpenAI-compatible endpoint the user supplies a base URL for.
 public enum ModelProvider: String, Codable, CaseIterable, Sendable {
-    case anthropic, openai, xai, zai, moonshot, custom
+    case anthropic, openai, xai, zai, moonshot, bedrock, custom
 
     public var displayName: String {
         switch self {
@@ -26,12 +26,15 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         case .xai:       return "xAI (Grok)"
         case .zai:       return "z.ai (GLM)"
         case .moonshot:  return "Moonshot (Kimi)"
+        case .bedrock:   return "Amazon Bedrock (Claude)"
         case .custom:    return "Custom (OpenAI-compatible)"
         }
     }
 
     /// The upstream API host the MITM scopes a fake→real key swap to (empty for
-    /// `.custom`, whose host is derived from the user's base URL).
+    /// `.custom`, whose host is derived from the user's base URL, and for
+    /// `.bedrock`, which has no key at all — the proxy SigV4-signs each request
+    /// with the workspace's AWS credentials).
     public var apiHost: String {
         switch self {
         case .anthropic: return "api.anthropic.com"
@@ -39,6 +42,7 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         case .xai:       return "api.x.ai"
         case .zai:       return "api.z.ai"
         case .moonshot:  return "api.moonshot.ai"
+        case .bedrock:   return ""
         case .custom:    return ""
         }
     }
@@ -48,12 +52,18 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
     public enum Wire: String, Codable, Sendable { case anthropic, openaiChat, openaiResponses }
     public var wire: Wire {
         switch self {
-        case .anthropic:             return .anthropic
+        case .anthropic, .bedrock:   return .anthropic
         case .openai:                return .openaiResponses
         case .xai, .zai, .moonshot,
              .custom:                return .openaiChat
         }
     }
+
+    /// Amazon Bedrock is Claude Code's own alternative route (its
+    /// `CLAUDE_CODE_USE_BEDROCK` mode): it carries no key or login of its own
+    /// — every workspace authenticates with the AWS credentials in its own
+    /// Credentials → AWS section — and it can power no other agent.
+    public var isBedrock: Bool { self == .bedrock }
 
     /// Whether an interactive subscription (OAuth) login can be captured for
     /// this provider (a throwaway-VM `<tool> login`, stored host-side). Anthropic
@@ -63,7 +73,7 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
     public var supportsSubscription: Bool {
         switch self {
         case .anthropic, .openai, .xai, .moonshot: return true
-        case .zai, .custom:                        return false
+        case .zai, .bedrock, .custom:              return false
         }
     }
 }
@@ -100,23 +110,72 @@ public struct ProviderCredential: Codable, Equatable, Sendable {
     public var useSubscription: Bool
     /// OpenAI-compatible base URL — `.custom` only.
     public var baseURL: String?
+    /// AWS region — `.bedrock` only. Empty/nil: each workspace's own AWS
+    /// region (Credentials → AWS), else `Bedrock.defaultRegion`.
+    public var region: String?
 
     public init(provider: ModelProvider, apiKey: String? = nil,
-                useSubscription: Bool = false, baseURL: String? = nil) {
+                useSubscription: Bool = false, baseURL: String? = nil,
+                region: String? = nil) {
         self.provider = provider
         self.apiKey = apiKey
         self.useSubscription = useSubscription
         self.baseURL = baseURL
+        self.region = region
+    }
+
+    /// Bedrock: an API key was pasted (bearer auth); otherwise the workspace's
+    /// AWS credentials sign each request (SigV4, host-side).
+    public var bedrockUsesAPIKey: Bool {
+        provider == .bedrock && !(apiKey ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// Configured enough to use: a subscription, an API key, or (custom) a URL.
+    /// Bedrock is usable as soon as it's registered — its credentials are each
+    /// workspace's own AWS ones.
     public var isUsable: Bool {
+        if provider == .bedrock { return true }
         if useSubscription { return true }
         if let k = apiKey, !k.trimmingCharacters(in: .whitespaces).isEmpty { return true }
         if provider == .custom, let u = baseURL, !u.trimmingCharacters(in: .whitespaces).isEmpty {
             return true
         }
         return false
+    }
+}
+
+/// Amazon Bedrock endpoints (verified against the Bedrock user guide,
+/// "Endpoints supported by Amazon Bedrock"): the `bedrock-runtime` endpoint
+/// serves the OpenAI-compatible Chat Completions / Responses APIs under
+/// `/openai/v1` and the Anthropic Messages API, with SigV4 (service `bedrock`)
+/// or a Bedrock API key as `Authorization: Bearer`. It has no `GET /models`.
+public enum Bedrock {
+    public static let defaultRegion = "us-east-1"
+
+    public static func runtimeHost(region: String) -> String {
+        "bedrock-runtime.\(region).amazonaws.com"
+    }
+    /// The base the external-engine route appends `v1/chat/completions` to.
+    public static func openAIBase(region: String) -> String {
+        "https://\(runtimeHost(region: region))/openai"
+    }
+    public static func isRuntimeHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h.hasPrefix("bedrock-runtime.") && h.hasSuffix(".amazonaws.com")
+    }
+    /// `bedrock-runtime.eu-west-1.amazonaws.com` → `eu-west-1`.
+    public static func region(fromHost host: String) -> String? {
+        guard isRuntimeHost(host) else { return nil }
+        let parts = host.lowercased().split(separator: ".")
+        return parts.count >= 4 ? String(parts[1]) : nil
+    }
+    /// The region a workspace uses: the provider's, else the workspace's AWS
+    /// region, else the default.
+    public static func region(credential: ProviderCredential?, workspaceRegion: String) -> String {
+        let fromCred = (credential?.region ?? "").trimmingCharacters(in: .whitespaces)
+        if !fromCred.isEmpty { return fromCred }
+        let ws = workspaceRegion.trimmingCharacters(in: .whitespaces)
+        return ws.isEmpty ? defaultRegion : ws
     }
 }
 

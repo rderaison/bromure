@@ -26,7 +26,7 @@ extension ACAppDelegate {
                 case .openai:    return e.codexSubscriptionStore.record(for: nil)?.savedAt
                 case .xai:       return e.grokSubscriptionStore.record(for: nil)?.savedAt
                 case .moonshot:  return e.kimiSubscriptionStore.record(for: nil)?.savedAt
-                case .zai, .custom: return nil
+                case .zai, .bedrock, .custom: return nil
                 }
             },
             register: { [weak self] provider in self?.beginWizardSignIn(provider: provider) },
@@ -37,7 +37,7 @@ extension ACAppDelegate {
                 case .openai:    try? e.codexSubscriptionStore.forget(for: nil)
                 case .xai:       try? e.grokSubscriptionStore.forget(for: nil)
                 case .moonshot:  try? e.kimiSubscriptionStore.forget(for: nil)
-                case .zai, .custom: return
+                case .zai, .bedrock, .custom: return
                 }
                 NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
             },
@@ -63,7 +63,7 @@ extension ACAppDelegate {
         case .openai:    sub = .codex
         case .xai:       sub = .grok
         case .moonshot:  sub = .kimi
-        case .zai, .custom: return
+        case .zai, .bedrock, .custom: return
         }
         wizard.signIn = OnboardingWizardModel.SignIn(
             provider: provider, providerName: sub.displayName,

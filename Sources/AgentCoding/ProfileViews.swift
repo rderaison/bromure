@@ -906,7 +906,7 @@ struct ProfileEditorView: View {
                 case .openai:    return codexAccountSavedAt?()
                 case .xai:       return grokAccountSavedAt?()
                 case .moonshot:  return kimiAccountSavedAt?()
-                case .zai, .custom: return nil
+                case .zai, .bedrock, .custom: return nil
                 }
             },
             register: { provider in
@@ -915,7 +915,7 @@ struct ProfileEditorView: View {
                 case .openai:    onRegisterCodex?()
                 case .xai:       onRegisterGrok?()
                 case .moonshot:  onRegisterKimi?()
-                case .zai, .custom: break
+                case .zai, .bedrock, .custom: break
                 }
             },
             forget: { provider in
@@ -924,7 +924,7 @@ struct ProfileEditorView: View {
                 case .openai:    onForgetCodex?()
                 case .xai:       onForgetGrok?()
                 case .moonshot:  onForgetKimi?()
-                case .zai, .custom: break
+                case .zai, .bedrock, .custom: break
                 }
             },
             fetchModels: { provider, useSubscription, apiKey, completion in

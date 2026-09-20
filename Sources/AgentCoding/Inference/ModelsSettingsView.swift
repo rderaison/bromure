@@ -173,10 +173,33 @@ struct ModelsSettingsView: View {
 
     @ViewBuilder private func sourcePopover(_ source: Source) -> some View {
         switch source {
-        case .provider(let p): providerPopover(p)
-        case .customServer:    customServerPopover
-        case .onDevice:        onDevicePopover
+        case .provider(.bedrock): bedrockPopover
+        case .provider(let p):    providerPopover(p)
+        case .customServer:       customServerPopover
+        case .onDevice:           onDevicePopover
         }
+    }
+
+    /// Bedrock has no key or login here: enabling it says "Claude Code goes
+    /// through Amazon Bedrock", and each workspace signs with the AWS
+    /// credentials in its own Credentials → AWS section.
+    @ViewBuilder private var bedrockPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(ModelProvider.bedrock.displayName).font(.headline)
+            Text("Any agent can run on Amazon Bedrock: Claude Code natively, the others through Bedrock's OpenAI-compatible API. Sign requests with each workspace's own AWS credentials (Credentials → AWS), or paste a Bedrock API key.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Toggle("Use Amazon Bedrock", isOn: bedrockEnabled)
+            if settings.credential(.bedrock)?.isUsable == true {
+                TextField("AWS region", text: bedrockRegion,
+                          prompt: Text(verbatim: "\(Bedrock.defaultRegion) — empty: each workspace's AWS region"))
+                    .textFieldStyle(.roundedBorder)
+                SecureField("Bedrock API key (optional — else AWS credentials sign)", text: bedrockKey)
+                    .textFieldStyle(.roundedBorder)
+                Text("Model ids as Bedrock names them, e.g. \(ProviderModels.bedrockPlaceholder) — pick them per agent on the right, or type your own.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
     }
 
     // MARK: Source popovers
@@ -450,6 +473,9 @@ struct ModelsSettingsView: View {
         if cred.useSubscription {
             return agent != nil && agent == provider.nativeAgent
         }
+        // Bedrock is pay-per-use (a key or the workspace's AWS account), so
+        // like an API key it may power any agent: Claude Code natively, the
+        // others through Bedrock's OpenAI-compatible surface.
         return true
     }
     private var installedOnDevice: [CatalogModel] {
@@ -489,6 +515,7 @@ struct ModelsSettingsView: View {
     private func sourceSubtitle(_ source: Source) -> String? {
         switch source {
         case .provider(let p):
+            if p.isBedrock { return settings.credential(p)?.isUsable == true ? "AWS credentials" : nil }
             if subscription?.savedAt(p) != nil { return "subscription" }
             if settings.credential(p)?.isUsable == true { return "API key" }
             return nil
@@ -530,7 +557,10 @@ struct ModelsSettingsView: View {
     /// set explicitly (never clobbers a deliberate choice).
     private func autofillAgent(for provider: ModelProvider) {
         guard let agent = provider.nativeAgent else { return }   // z.ai / custom: no native agent
-        let tiers: [ModelTier] = agent.usesAllTiers ? [.large, .medium, .small] : [.medium]
+        // Bedrock pins one model (Claude Code's ANTHROPIC_MODEL); the other
+        // tiers keep inheriting.
+        let tiers: [ModelTier] = (agent.usesAllTiers && !provider.isBedrock)
+            ? [.large, .medium, .small] : [.medium]
         for tier in tiers where explicitRef(agent, tier) == nil {
             if let id = modelOptions(for: provider, tier: tier).first {
                 assign(agent, tier, source: .provider(provider), modelID: id)
@@ -679,6 +709,45 @@ struct ModelsSettingsView: View {
                 fetchProviderModels(provider)
                 if !txt.isEmpty { autofillAgent(for: provider) }  // pre-fill its agent
             })
+    }
+    private var bedrockEnabled: Binding<Bool> {
+        Binding(
+            get: { settings.credential(.bedrock)?.isUsable ?? false },
+            set: { on in
+                mutate { s in
+                    s.providers.removeAll { $0.provider == .bedrock }
+                    if on { s.providers.append(ProviderCredential(provider: .bedrock)) }
+                    else {
+                        // Off: every Bedrock-pinned tier points at nothing
+                        // now — drop them so those agents inherit again.
+                        for (t, r) in s.tiers where r.source == .provider(.bedrock) { s.tiers[t] = nil }
+                        for a in s.agentTiers.keys {
+                            var t = s.agentTiers[a] ?? [:]
+                            for (tier, r) in t where r.source == .provider(.bedrock) { t[tier] = nil }
+                            s.agentTiers[a] = t.isEmpty ? nil : t
+                        }
+                    }
+                }
+                if on { autofillAgent(for: .bedrock) }
+            })
+    }
+    private var bedrockRegion: Binding<String> {
+        Binding(get: { settings.credential(.bedrock)?.region ?? "" },
+                set: { txt in
+                    mutate { s in
+                        guard let i = s.providers.firstIndex(where: { $0.provider == .bedrock }) else { return }
+                        s.providers[i].region = txt.trimmingCharacters(in: .whitespaces).isEmpty ? nil : txt
+                    }
+                })
+    }
+    private var bedrockKey: Binding<String> {
+        Binding(get: { settings.credential(.bedrock)?.apiKey ?? "" },
+                set: { txt in
+                    mutate { s in
+                        guard let i = s.providers.firstIndex(where: { $0.provider == .bedrock }) else { return }
+                        s.providers[i].apiKey = txt.isEmpty ? nil : txt
+                    }
+                })
     }
     private var localServerEnabled: Binding<Bool> {
         Binding(
@@ -831,6 +900,12 @@ struct WorkspaceModelsSettingsView: View {
 // MARK: - Static model suggestions (offline seed / fallback)
 
 enum ProviderModels {
+    /// Bedrock has no model listing on the bedrock-runtime endpoint, so the
+    /// picker offers the ids the Claude Code and Bedrock docs use as examples
+    /// (cross-region `us.` inference profiles; OpenAI-compatible GPT OSS) and
+    /// the user types their own via "Custom id…" when theirs differ.
+    static let bedrockPlaceholder = "us.anthropic.claude-sonnet-4-6"
+
     /// The full curated lineup for a provider (every tier), merged with the live
     /// list by the picker so a curated model is always selectable.
     static func allSuggestions(for provider: ModelProvider) -> [String] {
@@ -855,12 +930,18 @@ enum ProviderModels {
         case .xai:      return ["grok-4", "grok-4-fast", "grok-3"]
         case .zai:      return ["glm-5.3", "glm-5.3-flash", "glm-4.6"]
         case .moonshot: return ["kimi-k2.5", "kimi-k2", "kimi-k2-turbo-preview"]
+        case .bedrock:
+            switch tier {
+            case .large:  return ["us.anthropic.claude-opus-4-8", bedrockPlaceholder]
+            case .medium: return [bedrockPlaceholder, "openai.gpt-oss-120b-1:0"]
+            case .small:  return ["us.anthropic.claude-haiku-4-5-20251001-v1:0", "openai.gpt-oss-20b-1:0"]
+            }
         case .custom:   return []
         }
     }
 
     static func ordered(_ live: [String], for provider: ModelProvider, tier: ModelTier) -> [String] {
-        guard provider == .anthropic else { return live }
+        guard provider == .anthropic || provider == .bedrock else { return live }
         let hints: [String]
         switch tier {
         case .large:  hints = ["opus", "fable"]
@@ -875,7 +956,7 @@ enum ProviderModels {
 
     static func capabilities(for modelID: String) -> ModelCapabilities? {
         let id = modelID.lowercased()
-        if id.hasPrefix("claude") {
+        if id.hasPrefix("claude") || id.contains(".anthropic.claude") {
             return ModelCapabilities(contextWindow: 200_000, reasoning: true, inputs: [.text, .image])
         }
         if id.hasPrefix("gpt-5") || id.hasPrefix("gpt-4") || id.hasPrefix("o4") || id.hasPrefix("o3") {

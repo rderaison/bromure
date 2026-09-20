@@ -361,7 +361,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
             if req.method == "GET",
                req.path.split(separator: "?").first.map(String.init) == "/v1/models",
                let pid = profileID(in: req), let ext = shared.externalEngine(for: pid) {
-                return externalModels(ext)
+                return externalModels(ext, pid: pid)
             }
             return passthrough(req, enginePort: enginePort)
         }
@@ -783,11 +783,9 @@ final class InferenceRepairProxy: @unchecked Sendable {
         var r = URLRequest(url: config.base.appendingPathComponent("v1/chat/completions"))
         r.httpMethod = "POST"
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let k = config.apiKey, !k.isEmpty {
-            r.setValue("Bearer \(k)", forHTTPHeaderField: "Authorization")
-        }
         r.httpBody = (try? JSONSerialization.data(
             withJSONObject: ExternalEngine.chatRequest(from: payload, wire: wire))) ?? Data()
+        ExternalEngine.authorize(&r, config: config)
         let (data, status) = syncData(r)
         guard status == 200, let data, !data.isEmpty,
               let chat = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -806,11 +804,19 @@ final class InferenceRepairProxy: @unchecked Sendable {
 
     /// Relay `GET /v1/models` to a workspace's external engine (readiness
     /// probes / model listings from the guest).
-    private static func externalModels(_ config: ExternalEngine.Config) -> Data {
-        var r = URLRequest(url: config.base.appendingPathComponent("v1/models"))
-        if let k = config.apiKey, !k.isEmpty {
-            r.setValue("Bearer \(k)", forHTTPHeaderField: "Authorization")
+    private static func externalModels(_ config: ExternalEngine.Config, pid: UUID?) -> Data {
+        // bedrock-runtime has no `GET /models`; answer with the model(s) this
+        // workspace was configured for, so CLIs that list before they chat
+        // (grok) see something to pick.
+        if config.isBedrock {
+            let ids = pid.flatMap { InferenceRepairProxy.shared.activeModel(for: $0) }.map { [$0] } ?? []
+            let body: [String: Any] = ["object": "list",
+                                       "data": ids.map { ["id": $0, "object": "model", "owned_by": "bedrock"] }]
+            return httpResponse(status: 200, headers: [("Content-Type", "application/json")],
+                                body: (try? JSONSerialization.data(withJSONObject: body)) ?? Data())
         }
+        var r = URLRequest(url: config.base.appendingPathComponent("v1/models"))
+        ExternalEngine.authorize(&r, config: config)
         let (data, status) = syncData(r)
         return httpResponse(status: status, headers: [("Content-Type", "application/json")],
                             body: data ?? Data())

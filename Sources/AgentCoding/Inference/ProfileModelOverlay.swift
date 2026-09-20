@@ -56,6 +56,13 @@ public extension Profile {
             p.additionalTools.append(ToolSpec(tool: tool, authMode: .token))
         }
 
+        // Claude Code via Amazon Bedrock: the workspace's own AWS credentials
+        // sign the requests (host-side), so the agent's auth is `.bedrock` and
+        // the staged ~/.claude/settings.json carries the Bedrock env. Decided
+        // here, applied to `p` after the per-agent pass (the pass borrows
+        // `p`'s fields inout, so it can't touch `p` itself).
+        var bedrock: (enabled: Bool, modelID: String)?
+
         // Resolve one agent: set its auth (+ return its local model id, if local).
         func applyAgent(tool: Tool, ompProvider: OmpProvider?, ompBaseURL: String?,
                         authMode: inout AuthMode, apiKey: inout String?) -> String? {
@@ -71,11 +78,37 @@ public extension Profile {
                 }
                 return ref.modelID
             }
+            if let ref, case .provider(.bedrock) = ref.source,
+               let cred = settings.credential(.bedrock), cred.isUsable {
+                let key = cred.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if tool == .claude {
+                    // Claude Code's own Bedrock mode (CLAUDE_CODE_USE_BEDROCK):
+                    // the key, if any, rides on the spec and is swapped on the
+                    // wire; without one the AWS resigner signs.
+                    authMode = .bedrock
+                    apiKey = (key ?? "").isEmpty ? nil : key
+                    bedrock = (true, ref.modelID)
+                    return nil
+                }
+                // Every other agent: Bedrock's OpenAI-compatible surface is an
+                // external engine — the guest talks to the host's repair proxy,
+                // which forwards (translating the wire) and authenticates
+                // host-side: the key as bearer, else SigV4 with the
+                // workspace's AWS credentials.
+                authMode = .local
+                anyLocal = true
+                let region = Bedrock.region(credential: cred, workspaceRegion: awsCredentials.region)
+                localServerBackend = (Bedrock.openAIBase(region: region),
+                                      (key ?? "").isEmpty ? nil : key)
+                return ref.modelID
+            }
             if let (mode, key) = Self.cloudAuth(tool: tool, ompProvider: ompProvider,
                                                 ompBaseURL: ompBaseURL, settings: settings,
                                                 subscribed: subscribed) {
                 authMode = mode
                 apiKey = key
+                // Settings moved Claude off Bedrock: drop the Bedrock env too.
+                if tool == .claude { bedrock = (false, "") }
             }
             return nil
         }
@@ -94,6 +127,18 @@ public extension Profile {
             p.additionalTools[i].authMode = mode
             p.additionalTools[i].apiKey = key
             if let lid { p.additionalTools[i].localModelID = lid }
+        }
+        if let bedrock {
+            p.bedrockEnabled = bedrock.enabled
+            if bedrock.enabled {
+                p.bedrockModelID = bedrock.modelID
+                // The provider's region wins over an empty workspace region
+                // (Claude Code reads AWS_REGION from the staged env).
+                if p.awsCredentials.region.trimmingCharacters(in: .whitespaces).isEmpty {
+                    p.awsCredentials.region = Bedrock.region(credential: settings.credential(.bedrock),
+                                                             workspaceRegion: "")
+                }
+            }
         }
 
         if anyLocal {
@@ -133,12 +178,29 @@ public extension Profile {
                 ?? settings.ref(for: agent, tier: .small)
             if let ref, ref.isLocal {
                 ready.insert(tool)
+            } else if let ref, case .provider(.bedrock) = ref.source {
+                // Bedrock: a pasted API key, else the workspace's AWS
+                // credentials must exist to sign with.
+                if let cred = settings.credential(.bedrock), cred.isUsable,
+                   cred.bedrockUsesAPIKey || awsCredentials.isUsable {
+                    ready.insert(tool)
+                }
             } else if Self.cloudAuth(tool: tool, ompProvider: ompProvider, ompBaseURL: ompBaseURL,
                                      settings: settings, subscribed: subscribed) != nil {
                 ready.insert(tool)
             }
         }
         return ready
+    }
+
+    /// Whether this (launch-time) profile reaches Amazon Bedrock with AWS
+    /// credentials: Claude Code's native mode, or the external-engine route
+    /// pointed at a bedrock-runtime host — both need the workspace's AWS
+    /// credentials resolved on the host before boot (SSO in particular).
+    var usesBedrockRoute: Bool {
+        if allToolSpecs.contains(where: { $0.authMode == .bedrock }) { return true }
+        if let host = localEngineBaseURL?.host, Bedrock.isRuntimeHost(host) { return true }
+        return false
     }
 
     /// The auth to apply to one cloud agent from the global credential of the
@@ -195,16 +257,17 @@ public extension ModelProvider {
         case .openai:    return .codex
         case .xai:       return .grok
         case .moonshot:  return .kimi
-        case .zai, .custom: return nil
+        case .zai, .bedrock, .custom: return nil
         }
     }
 
     /// The agent this provider natively powers — so registering the provider can
     /// pre-fill that agent's models. nil for provider-agnostic ones (z.ai/custom,
-    /// used via omp / the custom server).
+    /// used via omp / the custom server). Bedrock is Claude Code's alternative
+    /// route, so it pre-fills Claude too.
     var nativeAgent: ModelAgent? {
         switch self {
-        case .anthropic: return .claude
+        case .anthropic, .bedrock: return .claude
         case .openai:    return .codex
         case .xai:       return .grok
         case .moonshot:  return .kimi

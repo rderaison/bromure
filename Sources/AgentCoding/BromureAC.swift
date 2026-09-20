@@ -1705,6 +1705,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     lazy var mitmEngine: MitmEngine? = {
         do {
             let e = try MitmEngine()
+            // Amazon Bedrock as an external engine: the repair proxy signs its
+            // upstream calls with the workspace's AWS credentials, through the
+            // same consent-gated credential server every AWS call uses.
+            let awsCreds = e.awsCreds
+            ExternalEngine.awsSigner = { pid in
+                let hint = NSLocalizedString("for Amazon Bedrock model calls (signed on the host)", comment: "")
+                if case .material(let c) = await awsCreds.signingMaterial(for: pid, scopeHint: hint) { return c }
+                return nil
+            }
             // The proxy's conversation-request signal drives the sidebar's
             // animated "thinking" dots.
             e.traceStore.onConversationActivity = { [weak self] pid in
@@ -1816,6 +1825,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// only while the setup window is showing it.
     var onboarding: OnboardingWizardModel?
 
+    /// Per running workspace: the launch-time profile the agents were last
+    /// staged with (global model settings + host logins overlaid). A later
+    /// model/credential change diffs against it to decide which agents to
+    /// restart in place (LiveModelRefresh.swift).
+    var lastStagedProfiles: [UUID: Profile] = [:]
+    /// Debounced observer of the global Models settings (Combine).
+    var modelSettingsObserver: Any?
+
     /// If `url` is an OAuth authorize URL whose `redirect_uri` is a loopback
     /// callback (`http://127.0.0.1:<port>` or `localhost`), return that port —
     /// the signal to bridge the host's loopback into the guest. Otherwise nil.
@@ -1880,14 +1897,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let base = profile.localEngineBaseURL {
             let pid = profile.id
             let apiKey = profile.localEngineAPIKey
-            InferenceRepairProxy.shared.setExternalEngine(
-                pid, ExternalEngine.Config(base: base, apiKey: apiKey))
+            // Amazon Bedrock as the engine: a pasted Bedrock API key is a plain
+            // bearer; without one the host signs each request (SigV4) with the
+            // workspace's AWS credentials, resolved like any other AWS call.
+            var config = ExternalEngine.Config(base: base, apiKey: apiKey)
+            let bedrock = config.isBedrock
+            if bedrock, (apiKey ?? "").isEmpty, let region = Bedrock.region(fromHost: base.host ?? "") {
+                config.auth = .sigV4(profileID: pid, region: region)
+            }
+            InferenceRepairProxy.shared.setExternalEngine(pid, config)
             if let activeID = profile.activeModelID, !activeID.isEmpty {
                 InferenceRepairProxy.shared.setActiveModel(pid, repo: activeID)
                 // Refresh the cached context window (async): staging reads
                 // the cache, so the next restage/boot carries the server's
-                // real number instead of the 128k default.
-                EngineModelMeta.refresh(base: base, apiKey: apiKey, model: activeID)
+                // real number instead of the 128k default. (Not Bedrock: no
+                // model endpoints to ask.)
+                if !bedrock { EngineModelMeta.refresh(base: base, apiKey: apiKey, model: activeID) }
+            }
+            if bedrock {
+                Task { await InferenceService.shared.clearWorkspace(pid) }
+                InferenceRepairProxy.shared.startIfNeeded()
+                pane(for: pid)?.model.engineStatus = .ready(profile.activeModelID ?? "Amazon Bedrock")
+                InferenceLog.shared.record("[inference] Amazon Bedrock engine \(base.absoluteString) registered")
+                return
             }
             // A workspace that previously ran the BUILT-IN engine leaves its
             // model registration behind when it switches to an external
@@ -2348,6 +2380,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // ModelSettings from what the user already configured per-workspace so
         // the new "Models" pane opens pre-populated. Idempotent once configured.
         ModelSettingsStore.shared.seedIfEmpty(from: profiles + [store.loadTemplate()])
+        migrateBedrockWorkspaces()
+        installLiveModelRefresh()
         // Console-presence arbitration: track local input so agent browser
         // streams land on the console used last (server window vs a fat
         // client), and re-route live streams the moment the user changes
@@ -6743,6 +6777,96 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         renderSetup()
     }
 
+    /// Hand a workspace's AWS credentials to the host-side credential server:
+    /// static keys as they are; an SSO profile (or any Bedrock route, whose
+    /// requests the host signs) resolved through the SSO cache, with a refresh
+    /// loop that keeps the material current. Used at launch and again when a
+    /// live model change moves the workspace onto Bedrock.
+    @MainActor
+    func pushAWSCredentials(for profile: Profile, engine: MitmEngine) {
+        guard profile.awsCredentials.authMode == .ssoProfile || profile.usesBedrockRoute else {
+            engine.awsCreds.setCredentials(profile.awsCredentials, for: profile.id)
+            return
+        }
+        guard profile.awsCredentials.authMode == .ssoProfile else {
+            // Bedrock on static keys (or a Bedrock API key with no AWS
+            // credentials at all): nothing to resolve.
+            engine.awsCreds.setCredentials(profile.awsCredentials, for: profile.id)
+            return
+        }
+        let profileID = profile.id
+        let ssoProfileName = profile.awsCredentials.ssoProfileName
+        let awsCreds = profile.awsCredentials
+        ssoRefreshTasks[profileID]?.cancel()
+        FileHandle.standardError.write(Data(
+            "[sso] resolving credentials for SSO profile '\(ssoProfileName)'\n".utf8))
+        Task { [weak engine, weak self] in
+            guard let engine else { return }
+            do {
+                let resolved = try await AWSSSOResolver.resolve(
+                    profileName: ssoProfileName,
+                    progress: { msg in
+                        FileHandle.standardError.write(Data("[sso] \(msg)\n".utf8))
+                    }
+                )
+                var creds = awsCreds
+                creds.accessKeyID = resolved.accessKeyID
+                creds.secretAccessKey = resolved.secretAccessKey
+                creds.sessionToken = resolved.sessionToken
+                if creds.region.isEmpty { creds.region = resolved.region }
+                engine.awsCreds.setCredentials(creds, for: profileID)
+
+                self?.ssoRefreshTasks[profileID] = AWSSSOResolver.startRefreshLoop(
+                    profileName: ssoProfileName,
+                    initialExpiration: resolved.expiration,
+                    onRefresh: { [weak engine] newCreds in
+                        var updated = awsCreds
+                        updated.accessKeyID = newCreds.accessKeyID
+                        updated.secretAccessKey = newCreds.secretAccessKey
+                        updated.sessionToken = newCreds.sessionToken
+                        engine?.awsCreds.setCredentials(updated, for: profileID)
+                        FileHandle.standardError.write(Data(
+                            "[sso] refreshed credentials for '\(ssoProfileName)'\n".utf8))
+                    },
+                    onError: { error in
+                        FileHandle.standardError.write(Data(
+                            "[sso] refresh failed: \(error.localizedDescription)\n".utf8))
+                    }
+                )
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[sso] credential resolution failed: \(error.localizedDescription)\n".utf8))
+                engine.awsCreds.setCredentials(awsCreds, for: profileID)
+            }
+        }
+    }
+
+    /// A workspace whose Claude Code authenticated through Amazon Bedrock under
+    /// the old per-agent picker keeps doing so: it gets a per-workspace model
+    /// override (the global settings + Bedrock, Claude pointed at it), because
+    /// the launch overlay would otherwise re-auth Claude from the global
+    /// Anthropic provider. Idempotent — an override, once written, is the
+    /// user's to edit.
+    @MainActor
+    private func migrateBedrockWorkspaces() {
+        let global = ModelSettingsStore.shared.settings
+        var changed = false
+        for var p in profiles {
+            guard let override = p.bedrockModelOverride(global: global) else { continue }
+            p.modelOverride = override
+            do {
+                try store.save(p)
+                changed = true
+                InferenceLog.shared.record(
+                    "[models] \(p.name): kept Claude Code on Amazon Bedrock via a workspace override")
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[models] couldn't save the Bedrock override for \(p.name): \(error)\n".utf8))
+            }
+        }
+        if changed { profiles = store.loadAll() }
+    }
+
     /// Register imported agent API keys as global model providers. A provider
     /// the user already configured (key or subscription) is never clobbered.
     /// omp is provider-agnostic — no env var maps to it, so nothing to do.
@@ -7445,6 +7569,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // survive an edit made just before it.
         let priorRunning = runningSessions[new.id]?.profile
         runningSessions[new.id]?.profile = new
+        // What the agents were last staged with, so the refresh below can tell
+        // which of them now run on a different credential or model — those
+        // restart in place with their conversation (see LiveModelRefresh).
+        let priorStaged = lastStagedProfiles[new.id]
+        defer { restartAgentsWhoseModelsChanged(profileID: new.id, priorStaged: priorStaged) }
         if let win = pane(for: new.id) {
             let runningProfile = win.profile
             win.applyLiveProfileUpdates(new)
@@ -7761,6 +7890,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             || old.modelRouting != new.modelRouting
             || old.localEngineURL != new.localEngineURL
             || old.localEngineAPIKey != new.localEngineAPIKey
+            // A workspace's own model settings (or dropping them to inherit the
+            // global ones) change what the overlay stages for every agent.
+            || old.modelOverride != new.modelOverride
             // Approval-gate toggles flip a credential's consentCredentialID in the
             // token map, so the live refresh must re-emit it.
             || old.apiKeyRequiresApproval != new.apiKeyRequiresApproval
@@ -7888,7 +8020,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// plan changed because a credential now exists.
-    private func pushLiveCredentials(for new: Profile, terminalDefaults: TerminalAppDefaults,
+    func pushLiveCredentials(for new: Profile, terminalDefaults: TerminalAppDefaults,
                                      sandbox: UbuntuSandboxVM?) {
         // Guardrail config is consulted live on every proxied request —
         // update it unconditionally so a mode change lands even when no
@@ -7911,6 +8043,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Global model settings drive the restage too (see launch()).
         profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: profile),
                                                                   subscribed: subscribedProviders(for: profile))
+        lastStagedProfiles[profile.id] = profile
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
         let plan = self.sessionTokenPlan(for: profile, salt: salt)
 
@@ -7989,7 +8122,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 try store.finalizeHomeSeed(
                             for: profile, seedDir: seedDir,
                             anthropicEnvKey: plan.fakeForAnthropic()
-                                ?? plan.claudeSubscriptionBogusKey)
+                                ?? plan.claudeSubscriptionBogusKey,
+                            bedrockBearerFake: plan.fakeForBedrock())
                 session.bumpSeedGeneration()
             } catch {
                 NSLog("[bromure-ac] live home-seed refresh failed: \(error)")
@@ -8359,6 +8493,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // stages the models + credentials the user configured in "Models".
         profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: profile),
                                                                   subscribed: subscribedProviders(for: profile))
+        lastStagedProfiles[profile.id] = profile
         let salt = mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
         let plan = self.sessionTokenPlan(for: profile, salt: salt)
         // (prepareHomeDirectory call moved below — needs the
@@ -8477,55 +8612,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // re-signs each AWS request with the real material so the
             // secret never lives in the VM at all. setCredentials clears
             // the slot when the profile has no usable AWS creds.
-            if profile.awsCredentials.authMode == .ssoProfile
-                || profile.authMode == .bedrock {
-                let profileID = profile.id
-                let ssoProfileName = profile.awsCredentials.ssoProfileName
-                let awsCreds = profile.awsCredentials
-                FileHandle.standardError.write(Data(
-                    "[sso] resolving credentials for SSO profile '\(ssoProfileName)'\n".utf8))
-                Task { [weak engine, weak self] in
-                    guard let engine else { return }
-                    do {
-                        let resolved = try await AWSSSOResolver.resolve(
-                            profileName: ssoProfileName,
-                            progress: { msg in
-                                FileHandle.standardError.write(Data("[sso] \(msg)\n".utf8))
-                            }
-                        )
-                        var creds = awsCreds
-                        creds.accessKeyID = resolved.accessKeyID
-                        creds.secretAccessKey = resolved.secretAccessKey
-                        creds.sessionToken = resolved.sessionToken
-                        if creds.region.isEmpty { creds.region = resolved.region }
-                        engine.awsCreds.setCredentials(creds, for: profileID)
-
-                        self?.ssoRefreshTasks[profileID] = AWSSSOResolver.startRefreshLoop(
-                            profileName: ssoProfileName,
-                            initialExpiration: resolved.expiration,
-                            onRefresh: { [weak engine] newCreds in
-                                var updated = awsCreds
-                                updated.accessKeyID = newCreds.accessKeyID
-                                updated.secretAccessKey = newCreds.secretAccessKey
-                                updated.sessionToken = newCreds.sessionToken
-                                engine?.awsCreds.setCredentials(updated, for: profileID)
-                                FileHandle.standardError.write(Data(
-                                    "[sso] refreshed credentials for '\(ssoProfileName)'\n".utf8))
-                            },
-                            onError: { error in
-                                FileHandle.standardError.write(Data(
-                                    "[sso] refresh failed: \(error.localizedDescription)\n".utf8))
-                            }
-                        )
-                    } catch {
-                        FileHandle.standardError.write(Data(
-                            "[sso] credential resolution failed: \(error.localizedDescription)\n".utf8))
-                        engine.awsCreds.setCredentials(awsCreds, for: profileID)
-                    }
-                }
-            } else {
-                engine.awsCreds.setCredentials(profile.awsCredentials, for: profile.id)
-            }
+            pushAWSCredentials(for: profile, engine: engine)
             FileHandle.standardError.write(Data(
                 "[mitm] session launch for '\(profile.name)': loaded \(agentKeys.count) agent key(s)\n".utf8))
             // Mirror the per-profile key into our private bromure
@@ -8652,7 +8739,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         try store.finalizeHomeSeed(
                             for: profile, seedDir: seedDir,
                             anthropicEnvKey: plan.fakeForAnthropic()
-                                ?? plan.claudeSubscriptionBogusKey)
+                                ?? plan.claudeSubscriptionBogusKey,
+                            bedrockBearerFake: plan.fakeForBedrock())
                         // Bump even on a fresh boot (harmless — the agent
                         // baselines after its startup apply): on a RESTORE
                         // boot this is what tells the resumed agent that the
@@ -11852,7 +11940,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         try store.finalizeHomeSeed(
                             for: profile, seedDir: seedDir,
                             anthropicEnvKey: plan.fakeForAnthropic()
-                                ?? plan.claudeSubscriptionBogusKey)
+                                ?? plan.claudeSubscriptionBogusKey,
+                            bedrockBearerFake: plan.fakeForBedrock())
                     } catch {
                         FileHandle.standardError.write(Data(
                             "[ac] home-seed staging (reboot) failed: \(error)\n".utf8))
