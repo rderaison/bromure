@@ -2438,19 +2438,22 @@ private struct CommandCard: View {
 private struct ShellLine: View {
     let command: String
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .top, spacing: 8) {
-                Text(verbatim: "$").foregroundStyle(TranscriptStyle.toolTint("bash"))
-                Text(command).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        // The copy button sits BESIDE the scroller, never over it: a long
+        // command scrolls under nothing.
+        HStack(alignment: .top, spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(verbatim: "$").foregroundStyle(TranscriptStyle.toolTint("bash"))
+                    Text(command).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.system(size: TranscriptStyle.monoSize, design: .monospaced))
+                .padding(.horizontal, 10).padding(.vertical, 8)
             }
-            .font(.system(size: TranscriptStyle.monoSize, design: .monospaced))
-            .padding(.horizontal, 10).padding(.vertical, 8)
-            .padding(.trailing, 22)          // clear of the copy button
+            #if os(macOS)
+            CopyButton(text: command).padding(.vertical, 6).padding(.trailing, 8)
+            #endif
         }
         .transcriptCard()
-        #if os(macOS)
-        .overlay(alignment: .topTrailing) { CopyButton(text: command).padding(6) }
-        #endif
     }
 }
 

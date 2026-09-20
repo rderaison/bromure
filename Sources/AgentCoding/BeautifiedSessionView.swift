@@ -720,6 +720,36 @@ final class BeautifiedSessionModel: ObservableObject {
         }
     }
 
+    /// The AskUserQuestion round the agent is waiting on right now: the
+    /// trailing questions with nothing after them (the tool result only
+    /// lands once they're answered), while the tab is still there to answer
+    /// in. Empty when the round is answered, declined, or the session gone.
+    var pendingQuestionItems: [TranscriptItem] {
+        guard provider.activeTabIndex() != nil else { return [] }
+        var out: [TranscriptItem] = []
+        for item in items.reversed() {
+            switch item.kind {
+            case .question: out.insert(item, at: 0)
+            case .todo: continue          // pinned above the composer, not part of the round
+            default: return out
+            }
+        }
+        return out
+    }
+
+    /// Answer the live picker with the batch card's key sequence. Only while
+    /// the picker is ON SCREEN: keys sent after it closed go into the chat
+    /// input and interrupt the tool call, which reads as the user declining.
+    func answerQuestions(keys: [String]) async -> Bool {
+        guard let idx = provider.activeTabIndex(), !keys.isEmpty else { return false }
+        guard await provider.execGuest(CodingTaskEngine.pickerVisibleCommand(tabIndex: idx), timeout: 8) != nil
+        else { return false }
+        setWorking(true)
+        let ok = await provider.execGuest(CodingTaskEngine.answerKeysCommand(tabIndex: idx, keys: keys), timeout: 60) != nil
+        await rescanSoon()
+        return ok
+    }
+
     /// Force the throttled terminal scan to run on the next poll (so a card
     /// updates promptly after we send it a keystroke), then poll.
     private func rescanSoon() async {
@@ -1320,10 +1350,25 @@ struct BeautifiedSessionView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
+                        // The round the agent is waiting on is one live card
+                        // (pick, then Submit) instead of its static questions.
+                        let live = model.pendingQuestionItems
+                        let liveIDs = Set(live.map(\.id))
                         ForEach(model.items) { item in
                             // The consolidated todo is shown pinned above the
                             // composer, not inline (where it scrolls away).
-                            if !Self.isTodo(item) { itemRow(item) }
+                            if !Self.isTodo(item), !liveIDs.contains(item.id) { itemRow(item) }
+                        }
+                        if !live.isEmpty {
+                            let questions = live.compactMap {
+                                if case .question(let q) = $0.kind { q } else { nil }
+                            }
+                            TranscriptQuestionBatchCard(questions: questions) { keys in
+                                await model.answerQuestions(keys: keys)
+                            }
+                            // Fresh local picks per round, keyed by the texts
+                            // (consecutive rounds can reuse item indices).
+                            .id("q:" + questions.map(\.question).joined(separator: "\u{1f}"))
                         }
                         if let out = model.commandOutput {
                             CommandCard(output: out,
