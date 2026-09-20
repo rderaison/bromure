@@ -263,14 +263,14 @@ enum GuestDrop {
 
 }
 
-/// Dropped images kept on this Mac by their guest path, so a turn that
-/// references one shows its thumbnail after a remount or a relaunch without
-/// asking the guest — which is asked only for images this Mac never saw
-/// (sent from another client, or before the cache). Paths carry a per-send
-/// stamp, so a path names one picture for good.
-enum DropImageCache {
+/// The pictures this Mac uploaded, kept by their guest path, so a turn
+/// that references one shows its thumbnail after a remount or a relaunch.
+/// The record of record: the machine's copy is never read back (the agent
+/// may have changed it), and a turn sent from elsewhere shows none. Paths
+/// carry a per-send stamp, so a path names one picture for good.
+enum DropImageStore {
     private static let dir: URL = {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         return base.appendingPathComponent("BromureAC/drop-images", isDirectory: true)
     }()
@@ -350,12 +350,10 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Dropped image bytes keyed by their (deterministic) guest path, so the
     /// view can render a thumbnail wherever that path appears in the transcript
     /// — persisting across polls (the real user turn carries the same path).
-    /// Filled by a send, from this Mac's cache, or read back from the guest
-    /// (`ensureDropImages`) for turns this view never saw sent.
+    /// Filled by a send, else from this Mac's record of what it uploaded
+    /// (`ensureDropImages`); never read back from the machine, whose copy
+    /// the agent may have changed.
     @Published var imagesByPath: [String: Data] = [:]
-    private var dropImagesFetching: Set<String> = []
-    private var dropImagesMissing: Set<String> = []
-    private static let maxDropImageBytes = 25 * 1024 * 1024
 
     var accent: Color { provider.accent }
 
@@ -711,49 +709,15 @@ final class BeautifiedSessionModel: ObservableObject {
     @Published var pendingAttachments: [DroppedFile] = []
 
     /// The images user turns reference by their drop path that this view
-    /// doesn't hold: this Mac's cache first, else read back from the guest
-    /// (a turn sent from another client, or before the cache existed), once
-    /// per path — a file that isn't there stays missing.
+    /// doesn't hold yet, from this Mac's record of what it uploaded. A turn
+    /// sent from another client shows no thumbnail: the machine's copy is
+    /// never read back, since the agent may have changed it.
     private func ensureDropImages() {
         for item in parsedItems {
             guard case .userText(let text) = item.kind else { continue }
-            for path in GuestDrop.imagePaths(in: text)
-            where imagesByPath[path] == nil && !dropImagesFetching.contains(path)
-                && !dropImagesMissing.contains(path) {
-                if let cached = DropImageCache.load(path) {
-                    imagesByPath[path] = cached
-                    continue
-                }
-                dropImagesFetching.insert(path)
-                Task { [weak self] in
-                    guard let self else { return }
-                    let data = await self.readGuestFile(path, limit: Self.maxDropImageBytes)
-                    self.dropImagesFetching.remove(path)
-                    if let data, !data.isEmpty {
-                        self.imagesByPath[path] = data
-                        DropImageCache.store(data, for: path)
-                    } else {
-                        self.dropImagesMissing.insert(path)
-                    }
-                }
+            for path in GuestDrop.imagePaths(in: text) where imagesByPath[path] == nil {
+                if let kept = DropImageStore.load(path) { imagesByPath[path] = kept }
             }
-        }
-    }
-
-    /// A guest file over the file-op read plane, chunked; nil when it can't
-    /// be read or exceeds `limit`.
-    private func readGuestFile(_ path: String, limit: Int) async -> Data? {
-        var out = Data()
-        let chunk = 4 * 1024 * 1024
-        while true {
-            guard let resp = await provider.guestFileOp(
-                    ["op": "read", "path": path, "offset": out.count, "length": chunk]),
-                  let b64 = resp["data"] as? String, let piece = Data(base64Encoded: b64)
-            else { return nil }
-            out.append(piece)
-            guard out.count <= limit else { return nil }
-            let eof = (resp["eof"] as? Bool) ?? (resp["eof"] as? Int).map { $0 != 0 } ?? piece.isEmpty
-            if eof || piece.isEmpty { return out }
         }
     }
 
@@ -797,7 +761,7 @@ final class BeautifiedSessionModel: ObservableObject {
         let attPaths = prefixed.enumerated().map { GuestDrop.path(index: $0.offset, name: $0.element.name) }
         for (i, f) in prefixed.enumerated() where f.isImage {
             imagesByPath[attPaths[i]] = f.data
-            DropImageCache.store(f.data, for: attPaths[i])
+            DropImageStore.store(f.data, for: attPaths[i])
         }
 
         Task { [weak self] in
@@ -1023,7 +987,7 @@ final class BeautifiedSessionModel: ObservableObject {
             out = out.replacingOccurrences(of: h.token, with: staged[i])
             if h.file.isImage {
                 imagesByPath[staged[i]] = h.file.data
-                DropImageCache.store(h.file.data, for: staged[i])
+                DropImageStore.store(h.file.data, for: staged[i])
             }
         }
         return out
