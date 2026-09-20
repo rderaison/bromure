@@ -1682,7 +1682,7 @@ struct RemoteConnectionStatusView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
     }
 
     private var keyAuthorizationHint: some View {
@@ -2273,7 +2273,7 @@ final class RemoteHostWindow: NSWindow {
         // session is on stage), spanning the stage's width.
         sessionHeaderSlot.translatesAutoresizingMaskIntoConstraints = false
         sessionHeaderSlot.wantsLayer = true
-        sessionHeaderSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        sessionHeaderSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
         sessionHeaderSlot.isHidden = true
         content.addSubview(sessionHeaderSlot)
         content.addSubview(stage)
@@ -2402,6 +2402,12 @@ final class RemoteHostWindow: NSWindow {
         // (the authorize-key panel) inflates the whole window.
         statusHost.sizingOptions = []
         content.addSubview(statusHost)
+        // The sidebar's trailing hairline, as in the local window (over the
+        // stage's first column, so no other constraint moves).
+        let sidebarDivider = NSBox()
+        sidebarDivider.boxType = .separator
+        sidebarDivider.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(sidebarDivider)
         // Keep the drag strips topmost so an open pane host never intercepts the
         // half of a handle that overlaps it (re-adding moves them to the front).
         for h in [sidebarHandle, fileHandle, browserHandle] { content.addSubview(h) }
@@ -2421,6 +2427,10 @@ final class RemoteHostWindow: NSWindow {
             sidebarHandle.topAnchor.constraint(equalTo: content.topAnchor),
             sidebarHandle.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             sidebarHandle.widthAnchor.constraint(equalToConstant: 8),
+            sidebarDivider.leadingAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
+            sidebarDivider.widthAnchor.constraint(equalToConstant: 1),
+            sidebarDivider.topAnchor.constraint(equalTo: content.topAnchor),
+            sidebarDivider.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             // Grab strip centered on the file pane's leading edge, full height.
             fileHandle.centerXAnchor.constraint(equalTo: fpHost.leadingAnchor),
             fileHandle.topAnchor.constraint(equalTo: content.topAnchor),
@@ -3771,6 +3781,12 @@ final class RemoteHostWindow: NSWindow {
             selectWorkspaceName(id)
             return ["ok": true, "selectedID": controller.listModel.selectedID?.uuidString ?? "",
                     "dashboardShown": shownDashboard?.id == id]
+        case "shot":
+            // Just render the window as it is to "shot" (a PNG path).
+            guard let shot = p["shot"] as? String else { return ["error": "shot path required"] }
+            contentView?.layoutSubtreeIfNeeded()
+            writeSnapshot(to: shot)
+            return ["ok": true, "connected": controller.connected, "frame": ["w": Double(frame.width), "h": Double(frame.height)]]
         case "coding-board":
             // Show the mirrored coding board and report its column counts.
             // Optional "shot" writes an offscreen PNG of the window.

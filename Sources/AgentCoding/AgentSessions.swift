@@ -1067,7 +1067,7 @@ struct SessionRowView: View {
         .padding(.trailing, 8)
         .frame(height: 44)
         .background(RoundedRectangle(cornerRadius: 7)
-            .fill(selected ? Color.accentColor.opacity(0.16)
+            .fill(selected ? Color.acSelection
                            : (hovering ? Color.primary.opacity(0.04) : .clear)))
         .overlay(alignment: .leading) {
             if selected {

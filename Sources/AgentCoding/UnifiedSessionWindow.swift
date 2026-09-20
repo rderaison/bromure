@@ -127,7 +127,7 @@ extension NSWindow {
     }
 }
 
-/// A layer painted `windowBackgroundColor` under the view's OWN effective
+/// A layer painted the titlebar color under the view's OWN effective
 /// appearance, re-resolved whenever that changes — a color resolved once at
 /// install time froze the titlebar to the appearance of that moment (white
 /// in a dark window when the app's appearance differs from the system's, or
@@ -135,7 +135,7 @@ extension NSWindow {
 private final class WindowColorBackingView: NSView {
     override var wantsUpdateLayer: Bool { true }
     override func updateLayer() {
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer?.backgroundColor = NSColor.acTitlebar.cgColor
     }
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -439,7 +439,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // backing), and any slack between the header's content and its slot
         // must read as window, never as a black bar.
         headerHost.wantsLayer = true
-        headerHost.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        headerHost.layer?.backgroundColor = NSColor.acCanvas.cgColor
         headerHost.isHidden = true
         self.sessionHeaderHost = headerHost
         stage.addSubview(headerHost)
@@ -503,48 +503,48 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // and empty-state. Opaque background so it fully covers the VM behind it.
         dockerSlot.translatesAutoresizingMaskIntoConstraints = false
         dockerSlot.wantsLayer = true
-        dockerSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        dockerSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
         dockerSlot.isHidden = true
         stage.addSubview(dockerSlot)
         // Kubernetes cluster dashboard overlay — same treatment.
         kubeSlot.translatesAutoresizingMaskIntoConstraints = false
         kubeSlot.wantsLayer = true
-        kubeSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        kubeSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
         kubeSlot.isHidden = true
         stage.addSubview(kubeSlot)
         registrySlot.translatesAutoresizingMaskIntoConstraints = false
         registrySlot.wantsLayer = true
-        registrySlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        registrySlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
         registrySlot.isHidden = true
         stage.addSubview(registrySlot)
         // Automation editor overlay — same full-bleed pattern as Docker.
         automationSlot.translatesAutoresizingMaskIntoConstraints = false
         automationSlot.wantsLayer = true
-        automationSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        automationSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
         automationSlot.isHidden = true
         stage.addSubview(automationSlot)
         // Automation kanban board overlay — same treatment.
         kanbanSlot.translatesAutoresizingMaskIntoConstraints = false
         kanbanSlot.wantsLayer = true
-        kanbanSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        kanbanSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
         kanbanSlot.isHidden = true
         stage.addSubview(kanbanSlot)
         // Coding-task kanban board overlay — same treatment.
         taskBoardSlot.translatesAutoresizingMaskIntoConstraints = false
         taskBoardSlot.wantsLayer = true
-        taskBoardSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        taskBoardSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
         taskBoardSlot.isHidden = true
         stage.addSubview(taskBoardSlot)
         // Tasks-first stage overlay (task detail / inline review / composer).
         sessionSlot.translatesAutoresizingMaskIntoConstraints = false
         sessionSlot.wantsLayer = true
-        sessionSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        sessionSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
         sessionSlot.isHidden = true
         stage.addSubview(sessionSlot)
         // VM dashboard overlay — same treatment as the Docker overlay.
         vmDashboardSlot.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.wantsLayer = true
-        vmDashboardSlot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        vmDashboardSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
         vmDashboardSlot.isHidden = true
         stage.addSubview(vmDashboardSlot)
         // Grid overlay — topmost stage surface.
@@ -710,7 +710,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // this 1pt column would otherwise composite straight onto the desktop
         // — a see-through slit between the sidebar and the terminal.
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        divider.layer?.backgroundColor = NSColor.acCanvas.cgColor
         divider.translatesAutoresizingMaskIntoConstraints = false
         let resizeHandle = SidebarResizeHandle()
         resizeHandle.translatesAutoresizingMaskIntoConstraints = false
@@ -2748,7 +2748,7 @@ struct SessionSidebar: View {
                         onSelectSession: onSelectSession,
                         onNewSession: onNewSession)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .background(Color(nsColor: .windowBackgroundColor))
+                .background(Color.acSidebar)
         } else {
             fullSidebar
         }
@@ -2765,7 +2765,7 @@ struct SessionSidebar: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         // Solid (opaque) so the window's transparency for translucent profiles
         // only shows through the framebuffer, never the sidebar.
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.acSidebar)
     }
 
     /// The classic source list: boards, then Workspaces (Grid + every VM with

@@ -855,9 +855,9 @@ struct NewSessionView: View {
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
             .fill(Color.platformTextBackground)
-            .shadow(color: .black.opacity(0.08), radius: 16, y: 5))
+            .shadow(color: .black.opacity(0.04), radius: 10, y: 3))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .strokeBorder(messageFocused ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.10),
+            .strokeBorder(messageFocused ? Color.accentColor.opacity(0.6) : Color.acHairline,
                           lineWidth: messageFocused ? 1.5 : 1))
         .animation(.easeOut(duration: 0.12), value: messageFocused)
     }
@@ -935,9 +935,9 @@ struct NewSessionView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
             .fill(Color.platformTextBackground)
-            .shadow(color: .black.opacity(0.08), radius: 16, y: 5))
+            .shadow(color: .black.opacity(0.04), radius: 10, y: 3))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .strokeBorder(Color.primary.opacity(0.10)))
+            .strokeBorder(Color.acHairline))
     }
 
     // MARK: Agent

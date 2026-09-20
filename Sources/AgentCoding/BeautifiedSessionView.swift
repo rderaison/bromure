@@ -1272,7 +1272,8 @@ struct BeautifiedSessionView: View {
         .onChange(of: paletteQuery) { _, _ in paletteIndex = 0 }
         // A chat surface, not a terminal: opaque so it never picks up the
         // window's terminal-translucency (which reads as a gray scrim here).
-        .background(Color.platformTextBackground)
+        // The canvas tone — the composer card is the white thing on it.
+        .background(Color.platformWindowBackground)
         // Drop images or text-based files anywhere in the window → staged in
         // the guest and handed to the agent (the same thing the TUI does).
         .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in

@@ -1090,10 +1090,10 @@ struct ChatComposer: View {
         .padding(.bottom, 10)
         .background(RoundedRectangle(cornerRadius: 14)
             .fill(Color.platformTextBackground)
-            .shadow(color: .black.opacity(0.10), radius: 6, y: 2))
+            .shadow(color: .black.opacity(0.04), radius: 8, y: 2))
         .overlay(RoundedRectangle(cornerRadius: 14)
             .strokeBorder(focused ? accent.opacity(0.55)
-                                  : Color.primary.opacity(0.12),
+                                  : Color.acHairline,
                           lineWidth: focused ? 1.5 : 1))
         .animation(.easeOut(duration: 0.12), value: focused)
     }
