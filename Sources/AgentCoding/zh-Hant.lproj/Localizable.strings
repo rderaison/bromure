@@ -2262,3 +2262,6 @@
 "This machine keeps its home on the Mac, not in an image — nothing to rewind." = "這台機器的個人檔案夾保存在 Mac 上而不是映像檔中 — 沒有可回復的內容。";
 "Shut the machine down first — its home can't be swapped while it's in use." = "請先關閉機器 — 使用中的個人檔案夾無法替換。";
 "The server didn't answer." = "伺服器沒有回應。";
+
+/* Default cluster name */
+"Kube cluster" = "Kube 叢集";

@@ -156,7 +156,11 @@ public struct KubeClusterSpec: Codable, Equatable, Sendable {
     public var storageEnabled: Bool = true
     /// Size of each node's data disk (sparse — only used blocks cost space).
     public var storageDiskGB: Int = 40
-    public var loadBalancer: KubeLoadBalancerKind = .bromure
+    /// MetalLB by default: addresses on the VM network, nothing published
+    /// on the Mac's LAN unless the owner picks the LAN load balancer.
+    /// (Records saved without the key predate the choice and keep the LAN
+    /// load balancer they were created with — see `init(from:)`.)
+    public var loadBalancer: KubeLoadBalancerKind = .metallb
     /// Keep k3s's bundled Traefik ingress controller.
     public var ingress: Bool = true
     /// Bromure LB only: spare addresses on the Mac's LAN handed to Services

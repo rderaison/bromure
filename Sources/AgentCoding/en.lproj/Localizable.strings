@@ -2294,3 +2294,6 @@
 "This machine keeps its home on the Mac, not in an image — nothing to rewind." = "This machine keeps its home on the Mac, not in an image — nothing to rewind.";
 "Shut the machine down first — its home can't be swapped while it's in use." = "Shut the machine down first — its home can't be swapped while it's in use.";
 "The server didn't answer." = "The server didn't answer.";
+
+/* Default cluster name */
+"Kube cluster" = "Kube cluster";

@@ -2259,3 +2259,6 @@
 "This machine keeps its home on the Mac, not in an image — nothing to rewind." = "Diese Maschine hält ihr Home auf dem Mac, nicht in einem Image — nichts zum Zurückdrehen.";
 "Shut the machine down first — its home can't be swapped while it's in use." = "Fahren Sie die Maschine zuerst herunter — ihr Home kann nicht ausgetauscht werden, solange es in Gebrauch ist.";
 "The server didn't answer." = "Der Server hat nicht geantwortet.";
+
+/* Default cluster name */
+"Kube cluster" = "Kube-Cluster";

@@ -2259,3 +2259,6 @@
 "This machine keeps its home on the Mac, not in an image — nothing to rewind." = "Esta máquina mantém a pasta pessoal no Mac, não em uma imagem — nada a rebobinar.";
 "Shut the machine down first — its home can't be swapped while it's in use." = "Desligue a máquina primeiro — a pasta pessoal não pode ser trocada enquanto está em uso.";
 "The server didn't answer." = "O servidor não respondeu.";
+
+/* Default cluster name */
+"Kube cluster" = "Cluster Kube";

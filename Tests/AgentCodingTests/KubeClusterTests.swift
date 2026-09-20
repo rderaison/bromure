@@ -265,6 +265,8 @@ struct KubeClusterTests {
         #expect(old.ingress == true)
         #expect(old.awsEmulator == false)
         #expect(old.loadBalancer == .bromure)
+        // A new spec keeps to the VM network unless the owner opens it up.
+        #expect(KubeClusterSpec().loadBalancer == .metallb)
         var spec = KubeClusterSpec(); spec.awsEmulator = true
         let round = try JSONDecoder().decode(KubeClusterSpec.self, from: JSONEncoder().encode(spec))
         #expect(round.awsEmulator == true)
@@ -313,6 +315,7 @@ struct KubeClusterTests {
     @Test("the infrastructure MCP tells agents what exists and how to use it")
     func mcpOverview() {
         var spec = KubeClusterSpec()
+        spec.loadBalancer = .bromure   // the LAN load balancer is what this text describes
         spec.lanPool = "10.163.15.20-10.163.15.23"
         var syn = KubeSynologySpec(); syn.host = "nas.local"; syn.username = "k8s"; syn.location = "/volume1, /volume3"
         spec.synology = syn

@@ -901,10 +901,11 @@ struct NewKubeClusterSheet: View {
         #endif
         .onAppear {
             if name.isEmpty {
-                var candidate = "dev"
+                let base = NSLocalizedString("Kube cluster", comment: "default cluster name")
+                var candidate = base
                 var n = 2
                 while existingNames.contains(where: { $0.caseInsensitiveCompare(candidate) == .orderedSame }) {
-                    candidate = "dev \(n)"; n += 1
+                    candidate = "\(base) \(n)"; n += 1
                 }
                 name = candidate
             }
@@ -946,11 +947,13 @@ struct NewKubeClusterSheet: View {
     private var generalPane: some View {
         pane {
             Section {
-                TextField(NSLocalizedString("Name", comment: "k8s"), text: $name, prompt: Text("dev"))
+                TextField(NSLocalizedString("Name", comment: "k8s"), text: $name,
+                          prompt: Text(NSLocalizedString("Kube cluster", comment: "default cluster name")))
                 Toggle(NSLocalizedString("Start with Bromure", comment: "k8s"), isOn: $autoStart)
             } footer: {
                 caption(String(format: NSLocalizedString("Nodes are named k8s-%@-1, -2, … The cluster is a shared machine: every workspace on its access list gets it in ~/.kube/config, and their agents learn about it through the infrastructure MCP.", comment: "k8s"),
-                               KubeCluster.slug(for: name.isEmpty ? "dev" : name)))
+                               KubeCluster.slug(for: name.isEmpty
+                                                ? NSLocalizedString("Kube cluster", comment: "default cluster name") : name)))
             }
             Section(NSLocalizedString("Summary", comment: "k8s")) {
                 LabeledContent(NSLocalizedString("Nodes", comment: "k8s"),
