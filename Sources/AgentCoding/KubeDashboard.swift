@@ -372,6 +372,13 @@ struct KubeDashboardView: View {
                         HStack(spacing: 10) {
                             Circle().fill(e.bound ? Color.green : Color.red).frame(width: 8, height: 8)
                             Text("\(e.namespace)/\(e.service)").font(.system(size: 12, weight: .medium))
+                            if e.isVMScoped {
+                                Text("VM network").font(.system(size: 9.5, weight: .semibold))
+                                    .padding(.horizontal, 5).padding(.vertical, 1)
+                                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+                                    .foregroundStyle(.secondary)
+                                    .help("Private: bromure.io/scope: vm — reachable from the workspaces and this Mac, not from the LAN")
+                            }
                             Spacer()
                             if let ip = e.ip ?? status.hostIP, e.bound {
                                 Text("\(ip):\(String(e.port))").font(.system(size: 11, design: .monospaced))
@@ -1053,9 +1060,19 @@ struct NewKubeClusterSheet: View {
     private var networkingPane: some View {
         pane {
             Section {
+                // Every choice visible with its one-line meaning, so "VM
+                // network only" is a decision, not a hidden popup entry.
                 Picker(NSLocalizedString("Load balancer", comment: "k8s"), selection: $spec.loadBalancer) {
-                    ForEach(KubeLoadBalancerKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                    ForEach(KubeLoadBalancerKind.allCases, id: \.self) { kind in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(kind.displayName)
+                            Text(kind.summary).font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .tag(kind)
+                    }
                 }
+                .kubeRadioStyle()
                 if spec.loadBalancer == .bromure {
                     TextField(NSLocalizedString("LAN address pool", comment: "k8s"),
                               text: Binding(get: { spec.lanPool ?? "" },
@@ -1063,11 +1080,13 @@ struct NewKubeClusterSheet: View {
                               prompt: Text("10.0.0.20-10.0.0.29 (optional)"))
                 }
             } footer: {
-                VStack(alignment: .leading, spacing: 4) {
-                    caption(lbHelp)
-                    if spec.loadBalancer == .bromure {
+                if spec.loadBalancer == .bromure {
+                    VStack(alignment: .leading, spacing: 4) {
                         caption(NSLocalizedString("A pool of spare addresses on your LAN gives each LoadBalancer Service its own address, answered by ARP like MetalLB — nothing on this Mac is exposed. Leave it empty to share the Mac's address by port.", comment: "k8s"))
+                        caption(NSLocalizedString("Per Service: the annotation bromure.io/scope: vm keeps it private (an address on the VM network, for the workspaces and this Mac only); bromure.io/loadBalancerIP asks for a specific address. Agents get this from the infrastructure MCP.", comment: "k8s"))
                     }
+                } else if spec.loadBalancer == .metallb {
+                    caption(NSLocalizedString("Twenty addresses at the top of the VM subnet are reserved for MetalLB when the cluster is set up. Workspaces reach them directly; the Mac does through the VM network interface.", comment: "k8s"))
                 }
             }
             Section {
@@ -1102,16 +1121,6 @@ struct NewKubeClusterSheet: View {
         }
     }
 
-    private var lbHelp: String {
-        switch spec.loadBalancer {
-        case .bromure:
-            return NSLocalizedString("The cluster stays on the VM network; each LoadBalancer port is published on this Mac's LAN address and relayed in. Reachable from your LAN, this Mac and every workspace.", comment: "k8s")
-        case .metallb:
-            return NSLocalizedString("MetalLB hands out addresses from the VM network (reserved from DHCP). Reachable from the workspaces and this Mac only.", comment: "k8s")
-        case .none:
-            return NSLocalizedString("Services of type LoadBalancer stay pending; use NodePort or ClusterIP.", comment: "k8s")
-        }
-    }
 }
 
 // MARK: - Small pieces

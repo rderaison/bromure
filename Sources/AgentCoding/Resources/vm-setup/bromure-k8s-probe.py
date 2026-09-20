@@ -188,6 +188,10 @@ def probe_services():
         for i in ((s.get("status") or {}).get("loadBalancer") or {}).get("ingress", []) or []:
             ingress.append(i.get("ip") or i.get("hostname") or "")
         ann = meta.get("annotations") or {}
+        # bromure.io/scope: "vm" (private: an address on the VM network only)
+        # or "lan" (public, the default). Aliases tolerated.
+        scope = (ann.get("bromure.io/scope") or "").strip().lower()
+        scope = "vm" if scope in ("vm", "private", "internal", "vm-network") else ("lan" if scope else "")
         services.append({
             "namespace": meta.get("namespace", ""),
             "name": meta.get("name", ""),
@@ -200,6 +204,7 @@ def probe_services():
             # but universally understood) or the bromure annotation.
             "lbIP": spec.get("loadBalancerIP") or ann.get("bromure.io/loadBalancerIP")
                     or ann.get("metallb.io/loadBalancerIPs") or "",
+            "scope": scope,
         })
     return services
 

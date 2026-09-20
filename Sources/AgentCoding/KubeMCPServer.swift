@@ -243,23 +243,37 @@ final class KubeMCPServer: MCPLineHandler {
     static func loadBalancerText(_ cluster: KubeCluster, status: KubeClusterStatus, hostIP: String?) -> String {
         switch cluster.spec.loadBalancer {
         case .bromure:
-            var s = "Services of type LoadBalancer get an address automatically (TCP and UDP): "
+            var s = "Services of type LoadBalancer get an address automatically (TCP and UDP), public on the Mac's LAN by default: "
             if let pool = cluster.spec.lanPool, !pool.isEmpty {
-                s += "their own address on the Mac's LAN from the pool \(pool) (ARP-announced; spec.loadBalancerIP picks one explicitly)"
+                s += "their own LAN address from the pool \(pool) (ARP-announced by Bromure)"
                 if let ip = status.hostIP ?? hostIP { s += "; when the pool is exhausted, ports are published on the Mac's own address \(ip)" }
             } else if let ip = status.hostIP ?? hostIP {
                 s += "each port is published on the Mac's own LAN address \(ip) (ports must not clash across Services)"
             } else {
                 s += "published on the Mac's LAN address once it has one"
             }
-            s += ". EXTERNAL-IP appears within ~15 s of creating the Service."
+            s += ". EXTERNAL-IP appears within ~15 s of creating the Service. Annotations on the Service control this:"
+            s += " `bromure.io/scope: vm` makes it PRIVATE — an address on the VM network"
+            if let r = cluster.metallbRange { s += " (from \(r))" }
+            s += " reachable from every workspace and this Mac but never from the LAN; `bromure.io/scope: lan` (the default) makes it public."
+            s += " `bromure.io/loadBalancerIP: <ip>` (or spec.loadBalancerIP) asks for a specific address"
+            s += (cluster.spec.lanPool?.isEmpty == false) ? " — one from the LAN pool, or from the VM range with scope vm." : " from the VM range with scope vm."
+            s += " Example: `metadata: {annotations: {bromure.io/scope: vm}}` on a `type: LoadBalancer` Service. Prefer private unless the user wants the service reachable from the LAN."
             if !status.lbEndpoints.isEmpty {
-                let live = status.lbEndpoints.filter(\.bound).map { "\($0.namespace)/\($0.service) \($0.ip ?? status.hostIP ?? "?"):\($0.port)/\($0.protocolName)" }
+                let live = status.lbEndpoints.filter(\.bound).map { e in
+                    "\(e.namespace)/\(e.service) \(e.ip ?? status.hostIP ?? "?"):\(e.port)/\(e.protocolName)" + (e.isVMScoped ? " (private, VM network)" : " (public, LAN)")
+                }
                 if !live.isEmpty { s += " Currently published: " + live.joined(separator: ", ") + "." }
+                let broken = status.lbEndpoints.filter { !$0.bound }.map { "\($0.namespace)/\($0.service):\($0.port) — \($0.error ?? "pending")" }
+                if !broken.isEmpty { s += " Not published: " + broken.joined(separator: ", ") + "." }
             }
             return s
         case .metallb:
-            return "MetalLB (layer 2) hands Services of type LoadBalancer an address from \(cluster.metallbRange ?? "a pool on the VM network"); reachable from this workspace and the Mac only."
+            var s = "MetalLB (layer 2) hands Services of type LoadBalancer an address from \(cluster.metallbRange ?? "a pool on the VM network") — VM network only: reachable from this workspace and the Mac, never from the LAN. EXTERNAL-IP appears within seconds of creating the Service. `spec.loadBalancerIP` or the annotation `metallb.io/loadBalancerIPs: <ip>` asks for a specific address in that range; there is no public/LAN option on this cluster."
+            let live = (status.probe?.services ?? []).filter { $0.isLoadBalancer && !$0.ingress.isEmpty }
+                .map { svc in "\(svc.namespace)/\(svc.name) " + svc.ingress.joined(separator: ",") + " (" + svc.ports.map { "\($0.port)/\($0.protocolName)" }.joined(separator: ", ") + ")" }
+            if !live.isEmpty { s += " Currently assigned: " + live.joined(separator: "; ") + "." }
+            return s
         case .none:
             return "No LoadBalancer implementation: Services of type LoadBalancer stay pending — use NodePort (reachable at <node ip>:<nodePort> from this workspace) or ClusterIP."
         }
@@ -383,7 +397,7 @@ final class KubeMCPServer: MCPLineHandler {
                                 "endpointLAN": eps.lan ?? "", "credentials": "any, e.g. test/test, region us-east-1"]
         }
         if !st.lbEndpoints.isEmpty {
-            d["loadBalancerEndpoints"] = st.lbEndpoints.map { ["service": "\($0.namespace)/\($0.service)", "address": ($0.ip ?? st.hostIP ?? "") + ":\($0.port)", "protocol": $0.protocolName, "bound": $0.bound, "error": $0.error ?? ""] }
+            d["loadBalancerEndpoints"] = st.lbEndpoints.map { ["service": "\($0.namespace)/\($0.service)", "address": ($0.ip ?? st.hostIP ?? "") + ":\($0.port)", "protocol": $0.protocolName, "bound": $0.bound, "error": $0.error ?? "", "scope": $0.isVMScoped ? "vm (private)" : "lan (public)"] }
         }
         if !st.log.isEmpty { d["recentLog"] = Array(st.log.suffix(12)) }
         return jsonPretty(d)

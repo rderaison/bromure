@@ -31,8 +31,20 @@ public enum KubeLoadBalancerKind: String, Codable, CaseIterable, Sendable {
     public var displayName: String {
         switch self {
         case .bromure: return "Bromure LAN load balancer"
-        case .metallb: return "MetalLB (Layer 2, VM network)"
+        case .metallb: return "MetalLB, VM network only"
         case .none:    return "None (NodePort only)"
+        }
+    }
+
+    /// What each choice means, for the sheet and the agents' briefing.
+    public var summary: String {
+        switch self {
+        case .bromure:
+            return "Published on this Mac's LAN address by port, or on spare LAN addresses from a pool. Reachable from your LAN, this Mac and the workspaces."
+        case .metallb:
+            return "Layer-2 MetalLB hands out addresses from the VM network (a range kept out of its DHCP). Reachable from the workspaces and this Mac; nothing is exposed on your LAN."
+        case .none:
+            return "Services of type LoadBalancer stay pending; use NodePort or ClusterIP."
         }
     }
 }
@@ -499,11 +511,16 @@ public struct KubeLBEndpoint: Codable, Equatable, Identifiable, Sendable {
     public var bound: Bool
     /// Why it isn't bound (port in use, UDP unsupported, …).
     public var error: String?
-    /// The LAN address this Service was given from the cluster's pool.
+    /// The LAN address this Service was given from the cluster's pool — or,
+    /// with `scope == "vm"`, its private address on the VM network.
     public var ip: String?
+    /// "vm" when the address is private to the VM network (annotation
+    /// `bromure.io/scope: vm`); nil = the Mac's LAN.
+    public var scope: String?
 
     public init(namespace: String, service: String, port: Int, nodePort: Int,
-                protocolName: String, bound: Bool, error: String? = nil, ip: String? = nil) {
+                protocolName: String, bound: Bool, error: String? = nil, ip: String? = nil,
+                scope: String? = nil) {
         self.namespace = namespace
         self.service = service
         self.port = port
@@ -512,7 +529,10 @@ public struct KubeLBEndpoint: Codable, Equatable, Identifiable, Sendable {
         self.bound = bound
         self.error = error
         self.ip = ip
+        self.scope = scope
     }
+
+    public var isVMScoped: Bool { scope == "vm" }
 }
 
 /// Decoded output of `bromure-k8s-probe.py`. Field names match the JSON the
@@ -592,7 +612,11 @@ public struct KubeProbe: Codable, Equatable, Sendable {
         public var lbClass: String
         /// Requested address (spec.loadBalancerIP / annotation), "" if none.
         public var lbIP: String?
+        /// `bromure.io/scope` annotation: "vm" = private to the VM network,
+        /// "lan" or nil = public on the Mac's LAN (Bromure load balancer).
+        public var scope: String?
         public var isLoadBalancer: Bool { type == "LoadBalancer" }
+        public var isVMScoped: Bool { scope == "vm" }
     }
 
     public struct PVC: Codable, Equatable, Identifiable, Sendable {

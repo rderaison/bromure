@@ -319,7 +319,9 @@ struct KubeClusterTests {
         var c = KubeCluster(name: "Dev", spec: spec)
         c.nodes = [KubeNodeRecord(name: "k8s-dev-1", role: .server, index: 1, lastIP: "172.28.153.2")]
         var cs = KubeClusterStatus(); cs.phase = .running; cs.hostIP = "10.163.15.54"
-        cs.lbEndpoints = [KubeLBEndpoint(namespace: "default", service: "web", port: 80, nodePort: 31080, protocolName: "TCP", bound: true, ip: "10.163.15.20")]
+        cs.lbEndpoints = [KubeLBEndpoint(namespace: "default", service: "web", port: 80, nodePort: 31080, protocolName: "TCP", bound: true, ip: "10.163.15.20"),
+                          KubeLBEndpoint(namespace: "default", service: "db", port: 5432, nodePort: 31432, protocolName: "TCP", bound: true, ip: "172.28.153.230", scope: "vm")]
+        c.metallbRange = "172.28.153.230-172.28.153.249"
         var r = KubeRegistry(name: "reg"); r.node.lastIP = "172.28.153.5"
         var rs = KubeClusterStatus(); rs.phase = .running; rs.address = "172.28.153.5:5000"
         let text = KubeMCPServer.overviewText(clusters: [c], registries: [r],
@@ -329,7 +331,14 @@ struct KubeClusterTests {
         #expect(text.contains("`bromure-synology-volume1` (default"))
         #expect(text.contains("`bromure-longhorn`"))
         #expect(text.contains("pool 10.163.15.20-10.163.15.23"))
-        #expect(text.contains("default/web 10.163.15.20:80/TCP"))
+        #expect(text.contains("default/web 10.163.15.20:80/TCP (public, LAN)"))
+        #expect(text.contains("default/db 172.28.153.230:5432/TCP (private, VM network)"))
+        #expect(text.contains("`bromure.io/scope: vm`"))
+        #expect(text.contains("from 172.28.153.230-172.28.153.249"))
+        #expect(text.contains("`bromure.io/loadBalancerIP: <ip>`"))
+        // Endpoint records without the scope key (older servers) decode as public.
+        let old = try? JSONDecoder().decode(KubeLBEndpoint.self, from: Data("{\"namespace\":\"a\",\"service\":\"b\",\"port\":1,\"nodePort\":2,\"protocolName\":\"TCP\",\"bound\":true}".utf8))
+        #expect(old?.isVMScoped == false)
         #expect(text.contains("docker push 172.28.153.5:5000/myapp:dev"))
         #expect(text.contains("Traefik"))
         // Storage class order: NAS classes first (default), then Longhorn, then local-path.

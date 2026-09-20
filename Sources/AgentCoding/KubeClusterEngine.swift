@@ -86,8 +86,11 @@ final class KubeClusterEngine {
         var direct: KubeDirectCluster?
         /// Services already stamped with the host IP (ns/name).
         var patchedServices: Set<String> = []
-    /// The base URL the AWS emulator was last told to put in the URLs it returns.
-    var flociBaseURL: String?
+        /// The base URL the AWS emulator was last told to put in the URLs it returns.
+        var flociBaseURL: String?
+        /// VM-network addresses applied on the control-plane node for
+        /// `bromure.io/scope: vm` Services (ns/name → ip), this boot.
+        var vmScopeApplied: [String: String] = [:]
         var stopping = false
         init(id: UUID) { self.id = id }
     }
@@ -906,9 +909,93 @@ final class KubeClusterEngine {
             if $0.phase == .running { $0.message = nil }
         }
         if let lb = rt.loadBalancer, probe.reachable {
-            let endpoints = lb.reconcile(services: probe.loadBalancerServices)
+            // Public Services: host listeners / LAN pool. Private ones
+            // (`bromure.io/scope: vm`): an address on the VM network.
+            var endpoints = lb.reconcile(services: probe.loadBalancerServices)
+            await reconcileVMScope(id, rt: rt, services: probe.loadBalancerServices, endpoints: &endpoints)
+            endpoints.sort { ($0.namespace, $0.service, $0.port) < ($1.namespace, $1.service, $1.port) }
             store.setStatus(id) { $0.lbEndpoints = endpoints }
             await publishLoadBalancerIPs(id, rt: rt, services: probe.loadBalancerServices, endpoints: endpoints)
+        }
+    }
+
+    /// `bromure.io/scope: vm` Services get an address from the cluster's
+    /// VM-network pool (the twenty MetalLB would use), answered by the
+    /// control-plane node itself (`patch-lb-vm` adds it to the node's NIC;
+    /// kube-proxy already routes LoadBalancer ingress addresses) — reachable
+    /// from every workspace and this Mac, invisible on the LAN. Assignments
+    /// are read back from the Services' own status, so they survive restarts.
+    private func reconcileVMScope(_ id: UUID, rt: ClusterRuntime, services: [KubeProbe.Service],
+                                  endpoints: inout [KubeLBEndpoint]) async {
+        guard var cluster = store.cluster(id), let server = cluster.server,
+              cluster.spec.loadBalancer == .bromure else { return }
+        let key = { (svc: KubeProbe.Service) in "\(svc.namespace)/\(svc.name)" }
+        let vmServices = services.filter(\.isVMScoped)
+        if !vmServices.isEmpty, cluster.metallbRange == nil, let range = reserveMetalLBRange() {
+            cluster.metallbRange = range
+            store.upsert(cluster)
+            log(id, "Reserved \(range) on the VM network for private load balancers")
+        }
+        func pending(_ svc: KubeProbe.Service, _ error: String) -> [KubeLBEndpoint] {
+            svc.ports.map { KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: $0.port, nodePort: $0.nodePort,
+                                           protocolName: $0.protocolName, bound: false, error: error, scope: "vm") }
+        }
+        guard let range = cluster.metallbRange, let pool = KubeLANPool.parse(range) else {
+            for svc in vmServices { endpoints += pending(svc, "no VM-network pool") }
+            return
+        }
+        // What the Services already hold from the pool.
+        var taken: [String: UInt32] = [:]
+        for svc in services {
+            for ing in svc.ingress {
+                if let ip = VMNetSwitch.parseIPv4(ing), pool.contains(ip) { taken[key(svc)] = ip }
+            }
+        }
+        // Lost the annotation but still holds a private address: release it
+        // (the public path takes over in this same cycle).
+        for svc in services where !svc.isVMScoped {
+            guard let ip = taken[key(svc)] else { continue }
+            let ipStr = VMNetSwitch.ipString(ip)
+            _ = try? await exec(server.id, script("clear-lb-vm \(Self.shellQuote(svc.namespace)) \(Self.shellQuote(svc.name)) \(ipStr)"), timeout: 20)
+            rt.vmScopeApplied[key(svc)] = nil
+            taken[key(svc)] = nil
+            log(id, "Released \(ipStr) from \(key(svc)) (no longer private)")
+        }
+        for svc in vmServices {
+            let k = key(svc)
+            var ip = taken[k]
+            if ip == nil {
+                if let want = svc.lbIP, let w = VMNetSwitch.parseIPv4(want), pool.contains(w), !taken.values.contains(w) {
+                    ip = w
+                } else {
+                    ip = pool.first { !taken.values.contains($0) }
+                }
+            }
+            guard let ip else { endpoints += pending(svc, "VM-network pool exhausted"); continue }
+            let ipStr = VMNetSwitch.ipString(ip)
+            taken[k] = ip
+            let inStatus = svc.ingress.contains(ipStr)
+            if !inStatus || rt.vmScopeApplied[k] != ipStr {
+                if (try? await exec(server.id, script("patch-lb-vm \(Self.shellQuote(svc.namespace)) \(Self.shellQuote(svc.name)) \(ipStr)"), timeout: 30)) != nil {
+                    rt.vmScopeApplied[k] = ipStr
+                    if !inStatus { log(id, "Published \(k) at \(ipStr) on the VM network (private)") }
+                }
+            }
+            let bound = rt.vmScopeApplied[k] == ipStr
+            for port in svc.ports {
+                endpoints.append(KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: port.port, nodePort: port.nodePort,
+                                                protocolName: port.protocolName, bound: bound,
+                                                error: bound ? nil : "couldn't publish on the node", ip: ipStr, scope: "vm"))
+            }
+        }
+        // Services that are gone: drop their address from the node.
+        let present = Set(services.map(key))
+        for (k, ipStr) in rt.vmScopeApplied where !present.contains(k) {
+            let parts = k.split(separator: "/", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                _ = try? await exec(server.id, script("clear-lb-vm \(Self.shellQuote(parts[0])) \(Self.shellQuote(parts[1])) \(ipStr)"), timeout: 20)
+            }
+            rt.vmScopeApplied[k] = nil
         }
     }
 
@@ -920,12 +1007,17 @@ final class KubeClusterEngine {
         guard let cluster = store.cluster(id), let server = cluster.server, let lb = rt.loadBalancer else { return }
         // The address each Service is answered on: its pool IP, else the Mac's.
         var publishIP: [String: String] = [:]
-        for e in endpoints where e.bound {
+        for e in endpoints where e.bound && !e.isVMScoped {
             let key = "\(e.namespace)/\(e.service)"
             if publishIP[key] == nil, let ip = e.ip ?? lb.hostIP { publishIP[key] = ip }
         }
         for svc in services {
             let key = "\(svc.namespace)/\(svc.name)"
+            if svc.isVMScoped {
+                // Private: reconcileVMScope owns its status.
+                rt.patchedServices.remove(key)
+                continue
+            }
             if let ip = publishIP[key] {
                 if !svc.ingress.contains(ip) {
                     if (try? await exec(server.id, script("patch-lb \(Self.shellQuote(svc.namespace)) \(Self.shellQuote(svc.name)) \(ip)"), timeout: 20)) != nil {
@@ -1095,7 +1187,10 @@ final class KubeLoadBalancer {
 
     /// Bring the listener set in line with the cluster's LoadBalancer
     /// services. Returns the endpoint list for the status snapshot.
-    func reconcile(services: [KubeProbe.Service]) -> [KubeLBEndpoint] {
+    func reconcile(services allServices: [KubeProbe.Service]) -> [KubeLBEndpoint] {
+        // `bromure.io/scope: vm` Services live on the VM network (the
+        // engine's reconcileVMScope); nothing of theirs touches the LAN.
+        let services = allServices.filter { !$0.isVMScoped }
         var desired: [String: (svc: KubeProbe.Service, port: KubeProbe.ServicePort)] = [:]
         var endpoints: [KubeLBEndpoint] = []
         // Services that get their own LAN address are answered by the

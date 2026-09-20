@@ -540,6 +540,22 @@ cmd_clear_lb() {
     kubectl -n "$1" patch svc "$2" --subresource=status --type=merge \
         -p '{"status":{"loadBalancer":{}}}' 2>&1
 }
+cmd_patch_lb_vm() {
+    # patch-lb-vm <namespace> <name> <ip> — a private LoadBalancer address
+    # on the VM network: this node answers for it (secondary address on the
+    # uplink; kube-proxy already routes LoadBalancer ingress addresses) and
+    # the Service shows it as EXTERNAL-IP. Idempotent.
+    local dev; dev=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}'); dev="${dev:-eth0}"
+    ip -4 addr show dev "$dev" | grep -q " $3/32 " || sudo ip addr add "$3/32" dev "$dev" 2>&1
+    kubectl -n "$1" patch svc "$2" --subresource=status --type=merge \
+        -p "{\"status\":{\"loadBalancer\":{\"ingress\":[{\"ip\":\"$3\"}]}}}" 2>&1
+}
+cmd_clear_lb_vm() {
+    local dev; dev=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}'); dev="${dev:-eth0}"
+    sudo ip addr del "$3/32" dev "$dev" 2>/dev/null || true
+    kubectl -n "$1" patch svc "$2" --subresource=status --type=merge \
+        -p '{"status":{"loadBalancer":{}}}' 2>&1 || true
+}
 cmd_floci_base_url() {
     # floci-base-url <url> — the base the AWS emulator puts in the URLs it
     # returns (SQS queue URLs, presigned S3 URLs): the address its Service
@@ -564,5 +580,7 @@ case "${1:-}" in
     patch-lb)    shift; cmd_patch_lb "$@" ;;
     clear-lb)    shift; cmd_clear_lb "$@" ;;
     floci-base-url) shift; cmd_floci_base_url "$@" ;;
+    patch-lb-vm) shift; cmd_patch_lb_vm "$@" ;;
+    clear-lb-vm) shift; cmd_clear_lb_vm "$@" ;;
     *) echo "usage: $0 start|poll|token|kubeconfig|ip|ready|wait-nodes|patch-lb|clear-lb" >&2; exit 2 ;;
 esac
