@@ -189,7 +189,7 @@ struct CodingTasksSection: View {
         VStack(alignment: .leading, spacing: 1) {
             HStack {
                 Button(action: onShowBoard) {
-                    Text(NSLocalizedString("Kanban", comment: "sidebar section"))
+                    Text(NSLocalizedString("Tasks", comment: "sidebar section"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(model.taskBoardSelected
                                          ? Color.accentColor : .secondary)
@@ -339,7 +339,7 @@ struct CodingKanbanView: View {
             ToolbarItem(placement: .principal) {
                 // .titleAndIcon is not the default in a navigation bar — a bare
                 // Label renders icon-only there.
-                Label(NSLocalizedString("Kanban", comment: "coding kanban title"),
+                Label(NSLocalizedString("Coding Tasks", comment: "coding kanban title"),
                       systemImage: "checklist")
                     .labelStyle(.titleAndIcon)
                     .font(.headline)
@@ -382,7 +382,7 @@ struct CodingKanbanView: View {
             Image(systemName: "checklist")
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(.tint)
-            Text(NSLocalizedString("Kanban", comment: "coding kanban title"))
+            Text(NSLocalizedString("Coding Tasks", comment: "coding kanban title"))
                 .font(.system(size: 16, weight: .bold))
             Spacer()
             Button { editing = newDraft() } label: {

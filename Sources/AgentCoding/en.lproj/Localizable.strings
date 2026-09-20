@@ -1619,7 +1619,6 @@
 
 /* Sessions-first UI */
 "New Session…" = "New Session…";
-"Kanban" = "Kanban";
 "New session" = "New session";
 "Start an agent (⌘N)" = "Start an agent (⌘N)";
 "Search sessions" = "Search sessions";

@@ -599,7 +599,7 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     autoBoardItem.target = delegate
     wsMenu.addItem(autoBoardItem)
 
-    let taskBoardItem = NSMenuItem(title: L("Kanban"),
+    let taskBoardItem = NSMenuItem(title: L("Tasks"),
                                    action: #selector(ACAppDelegate.showTaskBoardAction(_:)),
                                    keyEquivalent: "t")
     taskBoardItem.keyEquivalentModifierMask = [.command, .shift]
