@@ -1008,6 +1008,22 @@ final class RemoteHostController {
         send("POST", "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
     }
 
+    /// POST /agent-sessions/{id}/worktree — a new session in a git worktree
+    /// off that session's folder. The new session's id, or nil.
+    func startWorktreeSession(from id: UUID, name: String, tool: Profile.Tool,
+                              message: String?) async -> UUID? {
+        let host = self.host
+        var body: [String: Any] = ["name": name, "tool": tool.rawValue]
+        if let message, !message.isEmpty { body["message"] = message }
+        let path = "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/worktree"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", path, body: body)
+        }.value
+        pollOnce()
+        guard let resp, resp.status == 200, let idStr = resp.json["id"] as? String else { return nil }
+        return UUID(uuidString: idStr)
+    }
+
     /// POST /agent-sessions/folders — the subfolders of a folder on a
     /// workspace, for the new-session browser. nil when the machine can't
     /// be read right now, or the server predates the verb.
@@ -3285,6 +3301,17 @@ final class RemoteHostWindow: NSWindow {
             archive: { [weak self] id in self?.controller.sessionCommand(id, "archive") },
             unarchive: { [weak self] id in self?.controller.sessionCommand(id, "unarchive") },
             delete: { [weak self] id in self?.confirmDeleteSession(id) },
+            newWorktree: { [weak self] id, name, tool, message in
+                guard let self else { return }
+                let c = self.controller
+                Task { @MainActor in
+                    guard let newID = await c.startWorktreeSession(from: id, name: name, tool: tool,
+                                                                   message: message) else { return }
+                    // The mirror gets it with the next poll; select it then.
+                    if c.sessionStore.session(newID) != nil { self.selectSession(newID) }
+                    else { self.pendingSelectSessionID = newID }
+                }
+            },
             represent: { [weak self] id in
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()

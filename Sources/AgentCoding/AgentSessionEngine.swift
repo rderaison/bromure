@@ -71,6 +71,46 @@ final class AgentSessionEngine {
         return s.id
     }
 
+    /// A new session in a git worktree branched off `parentID`'s folder at
+    /// its current commit: the record is on screen at once (launching), the
+    /// guest's worktree-create makes the branch + checkout and opens the
+    /// agent's tab, and the binder takes the worktree's path and branch
+    /// from that tab. nil when the parent has no folder to branch.
+    @discardableResult
+    func startWorktree(from parentID: UUID, name: String, tool: Profile.Tool,
+                       message: String?) -> UUID? {
+        guard let parent = store.session(parentID), SessionHome.hasFolder(parent) else { return nil }
+        let title = name.trimmingCharacters(in: .whitespaces).nonEmpty
+            ?? String(format: NSLocalizedString("Worktree of %@", comment: "session title"), parent.title)
+        let message = message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+        var s = AgentSession(profileID: parent.profileID, tool: tool, title: title,
+                             cwd: parent.cwd, openingMessage: message)
+        s.worktreeOf = parentID
+        s.userTitled = true          // the worktree's name is the session's name
+        s.launchingSince = Date()
+        store.upsert(s)
+        BACDebug.log("sessions", "start worktree “\(title)” off “\(parent.title)” (\(tool.rawValue))")
+        launch(s.id, prompt: message ?? "", flags: "", worktreeSlug: Self.worktreeSlug(title))
+        return s.id
+    }
+
+    /// A filesystem/branch-safe slug from a free-form name — the same rule
+    /// the kanban's worktrees use.
+    static func worktreeSlug(_ name: String) -> String {
+        var out = ""
+        var lastDash = false
+        for ch in name.lowercased() {
+            if ch.isLetter || ch.isNumber {
+                out.append(ch); lastDash = false
+            } else if !lastDash {
+                out.append("-"); lastDash = true
+            }
+        }
+        let trimmed = String(out.trimmingCharacters(in: CharacterSet(charactersIn: "-")).prefix(40))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return trimmed.isEmpty ? "worktree" : trimmed
+    }
+
     /// "hello-260915-1830": a few words of the message (or the agent's name)
     /// plus a timestamp, so folders never collide and still read at a glance.
     static func syntheticFolderName(message: String?, tool: Profile.Tool, now: Date = Date()) -> String {
@@ -292,7 +332,10 @@ final class AgentSessionEngine {
 
     // MARK: Launch
 
-    private func launch(_ id: UUID, prompt: String, flags: String, alreadyUp: Bool = false) {
+    /// `worktreeSlug`: branch the folder into a worktree (the guest's
+    /// worktree-create) instead of opening the agent in it (agent-tab).
+    private func launch(_ id: UUID, prompt: String, flags: String, alreadyUp: Bool = false,
+                        worktreeSlug: String? = nil) {
         Task { [weak self] in
             guard let self, let delegate = self.delegate, let s = self.store.session(id) else { return }
             @MainActor func fail(_ reason: String) {
@@ -306,6 +349,54 @@ final class AgentSessionEngine {
             }
             let guestPath = ScheduledAutomationEngine.guestPath(s.cwd)
             let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            if let worktreeSlug {
+                // The folder must be a git checkout; say so now rather than
+                // waiting for a tab that never comes.
+                let top = (try? await delegate.guestExec(
+                    profileID: s.profileID,
+                    command: "git -C \(q) rev-parse --show-toplevel 2>/dev/null", timeout: 15)) ?? ""
+                guard !top.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    fail(String(format: NSLocalizedString("%@ isn't a git repository — a worktree needs one.", comment: "session start"),
+                                prettyGuestPath(guestPath)))
+                    return
+                }
+                // …with a commit to branch from. A folder Bromure made for a
+                // session is a bare `git init` (unborn HEAD): give it an
+                // empty root commit rather than have `worktree add` fail on
+                // "invalid reference: HEAD". The identity fallback only
+                // applies when the machine has none configured.
+                func headCommit() async -> String {
+                    ((try? await delegate.guestExec(
+                        profileID: s.profileID,
+                        command: "git -C \(q) rev-parse --verify -q HEAD 2>/dev/null; true", timeout: 15)) ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if await headCommit().isEmpty {
+                    _ = try? await delegate.guestExec(
+                        profileID: s.profileID,
+                        command: "git -C \(q) commit -q --allow-empty -m 'Initial commit' 2>/dev/null "
+                            + "|| git -C \(q) -c user.name=Bromure -c user.email=bromure@localhost "
+                            + "commit -q --allow-empty -m 'Initial commit' 2>/dev/null; true",
+                        timeout: 20)
+                    guard await !headCommit().isEmpty else {
+                        fail(String(format: NSLocalizedString("%@ has no commit to branch from yet.", comment: "session start"),
+                                    prettyGuestPath(guestPath)))
+                        return
+                    }
+                    BACDebug.log("sessions", "“\(s.title)”: gave \(guestPath) its root commit")
+                }
+                let display = s.title
+                let baseline = await self.tabBaseline(profileID: s.profileID, delegate: delegate)
+                self.store.mutate(id) { $0.launchBaselineIndex = baseline; $0.launchDisplay = display }
+                guard delegate.automationWorktreeCommand(
+                    profileNameOrID: s.profileID.uuidString, action: "create",
+                    args: [guestPath, worktreeSlug, display, s.tool.rawValue, prompt]) else {
+                    fail(NSLocalizedString("Couldn't reach the workspace — is it running?", comment: "task start"))
+                    return
+                }
+                BACDebug.log("sessions", "“\(s.title)”: worktree-create sent (baseline \(baseline))")
+                return
+            }
             if let url = s.cloneURL, !url.isEmpty {
                 let qu = "'" + url.replacingOccurrences(of: "'", with: "'\\''") + "'"
                 BACDebug.log("sessions", "“\(s.title)”: cloning \(url) → \(s.cwd)")
@@ -331,15 +422,7 @@ final class AgentSessionEngine {
                         + "(git -C \(q) init -q -b main 2>/dev/null || git -C \(q) init -q); fi",
                     timeout: 15)
             }
-            // Remember which tabs were there, so the new one can be told
-            // apart — the roster may lag right after a boot, so ask tmux.
-            var baseline = delegate.pane(for: s.profileID)?.model.tabs.map(\.index).max() ?? -1
-            if let out = try? await delegate.guestExec(
-                profileID: s.profileID,
-                command: "tmux list-windows -t bromure -F '#{window_index}' 2>/dev/null | sort -n | tail -1",
-                timeout: 8), let n = Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                baseline = max(baseline, n)
-            }
+            let baseline = await self.tabBaseline(profileID: s.profileID, delegate: delegate)
             let display = s.title
             self.store.mutate(id) { $0.launchBaselineIndex = baseline; $0.launchDisplay = display }
             guard delegate.automationWorktreeCommand(
@@ -350,6 +433,19 @@ final class AgentSessionEngine {
             }
             BACDebug.log("sessions", "“\(s.title)”: agent-tab sent (baseline \(baseline))")
         }
+    }
+
+    /// Which tabs are there before a launch, so the new one can be told
+    /// apart — the roster may lag right after a boot, so ask tmux too.
+    private func tabBaseline(profileID: UUID, delegate: ACAppDelegate) async -> Int {
+        var baseline = delegate.pane(for: profileID)?.model.tabs.map(\.index).max() ?? -1
+        if let out = try? await delegate.guestExec(
+            profileID: profileID,
+            command: "tmux list-windows -t bromure -F '#{window_index}' 2>/dev/null | sort -n | tail -1",
+            timeout: 8), let n = Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            baseline = max(baseline, n)
+        }
+        return baseline
     }
 
     // MARK: Liveness

@@ -32,6 +32,9 @@ struct SessionStageActions {
     /// drops the record and its transcript copy. The folder on the machine
     /// stays.
     var delete: (UUID) -> Void = { _ in }
+    /// Start a new session in a git worktree branched off this session's
+    /// folder: (session, worktree name, agent, opening message).
+    var newWorktree: (UUID, String, Profile.Tool, String?) -> Void = { _, _, _, _ in }
     var represent: (UUID) -> Void = { _ in }
     var showFiles: () -> Void = {}
     var showContainers: (UUID) -> Void = { _ in }
@@ -105,6 +108,7 @@ struct SessionHeaderView: View {
     let actions: SessionStageActions
     @State private var renaming = false
     @State private var draftTitle = ""
+    @State private var worktreeSheet = false
 
     private var session: AgentSession? { model.selectedSessionID.flatMap { store.session($0) } }
 
@@ -178,6 +182,16 @@ struct SessionHeaderView: View {
                                     .font(.system(size: 11.5, design: .monospaced))
                                     .truncationMode(.middle)
                             }
+                            if let branch = s.worktreeBranch, !branch.isEmpty {
+                                metaDot
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.triangle.branch").font(.system(size: 10.5))
+                                    Text(branch)
+                                        .font(.system(size: 11.5, design: .monospaced))
+                                        .truncationMode(.middle)
+                                }
+                                .help(NSLocalizedString("A git worktree: its own branch, off the session it was started from", comment: "session header"))
+                            }
                             if let url = s.cloneURL, !url.isEmpty {
                                 metaDot
                                 HStack(spacing: 4) {
@@ -228,6 +242,10 @@ struct SessionHeaderView: View {
                             if s.windowIndex != nil {
                                 Button(NSLocalizedString("End session", comment: "session menu")) { actions.close(s.id) }
                             }
+                            if SessionHome.hasFolder(s) {
+                                Divider()
+                                Button(NSLocalizedString("New worktree…", comment: "session menu")) { worktreeSheet = true }
+                            }
                         } else if s.isArchived {
                             Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
                         }
@@ -275,6 +293,11 @@ struct SessionHeaderView: View {
             .overlay(alignment: .bottom) { Divider().opacity(0.6) }
             .onChange(of: live) { _, _ in actions.represent(s.id) }
             .onChange(of: bucket) { _, _ in actions.represent(s.id) }
+            .sheet(isPresented: $worktreeSheet) {
+                NewWorktreeSheet(parent: s) { name, tool, message in
+                    actions.newWorktree(s.id, name, tool, message)
+                }
+            }
         }
     }
 
@@ -1095,6 +1118,75 @@ struct NewSessionView: View {
             p = parent
         }
         return out
+    }
+}
+
+// MARK: - New worktree
+
+/// "New worktree…" on a session: a name for the worktree (its branch is
+/// wt/<slug>), the agent to run there, an optional opening message. The
+/// guest branches the session's folder at its current commit into
+/// ~/.bromure/worktrees/<repo>/<slug> and the new session starts there.
+struct NewWorktreeSheet: View {
+    let parent: AgentSession
+    let onCreate: (String, Profile.Tool, String?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name = ""
+    @State private var tool: Profile.Tool
+    @State private var message = ""
+    @FocusState private var nameFocused: Bool
+
+    init(parent: AgentSession, onCreate: @escaping (String, Profile.Tool, String?) -> Void) {
+        self.parent = parent
+        self.onCreate = onCreate
+        _tool = State(initialValue: parent.tool)
+    }
+
+    private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(NSLocalizedString("New worktree", comment: "new worktree"))
+                    .font(.system(size: 15, weight: .semibold))
+                Text(String(format: NSLocalizedString("Branches %@ at its current commit into a worktree of its own and starts an agent there.", comment: "new worktree"),
+                            prettyGuestPath(SessionHome.guestPath(parent.cwd))))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                TextField(NSLocalizedString("Worktree name (e.g. Login redirect fix)", comment: "new worktree"), text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($nameFocused)
+                Picker(NSLocalizedString("Agent", comment: "new worktree"), selection: $tool) {
+                    ForEach(Profile.Tool.allCases, id: \.self) { t in
+                        Text(t.displayName).tag(t)
+                    }
+                }
+                TextField(NSLocalizedString("Opening message (optional)", comment: "new worktree"),
+                          text: $message, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(2...4)
+            }
+            HStack {
+                Spacer()
+                Button(NSLocalizedString("Cancel", comment: "")) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(NSLocalizedString("Create", comment: "new worktree")) {
+                    let m = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                    onCreate(trimmedName, tool, m.isEmpty ? nil : m)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmedName.isEmpty)
+            }
+        }
+        .padding(18)
+        #if os(macOS)
+        .frame(width: 440)
+        #endif
+        .onAppear { nameFocused = true }
     }
 }
 

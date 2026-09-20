@@ -82,6 +82,13 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// stays until its tab is gone from the roster (killed now, or when
     /// the machine wakes), so the dying tab isn't adopted as a stranger.
     var deletedAt: Date?
+    /// Started as a git worktree off another session's folder. `cwd` is
+    /// that folder until the tab binds — the guest picks the worktree's
+    /// path and branch (unique suffixes and all), and the binder takes
+    /// both from the tab.
+    var worktreeOf: UUID?
+    /// The worktree's branch ("wt/<slug>"), once the tab reported it.
+    var worktreeBranch: String?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -354,11 +361,17 @@ final class AgentSessionStore {
                         s.endedAt = nil
                         s.lastError = nil
                         s.lastSeenAt = now
+                        // A worktree session: the guest chose the folder
+                        // and the branch — the tab knows both.
+                        if s.worktreeOf != nil {
+                            if let c = tab.cwd, !c.isEmpty { s.cwd = c }
+                            if let b = tab.worktreeBranch, !b.isEmpty { s.worktreeBranch = b }
+                        }
                     } else if let since = s.launchingSince,
                               now.timeIntervalSince(since) > Self.launchTimeout {
                         s.launchingSince = nil
                         s.lastError = NSLocalizedString(
-                            "The agent never showed up. The workspace may run an older in-VM agent — restart it (Machines › ⋯ › Restart) and try again.",
+                            "The agent never showed up. The workspace may run an older in-VM agent — restart it (Virtual Machines › ⋯ › Restart) and try again.",
                             comment: "session launch")
                     }
                 }
@@ -581,6 +594,12 @@ enum SessionHome {
         if trimmed.hasPrefix("~/") { return home + String(trimmed.dropFirst(1)) }
         if trimmed.hasPrefix("/") { return trimmed }
         return home + "/" + trimmed
+    }
+
+    /// The session works in a folder of its own (not the bare home) — what
+    /// a git worktree can branch off.
+    nonisolated static func hasFolder(_ s: AgentSession) -> Bool {
+        guestPath(s.cwd) != guestPath("~")
     }
 
     /// The session's machine was deleted, or its folder is gone from the
@@ -1011,6 +1030,8 @@ struct SessionSectionsView: View {
     var actions = SessionStageActions()
     @AppStorage("sessions.listExpanded") private var expanded = true
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
+    /// The session a "New worktree…" sheet is open for.
+    @State private var worktreeFor: AgentSession?
 
     private var matching: [AgentSession] {
         var sessions = store.sessions
@@ -1117,6 +1138,11 @@ struct SessionSectionsView: View {
         }
         .onAppear { revealSelectedArchived(model.selectedSessionID) }
         .onChange(of: model.selectedSessionID) { _, id in revealSelectedArchived(id) }
+        .sheet(item: $worktreeFor) { parent in
+            NewWorktreeSheet(parent: parent) { name, tool, message in
+                actions.newWorktree(parent.id, name, tool, message)
+            }
+        }
     }
 
     /// The selection just landed on an archived session: open the fold so
@@ -1155,6 +1181,10 @@ struct SessionSectionsView: View {
                 }
                 if s.windowIndex != nil, !s.hasEnded {
                     Button(NSLocalizedString("End session", comment: "session menu")) { actions.close(s.id) }
+                }
+                if SessionHome.hasFolder(s) {
+                    Divider()
+                    Button(NSLocalizedString("New worktree…", comment: "session menu")) { worktreeFor = s }
                 }
             } else if s.isArchived {
                 Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }

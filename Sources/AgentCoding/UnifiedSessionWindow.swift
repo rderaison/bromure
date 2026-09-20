@@ -1311,6 +1311,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self?.sessionStageDidChange()
             },
             delete: { [weak self] id in self?.confirmDeleteSession(id) },
+            newWorktree: { [weak self] id, name, tool, message in
+                guard let self, let delegate = self.acDelegate,
+                      let newID = delegate.agentSessionEngine.startWorktree(
+                          from: id, name: name, tool: tool, message: message)
+                else { return }
+                self.selectSession(newID)
+            },
             represent: { [weak self] id in
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()
@@ -2488,9 +2495,9 @@ struct SessionSidebar: View {
         }
     }
 
-    /// "Machines" — the workspaces (VMs) behind the tasks, folded away by
-    /// default. Expanded, it's the classic source list: Grid, each VM with its
-    /// terminals and Docker, the control menus, and "+" for a new one.
+    /// "Virtual Machines" — the workspaces (VMs) behind the tasks, folded
+    /// away by default. Expanded, it's the classic source list: Grid, each VM
+    /// with its terminals and Docker, the control menus, and "+" for a new one.
     @ViewBuilder
     private var machinesSection: some View {
         let running = model.profileRows.filter { $0.state == .running || $0.state == .booting }.count
@@ -2503,7 +2510,7 @@ struct SessionSidebar: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)
                     .frame(width: 10)
-                Text(NSLocalizedString("Machines", comment: "sidebar section"))
+                Text(NSLocalizedString("Virtual Machines", comment: "sidebar section"))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)

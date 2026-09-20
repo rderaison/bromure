@@ -3087,6 +3087,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     else { return ["error": "unknown session"] }
                     self.agentSessionEngine.resume(id, message: params["message"] as? String)
                     return ["ok": true]
+                case "worktree-session":
+                    // {id, name, tool?, message?} → the new session's id.
+                    guard let s = params["id"] as? String, let id = UUID(uuidString: s),
+                          let parent = self.agentSessionStore.session(id),
+                          let name = params["name"] as? String
+                    else { return ["error": "id and name required"] }
+                    let tool = (params["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) ?? parent.tool
+                    guard let newID = self.agentSessionEngine.startWorktree(
+                        from: id, name: name, tool: tool, message: params["message"] as? String)
+                    else { return ["error": "the session has no folder to branch"] }
+                    self.ensureUnifiedWindow().selectSession(newID)
+                    return ["ok": true, "id": newID.uuidString]
                 case "archive-session", "unarchive-session":
                     guard let s = params["id"] as? String, let id = UUID(uuidString: s),
                           self.agentSessionStore.session(id) != nil
@@ -3560,6 +3572,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
                     self.agentSessionEngine.close(sid)
                     return ["ok": true]
+                case (let sid?, "worktree"):
+                    // {name, tool, message?} → a new session in a git worktree
+                    // off this session's folder.
+                    guard let parent = self.agentSessionStore.session(sid) else { return ["error": "unknown session"] }
+                    guard let name = (body["name"] as? String)?.trimmingCharacters(in: .whitespaces), !name.isEmpty
+                    else { return ["error": "name required"] }
+                    let tool = (body["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) ?? parent.tool
+                    guard let newID = self.agentSessionEngine.startWorktree(
+                        from: sid, name: name, tool: tool, message: body["message"] as? String)
+                    else { return ["error": "the session has no folder to branch"] }
+                    return ["ok": true, "id": newID.uuidString]
                 case (let sid?, "rename"):
                     guard self.agentSessionStore.session(sid) != nil,
                           let title = body["title"] as? String else { return ["error": "unknown session or no title"] }
