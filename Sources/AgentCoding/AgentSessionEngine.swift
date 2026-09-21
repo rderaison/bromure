@@ -70,8 +70,33 @@ final class AgentSessionEngine {
         s.launchingSince = Date()
         store.upsert(s)
         BACDebug.log("sessions", "start “\(title)” (\(req.tool.rawValue) in \(cwd))")
-        launch(s.id, prompt: message ?? "", flags: "")
+        launch(s.id, prompt: message ?? "", flags: "", attachments: req.attachments)
         return s.id
+    }
+
+    /// Stage the files dropped on the new-session composer in the machine
+    /// (same folder and naming as a drop in the chat, so the chat shows their
+    /// thumbnails), and give back their guest paths. Best effort: a file that
+    /// fails to land is left out, the rest still reach the agent.
+    private func stageAttachments(_ files: [DroppedFile], sessionID: UUID,
+                                  profileID: UUID, delegate: ACAppDelegate) async -> [String] {
+        guard !files.isEmpty else { return [] }
+        func op(_ dict: [String: Any]) async -> Bool {
+            (try? await delegate.guestFileOp(profileID: profileID, op: dict, timeout: 60)) != nil
+        }
+        guard await op(["op": "mkdir", "path": GuestDrop.baseDir]) else { return [] }
+        let stamp = GuestDrop.stamp()
+        var paths: [String] = []
+        for (i, f) in files.enumerated() {
+            let path = GuestDrop.path(index: i, name: "\(stamp)_\(f.name)")
+            var ok = true
+            for w in GuestDrop.writeOps(guestPath: path, data: f.data) where !(await op(w)) { ok = false; break }
+            guard ok else { continue }
+            if f.isImage { DropImageStore.store(f.data, for: path) }
+            paths.append(path)
+        }
+        BACDebug.log("sessions", "staged \(paths.count)/\(files.count) attachment(s) for \(sessionID)")
+        return paths
     }
 
     /// A new session in a git worktree branched off `parentID`'s folder at
@@ -340,7 +365,7 @@ final class AgentSessionEngine {
     /// `worktreeSlug`: branch the folder into a worktree (the guest's
     /// worktree-create) instead of opening the agent in it (agent-tab).
     private func launch(_ id: UUID, prompt: String, flags: String, alreadyUp: Bool = false,
-                        worktreeSlug: String? = nil) {
+                        worktreeSlug: String? = nil, attachments: [DroppedFile] = []) {
         Task { [weak self] in
             guard let self, let delegate = self.delegate, let s = self.store.session(id) else { return }
             @MainActor func fail(_ reason: String) {
@@ -354,6 +379,17 @@ final class AgentSessionEngine {
                     fail(NSLocalizedString("The workspace did not start in time", comment: "session start"))
                     return
                 }
+            }
+            // Dropped files land in the machine before the agent starts, and
+            // ride along as paths — the same shape a drop in the chat sends,
+            // so the opening turn shows their thumbnails too.
+            var prompt = prompt
+            let staged = await self.stageAttachments(attachments, sessionID: id,
+                                                     profileID: s.profileID, delegate: delegate)
+            if !staged.isEmpty {
+                prompt = prompt.isEmpty ? staged.joined(separator: " ") : prompt + " " + staged.joined(separator: " ")
+                let echoed = prompt
+                self.store.mutate(id) { $0.openingMessage = echoed }
             }
             let guestPath = ScheduledAutomationEngine.guestPath(s.cwd)
             let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"

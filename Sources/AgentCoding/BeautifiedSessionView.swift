@@ -218,14 +218,6 @@ extension BeautifiedTranscriptProvider {
     }
 }
 
-/// A file dragged onto the beautified window (host bytes + name + whether it's
-/// an image, so the drop can show a thumbnail).
-struct DroppedFile {
-    let name: String
-    let data: Data
-    let isImage: Bool
-}
-
 /// Builds the guest-side commands to stage a dropped file and the message that
 /// references it to the agent.
 enum GuestDrop {
@@ -1882,40 +1874,10 @@ struct BeautifiedSessionView: View {
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         Task { @MainActor in
-            var files: [DroppedFile] = []
-            for p in providers {
-                if let f = await Self.loadDropped(p) { files.append(f) }
-            }
+            let files = await DroppedFile.load(providers)
             if !files.isEmpty { model.drop(files) }
         }
         return true
-    }
-
-    /// Load one dragged item as bytes. Uses `loadObject(ofClass: URL.self)` —
-    /// the same call the file browser's working drop uses — for Finder file
-    /// drags (any type), and falls back to a raw image representation for images
-    /// dragged from a browser/Preview (no backing file URL).
-    private static func loadDropped(_ p: NSItemProvider) async -> DroppedFile? {
-        let maxBytes = 25 * 1024 * 1024
-        if p.canLoadObject(ofClass: URL.self) {
-            let url: URL? = await withCheckedContinuation { cont in
-                _ = p.loadObject(ofClass: URL.self) { u, _ in cont.resume(returning: u) }
-            }
-            guard let url, url.isFileURL,
-                  let data = try? Data(contentsOf: url), data.count <= maxBytes else { return nil }
-            let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
-            return DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg)
-        }
-        if p.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-            let data: Data? = await withCheckedContinuation { cont in
-                p.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { d, _ in
-                    cont.resume(returning: d)
-                }
-            }
-            guard let data, data.count <= maxBytes else { return nil }
-            return DroppedFile(name: "pasted-image.png", data: data, isImage: true)
-        }
-        return nil
     }
 
     private static let tailID = "beautified-tail"
@@ -1928,59 +1890,6 @@ struct BeautifiedSessionView: View {
 
 /// Pending-attachment chips above the composer: image thumbnails / file chips,
 /// each removable. What Send transmits alongside the text.
-private struct PendingAttachmentChips: View {
-    let files: [DroppedFile]
-    let onRemove: (Int) -> Void
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(files.indices, id: \.self) { i in
-                    chip(files[i], index: i)
-                }
-            }
-            .padding(.vertical, 2)
-        }
-    }
-
-    @ViewBuilder
-    private func chip(_ f: DroppedFile, index: Int) -> some View {
-        ZStack(alignment: .topTrailing) {
-            Group {
-                if f.isImage, let ns = NSImage(data: f.data) {
-                    Image(nsImage: ns)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 84, height: 64)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                } else {
-                    VStack(spacing: 4) {
-                        Image(systemName: "doc.text").font(.system(size: 18))
-                            .foregroundStyle(.secondary)
-                        Text(f.name).font(.system(size: 9.5)).lineLimit(1)
-                            .truncationMode(.middle).foregroundStyle(.secondary)
-                            .frame(maxWidth: 76)
-                    }
-                    .frame(width: 84, height: 64)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.primary.opacity(0.06)))
-                }
-            }
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.15)))
-            Button { onRemove(index) } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 14))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, Color.black.opacity(0.55))
-            }
-            .buttonStyle(.plain)
-            .padding(3)
-            .help(NSLocalizedString("Remove attachment", comment: "chip"))
-        }
-    }
-}
-
 /// A blinking caret shown at the tail of streaming assistant prose — the "still
 /// writing" cue, the beautified-view counterpart to a terminal cursor. Shown in
 /// place of `ThinkingRow` while the last turn is assistant text being extended.

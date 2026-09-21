@@ -24,6 +24,9 @@ struct AgentSessionRequest {
     var openingMessage: String? = nil
     /// Optional explicit name; else derived from the message / folder.
     var title: String? = nil
+    /// Files dropped on the new-session composer: staged in the machine
+    /// once it's up, their guest paths appended to the opening message.
+    var attachments: [DroppedFile] = []
 }
 
 struct AgentSession: Identifiable, Codable, Equatable, Sendable {

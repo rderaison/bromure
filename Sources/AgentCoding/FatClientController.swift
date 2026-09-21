@@ -1026,11 +1026,15 @@ final class RemoteHostController {
 
     /// POST /sessions/start — the new session's id once the server has it.
     func startSession(profileID: Profile.ID, tool: Profile.Tool, cwd: String,
-                      cloneURL: String?, message: String?) async -> UUID? {
+                      cloneURL: String?, message: String?,
+                      attachments: [DroppedFile] = []) async -> UUID? {
         let host = self.host
         var body: [String: Any] = ["profile": profileID.uuidString, "tool": tool.rawValue, "cwd": cwd]
         if let cloneURL, !cloneURL.isEmpty { body["cloneURL"] = cloneURL }
         if let message, !message.isEmpty { body["message"] = message }
+        // Dropped files travel with the request; the server stages them in
+        // the machine once it's up, exactly like a local drop.
+        if !attachments.isEmpty { body["attachments"] = attachments.map(\.wireDictionary) }
         let resp = try? await Task.detached(priority: .userInitiated) {
             try RemoteTransport.client(for: host).request("POST", "/agent-sessions/start", body: body)
         }.value
@@ -3512,7 +3516,8 @@ final class RemoteHostWindow: NSWindow {
             onStart: { [weak self] req in
                 Task { @MainActor in
                     guard let id = await c.startSession(profileID: req.profileID, tool: req.tool, cwd: req.cwd,
-                                                        cloneURL: req.cloneURL, message: req.openingMessage),
+                                                        cloneURL: req.cloneURL, message: req.openingMessage,
+                                                        attachments: req.attachments),
                           let self else { return }
                     // The mirror gets it with the next poll; select it then.
                     if c.sessionStore.session(id) != nil { self.selectSession(id) }

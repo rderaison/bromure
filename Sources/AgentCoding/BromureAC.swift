@@ -3907,11 +3907,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                           let toolRaw = body["tool"] as? String,
                           let tool = Profile.Tool(rawValue: toolRaw)
                     else { return ["error": "profile and tool required"] }
+                    // Files dropped on a remote client's new-session screen,
+                    // {name, data (base64), isImage} each — staged here once
+                    // the machine is up, like a local drop.
+                    let attachments = ((body["attachments"] as? [[String: Any]]) ?? [])
+                        .compactMap(DroppedFile.init(wire:))
                     let sid = self.agentSessionEngine.start(.init(
                         profileID: profile.id, tool: tool,
                         cwd: body["cwd"] as? String ?? "~",
                         cloneURL: body["cloneURL"] as? String,
-                        openingMessage: body["message"] as? String))
+                        openingMessage: body["message"] as? String,
+                        attachments: attachments))
                     return ["ok": true, "id": sid.uuidString]
                 case (let sid?, "resume"):
                     guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }

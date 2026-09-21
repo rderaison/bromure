@@ -2,6 +2,175 @@
 import AppKit
 #endif
 import SwiftUI
+import UniformTypeIdentifiers
+
+// MARK: - Dropped files
+
+/// A file dragged onto a composer (host bytes + name + whether it's an
+/// image, so the drop can show a thumbnail). Shared by the chat's composer
+/// and the new-session screen, on every platform.
+struct DroppedFile {
+    let name: String
+    let data: Data
+    let isImage: Bool
+
+    static let maxBytes = 25 * 1024 * 1024
+
+    /// Load one dragged item as bytes. Uses `loadObject(ofClass: URL.self)` —
+    /// the same call the file browser's working drop uses — for Finder file
+    /// drags (any type), and falls back to a raw image representation for images
+    /// dragged from a browser/Preview (no backing file URL).
+    static func load(_ p: NSItemProvider) async -> DroppedFile? {
+        if p.canLoadObject(ofClass: URL.self) {
+            let url: URL? = await withCheckedContinuation { cont in
+                _ = p.loadObject(ofClass: URL.self) { u, _ in cont.resume(returning: u) }
+            }
+            guard let url, url.isFileURL,
+                  let data = try? Data(contentsOf: url), data.count <= maxBytes else { return nil }
+            let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
+            return DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg)
+        }
+        if p.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            let data: Data? = await withCheckedContinuation { cont in
+                p.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { d, _ in
+                    cont.resume(returning: d)
+                }
+            }
+            guard let data, data.count <= maxBytes else { return nil }
+            return DroppedFile(name: "pasted-image.png", data: data, isImage: true)
+        }
+        return nil
+    }
+
+    /// Every item of a drop, loaded; empty when nothing usable was dragged.
+    static func load(_ providers: [NSItemProvider]) async -> [DroppedFile] {
+        var files: [DroppedFile] = []
+        for p in providers {
+            if let f = await load(p) { files.append(f) }
+        }
+        return files
+    }
+
+    /// A readable host FILE for `token` (absolute path, `~`, or `file://`), or nil.
+    static func hostFileURL(_ token: String) -> URL? {
+        var path = token
+        if path.hasPrefix("file://"), let u = URL(string: path) { path = u.path }
+        else if path.hasPrefix("~") { path = (path as NSString).expandingTildeInPath }
+        guard path.hasPrefix("/") else { return nil }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue
+        else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
+    /// Host file paths a text field took on a drop — the field itself accepts
+    /// the drag and pastes the path, before any drop handler around it sees
+    /// anything. Each becomes a file and leaves the text. Lines and the whole
+    /// text are tried first, so a path with spaces is found whole; then the
+    /// whitespace-separated tokens.
+    static func absorbHostPaths(in text: String) -> (text: String, files: [DroppedFile]) {
+        var out = text
+        var files: [DroppedFile] = []
+        var candidates: [String] = [text.trimmingCharacters(in: .whitespacesAndNewlines)]
+        candidates += text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        candidates += text.split(whereSeparator: { " \n\t".contains($0) }).map(String.init)
+        var seen: Set<String> = []
+        for tok in candidates where !tok.isEmpty && !seen.contains(tok) {
+            seen.insert(tok)
+            guard out.contains(tok), let url = hostFileURL(tok),
+                  let data = try? Data(contentsOf: url), data.count <= maxBytes else { continue }
+            let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
+            files.append(DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg))
+            out = out.replacingOccurrences(of: tok, with: "")
+        }
+        guard !files.isEmpty else { return (text, []) }
+        // Collapse what the removal left behind (a double space, a bare line).
+        let cleaned = out.split(whereSeparator: \.isNewline)
+            .map { $0.split(separator: " ").joined(separator: " ") }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        return (cleaned, files)
+    }
+
+    /// Wire form for the remote session API: {name, data (base64), isImage}.
+    var wireDictionary: [String: Any] {
+        ["name": name, "data": data.base64EncodedString(), "isImage": isImage]
+    }
+
+    init(name: String, data: Data, isImage: Bool) {
+        self.name = name; self.data = data; self.isImage = isImage
+    }
+
+    init?(wire: [String: Any]) {
+        guard let name = wire["name"] as? String,
+              let b64 = wire["data"] as? String, let data = Data(base64Encoded: b64),
+              data.count <= Self.maxBytes else { return nil }
+        self.init(name: name, data: data, isImage: wire["isImage"] as? Bool ?? false)
+    }
+}
+
+/// The files staged for the next send, as thumbnails with a remove badge.
+struct PendingAttachmentChips: View {
+    let files: [DroppedFile]
+    let onRemove: (Int) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(files.indices, id: \.self) { i in
+                    chip(files[i], index: i)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    @ViewBuilder
+    private func thumbnail(_ f: DroppedFile) -> some View {
+        #if canImport(AppKit)
+        if f.isImage, let ns = NSImage(data: f.data) {
+            Image(nsImage: ns).resizable().aspectRatio(contentMode: .fill)
+        } else { placeholder(f) }
+        #else
+        if f.isImage, let ui = UIImage(data: f.data) {
+            Image(uiImage: ui).resizable().aspectRatio(contentMode: .fill)
+        } else { placeholder(f) }
+        #endif
+    }
+
+    private func placeholder(_ f: DroppedFile) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: "doc.text").font(.system(size: 18))
+                .foregroundStyle(.secondary)
+            Text(f.name).font(.system(size: 9.5)).lineLimit(1)
+                .truncationMode(.middle).foregroundStyle(.secondary)
+                .frame(maxWidth: 76)
+        }
+        .frame(width: 84, height: 64)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Color.primary.opacity(0.06)))
+    }
+
+    @ViewBuilder
+    private func chip(_ f: DroppedFile, index: Int) -> some View {
+        ZStack(alignment: .topTrailing) {
+            thumbnail(f)
+                .frame(width: 84, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.15)))
+            Button { onRemove(index) } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 14))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Color.black.opacity(0.55))
+            }
+            .buttonStyle(.plain)
+            .padding(3)
+            .help(NSLocalizedString("Remove attachment", comment: "chip"))
+        }
+    }
+}
 
 // MARK: - Session-first stage views (macOS)
 //
@@ -610,6 +779,10 @@ struct NewSessionView: View {
     @State private var machinePopover = false
     @State private var agentPopover = false
     @State private var wherePopover = false
+    /// Files dropped on the composer: staged in the machine when the
+    /// session starts and handed to the agent with the opening message.
+    @State private var attachments: [DroppedFile] = []
+    @State private var dropTargeted = false
     /// The folder picker sheet ("Choose…" in the Where popover).
     @State private var folderPicker = false
     @FocusState private var messageFocused: Bool
@@ -722,7 +895,15 @@ struct NewSessionView: View {
         onStart(AgentSessionRequest(
             profileID: profileID, tool: tool, cwd: effectiveFolder,
             cloneURL: place == .repository ? repoURL.trimmingCharacters(in: .whitespaces) : nil,
-            openingMessage: message))
+            openingMessage: message, attachments: attachments))
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        Task { @MainActor in
+            let files = await DroppedFile.load(providers)
+            if !files.isEmpty { attachments.append(contentsOf: files) }
+        }
+        return true
     }
 
     /// The one question, then the composer — a new chat, not a form. The
@@ -745,6 +926,21 @@ struct NewSessionView: View {
                         firstMachineCard
                     } else {
                         composer
+                            .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { handleDrop($0) }
+                            .overlay {
+                                if dropTargeted {
+                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                        .strokeBorder(Color.accentColor, lineWidth: 2)
+                                        .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                            .fill(Color.accentColor.opacity(0.06)))
+                                        .overlay(
+                                            Label(NSLocalizedString("Drop to attach", comment: "drop hint"),
+                                                  systemImage: "arrow.down.doc")
+                                                .font(.system(size: 13, weight: .medium))
+                                                .foregroundStyle(Color.accentColor))
+                                        .allowsHitTesting(false)
+                                }
+                            }
                         recentRow
                         Text(Self.footnote)
                             .font(.system(size: 11.5))
@@ -787,6 +983,13 @@ struct NewSessionView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if !attachments.isEmpty {
+                PendingAttachmentChips(files: attachments) { i in
+                    if attachments.indices.contains(i) { attachments.remove(at: i) }
+                }
+                .padding(.horizontal, 4)
+                .padding(.top, 4)
+            }
             TextField(placeholderText, text: $message, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 15))
@@ -794,6 +997,14 @@ struct NewSessionView: View {
                 .lineLimit(3...14)
                 .focused($messageFocused)
                 .onSubmit(start)
+                // A drop that lands ON the field pastes the file's host path
+                // (the field takes the drag first): turn it into a chip.
+                .onChange(of: message) { _, text in
+                    let (rest, files) = DroppedFile.absorbHostPaths(in: text)
+                    guard !files.isEmpty else { return }
+                    attachments.append(contentsOf: files)
+                    message = rest
+                }
                 .padding(.horizontal, 4)
                 .padding(.top, 4)
             HStack(spacing: 8) {

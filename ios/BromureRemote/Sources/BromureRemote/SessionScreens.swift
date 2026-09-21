@@ -382,7 +382,8 @@ struct MobileNewSessionScreen: View {
                 Task { @MainActor in
                     let id = await controller.startSession(
                         profileID: req.profileID, tool: req.tool, cwd: req.cwd,
-                        cloneURL: req.cloneURL, message: req.openingMessage)
+                        cloneURL: req.cloneURL, message: req.openingMessage,
+                        attachments: req.attachments)
                     starting = false
                     if let id { onStarted(id) } else { failed = true }
                 }
