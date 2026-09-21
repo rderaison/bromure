@@ -2379,3 +2379,4 @@
 "Back to the session this terminal hosts (⌥⌘U)" = "Volver a la sesión que aloja este terminal (⌥⌘U)";
 "The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "La máquina Linux detrás de esta sesión: su pestaña de terminal en la lista de máquinas (⌥⌘U)";
 "Or open Linux (⌥⌘U) to answer in the terminal." = "O abre Linux (⌥⌘U) para responder en el terminal.";
+"New machine…" = "Nueva máquina…";

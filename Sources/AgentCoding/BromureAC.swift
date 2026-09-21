@@ -7479,6 +7479,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         closeEditorWindow()
+        // A machine made on the spot is the one the new-session screen
+        // selects when it rebuilds ("New machine…" in its picker).
+        if editing == nil {
+            UserDefaults.standard.set(profile.id.uuidString, forKey: NewSessionView.lastProfileKey)
+        }
         // Show the SSH key viewer right after a brand-new generation so the
         // user can paste it into GitHub before forgetting.
         if generateSSH, profile.sshPublicKey != nil { openSSHWindow(for: profile) }

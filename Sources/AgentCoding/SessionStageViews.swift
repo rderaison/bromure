@@ -1030,11 +1030,34 @@ struct NewSessionView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                // A machine that doesn't exist yet: the editor opens, and the
+                // saved machine comes back selected here (the caller remembers
+                // it as the last-used one before the screen is rebuilt).
+                Divider().padding(.vertical, 4)
+                Button {
+                    machinePopover = false
+                    onNewMachine()
+                } label: {
+                    HStack(spacing: 10) {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(Color.secondary.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                            .frame(width: 26, height: 26)
+                            .overlay(Image(systemName: "plus")
+                                .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary))
+                        Text(NSLocalizedString("New machine…", comment: "new session machine picker"))
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 40)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
             .padding(6)
         }
         .frame(width: 320)
-        .frame(maxHeight: min(440, CGFloat(profiles.count) * 46 + 12))
+        .frame(maxHeight: min(440, CGFloat(profiles.count) * 46 + 12 + 50))
     }
 
     // MARK: Where

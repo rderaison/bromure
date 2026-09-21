@@ -2885,6 +2885,10 @@ final class RemoteHostWindow: NSWindow {
             do {
                 let resp = try await c.createProfileDoc(doc)
                 self?.closeNewWorkspaceWindow()
+                // The machine the new-session screen selects on its rebuild.
+                if let id = resp["id"] as? String, UUID(uuidString: id) != nil {
+                    UserDefaults.standard.set(id, forKey: NewSessionView.lastProfileKey)
+                }
                 if generateSSH, let pub = resp["sshPublicKey"] as? String, !pub.isEmpty {
                     let a = NSAlert()
                     a.messageText = NSLocalizedString("New SSH key generated", comment: "")
