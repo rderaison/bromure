@@ -98,6 +98,57 @@ struct SessionFailureTests {
         #expect(TerminalScan.classify(trustDialog) == .prompt(p!))
     }
 
+    // Verbatim from a fresh install's first turn (2.1.258): the fullscreen
+    // renderer upsell — a modal the chat used to hide entirely.
+    private let fullscreenUpsell = """
+        ∗ Churned for 2s · done 10:42 AM
+        ────────────────────────────────────────────────────────────
+         Try the new fullscreen renderer?
+
+         · Flicker-free output — fixes the flashing you see during long responses
+         · Mouse support — click to move your cursor or expand results
+         · Selected text auto-copies to your clipboard
+
+         ❯ 1. Yes, try it
+           2. Not now
+
+         Enter to confirm · Esc to cancel
+        """
+
+    @Test("An unknown modal picker (real capture) becomes a generic picker prompt")
+    func genericPicker() {
+        let p = TerminalPrompt.detect(inScreen: fullscreenUpsell)
+        #expect(p?.kind == .picker)
+        #expect(p?.title == "Try the new fullscreen renderer?")
+        #expect(p?.options.map(\.label) == ["Yes, try it", "Not now"])
+        #expect(p?.selectedOption == 1)
+        #expect(p?.keys(picking: 2) == ["Down", "Enter"])   // from the highlighted row
+        #expect(p?.keys(picking: 1) == ["Enter"])
+        #expect(TerminalScan.classify(fullscreenUpsell) == .prompt(p!))
+    }
+
+    @Test("AskUserQuestion and permission pickers are not generic picker prompts")
+    func genericPickerExclusions() {
+        // AskUserQuestion's own card answers these ("Enter to select" footer).
+        let question = """
+         Which database should the service use?
+         ❯ 1. Postgres
+           2. SQLite
+         Enter to select · Esc to cancel
+        """
+        #expect(TerminalPrompt.detect(inScreen: question) == nil)
+        // A tool-permission prompt is never decided from a card.
+        let permission = """
+         Bash command: rm -rf build
+         Do you want to proceed?
+         ❯ 1. Yes
+           2. Yes, and don't ask again for rm commands
+           3. No
+         Enter to confirm · Esc to cancel
+        """
+        #expect(TerminalPrompt.detect(inScreen: permission) == nil)
+    }
+
     // Verbatim `/login` method menu from a real `claude` run.
     private let loginMenu = """
            Login

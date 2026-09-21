@@ -2042,11 +2042,139 @@ def _preonboard_claude():
     if cfg.get("hasCompletedOnboarding") is not True:
         cfg["hasCompletedOnboarding"] = True
         changed = True
+    # Never a "fresh install". Every session starts from a blank home, and
+    # Claude Code treats an install with no first-start record as brand new:
+    # that is what makes it try the fullscreen renderer for a session and
+    # then ask "Try the new fullscreen renderer?" — a modal the chat can't
+    # answer. A first-start stamp (without the version, which is what the
+    # freshness check keys on) plus its seen-count cap settle that one; the
+    # sweep below settles the rest of the family.
+    if not cfg.get("firstStartTime"):
+        cfg["firstStartTime"] = _utc_now_iso()
+        changed = True
+    for key, value in _claude_nudge_keys().items():
+        if key not in cfg:
+            cfg[key] = value
+            changed = True
     if changed:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(cfg, f, indent=2)
         os.replace(tmp, path)
+    _settle_claude_tui()
+
+
+def _utc_now_iso():
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _settle_claude_tui():
+    """An explicit `tui` in ~/.claude/settings.json means "the user chose a
+    renderer": Claude Code neither upsells nor trials the fullscreen one over
+    it. Classic (`default`) is what the beautified view scrapes — the
+    fullscreen renderer draws on the alternate screen. Only ever seeds a
+    missing key; a value the user set is theirs. (_seed_claude_settings
+    seeds it again after its Bedrock rewrite.)"""
+    claude_dir = os.path.join(HOME, ".claude")
+    path = os.path.join(claude_dir, "settings.json")
+    settings = {}
+    try:
+        with open(path) as f:
+            obj = json.load(f)
+        if isinstance(obj, dict):
+            settings = obj
+    except (OSError, ValueError):
+        pass
+    if "tui" in settings:
+        return
+    settings["tui"] = "default"
+    os.makedirs(claude_dir, exist_ok=True)
+    tmp = path + ".bromure-tui-tmp"
+    with open(tmp, "w") as f:
+        json.dump(settings, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+# Claude Code names its one-time nudges by convention — `hasSeen…` booleans
+# and `…SeenCount` counters in ~/.claude.json (hasSeenTasksHint,
+# fullscreenUpsellSeenCount, hasSeenAutoDefaultNudge, …) — and a release adds
+# new ones without notice. Rather than chase each, the installed bundle is
+# swept for those two shapes once per version and every match is pre-seeded
+# as already seen. A false match costs nothing: an unknown key in the state
+# file is inert.
+_NUDGE_KEY_RE = re.compile(rb"(?<![A-Za-z0-9_$])(hasSeen[A-Z][A-Za-z0-9]{2,60}|[a-z][A-Za-z0-9]{2,60}SeenCount)(?![A-Za-z0-9_$])")
+_NUDGE_COUNT = 99
+_NUDGE_CACHE = os.path.join(HOME, ".bromure", "claude-nudge-keys.json")
+
+
+def _claude_bundle():
+    """The Claude Code bundle to sweep: the resolved `claude` on PATH when
+    it's a real file of some size (npm's cli.js, the native binary), else
+    the usual install spots. None when nothing plausible is around."""
+    candidates = []
+    exe = shutil.which("claude")
+    if exe:
+        candidates.append(os.path.realpath(exe))
+    for root in ("/usr/lib/node_modules", "/usr/local/lib/node_modules",
+                 os.path.join(HOME, ".npm-global/lib/node_modules")):
+        candidates.append(os.path.join(root, "@anthropic-ai/claude-code/cli.js"))
+    candidates += sorted(glob.glob(os.path.join(HOME, ".local/share/claude/versions/*")), reverse=True)
+    for c in candidates:
+        try:
+            if os.path.isfile(c) and os.path.getsize(c) > 1_000_000:
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def _claude_nudge_keys():
+    """{key: seeded value} for every nudge-shaped key in the installed Claude
+    Code bundle — cached by (path, size, mtime) so the sweep (a regex over a
+    10–200 MB file, a few seconds) runs once per version."""
+    bundle = _claude_bundle()
+    if not bundle:
+        return {}
+    try:
+        st = os.stat(bundle)
+    except OSError:
+        return {}
+    stamp = {"path": bundle, "size": st.st_size, "mtime": int(st.st_mtime)}
+    try:
+        with open(_NUDGE_CACHE) as f:
+            cached = json.load(f)
+        if all(cached.get(k) == v for k, v in stamp.items()) and isinstance(cached.get("keys"), dict):
+            return cached["keys"]
+    except (OSError, ValueError):
+        pass
+    import mmap
+    import time
+    t0 = time.time()
+    keys = {}
+    try:
+        with open(bundle, "rb") as f:
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                for m in _NUDGE_KEY_RE.finditer(mm):
+                    name = m.group(1).decode("ascii", "ignore")
+                    # Terms acceptances (hasSeenUltraplanTerms…) are the
+                    # user's to click through, not a nudge.
+                    if name.endswith("Terms"):
+                        continue
+                    keys[name] = True if name.startswith("hasSeen") else _NUDGE_COUNT
+    except (OSError, ValueError) as e:
+        log("home", "claude nudge sweep failed:", e)
+        return {}
+    log("home", "claude nudge sweep: %d keys in %s (%.1fs)" % (len(keys), bundle, time.time() - t0))
+    try:
+        os.makedirs(os.path.dirname(_NUDGE_CACHE), exist_ok=True)
+        tmp = _NUDGE_CACHE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(dict(stamp, keys=keys), f, indent=2, sort_keys=True)
+        os.replace(tmp, _NUDGE_CACHE)
+    except OSError:
+        pass
+    return keys
 
 
 def _pretrust_codex(cwd):
@@ -4138,6 +4266,9 @@ def _seed_claude_settings():
     if not uses_claude:
         return
     settings = _read()
+    # The renderer the user "chose" (see _settle_claude_tui): re-seeded here
+    # because the Bedrock branch above restarts the file from scratch.
+    settings.setdefault("tui", "default")
     perms = settings.get("permissions")
     perms = perms if isinstance(perms, dict) else {}
     if "defaultMode" not in perms:

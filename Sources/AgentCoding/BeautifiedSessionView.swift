@@ -890,7 +890,10 @@ final class BeautifiedSessionModel: ObservableObject {
         let state = TerminalScan.classify(screen, agent: agentKind)
         // Only touch published state when it actually changes, so a steady error
         // banner doesn't re-fire the animation every scan.
-        let newPrompt: TerminalPrompt? = { if case .prompt(let p) = state { return p } else { return nil } }()
+        var newPrompt: TerminalPrompt? = { if case .prompt(let p) = state { return p } else { return nil } }()
+        // An AskUserQuestion round has its own card; a generic picker read
+        // off the same screen would double it.
+        if newPrompt?.kind == .picker, !pendingQuestionItems.isEmpty { newPrompt = nil }
         var newFailure: SessionFailure? = { if case .failure(let f) = state { return f } else { return nil } }()
         // The terminal shows the agent's answers too: a line of prose that
         // happens to carry a needle is the conversation, not a banner. The
@@ -941,6 +944,19 @@ final class BeautifiedSessionModel: ObservableObject {
         withAnimation(.easeOut(duration: 0.2)) { prompt = nil }
         setWorking(true)
         let keys = p.trustKeys
+        Task { [weak self] in
+            await self?.provider.pressKeys(keys)
+            await self?.rescanSoon()
+        }
+    }
+
+    /// Answer a generic modal picker with one of its options, or dismiss it
+    /// (Esc — every Claude Code nudge takes it as "not now"). Optimistic:
+    /// the card goes, the next scan confirms the screen moved on.
+    func answerPicker(_ index: Int?) {
+        guard let p = prompt, p.kind == .picker else { return }
+        withAnimation(.easeOut(duration: 0.2)) { prompt = nil }
+        let keys = index.map { p.keys(picking: $0) } ?? ["Escape"]
         Task { [weak self] in
             await self?.provider.pressKeys(keys)
             await self?.rescanSoon()
@@ -1710,6 +1726,7 @@ struct BeautifiedSessionView: View {
                                        onHostSignIn: { model.startHostSignIn() },
                                        onOpenProviderSettings: model.signInProvider == nil ? model.openProviderSettings : nil,
                                        onTrust: { model.trustFolder() },
+                                       onPick: { model.answerPicker($0) },
                                        onMethod: { model.chooseLoginMethod($0) },
                                        onOpenURL: { model.openLoginURL() },
                                        onSubmitCode: { model.submitLoginCode($0) })
@@ -1736,6 +1753,14 @@ struct BeautifiedSessionView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 16)
+                    // A short transcript sits at the bottom by FILLING the
+                    // viewport, never by the scroll anchor alone: a ScrollView
+                    // whose content is shorter than itself draws that content
+                    // bottom-anchored but hit-tests (and exposes to
+                    // accessibility) top-aligned, so every button in a fresh
+                    // session's chat — trust, sign-in, a picker — was dead
+                    // until the conversation outgrew the window.
+                    .frame(maxWidth: .infinity, minHeight: max(0, viewportHeight), alignment: .bottom)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
                         contentHeight = h
                         model.debugGeometry["content"] = h
@@ -2128,7 +2153,7 @@ struct LoginOption: Equatable, Identifiable {
 /// Claude's trust dialog is likewise answerable inline (its arrow list puts
 /// "Yes, I trust this folder" one Down from the default "No, exit").
 struct TerminalPrompt: Equatable {
-    enum Kind: Equatable { case trust, login }
+    enum Kind: Equatable { case trust, login, picker }
     let kind: Kind
     /// Trust: the folder path. (Login carries its state in the fields below.)
     var detail: String = ""
@@ -2144,12 +2169,28 @@ struct TerminalPrompt: Equatable {
     var authURL: String? = nil
     /// Login — the agent is waiting for the verification code ("Paste code here").
     var awaitingCode: Bool = false
+    /// Picker — any other modal the agent put up ("Try the new fullscreen
+    /// renderer?"): its title, its numbered options, and which one the
+    /// cursor sits on (so an answer is arrow moves from there, then Enter).
+    var title: String = ""
+    var options: [LoginOption] = []
+    var selectedOption: Int? = nil
 
     var headline: String {
         switch kind {
         case .trust: return NSLocalizedString("The agent is waiting for you to trust this folder", comment: "prompt")
         case .login: return NSLocalizedString("Sign in to Claude", comment: "prompt")
+        case .picker: return title.isEmpty ? NSLocalizedString("The agent is asking", comment: "prompt") : title
         }
+    }
+
+    /// The keystrokes that pick option `index`: from the highlighted row
+    /// (the first one when unknown) to the target, then Enter. Arrow moves
+    /// work in every Claude Code picker; digits only in some.
+    func keys(picking index: Int) -> [String] {
+        let from = selectedOption ?? options.first?.index ?? 1
+        let moves = index - from
+        return Array(repeating: moves > 0 ? "Down" : "Up", count: abs(moves)) + ["Enter"]
     }
 
     private static let trustNeedles = [
@@ -2213,7 +2254,44 @@ struct TerminalPrompt: Equatable {
                                   canAnswerTrust: claudePicker || codexPicker || kimiPicker,
                                   trustKeys: claudePicker ? ["Down", "Enter"] : ["Enter"])
         }
+
+        // Any other modal picker — a numbered list under a title with a
+        // picker footer ("Try the new fullscreen renderer?" → 1. Yes, try it
+        // / 2. Not now). Surfaced generically so nothing ever blocks the
+        // chat unseen; the user picks here, or dismisses (Esc). Not the
+        // AskUserQuestion pickers (their own card answers those; footers
+        // "Enter to select" / "Space to toggle") and not tool-permission
+        // prompts, which auto mode never shows and a card must not decide.
+        if BeautifiedSessionModel.menuHints(trimmed.joined(separator: "\n")),
+           !low.contains("enter to select"), !low.contains("space to toggle"),
+           !low.contains("don't ask again"), !low.contains("do you want to proceed") {
+            let optionLines = trimmed.enumerated().filter { loginOption($0.element) != nil }
+            let options = optionLines.compactMap { loginOption($0.element) }
+            if options.count >= 2, options.map(\.index) == Array(1...options.count),
+               let first = optionLines.first {
+                let selected = optionLines.first { $0.element.hasPrefix("❯") }
+                    .flatMap { loginOption($0.element)?.index }
+                return TerminalPrompt(kind: .picker,
+                                      title: pickerTitle(trimmed, before: first.offset),
+                                      options: options, selectedOption: selected)
+            }
+        }
         return nil
+    }
+
+    /// The dialog's title: the nearest question above the options, else the
+    /// nearest line of prose — never a bullet, box art, or the footer.
+    private static func pickerTitle(_ lines: [String], before end: Int) -> String {
+        let above = lines[0..<end].suffix(12).reversed()
+        func prose(_ l: String) -> String? {
+            let t = l.trimmingCharacters(in: CharacterSet(charactersIn: " │┃|"))
+            guard !t.isEmpty, t.count <= 90, t.contains(where: \.isLetter),
+                  !t.hasPrefix("·"), !t.hasPrefix("•"), !t.hasPrefix("-"), !t.hasPrefix("—")
+            else { return nil }
+            return t
+        }
+        if let q = above.compactMap(prose).first(where: { $0.hasSuffix("?") }) { return q }
+        return above.compactMap(prose).first ?? ""
     }
 
     /// "❯ 1. Claude account with subscription · Pro, Max…" → (1, "Claude account
@@ -2439,15 +2517,25 @@ private struct PromptCard: View {
     /// No account to sign into (Oh My Pi): the machine's provider settings.
     var onOpenProviderSettings: (() -> Void)? = nil
     var onTrust: () -> Void = {}
+    /// Picker: the option's index, or nil to dismiss (Esc).
+    var onPick: (Int?) -> Void = { _ in }
     var onMethod: (Int) -> Void = { _ in }
     var onOpenURL: () -> Void = {}
     var onSubmitCode: (String) -> Void = { _ in }
 
     @State private var code = ""
 
+    private var icon: String {
+        switch prompt.kind {
+        case .login: return "person.badge.key.fill"
+        case .trust: return "hand.raised.fill"
+        case .picker: return "questionmark.circle.fill"
+        }
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: prompt.kind == .login ? "person.badge.key.fill" : "hand.raised.fill")
+            Image(systemName: icon)
                 .font(.system(size: 15))
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 6) {
@@ -2455,6 +2543,7 @@ private struct PromptCard: View {
                 switch prompt.kind {
                 case .trust: trustBody
                 case .login: loginBody
+                case .picker: pickerBody
                 }
             }
             Spacer(minLength: 0)
@@ -2484,6 +2573,27 @@ private struct PromptCard: View {
                 comment: "prompt hint"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
+    }
+
+    /// The dialog's options as buttons (the highlighted one prominent —
+    /// it's what Enter would pick), and the way out.
+    @ViewBuilder private var pickerBody: some View {
+        HStack(spacing: 6) {
+            ForEach(prompt.options) { option in
+                let highlighted = option.index == (prompt.selectedOption ?? prompt.options.first?.index)
+                Button(option.label) { onPick(option.index) }
+                    .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    .tint(highlighted ? .orange : nil)
+            }
+            Button(NSLocalizedString("Dismiss", comment: "prompt picker (Esc)")) { onPick(nil) }
+                .controlSize(.small)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+        }
+        Text(NSLocalizedString("Or open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
+            .font(.system(size: 11)).foregroundStyle(.tertiary)
     }
 
     private var headline: String {
