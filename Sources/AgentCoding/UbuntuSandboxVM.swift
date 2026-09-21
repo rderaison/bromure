@@ -213,6 +213,14 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// The underlying VZ machine. Exposed so the host app can attach a
     /// VZVirtualMachineView for display.
     public private(set) var vm: VZVirtualMachine?
+    /// What the running configuration looks like (device counts and
+    /// kinds, sizes, image version) — written next to a saved state at
+    /// suspend and compared at restore, so a restore refused for
+    /// configuration drift names what changed.
+    public private(set) var configFingerprint: [String: String] = [:]
+    /// The differences between the saved state's configuration and this
+    /// boot's, as of the last `restore()`; nil when they matched.
+    public private(set) var lastRestoreDrift: String?
 
     /// Push a new egress firewall to this VM's live switch port — the L4
     /// counterpart of the MITM's `setGuardrailsConfig`, for profile edits
@@ -539,6 +547,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
 
         let virtualMachine = VZVirtualMachine(configuration: config)
         virtualMachine.delegate = self
+        configFingerprint = Self.fingerprint(of: config,
+                                             baseVersion: imageManager.installedImageVersion ?? "")
         self.vm = virtualMachine
     }
 
@@ -580,6 +590,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
         let stateURL = session.savedStateURL
         state = .starting
+        lastRestoreDrift = Self.drift(from: Self.readFingerprint(at: Self.fingerprintURL(for: stateURL)),
+                                      to: configFingerprint)
+        if let drift = lastRestoreDrift {
+            FileHandle.standardError.write(Data(
+                "[ac] saved state of '\(session.profile.name)' was taken with a different configuration: \(drift)\n".utf8))
+        }
         try await vm.restoreMachineStateFrom(url: stateURL)
         // The snapshot is consumed — its contents are the VM's RAM now.
         // Delete it BEFORE resuming: from the first resumed instruction the
@@ -622,7 +638,71 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // any leftover (e.g. a suspend that crashed mid-teardown) first.
         try? FileManager.default.removeItem(at: session.savedStateURL)
         try await vm.saveMachineStateTo(url: session.savedStateURL)
+        Self.writeFingerprint(configFingerprint, to: Self.fingerprintURL(for: session.savedStateURL))
+        await Self.discardPausedInstance(vm)
         state = .stopped
+    }
+
+    /// Stop the paused instance once its state is on disk. A paused
+    /// VZVirtualMachine keeps its storage attachments — an exclusive hold
+    /// on disk.img — for as long as it lives, and the retired session
+    /// object lives on in this process. The next boot of the same
+    /// workspace in this process (the restore itself, and the fresh-boot
+    /// fallback after it) then failed with "The storage device attachment
+    /// is invalid"; only an app restart cleared it. Stopping discards the
+    /// paused guest, whose memory is already saved.
+    private static func discardPausedInstance(_ vm: VZVirtualMachine) async {
+        guard vm.canStop else { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            vm.stop { _ in cont.resume() }
+        }
+    }
+
+    // MARK: Configuration fingerprint (saved-state drift)
+
+    static func fingerprintURL(for stateURL: URL) -> URL { stateURL.appendingPathExtension("json") }
+
+    static func fingerprint(of c: VZVirtualMachineConfiguration, baseVersion: String) -> [String: String] {
+        var f: [String: String] = [:]
+        f["cpus"] = "\(c.cpuCount)"
+        f["memoryGB"] = "\(c.memorySize >> 30)"
+        f["storage"] = c.storageDevices.map {
+            ($0.attachment as? VZDiskImageStorageDeviceAttachment)?.url.lastPathComponent ?? "?"
+        }.joined(separator: ",")
+        f["shares"] = c.directorySharingDevices.map {
+            ($0 as? VZVirtioFileSystemDeviceConfiguration)?.tag ?? "?"
+        }.joined(separator: ",")
+        f["network"] = c.networkDevices.map {
+            $0.attachment.map { String(describing: type(of: $0)) } ?? "none"
+        }.joined(separator: ",")
+        f["serial"] = "\(c.serialPorts.count)"
+        f["sockets"] = "\(c.socketDevices.count)"
+        f["entropy"] = "\(c.entropyDevices.count)"
+        f["balloons"] = "\(c.memoryBalloonDevices.count)"
+        f["base"] = baseVersion
+        f["build"] = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? ""
+        return f
+    }
+
+    static func writeFingerprint(_ f: [String: String], to url: URL) {
+        guard let data = try? JSONSerialization.data(withJSONObject: f, options: [.sortedKeys]) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    static func readFingerprint(at url: URL) -> [String: String]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: String]
+    }
+
+    /// "key: old → new" for every key that differs; nil when nothing does
+    /// or there is nothing to compare (a state saved before fingerprints).
+    static func drift(from saved: [String: String]?, to current: [String: String]) -> String? {
+        guard let saved else { return nil }
+        let diffs = Set(saved.keys).union(current.keys).sorted().compactMap { k -> String? in
+            let a = saved[k] ?? "", b = current[k] ?? ""
+            return a == b ? nil : "\(k): \(a.isEmpty ? "—" : a) → \(b.isEmpty ? "—" : b)"
+        }
+        return diffs.isEmpty ? nil : diffs.joined(separator: "; ")
     }
 
     /// Save the RAM state of an already-paused VM. Used by the
@@ -638,6 +718,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         outboxPollTask?.cancel()
         try? FileManager.default.removeItem(at: session.savedStateURL)
         try await vm.saveMachineStateTo(url: session.savedStateURL)
+        Self.writeFingerprint(configFingerprint, to: Self.fingerprintURL(for: session.savedStateURL))
+        await Self.discardPausedInstance(vm)
         state = .stopped
     }
 

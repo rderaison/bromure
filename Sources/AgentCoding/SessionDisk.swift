@@ -1795,6 +1795,7 @@ public final class SessionDisk {
     /// disk image isn't paired with a stale RAM snapshot.
     public func clearSavedState() {
         try? fm.removeItem(at: savedStateURL)
+        try? fm.removeItem(at: savedStateURL.appendingPathExtension("json"))
         // tabs.json is only meaningful paired with a saved RAM
         // snapshot — without one the recorded UUIDs reference
         // kittys that no longer exist on a fresh boot.

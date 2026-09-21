@@ -1123,9 +1123,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Automation-initiated start: boots an off workspace and resumes a
     /// suspended one, but never trades saved state for a cold boot — if the
     /// snapshot won't restore (config drift after an update, bad state), the
-    /// start is aborted and the automation records a failure instead of the
-    /// interactive path's fresh-boot fallback, which would silently destroy
-    /// the suspended session's terminals and running work.
+    /// workspace boots fresh like an interactive start would — the saved
+    /// state can't come back by any path — with the reason in the log.
     /// `detached: true` boots the VM headless — used by flows that have
     /// their own surface (the plan window) and must not raise the session
     /// window over it. The terminal can be attached later on demand.
@@ -3279,6 +3278,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         openingMessage: params["message"] as? String))
                     self.ensureUnifiedWindow().selectSession(id)
                     return ["ok": true, "id": id.uuidString]
+                case "start-unattended":
+                    // E2E: boot a workspace the way an automation does
+                    // (no fresh-boot fallback over a suspended state).
+                    guard let name = params["profile"] as? String,
+                          let profile = self.profiles.first(where: { $0.name.lowercased() == name.lowercased() })
+                    else { return ["error": "unknown profile"] }
+                    self.startProfileForAutomation(profile.id, detached: params["detached"] as? Bool ?? false)
+                    return ["ok": true, "refusal": self.unattendedLaunchRefusals[profile.id] ?? ""]
+                case "unattended-refusal":
+                    guard let name = params["profile"] as? String,
+                          let profile = self.profiles.first(where: { $0.name.lowercased() == name.lowercased() })
+                    else { return ["error": "unknown profile"] }
+                    return ["refusal": self.unattendedLaunchRefusals[profile.id] ?? ""]
                 case "resume-session":
                     guard let s = params["id"] as? String, let id = UUID(uuidString: s),
                           self.agentSessionStore.session(id) != nil
@@ -8822,24 +8834,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                             "[ac] restored '\(profile.name)' from saved state\n".utf8))
                     } catch {
                         // Restore failed — bad snapshot, configuration
-                        // drift, or VZ refused.
-                        guard freshBootFallback else {
-                            // Automation-initiated start: refuse to cold-boot
-                            // over the user's suspended session. Keep the
-                            // state file for a manual resume and abort.
-                            FileHandle.standardError.write(Data(
-                                "[ac] restore failed (\(error)) — automation start aborted to protect the suspended session\n".utf8))
-                            self.unattendedLaunchRefusals[profile.id] = NSLocalizedString(
-                                "The workspace's suspended state couldn't be restored — start it yourself to boot it fresh.",
-                                comment: "unattended start refused")
-                            self.unifiedWindow?.removePane(profile.id)
-                            self.unregisterPane(profile.id, ifMatches: win)
-                            return
-                        }
-                        // Interactive start: drop the state file and
-                        // do a fresh boot.
+                        // drift (an app or base-image update since the
+                        // suspend), or VZ refused. No path brings that
+                        // state back: a manual start lands in this same
+                        // fresh boot. So an unattended start (an
+                        // automation, a delegate) boots fresh too, rather
+                        // than failing its run for the user to do the
+                        // same by hand — loudly: the VZ error and what
+                        // changed since the suspend go to the log.
+                        let drift = sandbox.lastRestoreDrift.map {
+                            " — configuration changed since the suspend: \($0)" } ?? ""
+                        let who = freshBootFallback ? "" : " (unattended start)"
                         FileHandle.standardError.write(Data(
-                            "[ac] restore failed (\(error)) — booting fresh\n".utf8))
+                            "[ac] restore failed (\(error))\(drift) — booting fresh\(who)\n".utf8))
+                        AppLog.stamp("restore of '\(profile.name)' failed: \(error.localizedDescription)\(drift) — booting fresh\(who)")
                         sessionDisk.clearSavedState()
                         // VZ leaves the VM in an indeterminate state
                         // after a failed restore; rebuild it.
