@@ -328,10 +328,7 @@ final class FileBrowserModel {
     /// A guest listing name is only ever a single path component. Reject
     /// anything that could traverse or confuse host-side path handling.
     /// (Internal — not private — so the security-guard tests can pin it.)
-    static func isSafeGuestName(_ name: String) -> Bool {
-        !name.isEmpty && name != "." && name != ".."
-            && !name.contains("/") && !name.contains("\\") && !name.contains("\0")
-    }
+    static func isSafeGuestName(_ name: String) -> Bool { GuestFileNames.isSafe(name) }
 
     /// Pull a guest file into the local cache; returns the local URL.
     func download(_ entry: FileEntry) async throws -> URL {
@@ -475,8 +472,9 @@ final class FileBrowserModel {
             return NSItemProvider(contentsOf: url) ?? NSItemProvider()
         }
         let provider = NSItemProvider()
-        let ext = (entry.name as NSString).pathExtension
-        let type = UTType(filenameExtension: ext) ?? .data
+        // A type whose preferred extension isn't the file's own (".yaml" is
+        // "yml" to the system) would rename the copy: plain data then.
+        let type = FileExplorerModel.dragType(forFileName: entry.name)
         // The receiver names the dropped file suggestedName + the registered
         // type's preferred extension, so hand it an extension-less base —
         // "index.html" would otherwise land as "index.html.html".

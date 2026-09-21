@@ -17,11 +17,15 @@ enum ACAppDelegate {
     /// macOS delegate's nested enum.
     enum GuestExecError: LocalizedError {
         case vmNotRunning
+        case vmOff
+        case vmSuspended
         case connectionFailed
         case commandFailed(exitCode: Int, stderr: String)
         var errorDescription: String? {
             switch self {
             case .vmNotRunning: "The VM isn't running"
+            case .vmOff: "The VM is off"
+            case .vmSuspended: "The VM is suspended"
             case .connectionFailed: "Couldn't reach the VM's shell agent"
             case .commandFailed(let code, let stderr):
                 stderr.isEmpty ? "Command failed (exit \(code))"

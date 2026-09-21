@@ -447,9 +447,6 @@ final class RemoteMenuApp {
             "bedrockModelID": p.bedrockModelID,
             // Local Models / Fusion
             "modelRouting": p.modelRouting.rawValue,
-            "hybridCloudTokenBudget": p.hybridCloudTokenBudget,
-            "hybridSoftTTFTSeconds": p.hybridSoftTTFTSeconds,
-            "hybridLocalSplitPercent": p.hybridLocalSplitPercent,
             "fusionJudgeLocal": p.fusionJudgeLocal,
             // Tracing
             "traceLevel": p.traceLevel.rawValue,

@@ -571,11 +571,11 @@ enum Fusion {
 
     private static func defaultModels(_ provider: Profile.Tool) -> [String] {
         switch provider {
-        case .claude: return ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+        case .claude: return ["claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"]
         case .codex:  return ["gpt-5.5-2026-04-23", "gpt-5", "gpt-4o"]
         case .grok:   return ["grok-build", "grok-4", "grok-3"]
         case .kimi:   return ["kimi-k2.5", "kimi-k2", "kimi-k2-turbo-preview"]
-        case .omp:    return ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+        case .omp:    return ["claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"]
         }
     }
 

@@ -68,6 +68,17 @@ enum RemoteTransport {
     }()
 
     static func loadClientKeyCrypto() -> Curve25519.Signing.PrivateKey? {
+        #if DEBUG
+        // Headless simulator bring-up (see RootView's BROMURE_DEBUG_* hooks):
+        // an unsigned simulator build has no keychain entitlement
+        // (errSecMissingEntitlement), so the seeded identity is read straight
+        // from the launch environment instead.
+        if let seedB64 = ProcessInfo.processInfo.environment["BROMURE_DEBUG_SEED_KEY"],
+           let seed = Data(base64Encoded: seedB64),
+           let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: seed) {
+            return key
+        }
+        #endif
         guard case .found(let seedB64) = FatClientKeyStore.load(),
               let seed = Data(base64Encoded: seedB64),
               let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: seed) else { return nil }

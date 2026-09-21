@@ -80,19 +80,19 @@ struct GuestFileNameTests {
 
     @Test("bare filenames pass")
     func validNames() {
-        #expect(FileBrowserModel.isSafeGuestName("report.pdf"))
-        #expect(FileBrowserModel.isSafeGuestName("some dir"))       // spaces are fine
-        #expect(FileBrowserModel.isSafeGuestName("..config"))       // leading dots: filtered as hidden elsewhere, not traversal
+        #expect(GuestFileNames.isSafe("report.pdf"))
+        #expect(GuestFileNames.isSafe("some dir"))       // spaces are fine
+        #expect(GuestFileNames.isSafe("..config"))       // leading dots: filtered as hidden elsewhere, not traversal
     }
 
     @Test("traversal and separator shapes are rejected")
     func maliciousNames() {
-        #expect(!FileBrowserModel.isSafeGuestName(".."))
-        #expect(!FileBrowserModel.isSafeGuestName("."))
-        #expect(!FileBrowserModel.isSafeGuestName(""))
-        #expect(!FileBrowserModel.isSafeGuestName("x/../../../../Users/victim/.zshrc"))
-        #expect(!FileBrowserModel.isSafeGuestName("../.."))
-        #expect(!FileBrowserModel.isSafeGuestName("a\\..\\b"))
-        #expect(!FileBrowserModel.isSafeGuestName("a\0b"))
+        #expect(!GuestFileNames.isSafe(".."))
+        #expect(!GuestFileNames.isSafe("."))
+        #expect(!GuestFileNames.isSafe(""))
+        #expect(!GuestFileNames.isSafe("x/../../../../Users/victim/.zshrc"))
+        #expect(!GuestFileNames.isSafe("../.."))
+        #expect(!GuestFileNames.isSafe("a\\..\\b"))
+        #expect(!GuestFileNames.isSafe("a\0b"))
     }
 }

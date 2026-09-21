@@ -157,6 +157,24 @@ public final class SecurityTimeline {
                        observed,
                        NSLocalizedString("allowed by user for this session", comment: "Security Timeline decision"), .allowed)
 
+        case "agent.delegation":
+            // One agent's word to another, brokered by the host: every
+            // message is a row, the ones the injection scan withheld in red.
+            let title = str(d, "delegation") ?? "delegation"
+            let kind = str(d, "kind") ?? "message"
+            let from = str(d, "from") ?? "agent"
+            let to = str(d, "to") ?? "agent"
+            let text = (str(d, "text") ?? "").replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+            let short = text.count > 80 ? String(text.prefix(80)) + "…" : text
+            let blocked = (str(d, "verdict") ?? "clean") != "clean"
+            let cond = "“\(title)” \(from) → \(to): \(kind) — \(short)"
+            return row(NSLocalizedString("Agent delegation", comment: "Security Timeline engine"), cond,
+                       blocked
+                           ? NSLocalizedString("withheld — prompt injection", comment: "Security Timeline decision")
+                           : NSLocalizedString("relayed", comment: "Security Timeline decision"),
+                       blocked ? .blocked : .info)
+
         case "supply_chain.fetch":
             let eco = str(d, "ecosystem") ?? ""
             let pkg = str(d, "package") ?? "?"

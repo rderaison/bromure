@@ -113,8 +113,9 @@ REFRESH_FAKE_MARKER = "brm-cdX-rfs"
 CLAUDE_CREDS_PATH = os.path.expanduser("~/.claude/.credentials.json")
 CODEX_CREDS_PATH = os.path.expanduser("~/.codex/auth.json")
 
-# loopback-relay
-MAX_PORT_HEADER = 16
+# loopback-relay ("<port>\n", "UDP\n", or "<ipv4>:<port>\n" — the last form is
+# how the host's Kubernetes load balancer reaches a NodePort from a node VM)
+MAX_PORT_HEADER = 32
 
 # hot-upgrade
 UPGRADE_POLL_SECONDS = 3.0
@@ -1231,12 +1232,15 @@ def _loopback_pipe(src, dst, label=None):
             pass
 
 
-def _loopback_handle_udp(vs, rest):
-    """UDP tunnel mode (fat-client system-wide utun). The host multiplexes all
-    UDP to this guest over one vsock connection; each datagram is framed
+def _loopback_handle_udp(vs, rest, target_host="127.0.0.1"):
+    """UDP tunnel mode (fat-client system-wide utun, and the Kubernetes load
+    balancer's UDP Services). The host multiplexes all UDP to this guest over
+    one vsock connection; each datagram is framed
         [u16 bodyLen][u32 srcIP][u16 srcPort][u16 dstPort][payload]
     We keep one UDP socket per (srcIP, srcPort, dstPort) connected to
-    127.0.0.1:<dstPort>, send the payload, and frame replies back the same way.
+    <target_host>:<dstPort> (127.0.0.1 unless the "UDP <ipv4>" header form
+    named another address, e.g. this node's own IP for a NodePort), send the
+    payload, and frame replies back the same way.
     """
     import struct
     socks = {}          # (srcIP, srcPort, dstPort) -> connected UDP socket
@@ -1293,9 +1297,9 @@ def _loopback_handle_udp(vs, rest):
                 try:
                     ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                     ns.settimeout(120)
-                    ns.connect(("127.0.0.1", dstport))
+                    ns.connect((target_host, dstport))
                 except OSError as exc:
-                    _loopback_log("udp socket 127.0.0.1:%d failed: %s" % (dstport, exc))
+                    _loopback_log("udp socket %s:%d failed: %s" % (target_host, dstport, exc))
                     if ns is not None:
                         try:
                             ns.close()
@@ -1347,20 +1351,52 @@ def _loopback_handle(vs):
         return
 
     line, _, rest = buf.partition(b"\n")
-    if line.strip() == b"UDP":
-        _loopback_handle_udp(vs, rest)
+    if line.strip().startswith(b"UDP"):
+        # "UDP\n" → 127.0.0.1 targets; "UDP <ipv4>\n" → that address.
+        parts = line.strip().split()
+        udp_host = "127.0.0.1"
+        if len(parts) > 1:
+            try:
+                ipaddress.IPv4Address(parts[1].decode("ascii", "replace"))
+                udp_host = parts[1].decode("ascii")
+            except (ValueError, ipaddress.AddressValueError):
+                vs.close()
+                return
+        _loopback_handle_udp(vs, rest, udp_host)
         return
-    try:
-        port = int(line.strip())
-    except ValueError:
-        vs.close()
-        return
+    target_host = None
+    header = line.strip().decode("ascii", "replace")
+    if ":" in header:
+        # "<ipv4>:<port>" — relay to an arbitrary address reachable from this
+        # guest (the Kubernetes load balancer: host LAN listener → this node →
+        # a Service's NodePort). Only dotted-quad targets, never names.
+        host_part, _, port_part = header.rpartition(":")
+        try:
+            ipaddress.IPv4Address(host_part)
+            port = int(port_part)
+        except (ValueError, ipaddress.AddressValueError):
+            vs.close()
+            return
+        target_host = host_part
+    else:
+        try:
+            port = int(header)
+        except ValueError:
+            vs.close()
+            return
     if not (1 <= port <= 65535):
         vs.close()
         return
 
     try:
-        tcp, host = _loopback_connect(port)
+        if target_host is not None:
+            tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            tcp.settimeout(10)
+            tcp.connect((target_host, port))
+            tcp.settimeout(None)
+            host = target_host
+        else:
+            tcp, host = _loopback_connect(port)
     except OSError as exc:
         # Nothing is listening on 127.0.0.1:<port>. Two very different cases:
         #
@@ -1960,6 +1996,80 @@ def _pretrust(tool, *dirs):
         log("worktree", "pretrust failed:", e)
 
 
+def _preonboard(tool, cwd=None):
+    """Answer the first-run questions an agent asks before it will talk, so
+    a session opens on the conversation — the beautified view can't show a
+    TUI wizard. Claude Code: the text-style (theme) picker and the security
+    notes screen, both gated by hasCompletedOnboarding in ~/.claude.json;
+    the theme follows the host's appearance (seed spec claudeTheme, dark by
+    default). Codex: trust for the folder in ~/.codex/config.toml, so its
+    "do you trust this directory" picker doesn't come first. Best-effort,
+    same clobber caveat as _pretrust."""
+    try:
+        if tool == "claude":
+            _preonboard_claude()
+        elif tool == "codex" and cwd:
+            _pretrust_codex(cwd)
+    except Exception as e:
+        log("worktree", "preonboard failed:", e)
+
+
+def _claude_theme_from_spec():
+    try:
+        with open(os.path.join(SEED_DIR, "claude-settings.spec.json")) as f:
+            spec = json.load(f)
+        t = spec.get("claudeTheme")
+        if t in ("dark", "light", "dark-daltonized", "light-daltonized",
+                 "dark-ansi", "light-ansi"):
+            return t
+    except Exception:
+        pass
+    return "dark"
+
+
+def _preonboard_claude():
+    path = os.path.join(HOME, ".claude.json")
+    cfg = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            obj = json.load(f)
+        if isinstance(obj, dict):
+            cfg = obj
+    changed = False
+    if not cfg.get("theme"):
+        cfg["theme"] = _claude_theme_from_spec()
+        changed = True
+    if cfg.get("hasCompletedOnboarding") is not True:
+        cfg["hasCompletedOnboarding"] = True
+        changed = True
+    if changed:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, path)
+
+
+def _pretrust_codex(cwd):
+    """Codex records folder trust in ~/.codex/config.toml as
+    [projects."<abs path>"] trust_level = "trusted". Append the table when
+    the folder has none (a textual check — the file is the user's)."""
+    d = os.path.realpath(cwd)
+    cdir = os.path.join(HOME, ".codex")
+    path = os.path.join(cdir, "config.toml")
+    text = ""
+    if os.path.exists(path):
+        with open(path) as f:
+            text = f.read()
+    key = '[projects."%s"]' % d
+    if key in text:
+        return
+    os.makedirs(cdir, exist_ok=True)
+    block = ("\n" if text and not text.endswith("\n") else "") \
+        + key + '\ntrust_level = "trusted"\n'
+    with open(path, "a") as f:
+        f.write(block)
+
+
 _TASK_MCP_SHIM = "/mnt/bromure-meta/bromure-task-mcp.py"
 
 
@@ -2067,8 +2177,65 @@ def _task_mcp_setup(branch, tool, workdir):
     return ""
 
 
+_DELEGATION_MCP_SHIM = "/mnt/bromure-meta/bromure-delegation-mcp.py"
+
+
+def _git_exclude(workdir, pattern):
+    """Add `pattern` to the checkout's local git exclude (never to a
+    tracked .gitignore), so a settings file we drop in the tree can't
+    dirty its diff or get committed. No-op outside a repository."""
+    ex = _capture(["git", "-C", workdir, "rev-parse",
+                   "--git-path", "info/exclude"]).strip()
+    if not ex:
+        return
+    path = ex if os.path.isabs(ex) else os.path.join(workdir, ex)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    current = ""
+    if os.path.exists(path):
+        with open(path) as f:
+            current = f.read()
+    if pattern not in current:
+        with open(path, "a") as f:
+            f.write("\n" + pattern + "\n")
+
+
+def _delegation_mcp_setup(tool, workdir):
+    """Every agent tab gets the delegation MCP (hand work to another agent,
+    hear back from it). Claude and Codex find it in the user-scope configs
+    the host writes; grok, kimi and omp only read project-scope files, so
+    those get the entry MERGED into the same files the board MCP uses
+    (after it, so a task tab keeps both), git-excluded. Nothing to
+    announce: the shim reads its own tmux window."""
+    if tool not in ("grok", "kimi", "omp") or not os.path.exists(_DELEGATION_MCP_SHIM):
+        return
+    if tool == "omp":
+        path, exclude = os.path.join(workdir, ".mcp.json"), ".mcp.json"
+    else:
+        subdir, fname = ((".grok", "settings.json") if tool == "grok"
+                         else (".kimi-code", "mcp.json"))
+        path, exclude = os.path.join(workdir, subdir, fname), subdir + "/"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        existing = {}
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    existing = json.load(f)
+            except (OSError, ValueError):
+                existing = {}
+        servers = existing.get("mcpServers", {}) or {}
+        servers["bromure-delegation"] = {
+            "command": "python3", "args": [_DELEGATION_MCP_SHIM]}
+        existing["mcpServers"] = servers
+        with open(path, "w") as f:
+            json.dump(existing, f, indent=2)
+        _git_exclude(workdir, exclude)
+    except OSError as e:
+        log("worktree", "%s delegation-mcp setup failed: %s" % (tool, e))
+
+
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
-                     task=False):
+                     task=False, background=False):
     _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
@@ -2116,12 +2283,14 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
     flags = _YOLO_FLAGS.get(tool, "") if yolo else ""
     if task:
         flags += _task_mcp_setup(branch, tool, wt_dir)
+    _delegation_mcp_setup(tool, wt_dir)
     if flags:
         _env["BROMURE_AC_WT_FLAGS"] = flags
     if yolo and _YOLO_FLAGS.get(tool):
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
-    win = _new_window(command="bash -l", cwd=wt_dir, env=_env)
+        _preonboard(tool, wt_dir)
+    win = _new_window(command="bash -l", cwd=wt_dir, env=_env, background=background)
     if not win:
         worktree_err("worktree: could not open a tab (created %s at %s)"
                      % (branch, wt_dir))
@@ -2161,6 +2330,7 @@ def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
     if _YOLO_FLAGS.get(tool):
         _preaccept_yolo(tool)
         _pretrust(tool, wt_dir, main_root)
+        _preonboard(tool, wt_dir)
     win = _new_window(command="bash -l", cwd=wt_dir, env=env)
     if not win:
         worktree_err("task-resume: could not open a tab for %s" % branch)
@@ -2191,6 +2361,7 @@ def _automation_tab(cwd, display, tool, prompt_b64, slug=""):
         env["BROMURE_AC_WT_FLAGS"] = _YOLO_FLAGS[tool]
         _preaccept_yolo(tool)
         _pretrust(tool, cwd)
+        _preonboard(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("automation: could not open a tab at %s" % cwd)
@@ -2199,6 +2370,37 @@ def _automation_tab(cwd, display, tool, prompt_b64, slug=""):
     _set_window_option(win, "@display", display)
     if slug:
         _set_window_option(win, "@worktree", "wt/" + slug)
+
+
+def _agent_tab(cwd, display, tool, prompt_b64, flags="", background=False):
+    """Session-first home: an INTERACTIVE agent tab in a folder the user
+    chose — the launch env of a worktree tab (tool, optional opening
+    message) without a worktree and without yolo flags, so the agent asks
+    its permission questions like it would in a terminal. `flags` carries
+    a resume flag when the host reopens a conversation. Folder trust is
+    pre-seeded: the user picked the folder. `background`: the tab opens
+    behind the current one (a delegate another agent started — the user
+    is looking at the delegator)."""
+    _ensure_seed_current()
+    if prompt_b64 == "-":
+        prompt_b64 = ""
+    if not os.path.isdir(cwd):
+        cwd = HOME
+    env = {"BROMURE_AC_WT_TOOL": tool, "BROMURE_AC_WT_PROMPT": prompt_b64}
+    if flags:
+        env["BROMURE_AC_WT_FLAGS"] = flags
+    _pretrust(tool, cwd)
+    _preonboard(tool, cwd)
+    _delegation_mcp_setup(tool, cwd)
+    win = _new_window(command="bash -l", cwd=cwd, env=env, background=background)
+    if not win:
+        worktree_err("session: could not open a tab at %s" % cwd)
+        return
+    # No fixed @label: the roster label follows the FOREGROUND program, so
+    # the host can tell a running agent ("codex") from one that exited
+    # (back to "bash") and offer to resume the conversation.
+    if display:
+        _set_window_option(win, "@display", display)
 
 
 def _seed_question_hooks():
@@ -2278,6 +2480,7 @@ def _plan_tab(cwd, slug, display, tool, prompt_b64):
     if _YOLO_FLAGS.get(tool):
         _preaccept_yolo(tool)
         _pretrust(tool, cwd)
+        _preonboard(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env)
     if not win:
         worktree_err("plan: could not open a tab at %s" % cwd)
@@ -3387,9 +3590,11 @@ def _dispatch_command(action, arg):
         _tmux_ok("kill-window", "-t", "%s:%s" % (TMUX_S, arg))
     elif action == "worktree-create":
         # Fields 1-4 are base64; field 5 (tool) is passed RAW (matches "$5").
-        f = _fields(arg, 5)
+        # Optional 6th, raw: "background" opens the tab behind the current
+        # one (a delegate's tab — the user is looking at the delegator).
+        f = _fields(arg, 6)
         _bg(_worktree_create, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), f[4])
+            _b64d(f[3]), f[4], False, False, f[5] == "background")
     elif action == "automation-run":
         # Same field layout as worktree-create; falls back to a plain agent
         # tab when the path isn't a git repo. Optional 6th field: run mode
@@ -3400,6 +3605,15 @@ def _dispatch_command(action, arg):
     elif action == "automation-finish":
         f = _fields(arg, 1)
         _bg(_automation_finish, _b64d(f[0]))
+    elif action == "agent-tab":
+        # Home screen session: an interactive agent tab in a folder. Fields
+        # 1-3 base64 (cwd, display, tool); 4 the raw prompt b64 or "-";
+        # optional 5 base64 flags (a resume flag); optional 6 raw
+        # "background" (see worktree-create).
+        f = _fields(arg, 6)
+        _bg(_agent_tab, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
+            f[3] if f[3] else "-", _b64d(f[4]) if f[4] else "",
+            f[5] == "background")
     elif action == "task-resume":
         # Coding board: reopen the agent in an existing worktree with a
         # follow-up prompt. Fields 1-5 base64, field 6 the raw prompt b64.
@@ -3879,6 +4093,12 @@ def _seed_claude_settings():
         except Exception:
             log("home", "claude.json key pre-approve failed:\n"
                 + traceback.format_exc())
+    # First-run wizard answers (text style, security notes) — see _preonboard.
+    if uses_claude:
+        try:
+            _preonboard_claude()
+        except Exception:
+            log("home", "claude onboarding seed failed:\n" + traceback.format_exc())
 
     claude_dir = os.path.join(HOME_MOUNT, ".claude")
     path = os.path.join(claude_dir, "settings.json")
@@ -4138,6 +4358,7 @@ _UNIT_CONTENT = r"""[Unit]
 Description=Bromure guest agent daemon
 After=mnt-bromure\x2dmeta.mount network.target
 StartLimitIntervalSec=0
+ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
 [Service]
 Type=simple
 User=ubuntu
@@ -4149,6 +4370,24 @@ TimeoutStopSec=5
 [Install]
 WantedBy=multi-user.target
 """
+
+
+def task_apply_hostname():
+    """The workspace's hostname, from the meta share (hostname.txt). The
+    host-written tty1 .bash_profile used to do this before the agent ran;
+    on images that bake the agent's unit (imageVersion >= 201) that file
+    is gone with the virtiofs home, and nothing else runs early enough —
+    so it lives here too. Idempotent; runs before anything else."""
+    want = _read_text(os.path.join(META, "hostname.txt")).split("\n")[0].strip()
+    if not want or want == socket.gethostname():
+        return
+    # /etc/hosts first, so subsequent sudo calls can resolve the new name.
+    hosts = ("127.0.0.1\tlocalhost %s\n::1\tlocalhost %s\n127.0.1.1\t%s\n\n"
+             "# Bromure AC: managed at session boot.\n" % (want, want, want))
+    _sudo_write("/etc/hosts", hosts)
+    _sudo(["hostname", want])
+    _sudo_write("/etc/hostname", want + "\n")
+    log("agentd", "hostname -> %s" % want)
 
 
 def task_fix_systemd_unit():
@@ -4304,29 +4543,149 @@ def task_install_ca():
     log("session", "installed MITM CA")
 
 
+DOCKER_REGISTRIES_FILE = os.path.join(META, "docker-registries.txt")
+DOCKER_DAEMON_JSON = "/etc/docker/daemon.json"
+
+
+def _meta_no_proxy():
+    """NO_PROXY as the host wrote it into proxy.env (VM subnet, cluster
+    nodes, registries) — dockerd must skip the proxy for those too, or a
+    `docker push` to a registry on the VM LAN would be sent to the host
+    proxy, which can't reach the guests."""
+    try:
+        with open(os.path.join(META, "proxy.env")) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export NO_PROXY="):
+                    return line.split("=", 1)[1].strip().strip("'\"")
+    except OSError:
+        pass
+    return "localhost,127.0.0.1,::1"
+
+
+def _docker_registries():
+    """Insecure (plain-HTTP) registries the host lists for this workspace."""
+    try:
+        with open(DOCKER_REGISTRIES_FILE) as f:
+            return [l.strip() for l in f if l.strip() and not l.startswith("#")]
+    except OSError:
+        return []
+
+
+def _docker_daemon_json_text(registries):
+    current = {}
+    try:
+        with open(DOCKER_DAEMON_JSON) as f:
+            current = json.load(f) or {}
+    except (OSError, ValueError):
+        current = {}
+    if registries:
+        current["insecure-registries"] = sorted(set(registries))
+    else:
+        current.pop("insecure-registries", None)
+    return json.dumps(current, indent=2, sort_keys=True) + "\n"
+
+
+def _docker_proxy_fragment():
+    return (DOCKER_PROXY_FRAGMENT.replace(
+        'Environment="NO_PROXY=localhost,127.0.0.1,::1"',
+        'Environment="NO_PROXY=%s"' % _meta_no_proxy()))
+
+
+def _apply_docker_config(restart_if_unchanged):
+    """Write the proxy drop-in + daemon.json; restart dockerd when anything
+    changed (or unconditionally on the boot pass). Returns True when it
+    restarted."""
+    changed = restart_if_unchanged
+    frag = _docker_proxy_fragment()
+    frag_path = "/etc/systemd/system/docker.service.d/bromure-proxy.conf"
+    try:
+        with open(frag_path) as f:
+            if f.read() != frag:
+                changed = True
+    except OSError:
+        changed = True
+    _sudo(["mkdir", "-p", "/etc/systemd/system/docker.service.d"])
+    try:
+        subprocess.run(["sudo", "tee", frag_path], input=frag, text=True,
+                       stdout=_DEVNULL, stderr=_DEVNULL)
+    except Exception:
+        return False
+    daemon = _docker_daemon_json_text(_docker_registries())
+    try:
+        with open(DOCKER_DAEMON_JSON) as f:
+            if f.read() != daemon:
+                changed = True
+    except OSError:
+        changed = True
+    _sudo(["mkdir", "-p", "/etc/docker"])
+    try:
+        subprocess.run(["sudo", "tee", DOCKER_DAEMON_JSON], input=daemon, text=True,
+                       stdout=_DEVNULL, stderr=_DEVNULL)
+    except Exception:
+        return False
+    if not changed:
+        return False
+    _sudo(["systemctl", "daemon-reload"])
+    if _sudo(["systemctl", "restart", "docker"]).returncode == 0:
+        log("session", "docker restarted (proxy + CA + %d insecure registr%s)"
+            % (len(_docker_registries()), "y" if len(_docker_registries()) == 1 else "ies"))
+        return True
+    log("session", "docker restart failed (non-fatal)")
+    return False
+
+
+_APT_FORCE_IPV4_PATH = "/etc/apt/apt.conf.d/99force-ipv4"
+_APT_FORCE_IPV4 = 'Acquire::ForceIPv4 "true";\n'
+
+
+def task_apt_force_ipv4():
+    """apt over IPv4 only. Newer images bake this in; an older one gets it
+    here, since a LAN can hand the VM a v6 address and route with no v6
+    egress behind them, and apt then waits on every mirror's AAAA record."""
+    try:
+        with open(_APT_FORCE_IPV4_PATH, encoding="utf-8") as f:
+            if f.read() == _APT_FORCE_IPV4:
+                return
+    except OSError:
+        pass
+    _sudo_write(_APT_FORCE_IPV4_PATH, _APT_FORCE_IPV4)
+    log("session", "apt pinned to IPv4")
+
+
 def task_apt_and_docker_proxy():
     """Drop stale bake-time apt proxy config; wire dockerd through the bridge
-    (proxy env + freshly installed CA) and restart it."""
+    (proxy env + freshly installed CA + the bromure registries) and restart it."""
     stale = "/etc/apt/apt.conf.d/99-bromure-proxy"
     if os.path.isfile(stale):
         _sudo(["rm", "-f", stale])
         log("session", "removed stale bake-time apt proxy config")
     if not shutil.which("docker"):
         return
-    _sudo(["mkdir", "-p", "/etc/systemd/system/docker.service.d"])
-    try:
-        subprocess.run(
-            ["sudo", "tee",
-             "/etc/systemd/system/docker.service.d/bromure-proxy.conf"],
-            input=DOCKER_PROXY_FRAGMENT, text=True, stdout=_DEVNULL,
-            stderr=_DEVNULL)
-    except Exception:
-        return
-    _sudo(["systemctl", "daemon-reload"])
-    if _sudo(["systemctl", "restart", "docker"]).returncode == 0:
-        log("session", "docker restarted with bromure proxy + CA")
-    else:
-        log("session", "docker restart failed (non-fatal)")
+    _apply_docker_config(restart_if_unchanged=True)
+
+
+def docker_registries_watcher_service():
+    """A registry appeared or went away while the workspace runs: the host
+    rewrites docker-registries.txt (and proxy.env's NO_PROXY); re-apply and
+    bounce dockerd only when the effective config changed."""
+    if not shutil.which("docker"):
+        while True:
+            time.sleep(3600)
+    last = None
+    while True:
+        time.sleep(5)
+        try:
+            sig = (os.stat(DOCKER_REGISTRIES_FILE).st_mtime if os.path.exists(DOCKER_REGISTRIES_FILE) else 0,
+                   os.stat(os.path.join(META, "proxy.env")).st_mtime if os.path.exists(os.path.join(META, "proxy.env")) else 0)
+        except OSError:
+            continue
+        if last is None:
+            last = sig
+            continue
+        if sig != last:
+            last = sig
+            _apply_docker_config(restart_if_unchanged=False)
 
 
 def task_set_timezone():
@@ -4501,10 +4860,12 @@ def main():
         pass
 
     # 2. One-shot session tasks (each isolated; a failure never aborts boot).
+    _run_once("hostname", task_apply_hostname)
     _run_once("unit", task_fix_systemd_unit)
     _run_once("mtu", task_set_mtu)
     _run_once("ca", task_install_ca)
     _run_once("docker-proxy", task_apt_and_docker_proxy)
+    _run_once("apt-ipv4", task_apt_force_ipv4)
     _run_once("timezone", task_set_timezone)
     # Home storage BEFORE anything that touches ~ (folder-share symlinks,
     # the tmux session): on ext4/migrate boots this mounts the real home.
@@ -4535,6 +4896,7 @@ def main():
         ("ip", ip_reporter_service),
         ("session-monitor", session_monitor_service),
         ("seed", seed_watcher_service),
+        ("docker-registries", docker_registries_watcher_service),
         ("upgrade", upgrade_watcher),
     ]
     for name, fn in services:

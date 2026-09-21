@@ -23,6 +23,8 @@ public final class MitmEngine {
     public let grokRefresher: GrokSubscriptionRefresher
     /// Kimi (Moonshot) counterparts.
     public let kimiSubscriptionStore: KimiSubscriptionStore
+    /// Sign-ins the proxy is answering itself (SignInCapture.swift).
+    let signInCaptures = SignInCaptureRegistry()
     public let kimiRefresher: KimiSubscriptionRefresher
     public let sshAgent: SSHAgentServer
     public let awsCreds: AWSCredentialServer
@@ -241,19 +243,16 @@ public final class MitmEngine {
 
     public nonisolated func setRouting(_ routing: Profile.Routing,
                                        modelLabel: String,
-                                       hybrid: HybridConfig,
                                        localCloudHosts: Set<String> = [],
                                        for profileID: UUID) {
         fusionLock.lock()
         if let existing = routingContexts[profileID] {
             existing.routing = routing
             existing.localModelLabel = modelLabel
-            existing.hybrid.update(config: hybrid)
             existing.localCloudHosts = localCloudHosts
         } else {
             routingContexts[profileID] = LLMRoutingContext(
                 routing: routing, localModelLabel: modelLabel,
-                hybrid: HybridRouter(config: hybrid),
                 localCloudHosts: localCloudHosts)
         }
         fusionLock.unlock()
@@ -392,6 +391,9 @@ public final class MitmEngine {
         HTTPMitmConnection.codexSubscriptionProvider = { [weak self] in
             guard let self else { return nil }
             return (self.codexSubscriptionStore, self.codexRefresher)
+        }
+        HTTPMitmConnection.signInCaptureProvider = { [weak self] pid in
+            self?.signInCaptures.capture(for: pid)
         }
         HTTPMitmConnection.grokSubscriptionProvider = { [weak self] in
             guard let self else { return nil }

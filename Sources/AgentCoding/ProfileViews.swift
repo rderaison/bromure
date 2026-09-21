@@ -77,10 +77,16 @@ public extension Notification.Name {
         Notification.Name("bromureSubscriptionStoresChanged")
 }
 
+/// Another workspace, as the editor lists it (the reach policy picks
+/// among these).
+struct WorkspaceRef: Identifiable, Hashable {
+    let id: UUID
+    let name: String
+}
+
 enum EditorCategory: String, CaseIterable, Identifiable {
     case general     = "General"
-    case models      = "Agents"
-    case localModels = "Local Models"
+    case localModels = "Models"
     case fusion      = "Fusion"
     case folders     = "Folders"
     case credentials = "Credentials"
@@ -103,8 +109,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .general:     "person.text.rectangle.fill"
-        case .models:      "sparkles"
-        case .localModels: "cpu.fill"
+        case .localModels: "sparkles"
         case .fusion:      "bolt.fill"
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
@@ -124,8 +129,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     var color: Color {
         switch self {
         case .general:     .indigo
-        case .models:      .purple
-        case .localModels: .mint
+        case .localModels: .purple
         case .fusion:      .yellow
         case .folders:     .orange
         case .credentials: .green
@@ -366,6 +370,8 @@ struct ProfileEditorView: View {
     /// from `draft` — whose secrets are blanked on the wire, which would otherwise
     /// hide every secret-bearing credential. nil = local editor: derive from the draft.
     private let remoteCredentialRefs: [CredentialRef]?
+    /// The other workspaces on this host, for the agents' reach policy.
+    private let siblingWorkspaces: [WorkspaceRef]
 
     /// "Generate SSH key" toggle is decoupled from the model — only used
     /// to decide whether to call ssh-keygen on save.
@@ -483,6 +489,7 @@ struct ProfileEditorView: View {
         terminalDefaults: TerminalAppDefaults,
         storageContext: ProfileStorageContext?,
         remoteCredentialRefs: [CredentialRef]? = nil,
+        siblingWorkspaces: [WorkspaceRef] = [],
         onSave: @escaping (Profile, _ generateSSH: Bool) -> Void,
         onCancel: @escaping () -> Void,
         onTitleChange: ((String) -> Void)? = nil,
@@ -548,6 +555,7 @@ struct ProfileEditorView: View {
         self.terminalDefaults = terminalDefaults
         self.storageContext = storageContext
         self.remoteCredentialRefs = remoteCredentialRefs
+        self.siblingWorkspaces = siblingWorkspaces
         self.onSave = onSave
         self.onCancel = onCancel
         self.onTitleChange = onTitleChange
@@ -559,11 +567,17 @@ struct ProfileEditorView: View {
     /// caller doesn't pass a `storageContext`). On iOS the editor is
     /// always remote: Automation (this-machine UserDefaults) and Local
     /// Models (this-machine MLX catalog/downloads) don't apply.
+    ///
+    /// Models appears in BOTH Preferences (edits the global settings) and a
+    /// workspace editor (edits that workspace's OVERRIDE of the global settings).
+    /// Automation is app-wide UserDefaults, so it stays Preferences-only.
     private var visibleCategories: [EditorCategory] {
         EditorCategory.allCases.filter { c in
             #if os(macOS)
             return c != .automation || storageContext == nil
             #else
+            // iOS editor is always remote: this-machine Automation + Models panes
+            // (MLX catalog / global store) don't apply.
             return c != .automation && c != .localModels
             #endif
         }
@@ -818,7 +832,6 @@ struct ProfileEditorView: View {
     private func detailContent(for category: EditorCategory) -> some View {
         switch category {
         case .general:     generalSection
-        case .models:      modelsSection
         case .localModels: localModelsSection
         case .fusion:      fusionSection
         case .folders:     foldersSection
@@ -865,19 +878,68 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private var localModelsSection: some View {
-        // The pane manages THIS machine's MLX catalog + downloads; it's
-        // filtered out of visibleCategories on iOS.
+        // The global "Models" pane: providers + tiers + local server + on-device
+        // Global config in Preferences (storageContext == nil); a per-workspace
+        // OVERRIDE of it in a workspace editor. Filtered out on iOS.
         #if os(macOS)
-        LocalModelsSettingsView(routing: $draft.modelRouting,
-                                activeModelID: $draft.activeModelID,
-                                engineURL: $draft.localEngineURL,
-                                engineKey: $draft.localEngineAPIKey,
-                                selectedModelIDs: draft.distinctLocalModelIDs,
-                                remote: localModelsRemoteAny as? RemoteModelBackend)
+        if storageContext == nil {
+            GlobalModelsSettingsView(subscription: modelsSubscriptionHooks)
+        } else {
+            WorkspaceModelsSettingsView(override: $draft.modelOverride,
+                                        globalSettings: ModelSettingsStore.shared.settings,
+                                        subscription: modelsSubscriptionHooks)
+        }
         #else
         EmptyView()
         #endif
     }
+
+    #if os(macOS)
+    /// Bridge the editor's per-tool subscription register/forget/savedAt closures
+    /// to the Models pane's provider-keyed hooks. nil closures → no-op, so the
+    /// pane hides sign-in for providers the host can't register here.
+    private var modelsSubscriptionHooks: ModelsSubscriptionHooks {
+        ModelsSubscriptionHooks(
+            savedAt: { provider in
+                switch provider {
+                case .anthropic: return claudeAccountSavedAt?()
+                case .openai:    return codexAccountSavedAt?()
+                case .xai:       return grokAccountSavedAt?()
+                case .moonshot:  return kimiAccountSavedAt?()
+                case .zai, .bedrock, .openrouter, .custom: return nil
+                }
+            },
+            register: { provider in
+                switch provider {
+                case .anthropic: onRegisterClaude?()
+                case .openai:    onRegisterCodex?()
+                case .xai:       onRegisterGrok?()
+                case .moonshot:  onRegisterKimi?()
+                case .zai, .bedrock, .openrouter, .custom: break
+                }
+            },
+            forget: { provider in
+                switch provider {
+                case .anthropic: onForgetClaude?()
+                case .openai:    onForgetCodex?()
+                case .xai:       onForgetGrok?()
+                case .moonshot:  onForgetKimi?()
+                case .zai, .bedrock, .openrouter, .custom: break
+                }
+            },
+            fetchModels: { provider, useSubscription, apiKey, completion in
+                // Pull the provider's live model list (Fusion GETs its /v1/models)
+                // with the credential the PANE holds — global or a workspace
+                // override's own. Providers with no matching tool (z.ai, custom)
+                // fall back to the static list — return empty.
+                guard let tool = provider.fusionTool, let fetch = onFetchFusionModels else {
+                    ModelsSettingsView.fetchCompatibleModels(provider, apiKey: apiKey, completion: completion)
+                    return
+                }
+                fetch(tool, useSubscription ? .subscription : .token, apiKey, completion)
+            })
+    }
+    #endif
 
     /// Local models installed on this machine (the fusion-leg / pinned-agent
     /// pickers). A mobile client has no local engine, so the list is empty and
@@ -1094,6 +1156,9 @@ struct ProfileEditorView: View {
                     onForgetSubscription: sub.onForget
                 )
             }
+
+            Divider().padding(.vertical, 4)
+            agentReachSection
         }
         // Re-read registration status when a register/forget completes (it runs
         // in a separate window), so the inline controls flip without reopening.
@@ -1120,6 +1185,49 @@ struct ProfileEditorView: View {
                               onRegisterKimi, onForgetKimi)
         // omp is API-key only (no OAuth subscription) — nothing to register.
         case .omp:    return (nil, nil, nil, nil)
+        }
+    }
+
+    /// Which workspaces the agents here may reach: every one (the default),
+    /// or only the ones ticked. Directional — the other workspace's own
+    /// setting says whether its agents can reach back.
+    @ViewBuilder
+    private var agentReachSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Reach")
+                .font(.headline)
+            Text("Agents in this workspace can hand work to agents elsewhere (a delegation runs in the other workspace) and ask a session there by its @nickname; files travel along. Which workspaces they may reach:")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle(isOn: Binding(
+                get: { draft.agentReach == nil },
+                set: { draft.agentReach = $0 ? nil : [] })) {
+                Text("Every workspace")
+            }
+            .toggleStyle(.switch)
+            if draft.agentReach != nil {
+                if siblingWorkspaces.isEmpty {
+                    Text("No other workspace yet — agents here can only reach each other.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    ForEach(siblingWorkspaces) { w in
+                        Toggle(isOn: Binding(
+                            get: { draft.agentReach?.contains(w.id) ?? false },
+                            set: { on in
+                                var set = draft.agentReach ?? []
+                                if on { if !set.contains(w.id) { set.append(w.id) } }
+                                else { set.removeAll { $0 == w.id } }
+                                draft.agentReach = set
+                            })) {
+                            Text(w.name)
+                        }
+                        .toggleStyle(.switch)
+                        .padding(.leading, 12)
+                    }
+                }
+            }
         }
     }
 
@@ -4268,17 +4376,8 @@ struct LocalModelsSettingsView: View {
 
             if routing != .cloud {
                 Section {
-                    Picker("Mode", selection: modeSelection) {
-                        Text("Local — always on-device").tag(Profile.Routing.local)
-                        Text("Hybrid — cloud, fall back to local").tag(Profile.Routing.hybrid)
-                    }
-                    .pickerStyle(.radioGroup)
-                } footer: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("**Local** keeps every request on this Mac — nothing leaves the machine. Replies are private but slower, and bounded by the model you can fit in memory.")
-                        Text("**Hybrid** sends requests to the cloud as usual, falling back to the on-device model only when the cloud is unreachable — cloud speed and quality, with a local safety net.")
-                    }
-                    .font(.caption).foregroundStyle(.secondary)
+                    Text("Every request runs on this Mac — nothing leaves the machine. Replies are private but bounded by the model you can fit in memory.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
 
                 engineSection

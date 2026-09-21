@@ -226,6 +226,11 @@ final class TabsModel {
 
     var tabs: [Tab] = []
     var activeIndex: Int = 0
+    /// `tabs` is the guest's live roster. False for the placeholder pill a
+    /// fresh boot shows and for the pills rebuilt from a suspend snapshot
+    /// (labels only — every one at index 0): nothing to bind sessions to,
+    /// or to judge them by, until tmux has reported.
+    var rosterLive = false
 
     /// All docker containers in this VM (running + stopped), refreshed ~every 2s
     /// from the guest. Drives the source-list Docker sub-tree and the dashboard.
@@ -348,6 +353,9 @@ final class SessionListModel {
     var automationBoardSelected = false
     /// True when the coding-task kanban board is the active stage surface.
     var taskBoardSelected = false
+    /// The sidebar's Tasks "+" was clicked: the board opens a blank task's
+    /// editor and clears this.
+    var newTaskRequested = false
     /// True when the sidebar is collapsed to the icon rail.
     var sidebarCollapsed = false
     /// True when the right-hand file-explorer pane is open. Drives the
@@ -366,6 +374,32 @@ final class SessionListModel {
     /// (desktop-app look) instead of the raw terminal. Per-pane state mirrored
     /// here so the toolbar toggle can tint; updated on selection + flip.
     var beautifiedActive = false
+
+    // MARK: Sessions-first
+
+    /// The sidebar leads with agent sessions (grouped by what they need from
+    /// the user) and folds the machines away; off = the classic workspace
+    /// source list.
+    var sessionsFirst = false
+    /// The session on stage (its live chat, the launch surface, or the
+    /// ended/asleep page).
+    var selectedSessionID: UUID?
+    /// The selected session's machine and folder — what the Files pane
+    /// follows (the session's, even when its tab is gone or asleep).
+    var selectedSessionProfileID: Profile.ID?
+    var selectedSessionCwd: String?
+    /// The new-session screen is the stage surface.
+    var newSessionSelected = false
+    /// "Machines" disclosure in the session sidebar.
+    var machinesExpanded = false
+    /// The Kubernetes cluster whose dashboard is the active stage surface.
+    var kubeSelectedID: UUID?
+    /// The container registry whose dashboard is the active stage surface.
+    var registrySelectedID: UUID?
+    /// "Under the hood": the raw terminal instead of the chat for the
+    /// selected session, plus the machine shortcuts and the geekier toolbar
+    /// controls.
+    var underTheHood = false
 }
 
 /// Right-click actions on a tab row. Handled by the window, which reads the
@@ -415,4 +449,15 @@ extension ProfileColor {
         case .gray:   "#6B7280"
         }
     }
+}
+
+// MARK: - Home rollback points
+
+/// One rollback point of a workspace's home image, as the Rewind sheet
+/// lists it: the boot it was taken at, and the space its copy takes up.
+/// Shared with the fat client, which reads them off the server.
+struct HomeCheckpoint: Identifiable, Equatable, Sendable {
+    let id: String
+    let createdAt: Date
+    let allocatedBytes: Int64
 }

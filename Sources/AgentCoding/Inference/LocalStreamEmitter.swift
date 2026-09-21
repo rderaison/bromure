@@ -487,10 +487,8 @@ enum ChatStreamClient {
         req.httpMethod = "POST"
         req.timeoutInterval = 600
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let k = config.apiKey, !k.isEmpty {
-            req.setValue("Bearer \(k)", forHTTPHeaderField: "Authorization")
-        }
         req.httpBody = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        ExternalEngine.authorize(&req, config: config)
 
         // Assembly state, mutated only from the session's delegate queue.
         var text = ""

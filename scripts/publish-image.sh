@@ -7,9 +7,15 @@
 #
 # Publishes, under https://dl.bromure.io/ (the `bromure-dl` bucket):
 #
-#   images/img-catalog.json          ← the live image manifest (1s CDN TTL)
-#   images/<uuid>/base.img.gz        ← the compressed prebuilt disk image
+#   images/<major>/img-catalog.json   ← the live image manifest (1s CDN TTL)
+#   images/<major>/<uuid>/base.img.gz ← the compressed prebuilt disk image
 #
+# <major> is the image version the binary bakes (build-info.json's
+# `version`, e.g. 201): one catalog per image major, the same path
+# ImageDistribution.agentCoding reads, so an app only ever sees images of
+# the major it was built for — a newer major may need the newer app. Apps
+# before 5.0.0 read the unversioned images/img-catalog.json, which this
+# script no longer touches: it stays frozen at the last 200.x publish.
 # <uuid> is random per build. The catalog's postinstall steps come verbatim
 # from Sources/AgentCoding/Resources/img-catalog.json (the canonical
 # source) — that's where the non-free software (Claude Code, Codex, Grok,
@@ -120,7 +126,14 @@ fi
 COMPRESSED_BYTES=$(stat -f%z "$GZ")
 SHA256=$(shasum -a 256 "$GZ" | awk '{print $1}')
 UUID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-DISK_KEY="images/$UUID/base.img.gz"
+# The channel is the image major the binary just baked — never the path
+# an older app reads.
+IMAGE_VERSION=$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version||""))' "$BUILD_INFO")
+IMAGE_MAJOR="${IMAGE_VERSION%%.*}"
+[ -n "$IMAGE_MAJOR" ] || { echo "ERROR: $BUILD_INFO carries no version"; exit 1; }
+CHANNEL="images/$IMAGE_MAJOR"
+DISK_KEY="$CHANNEL/$UUID/base.img.gz"
+echo "image major:  $IMAGE_MAJOR (channel $CHANNEL)"
 echo "image uuid:   $UUID"
 echo "compressed:   $COMPRESSED_BYTES bytes (from $UNCOMPRESSED_BYTES logical)"
 echo "sha256:       $SHA256"
@@ -139,7 +152,7 @@ put "$GZ" "$DISK_KEY" "application/gzip"
 echo "=== Fetching previous img-catalog.json ==="
 PREV_CATALOG="$STAGING/img-catalog.prev.json"
 PREV_UUID=""
-if curl -fsSL "$DO_SPACES_PUBLIC_BASE/images/img-catalog.json" -o "$PREV_CATALOG"; then
+if curl -fsSL "$DO_SPACES_PUBLIC_BASE/$CHANNEL/img-catalog.json" -o "$PREV_CATALOG"; then
     PREV_UUID=$(node tools/make-img-catalog.mjs --print-image-uuid "$PREV_CATALOG")
     echo "previous image uuid: ${PREV_UUID:-<none>}"
 else
@@ -163,7 +176,7 @@ node tools/make-img-catalog.mjs \
 # The 1s TTL is what makes "always download the latest catalog first"
 # meaningful for clients — a weekly publish is visible immediately.
 echo "=== Uploading img-catalog.json (1s CDN TTL) ==="
-put "$NEW_CATALOG" "images/img-catalog.json" "application/json" "public, max-age=1, must-revalidate"
+put "$NEW_CATALOG" "$CHANNEL/img-catalog.json" "application/json" "public, max-age=1, must-revalidate"
 
 # --- 7. Smoke-test ---------------------------------------------------------
 # The image download must be confirmed live BEFORE the old one is deleted,
@@ -180,7 +193,7 @@ catalog_uuid() {  # url → prints the catalog's image uuid, or nothing
 # uploads themselves landed. Fails fast — nothing here is eventually
 # consistent enough to warrant retries.
 ORIGIN_BASE="https://${DO_SPACES_BUCKET}.${DO_SPACES_ENDPOINT#https://}"
-ORIGIN_UUID=$(catalog_uuid "$ORIGIN_BASE/images/img-catalog.json")
+ORIGIN_UUID=$(catalog_uuid "$ORIGIN_BASE/$CHANNEL/img-catalog.json")
 [ "$ORIGIN_UUID" = "$UUID" ] \
     || { echo "ERROR: origin doesn't serve the new catalog (got '${ORIGIN_UUID:-<empty>}')"; exit 1; }
 curl -fsSIL "$ORIGIN_BASE/$DISK_KEY" >/dev/null \
@@ -192,8 +205,8 @@ echo "origin OK ($ORIGIN_BASE)."
 # despite the 1s max-age. Poll for up to an hour — the previous image is
 # only deleted after this passes, so clients stay fully served while we
 # wait. If this regularly takes long, a Cloudflare cache rule bypassing
-# the edge cache for images/img-catalog.json is the real fix.
-CATALOG_URL="$DO_SPACES_PUBLIC_BASE/images/img-catalog.json"
+# the edge cache for images/*/img-catalog.json is the real fix.
+CATALOG_URL="$DO_SPACES_PUBLIC_BASE/$CHANNEL/img-catalog.json"
 OK=""
 CDN_ATTEMPTS=120   # × 30s = 1 hour
 for i in $(seq 1 "$CDN_ATTEMPTS"); do
@@ -211,13 +224,13 @@ echo "smoke-test passed."
 if enabled "$KEEP_PREVIOUS"; then
     echo "=== KEEP_PREVIOUS set — leaving ${PREV_UUID:-<none>} in place ==="
 elif [ -n "$PREV_UUID" ] && [ "$PREV_UUID" != "$UUID" ]; then
-    echo "=== Deleting previous image (images/$PREV_UUID/) ==="
-    node tools/spaces-delete.mjs --prefix "images/$PREV_UUID/"
+    echo "=== Deleting previous image ($CHANNEL/$PREV_UUID/) ==="
+    node tools/spaces-delete.mjs --prefix "$CHANNEL/$PREV_UUID/"
 else
     echo "=== No previous image to delete ==="
 fi
 
 echo ""
 echo "=== Done ==="
-echo "Catalog: $DO_SPACES_PUBLIC_BASE/images/img-catalog.json"
+echo "Catalog: $DO_SPACES_PUBLIC_BASE/$CHANNEL/img-catalog.json"
 echo "Image:   $DO_SPACES_PUBLIC_BASE/$DISK_KEY"

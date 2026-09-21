@@ -29,3 +29,4 @@ Tests/node_modules/
 # tracked; the rendered site and the packaged tarball are not).
 manual/_site/
 bromure-agentic-coding-manual.tgz
+.build-ios/

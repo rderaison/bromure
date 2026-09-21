@@ -144,6 +144,14 @@ struct CodingTasksSection: View {
     var store: CodingTaskStore
     @Bindable var model: SessionListModel
     let onShowBoard: () -> Void
+    /// "+": the board with a blank task's editor open.
+    var onNew: () -> Void = {}
+
+    /// Everything not done — the header's count.
+    private var openCount: Int {
+        store.backlogTasks().count + store.tasks(in: .planning).count
+            + store.tasks(in: .inProgress).count + store.tasks(in: .testing).count
+    }
 
     private var statusLine: String {
         let planning = store.tasks(in: .planning).count
@@ -187,23 +195,14 @@ struct CodingTasksSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            HStack {
-                Button(action: onShowBoard) {
-                    Text(NSLocalizedString("Tasks", comment: "sidebar section"))
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(model.taskBoardSelected
-                                         ? Color.accentColor : .secondary)
-                        .textCase(.uppercase)
-                        .tracking(0.7)
-                }
-                .buttonStyle(.plain)
-                .help(NSLocalizedString("Open the coding board (⇧⌘T)", comment: ""))
-                Spacer()
-            }
-            .padding(.leading, 8)
-            .padding(.trailing, 6)
-            .padding(.top, 14)
-            .padding(.bottom, 4)
+            SidebarSectionHeader(title: NSLocalizedString("Tasks", comment: "sidebar section"),
+                                 selected: model.taskBoardSelected,
+                                 badges: [(attentionCount, .red), (reviewCount, .orange)],
+                                 count: openCount,
+                                 help: NSLocalizedString("Open the coding board (⇧⌘T)", comment: ""),
+                                 onTitle: onShowBoard,
+                                 onAdd: onNew,
+                                 addHelp: NSLocalizedString("New task", comment: ""))
 
             Button(action: onShowBoard) {
                 HStack(spacing: 8) {
@@ -215,8 +214,6 @@ struct CodingTasksSection: View {
                         .foregroundStyle(model.taskBoardSelected ? .primary : .secondary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    SidebarAttentionBadge(count: reviewCount, tint: .orange)
-                    SidebarAttentionBadge(count: attentionCount)
                 }
                 .padding(.vertical, 4)
                 .padding(.horizontal, 6)
@@ -350,6 +347,10 @@ struct CodingKanbanView: View {
             }
         }
         #endif
+        // The sidebar's "+" asked for a blank task: open its editor whether
+        // the board was just mounted for it or already on stage.
+        .onAppear { consumeNewTaskRequest() }
+        .onChange(of: model.newTaskRequested) { _, _ in consumeNewTaskRequest() }
         .sheet(item: $editing) { task in
             TaskEditorSheet(
                 task: task,
@@ -368,6 +369,12 @@ struct CodingKanbanView: View {
                 onDelete: { id in actions.delete(id); editing = nil },
                 onCancel: { editing = nil })
         }
+    }
+
+    private func consumeNewTaskRequest() {
+        guard model.newTaskRequested, editing == nil else { return }
+        model.newTaskRequested = false
+        editing = newDraft()
     }
 
     /// A blank task on the first workspace — the "New Task" subject.
@@ -1365,6 +1372,15 @@ private struct TaskEditorSheet: View {
                     .font(.system(size: 11))
                     .help(NSLocalizedString(
                         "Starting or planning first runs mkdir + git init (with an empty root commit) when the folder isn't already a git repository of its own. Leave off for a folder inside an existing repo.",
+                        comment: "task editor"))
+                TextField("", text: Binding(
+                    get: { task.cloneURL ?? "" },
+                    set: { task.cloneURL = $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }),
+                          prompt: Text(verbatim: "https://github.com/org/repo.git"))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .help(NSLocalizedString(
+                        "Optional: clone this git repository into the folder above before the first start, using the workspace's git credentials. Skipped when the folder already holds a repository.",
                         comment: "task editor"))
             }
             .frame(maxWidth: compact ? .infinity : nil, alignment: .leading)

@@ -88,7 +88,7 @@ final class AutomationRunWindowManager {
 
         let content = NSView()
         content.wantsLayer = true
-        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        content.layer?.backgroundColor = NSColor.acCanvas.cgColor
 
         let header = NSHostingView(rootView: RunWindowHeader(model: model))
         header.translatesAutoresizingMaskIntoConstraints = false
@@ -202,11 +202,11 @@ final class AutomationRunWindowManager {
             mount(view, in: slot)
             windows[runID]?.makeFirstResponder(view)
         case .transcript(let url):
-            slot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            slot.layer?.backgroundColor = NSColor.acCanvas.cgColor
             let host = NSHostingView(rootView: ClaudeTranscriptPane(url: url))
             mount(host, in: slot)
         case .outcome:
-            slot.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            slot.layer?.backgroundColor = NSColor.acCanvas.cgColor
             let host = NSHostingView(rootView: RunOutcomeView(model: model))
             mount(host, in: slot)
         }

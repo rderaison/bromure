@@ -16,6 +16,14 @@ modprobe virtiofs 2>/dev/null
 modprobe loop 2>/dev/null
 mkdir -p /mnt/share
 
+# apt over IPv4 only. Newer images bake this in; an older one gets it
+# here, since a LAN can hand the VM a v6 address and route with no v6
+# egress behind them, and apt then waits on every mirror's AAAA record.
+if [ -d /etc/apt ] && [ ! -f /etc/apt/apt.conf.d/99force-ipv4 ]; then
+    mkdir -p /etc/apt/apt.conf.d 2>/dev/null
+    echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 2>/dev/null || true
+fi
+
 # Start dbus early (needed by warp-svc if VPN is enabled later).
 # On the Ubuntu image systemd owns the system bus — only start one if
 # no bus is up (Alpine/openrc, or a degraded boot).

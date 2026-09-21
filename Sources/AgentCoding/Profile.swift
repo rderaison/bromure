@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
 // The iOS fat client compiles this file without SandboxEngine (macOS-only:
 // Virtualization et al.) — PlatformStubs.swift supplies the EgressPolicy
 // stand-in there.
@@ -1026,9 +1029,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                 // `apiKeyEnv` is OPENAI_API_KEY, so we export the dummy key
                 // here (the engine ignores it). The base URL + model live in
                 // models.yml; the `--model` at launch matches its entry.
+                //
+                // A local model can take a long time to produce its first
+                // token (cold load, big prompt, slow hardware); omp's default
+                // first-event timeout would abort the stream. Give it 30 min.
                 _ = (model, base)
                 return [
                     ("OPENAI_API_KEY", key),
+                    ("PI_STREAM_FIRST_EVENT_TIMEOUT_MS", "1800000"),
                 ]
             }
         }
@@ -1348,15 +1356,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case cloud
         /// Always serve from the local on-host inference engine.
         case local
-        /// Cloud by default, fall back to local on failure / budget /
-        /// split-ratio — the only mode where the policy engine runs.
-        case hybrid
 
         public var displayName: String {
             switch self {
             case .cloud:  return "Cloud"
             case .local:  return "Local"
-            case .hybrid: return "Hybrid"
             }
         }
     }
@@ -1377,6 +1381,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var localEngineURL: String?
     /// Optional bearer token `localEngineURL` requires (vLLM `--api-key`).
     public var localEngineAPIKey: String?
+
+    /// Per-workspace override of the global model settings. nil ⇒ this workspace
+    /// inherits `ModelSettingsStore.shared` (the Preferences → Models config).
+    /// Non-nil ⇒ a complete `ModelSettings` (seeded from the global one when the
+    /// override is turned on) that this workspace uses instead. Edited via the
+    /// Models pane inside the workspace editor and committed with Save/Cancel.
+    public var modelOverride: ModelSettings? = nil
 
     /// `localEngineURL` normalized to a server-root base URL, or nil when the
     /// built-in engine serves this profile.
@@ -1412,19 +1423,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         while s.hasSuffix("/") { s.removeLast() }
         return URL(string: s)
     }
-
-    /// Hybrid-only policy knobs (ignored unless `modelRouting == .hybrid`).
-    /// Cloud token budget over a rolling 24 h wall-clock window; `0` =
-    /// unlimited. Once exceeded, new sessions route local until the
-    /// window slides back under cap.
-    public var hybridCloudTokenBudget: Int
-    /// Soft fallback threshold: if the cloud upstream emits no first
-    /// token within this many seconds, cancel and replay local. Default 5.
-    public var hybridSoftTTFTSeconds: Double
-    /// Percentage (0–100) of *new sessions* proactively pinned to local
-    /// even when cloud is healthy. Applied at session granularity so it
-    /// never swaps models mid-trajectory. Default 0.
-    public var hybridLocalSplitPercent: Int
 
     /// Whether the user has consented to swap the Claude subscription
     /// OAuth tokens (access + refresh) on disk for proxy-side fakes.
@@ -1554,6 +1552,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Empty string uses Claude Code's default.
     public var bedrockModelID: String
 
+    /// Claude Code through an Anthropic-compatible gateway (OpenRouter):
+    /// ANTHROPIC_BASE_URL, and the gateway's model id per tier (`small` /
+    /// `medium` / `large`) pinned into its env. Set by the launch-time model
+    /// overlay; nil = Claude talks to Anthropic itself.
+    public var claudeGatewayBaseURL: String?
+    public var claudeGatewayModels: [String: String]
+
     /// Container-registry credentials. One entry per host. Materialized
     /// as ~/.docker/config.json `auths` entries (with FAKE base64 auth
     /// strings); the proxy swaps fake → real on the wire when the
@@ -1587,6 +1592,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// disk was clonefile()'d from base.img. Used to detect when the base
     /// has been rebuilt since the clone (so we can offer to reset).
     public var baseImageVersionAtClone: String?
+    /// Which workspaces agents here may reach — delegate work into, ask a
+    /// session of by @nickname. nil = every workspace (the default); a list
+    /// names the only ones (empty = none but this one).
+    public var agentReach: [UUID]?
 
     /// Visual color in the picker sidebar. Optional in JSON for forward
     /// compat — older profile files don't have this field.
@@ -1797,9 +1806,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         activeModelID: String? = nil,
         localEngineURL: String? = nil,
         localEngineAPIKey: String? = nil,
-        hybridCloudTokenBudget: Int = 0,
-        hybridSoftTTFTSeconds: Double = 5,
-        hybridLocalSplitPercent: Int = 0,
         subscriptionTokenSwap: SubscriptionTokenSwapState = .unset,
         codexTokenSwap: SubscriptionTokenSwapState = .unset,
         defaultClaudeTokens: StoredOAuthTokens? = nil,
@@ -1814,6 +1820,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         awsCredentials: AWSCredentials = AWSCredentials(),
         bedrockEnabled: Bool = false,
         bedrockModelID: String = "",
+        claudeGatewayBaseURL: String? = nil,
+        claudeGatewayModels: [String: String] = [:],
         dockerRegistries: [DockerRegistryCredential] = [],
         httpDatabases: [HTTPDatabaseEndpoint] = [],
         apiKeyRequiresApproval: Bool = false,
@@ -1823,6 +1831,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
         baseImageVersionAtClone: String? = nil,
+        agentReach: [UUID]? = nil,
         color: ProfileColor = .blue,
         comments: String = "",
         memoryGB: Int = Profile.defaultMemoryGB(),
@@ -1879,9 +1888,6 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.activeModelID = activeModelID
         self.localEngineURL = localEngineURL
         self.localEngineAPIKey = localEngineAPIKey
-        self.hybridCloudTokenBudget = hybridCloudTokenBudget
-        self.hybridSoftTTFTSeconds = hybridSoftTTFTSeconds
-        self.hybridLocalSplitPercent = hybridLocalSplitPercent
         self.subscriptionTokenSwap = subscriptionTokenSwap
         self.codexTokenSwap = codexTokenSwap
         self.defaultClaudeTokens = defaultClaudeTokens
@@ -1896,6 +1902,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.awsCredentials = awsCredentials
         self.bedrockEnabled = bedrockEnabled
         self.bedrockModelID = bedrockModelID
+        self.claudeGatewayBaseURL = claudeGatewayBaseURL
+        self.claudeGatewayModels = claudeGatewayModels
         self.dockerRegistries = dockerRegistries
         self.httpDatabases = httpDatabases
         self.apiKeyRequiresApproval = apiKeyRequiresApproval
@@ -1905,6 +1913,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.baseImageVersionAtClone = baseImageVersionAtClone
+        self.agentReach = agentReach
         self.color = color
         self.comments = comments
         self.memoryGB = memoryGB
@@ -1938,7 +1947,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case ompProvider, ompBaseURL, ompModel
         case folderPath  // legacy: single folder, migrated to folderPaths
         case folderPaths
-        case createdAt, lastUsedAt, baseImageVersionAtClone, color, comments
+        case createdAt, lastUsedAt, baseImageVersionAtClone, agentReach, color, comments
         case memoryGB, nativeTerminal, gitUserName, gitUserEmail, importedConfigFiles
         case useTerminalAppDefaults, customFontFamily, customFontSize
         case customBackgroundHex, customForegroundHex, fontLigatures
@@ -1966,10 +1975,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case modelRouting
         case activeModelID
         case localEngineURL
+        case modelOverride
         case localEngineAPIKey
-        case hybridCloudTokenBudget
-        case hybridSoftTTFTSeconds
-        case hybridLocalSplitPercent
         case subscriptionTokenSwap
         case codexTokenSwap
         case kubeconfigs
@@ -1984,6 +1991,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case twilioCredential
         case awsCredentials
         case bedrockEnabled, bedrockModelID
+        case claudeGatewayBaseURL, claudeGatewayModels
         case dockerRegistries
         case httpDatabases
         case apiKeyRequiresApproval
@@ -2021,6 +2029,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         createdAt       = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         lastUsedAt      = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         baseImageVersionAtClone = try c.decodeIfPresent(String.self, forKey: .baseImageVersionAtClone)
+        agentReach      = try c.decodeIfPresent([UUID].self, forKey: .agentReach)
         color           = try c.decodeIfPresent(ProfileColor.self, forKey: .color) ?? .blue
         comments        = try c.decodeIfPresent(String.self, forKey: .comments) ?? ""
         memoryGB        = try c.decodeIfPresent(Int.self, forKey: .memoryGB) ?? 8
@@ -2080,10 +2089,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         modelRouting = try c.decodeIfPresent(Routing.self, forKey: .modelRouting) ?? .cloud
         activeModelID = try c.decodeIfPresent(String.self, forKey: .activeModelID)
         localEngineURL = try c.decodeIfPresent(String.self, forKey: .localEngineURL)
+        modelOverride = try c.decodeIfPresent(ModelSettings.self, forKey: .modelOverride)
         localEngineAPIKey = try c.decodeIfPresent(String.self, forKey: .localEngineAPIKey)
-        hybridCloudTokenBudget = try c.decodeIfPresent(Int.self, forKey: .hybridCloudTokenBudget) ?? 0
-        hybridSoftTTFTSeconds = try c.decodeIfPresent(Double.self, forKey: .hybridSoftTTFTSeconds) ?? 5
-        hybridLocalSplitPercent = try c.decodeIfPresent(Int.self, forKey: .hybridLocalSplitPercent) ?? 0
         subscriptionTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
                                                       forKey: .subscriptionTokenSwap) ?? .unset
         codexTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
@@ -2101,6 +2108,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         awsCredentials = try c.decodeIfPresent(AWSCredentials.self, forKey: .awsCredentials) ?? AWSCredentials()
         bedrockEnabled = try c.decodeIfPresent(Bool.self, forKey: .bedrockEnabled) ?? false
         bedrockModelID = try c.decodeIfPresent(String.self, forKey: .bedrockModelID) ?? ""
+        claudeGatewayBaseURL = try c.decodeIfPresent(String.self, forKey: .claudeGatewayBaseURL)
+        claudeGatewayModels = try c.decodeIfPresent([String: String].self, forKey: .claudeGatewayModels) ?? [:]
         dockerRegistries = try c.decodeIfPresent([DockerRegistryCredential].self, forKey: .dockerRegistries) ?? []
         httpDatabases = try c.decodeIfPresent([HTTPDatabaseEndpoint].self, forKey: .httpDatabases) ?? []
         apiKeyRequiresApproval = try c.decodeIfPresent(Bool.self, forKey: .apiKeyRequiresApproval) ?? false
@@ -2132,6 +2141,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(createdAt, forKey: .createdAt)
         try c.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)
         try c.encodeIfPresent(baseImageVersionAtClone, forKey: .baseImageVersionAtClone)
+        try c.encodeIfPresent(agentReach, forKey: .agentReach)
         try c.encode(color, forKey: .color)
         try c.encode(comments, forKey: .comments)
         try c.encode(memoryGB, forKey: .memoryGB)
@@ -2213,17 +2223,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if let localEngineURL, !localEngineURL.isEmpty {
             try c.encode(localEngineURL, forKey: .localEngineURL)
         }
+        try c.encodeIfPresent(modelOverride, forKey: .modelOverride)
         if let localEngineAPIKey, !localEngineAPIKey.isEmpty {
             try c.encode(localEngineAPIKey, forKey: .localEngineAPIKey)
-        }
-        if hybridCloudTokenBudget != 0 {
-            try c.encode(hybridCloudTokenBudget, forKey: .hybridCloudTokenBudget)
-        }
-        if hybridSoftTTFTSeconds != 5 {
-            try c.encode(hybridSoftTTFTSeconds, forKey: .hybridSoftTTFTSeconds)
-        }
-        if hybridLocalSplitPercent != 0 {
-            try c.encode(hybridLocalSplitPercent, forKey: .hybridLocalSplitPercent)
         }
         if subscriptionTokenSwap != .unset {
             try c.encode(subscriptionTokenSwap, forKey: .subscriptionTokenSwap)
@@ -2275,6 +2277,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if bedrockEnabled { try c.encode(true, forKey: .bedrockEnabled) }
         if !bedrockModelID.isEmpty { try c.encode(bedrockModelID, forKey: .bedrockModelID) }
+        try c.encodeIfPresent(claudeGatewayBaseURL, forKey: .claudeGatewayBaseURL)
+        if !claudeGatewayModels.isEmpty { try c.encode(claudeGatewayModels, forKey: .claudeGatewayModels) }
         if !dockerRegistries.isEmpty {
             try c.encode(dockerRegistries, forKey: .dockerRegistries)
         }
@@ -2381,8 +2385,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// auth mode — e.g. a subscription Claude that still has a model selected —
     /// honoring it would short-circuit the agent's management calls and reroute
     /// `/v1/messages` into the engine, returning empty/garbled 200s instead of
-    /// the real subscription response. Treat that as cloud. `.hybrid` (a
-    /// deliberate cloud+local split for a cloud-auth agent) is left untouched.
+    /// the real subscription response. Treat that as cloud.
     public var effectiveModelRouting: Routing {
         if modelRouting == .local,
            !allToolSpecs.contains(where: { $0.authMode == .local }) {
@@ -3962,10 +3965,14 @@ public final class ProfileStore {
         } else if profile.bedrockEnabled {
             try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true,
                                    attributes: [.posixPermissions: NSNumber(value: 0o700)])
-            var env: [String: String] = [
-                "CLAUDE_CODE_USE_BEDROCK": "1",
-                "AWS_PROFILE": "default",
-            ]
+            var env: [String: String] = ["CLAUDE_CODE_USE_BEDROCK": "1"]
+            // A Bedrock API key (fake — swapped on the wire) instead of the
+            // AWS credential chain; Claude Code reads AWS_BEARER_TOKEN_BEDROCK.
+            if let fake = tokenPlan?.fakeForBedrock() {
+                env["AWS_BEARER_TOKEN_BEDROCK"] = fake
+            } else {
+                env["AWS_PROFILE"] = "default"
+            }
             let region = awsCreds.region.trimmingCharacters(in: .whitespaces)
             if !region.isEmpty {
                 env["AWS_REGION"] = region
@@ -4139,6 +4146,18 @@ public final class ProfileStore {
             [ -n "$idx" ] || exit 0
             printf '%s' "${1:-}" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
               && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
+            # Claude hands the hook its JSON on stdin, naming the transcript
+            # file. Remember it per tab: the host then reads THIS agent's
+            # transcript even when another agent in the same folder (a
+            # delegate) writes newer files there. A /clear records the new
+            # file on the next prompt. Not a terminal → nothing to read.
+            if [ ! -t 0 ]; then
+              tp=$(sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' 2>/dev/null | head -1)
+              if [ -n "$tp" ]; then
+                printf '%s' "$tp" > "$HOME/.bromure/.transcript-$idx.tmp" 2>/dev/null \
+                  && mv -f "$HOME/.bromure/.transcript-$idx.tmp" "$HOME/.bromure/transcript-$idx.path" 2>/dev/null || true
+              fi
+            fi
             exit 0
             """#
             let scriptURL = bromureDir.appendingPathComponent("agent-status.sh")
@@ -4360,7 +4379,8 @@ public final class ProfileStore {
     /// workspaces (whose per-profile bogus key differs from the approval
     /// the base workspace's home carries).
     public func finalizeHomeSeed(for profile: Profile, seedDir: URL,
-                                 anthropicEnvKey: String? = nil) throws {
+                                 anthropicEnvKey: String? = nil,
+                                 bedrockBearerFake: String? = nil) throws {
         let files = seedDir.appendingPathComponent("files", isDirectory: true)
         let importedPaths = Set(profile.importedConfigFiles.map(\.path))
         var dirLines: [String] = []
@@ -4433,15 +4453,18 @@ public final class ProfileStore {
         let usesClaude = profile.tool == .claude
             || profile.additionalTools.contains { $0.tool == .claude }
         var spec: [String: Any] = ["usesClaude": usesClaude]
+        // Claude Code's first-run wizard asks for a text style: the guest
+        // answers with the host's appearance (and marks onboarding done) so a
+        // session opens on the conversation — agentd `_preonboard`.
+        spec["claudeTheme"] = Self.claudeThemeForHostAppearance()
         if usesClaude, let key = anthropicEnvKey, !key.isEmpty {
             // Claude Code stores approvals as the key's last 20 characters.
             spec["approvedApiKeySuffix"] = String(key.suffix(20))
         }
         if profile.bedrockEnabled {
-            var env: [String: String] = [
-                "CLAUDE_CODE_USE_BEDROCK": "1",
-                "AWS_PROFILE": "default",
-            ]
+            var env: [String: String] = ["CLAUDE_CODE_USE_BEDROCK": "1"]
+            if let bedrockBearerFake { env["AWS_BEARER_TOKEN_BEDROCK"] = bedrockBearerFake }
+            else { env["AWS_PROFILE"] = "default" }
             let region = profile.awsCredentials.region.trimmingCharacters(in: .whitespaces)
             if !region.isEmpty { env["AWS_REGION"] = region }
             let modelID = profile.bedrockModelID.trimmingCharacters(in: .whitespaces)
@@ -4452,6 +4475,18 @@ public final class ProfileStore {
             withJSONObject: spec, options: [.prettyPrinted, .sortedKeys])
         try specData.write(to: seedDir.appendingPathComponent("claude-settings.spec.json"),
                            options: .atomic)
+    }
+
+    /// "dark" or "light" for Claude Code's `theme`, following the app's
+    /// effective appearance (dark when there is no app, e.g. the CLI).
+    static func claudeThemeForHostAppearance() -> String {
+        #if canImport(AppKit)
+        if let app = NSApp,
+           app.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .aqua {
+            return "light"
+        }
+        #endif
+        return "dark"
     }
 
     /// Percent-encode a string for use in the userinfo portion of a URL
@@ -5028,11 +5063,15 @@ public final class ProfileStore {
             # would have to type /login); its `kimi login` subcommand drives
             # the device-code flow directly, which is exactly what a
             # registration VM exists for.
-            if [ "$BROMURE_AC_TOOL" = "kimi" ]; then
-                kimi login
-            else
-                "$BROMURE_AC_TOOL"
-            fi
+            # Each CLI's login subcommand goes straight to the browser
+            # hand-off — no wizard in between (see launchRegistrationAgentIfNeeded).
+            case "$BROMURE_AC_TOOL" in
+                claude) claude auth login --claudeai ;;
+                codex)  codex login ;;
+                grok)   grok login ;;
+                kimi)   kimi login ;;
+                *)      "$BROMURE_AC_TOOL" ;;
+            esac
         fi
     fi
     unset _bromure_marker
@@ -5100,6 +5139,7 @@ public final class ProfileStore {
     Description=Bromure guest agent daemon
     After=mnt-bromure\x2dmeta.mount network.target
     StartLimitIntervalSec=0
+    ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
     [Service]
     Type=simple
     User=ubuntu

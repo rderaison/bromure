@@ -1,14 +1,13 @@
 import Foundation
 
 /// Per-profile routing context handed to the MITM proxy: the top-level
-/// routing mode plus (for hybrid) the policy engine that decides per
-/// session. One instance per profile, owned by `MitmEngine`.
+/// routing mode plus the per-agent local-host scoping. One instance per
+/// profile, owned by `MitmEngine`.
 public final class LLMRoutingContext: @unchecked Sendable {
     public var routing: Profile.Routing
     /// Repo/id of the model the local engine serves — used in the
     /// `served-by` marker (§4.4).
     public var localModelLabel: String
-    public let hybrid: HybridRouter
     /// Base domains (lowercased, e.g. `anthropic.com`) whose owning agent is
     /// itself in `.local` auth mode. A profile can mix agents — e.g. Claude on
     /// a subscription (cloud) alongside Codex on the local engine. Profile-wide
@@ -20,11 +19,9 @@ public final class LLMRoutingContext: @unchecked Sendable {
 
     public init(routing: Profile.Routing,
                 localModelLabel: String,
-                hybrid: HybridRouter,
                 localCloudHosts: Set<String> = []) {
         self.routing = routing
         self.localModelLabel = localModelLabel
-        self.hybrid = hybrid
         self.localCloudHosts = localCloudHosts
     }
 
@@ -35,6 +32,9 @@ public final class LLMRoutingContext: @unchecked Sendable {
         return localCloudHosts.contains { h == $0 || h.hasSuffix("." + $0) }
     }
 }
+
+/// Which backend a request was routed to.
+public enum Backend: String, Equatable, Sendable { case cloud, local }
 
 /// The upstream a request should be sent to after routing.
 public struct UpstreamTarget: Equatable, Sendable {
@@ -99,15 +99,6 @@ public enum LLMRouting {
             // hijack it into a dead local path. (Genuinely-local agents reach
             // the engine via the sentinel host, handled above.)
             return context.isLocalProviderHost(host) ? local : cloud
-        case .hybrid:
-            let decision = context.hybrid.route(sessionID: sessionKey, now: now)
-            return decision.backend == .local ? local : cloud
         }
-    }
-
-    /// HTTP statuses that count as a hard fallback trigger under hybrid
-    /// (§4.3 Trap 1): connection errors plus 429 / 529 / 5xx.
-    public static func isHardErrorStatus(_ status: Int) -> Bool {
-        status == 429 || status == 529 || (500...599).contains(status)
     }
 }

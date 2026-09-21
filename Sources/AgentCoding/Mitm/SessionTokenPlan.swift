@@ -47,6 +47,14 @@ public struct SessionTokenPlan: Sendable {
         /// single-provider purposes so `fakeForOmp()` is unambiguous even when
         /// a Claude/OpenAI/… tool is also configured in the same profile.
         case ompAPIKey(host: String)
+        /// Amazon Bedrock API key — AWS_BEARER_TOKEN_BEDROCK in Claude Code's
+        /// settings env; sent as `Authorization: Bearer` to that region's
+        /// bedrock-runtime host, which is the only host the swap applies to.
+        case bedrockAPIKey(region: String)
+        /// A gateway's API key Claude Code sends as `Authorization: Bearer`
+        /// (ANTHROPIC_AUTH_TOKEN) to that host — OpenRouter's Anthropic-
+        /// compatible endpoint. Swapped on the gateway host only.
+        case cloudAPIKey(host: String)
         /// HTTPS git credential. Materialized in ~/.git-credentials and
         /// the gh / glab configs.
         case gitHTTPS(host: String, username: String)
@@ -174,6 +182,22 @@ public struct SessionTokenPlan: Sendable {
         return nil
     }
 
+    /// Fake gateway key for `host` (Claude Code's ANTHROPIC_AUTH_TOKEN).
+    public func fakeForCloud(host: String) -> String? {
+        for e in entries {
+            if case .cloudAPIKey(let h) = e.purpose, h == host { return e.fakeValue }
+        }
+        return nil
+    }
+
+    /// Fake Bedrock API key for Claude Code's AWS_BEARER_TOKEN_BEDROCK.
+    public func fakeForBedrock() -> String? {
+        for e in entries {
+            if case .bedrockAPIKey = e.purpose { return e.fakeValue }
+        }
+        return nil
+    }
+
     /// Fake to embed into ~/.git-credentials for the matching host.
     public func fakeForGitHTTPS(host: String, username: String) -> String? {
         for e in entries {
@@ -192,6 +216,8 @@ public struct SessionTokenPlan: Sendable {
         case .xaiAPIKey:              return "x.ai"
         case .moonshotAPIKey:         return "moonshot.ai"
         case .ompAPIKey(let host):    return host.isEmpty ? nil : host
+        case .bedrockAPIKey(let region): return Bedrock.runtimeHost(region: region)
+        case .cloudAPIKey(let host):  return host.isEmpty ? nil : host
         case .gitHTTPS(let host, _):  return host
         case .manual(_, _, let host): return host.isEmpty ? nil : host
         case .digitalOcean:           return "digitalocean.com"
@@ -326,6 +352,24 @@ public extension Profile {
     func makeTokenPlan(salt: Data, claudeSubscriptionAvailable: Bool = false) -> SessionTokenPlan {
         var entries: [SessionTokenPlan.Entry] = []
 
+        // Claude Code through Amazon Bedrock with a Bedrock API key: the key
+        // rides on the Claude spec (`.bedrock` auth + apiKey) and is swapped
+        // on that region's bedrock-runtime host only. SigV4 Bedrock has no
+        // key — the AWS resigner handles it.
+        if let claude = allToolSpecs.first(where: { $0.tool == .claude && $0.authMode == .bedrock }),
+           let raw = claude.apiKey {
+            let real = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !real.isEmpty {
+                let region = Bedrock.region(credential: nil, workspaceRegion: awsCredentials.region)
+                entries.append(.init(
+                    realValue: real,
+                    fakeValue: SessionTokenPlan.deriveFake(prefix: "bedrock-brm-", real: real, salt: salt),
+                    purpose: .bedrockAPIKey(region: region),
+                    consentCredentialID: nil,
+                    consentDisplayName: "Amazon Bedrock API key"))
+            }
+        }
+
         // Primary tool API key gating: the primary tool's flag lives
         // on Profile (apiKeyRequiresApproval); each entry in
         // additionalTools carries its own `requireApproval`.
@@ -341,6 +385,17 @@ public extension Profile {
             let displayName = "\(spec.tool.displayName) API key"
             switch spec.tool {
             case .claude:
+                if let base = claudeGatewayBaseURL, let host = URL(string: base)?.host {
+                    // Gateway key: scoped to the gateway, never to anthropic.com.
+                    entries.append(.init(
+                        realValue: real,
+                        fakeValue: SessionTokenPlan.deriveFake(prefix: "sk-or-v1-brm-",
+                                                               real: real, salt: salt),
+                        purpose: .cloudAPIKey(host: host),
+                        consentCredentialID: consentID,
+                        consentDisplayName: "\(host) API key"))
+                    continue
+                }
                 entries.append(.init(
                     realValue: real,
                     fakeValue: SessionTokenPlan.deriveFake(prefix: "sk-ant-api03-brm-",

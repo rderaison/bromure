@@ -19,10 +19,67 @@ enum ExternalEngine {
 
     /// One workspace's external engine endpoint. `apiKey` is the server's own
     /// bearer (vLLM `--api-key`); nil/empty for open servers like Ollama.
+    /// Amazon Bedrock's OpenAI-compatible surface is an external engine too —
+    /// keyed by a Bedrock API key (bearer), or signed on the host with the
+    /// workspace's AWS credentials (`.sigV4`).
     struct Config: Equatable, Sendable {
+        enum Auth: Equatable, Sendable {
+            case bearer
+            case sigV4(profileID: UUID, region: String)
+        }
         var base: URL
         var apiKey: String?
+        var auth: Auth = .bearer
+
+        /// A Bedrock endpoint (either auth) — no `GET /models`, so probes and
+        /// listings are synthesized rather than fetched.
+        var isBedrock: Bool { Bedrock.isRuntimeHost(base.host ?? "") }
     }
+
+    /// Host-side AWS signing material for a workspace (set by the app once the
+    /// MITM engine's credential server exists; consent-gated like every other
+    /// AWS call the host signs). nil → SigV4 configs send unsigned.
+    nonisolated(unsafe) static var awsSigner: (@Sendable (UUID) async -> SigV4Signer.Credentials?)?
+
+    /// Put the engine's auth on an outgoing request: the bearer key, or a
+    /// SigV4 signature over the request as it will go on the wire (call AFTER
+    /// the body and Content-Type are set). Synchronous — the repair proxy's
+    /// request builders are; the consent prompt (if any) resolves off-main.
+    static func authorize(_ req: inout URLRequest, config: Config) {
+        switch config.auth {
+        case .bearer:
+            if let k = config.apiKey, !k.isEmpty {
+                req.setValue("Bearer \(k)", forHTTPHeaderField: "Authorization")
+            }
+        case .sigV4(let profileID, let region):
+            guard let signer = awsSigner, let url = req.url, let host = url.host else { return }
+            let box = CredsBox()
+            let sem = DispatchSemaphore(value: 0)
+            Task.detached { box.creds = await signer(profileID); sem.signal() }
+            sem.wait()
+            guard let creds = box.creds else { return }
+            let body = req.httpBody ?? Data()
+            let now = Date()
+            let amzDate = SigV4Signer.isoBasic(now)
+            let payloadHash = SigV4Signer.hexSHA256(body)
+            var headers: [(String, String)] = [("Host", host)]
+            if let ct = req.value(forHTTPHeaderField: "Content-Type") { headers.append(("Content-Type", ct)) }
+            headers.append(("X-Amz-Date", amzDate))
+            headers.append(("X-Amz-Content-SHA256", payloadHash))
+            if let st = creds.sessionToken, !st.isEmpty { headers.append(("X-Amz-Security-Token", st)) }
+            let signed = SigV4Signer.sign(
+                request: SigV4Signer.Request(method: req.httpMethod ?? "POST",
+                                             path: url.path.isEmpty ? "/" : url.path,
+                                             query: url.query ?? "",
+                                             headers: headers, body: body),
+                credentials: creds,
+                scope: SigV4Signer.Scope(date: String(amzDate.prefix(8)), region: region, service: "bedrock"),
+                date: now)
+            for (n, v) in headers where n != "Host" { req.setValue(v, forHTTPHeaderField: n) }
+            req.setValue(signed.authorization, forHTTPHeaderField: "Authorization")
+        }
+    }
+    private final class CredsBox: @unchecked Sendable { var creds: SigV4Signer.Credentials? }
 
     // MARK: - Request translation (wire → OpenAI chat)
 

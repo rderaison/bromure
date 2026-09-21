@@ -477,7 +477,7 @@ private struct PlanSessionView: View {
                     }
                 }
             }
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Color.platformWindowBackground)
             Divider()
 
             // The conversation composer — or, once the plan landed, the

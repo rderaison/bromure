@@ -89,6 +89,72 @@ struct GridLayoutTests {
         #expect(reloaded.cells[0].label == "worktree (claude)")
     }
 
+    @Test("Auto-fill appends new terminals; a full grid drops the oldest and shifts")
+    @MainActor
+    func autoFillEvicts() {
+        let store = freshStore()
+        let pid = UUID()
+        #expect(store.autoFill)
+        for i in 0..<GridLayoutStore.maxCells {
+            #expect(store.autoAdd(profileID: pid, windowIndex: i, label: "w\(i)"))
+        }
+        #expect(!store.autoAdd(profileID: pid, windowIndex: 3, label: "dupe"))
+        store.focusedCellID = GridCell.id(profileID: pid, windowIndex: 0)
+        // One more: window 0 (the oldest) goes, everything shifts up, 25 lands last.
+        #expect(store.autoAdd(profileID: pid, windowIndex: 25, label: "new"))
+        #expect(store.cells.count == GridLayoutStore.maxCells)
+        #expect(store.cells.first?.windowIndex == 1)
+        #expect(store.cells.last?.windowIndex == 25)
+        #expect(store.focusedCellID == nil)   // it pointed at the evicted cell
+    }
+
+    @Test("Rearranging by hand stands auto-fill down; the menu turns it back on")
+    @MainActor
+    func manualRearrangementStopsAutoFill() {
+        let store = freshStore()
+        let pid = UUID()
+        for i in 0..<3 { store.autoAdd(profileID: pid, windowIndex: i, label: "w\(i)") }
+        store.swap(GridCell.id(profileID: pid, windowIndex: 0), GridCell.id(profileID: pid, windowIndex: 2))
+        #expect(!store.autoFill)
+        #expect(!store.autoAdd(profileID: pid, windowIndex: 9, label: "later"))
+        #expect(store.cells.count == 3)
+        store.setAutoFill(true)
+        #expect(store.autoAdd(profileID: pid, windowIndex: 9, label: "later"))
+        // move() counts too.
+        store.move(id: GridCell.id(profileID: pid, windowIndex: 9), toIndex: 0)
+        #expect(!store.autoFill)
+    }
+
+    @Test("A replaced layout counts as a rearrangement only when it reorders known cells")
+    @MainActor
+    func replaceAllDetectsReorder() {
+        let store = freshStore()
+        let pid = UUID()
+        for i in 0..<3 { store.autoAdd(profileID: pid, windowIndex: i, label: "w\(i)") }
+        let same = store.cells
+        // Same order, one removed, one added at the end: not a rearrangement.
+        store.replaceAll([same[0], same[2], GridCell(profileID: pid, windowIndex: 7, label: "x")])
+        #expect(store.autoFill)
+        // The known cells swapped: a rearrangement.
+        store.replaceAll([same[2], same[0]])
+        #expect(!store.autoFill)
+        #expect(GridLayoutStore.reorders([same[0], same[1]], into: [same[1], same[0]]))
+        #expect(!GridLayoutStore.reorders([same[0], same[1]], into: [same[0]]))
+    }
+
+    @Test("The auto-fill flag persists")
+    @MainActor
+    func autoFillPersists() {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("grid-test-\(UUID().uuidString).json")
+        let a = GridLayoutStore(saveURL: url)
+        a.setAutoFill(false)
+        let b = GridLayoutStore(saveURL: url)
+        #expect(!b.autoFill)
+        b.setAutoFill(true)
+        #expect(GridLayoutStore(saveURL: url).autoFill)
+    }
+
     @Test("Drag payload round-trips, including labels containing pipes")
     func payload() throws {
         let pid = UUID()

@@ -3,12 +3,15 @@ import AppKit
 #endif
 import MarkdownUI
 import SwiftUI
+import UniformTypeIdentifiers
 
-// The file-explorer pane (right side of the unified window): the active
-// tab's repo as a tree with IDE-style git-status coloring, plus a detail
-// split showing a colored diff or a rendered preview (Markdown / highlighted
-// source) of the selected file. Data arrives via FileExplorerModel over the
-// guest shell vsock — see FileExplorer.swift.
+// The Files pane (right side of the unified window): the active tab's
+// folder — the repo root when it sits in one — as a tree with IDE-style
+// git-status coloring, ".." to go up, files that drag out to the Finder and
+// a drop target that copies files in, plus a detail split showing a colored
+// diff or a rendered preview (Markdown / highlighted source) of the selected
+// file. Data arrives via FileExplorerModel over the guest shell vsock — see
+// FileExplorer.swift.
 
 struct FileExplorerPane: View {
     @Bindable var model: FileExplorerModel
@@ -24,8 +27,8 @@ struct FileExplorerPane: View {
     /// managed from the sidebar.
     var onWorktreeAction: ((TabAction) -> Void)? = nil
 
-    /// Expanded directories (repo-relative paths). Reset per repo.
-    @State private var expanded: Set<String> = []
+    /// A Finder drag is over the pane.
+    @State private var dropTargeted = false
     /// Repo the tree was last auto-expanded for (dirs containing changes).
     @State private var autoExpandedRepo: String?
     /// The (VM, repo) context the pane last auto-opened for. Keeps the 0.7s
@@ -41,15 +44,36 @@ struct FileExplorerPane: View {
     private var activeTab: TabsModel.Tab? {
         listModel.entries.first { $0.id == listModel.selectedID }?.model.activeTab
     }
+    /// Sessions-first: the pane follows the SELECTED SESSION — its machine
+    /// and its folder — whether or not its tab is the one on stage (an
+    /// ended session's folder is still there to browse). Otherwise the
+    /// selected machine's active tab, as in the classic layout.
+    private var sessionContext: (profile: Profile.ID, cwd: String)? {
+        guard listModel.sessionsFirst, listModel.selectedSessionID != nil,
+              let pid = listModel.selectedSessionProfileID,
+              let cwd = listModel.selectedSessionCwd else { return nil }
+        let home = "/home/ubuntu"
+        let abs: String
+        if cwd.isEmpty || cwd == "~" { abs = home }
+        else if cwd.hasPrefix("~/") { abs = home + cwd.dropFirst(1) }
+        else if cwd.hasPrefix("/") { abs = cwd }
+        else { abs = home + "/" + cwd }
+        return (pid, abs)
+    }
+    private var contextProfileID: Profile.ID? { sessionContext?.profile ?? listModel.selectedID }
+    private var contextCwd: String? { sessionContext?.cwd ?? activeTab?.cwd }
     private var currentRepoRoot: String? {
         guard let tab = activeTab, tab.isGitRepo else { return nil }
+        // The tab's repo only describes the session's folder when it IS the
+        // session's tab.
+        if let sc = sessionContext, listModel.selectedID != sc.profile || tab.cwd != sc.cwd { return nil }
         return tab.repoRoot
     }
     /// One key that captures everything the pane's context depends on; any
     /// change re-points the model and restarts the status polling task.
     private var contextKey: String {
-        let id = listModel.selectedID?.uuidString ?? "-"
-        return "\(id)|\(currentRepoRoot ?? "-")|\(listModel.filePaneOpen)|\(listModel.gridSelected)|\(model.poppedOut)"
+        let id = contextProfileID?.uuidString ?? "-"
+        return "\(id)|\(contextCwd ?? "-")|\(currentRepoRoot ?? "-")|\(listModel.filePaneOpen)|\(listModel.gridSelected)|\(model.poppedOut)"
     }
     /// Auto-open watches only (VM, repo) — deliberately NOT filePaneOpen, so
     /// closing the pane doesn't retrigger the transition check.
@@ -70,6 +94,27 @@ struct FileExplorerPane: View {
         .overlay(alignment: .leading) {
             Rectangle().fill(Color.platformSeparator).frame(width: 1)
         }
+        // Drop files from the Finder anywhere on the pane: they land in the
+        // folder on show.
+        .overlay {
+            if dropTargeted && model.canTransfer {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.06)))
+                    .padding(6)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted) { providers in
+            guard model.canTransfer else { return false }
+            for provider in providers {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    Task { @MainActor in model.receive([url]) }
+                }
+            }
+            return true
+        }
         .onAppear {
             applyContext()
             handleRepoTransition()
@@ -83,16 +128,15 @@ struct FileExplorerPane: View {
             guard !model.loading, let repo = model.repoRoot, autoExpandedRepo != repo
             else { return }
             autoExpandedRepo = repo
-            expanded = Self.dirtyDirectories(model.rootNodes)
+            model.expand(Self.dirtyDirectories(model.rootNodes))
         }
         .task(id: contextKey) {
-            // Poll git status while the pane is actually showing (not closed,
-            // not covered by the grid) — or while the pop-out viewer window
-            // is up, which shows this model regardless of the pane. 4s keeps
-            // the tree live against agent edits without meaningfully loading
-            // the guest.
+            // Poll while the pane is actually showing (not closed, not covered
+            // by the grid) — or while the pop-out viewer window is up, which
+            // shows this model regardless of the pane. 4s keeps the tree live
+            // against agent edits without meaningfully loading the guest.
             guard (listModel.filePaneOpen && !listModel.gridSelected) || model.poppedOut,
-                  currentRepoRoot != nil else { return }
+                  contextCwd != nil else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 if Task.isCancelled { return }
@@ -104,10 +148,10 @@ struct FileExplorerPane: View {
 
     private func applyContext() {
         guard listModel.filePaneOpen || model.poppedOut else {
-            model.setRepo(profileID: nil, root: nil)   // park while closed
+            model.setLocation(profileID: nil, cwd: nil, repoRoot: nil)   // park while closed
             return
         }
-        model.setRepo(profileID: listModel.selectedID, root: currentRepoRoot)
+        model.setLocation(profileID: contextProfileID, cwd: contextCwd, repoRoot: currentRepoRoot)
         updateAgentTab()
     }
 
@@ -203,12 +247,31 @@ struct FileExplorerPane: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Text("Files")
+        HStack(spacing: 6) {
+            // ".." — the folder above, all the way up if need be.
+            Button { model.goUp() } label: {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(model.canGoUp ? Color.secondary : Color.secondary.opacity(0.35))
+                    .frame(width: 18, height: 18)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.06)))
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canGoUp)
+            .help(NSLocalizedString("Up to the enclosing folder", comment: "files pane"))
+            Text(folderTitle)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-                .tracking(0.7)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(model.root.map(prettyGuestPath) ?? "")
+            if let t = model.transferText {
+                Text(t)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.accentColor)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             if !model.statuses.isEmpty {
                 Text("\(model.statuses.count)")
                     .font(.system(size: 10, weight: .semibold))
@@ -239,21 +302,27 @@ struct FileExplorerPane: View {
             .buttonStyle(.plain)
             .help("Refresh now")
         }
-        .padding(.leading, 12)
+        .padding(.leading, 10)
         .padding(.trailing, 10)
-        .padding(.top, 12)
+        .padding(.top, 10)
         .padding(.bottom, 6)
+    }
+
+    /// "~", "clock", or the repo's name — the folder on show, as its own name.
+    private var folderTitle: String {
+        guard let root = model.root else { return NSLocalizedString("Files", comment: "files pane") }
+        let pretty = prettyGuestPath(root)
+        if pretty == "~" || pretty == "/" { return pretty }
+        return (pretty as NSString).lastPathComponent
     }
 
     // MARK: Content
 
     @ViewBuilder
     private var content: some View {
-        if model.repoRoot == nil {
+        if model.root == nil {
             placeholder(icon: "folder.badge.questionmark",
-                        text: activeTab?.cwd == nil
-                            ? "No session selected"
-                            : "The current directory isn't a git repository")
+                        text: NSLocalizedString("No session selected", comment: "files pane"))
         } else if model.loading && model.rootNodes.isEmpty {
             VStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
                 .frame(maxWidth: .infinity)
@@ -310,28 +379,40 @@ struct FileExplorerPane: View {
                         FileRow(name: path, depth: 0, isDirectory: false,
                                 isExpanded: false, status: model.statuses[path],
                                 isSelected: model.selectedPath == path,
-                                onTap: { model.select(path) })
+                                onTap: { model.select(path) },
+                                onDoubleTap: {},
+                                dragProvider: dragProvider(path),
+                                onDownload: model.canTransfer ? { model.saveToDownloads(path) } : nil,
+                                onCopyPath: { copyPath(path) })
                     }
                 } else {
-                    ForEach(Self.flatten(model.rootNodes, expanded: expanded),
+                    if model.rootNodes.isEmpty, !model.loading {
+                        Text(NSLocalizedString("Empty folder — drop files here to add some.", comment: "files pane"))
+                            .font(.system(size: 11)).foregroundStyle(.tertiary)
+                            .padding(8)
+                    }
+                    ForEach(Self.flatten(model.rootNodes, expanded: model.expandedDirs),
                             id: \.node.id) { item in
                         FileRow(name: item.node.name, depth: item.depth,
                                 isDirectory: item.node.isDirectory,
-                                isExpanded: expanded.contains(item.node.path),
+                                isExpanded: model.expandedDirs.contains(item.node.path),
                                 status: item.node.status,
                                 containsChanges: item.node.containsChanges,
                                 isSelected: model.selectedPath == item.node.path,
                                 onTap: {
                                     if item.node.isDirectory {
-                                        if expanded.contains(item.node.path) {
-                                            expanded.remove(item.node.path)
-                                        } else {
-                                            expanded.insert(item.node.path)
-                                        }
+                                        model.toggleExpanded(item.node.path)
                                     } else {
                                         model.select(item.node.path)
                                     }
-                                })
+                                },
+                                onDoubleTap: {
+                                    if item.node.isDirectory { model.enter(item.node.path) }
+                                },
+                                dragProvider: item.node.isDirectory ? nil : dragProvider(item.node.path),
+                                onDownload: (model.canTransfer && !item.node.isDirectory)
+                                    ? { model.saveToDownloads(item.node.path) } : nil,
+                                onCopyPath: { copyPath(item.node.path) })
                     }
                 }
                 if model.truncated {
@@ -343,6 +424,25 @@ struct FileExplorerPane: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
         }
+    }
+
+    private func dragProvider(_ path: String) -> (() -> NSItemProvider)? {
+#if os(macOS)
+        guard model.canTransfer else { return nil }
+        let m = model
+        return { FileExplorerModel.dragProvider(for: path, model: m) }
+#else
+        return nil
+#endif
+    }
+
+    private func copyPath(_ path: String) {
+#if os(macOS)
+        guard let root = model.root else { return }
+        let full = (root as NSString).appendingPathComponent(path)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(full, forType: .string)
+#endif
     }
 
     /// Depth-first flatten of the visible (expanded) tree — keeps the list
@@ -372,10 +472,37 @@ private struct FileRow: View {
     var containsChanges = false
     let isSelected: Bool
     let onTap: () -> Void
+    /// Folders: make this the folder on show.
+    var onDoubleTap: () -> Void = {}
+    /// Files: drag out to the Finder (a lazy download).
+    var dragProvider: (() -> NSItemProvider)? = nil
+    var onDownload: (() -> Void)? = nil
+    var onCopyPath: (() -> Void)? = nil
     @State private var hovering = false
 
     var body: some View {
-        Button(action: onTap) {
+        rowBody
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2, perform: onDoubleTap)
+            .onTapGesture(perform: onTap)
+            .onHover { hovering = $0 }
+            .help(name)
+            .contextMenu {
+                if let onDownload {
+                    Button(NSLocalizedString("Save to Downloads", comment: "files pane"), action: onDownload)
+                }
+                if let onCopyPath {
+                    Button(NSLocalizedString("Copy Path", comment: "files pane"), action: onCopyPath)
+                }
+                if isDirectory {
+                    Button(NSLocalizedString("Show This Folder", comment: "files pane"), action: onDoubleTap)
+                }
+            }
+            .modifier(DragOut(provider: dragProvider))
+    }
+
+    private var rowBody: some View {
+        Group {
             HStack(spacing: 4) {
                 if isDirectory {
                     Image(systemName: "chevron.right")
@@ -411,11 +538,7 @@ private struct FileRow: View {
             .background(RoundedRectangle(cornerRadius: 5).fill(
                 isSelected ? Color.accentColor.opacity(0.18)
                            : hovering ? Color.primary.opacity(0.06) : .clear))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(name)
     }
 
     private var iconName: String {
@@ -430,6 +553,19 @@ private struct FileRow: View {
     private var nameColor: Color {
         if let status { return status.tint }
         return .primary
+    }
+}
+
+/// `.onDrag` only when there is something to drag (a file with the guest
+/// file service at hand); folders and mirrors without it stay put.
+private struct DragOut: ViewModifier {
+    let provider: (() -> NSItemProvider)?
+    func body(content: Content) -> some View {
+        if let provider {
+            content.onDrag(provider)
+        } else {
+            content
+        }
     }
 }
 

@@ -174,6 +174,10 @@ struct TaskReviewView: View {
     let fetchBranches: (CodingTask) async -> [String]
     let onMerge: (_ target: String?, _ squash: Bool, _ cleanup: Bool) -> Void
     let onOpenPR: () -> Void
+    /// "Keep working": reopen the agent's session on this branch and return
+    /// the task to In Progress — for a run that stopped before it was really
+    /// done. nil hides the button (the standalone window doesn't offer it).
+    var onResume: (() -> Void)? = nil
 
     @State private var data: TaskReviewData?
     @State private var loadFailed = false
@@ -250,6 +254,12 @@ struct TaskReviewView: View {
                 .help(NSLocalizedString("Refresh the diff", comment: ""))
             Button(NSLocalizedString("Open Terminal", comment: "review"),
                    action: onOpenTerminal)
+            if let onResume {
+                Button(NSLocalizedString("Keep working", comment: "review"), action: onResume)
+                    .help(NSLocalizedString(
+                        "Reopen the agent on this branch and continue the task — it goes back to In Progress. Add comments first to send them along.",
+                        comment: "review"))
+            }
             Button(NSLocalizedString("Send Back to In Progress", comment: "review"),
                    action: onSendBack)
                 .disabled(unsentCount == 0)

@@ -121,7 +121,21 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     /// Retired sessions kept alive permanently to prevent VZ dispatch source
     /// use-after-free crashes during dealloc. These are lightweight after cleanup.
     private var retiredSessions: [BrowserSession] = []
-    private var mainWindow: NSWindow?
+    /// First-run / rebuild progress window. Shown only while the engine
+    /// isn't ready; browser windows open directly once it is.
+    private var setupWindow: NSWindow?
+    /// Create / edit / delete profile windows (chip menu, File menu,
+    /// AppleScript).
+    private(set) var profileEditor: ProfileEditorController!
+    /// A window the user asked for before the pool was ready; opened by
+    /// the pool-ready hook.
+    private var pendingLaunch: PendingLaunch?
+    private enum PendingLaunch {
+        case startup
+        case profile(UUID, URL?)
+    }
+    /// File ▸ New Window With Profile — rebuilt on each open.
+    private weak var profilesSubmenu: NSMenu?
     private var settingsWindow: NSWindow?
     private var diagnosticWindow: NSWindow?
     private var eulaWindow: NSWindow?
@@ -234,15 +248,30 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
 
         state.onPoolReady = { [weak self] in
-            guard let self, let url = self.pendingURL else { return }
-            self.pendingURL = nil
-            // Re-enter the normal URL handling flow now that the pool is ready
-            self.application(NSApp, open: [url])
+            guard let self else { return }
+            self.hideSetupWindow()
+            if let url = self.pendingURL {
+                self.pendingURL = nil
+                self.pendingLaunch = nil
+                // Re-enter the normal URL handling flow now that the pool is ready
+                self.application(NSApp, open: [url])
+                return
+            }
+            self.performPendingLaunch()
         }
 
         state.onShowEnrollment = { [weak self] in
             self?.showEnrollmentAction(nil)
         }
+
+        profileEditor = ProfileEditorController(state: state, delegate: self)
+        state.onOpenProfileSettings = { [weak self] profileID, category in
+            self?.profileEditor.presentSettings(forProfileID: profileID, category: category)
+        }
+
+        // The chip menus in every open window mirror the roster; re-render
+        // them whenever a profile is created, edited or deleted.
+        observeProfileRoster()
 
         // Start automation server if enabled
         startAutomationServerIfNeeded()
@@ -263,7 +292,110 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             }
         }
 
-        showMainWindow()
+        // Like Safari: launching the app opens a browser window. The
+        // engine check kicks the pool; until it's warm the setup window
+        // shows progress and the window opens from the pool-ready hook.
+        state.checkState()
+        pendingLaunch = .startup
+        if state.poolReady {
+            performPendingLaunch()
+        } else {
+            showSetupWindow()
+        }
+    }
+
+    // MARK: - Launch flow
+
+    /// The profile a fresh window opens in when no window is key: the
+    /// most recently used one (``ProfileManager/allProfiles`` sorts by
+    /// last use), falling back to the ephemeral default.
+    @MainActor private func startupProfile() -> Profile? {
+        if let id = state.selectedProfileID,
+           let p = state.profileManager.profile(withID: id) { return p }
+        return state.profileManager.allProfiles.first
+    }
+
+    /// The ephemeral profile "New Private Window" opens: the first
+    /// non-persistent one (the built-in Private Browsing profile unless
+    /// the user deleted it).
+    @MainActor private func privateProfile() -> Profile? {
+        let all = state.profileManager.allProfiles
+        return all.first { $0.name == "Private Browsing" && !$0.isPersistent }
+            ?? all.first { !$0.isPersistent }
+    }
+
+    @MainActor private func performPendingLaunch() {
+        guard state.poolReady, let launch = pendingLaunch else { return }
+        pendingLaunch = nil
+        switch launch {
+        case .startup:
+            guard sessions.isEmpty else { return }
+            // Profiles load asynchronously (iCloud discovery); the pool
+            // normally takes longer, but never open a profile-less window
+            // just because the roster hasn't landed yet.
+            guard state.profileManager.isReady else {
+                pendingLaunch = .startup
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(250))
+                    self.performPendingLaunch()
+                }
+                return
+            }
+            if let profile = startupProfile() {
+                openNewBrowser(with: profile)
+            } else {
+                openNewBrowser()
+            }
+        case .profile(let id, let url):
+            if let profile = state.profileManager.profile(withID: id) {
+                openNewBrowser(with: profile, initialURL: url)
+            }
+        }
+    }
+
+    /// Re-run the profile-roster observation: bump every open window's
+    /// chip so its menu re-renders, then re-arm (Observation fires once).
+    @MainActor private func observeProfileRoster() {
+        withObservationTracking {
+            _ = state.profileVersion
+            _ = state.phase
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.refreshProfileMenus()
+                // Setup / rebuild / error states get the progress window
+                // back (Settings ▸ Reset Base Image, a failed warm-up…).
+                switch self.state.phase {
+                case .needsSetup, .initializing, .error:
+                    self.showSetupWindow()
+                case .checking, .warmingUp, .ready:
+                    break
+                }
+                self.observeProfileRoster()
+            }
+        }
+    }
+
+    /// Entries for the chip menu of the window running `current`, and for
+    /// File ▸ New Window With Profile (current == nil).
+    @MainActor func profileMenuEntries(current: UUID?) -> [ProfileMenuEntry] {
+        state.profileManager.allProfiles.map { p in
+            ProfileMenuEntry(
+                id: p.id,
+                name: p.name,
+                color: p.color,
+                isManaged: state.profileManager.isManaged(p.id),
+                isPersistent: p.isPersistent,
+                isCurrent: p.id == current,
+                hasOpenWindow: sessions.contains { $0.profile?.id == p.id && !$0.closing }
+            )
+        }
+    }
+
+    @MainActor private func refreshProfileMenus() {
+        for session in sessions {
+            session.refreshProfileChip()
+        }
     }
 
     // MARK: - URL Handling
@@ -340,7 +472,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         } else {
             print("[URL] storing as pending URL")
             pendingURL = url
-            showMainWindow()
+            if state.phase != .ready { showSetupWindow() }
         }
     }
 
@@ -650,27 +782,15 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     // MARK: - Windows
 
-    private func showMainWindow() {
-        if let mainWindow, mainWindow.isVisible {
-            mainWindow.makeKeyAndOrderFront(nil)
+    /// Progress window for first-run setup, image rebuilds and warm-up.
+    /// Never shown once the pool is ready — browser windows open directly.
+    private func showSetupWindow() {
+        if let setupWindow, setupWindow.isVisible {
+            setupWindow.makeKeyAndOrderFront(nil)
             return
         }
 
-        let onNewBrowser: @MainActor () -> Void = { [weak self] in
-            self?.openNewBrowser()
-        }
-        let onNewBrowserWithProfile: @MainActor (Profile) -> Void = { [weak self] profile in
-            self?.openNewBrowser(with: profile)
-        }
-        let onShowWarpEULA: (@escaping () -> Void) -> Void = { [weak self] onAccepted in
-            self?.showWarpEULA(onAccepted: onAccepted)
-        }
-        let onShowPhishingConsent: (@escaping () -> Void) -> Void = { [weak self] onAccepted in
-            self?.showPhishingConsent(onAccepted: onAccepted)
-        }
-        let mainView = MainView(state: state, onNewBrowser: onNewBrowser, onNewBrowserWithProfile: onNewBrowserWithProfile, onShowWarpEULA: onShowWarpEULA, onShowPhishingConsent: onShowPhishingConsent)
-
-        let hostingView = NSHostingView(rootView: mainView)
+        let hostingView = NSHostingView(rootView: MainView(state: state))
         let window = NSWindow(
             contentRect: .zero,
             styleMask: [.titled, .closable, .miniaturizable],
@@ -686,12 +806,17 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
         window.isReleasedWhenClosed = false
         window.delegate = self
-        self.mainWindow = window
+        self.setupWindow = window
+    }
+
+    private func hideSetupWindow() {
+        setupWindow?.orderOut(nil)
+        setupWindow = nil
     }
 
     func windowWillClose(_ notification: Notification) {
-        if (notification.object as? NSWindow) === mainWindow {
-            mainWindow = nil
+        if (notification.object as? NSWindow) === setupWindow {
+            setupWindow = nil
         }
     }
 
@@ -767,9 +892,37 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
         // File menu
         let fileMenu = NSMenu(title: NSLocalizedString("File", comment: ""))
-        fileMenu.addItem(withTitle: NSLocalizedString("New Browser", comment: ""),
-                         action: #selector(newBrowserAction(_:)),
+        // Safari's trio: ⌘N opens another window of the front window's
+        // profile, ⇧⌘N a fresh private one, and the submenu lists every
+        // profile (rebuilt on open by the menu delegate).
+        fileMenu.addItem(withTitle: NSLocalizedString("New Window", comment: ""),
+                         action: #selector(newWindowAction(_:)),
                          keyEquivalent: "n")
+        let privateItem = NSMenuItem(
+            title: NSLocalizedString("New Private Window", comment: ""),
+            action: #selector(newPrivateWindowAction(_:)),
+            keyEquivalent: "n")
+        privateItem.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(privateItem)
+        let profilesItem = NSMenuItem(
+            title: NSLocalizedString("New Window With Profile", comment: ""),
+            action: nil, keyEquivalent: "")
+        let profilesMenu = NSMenu(title: NSLocalizedString("New Window With Profile", comment: ""))
+        profilesMenu.delegate = self
+        profilesItem.submenu = profilesMenu
+        self.profilesSubmenu = profilesMenu
+        fileMenu.addItem(profilesItem)
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(withTitle: NSLocalizedString("New Profile\u{2026}", comment: ""),
+                         action: #selector(newProfileAction(_:)),
+                         keyEquivalent: "")
+        fileMenu.addItem(withTitle: NSLocalizedString("Edit Profile\u{2026}", comment: ""),
+                         action: #selector(editProfileAction(_:)),
+                         keyEquivalent: "")
+        fileMenu.addItem(withTitle: NSLocalizedString("Delete Profile\u{2026}", comment: ""),
+                         action: #selector(deleteProfileAction(_:)),
+                         keyEquivalent: "")
+        fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: NSLocalizedString("Open Trace\u{2026}", comment: ""),
                          action: #selector(openTraceFileAction(_:)),
                          keyEquivalent: "o")
@@ -877,9 +1030,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         // Window menu
         let windowMenu = NSMenu(title: NSLocalizedString("Window", comment: ""))
         windowMenu.addItem(withTitle: NSLocalizedString("Minimize", comment: ""), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-        windowMenu.addItem(withTitle: NSLocalizedString("Bromure", comment: ""),
-                           action: #selector(showMainWindowAction(_:)),
-                           keyEquivalent: "0")
         let windowItem = NSMenuItem()
         windowItem.submenu = windowMenu
         mainMenu.addItem(windowItem)
@@ -890,8 +1040,76 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     // MARK: - Actions
 
-    @MainActor @objc func newBrowserAction(_ sender: Any?) {
-        openNewBrowser()
+    // MARK: - Window / profile actions
+
+    /// ⌘N: another window of the front window's profile; with no browser
+    /// window in front, the start-up profile.
+    @MainActor @objc func newWindowAction(_ sender: Any?) {
+        if let profile = keyWindowSession()?.profile
+            ?? sessions.last(where: { !$0.closing })?.profile
+            ?? startupProfile() {
+            openWindow(forProfileID: profile.id)
+        } else {
+            openNewBrowser()
+        }
+    }
+
+    /// ⇧⌘N: a fresh ephemeral VM.
+    @MainActor @objc func newPrivateWindowAction(_ sender: Any?) {
+        if let profile = privateProfile() {
+            openWindow(forProfileID: profile.id)
+        } else {
+            openNewBrowser()
+        }
+    }
+
+    /// File ▸ New Window With Profile ▸ <name>.
+    @MainActor @objc func openProfileWindowAction(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
+              let id = item.representedObject as? UUID else { return }
+        openWindow(forProfileID: id)
+    }
+
+    /// Open (or, for a persistent profile that already has one, focus)
+    /// the window for a profile. Queues the launch while the pool warms.
+    @MainActor func openWindow(forProfileID id: UUID, initialURL: URL? = nil) {
+        guard let profile = state.profileManager.profile(withID: id) else { return }
+        guard state.pool != nil, state.poolReady else {
+            pendingLaunch = .profile(id, initialURL)
+            if state.phase != .ready { showSetupWindow() }
+            return
+        }
+        openNewBrowser(with: profile, initialURL: initialURL)
+    }
+
+    @MainActor @objc func newProfileAction(_ sender: Any?) {
+        profileEditor.presentNewProfile()
+    }
+
+    /// Edit the front window's profile (or the start-up one).
+    @MainActor @objc func editProfileAction(_ sender: Any?) {
+        guard let profile = keyWindowSession()?.profile ?? startupProfile() else { return }
+        profileEditor.presentSettings(for: profile)
+    }
+
+    @MainActor @objc func deleteProfileAction(_ sender: Any?) {
+        guard let profile = keyWindowSession()?.profile ?? startupProfile() else { return }
+        profileEditor.confirmDelete(profileID: profile.id)
+    }
+
+    @MainActor private func rebuildProfilesSubmenu() {
+        guard let menu = profilesSubmenu else { return }
+        menu.removeAllItems()
+        for entry in profileMenuEntries(current: nil) {
+            let title = entry.hasOpenWindow && entry.isPersistent
+                ? String(format: NSLocalizedString("Show %@ Window", comment: "File menu: focus the open window of a persistent profile"), entry.name)
+                : String(format: NSLocalizedString("New %@ Window", comment: "File menu: open a window in this profile"), entry.name)
+            let item = NSMenuItem(title: title, action: #selector(openProfileWindowAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = entry.id
+            item.image = ProfileSwatch.dotImage(for: entry.color)
+            menu.addItem(item)
+        }
     }
 
     @MainActor @objc func toggleFileDrawerAction(_ sender: Any?) {
@@ -955,6 +1173,8 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                     rebuildHistoryMenu()
                 }
             }
+        } else if menu === profilesSubmenu {
+            rebuildProfilesSubmenu()
         }
     }
 
@@ -1086,6 +1306,22 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if item.action == #selector(toggleFileDrawerAction(_:)) {
             return keyWindowSession()?.hasFileTransfer ?? false
         }
+        if item.action == #selector(editProfileAction(_:))
+            || item.action == #selector(deleteProfileAction(_:)) {
+            guard let profile = keyWindowSession()?.profile ?? startupProfile() else { return false }
+            let managed = state.profileManager.isManaged(profile.id)
+            item.title = item.action == #selector(editProfileAction(_:))
+                ? (managed
+                   ? String(format: NSLocalizedString("View \u{201C}%@\u{201D} Settings\u{2026}", comment: "Profile menu: read-only settings of a managed profile"), profile.name)
+                   : String(format: NSLocalizedString("Edit \u{201C}%@\u{201D}\u{2026}", comment: "Profile menu: edit the current profile"), profile.name))
+                : String(format: NSLocalizedString("Delete \u{201C}%@\u{201D}\u{2026}", comment: "Profile menu: delete the current profile"), profile.name)
+            return item.action == #selector(editProfileAction(_:)) || !managed
+        }
+        if item.action == #selector(newWindowAction(_:))
+            || item.action == #selector(newPrivateWindowAction(_:))
+            || item.action == #selector(openProfileWindowAction(_:)) {
+            return state.phase == .ready
+        }
         return true
     }
 
@@ -1213,13 +1449,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 state.sessionCount = 0
 
                 state.regenerateImage()
-                showMainWindow()
+                pendingLaunch = .startup
+                showSetupWindow()
             }
         }
-    }
-
-    @objc func showMainWindowAction(_ sender: Any?) {
-        showMainWindow()
     }
 
     @MainActor private func showSessionError() {
@@ -1234,7 +1467,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     @MainActor func openNewBrowser(initialURL: URL? = nil) {
         guard state.pool != nil, state.poolReady else {
             if let url = initialURL { pendingURL = url }
-            showMainWindow()
+            if state.phase != .ready { showSetupWindow() }
             return
         }
         var config = state.buildDefaultConfig()
@@ -1257,6 +1490,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 self.sessions.removeAll { $0 === session }
                 self.state.sessionCount = self.sessions.count
                 self.retiredSessions.append(session)
+                self.refreshProfileMenus()
             }
             session.onOpenInProfile = { [weak self] url in
                 self?.handleOpenInProfile(url: url)
@@ -1264,6 +1498,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
             session.show()
+            self.refreshProfileMenus()
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
                 self.state.pool?.scheduleWarmUp()
             }
@@ -1276,8 +1511,12 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let profile = state.profileManager.profile(withID: profile.id) ?? profile
 
         guard state.pool != nil, state.poolReady else {
-            if let url = initialURL { pendingURL = url }
-            showMainWindow()
+            if let url = initialURL {
+                pendingURL = url
+            } else {
+                pendingLaunch = .profile(profile.id, nil)
+            }
+            if state.phase != .ready { showSetupWindow() }
             return
         }
 
@@ -1385,6 +1624,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 self.sessions.removeAll { $0 === session }
                 self.state.sessionCount = self.sessions.count
                 self.retiredSessions.append(session)
+                self.refreshProfileMenus()
             }
             session.onOpenInProfile = { [weak self] url in
                 self?.handleOpenInProfile(url: url)
@@ -1392,6 +1632,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             self.sessions.append(session)
             self.state.sessionCount = self.sessions.count
             session.show()
+            self.refreshProfileMenus()
             if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
                 self.state.pool?.scheduleWarmUp()
             }
@@ -1688,7 +1929,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                   })
             else { return false }
             return MainActor.assumeIsolated {
-                guard let bridge = session.scrollBridge, bridge.isConnected else { return false }
+                guard let bridge = session.scrollBridge, bridge.canSend else { return false }
                 bridge.sendScroll(dx: dx, dy: dy)
                 return true
             }
@@ -1830,6 +2071,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             self.sessions.removeAll { $0 === session }
             self.state.sessionCount = self.sessions.count
             self.retiredSessions.append(session)
+            self.refreshProfileMenus()
         }
         session.onOpenInProfile = { [weak self] url in
             self?.handleOpenInProfile(url: url)
@@ -1837,6 +2079,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         self.sessions.append(session)
         self.state.sessionCount = self.sessions.count
         session.show()
+        self.refreshProfileMenus()
         // Shorter warm-up delay for automation — sessions are created/destroyed rapidly
         state.pool?.scheduleWarmUp(delay: .seconds(3))
 
@@ -1951,8 +2194,18 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         false
     }
 
+    /// Dock click with no window: open one, like Safari. With windows
+    /// (visible or minimised) AppKit's default reopen brings them back.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showMainWindow()
+        if state.phase != .ready {
+            showSetupWindow()
+            return false
+        }
+        if sessions.isEmpty {
+            pendingLaunch = .startup
+            performPendingLaunch()
+            return false
+        }
         return true
     }
 
@@ -2016,6 +2269,9 @@ final class BrowserSession {
     var onClosed: ((BrowserSession) -> Void)?
     var onOpenInProfile: ((URL) -> Void)?
     fileprivate var closing = false
+    /// `closing` for other files (the profile editor refuses to delete a
+    /// profile whose window is still up).
+    var isClosing: Bool { closing }
     fileprivate var confirmed = false
     private static var windowCount = 0
     private var delegateHelper: SessionDelegateHelper?
@@ -2561,6 +2817,22 @@ final class BrowserSession {
                     if let window, let vmView { window.makeFirstResponder(vmView) }
                 }
 
+                // Profile chip: the window's profile, and a menu that
+                // opens other profiles' windows or manages the roster.
+                // All actions resolve through the app delegate.
+                if let profile {
+                    tabModel.profileName = profile.name
+                    tabModel.profileColor = profile.color
+                    let delegate = { NSApp.delegate as? GUIAppDelegate }
+                    tabModel.profileIsManaged = delegate()?.state.profileManager.isManaged(profile.id) ?? false
+                    let pid = profile.id
+                    tabModel.profileEntries = { delegate()?.profileMenuEntries(current: pid) ?? [] }
+                    tabModel.onOpenProfile = { id in delegate()?.openWindow(forProfileID: id) }
+                    tabModel.onNewProfile = { delegate()?.profileEditor.presentNewProfile() }
+                    tabModel.onEditProfile = { delegate()?.profileEditor.presentSettings(forProfileID: pid) }
+                    tabModel.onDeleteProfile = { delegate()?.profileEditor.confirmDelete(profileID: pid) }
+                }
+
                 let chrome = NativeTabBarChrome(model: tabModel)
                 self.nativeTabBar = chrome
                 chrome.install(on: window)
@@ -2985,7 +3257,28 @@ final class BrowserSession {
            UserDefaults.standard.object(forKey: "vm.precisionScroll") as? Bool ?? true {
             let bridge = MainActor.assumeIsolated { PrecisionScrollBridge(socketDevice: dev) }
             self.scrollBridge = bridge
-            MainActor.assumeIsolated { vmView.scrollBridge = bridge }
+            MainActor.assumeIsolated {
+                vmView.scrollBridge = bridge
+                // Direct transport: one DevTools socket into Chromium,
+                // addressed by the active tab's target id.
+                if let cdp = self.cdpBridge {
+                    let injector = CDPWheelInjector(bridge: cdp)
+                    injector.start()
+                    bridge.injector = injector
+                }
+                bridge.activeTargetId = { [weak self] in self?.nativeTabBar?.model.activeTab?.id }
+                // CDP wheel events are positioned in the page viewport:
+                // the view's framebuffer rows above it hold Chromium's
+                // hidden tab strip + omnibox in native-chrome mode.
+                vmView.viewportInsetPixels = config.nativeChromeInset
+                bridge.defaultPoint = { [weak vmView] in
+                    guard let vmView else { return (x: 400, y: 300) }
+                    return vmView.guestViewportPoint(
+                        NSPoint(x: vmView.bounds.midX,
+                                y: vmView.bounds.midY - CGFloat(config.nativeChromeInset) / 2
+                                    / max(vmView.window?.backingScaleFactor ?? 2, 1)))
+                }
+            }
         }
 
         // Auto-suspend on idle — whether idle actually triggers a suspend is
@@ -3021,6 +3314,19 @@ final class BrowserSession {
     ///     swallow them.
     /// Keeping both paths on this one method means the finicky ⌘T focus-grab
     /// logic can't drift between them.
+    /// Re-render the tab-bar profile chip (roster or open-window set
+    /// changed). Also refreshes the name / colour in case the profile
+    /// itself was edited.
+    @MainActor func refreshProfileChip() {
+        guard let model = nativeTabBar?.model, let profile else { return }
+        if let delegate = NSApp.delegate as? GUIAppDelegate,
+           let fresh = delegate.state.profileManager.profile(withID: profile.id) {
+            model.profileName = fresh.name
+            model.profileColor = fresh.color
+        }
+        model.profileVersion &+= 1
+    }
+
     @MainActor
     func performNativeChromeShortcut(_ key: String) {
         // ⌘H bounced from the guest (Openbox grabs Ctrl+H so Chromium never
@@ -3897,6 +4203,11 @@ final class BrowserSession {
             networkRefreshBridge = nil
             webcamBridge?.stop()
             webcamBridge = nil
+            // Before the CDP bridge: closes the direct wheel socket and
+            // stops its reconnect loop, which would otherwise poll the
+            // (stopped) pool forever from the retired session.
+            scrollBridge?.stop()
+            scrollBridge = nil
             cdpBridge?.stop()
             cdpBridge = nil
             tabBridge?.stop()
@@ -5359,10 +5670,31 @@ final class PrecisionScrollVMView: VZVirtualMachineView {
         return super.performKeyEquivalent(with: event)
     }
 
+    /// Framebuffer rows above the page viewport (native-chrome inset, in
+    /// guest device pixels). CDP wheel events are addressed in viewport
+    /// coordinates, so the cursor's y is shifted up by this much.
+    var viewportInsetPixels = 0
+
+    /// A point in this view's coordinates → guest device pixels relative
+    /// to the page viewport's top-left. With
+    /// `automaticallyReconfiguresDisplay` the guest framebuffer is exactly
+    /// this view at the window's backing scale.
+    func guestViewportPoint(_ p: NSPoint) -> (x: Double, y: Double) {
+        let scale = Double(max(window?.backingScaleFactor ?? 2, 1))
+        let x = Double(p.x) * scale
+        let y = Double(bounds.height - p.y) * scale - Double(viewportInsetPixels)
+        return (x: max(0, x), y: max(0, y))
+    }
+
     override func scrollWheel(with event: NSEvent) {
-        if let bridge = scrollBridge, bridge.isConnected,
+        if let bridge = scrollBridge, bridge.canSend,
            event.hasPreciseScrollingDeltas {
-            bridge.sendScroll(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY)
+            let p = guestViewportPoint(convert(event.locationInWindow, from: nil))
+            let mods = event.modifierFlags
+            bridge.sendScroll(
+                dx: event.scrollingDeltaX, dy: event.scrollingDeltaY,
+                x: p.x, y: p.y,
+                shift: mods.contains(.shift), ctrl: mods.contains(.control), alt: mods.contains(.option))
             return
         }
         super.scrollWheel(with: event)

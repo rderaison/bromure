@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import os
 import Virtualization
@@ -143,8 +144,14 @@ public final class VMPool {
         warmVM = warm
         warmingMAC = nil  // Now tracked by warmVM.macAddress
 
-        // Inflate balloon to reclaim unused guest memory while VM is idle.
-        inflateBalloon(vm: warm.vm)
+        // Do NOT inflate the balloon here. Measured on macOS 26 (footprint
+        // of the per-VM Virtualization helper): a freshly booted warm VM
+        // sits at ~450 MB; inflating the traditional balloon to "keep
+        // 512 MB" makes the guest allocate the other 3.5 GB into the
+        // balloon, which VZ leaves resident — the helper jumps to the full
+        // 4.1 GB within seconds and never comes back down, even after the
+        // deflate on claim. The balloon device stays attached (harmless),
+        // but inflating it costs memory instead of saving it.
 
         // Suspend the pre-warmed VM after 30s to save CPU while it waits.
         // VZVirtualMachineView is created at claim time (after resume), so there's
@@ -677,6 +684,33 @@ public final class VMPool {
         //   defaults write io.bromure.app vm.extraChromeFlags -string "--foo --bar"
         //   defaults write io.bromure.app vm.chromeEnvExtra -string "LP_NUM_THREADS=8"
         var extraChromeFlags = UserDefaults.standard.string(forKey: "vm.extraChromeFlags") ?? ""
+        // Software display compositing. The guest has no GPU: virtio-gpu
+        // offers no 3D, so "GPU acceleration" runs Chromium's GL compositor
+        // on llvmpipe (CPU). Measured while flinging a page (7 vCPUs, 2x
+        // display): the GL compositor burns ~150% CPU at 60 Hz / ~280% at
+        // 120 Hz; the software compositor does the same frames at ~46% /
+        // ~90% with identical frame timing. Less CPU per frame is also
+        // what keeps 120 Hz scrolling from dropping frames.
+        // Escape hatch: defaults write io.bromure.app vm.gpuCompositing -bool YES
+        if config.enableGPU,
+           !(UserDefaults.standard.object(forKey: "vm.gpuCompositing") as? Bool ?? false) {
+            extraChromeFlags = (extraChromeFlags + " --disable-gpu-compositing")
+                .trimmingCharacters(in: .whitespaces)
+        }
+        // Profile opt-out of strict site isolation (Performance pane). The
+        // switch is the only host-side lever: `--disable-features=
+        // SitePerProcess` is overridden by config-agent's later
+        // `--disable-features=LcdText`, and `--renderer-process-limit` is
+        // a soft cap that strict isolation ignores (64 vs 70 renderers).
+        // `--test-type` only suppresses Chromium's "unsupported command-line
+        // flag" infobar that the switch would otherwise show in the page
+        // area (it is what chromedriver passes for the same reason); it
+        // also skips the default-browser and first-run prompts, both
+        // already disabled here.
+        if !config.strictSiteIsolation {
+            extraChromeFlags = (extraChromeFlags + " --disable-site-isolation-trials --test-type")
+                .trimmingCharacters(in: .whitespaces)
+        }
         // Direct connection: force DIRECT even on an already-built image whose
         // baked config-agent still emits --proxy-server. Chromium honors
         // --no-proxy-server over --proxy-server regardless of order, and
@@ -688,8 +722,23 @@ public final class VMPool {
         if !extraChromeFlags.isEmpty {
             cfg["extraChromeFlags"] = extraChromeFlags
         }
-        if let envExtra = UserDefaults.standard.string(forKey: "vm.chromeEnvExtra"),
-           !envExtra.isEmpty {
+        // Host screen refresh rate → guest display mode. resize-watcher.sh
+        // (images that ship it) synthesises a matching modeline so a
+        // ProMotion Mac gets 120 Hz scrolling instead of virtio-gpu's
+        // 60 Hz. Older images ignore the variable.
+        // Override: defaults write io.bromure.app vm.displayHz -int 60
+        var envExtra = UserDefaults.standard.string(forKey: "vm.chromeEnvExtra") ?? ""
+        let hz: Int = {
+            let forced = UserDefaults.standard.integer(forKey: "vm.displayHz")
+            if forced > 0 { return forced }
+            let screens = NSScreen.screens.map(\.maximumFramesPerSecond)
+            return min(max(screens.max() ?? 60, 60), 120)
+        }()
+        if hz > 60 {
+            // config-agent splits entries on newlines / semicolons.
+            envExtra = (envExtra + "\nDISPLAY_HZ=\(hz)").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if !envExtra.isEmpty {
             cfg["chromeEnvExtra"] = envExtra
         }
 

@@ -232,11 +232,11 @@ struct BrowserPaneView: View {
             NativeCompactBarView(model: model.tabBar, downloads: model.downloads)
                 .frame(minHeight: 34)
                 .padding(.vertical, 3)
-                .background(Color(nsColor: .windowBackgroundColor))
+                .background(Color.platformWindowBackground)
             Divider()
             content
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
     }
 
     @ViewBuilder private var content: some View {

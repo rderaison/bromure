@@ -131,6 +131,14 @@ public final class CodexSubscriptionStore: @unchecked Sendable {
             [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: fileURL.path)
     }
 
+    /// True when THIS profile has its own per-profile record (as opposed to
+    /// only inheriting the shared one). Lets a per-workspace log-out clear
+    /// the right scope.
+    public func hasProfileRecord(_ profileID: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return loadLocked().perProfile[profileID.uuidString] != nil
+    }
+
     public func record(for profileID: UUID?) -> CodexSubscriptionRecord? {
         lock.lock(); defer { lock.unlock() }
         let file = loadLocked()

@@ -218,10 +218,8 @@ struct ModelValidationTests {
 @Suite("LLMRouting")
 struct LLMRoutingTests {
     private func ctx(_ routing: Profile.Routing,
-                     localCloudHosts: Set<String> = [],
-                     _ cfg: HybridConfig = HybridConfig()) -> LLMRoutingContext {
+                     localCloudHosts: Set<String> = []) -> LLMRoutingContext {
         LLMRoutingContext(routing: routing, localModelLabel: "glm",
-                          hybrid: HybridRouter(config: cfg),
                           localCloudHosts: localCloudHosts)
     }
 
@@ -286,110 +284,6 @@ struct LLMRoutingTests {
         #expect(t.backend == .local)
     }
 
-    @Test("Hard-error statuses are recognized") func hardErr() {
-        #expect(LLMRouting.isHardErrorStatus(429))
-        #expect(LLMRouting.isHardErrorStatus(529))
-        #expect(LLMRouting.isHardErrorStatus(503))
-        #expect(!LLMRouting.isHardErrorStatus(200))
-        #expect(!LLMRouting.isHardErrorStatus(401))
-    }
-}
-
-// MARK: - Hybrid policy engine (vLLM.md §4.3)
-
-@Suite("HybridRouter")
-struct HybridRouterTests {
-
-    @Test("Healthy cloud is the default") func healthyCloud() {
-        let r = HybridRouter(config: HybridConfig())
-        #expect(r.route(sessionID: "s1", now: 0).backend == .cloud)
-    }
-
-    @Test("Sticky session never switches backend mid-trajectory") func sticky() {
-        let r = HybridRouter(config: HybridConfig(localSplitPercent: 0))
-        let first = r.route(sessionID: "s", now: 0)
-        // Trip the gate hard, then re-route the SAME session.
-        r.recordHardError(sessionID: "other", now: 1)
-        r.recordHardError(sessionID: "other", now: 2)
-        r.recordHardError(sessionID: "other", now: 3)
-        let again = r.route(sessionID: "s", now: 10)
-        #expect(again.backend == first.backend)
-        #expect(again.reason == .sticky)
-    }
-
-    @Test("Over-budget routes new sessions local") func budget() {
-        let r = HybridRouter(config: HybridConfig(cloudTokenBudget: 1000,
-                                                  budgetWindowSeconds: 86_400))
-        r.recordCloudTokens(1200, now: 100)
-        let d = r.route(sessionID: "new", now: 200)
-        #expect(d.backend == .local)
-        #expect(d.reason == .overBudget)
-    }
-
-    @Test("Budget window slides — old usage expires") func budgetWindow() {
-        let r = HybridRouter(config: HybridConfig(cloudTokenBudget: 1000,
-                                                  budgetWindowSeconds: 100))
-        r.recordCloudTokens(1200, now: 0)
-        #expect(r.cloudTokensInWindow(now: 50) == 1200)
-        #expect(r.cloudTokensInWindow(now: 200) == 0)   // slid past the window
-        #expect(r.route(sessionID: "later", now: 200).backend == .cloud)
-    }
-
-    @Test("Health gate flips unhealthy after ≥3 failures, recovers on clean probes") func healthGate() {
-        let r = HybridRouter(config: HybridConfig(failureThreshold: 3, recoveryProbes: 3))
-        #expect(!r.isUnhealthy)
-        r.recordHardError(sessionID: "a", now: 0)
-        r.recordHardError(sessionID: "b", now: 1)
-        #expect(!r.isUnhealthy)              // 2 failures — still healthy (conservative)
-        r.recordHardError(sessionID: "c", now: 2)
-        #expect(r.isUnhealthy)               // 3rd trips it
-        #expect(r.route(sessionID: "fresh", now: 3).reason == .unhealthy)
-        // Recover after a streak of clean, fast probes.
-        r.recordSuccess(ttftSeconds: 0.5)
-        r.recordSuccess(ttftSeconds: 0.5)
-        #expect(r.isUnhealthy)               // not enough yet
-        r.recordSuccess(ttftSeconds: 0.5)
-        #expect(!r.isUnhealthy)
-    }
-
-    @Test("EWMA TTFT over threshold trips the gate") func ewmaGate() {
-        let r = HybridRouter(config: HybridConfig(ewmaTTFTThresholdSeconds: 8, ewmaAlpha: 1.0))
-        r.recordSuccess(ttftSeconds: 20)     // alpha=1 → ewma=20 > 8
-        #expect(r.isUnhealthy)
-    }
-
-    @Test("Split ratio is deterministic and proportional") func split() {
-        // 100% local → every session local; 0% → every session cloud.
-        let all = HybridRouter(config: HybridConfig(localSplitPercent: 100))
-        #expect(all.route(sessionID: "anything", now: 0).backend == .local)
-        #expect(all.route(sessionID: "another", now: 0).reason == .splitRatio)
-
-        let none = HybridRouter(config: HybridConfig(localSplitPercent: 0))
-        #expect(none.route(sessionID: "anything", now: 0).backend == .cloud)
-
-        // ~30% over many session ids lands roughly on target (deterministic hash).
-        let r = HybridRouter(config: HybridConfig(localSplitPercent: 30))
-        var local = 0
-        for i in 0..<1000 { if r.route(sessionID: "sess-\(i)", now: 0).backend == .local { local += 1 } }
-        #expect(local > 200 && local < 400)
-    }
-
-    @Test("Output-token extraction feeds the budget") func tokens() {
-        // Anthropic streamed message_delta carries the cumulative total.
-        let sse = Data(#"event: message_delta\ndata: {"usage":{"output_tokens":137}}\n"#.utf8)
-        #expect(HTTPMitmConnection.extractOutputTokens(sse) == 137)
-        // OpenAI completion_tokens.
-        let oai = Data(#"{"usage":{"prompt_tokens":10,"completion_tokens":42}}"#.utf8)
-        #expect(HTTPMitmConnection.extractOutputTokens(oai) == 42)
-        #expect(HTTPMitmConnection.extractOutputTokens(Data("no usage here".utf8)) == nil)
-    }
-
-    @Test("Precedence: budget beats split") func precedence() {
-        let r = HybridRouter(config: HybridConfig(cloudTokenBudget: 100,
-                                                  localSplitPercent: 0))
-        r.recordCloudTokens(500, now: 0)
-        #expect(r.route(sessionID: "x", now: 1).reason == .overBudget)
-    }
 }
 
 // MARK: - Per-tool local model auth (env injection)
@@ -581,12 +475,6 @@ struct LocalToolAuthTests {
                                                localModelID: "m-codex")]
         #expect(p2.localEngineModelID == nil)
 
-        // Hybrid routing also needs the active model served.
-        var p3 = Profile(name: "t", tool: .claude, authMode: .token)
-        p3.modelRouting = .hybrid
-        p3.activeModelID = "m-route"
-        #expect(p3.localEngineModelID == "m-route")
-
         // Pure cloud, no local tool → nothing to serve.
         let p4 = Profile(name: "t", tool: .claude, authMode: .token)
         #expect(p4.localEngineModelID == nil)
@@ -597,21 +485,15 @@ struct LocalToolAuthTests {
 
 @Suite("Profile routing persistence")
 struct ProfileRoutingPersistenceTests {
-    @Test("Routing + hybrid knobs round-trip through Codable") func roundTrip() throws {
+    @Test("Routing round-trips through Codable") func roundTrip() throws {
         var p = Profile(name: "t", tool: .claude, authMode: .token)
-        p.modelRouting = .hybrid
+        p.modelRouting = .local
         p.activeModelID = "glm-5.2-mlx-3bit"
-        p.hybridCloudTokenBudget = 500_000
-        p.hybridSoftTTFTSeconds = 7.5
-        p.hybridLocalSplitPercent = 25
 
         let data = try JSONEncoder().encode(p)
         let back = try JSONDecoder().decode(Profile.self, from: data)
-        #expect(back.modelRouting == .hybrid)
+        #expect(back.modelRouting == .local)
         #expect(back.activeModelID == "glm-5.2-mlx-3bit")
-        #expect(back.hybridCloudTokenBudget == 500_000)
-        #expect(back.hybridSoftTTFTSeconds == 7.5)
-        #expect(back.hybridLocalSplitPercent == 25)
     }
 
     @Test("Defaults stay compact — cloud routing emits nothing extra") func defaultCompact() throws {

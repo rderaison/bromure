@@ -584,8 +584,16 @@ struct ProfileSettingsView: View {
 
             settingToggle(
                 "Smooth Scrolling",
-                description: "Animates scrolling for a smoother feel. Disable for instant, jump-style scrolling.",
+                description: "Animates mouse-wheel scrolling for a smoother feel. Trackpad scrolling always follows your fingers exactly.",
                 isOn: $draft.settings.enableSmoothScrolling
+            )
+
+            settingsDivider
+
+            settingToggle(
+                "Strict Site Isolation",
+                description: "Runs every website in its own process, which protects sites from each other but costs a lot of memory on ad-heavy pages (dozens of processes for one tab). Off keeps a separate process only for sites you sign in to.",
+                isOn: $draft.settings.strictSiteIsolation
             )
         }
     }

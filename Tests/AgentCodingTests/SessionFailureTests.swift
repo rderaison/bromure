@@ -51,6 +51,10 @@ struct SessionFailureTests {
         #expect(SessionFailure.detect(inScreen: "Credit balance is too low.")?.kind == .quota)
         #expect(SessionFailure.detect(inScreen: "You've reached your usage limit for this session.")?.kind == .quota)
         #expect(SessionFailure.detect(inScreen: "429 Too Many Requests")?.kind == .quota)
+        #expect(SessionFailure.detect(inScreen: "Error: rate_limit_error — try again later")?.kind == .quota)
+        // An answer that merely talks about a rate limit is not a banner.
+        #expect(SessionFailure.detect(inScreen:
+            "4. Sets logging to high, which removes the 3-per-minute rate limit. That also fixes the block undercount.") == nil)
     }
 
     @Test("Healthy output that merely mentions 'error' is NOT a failure")
