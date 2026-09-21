@@ -2015,6 +2015,12 @@ struct SessionFailure: Equatable {
         "login expired", "session expired", "token has expired", "token expired",
         "oauth token", "sign in again", "re-authenticate",
         "subscription has expired", "subscription is invalid", "subscription expired",
+        // Kimi Code at startup: `Skipped refreshing managed:kimi-code: OAuth
+        // provider "managed:kimi-code" requires login before it can be used.`
+        // Without this the beautified view never saw the agent was blocked and
+        // sat on "Thinking…" forever. ("requires login" alone is specific
+        // enough; a real answer doesn't say it.)
+        "requires login", "requires you to log in", "run login",
     ]
     // "rate limit" on its own is NOT a needle: an answer that merely talks
     // about one (a firewall's "3-per-minute rate limit") is on the same

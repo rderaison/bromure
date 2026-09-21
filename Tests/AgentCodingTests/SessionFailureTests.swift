@@ -44,6 +44,10 @@ struct SessionFailureTests {
         // subscription / login
         #expect(SessionFailure.detect(inScreen: "Your subscription has expired.")?.kind == .auth)
         #expect(SessionFailure.detect(inScreen: "Not logged in — please run /login")?.kind == .auth)
+        // Kimi Code's startup warning when its credential slot is empty — the
+        // beautified view stalled on "Thinking…" until this was recognized.
+        #expect(SessionFailure.detect(inScreen:
+            "Skipped refreshing managed:kimi-code: OAuth provider \"managed:kimi-code\" requires login before it can be used.")?.kind == .auth)
     }
 
     @Test("Credit/usage banners are read as a quota failure")
