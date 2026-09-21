@@ -1705,6 +1705,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     lazy var mitmEngine: MitmEngine? = {
         do {
             let e = try MitmEngine()
+            // Bring the local-inference repair proxy up the moment the MITM
+            // engine exists, not lazily on the first local-model boot. Local/
+            // Hybrid routing rewrites LLM traffic to 127.0.0.1:<repairProxyPort>,
+            // and that port is 0 until the proxy's listener is bound. A VM that
+            // routed local before any prior workspace had started the proxy —
+            // e.g. `vm routing local` (automationSetRouting), or a custom-server
+            // workspace whose first request raced ahead of startLocalEngineIfNeeded
+            // — dialed a dead 127.0.0.1:0, surfaced to the guest as the cryptic
+            // "the host running Bromure AC could not connect to 127.0.0.1". Binding
+            // the listener here keeps the port always valid; with no engine
+            // registered yet the proxy returns a wire-shaped error instead of
+            // refusing the connection. Idempotent, and it reads the live engine
+            // port per connection, so an eager start with the default is safe.
+            InferenceRepairProxy.shared.startIfNeeded()
             // Amazon Bedrock as an external engine: the repair proxy signs its
             // upstream calls with the workspace's AWS credentials, through the
             // same consent-gated credential server every AWS call uses.

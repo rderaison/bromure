@@ -127,6 +127,43 @@ struct OmpAgentTests {
         #expect(catalogID.resolvedOmpModel(localFallback: nil) == "qwen3-coder-next-mlx-mxfp4")
     }
 
+    @Test("omp-config overlay scopes enabledModels to the configured provider")
+    func configOverlayScopesModels() {
+        // Local model (custom server or on-device): scoped to `bromure/*`, plus
+        // omp's own web/local tool providers, and the default is bromure-qualified.
+        let localOverlay = SessionDisk.ompConfigOverlay(
+            authMode: .local, provider: .anthropic, modelName: "deepseek-v4-flash")
+        #expect(localOverlay.contains("enabledModels:"))
+        #expect(localOverlay.contains("- \"bromure/*\""))
+        #expect(localOverlay.contains("- \"web/*\""))
+        #expect(localOverlay.contains("- \"local/*\""))
+        #expect(localOverlay.contains("default: bromure/deepseek-v4-flash"))
+        // The ambient cloud provider is NEVER in scope — that's the whole point:
+        // omp mustn't fall back to Anthropic because ANTHROPIC_API_KEY is set for
+        // a sibling Claude agent.
+        #expect(!localOverlay.contains("anthropic/*"))
+
+        // A custom OpenAI-compatible provider is also served as `bromure`.
+        let customOverlay = SessionDisk.ompConfigOverlay(
+            authMode: .token, provider: .custom, modelName: "my-model")
+        #expect(customOverlay.contains("- \"bromure/*\""))
+        #expect(customOverlay.contains("default: bromure/my-model"))
+
+        // Cloud omp is scoped to its own provider slug (the raw case name), and
+        // the bare model stays unqualified for fuzzy matching.
+        let cloudOverlay = SessionDisk.ompConfigOverlay(
+            authMode: .token, provider: .zai, modelName: "glm-5.3-flash")
+        #expect(cloudOverlay.contains("- \"zai/*\""))
+        #expect(cloudOverlay.contains("default: glm-5.3-flash"))
+        #expect(!cloudOverlay.contains("bromure/*"))
+
+        // No model pin when nothing concrete was resolved.
+        let bare = SessionDisk.ompConfigOverlay(
+            authMode: .token, provider: .openai, modelName: "default")
+        #expect(bare.contains("- \"openai/*\""))
+        #expect(!bare.contains("modelRoles:"))
+    }
+
     @Test("Token plan mints an omp fake shaped for the selected provider")
     func fakeKeyMint() {
         let salt = Data("salt".utf8)

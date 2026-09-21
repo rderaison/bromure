@@ -1079,7 +1079,14 @@ final class BeautifiedSessionModel: ObservableObject {
         failure = nil
         prompt = nil
         gate.userSent()                   // a fresh send supersedes any prior stop
-        setWorking(true)
+        // A slash command (/model, /cost, /help…) drives the TUI's own overlay;
+        // it does NOT start an agent turn. Marking it "working" showed the
+        // "Thinking…" cue the moment the command was sent, and — because a
+        // slash command writes no transcript and fires no Stop hook — nothing
+        // ever cleared it, so the chat sat on a phantom "Thinking…" while the
+        // TUI was really waiting on the user inside a menu (the reported
+        // desync). Only a real message marks the agent as working.
+        if !isCommand { setWorking(true) }
         sending = true
 
         // Deterministic guest paths for this batch (computed before staging so
@@ -1228,34 +1235,36 @@ final class BeautifiedSessionModel: ObservableObject {
         }
     }
 
-    /// While the terminal is inline: once its menu has gone (a pick made,
-    /// Esc pressed), fold the card back to what the screen says now.
+    /// While the terminal is inline: fold the card back only once the TUI has
+    /// returned to its idle input prompt — never while a menu is still up.
     ///
-    /// "Gone" is judged on the menu's OWN lines: what the picker drew when it
-    /// opened is its signature, and the menu is over when that signature has
-    /// (mostly) left the screen and no picker footer remains — whatever the
-    /// idle prompt looks like afterwards (Claude Code's starts with the same
-    /// "❯" a highlighted row does).
+    /// The fold is judged on whether the screen still `looksLikeMenu`, not on
+    /// how much of the opening frame survives. A menu is often multi-step: omp's
+    /// `/model` hub keeps the list on screen while Enter assigns a role and only
+    /// closes on Esc, and a login flow walks through several panes. Judging
+    /// "gone" by the first frame's disappearing lines collapsed the terminal the
+    /// instant the menu redrew for its next step, stranding the user mid-flow
+    /// (the chat folded to a static card while the TUI still showed the menu).
+    /// `looksLikeMenu` already tells a real menu (a footer hint, or a
+    /// highlighted row sitting inside a list) from an idle prompt — Claude
+    /// Code's input line starts with the same "❯" but has only chrome beneath
+    /// it — so it stays live across every step and folds only at the idle
+    /// prompt, held for two ticks so a one-frame redraw between steps never
+    /// trips it. `sawMenu` guards a slow-drawing picker from folding before it
+    /// has even appeared.
     private func watchLive(_ command: String) {
         liveWatch?.cancel()
         liveWatch = Task { [weak self] in
-            var signature: Set<String>? = nil
+            var sawMenu = false
             var calm = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard let self, var out = self.commandOutput, out.command == command, out.live else { return }
                 guard let screen = await self.provider.captureScreen() else { continue }
-                let current = Set(screen.split(whereSeparator: \.isNewline).map { Self.normalizedLine($0) })
-                if signature == nil {
-                    // First look with the menu up: remember what it drew.
-                    let drawn = Set(Self.commandLines(screen, excluding: self.commandBaseline, command: command)
-                        .map { $0.trimmingCharacters(in: .whitespaces) })
-                    if Self.looksLikeMenu(screen), !drawn.isEmpty { signature = drawn }
-                    continue
-                }
-                let remaining = signature!.filter { current.contains($0) }.count
-                let mostlyGone = remaining <= max(1, signature!.count * 3 / 10)
-                if Self.menuHints(screen) || !mostlyGone { calm = 0; continue }
+                if Self.looksLikeMenu(screen) { sawMenu = true; calm = 0; continue }
+                // Not a menu any more. Only fold once we've actually seen the
+                // menu open, and only after the idle screen holds for two ticks.
+                guard sawMenu else { continue }
                 calm += 1
                 guard calm >= 2 else { continue }
                 out.live = false
