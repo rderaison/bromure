@@ -10,14 +10,39 @@ struct MainView: View {
     @Bindable var state: AppState
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .frame(width: 440, height: 420)
+        switch state.phase {
+        case .warmingUp, .ready, .checking:
+            // Normal launch: a compact "starting" panel that the first
+            // browser window replaces within seconds. Deliberately not the
+            // big setup layout, so it never reads as a launcher.
+            HStack(spacing: 12) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 40, height: 40)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Starting browser engine...")
+                        .font(.headline)
+                    Text("First launch is slower, subsequent ones will be faster.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                ProgressView()
+                    .controlSize(.small)
+            }
+            .padding(20)
+            .frame(width: 400)
+            .background(.background)
+        default:
+            VStack(spacing: 0) {
+                header
+                Divider()
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(width: 440, height: 420)
+            }
+            .background(.background)
         }
-        .background(.background)
     }
 
     // MARK: - Header
