@@ -623,9 +623,10 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     taskBoardItem.target = delegate
     wsMenu.addItem(taskBoardItem)
 
-    // The Linux machine behind the selected session: terminal, files, containers.
+    // The Linux machine behind the selected session: its terminal tab — and
+    // from that terminal, the session again.
     let hoodItem = NSMenuItem(title: L("Linux"),
-                              action: #selector(ACAppDelegate.toggleUnderTheHoodAction(_:)),
+                              action: #selector(ACAppDelegate.toggleLinuxAction(_:)),
                               keyEquivalent: "u")
     hoodItem.keyEquivalentModifierMask = [.command, .option]
     hoodItem.target = delegate
@@ -3325,10 +3326,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     if self.unifiedWindow?.selectedID != nil { self.unifiedWindow?.sessionStageDidChange() }
                     return ["ok": true, "present": self.agentSessionStore.session(id) != nil,
                             "deleted": self.agentSessionStore.session(id)?.isDeleted ?? false]
-                case "hood":
-                    // Toggle "Under the hood" for the selected session.
-                    self.unifiedWindow?.toggleUnderTheHood(nil)
-                    return ["ok": true, "underTheHood": self.unifiedWindow?.listModel.underTheHood ?? false]
+                case "hood", "linux":
+                    // The selected session's terminal tab (⌥⌘U) — or, from a
+                    // terminal hosting a session, the session again.
+                    self.unifiedWindow?.toggleLinux(nil)
+                    return ["ok": true,
+                            "session": self.unifiedWindow?.selectedSessionID?.uuidString as Any,
+                            "terminalSession": self.unifiedWindow?.sessionOnSelectedTab?.uuidString as Any]
                 case "sidebar":
                     // Collapse the sidebar to the rail, or expand it (⌃⌘S).
                     self.unifiedWindow?.toggleSidebar(nil)
@@ -6383,9 +6387,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         w.showNewSession()
     }
 
-    /// ⌥⌘U — flip the selected task between its chat and the raw terminal.
-    @objc func toggleUnderTheHoodAction(_ sender: Any?) {
-        unifiedWindow?.toggleUnderTheHood(nil)
+    /// ⌥⌘U — the selected session's terminal tab; from that terminal, the
+    /// session again.
+    @objc func toggleLinuxAction(_ sender: Any?) {
+        unifiedWindow?.toggleLinux(nil)
     }
 
     @objc func deleteWorkspaceAction(_ sender: Any?) {

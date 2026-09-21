@@ -29,10 +29,7 @@ enum MobileSessions {
             unarchive: { controller.sessionCommand($0, "unarchive") },
             delete: { id in controller.sessionCommand(id, "delete"); onForget() },
             represent: { _ in },
-            showFiles: onLinux,
-            showContainers: { _ in onLinux() },
-            showMachine: { _ in onLinux() },
-            toggleUnderTheHood: onLinux)
+            showMachine: { _ in onLinux() })
     }
 
     /// Folders earlier sessions on a machine ran in, most recent first.

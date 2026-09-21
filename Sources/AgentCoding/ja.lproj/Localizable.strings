@@ -1832,7 +1832,6 @@
 "Runs in an isolated machine of its own. Nothing on your Mac is touched." = "専用の隔離されたマシンで動きます。Mac 上のものには触れません。";
 "Ask for anything — or just press Return to open %@." = "何でも頼んでください — または Return を押すだけで %@ を開きます。";
 "Linux" = "Linux";
-"The Linux machine behind this session: its terminal, files and containers (⌥⌘U)" = "このセッションの裏にある Linux マシン：ターミナル、ファイル、コンテナ (⌥⌘U)";
 "Open Linux (⌥⌘U) to answer in the terminal." = "Linux (⌥⌘U) を開いてターミナルで回答してください。";
 "Waking up…" = "起動中…";
 "Almost there…" = "もう少しです…";
@@ -2372,3 +2371,9 @@
 "Ready to build?" = "作る準備はできましたか？";
 "What's the idea?" = "どんなアイデアですか？";
 "Let's start something new." = "新しいことを始めましょう。";
+
+/* Added 2026-09-21: the Linux pill is a jump, the Session pill the way back */
+"Session" = "セッション";
+"Back to the session this terminal hosts (⌥⌘U)" = "このターミナルが実行しているセッションに戻る (⌥⌘U)";
+"The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "このセッションの裏にある Linux マシン：マシン一覧にあるそのターミナルのタブ (⌥⌘U)";
+"Or open Linux (⌥⌘U) to answer in the terminal." = "または Linux (⌥⌘U) を開いてターミナルで回答してください。";

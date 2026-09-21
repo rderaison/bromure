@@ -39,10 +39,8 @@ struct SessionStageActions {
     /// folder: (session, worktree name, agent, opening message).
     var newWorktree: (UUID, String, Profile.Tool, String?) -> Void = { _, _, _, _ in }
     var represent: (UUID) -> Void = { _ in }
-    var showFiles: () -> Void = {}
-    var showContainers: (UUID) -> Void = { _ in }
+    /// The machine's dashboard (the header's machine name).
     var showMachine: (UUID) -> Void = { _ in }
-    var toggleUnderTheHood: () -> Void = {}
 }
 
 // MARK: - Small chrome
@@ -275,31 +273,7 @@ struct SessionHeaderView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
-                .padding(.bottom, model.underTheHood ? 8 : 12)
-
-                if model.underTheHood {
-                    // The machine, one click each: the terminal is already the
-                    // surface; files, containers and the VM itself sit here.
-                    HStack(spacing: 6) {
-                        Image(systemName: "terminal")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                        Text(NSLocalizedString("Terminal", comment: "under the hood"))
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        if let branch = SessionHome.liveTab(for: s, in: model)?.worktreeBranch {
-                            InfoChip(text: branch, mono: true) {
-                                Image(systemName: "arrow.triangle.branch").font(.system(size: 10)).foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer()
-                        hoodButton("Files", system: "folder", help: NSLocalizedString("The folder's files and changes", comment: "")) { actions.showFiles() }
-                        hoodButton("Containers", system: "shippingbox", help: NSLocalizedString("Docker containers on this machine", comment: "")) { actions.showContainers(s.profileID) }
-                        hoodButton("Machine", system: "desktopcomputer", help: NSLocalizedString("CPU, memory, disk, ports, power", comment: "")) { actions.showMachine(s.profileID) }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 8)
-                }
+                .padding(.bottom, 12)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.platformWindowBackground)
@@ -315,16 +289,6 @@ struct SessionHeaderView: View {
                 }
             }
         }
-    }
-
-    private func hoodButton(_ title: String, system: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(NSLocalizedString(title, comment: "under the hood"), systemImage: system)
-                .font(.system(size: 11.5, weight: .medium))
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .help(help)
     }
 
     private var metaDot: some View {

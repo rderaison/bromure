@@ -1835,7 +1835,6 @@
 "Runs in an isolated machine of its own. Nothing on your Mac is touched." = "在一台專屬的隔離機器裡執行。你 Mac 上的任何東西都不會被碰到。";
 "Ask for anything — or just press Return to open %@." = "想要什麼都可以問 — 或者直接按 Return 打開 %@。";
 "Linux" = "Linux";
-"The Linux machine behind this session: its terminal, files and containers (⌥⌘U)" = "此工作階段背後的 Linux 機器：它的終端機、檔案和容器 (⌥⌘U)";
 "Open Linux (⌥⌘U) to answer in the terminal." = "打開 Linux (⌥⌘U) 在終端機中回答。";
 "Waking up…" = "正在喚醒…";
 "Almost there…" = "快好了…";
@@ -2375,3 +2374,9 @@
 "Ready to build?" = "準備好開始建構了嗎？";
 "What's the idea?" = "有什麼點子？";
 "Let's start something new." = "我們開始做點新東西吧。";
+
+/* Added 2026-09-21: the Linux pill is a jump, the Session pill the way back */
+"Session" = "工作階段";
+"Back to the session this terminal hosts (⌥⌘U)" = "返回此終端機承載的工作階段 (⌥⌘U)";
+"The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "此工作階段背後的 Linux 機器：它在機器列表中的終端機分頁 (⌥⌘U)";
+"Or open Linux (⌥⌘U) to answer in the terminal." = "或打開 Linux (⌥⌘U) 在終端機中回答。";

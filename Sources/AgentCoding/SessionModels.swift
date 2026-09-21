@@ -396,10 +396,6 @@ final class SessionListModel {
     var kubeSelectedID: UUID?
     /// The container registry whose dashboard is the active stage surface.
     var registrySelectedID: UUID?
-    /// "Under the hood": the raw terminal instead of the chat for the
-    /// selected session, plus the machine shortcuts and the geekier toolbar
-    /// controls.
-    var underTheHood = false
 }
 
 /// Right-click actions on a tab row. Handled by the window, which reads the

@@ -1804,17 +1804,27 @@ struct RemoteToolbarBar: View {
     let onToggleFilePane: () -> Void
     let onToggleTunnel: () -> Void
     let onToggleBeautified: (Profile.ID) -> Void
-    /// Sessions-first (a server with the home): the Linux toggle.
+    /// Sessions-first (a server with the home): the Linux pill — a session's
+    /// terminal tab, and from that tab the session again.
     var onToggleLinux: () -> Void = {}
+    /// The session hosted by a machine's tmux window, if any (profile, window
+    /// index): decides whether a terminal on stage offers the way back.
+    var sessionForTab: (Profile.ID, Int) -> UUID? = { _, _ in nil }
 
     private var entry: SessionListModel.VMEntry? {
         model.entries.first { $0.id == model.selectedID }
     }
-    /// A session is on stage: the machine-level controls wait for Linux mode.
+    /// A session is on stage: the machine-level controls belong to the
+    /// machine's own tabs.
     private var sessionOnStage: Bool {
         model.sessionsFirst && (model.selectedSessionID != nil || model.newSessionSelected)
     }
-    private var showMachineControls: Bool { !sessionOnStage || model.underTheHood }
+    private var showMachineControls: Bool { !sessionOnStage }
+    /// The terminal on stage hosts a session: offer the way back to it.
+    private var terminalHostsSession: Bool {
+        guard model.sessionsFirst, !sessionOnStage, let entry, let tab = entry.model.activeTab else { return false }
+        return sessionForTab(entry.id, tab.index) != nil
+    }
 
     private var tunnelHelp: String {
         switch controller.tunnelState {
@@ -1849,7 +1859,9 @@ struct RemoteToolbarBar: View {
                     }
                 }
                 if model.sessionsFirst, model.selectedSessionID != nil {
-                    UnderTheHoodToggle(active: model.underTheHood, action: onToggleLinux)
+                    LinuxPill(back: false, action: onToggleLinux)
+                } else if terminalHostsSession {
+                    LinuxPill(back: true, action: onToggleLinux)
                 }
                 if showMachineControls {
                     HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
@@ -1993,11 +2005,10 @@ final class RemoteHostWindow: NSWindow {
     /// The (session, batch of changes) the Files pane last popped up for —
     /// see `revealChangedFiles`.
     private var revealedChangesKey: String?
-    /// While a session is on stage: chat, or the terminal in Linux mode —
+    /// While a session is on stage: chat; a machine's tab: the terminal —
     /// never the app-wide default.
     private var sessionViewMode: SessionViewMode?
     private static let sessionHeaderHeightValue: CGFloat = 66
-    private static let linuxHeaderExtra: CGFloat = 30
 
     // Resizable sidebar (fat-client counterpart of the local window's
     // drag-to-resize divider). Width is user-adjustable and persisted.
@@ -2172,14 +2183,14 @@ final class RemoteHostWindow: NSWindow {
         let fire = !event.isARepeat   // don't spawn/close on autorepeat
         // Sessions-first chords, as in the local window: ⌘N a new session;
         // ⌘1–9 the sidebar's sessions and ⌘W the session on stage (asked
-        // first) while the chat is up — under Linux the tab chords apply.
+        // first) while the chat is up — on a machine's terminal the tab
+        // chords apply.
         if sessionsFirst {
             if chars == "n" {
                 if fire { showNewSession() }
                 return true
             }
-            if !controller.listModel.underTheHood,
-               selectedSessionID != nil || controller.listModel.newSessionSelected {
+            if selectedSessionID != nil || controller.listModel.newSessionSelected {
                 if let n = Int(chars), (1...9).contains(n) {
                     let ordered = SessionHome.ordered(controller.sessionStore.sessions, in: controller.listModel)
                     if fire, ordered.indices.contains(n - 1) { selectSession(ordered[n - 1].id) }
@@ -2521,7 +2532,10 @@ final class RemoteHostWindow: NSWindow {
                 c.setTunnelEnabled(c.tunnelState == "off" || c.tunnelState == "failed")
             },
             onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
-            onToggleLinux: { [weak self] in self?.toggleLinux() })
+            onToggleLinux: { [weak self] in self?.toggleLinux() },
+            sessionForTab: { [weak self] id, window in
+                self?.controller.sessionStore.session(profileID: id, windowIndex: window)?.id
+            })
         let delegate = RemoteToolbarDelegate(rootView: AnyView(bar))
         toolbarDelegate = delegate
         let tb = NSToolbar(identifier: "io.bromure.ac.remote")
@@ -3453,18 +3467,7 @@ final class RemoteHostWindow: NSWindow {
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()
             },
-            showFiles: { [weak self] in self?.setFilePaneOpen(true) },
-            showContainers: { [weak self] pid in
-                self?.clearSessionStage()
-                self?.showDockerDashboard(pid)
-            },
-            showMachine: { [weak self] pid in
-                self?.clearSessionStage()
-                self?.controller.listModel.selectedID = pid
-                self?.unmountTerminal()
-                self?.showVMDashboard(pid)
-            },
-            toggleUnderTheHood: { [weak self] in self?.toggleLinux() })
+            showMachine: { [weak self] pid in self?.showMachineDashboard(pid) })
     }
 
     /// The new-session screen as the stage.
@@ -3565,15 +3568,15 @@ final class RemoteHostWindow: NSWindow {
         case .running, .booting: running = true
         default: running = false
         }
-        let liveChat = live != nil && running && (bucket != .ended || model.underTheHood)
+        let liveChat = live != nil && running && bucket != .ended
         revealChangedFiles(for: s, live: live != nil && running)
         let key: String
         if liveChat, let w = s.windowIndex {
-            key = "live:\(s.profileID.uuidString):\(w):\(model.underTheHood)"
+            key = "live:\(s.profileID.uuidString):\(w)"
         } else if s.isLaunching {
-            key = "launch:\(model.underTheHood)"
+            key = "launch"
         } else {
-            key = "rest:\(bucket.rawValue):\(s.lastError ?? ""):\(model.underTheHood)"
+            key = "rest:\(bucket.rawValue):\(s.lastError ?? "")"
         }
         guard key != sessionPresentationKey else { return }
         sessionPresentationKey = key
@@ -3589,7 +3592,7 @@ final class RemoteHostWindow: NSWindow {
                 seededSessions.insert(s.id)
                 sessionSeeds[k] = msg
             }
-            sessionViewMode = model.underTheHood ? .terminal : .beautified
+            sessionViewMode = .beautified
             model.selectedID = s.profileID
             controller.selectTab(s.profileID, index: w)
             showWorkspace(s.profileID, window: w)
@@ -3654,9 +3657,7 @@ final class RemoteHostWindow: NSWindow {
             sessionHeaderHost = host
         }
         sessionHeaderSlot.isHidden = !visible
-        sessionHeaderHeight.constant = visible
-            ? Self.sessionHeaderHeightValue + (controller.listModel.underTheHood ? Self.linuxHeaderExtra : 0)
-            : 0
+        sessionHeaderHeight.constant = visible ? Self.sessionHeaderHeightValue : 0
     }
 
     /// Leave the session surfaces — a machine row, a board or a dashboard
@@ -3678,18 +3679,46 @@ final class RemoteHostWindow: NSWindow {
 
     /// Linux mode: the terminal for every tab, the machine's controls back,
     /// the Machines list unfolded.
+    /// Toolbar / ⌥⌘U, as in the local window: from a session, the Linux
+    /// machine behind it — its terminal tab in the Machines list. From that
+    /// terminal, the session again.
     func toggleLinux() {
-        let model = controller.listModel
-        model.underTheHood.toggle()
-        if model.underTheHood { model.machinesExpanded = true }
-        setSessionHeader(visible: !sessionHeaderSlot.isHidden)
-        if let id = selectedSessionID, let s = controller.sessionStore.session(id) {
-            presentSession(s)
-        } else if let id = shownWorkspace {
-            // A plain tab on stage is a terminal either way.
-            sessionViewMode = .terminal
-            showWorkspace(id)
+        if let id = selectedSessionID {
+            showLinux(for: id)
+        } else if let id = sessionOnShownTab {
+            selectSession(id)
         }
+    }
+
+    /// The session hosted by the terminal tab on stage, if any.
+    private var sessionOnShownTab: UUID? {
+        guard sessionsFirst, selectedSessionID == nil, !controller.listModel.newSessionSelected,
+              let pid = shownWorkspace, let w = shownWindowIndex else { return nil }
+        return controller.sessionStore.session(profileID: pid, windowIndex: w)?.id
+    }
+
+    /// The Linux machine behind a session: its terminal tab (unfolding the
+    /// Machines list, where the tab lights up), or the machine's dashboard
+    /// when the tab is gone.
+    private func showLinux(for id: UUID) {
+        guard let s = controller.sessionStore.session(id) else { return }
+        controller.listModel.machinesExpanded = true
+        if let w = s.windowIndex, SessionHome.liveTab(for: s, in: controller.listModel) != nil {
+            clearSessionStage()
+            controller.selectTab(s.profileID, index: w)
+            sessionViewMode = .terminal
+            showWorkspace(s.profileID, window: w)
+        } else if controller.profile(for: s.profileID) != nil {
+            showMachineDashboard(s.profileID)
+        }
+    }
+
+    /// The machine's dashboard as the stage, leaving the session surfaces.
+    private func showMachineDashboard(_ pid: Profile.ID) {
+        clearSessionStage()
+        controller.listModel.selectedID = pid
+        unmountTerminal()
+        showVMDashboard(pid)
     }
 
     private func confirmEndSession(_ id: UUID) {
@@ -3761,7 +3790,7 @@ final class RemoteHostWindow: NSWindow {
                 "supportsSessions": controller.supportsSessions,
                 "selectedSession": selectedSessionID?.uuidString ?? "",
                 "newSessionSelected": model.newSessionSelected,
-                "underTheHood": model.underTheHood,
+                "terminalSession": sessionOnShownTab?.uuidString ?? "",
                 "shownWorkspace": shownWorkspace?.uuidString ?? "",
                 "shownWindowIndex": shownWindowIndex ?? -1,
                 "beautified": mountedBeautifiedHost != nil,
@@ -4350,13 +4379,6 @@ final class RemoteHostWindow: NSWindow {
             // as window indices have gaps.
             onSelectTab: { [weak self] id, pos in
                 guard let self, let index = self.windowIndex(for: id, position: pos) else { return }
-                // Linux mode: a tab that IS a session selects the session
-                // (header and all); any other tab is a plain terminal.
-                if self.sessionsFirst, self.controller.listModel.underTheHood,
-                   let s = self.controller.sessionStore.session(profileID: id, windowIndex: index) {
-                    self.selectSession(s.id)
-                    return
-                }
                 self.clearSessionStage()
                 self.controller.selectTab(id, index: index)
                 // A tab from the Machines list is a terminal, full stop.

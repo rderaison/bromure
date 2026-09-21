@@ -215,15 +215,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Set once the home selection ran, so reopening the window doesn't
     /// yank the user off a machine they picked on purpose.
     private(set) var didShowHome = false
-    /// The Files pane was open when the hood closed (or at launch, in chat
-    /// mode): reopen it the next time the hood opens.
-    private var filePaneParkedForHood = false
     /// The (session, batch of changes) the Files pane last popped up for —
     /// see `revealChangedFiles`.
     private var revealedChangesKey: String?
     private var sessionReconcileTimer: Timer?
     private static let sessionHeaderHeightValue: CGFloat = 66
-    private static let underTheHoodHeaderExtra: CGFloat = 30
     private static let selectedSessionKey = "sessions.selected"
     private var automationEditorVisible = false
     /// The editor's draft differs from what's stored (reported by the view).
@@ -355,19 +351,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onSelect:    { [weak self] id in self?.selectWorkspaceName(id) },
             onSelectTab: { [weak self] id, idx in
                 guard let self else { return }
-                // In Linux mode a tab that IS a session selects the session
-                // (header, sidebar row and all); any other tab, and every
-                // tab outside Linux mode, is a plain terminal again.
-                if self.listModel.sessionsFirst, self.listModel.underTheHood,
-                   let entry = self.listModel.entries.first(where: { $0.id == id }),
-                   entry.model.tabs.indices.contains(idx),
-                   let s = self.acDelegate?.agentSessionStore.session(
-                       profileID: id, windowIndex: entry.model.tabs[idx].index) {
-                    self.selectSession(s.id)
-                    return
-                }
+                // A tab from the Machines list is a plain terminal, even one
+                // that hosts a session — the toolbar's Session pill leads back.
                 self.clearSessionStage()
-                self.selectTab(profileID: id, index: idx)   // a terminal, in sessions-first
+                self.selectTab(profileID: id, index: idx)
             },
             onNewTab:    { [weak self] id in self?.newTab(profileID: id) },
             onCloseTab:  { [weak self] id, idx in self?.closeTab(profileID: id, index: idx) },
@@ -784,7 +771,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onToggleFilePane: { [weak self] in self?.toggleFilePane(nil) },
             onToggleBrowser: { [weak self] in self?.toggleBrowserPane(nil) },
             onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
-            onToggleUnderTheHood: { [weak self] in self?.toggleUnderTheHood() })
+            onToggleLinux: { [weak self] in self?.toggleLinux() },
+            sessionForTab: { [weak self] id, window in
+                self?.acDelegate?.agentSessionStore.session(profileID: id, windowIndex: window)?.id
+            })
         let tbDelegate = UnifiedToolbarDelegate(rootView: toolbarBar)
         self.toolbarDelegate = tbDelegate
         let bar = NSToolbar(identifier: "io.bromure.ac.unified")
@@ -1382,10 +1372,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()
             },
-            showFiles: { [weak self] in self?.setFilePaneOpen(true, animated: true) },
-            showContainers: { [weak self] pid in self?.showDockerDashboard(pid) },
-            showMachine: { [weak self] pid in self?.showVMDashboard(pid) },
-            toggleUnderTheHood: { [weak self] in self?.toggleUnderTheHood(nil) })
+            showMachine: { [weak self] pid in self?.showVMDashboard(pid) })
     }
 
     /// Delete a session — after a word when its agent is running; at once
@@ -1423,10 +1410,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func selectInitialSession() {
         guard let delegate = acDelegate else { return }
         didShowHome = true
-        // The chat is the surface; a Files pane remembered from the classic
-        // layout (or last time's under-the-hood look) waits for the hood.
-        if listModel.sessionsFirst, !listModel.underTheHood, filePaneOpen {
-            filePaneParkedForHood = true
+        // The chat is the surface: a Files pane remembered from the classic
+        // layout stays closed until changes show up or ⌃⌘E asks for it.
+        if listModel.sessionsFirst, filePaneOpen {
             setFilePaneOpen(false, animated: false)
         }
         delegate.agentSessionStore.reconcile(entries: listModel.entries)
@@ -1594,17 +1580,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let livePosition = SessionHome.liveTabPosition(for: s, in: listModel)
         let bucket = SessionHome.bucket(for: s, in: listModel)
         revealChangedFiles(for: s, live: livePosition != nil && pane(s.profileID) != nil)
-        // The tab itself is the surface while the agent runs — and under the
-        // hood always (an ended session's shell is still a terminal).
-        let liveChat = livePosition != nil && pane(s.profileID) != nil
-            && (bucket != .ended || listModel.underTheHood)
+        // The tab itself is the surface while the agent runs; an ended
+        // session's shell is reachable as a terminal from the Machines list.
+        let liveChat = livePosition != nil && pane(s.profileID) != nil && bucket != .ended
         let key: String
         if liveChat, let livePosition {
-            key = "live:\(s.profileID.uuidString):\(livePosition):\(listModel.underTheHood)"
+            key = "live:\(s.profileID.uuidString):\(livePosition)"
         } else if s.isLaunching {
-            key = "launch:\(listModel.underTheHood)"
+            key = "launch"
         } else {
-            key = "rest:\(bucket.rawValue):\(s.lastError ?? ""):\(listModel.underTheHood)"
+            key = "rest:\(bucket.rawValue):\(s.lastError ?? "")"
         }
         guard key != sessionPresentationKey else { return }
         sessionPresentationKey = key
@@ -1662,7 +1647,6 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard key != revealedChangesKey else { return }
         revealedChangesKey = key
         guard !filePaneOpen else { return }
-        filePaneParkedForHood = false
         setFilePaneOpen(true, animated: true)
     }
 
@@ -1670,18 +1654,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         "\(id.uuidString)|\(Int(at.timeIntervalSince1970))"
     }
 
-    /// The pane is up for the changes of the session on stage (not a
-    /// leftover of the classic layout): a trip under the hood keeps it.
-    private var filePaneRevealedForStage: Bool {
-        guard let id = selectedSessionID, let s = acDelegate?.agentSessionStore.session(id),
-              let at = s.changesSeenAt else { return false }
-        return revealedChangesKey == Self.changesKey(id, at)
-    }
-
-    /// Chat by default; the raw terminal "under the hood". Pane-local — never
-    /// rewrites the app-wide beautified default.
+    /// A session on stage is a chat. Pane-local — never rewrites the
+    /// app-wide beautified default.
     private func applySessionViewMode(_ pane: SessionPane) {
-        let mode: SessionViewMode = listModel.underTheHood ? .terminal : .beautified
+        let mode: SessionViewMode = .beautified
         // The session's tab hosts an agent even before its title says so.
         if let active = pane.model.activeTab { pane.agentWindows.insert(active.index) }
         pane.setViewMode(mode, persist: false)
@@ -1691,30 +1667,37 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         makeFirstResponder(pane.preferredFirstResponder)
     }
 
-    /// Toolbar / ⌥⌘U: the raw terminal instead of the chat, the machine
-    /// shortcuts in the header, and the geekier toolbar controls. Also
-    /// unfolds the Machines list, since that's what the user is looking for.
-    @objc func toggleUnderTheHood(_ sender: Any? = nil) {
-        listModel.underTheHood.toggle()
-        if listModel.underTheHood {
-            listModel.machinesExpanded = true
-            // The Files pane left open under the hood comes back with it.
-            if filePaneParkedForHood { filePaneParkedForHood = false; setFilePaneOpen(true, animated: true) }
-        } else if filePaneOpen, !filePaneRevealedForStage {
-            filePaneParkedForHood = true
-            setFilePaneOpen(false, animated: true)
+    /// Toolbar / ⌥⌘U: from a session, the Linux machine behind it — its
+    /// terminal tab in the Machines list, with the machine's own toolbar.
+    /// From that terminal, the same chord brings the session back.
+    @objc func toggleLinux(_ sender: Any? = nil) {
+        if let id = selectedSessionID {
+            showLinux(for: id)
+        } else if let id = sessionOnSelectedTab {
+            selectSession(id)
         }
-        setSessionHeader(visible: !sessionHeaderHost.isHidden)   // re-size for the shortcuts strip
-        guard let id = selectedSessionID, let s = acDelegate?.agentSessionStore.session(id) else {
-            // A plain tab on stage is a terminal either way.
-            if let pid = selectedID, let pane = pane(pid) {
-                pane.setViewMode(.terminal, persist: false)
-                pane.updateNativeTerminalMount()
-                listModel.beautifiedActive = false
-            }
-            return
+    }
+
+    /// The session hosted by the terminal tab on stage, if any.
+    var sessionOnSelectedTab: UUID? {
+        guard listModel.sessionsFirst, selectedSessionID == nil, !listModel.newSessionSelected,
+              let pid = selectedID, let pane = pane(pid), let tab = pane.model.activeTab
+        else { return nil }
+        return acDelegate?.agentSessionStore.session(profileID: pid, windowIndex: tab.index)?.id
+    }
+
+    /// The Linux machine behind a session: its terminal tab (unfolding the
+    /// Machines list, where the tab lights up), or the machine's dashboard
+    /// when the tab is gone.
+    func showLinux(for id: UUID) {
+        guard let delegate = acDelegate, let s = delegate.agentSessionStore.session(id) else { return }
+        listModel.machinesExpanded = true
+        if let position = SessionHome.liveTabPosition(for: s, in: listModel), pane(s.profileID) != nil {
+            clearSessionStage()
+            selectTab(profileID: s.profileID, index: position)
+        } else if delegate.profile(for: s.profileID) != nil {
+            showVMDashboard(s.profileID)
         }
-        presentSession(s)
     }
 
     private func showSessionOverlay<V: View>(_ view: V) {
@@ -1757,7 +1740,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private func setSessionHeader(visible: Bool) {
         sessionHeaderHost.isHidden = !visible
         sessionHeaderHeight?.constant = visible
-            ? Self.sessionHeaderHeightValue + (listModel.underTheHood ? Self.underTheHoodHeaderExtra : 0)
+            ? Self.sessionHeaderHeightValue
             : 0
     }
 
@@ -2487,7 +2470,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard let pane = pane(id) else { return }
         pane.switchTo(index: index)
         // Sessions-first: a tab picked by hand from the Machines list is a
-        // terminal, Linux mode or not — the chat is what sessions are for.
+        // terminal — the chat is what sessions are for.
         if listModel.sessionsFirst {
             pane.setViewMode(.terminal, persist: false)
             pane.updateNativeTerminalMount()
@@ -2606,14 +2589,14 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     /// Sessions-first chords: ⌘N a new session, ⌘1–9 the sidebar's sessions
-    /// in order, ⌘W ends the session on stage (after asking). Under the hood
-    /// the classic tab chords apply again.
+    /// in order, ⌘W ends the session on stage (after asking). On a machine's
+    /// terminal the classic tab chords apply again.
     private func handleSessionShortcut(_ chars: String, isRepeat: Bool) -> Bool {
         if chars == "n" {
             if !isRepeat { showNewSession() }
             return true
         }
-        guard !listModel.underTheHood, let delegate = acDelegate,
+        guard let delegate = acDelegate,
               selectedSessionID != nil || listModel.newSessionSelected
         else { return false }
         if let n = Int(chars), (1...9).contains(n) {
@@ -2948,10 +2931,8 @@ struct SessionSidebar: View {
             VMSection(
                 row: row,
                 entry: model.entries.first { $0.id == row.id },
-                // In Linux mode the session's machine and tab light up too —
-                // that's what the list is there for.
                 isSelected: model.selectedID == row.id && !model.newSessionSelected
-                    && (model.selectedSessionID == nil || model.underTheHood),
+                    && model.selectedSessionID == nil,
                 isDockerActive: model.dockerSelectedID == row.id,
                 onSelect: onSelect,
                 onSelectTab: onSelectTab,
@@ -4184,21 +4165,29 @@ struct UnifiedToolbarBar: View {
     let onToggleFilePane: () -> Void
     let onToggleBrowser: () -> Void
     let onToggleBeautified: (Profile.ID) -> Void
-    /// Tasks-first: the "Under the hood" toggle (terminal + machine details
-    /// for the selected task).
-    var onToggleUnderTheHood: () -> Void = {}
+    /// Sessions-first: the Linux pill — a session's terminal tab, and from
+    /// that tab the session again.
+    var onToggleLinux: () -> Void = {}
+    /// The session hosted by a machine's tmux window, if any (profile, window
+    /// index): decides whether a terminal on stage offers the way back.
+    var sessionForTab: (Profile.ID, Int) -> UUID? = { _, _ in nil }
 
     private var entry: SessionListModel.VMEntry? {
         model.entries.first { $0.id == model.selectedID }
     }
 
     /// A task is on stage (tasks-first): keep the machine-level controls
-    /// (IP, reboot, trace, pop-out, Fusion, raw/beautified flip) behind
-    /// "Under the hood" so the default chrome reads like a task, not a VM.
+    /// (IP, reboot, trace, pop-out, Fusion, raw/beautified flip) for the
+    /// machine's own tabs, so the default chrome reads like a task, not a VM.
     private var taskOnStage: Bool {
         model.sessionsFirst && (model.selectedSessionID != nil || model.newSessionSelected)
     }
-    private var showMachineControls: Bool { !taskOnStage || model.underTheHood }
+    private var showMachineControls: Bool { !taskOnStage }
+    /// The terminal on stage hosts a session: offer the way back to it.
+    private var terminalHostsSession: Bool {
+        guard model.sessionsFirst, !taskOnStage, let entry, let tab = entry.model.activeTab else { return false }
+        return sessionForTab(entry.id, tab.index) != nil
+    }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -4219,7 +4208,9 @@ struct UnifiedToolbarBar: View {
                     }
                 }
                 if model.sessionsFirst, model.selectedSessionID != nil {
-                    UnderTheHoodToggle(active: model.underTheHood, action: onToggleUnderTheHood)
+                    LinuxPill(back: false, action: onToggleLinux)
+                } else if terminalHostsSession {
+                    LinuxPill(back: true, action: onToggleLinux)
                 }
                 if showMachineControls {
                     HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
@@ -4241,30 +4232,32 @@ struct UnifiedToolbarBar: View {
     }
 }
 
-/// Toolbar pill: reveal the terminal, branch and machine behind a task.
-struct UnderTheHoodToggle: View {
-    let active: Bool
+/// Toolbar pill: from a session, the Linux machine behind it (its terminal
+/// tab in the Machines list); from that terminal (`back`), the session again.
+struct LinuxPill: View {
+    let back: Bool
     let action: () -> Void
     @State private var hovering = false
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                Image(systemName: "terminal")
+                Image(systemName: back ? "text.bubble" : "terminal")
                     .font(.system(size: 12))
-                Text(NSLocalizedString("Linux", comment: "toolbar"))
+                Text(back ? NSLocalizedString("Session", comment: "toolbar")
+                          : NSLocalizedString("Linux", comment: "toolbar"))
                     .font(.system(size: 12, weight: .medium))
             }
-            .foregroundStyle(active ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 8)
             .frame(height: 24)
-            .background(active ? Color.accentColor.opacity(0.14)
-                               : (hovering ? Color.primary.opacity(0.10) : .clear),
+            .background(hovering ? Color.primary.opacity(0.10) : .clear,
                         in: RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help(NSLocalizedString("The Linux machine behind this session: its terminal, files and containers (⌥⌘U)", comment: "toolbar"))
+        .help(back ? NSLocalizedString("Back to the session this terminal hosts (⌥⌘U)", comment: "toolbar")
+                   : NSLocalizedString("The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)", comment: "toolbar"))
     }
 }
 

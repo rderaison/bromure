@@ -1834,7 +1834,6 @@
 "Runs in an isolated machine of its own. Nothing on your Mac is touched." = "Corre en una máquina aislada propia. Nada en tu Mac se toca.";
 "Ask for anything — or just press Return to open %@." = "Pide lo que quieras — o simplemente pulsa Retorno para abrir %@.";
 "Linux" = "Linux";
-"The Linux machine behind this session: its terminal, files and containers (⌥⌘U)" = "La máquina Linux detrás de esta sesión: su terminal, archivos y contenedores (⌥⌘U)";
 "Open Linux (⌥⌘U) to answer in the terminal." = "Abre Linux (⌥⌘U) para responder en el terminal.";
 "Waking up…" = "Despertando…";
 "Almost there…" = "Casi listo…";
@@ -2374,3 +2373,9 @@
 "Ready to build?" = "¿Listo para construir?";
 "What's the idea?" = "¿Cuál es la idea?";
 "Let's start something new." = "Empecemos algo nuevo.";
+
+/* Added 2026-09-21: the Linux pill is a jump, the Session pill the way back */
+"Session" = "Sesión";
+"Back to the session this terminal hosts (⌥⌘U)" = "Volver a la sesión que aloja este terminal (⌥⌘U)";
+"The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "La máquina Linux detrás de esta sesión: su pestaña de terminal en la lista de máquinas (⌥⌘U)";
+"Or open Linux (⌥⌘U) to answer in the terminal." = "O abre Linux (⌥⌘U) para responder en el terminal.";
