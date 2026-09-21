@@ -124,7 +124,7 @@ enum Fusion {
         case grokKey(String)             // api.x.ai Bearer (OpenAI-compatible)
         case grokSubscription(String)    // cli-chat-proxy.grok.com Bearer (best-effort)
         case kimiKey(String)             // api.moonshot.ai Bearer (OpenAI-compatible)
-        case kimiSubscription(String)    // api.kimi.com/coding Bearer (OpenAI-compatible)
+        case kimiSubscription(String)    // api.kimi.ai/coding Bearer (OpenAI-compatible)
         case local(base: String, key: String)  // local engine (built-in or user-supplied), OpenAI-compatible
     }
 
@@ -270,7 +270,7 @@ enum Fusion {
         case .kimiSubscription(let tok):
             // The managed Kimi Code endpoint is OpenAI-compatible, just on a
             // /coding-prefixed base rather than the open platform's /v1.
-            return await askOpenAIChat(base: "https://api.kimi.com/coding", model: model, system: system,
+            return await askOpenAIChat(base: KimiRegion.apiBase, model: model, system: system,
                                        question: question, maxTokens: maxTokens, token: tok,
                                        session: session, callLog: callLog)
         case .grokSubscription(let tok):
@@ -589,7 +589,7 @@ enum Fusion {
             case .grokKey(let k):         return ("https://api.x.ai", ("Authorization", "Bearer \(k)"))
             case .grokSubscription(let t): return ("https://cli-chat-proxy.grok.com", ("Authorization", "Bearer \(t)"))
             case .kimiKey(let k):         return ("https://api.moonshot.ai", ("Authorization", "Bearer \(k)"))
-            case .kimiSubscription(let t): return ("https://api.kimi.com/coding", ("Authorization", "Bearer \(t)"))
+            case .kimiSubscription(let t): return (KimiRegion.apiBase, ("Authorization", "Bearer \(t)"))
             case .local(let base, let key): return (base, ("Authorization", "Bearer \(key)"))
             }
         }()

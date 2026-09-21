@@ -50,7 +50,9 @@ extension ACAppDelegate {
         case .claude: return (["platform.claude.com", "console.anthropic.com"], "/v1/oauth/token")
         case .codex:  return (["auth.openai.com"], "/oauth/token")
         case .grok:   return (["auth.x.ai"], "/oauth2/token")
-        case .kimi:   return (["auth.kimi.com"], "/api/oauth/token")
+        // International (auth.kimi.ai) is what Bromure uses now; keep the
+        // China default (auth.kimi.com) too so a login on either is captured.
+        case .kimi:   return (["auth.kimi.ai", "auth.kimi.com"], "/api/oauth/token")
         }
     }
 

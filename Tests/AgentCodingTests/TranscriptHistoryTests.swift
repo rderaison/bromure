@@ -98,4 +98,32 @@ struct TranscriptHistoryTests {
         #expect(earlier.contains("'' -1 8000000 earlier"))
         #expect(!earlier.contains("pq-"))
     }
+
+    @Test("A named agent scopes the locator to that agent's store only")
+    func locatorScopesToAgent() throws {
+        // The beautified view passes the tab's own agent so a kimi tab and an
+        // omp tab sharing one cwd don't cross-read (the "wrong session, then it
+        // switches" bug): agent: nil took the newest write across ALL stores.
+        let kimi = try #require(CodingTaskEngine.transcriptChunkCommand(
+            guestCwd: "/home/ubuntu/proj", since: 0, agent: "kimi",
+            knownPath: nil, knownOffset: -1, bytes: 8_000_000, earlier: false))
+        #expect(kimi.contains(".kimi-code/sessions"))
+        #expect(!kimi.contains("PI_CODING_AGENT_DIR"))   // omp's store marker
+        #expect(!kimi.contains(".claude/projects"))
+
+        let omp = try #require(CodingTaskEngine.transcriptChunkCommand(
+            guestCwd: "/home/ubuntu/proj", since: 0, agent: "omp",
+            knownPath: nil, knownOffset: -1, bytes: 8_000_000, earlier: false))
+        #expect(omp.contains("PI_CODING_AGENT_DIR"))
+        #expect(!omp.contains(".kimi-code/sessions"))
+
+        // No agent → the legacy probe-every-store fallback (safety net for a
+        // tab whose agent didn't resolve).
+        let any = try #require(CodingTaskEngine.transcriptChunkCommand(
+            guestCwd: "/home/ubuntu/proj", since: 0, agent: nil,
+            knownPath: nil, knownOffset: -1, bytes: 8_000_000, earlier: false))
+        #expect(any.contains(".kimi-code/sessions"))
+        #expect(any.contains("PI_CODING_AGENT_DIR"))
+        #expect(any.contains(".claude/projects"))
+    }
 }

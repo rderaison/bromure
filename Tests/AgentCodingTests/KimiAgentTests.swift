@@ -282,4 +282,39 @@ struct KimiAgentTests {
         #expect(!Profile.Tool.codex.hasReliableDoneSignal)
         #expect(!Profile.Tool.grok.hasReliableDoneSignal)
     }
+
+    // MARK: - International region (kimi.ai, not the China-only kimi.com)
+
+    @Test("Kimi runs against the international region hosts")
+    func regionIsInternational() {
+        #expect(KimiRegion.oauthHost == "auth.kimi.ai")
+        #expect(KimiRegion.baseURL == "https://api.kimi.ai/coding/v1")
+        #expect(KimiRegion.tokenURL.absoluteString == "https://auth.kimi.ai/api/oauth/token")
+        // The proxy bearer swap must recognize the international host AND the
+        // legacy China host (a credential registered before the switch).
+        #expect(KimiRegion.isSubscriptionHost("api.kimi.ai"))
+        #expect(KimiRegion.isSubscriptionHost("kimi.ai"))
+        #expect(KimiRegion.isSubscriptionHost("api.kimi.com"))
+        #expect(!KimiRegion.isSubscriptionHost("kimi.example.com"))
+        #expect(!KimiRegion.isSubscriptionHost("api.moonshot.ai"))
+    }
+
+    @Test("A Kimi subscription stages the global-region env for the guest CLI")
+    func subscriptionStagesRegionEnv() {
+        // The proxy.env exports force the CLI's `global` region so `kimi login`
+        // and the managed API hit kimi.ai; token (moonshot) mode does not.
+        let sub = SessionDisk.kimiRegionEnvExports(
+            for: Profile(name: "ws", tool: .kimi, authMode: .subscription))
+        #expect(sub.contains("export KIMI_CODE_OAUTH_HOST=https://auth.kimi.ai"))
+        #expect(sub.contains("export KIMI_CODE_BASE_URL=https://api.kimi.ai/coding/v1"))
+
+        let token = SessionDisk.kimiRegionEnvExports(
+            for: Profile(name: "ws", tool: .kimi, authMode: .token))
+        #expect(token.isEmpty)
+
+        // A workspace with no Kimi agent stages nothing.
+        let claude = SessionDisk.kimiRegionEnvExports(
+            for: Profile(name: "ws", tool: .claude, authMode: .subscription))
+        #expect(claude.isEmpty)
+    }
 }

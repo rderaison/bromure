@@ -1,21 +1,50 @@
 import Foundation
 
+/// Kimi Code region. The `@moonshot-ai/kimi-code` CLI ships two region
+/// profiles — `mainland-cn` (the default, `*.kimi.com`) and `global`
+/// (`*.kimi.ai`) — and a non-China account can only register and refresh
+/// against the international `global` endpoints; the `.com` region rejects it.
+/// Bromure therefore forces every Kimi session into the `global` region (the
+/// guest gets `KIMI_CODE_OAUTH_HOST` / `KIMI_CODE_BASE_URL` from SessionDisk),
+/// and the host-side refresh + proxy bearer swap follow the same hosts here.
+public enum KimiRegion {
+    /// OAuth device-flow + token host (international).
+    public static let oauthHost = "auth.kimi.ai"
+    /// Managed subscription API base (`…/coding/v1` is the OpenAI-compatible surface).
+    public static let baseURL = "https://api.kimi.ai/coding/v1"
+    /// Fusion's non-`/v1` base for the subscription leg.
+    public static let apiBase = "https://api.kimi.ai/coding"
+    /// The token endpoint the host refreshes against.
+    public static let tokenURL = URL(string: "https://auth.kimi.ai/api/oauth/token")!
+
+    /// Whether `host` is Kimi subscription traffic the proxy should swap the
+    /// bearer on. Matches BOTH the international `.ai` (what Bromure uses now)
+    /// and the legacy `.com` (a credential registered before the switch), so a
+    /// stale session keeps working until it re-registers.
+    public static func isSubscriptionHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h == "kimi.ai" || h.hasSuffix(".kimi.ai")
+            || h == "kimi.com" || h.hasSuffix(".kimi.com")
+    }
+}
+
 /// Host-owned storage + refresh for a Moonshot **Kimi Code** subscription
 /// credential, shared across every VM session. The Kimi twin of
 /// ``GrokSubscriptionStore`` — see ``ClaudeSubscriptionStore`` for the
 /// overall rationale.
 ///
 /// Kimi specifics (verified against MoonshotAI/kimi-code `packages/oauth`):
-///   * Auth is an RFC 8628 device-code flow against `https://auth.kimi.com`
+///   * Auth is an RFC 8628 device-code flow against `https://auth.kimi.ai`
+///     (international/global region; the `.com` default is China-only)
 ///     (`/api/oauth/device_authorization` + `/api/oauth/token`), public
 ///     client id below.
 ///   * Credentials live in `~/.kimi-code/credentials/<name>.json` (managed
 ///     flow name: `kimi-code`), snake_case wire shape
 ///     `{ access_token, refresh_token, expires_at (unix s), scope,
 ///     token_type, expires_in }`.
-///   * Subscription API calls go to `api.kimi.com/coding/v1` with
+///   * Subscription API calls go to `api.kimi.ai/coding/v1` with
 ///     `Authorization: Bearer <access>`.
-///   * Refresh is a form POST to `https://auth.kimi.com/api/oauth/token`
+///   * Refresh is a form POST to `https://auth.kimi.ai/api/oauth/token`
 ///     (`grant_type=refresh_token`), refreshed ~5 min before `expires_at`.
 ///     We seed `expires_at` far in the future so the guest never refreshes;
 ///     the host owns refresh.
@@ -220,7 +249,9 @@ public actor KimiSubscriptionRefresher {
     private let store: KimiSubscriptionStore
     /// Public device-flow client id from kimi-code's `packages/oauth`.
     private static let clientID = "17e5f671-d194-4dfb-9706-5516cb48c098"
-    private static let tokenURL = URL(string: "https://auth.kimi.com/api/oauth/token")!
+    // International (global) region — the mainland-CN default (auth.kimi.com)
+    // rejects non-China accounts. See ``KimiRegion``.
+    private static let tokenURL = KimiRegion.tokenURL
     private static let refreshMargin: TimeInterval = 300
 
     public init(store: KimiSubscriptionStore) { self.store = store }

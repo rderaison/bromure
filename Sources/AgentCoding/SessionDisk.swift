@@ -724,6 +724,10 @@ public final class SessionDisk {
                 }
             }
 
+            // Kimi Code region — force the international `global` endpoints for
+            // a Kimi subscription (see `kimiRegionEnvExports`).
+            proxyLines.append(contentsOf: Self.kimiRegionEnvExports(for: profile))
+
             // User-defined env vars from the profile. No substitution
             // — values land in the VM verbatim. Names are filtered to
             // POSIX shape at the boundary so an invalid character in
@@ -1641,6 +1645,27 @@ public final class SessionDisk {
             overlay += "modelRoles:\n  default: \(role)\n"
         }
         return overlay
+    }
+
+    /// The guest env exports that pin a Kimi **subscription** to the CLI's
+    /// international (`global`) region — empty for any other configuration.
+    ///
+    /// The `@moonshot-ai/kimi-code` CLI defaults to the mainland-China region
+    /// (`auth.kimi.com` / `api.kimi.com`), which rejects a non-China account.
+    /// `KIMI_CODE_OAUTH_HOST` / `KIMI_CODE_BASE_URL` are its own authoritative
+    /// region override (verified live), so setting them makes `kimi login`'s
+    /// device flow hit `auth.kimi.ai` (in the registration VM) and the managed
+    /// API calls hit `api.kimi.ai/coding` (in every session). Token (moonshot
+    /// API-key) mode is left alone — it already uses the international
+    /// `api.moonshot.ai`. The host side (refresh + proxy swap) follows the same
+    /// hosts via ``KimiRegion``. Pure so it's unit-tested (see KimiAgentTests).
+    static func kimiRegionEnvExports(for profile: Profile) -> [String] {
+        guard profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription })
+        else { return [] }
+        return [
+            "export KIMI_CODE_OAUTH_HOST=https://\(KimiRegion.oauthHost)",
+            "export KIMI_CODE_BASE_URL=\(KimiRegion.baseURL)",
+        ]
     }
 
     /// omp `~/.omp/agent/models.yml` declaring one OpenAI-compatible provider

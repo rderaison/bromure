@@ -430,7 +430,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             let codexHost = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com"
             let grokHost = host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
                 || host == "x.ai" || host.hasSuffix(".x.ai")
-            let kimiHost = host == "kimi.com" || host.hasSuffix(".kimi.com")
+            let kimiHost = KimiRegion.isSubscriptionHost(host)
             if codexHost || grokHost || kimiHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
                 let codexBogus = Self.codexSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
                 let grokBogus = Self.grokSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
@@ -628,12 +628,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // 5f. Kimi (Moonshot) subscription auth. The guest's
         //     ~/.kimi-code/credentials/<name>.json holds a bogus OAuth token
         //     with a far-future expiry (so the CLI never refreshes); it sends
-        //     that as Bearer to api.kimi.com/coding/v1. Swap it for the live
+        //     that as Bearer to api.kimi.ai/coding/v1. Swap it for the live
         //     real access token from the host store, which the host refreshes
-        //     against auth.kimi.com.
+        //     against auth.kimi.ai (the international region; see KimiRegion).
         var kimiSubStaleAccess: String? = nil
         if !insecure,
-           host == "kimi.com" || host.hasSuffix(".kimi.com"),
+           KimiRegion.isSubscriptionHost(host),
            let provider = Self.kimiSubscriptionProvider, let (store, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),

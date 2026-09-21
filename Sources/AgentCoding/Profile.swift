@@ -5477,7 +5477,7 @@ public extension Profile {
             case .claude: return ["anthropic.com"]
             case .codex:  return ["openai.com"]
             case .grok:   return ["x.ai"]
-            case .kimi:   return ["moonshot.ai", "kimi.com"]
+            case .kimi:   return ["moonshot.ai", "kimi.ai", "kimi.com"]
             // omp is multi-provider and this accessor only sees the Tool, not
             // the profile's `ompProvider` — return every supported provider
             // host so the credential stays valid whichever the user picks.

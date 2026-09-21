@@ -100,7 +100,8 @@ enum ConversationParser {
             || h.contains("grok.com")      // Grok subscription (cli-chat-proxy)
             || h.contains("groq.com")
             || h.contains("moonshot.ai")   // Kimi open platform
-            || h.contains("kimi.com")      // Kimi Code subscription backend
+            || h.contains("kimi.ai")       // Kimi Code subscription (international)
+            || h.contains("kimi.com")      // Kimi Code subscription (legacy China)
             || h.contains("perplexity.ai") {
             // openai.com vendor + OpenAI-compatible providers all
             // share the same wire shape (chat/completions or, for
@@ -181,7 +182,8 @@ enum ConversationParser {
             || h.contains("grok.com")      // Grok subscription (cli-chat-proxy)
             || h.contains("groq.com")
             || h.contains("moonshot.ai")   // Kimi open platform
-            || h.contains("kimi.com")      // Kimi Code subscription backend
+            || h.contains("kimi.ai")       // Kimi Code subscription (international)
+            || h.contains("kimi.com")      // Kimi Code subscription (legacy China)
             || h.contains("perplexity.ai") else {
             return nil
         }

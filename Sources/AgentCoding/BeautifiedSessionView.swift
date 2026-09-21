@@ -102,7 +102,8 @@ extension BeautifiedTranscriptProvider {
     /// so the process-start floor would hide it until the next turn bumps its
     /// mtime. When the foreground command line looks like a resume, drop the
     /// floor to 0 so the reattached transcript shows immediately.
-    func fetchTranscript(known: TranscriptCursor?, mode: TranscriptFetchMode) async -> TranscriptFetch? {
+    func fetchTranscript(known: TranscriptCursor?, mode: TranscriptFetchMode,
+                         agent: String?) async -> TranscriptFetch? {
         guard let idx = activeTabIndex() else { return nil }
         let meta = await execGuest(
             "i=\(idx); "
@@ -138,9 +139,16 @@ extension BeautifiedTranscriptProvider {
         let cwd = lines[0].trimmingCharacters(in: .whitespaces)
         let since = Int(lines[1].trimmingCharacters(in: .whitespaces)) ?? 0
         guard !cwd.isEmpty,
-              // agent: nil → probe every store, newest match wins + sniff.
+              // Scope to the tab's OWN agent store. Passing nil here probed
+              // every store and took the newest write across all of them —
+              // so a tab running kimi in the same cwd as an omp tab showed
+              // omp's transcript until kimi's file happened to become the
+              // newest (the reported "wrong session, then it switches"). A
+              // recognized agent reads only that agent's store; an unknown
+              // one (e.g. a "bash"-labeled tab) still falls back to the
+              // probe-every-store path inside the locator.
               let cmd = CodingTaskEngine.transcriptChunkCommand(
-                  guestCwd: cwd, since: since, agent: nil, pinnedWindow: idx,
+                  guestCwd: cwd, since: since, agent: agent, pinnedWindow: idx,
                   knownPath: known?.path, knownOffset: known?.offset ?? -1,
                   bytes: mode == .earlier ? BeautifiedSessionModel.earlierHistoryBytes
                                           : BeautifiedSessionModel.initialHistoryBytes,
@@ -713,7 +721,7 @@ final class BeautifiedSessionModel: ObservableObject {
         // it must not sit behind the transcript fetch's early return.
         await scanTerminal()
         let known: TranscriptCursor? = currentPath.flatMap { p in buffers[p].map { (p, $0.end) } }
-        guard let fetch = await provider.fetchTranscript(known: known, mode: .tail) else {
+        guard let fetch = await provider.fetchTranscript(known: known, mode: .tail, agent: agentKind) else {
             setWorking(isWorking); loading = false; return
         }
         loading = false
@@ -847,7 +855,7 @@ final class BeautifiedSessionModel: ObservableObject {
         guard !loadingEarlier, let path = currentPath, let held = buffers[path], held.base > 0 else { return }
         loadingEarlier = true
         defer { loadingEarlier = false }
-        guard let fetch = await provider.fetchTranscript(known: (path, held.base), mode: .earlier),
+        guard let fetch = await provider.fetchTranscript(known: (path, held.base), mode: .earlier, agent: agentKind),
               fetch.path == path, var buf = buffers[path], fetch.end == buf.base, !fetch.chunk.isEmpty
         else { return }
         var data = fetch.chunk

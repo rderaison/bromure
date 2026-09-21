@@ -12723,7 +12723,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// host-side home so the guest runs Kimi Code without logging in. The
     /// bogus token carries a far-future `expires_at` so the guest never
     /// refreshes; the host owns refresh and the proxy swaps the bogus Bearer
-    /// for the live one on api.kimi.com. `homeRoot`: see seedCodexAuthFile.
+    /// for the live one on api.kimi.ai. `homeRoot`: see seedCodexAuthFile.
     func seedKimiAuthFile(for profile: Profile, homeRoot: URL? = nil) {
         guard let engine = mitmEngine,
               profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription }),

@@ -43,7 +43,8 @@ public enum TraceLevel: String, Codable, CaseIterable, Sendable {
         "grok.com",           // Grok subscription backend (cli-chat-proxy)
         "groq.com",
         "moonshot.ai",        // Kimi open platform (api.moonshot.ai)
-        "kimi.com",           // Kimi Code subscription backend (api.kimi.com/coding)
+        "kimi.ai",            // Kimi Code subscription backend (api.kimi.ai/coding — international)
+        "kimi.com",           // Kimi Code subscription backend (legacy China region)
         "replicate.com",
         "huggingface.co",
         InferenceService.localMitmHost,  // local-inference sentinel (routed via the MITM)
