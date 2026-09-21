@@ -63,6 +63,7 @@ SHARED = [
     "ProfileViews.swift",
     "EnvFileImport.swift",
     "Inference/ModelCatalog.swift",   # CatalogModel type (pure data)
+    "Inference/ModelSettings.swift",  # provider/credential/Bedrock types the token plan routes on (pure data)
     "Mitm/OnePasswordCLI.swift",      # reference(in:) parsing; read() is mac-only
     # Shared, platform-guarded SwiftUI views + support
     "PlatformShims.swift",
