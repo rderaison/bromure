@@ -891,7 +891,11 @@ final class BeautifiedSessionModel: ObservableObject {
         // Only touch published state when it actually changes, so a steady error
         // banner doesn't re-fire the animation every scan.
         let newPrompt: TerminalPrompt? = { if case .prompt(let p) = state { return p } else { return nil } }()
-        let newFailure: SessionFailure? = { if case .failure(let f) = state { return f } else { return nil } }()
+        var newFailure: SessionFailure? = { if case .failure(let f) = state { return f } else { return nil } }()
+        // The terminal shows the agent's answers too: a line of prose that
+        // happens to carry a needle is the conversation, not a banner. The
+        // transcript holds the same words in that case.
+        if let f = newFailure, transcriptEchoes(f.detail) { newFailure = nil }
         guard newPrompt != prompt || newFailure != failure else { return }
         let wasLogin = prompt?.kind == .login
         withAnimation(.easeOut(duration: 0.2)) {
@@ -900,6 +904,33 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         let isLogin = newPrompt?.kind == .login
         if isLogin != wasLogin { loginPromptChanged?(isLogin) }
+    }
+
+    /// Whether a terminal line is a fragment of something the conversation
+    /// itself says (its last few turns): letters and digits only, so the
+    /// TUI's rendering of markdown (no backticks, wrapped lines) still
+    /// matches the transcript's source.
+    private func transcriptEchoes(_ line: String) -> Bool {
+        func norm(_ s: String) -> String {
+            s.lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+        let d = norm(line)
+        guard d.count >= 24 else { return false }
+        let window = 32
+        let start = d.index(d.startIndex, offsetBy: max(0, (d.count - window) / 2))
+        let end = d.index(start, offsetBy: min(window, d.distance(from: start, to: d.endIndex)))
+        let probe = String(d[start..<end])
+        for item in parsedItems.suffix(8).reversed() {
+            let text: String
+            switch item.kind {
+            case .assistantText(let t), .thinking(let t), .userText(let t): text = t
+            case .toolResult(_, let c, _): text = c
+            case .toolUse(_, _, let detail): text = detail
+            default: continue
+            }
+            if norm(text).contains(probe) { return true }
+        }
+        return false
     }
 
     /// Answer Claude's folder-trust dialog inline (Down → "Yes, I trust this
@@ -2034,9 +2065,14 @@ struct SessionFailure: Equatable {
         "oauth token", "sign in again", "re-authenticate",
         "subscription has expired", "subscription is invalid", "subscription expired",
     ]
+    // "rate limit" on its own is NOT a needle: an answer that merely talks
+    // about one (a firewall's "3-per-minute rate limit") is on the same
+    // screen, and read as the agent being throttled.
     private static let quotaNeedles = [
         "credit balance is too low", "usage limit reached", "reached your usage limit",
-        "you've reached your usage", "rate limit", "insufficient_quota",
+        "you've reached your usage", "hit your limit", "insufficient_quota",
+        "rate_limit", "rate-limit", "rate limit reached", "rate limit exceeded",
+        "rate limited", "being rate limit",
         "quota exceeded", "exceeded your current quota", "overloaded_error",
         "session limit reached", "out of credits", "too many requests",
     ]
