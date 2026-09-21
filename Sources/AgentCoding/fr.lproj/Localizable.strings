@@ -2341,3 +2341,34 @@
 "Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1." = "N'importe quel profil OCI avec n'importe quelle clé RSA fonctionne (les signatures sont lues, jamais vérifiées) ; la tenancy par défaut est ocid1.tenancy.oc1..flocilocal…, région us-ashburn-1.";
 "State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort." = "L'état persiste sur la classe de stockage par défaut du cluster. Les services qui lancent des conteneurs — %@ — utilisent le Docker du nœud, au mieux.";
 "%@ version: a tag such as 2.1.0 or a full image reference." = "Version de %@ : un tag tel que 2.1.0 ou une référence d'image complète.";
+
+/* Added since 4.6.2 — new-session greetings (one is picked at random) */
+"What are we building today?" = "Que construisons-nous aujourd'hui ?";
+"Let's build something." = "Construisons quelque chose.";
+"What's on your mind?" = "Qu'avez-vous en tête ?";
+"Where should we start?" = "Par où commencer ?";
+"What would you like to make?" = "Que souhaitez-vous créer ?";
+"Ready when you are." = "Prêt quand vous l'êtes.";
+"What's the plan?" = "Quel est le plan ?";
+"Let's get to work." = "Au travail.";
+"What shall we tackle first?" = "Par quoi attaquons-nous ?";
+"Tell me what you need." = "Dites-moi ce dont vous avez besoin.";
+"What are we working on?" = "Sur quoi travaillons-nous ?";
+"Let's make something great." = "Faisons quelque chose de grand.";
+"What needs doing?" = "Qu'y a-t-il à faire ?";
+"What's next?" = "Et ensuite ?";
+"Got something in mind?" = "Une idée en tête ?";
+"Let's ship something." = "Livrons quelque chose.";
+"What should we fix today?" = "Que corrigeons-nous aujourd'hui ?";
+"Where do we begin?" = "Par où commençons-nous ?";
+"What can we improve?" = "Que pouvons-nous améliorer ?";
+"Let's write some code." = "Écrivons du code.";
+"What are you working on?" = "Sur quoi travaillez-vous ?";
+"What's the task?" = "Quelle est la tâche ?";
+"Let's dig in." = "Plongeons-nous dedans.";
+"What do you want to build?" = "Que voulez-vous construire ?";
+"Let's solve something." = "Résolvons quelque chose.";
+"What are we shipping today?" = "Que livrons-nous aujourd'hui ?";
+"Ready to build?" = "Prêt à construire ?";
+"What's the idea?" = "Quelle est l'idée ?";
+"Let's start something new." = "Commençons quelque chose de nouveau.";

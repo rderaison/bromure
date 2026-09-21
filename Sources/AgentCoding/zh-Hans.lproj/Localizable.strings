@@ -2341,3 +2341,34 @@
 "Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1." = "任何带任意 RSA 密钥的 OCI 配置都可用（签名会被解析但从不验证）；默认租户为 ocid1.tenancy.oc1..flocilocal…，区域为 us-ashburn-1。";
 "State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort." = "状态保存在集群的默认存储类上。会启动容器的服务（%@）使用节点的 Docker，尽力而为。";
 "%@ version: a tag such as 2.1.0 or a full image reference." = "%@ 版本：请填写 2.1.0 这样的标签或完整镜像引用。";
+
+/* Added since 4.6.2 — new-session greetings (one is picked at random) */
+"What are we building today?" = "今天我们做点什么？";
+"Let's build something." = "我们来做点东西吧。";
+"What's on your mind?" = "你在想什么？";
+"Where should we start?" = "我们从哪里开始？";
+"What would you like to make?" = "你想做什么？";
+"Ready when you are." = "随时可以开始。";
+"What's the plan?" = "计划是什么？";
+"Let's get to work." = "开工吧。";
+"What shall we tackle first?" = "我们先解决什么？";
+"Tell me what you need." = "告诉我你需要什么。";
+"What are we working on?" = "我们在做什么？";
+"Let's make something great." = "我们来做点了不起的东西。";
+"What needs doing?" = "有什么要做的？";
+"What's next?" = "接下来做什么？";
+"Got something in mind?" = "有什么想法吗？";
+"Let's ship something." = "我们来发布点东西吧。";
+"What should we fix today?" = "今天修什么？";
+"Where do we begin?" = "从哪里开始？";
+"What can we improve?" = "我们能改进什么？";
+"Let's write some code." = "我们来写点代码吧。";
+"What are you working on?" = "你在做什么？";
+"What's the task?" = "任务是什么？";
+"Let's dig in." = "开始动手吧。";
+"What do you want to build?" = "你想构建什么？";
+"Let's solve something." = "我们来解决点问题吧。";
+"What are we shipping today?" = "今天我们发布什么？";
+"Ready to build?" = "准备好开始构建了吗？";
+"What's the idea?" = "有什么点子？";
+"Let's start something new." = "我们开始点新东西吧。";

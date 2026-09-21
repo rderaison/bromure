@@ -2341,3 +2341,34 @@
 "Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1." = "任意の RSA キーを持つ任意の OCI プロファイルが使えます（署名は解析されますが検証されません）。デフォルトのテナンシーは ocid1.tenancy.oc1..flocilocal…、リージョンは us-ashburn-1 です。";
 "State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort." = "状態はクラスタのデフォルトストレージクラスに保持されます。コンテナを起動するサービス（%@）はノードの Docker を使い、ベストエフォートで動作します。";
 "%@ version: a tag such as 2.1.0 or a full image reference." = "%@ のバージョン: 2.1.0 のようなタグ、または完全なイメージ参照を指定してください。";
+
+/* Added since 4.6.2 — new-session greetings (one is picked at random) */
+"What are we building today?" = "今日は何を作りましょうか？";
+"Let's build something." = "何か作りましょう。";
+"What's on your mind?" = "何をお考えですか？";
+"Where should we start?" = "どこから始めましょうか？";
+"What would you like to make?" = "何を作りたいですか？";
+"Ready when you are." = "準備ができたらどうぞ。";
+"What's the plan?" = "どんな計画ですか？";
+"Let's get to work." = "さあ、始めましょう。";
+"What shall we tackle first?" = "まず何に取り組みましょうか？";
+"Tell me what you need." = "必要なことを教えてください。";
+"What are we working on?" = "何に取り組んでいますか？";
+"Let's make something great." = "すばらしいものを作りましょう。";
+"What needs doing?" = "何をする必要がありますか？";
+"What's next?" = "次は何をしましょうか？";
+"Got something in mind?" = "何かお考えはありますか？";
+"Let's ship something." = "何かをリリースしましょう。";
+"What should we fix today?" = "今日は何を直しましょうか？";
+"Where do we begin?" = "どこから手をつけましょうか？";
+"What can we improve?" = "何を改善できるでしょうか？";
+"Let's write some code." = "コードを書きましょう。";
+"What are you working on?" = "今、何に取り組んでいますか？";
+"What's the task?" = "タスクは何ですか？";
+"Let's dig in." = "取りかかりましょう。";
+"What do you want to build?" = "何を構築したいですか？";
+"Let's solve something." = "何かを解決しましょう。";
+"What are we shipping today?" = "今日は何をリリースしますか？";
+"Ready to build?" = "作る準備はできましたか？";
+"What's the idea?" = "どんなアイデアですか？";
+"Let's start something new." = "新しいことを始めましょう。";

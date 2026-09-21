@@ -607,6 +607,42 @@ struct NewSessionView: View {
     @State private var repoURL: String = ""
     @State private var derivedFolder: String?
     @State private var message = ""
+    /// The greeting, one of a rotation: picked when the screen comes up
+    /// and kept while it's on show. Each is its own key, so every
+    /// language phrases it in its own way.
+    @State private var greeting = NewSessionView.greetings.randomElement() ?? ""
+    static let greetings: [String] = [
+        NSLocalizedString("What can I help you with?", comment: "new session greeting"),
+        NSLocalizedString("What are we building today?", comment: "new session greeting"),
+        NSLocalizedString("Let's build something.", comment: "new session greeting"),
+        NSLocalizedString("What's on your mind?", comment: "new session greeting"),
+        NSLocalizedString("Where should we start?", comment: "new session greeting"),
+        NSLocalizedString("What would you like to make?", comment: "new session greeting"),
+        NSLocalizedString("Ready when you are.", comment: "new session greeting"),
+        NSLocalizedString("What's the plan?", comment: "new session greeting"),
+        NSLocalizedString("Let's get to work.", comment: "new session greeting"),
+        NSLocalizedString("What shall we tackle first?", comment: "new session greeting"),
+        NSLocalizedString("Tell me what you need.", comment: "new session greeting"),
+        NSLocalizedString("What are we working on?", comment: "new session greeting"),
+        NSLocalizedString("Let's make something great.", comment: "new session greeting"),
+        NSLocalizedString("What needs doing?", comment: "new session greeting"),
+        NSLocalizedString("What's next?", comment: "new session greeting"),
+        NSLocalizedString("Got something in mind?", comment: "new session greeting"),
+        NSLocalizedString("Let's ship something.", comment: "new session greeting"),
+        NSLocalizedString("What should we fix today?", comment: "new session greeting"),
+        NSLocalizedString("Where do we begin?", comment: "new session greeting"),
+        NSLocalizedString("What can we improve?", comment: "new session greeting"),
+        NSLocalizedString("Let's write some code.", comment: "new session greeting"),
+        NSLocalizedString("What are you working on?", comment: "new session greeting"),
+        NSLocalizedString("What's the task?", comment: "new session greeting"),
+        NSLocalizedString("Let's dig in.", comment: "new session greeting"),
+        NSLocalizedString("What do you want to build?", comment: "new session greeting"),
+        NSLocalizedString("Let's solve something.", comment: "new session greeting"),
+        NSLocalizedString("What are we shipping today?", comment: "new session greeting"),
+        NSLocalizedString("Ready to build?", comment: "new session greeting"),
+        NSLocalizedString("What's the idea?", comment: "new session greeting"),
+        NSLocalizedString("Let's start something new.", comment: "new session greeting"),
+    ]
     @State private var machinePopover = false
     @State private var agentPopover = false
     @State private var wherePopover = false
@@ -735,7 +771,7 @@ struct NewSessionView: View {
                     Spacer(minLength: max(24, geo.size.height * 0.24))
                     Text(profiles.isEmpty
                          ? NSLocalizedString("Let's set up a machine first.", comment: "new session greeting")
-                         : NSLocalizedString("What can I help you with?", comment: "new session greeting"))
+                         : greeting)
                         .font(.system(size: 30, weight: .semibold))
                         .tracking(-0.3)
                         .multilineTextAlignment(.center)

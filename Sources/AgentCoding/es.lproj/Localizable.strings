@@ -2343,3 +2343,34 @@
 "Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1." = "Cualquier perfil de OCI con cualquier clave RSA funciona (las firmas se analizan, nunca se verifican); el tenancy predeterminado es ocid1.tenancy.oc1..flocilocal…, región us-ashburn-1.";
 "State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort." = "El estado persiste en la clase de almacenamiento predeterminada del clúster. Los servicios que lanzan contenedores — %@ — usan el Docker del nodo y funcionan según lo posible.";
 "%@ version: a tag such as 2.1.0 or a full image reference." = "Versión de %@: una etiqueta como 2.1.0 o una referencia de imagen completa.";
+
+/* Added since 4.6.2 — new-session greetings (one is picked at random) */
+"What are we building today?" = "¿Qué construimos hoy?";
+"Let's build something." = "Construyamos algo.";
+"What's on your mind?" = "¿Qué tienes en mente?";
+"Where should we start?" = "¿Por dónde empezamos?";
+"What would you like to make?" = "¿Qué te gustaría crear?";
+"Ready when you are." = "Listo cuando tú lo estés.";
+"What's the plan?" = "¿Cuál es el plan?";
+"Let's get to work." = "Manos a la obra.";
+"What shall we tackle first?" = "¿Qué abordamos primero?";
+"Tell me what you need." = "Dime qué necesitas.";
+"What are we working on?" = "¿En qué estamos trabajando?";
+"Let's make something great." = "Hagamos algo genial.";
+"What needs doing?" = "¿Qué hay que hacer?";
+"What's next?" = "¿Qué sigue?";
+"Got something in mind?" = "¿Tienes algo en mente?";
+"Let's ship something." = "Lancemos algo.";
+"What should we fix today?" = "¿Qué arreglamos hoy?";
+"Where do we begin?" = "¿Dónde empezamos?";
+"What can we improve?" = "¿Qué podemos mejorar?";
+"Let's write some code." = "Escribamos algo de código.";
+"What are you working on?" = "¿En qué estás trabajando?";
+"What's the task?" = "¿Cuál es la tarea?";
+"Let's dig in." = "Vamos a ello.";
+"What do you want to build?" = "¿Qué quieres construir?";
+"Let's solve something." = "Resolvamos algo.";
+"What are we shipping today?" = "¿Qué entregamos hoy?";
+"Ready to build?" = "¿Listo para construir?";
+"What's the idea?" = "¿Cuál es la idea?";
+"Let's start something new." = "Empecemos algo nuevo.";

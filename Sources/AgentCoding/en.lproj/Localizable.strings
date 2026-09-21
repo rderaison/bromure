@@ -2376,3 +2376,34 @@
 "Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1." = "Any OCI profile with any RSA key works (signatures are parsed, never verified); the default tenancy is ocid1.tenancy.oc1..flocilocal…, region us-ashburn-1.";
 "State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort." = "State persists on the cluster's default storage class. Services that spawn containers — %@ — use the node's Docker and are best effort.";
 "%@ version: a tag such as 2.1.0 or a full image reference." = "%@ version: a tag such as 2.1.0 or a full image reference.";
+
+/* Added since 4.6.2 — new-session greetings (one is picked at random) */
+"What are we building today?" = "What are we building today?";
+"Let's build something." = "Let's build something.";
+"What's on your mind?" = "What's on your mind?";
+"Where should we start?" = "Where should we start?";
+"What would you like to make?" = "What would you like to make?";
+"Ready when you are." = "Ready when you are.";
+"What's the plan?" = "What's the plan?";
+"Let's get to work." = "Let's get to work.";
+"What shall we tackle first?" = "What shall we tackle first?";
+"Tell me what you need." = "Tell me what you need.";
+"What are we working on?" = "What are we working on?";
+"Let's make something great." = "Let's make something great.";
+"What needs doing?" = "What needs doing?";
+"What's next?" = "What's next?";
+"Got something in mind?" = "Got something in mind?";
+"Let's ship something." = "Let's ship something.";
+"What should we fix today?" = "What should we fix today?";
+"Where do we begin?" = "Where do we begin?";
+"What can we improve?" = "What can we improve?";
+"Let's write some code." = "Let's write some code.";
+"What are you working on?" = "What are you working on?";
+"What's the task?" = "What's the task?";
+"Let's dig in." = "Let's dig in.";
+"What do you want to build?" = "What do you want to build?";
+"Let's solve something." = "Let's solve something.";
+"What are we shipping today?" = "What are we shipping today?";
+"Ready to build?" = "Ready to build?";
+"What's the idea?" = "What's the idea?";
+"Let's start something new." = "Let's start something new.";
