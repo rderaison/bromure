@@ -61,7 +61,7 @@ struct PadHostMirror: View {
             }
             controller.foregroundKick()
         }
-        .alert(item: topPrompt) { decisionAlert($0) }
+        .decisionPrompts(controller)
         .sheet(item: $workspaceEdit) { edit in
             WorkspaceEditorSheet(controller: controller, editing: edit.editingID) {
                 workspaceEdit = nil
@@ -335,32 +335,6 @@ struct PadHostMirror: View {
         return deepLinkWindow
     }
 
-    // MARK: Decision prompts (same wire as the iPhone mirror / macOS NSAlert)
-
-    private var topPrompt: Binding<RemoteHostController.DecisionPrompt?> {
-        Binding(get: { controller.decisionPrompts.first }, set: { _ in })
-    }
-
-    private func decisionAlert(_ prompt: RemoteHostController.DecisionPrompt) -> Alert {
-        let buttons = prompt.buttons
-        let primaryIsDestructive = buttons.first?.lowercased().contains("wipe") == true
-        if buttons.count >= 2 {
-            let primary: Alert.Button = primaryIsDestructive
-                ? .destructive(Text(buttons[0])) { controller.answerPrompt(prompt.id, choice: 0) }
-                : .default(Text(buttons[0])) { controller.answerPrompt(prompt.id, choice: 0) }
-            return Alert(
-                title: Text(prompt.title),
-                message: Text(prompt.message),
-                primaryButton: primary,
-                secondaryButton: .cancel(Text(buttons[1])) {
-                    controller.answerPrompt(prompt.id, choice: 1)
-                })
-        }
-        return Alert(
-            title: Text(prompt.title),
-            message: Text(prompt.message),
-            dismissButton: .default(Text(buttons.first ?? "OK")) {
-                controller.answerPrompt(prompt.id, choice: 0)
-            })
-    }
+    // Decision prompts: `.decisionPrompts(controller)` above — the same
+    // multi-button alert as the iPhone mirror (HostMirrorScreen.swift).
 }

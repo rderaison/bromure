@@ -8268,6 +8268,55 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// modes and routing recomputed from the global Models settings); saving
     /// that copy persisted the projection into the workspace, so a first boot
     /// silently turned "Claude Code only" into "every agent, Ready".
+    /// The base on disk is newer than the one this workspace's disk was
+    /// cloned from, and the user hasn't said "No" to this very base or
+    /// "Remind me later" within the day: the upgrade offer is due.
+    func baseImageUpgradeOfferDue(_ profile: Profile, current: String?) -> Bool {
+        guard FileManager.default.fileExists(atPath: store.diskURL(for: profile).path),
+              let recorded = profile.baseImageVersionAtClone,
+              let current, recorded != current else { return false }
+        if profile.baseImageUpgradeDeclinedFor == current { return false }
+        if let until = profile.baseImageUpgradeRemindAfter, until > Date() { return false }
+        return true
+    }
+
+    /// The upgrade offer's buttons, in order — shared by the local alert
+    /// and the fat-client (broker) rendering. Index 0 upgrades; the other
+    /// two launch as-is and remember the answer (`recordBaseImageUpgradeAnswer`).
+    static let baseImageUpgradeButtons = ["Yes, upgrade", "No", "Remind me later"]
+
+    /// Apply the offer's answer: "Yes" resets the disk now; "No" keeps quiet
+    /// until a different base ships; "Remind me later" keeps quiet until the
+    /// next boot after a day. Answers are stored on the STORED record (see
+    /// `stampBaseImageVersionAtClone` for why not the launch-time copy).
+    /// The launch-time copy is updated too (`inout`): `launch` saves that
+    /// copy right after (`store.touch`), which would otherwise put the old
+    /// answer back over the stored record.
+    func applyBaseImageUpgradeAnswer(_ index: Int, profile: inout Profile, current: String) {
+        switch index {
+        case 0:
+            try? store.resetDisk(for: profile)
+            emitDiskResetEvent(profile: profile, reason: "base_image_drift")
+        case 1:
+            profile.baseImageUpgradeDeclinedFor = current
+            profile.baseImageUpgradeRemindAfter = nil
+            recordBaseImageUpgradeAnswer(profileID: profile.id, declinedFor: current, remindAfter: nil)
+        default:
+            let until = Date().addingTimeInterval(24 * 3600)
+            profile.baseImageUpgradeDeclinedFor = nil
+            profile.baseImageUpgradeRemindAfter = until
+            recordBaseImageUpgradeAnswer(profileID: profile.id, declinedFor: nil, remindAfter: until)
+        }
+    }
+
+    private func recordBaseImageUpgradeAnswer(profileID: UUID, declinedFor: String?, remindAfter: Date?) {
+        guard var p = store.loadAll().first(where: { $0.id == profileID }) else { return }
+        p.baseImageUpgradeDeclinedFor = declinedFor
+        p.baseImageUpgradeRemindAfter = remindAfter
+        try? store.save(p)
+        profiles = store.loadAll()
+    }
+
     func stampBaseImageVersionAtClone(_ version: String, profileID: UUID) {
         guard var p = store.loadAll().first(where: { $0.id == profileID }) else { return }
         p.baseImageVersionAtClone = version
@@ -8493,17 +8542,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // launch path now treats this like any first launch.
         }
 
+        var profile = profile
+
         // Drift check: if the base image has been rebuilt since this
-        // profile's disk was cloned, prompt to reset.
+        // profile's disk was cloned, offer the upgrade — unless the user
+        // already answered for this base or asked to be reminded later.
         let currentBaseVersion = readCurrentBaseVersion()
-        let diskExists = FileManager.default.fileExists(atPath: store.diskURL(for: profile).path)
-        if !preflightResolved, diskExists,
+        if !preflightResolved, baseImageUpgradeOfferDue(profile, current: currentBaseVersion),
            let recorded = profile.baseImageVersionAtClone,
-           let current = currentBaseVersion,
-           recorded != current {
+           let current = currentBaseVersion {
             if unattended {
                 // Nobody to ask: launch as-is — the disk is kept, the way the
-                // prompt's "Launch as-is" keeps it; a reset is the owner's call.
+                // prompt's "No" keeps it; an upgrade is the owner's call.
                 FileHandle.standardError.write(Data(
                     "[ac] '\(profile.name)' is on base v\(recorded), current v\(current) — unattended start launches as-is\n".utf8))
             } else {
@@ -8513,24 +8563,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let alert = NSAlert()
                 alert.messageText = title
                 alert.informativeText = message
-                alert.addButton(withTitle: "Reset and launch")
-                alert.addButton(withTitle: "Launch as-is")
-                alert.addButton(withTitle: "Cancel")
+                for b in Self.baseImageUpgradeButtons { alert.addButton(withTitle: b) }
+                let index: Int
                 switch alert.runModal() {
-                case .alertFirstButtonReturn:
-                    try? store.resetDisk(for: profile)
-                    emitDiskResetEvent(profile: profile, reason: "base_image_drift")
-                case .alertThirdButtonReturn:
-                    return
-                default:
-                    break
+                case .alertFirstButtonReturn: index = 0
+                case .alertSecondButtonReturn: index = 1
+                default: index = 2
                 }
+                applyBaseImageUpgradeAnswer(index, profile: &profile, current: current)
             }
         }
 
         try? store.touch(profile)
-
-        var profile = profile
 
         // Home-storage migration (virtiofs → ext4 image) is MANDATORY: a
         // legacy virtiofs home is live-mounted as the guest's `/home/ubuntu`,
@@ -10551,8 +10595,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// NSAlert and the fat-client (broker) rendering.
     private static func driftPromptParts(recorded: String, current: String)
         -> (title: String, message: String) {
-        ("Base image updated since this workspace was created.",
-         "This workspace is on base v\(recorded); the current base is v\(current). Reset the workspace disk to pick up the new base? (Resetting wipes anything you've installed inside the VM. Your project folder is untouched.)")
+        ("A newer base image is available.",
+         "This workspace runs base v\(recorded); v\(current) is on disk. Upgrade it now? Upgrading resets the workspace disk — anything installed inside the VM is wiped; your project folder is untouched. “No” keeps this base until the next one ships; “Remind me later” asks again on the first boot after tomorrow.")
     }
 
     /// True when `launch` would have to ask the user something before booting
@@ -10560,11 +10604,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// resolves these asynchronously before re-entering `launch`.
     @MainActor private func launchNeedsPreflightPrompt(_ profile: Profile) -> Bool {
         if SessionDisk.isCompromised(profile: profile, store: store) { return true }
-        if FileManager.default.fileExists(atPath: store.diskURL(for: profile).path),
-           let recorded = profile.baseImageVersionAtClone,
-           let current = readCurrentBaseVersion(),
-           recorded != current { return true }
-        return false
+        return baseImageUpgradeOfferDue(profile, current: readCurrentBaseVersion())
     }
 
     /// Async preflight for a REMOTE launch: run the compromise-wipe and
@@ -10574,26 +10614,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// gates don't re-ask.
     @MainActor private func resolveRemoteLaunchPrompts(
         _ profile: Profile, detached: Bool, freshBootFallback: Bool) async {
+        var profile = profile
         if SessionDisk.isCompromised(profile: profile, store: store) {
             guard await confirmWipeAndProceedAsync(profile: profile) else { return }
         }
-        if FileManager.default.fileExists(atPath: store.diskURL(for: profile).path),
-           let recorded = profile.baseImageVersionAtClone,
-           let current = readCurrentBaseVersion(),
-           recorded != current {
+        let current = readCurrentBaseVersion()
+        if baseImageUpgradeOfferDue(profile, current: current),
+           let recorded = profile.baseImageVersionAtClone, let current {
             let (title, message) = Self.driftPromptParts(recorded: recorded, current: current)
-            switch await PendingPromptBroker.shared.askAsync(
+            // Nobody listening answers "Remind me later": launch as-is, ask
+            // again after a day.
+            let index = await PendingPromptBroker.shared.askAsync(
                 profileID: profile.id, title: title, message: message,
-                buttons: ["Reset and launch", "Launch as-is", "Cancel"],
-                fallback: 2) {
-            case 0:
-                try? store.resetDisk(for: profile)
-                emitDiskResetEvent(profile: profile, reason: "base_image_drift")
-            case 2:
-                return
-            default:
-                break
-            }
+                buttons: Self.baseImageUpgradeButtons, fallback: 2)
+            applyBaseImageUpgradeAnswer(index, profile: &profile, current: current)
         }
         launch(profile, detached: detached, freshBootFallback: freshBootFallback,
                remoteInitiated: true, preflightResolved: true)

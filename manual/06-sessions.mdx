@@ -51,7 +51,7 @@ A launch can be preceded by one of these prompts:
 
 | Prompt | When it appears | Choices |
 | --- | --- | --- |
-| Base-image drift | The shared base image was rebuilt since this workspace's disk was cloned | **Reset and launch** (re-clone from the new base; home untouched) / **Launch as-is** / **Cancel** |
+| Newer base image | The shared base image was rebuilt since this workspace's disk was cloned | **Yes, upgrade** (re-clone from the new base; home untouched) / **No** (launch as-is; not asked again until a different base ships) / **Remind me later** (launch as-is; asked again on the first boot after a day) |
 | Compromised workspace | A previous session was flagged for credential exfiltration | Confirm a wipe of the disk, home, RAM snapshot, and per-launch shares before boot; settings, tokens, and SSH keys are kept. See [Credentials](08-credentials.mdx). |
 | Model still downloading | A required local model has not finished downloading | Launch is refused with an explanation. See [Local models](13-local-models.mdx). |
 | Disk full | The host volume has less than 1 GB free | Launch is refused with a clear error instead of wedging mid-session. |

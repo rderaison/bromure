@@ -160,9 +160,7 @@ struct HostMirrorScreen: View {
             }
             controller.foregroundKick()
         }
-        .alert(item: topPrompt) { prompt in
-            promptAlert(prompt)
-        }
+        .decisionPrompts(controller)
         .sheet(item: $workspaceEdit) { edit in
             WorkspaceEditorSheet(controller: controller, editing: edit.editingID) {
                 workspaceEdit = nil
@@ -391,37 +389,49 @@ struct HostMirrorScreen: View {
         }
     }
 
-    // MARK: Decision prompts (mirror of the macOS NSAlert path)
+}
 
-    private var topPrompt: Binding<RemoteHostController.DecisionPrompt?> {
-        Binding(
-            get: { controller.decisionPrompts.first },
-            set: { _ in })
+// MARK: - Decision prompts (mirror of the macOS NSAlert path)
+
+/// The server's pending prompt as a native alert with EVERY button it sent,
+/// in order — the base-image upgrade offer has three ("Yes, upgrade" / "No"
+/// / "Remind me later"), and collapsing to two used to lose the last one.
+/// A "wipe" first button is styled destructive; a "Cancel" button takes the
+/// cancel role. Shared by the iPhone and iPad mirrors.
+struct DecisionPromptAlert: ViewModifier {
+    let controller: RemoteHostController
+
+    private var shown: Binding<Bool> {
+        // Dismissal is the answer itself (the prompt leaves the list); a
+        // swipe-away can't happen on an alert.
+        Binding(get: { controller.decisionPrompts.first != nil }, set: { _ in })
     }
 
-    private func promptAlert(_ prompt: RemoteHostController.DecisionPrompt) -> Alert {
-        // Two-button prompts map to the native alert; more are collapsed to the
-        // first two (destructive-looking first title is styled cautiously).
-        let buttons = prompt.buttons
-        let primaryIsDestructive = buttons.first?.lowercased().contains("wipe") == true
-        if buttons.count >= 2 {
-            let primary: Alert.Button = primaryIsDestructive
-                ? .destructive(Text(buttons[0])) { controller.answerPrompt(prompt.id, choice: 0) }
-                : .default(Text(buttons[0])) { controller.answerPrompt(prompt.id, choice: 0) }
-            return Alert(
-                title: Text(prompt.title),
-                message: Text(prompt.message),
-                primaryButton: primary,
-                secondaryButton: .cancel(Text(buttons[1])) {
-                    controller.answerPrompt(prompt.id, choice: 1)
-                })
+    func body(content: Content) -> some View {
+        content.alert(controller.decisionPrompts.first?.title ?? "",
+                      isPresented: shown,
+                      presenting: controller.decisionPrompts.first) { prompt in
+            ForEach(Array(prompt.buttons.enumerated()), id: \.offset) { i, title in
+                Button(title, role: Self.role(title, index: i)) {
+                    controller.answerPrompt(prompt.id, choice: i)
+                }
+            }
+        } message: { prompt in
+            Text(prompt.message)
         }
-        return Alert(
-            title: Text(prompt.title),
-            message: Text(prompt.message),
-            dismissButton: .default(Text(buttons.first ?? "OK")) {
-                controller.answerPrompt(prompt.id, choice: 0)
-            })
+    }
+
+    private static func role(_ title: String, index: Int) -> ButtonRole? {
+        let low = title.lowercased()
+        if index == 0, low.contains("wipe") { return .destructive }
+        if low == "cancel" { return .cancel }
+        return nil
+    }
+}
+
+extension View {
+    func decisionPrompts(_ controller: RemoteHostController) -> some View {
+        modifier(DecisionPromptAlert(controller: controller))
     }
 }
 

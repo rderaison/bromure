@@ -1592,6 +1592,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// disk was clonefile()'d from base.img. Used to detect when the base
     /// has been rebuilt since the clone (so we can offer to reset).
     public var baseImageVersionAtClone: String?
+    /// The base version the user answered "No" to upgrading to: the offer
+    /// stays quiet until a different base is on disk.
+    public var baseImageUpgradeDeclinedFor: String?
+    /// "Remind me later": the offer stays quiet until this moment has
+    /// passed — so the next boot after it, whichever comes last.
+    public var baseImageUpgradeRemindAfter: Date?
     /// Which workspaces agents here may reach — delegate work into, ask a
     /// session of by @nickname. nil = every workspace (the default); a list
     /// names the only ones (empty = none but this one).
@@ -1831,6 +1837,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
         baseImageVersionAtClone: String? = nil,
+        baseImageUpgradeDeclinedFor: String? = nil,
+        baseImageUpgradeRemindAfter: Date? = nil,
         agentReach: [UUID]? = nil,
         color: ProfileColor = .blue,
         comments: String = "",
@@ -1913,6 +1921,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.baseImageVersionAtClone = baseImageVersionAtClone
+        self.baseImageUpgradeDeclinedFor = baseImageUpgradeDeclinedFor
+        self.baseImageUpgradeRemindAfter = baseImageUpgradeRemindAfter
         self.agentReach = agentReach
         self.color = color
         self.comments = comments
@@ -1948,6 +1958,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case folderPath  // legacy: single folder, migrated to folderPaths
         case folderPaths
         case createdAt, lastUsedAt, baseImageVersionAtClone, agentReach, color, comments
+        case baseImageUpgradeDeclinedFor, baseImageUpgradeRemindAfter
         case memoryGB, nativeTerminal, gitUserName, gitUserEmail, importedConfigFiles
         case useTerminalAppDefaults, customFontFamily, customFontSize
         case customBackgroundHex, customForegroundHex, fontLigatures
@@ -2029,6 +2040,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         createdAt       = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         lastUsedAt      = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         baseImageVersionAtClone = try c.decodeIfPresent(String.self, forKey: .baseImageVersionAtClone)
+        baseImageUpgradeDeclinedFor = try c.decodeIfPresent(String.self, forKey: .baseImageUpgradeDeclinedFor)
+        baseImageUpgradeRemindAfter = try c.decodeIfPresent(Date.self, forKey: .baseImageUpgradeRemindAfter)
         agentReach      = try c.decodeIfPresent([UUID].self, forKey: .agentReach)
         color           = try c.decodeIfPresent(ProfileColor.self, forKey: .color) ?? .blue
         comments        = try c.decodeIfPresent(String.self, forKey: .comments) ?? ""
@@ -2141,6 +2154,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(createdAt, forKey: .createdAt)
         try c.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)
         try c.encodeIfPresent(baseImageVersionAtClone, forKey: .baseImageVersionAtClone)
+        try c.encodeIfPresent(baseImageUpgradeDeclinedFor, forKey: .baseImageUpgradeDeclinedFor)
+        try c.encodeIfPresent(baseImageUpgradeRemindAfter, forKey: .baseImageUpgradeRemindAfter)
         try c.encodeIfPresent(agentReach, forKey: .agentReach)
         try c.encode(color, forKey: .color)
         try c.encode(comments, forKey: .comments)
