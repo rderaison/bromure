@@ -2378,3 +2378,11 @@
 "The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "Die Linux-Maschine hinter dieser Sitzung: ihr Terminal-Tab in der Maschinenliste (⌥⌘U)";
 "Or open Linux (⌥⌘U) to answer in the terminal." = "Oder öffnen Sie Linux (⌥⌘U), um im Terminal zu antworten.";
 "New machine…" = "Neue Maschine…";
+
+/* Added 2026-09-22 — Preferences window targets a remote server */
+"Preferences — %@" = "Einstellungen — %@";
+"Couldn't save the preferences on %@." = "Die Einstellungen konnten auf %@ nicht gesichert werden.";
+"Settings for:" = "Einstellungen für:";
+"This Mac" = "Dieser Mac";
+"Couldn't load the remote preferences" = "Die Einstellungen des Remote-Servers konnten nicht geladen werden";
+"Loading preferences from %@…" = "Einstellungen werden von %@ geladen …";

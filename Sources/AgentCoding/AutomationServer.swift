@@ -153,6 +153,13 @@ final class ACAutomationServer {
     /// Reboot a running workspace in place (`soft` | `hard`). Async — a fresh
     /// VM has to boot before it returns.
     var onRebootVM: ((_ idOrName: String, _ mode: String) async -> [String: Any])?
+    /// The preferences template (Bromure → Preferences…) in the same redacted
+    /// full-document shape as `onExportProfile`, so a fat client can edit THIS
+    /// host's defaults with the same editor it uses for a workspace.
+    var onExportTemplate: (() -> [String: Any]?)?
+    /// Replace the preferences template (full-document, secret-preserving —
+    /// blank secrets keep their stored value). Returns `{ok}` or `{ok:false, error}`.
+    var onUpdateTemplate: ((_ doc: [String: Any]) -> [String: Any])?
 
     // MITM trace inspection (CLI `trace …`) + fusion toggle (`vm fusion`).
     var onListTrace: ((_ profileKey: String?) -> [[String: Any]])?
@@ -508,6 +515,30 @@ final class ACAutomationServer {
                 ?? ["ok": false, "error": "unavailable"]
             let ok = (result["ok"] as? Bool) ?? false
             sendResponse(fd: fd, status: ok ? 201 : 400, body: result)
+
+        // The preferences template: GET = full Profile JSON (secrets blanked),
+        // PUT = secret-preserving replace. This is what the fat client's
+        // Preferences window edits when it targets a remote host.
+        case ("GET", "/preferences"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            if let d = DispatchQueue.main.sync(execute: { self.onExportTemplate?() }) {
+                sendResponse(fd: fd, status: 200, body: d)
+            } else {
+                sendResponse(fd: fd, status: 503, body: ["error": "unavailable"])
+            }
+
+        case ("PUT", "/preferences"), ("PATCH", "/preferences"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let result = DispatchQueue.main.sync(execute: { self.onUpdateTemplate?(bodyJSON) })
+                ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: result)
 
         case ("GET", "/sessions"):
             let sessions = DispatchQueue.main.sync { self.onListSessions?() ?? [] }

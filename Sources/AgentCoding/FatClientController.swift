@@ -191,6 +191,28 @@ final class RemoteHostController {
     func cancelModelDownload(repo: String) { send("POST", "/models/cancel", body: ["repo": repo]) }
     func discardModelDownload(repo: String) { send("POST", "/models/discard", body: ["repo": repo]) }
     func removeServerModel(repo: String) { send("POST", "/models/remove", body: ["repo": repo]) }
+
+    /// Route a profile editor's Local Models pane to THIS remote: the engine
+    /// and its downloads live on the server, so the RAM-fit gate must use the
+    /// server's memory and downloads must run server-side (not fill the
+    /// client's disk). Reads observe the mirrored state live. Shared by the
+    /// mirror window's workspace editors and the remote-targeted Preferences
+    /// window.
+    func modelBackend() -> RemoteModelBackend {
+        RemoteModelBackend(
+            unifiedMemGB: { [weak self] in self?.serverUnifiedMemGB ?? 0 },
+            state: { [weak self] repo in self?.serverModelStates[repo] },
+            isInstalled: { [weak self] repo in self?.serverInstalledModels.contains(repo) ?? false },
+            download: { [weak self] model in
+                self?.downloadModel(repo: model.repo,
+                                    totalBytes: Int64(model.downloadGB * 1_000_000_000)) },
+            cancel: { [weak self] repo in self?.cancelModelDownload(repo: repo) },
+            discard: { [weak self] repo in self?.discardModelDownload(repo: repo) },
+            remove: { [weak self] model in self?.removeServerModel(repo: model.repo) },
+            installedRepos: { [weak self] in Array(self?.serverInstalledModels ?? []) },
+            removeRepo: { [weak self] repo in self?.removeServerModel(repo: repo) },
+            installedSizeGB: { [weak self] repo in self?.serverModelSizesGB[repo] })
+    }
 #endif
 
     /// Ask the remote to start a registration; the URL arrives via /state.
@@ -1409,6 +1431,35 @@ final class RemoteHostController {
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "save failed (HTTP \(resp.status))")
         }
         DispatchQueue.main.async { [weak self] in self?.pollOnce() }
+        return resp.json
+    }
+
+    /// The remote's preferences template (its Bromure → Preferences… defaults),
+    /// secrets blanked — the template counterpart of `fetchProfileDoc`.
+    func fetchPreferencesDoc() async throws -> [String: Any] {
+        let host = self.host
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("GET", "/preferences")
+        }.value
+        guard resp.status == 200 else {
+            throw ACAppDelegate.GuestExecError.commandFailed(
+                exitCode: 1, stderr: (resp.json["error"] as? String) ?? "preferences fetch failed")
+        }
+        return resp.json
+    }
+
+    /// Secret-preserving whole-document save of the remote's preferences
+    /// template (the counterpart of `fetchPreferencesDoc`).
+    @discardableResult
+    func savePreferencesDoc(_ doc: [String: Any]) async throws -> [String: Any] {
+        let host = self.host
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("PUT", "/preferences", body: doc)
+        }.value
+        guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
+            throw ACAppDelegate.GuestExecError.commandFailed(
+                exitCode: 1, stderr: (resp.json["error"] as? String) ?? "save failed (HTTP \(resp.status))")
+        }
         return resp.json
     }
 
@@ -2676,8 +2727,9 @@ final class RemoteHostWindow: NSWindow {
 
     /// Confirm on this Mac, then ask the remote to start the flow. The remote
     /// skips its own explainer for a client-initiated run, so this alert is the
-    /// only one the user sees.
-    private func beginRemoteRegistration(_ provider: SubscriptionProvider, _ profileID: Profile.ID) {
+    /// only one the user sees. `profileID == nil` registers into the remote's
+    /// SHARED store (its Preferences defaults) rather than one workspace's.
+    func beginRemoteRegistration(_ provider: SubscriptionProvider, _ profileID: Profile.ID?) {
         let a = NSAlert()
         a.messageText = String(format: NSLocalizedString("Register with %@ on %@?", comment: ""),
                                provider.displayName, controller.host.name)
@@ -2836,22 +2888,7 @@ final class RemoteHostWindow: NSWindow {
     /// installed/download state mirrors /state.localModels. Shared by the
     /// edit and New Workspace editors — the latter shipping without it was
     /// why a fresh workspace judged XL models against the CLIENT's RAM.
-    private func remoteModelBackend() -> RemoteModelBackend {
-        let ctrl = self.controller
-        return RemoteModelBackend(
-            unifiedMemGB: { [weak ctrl] in ctrl?.serverUnifiedMemGB ?? 0 },
-            state: { [weak ctrl] repo in ctrl?.serverModelStates[repo] },
-            isInstalled: { [weak ctrl] repo in ctrl?.serverInstalledModels.contains(repo) ?? false },
-            download: { [weak ctrl] model in
-                ctrl?.downloadModel(repo: model.repo,
-                                    totalBytes: Int64(model.downloadGB * 1_000_000_000)) },
-            cancel: { [weak ctrl] repo in ctrl?.cancelModelDownload(repo: repo) },
-            discard: { [weak ctrl] repo in ctrl?.discardModelDownload(repo: repo) },
-            remove: { [weak ctrl] model in ctrl?.removeServerModel(repo: model.repo) },
-            installedRepos: { [weak ctrl] in Array(ctrl?.serverInstalledModels ?? []) },
-            removeRepo: { [weak ctrl] repo in ctrl?.removeServerModel(repo: repo) },
-            installedSizeGB: { [weak ctrl] repo in ctrl?.serverModelSizesGB[repo] })
-    }
+    private func remoteModelBackend() -> RemoteModelBackend { controller.modelBackend() }
 
     private func presentNewWorkspaceEditor(draft: Profile) {
         if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }

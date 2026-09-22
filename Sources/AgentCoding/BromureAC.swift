@@ -3144,6 +3144,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 switch which {
                 case "picker": window = self.mainWindow
                 case "editor": window = self.editorWindow
+                case "preferences":
+                    // Bromure → Preferences… as currently open (E2E hook for
+                    // the local/remote target picker). Opens it if needed.
+                    if self.preferencesWindow == nil { self.openPreferencesAction(nil) }
+                    window = self.preferencesWindow
                 case "sheet":  window = self.editorWindow?.attachedSheet
                 case "board":
                     // Kanban board as the stage surface, then the unified
@@ -3730,6 +3735,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let win = self.remoteHostWindows[host.id] else {
                     return ["error": "mirror window not open"]
                 }
+                if (params["action"] as? String) == "open-preferences" {
+                    // ⌘, with THIS mirror window focused: Preferences must
+                    // open targeting the remote (E2E hook for the picker).
+                    win.makeKeyAndOrderFront(nil)
+                    self.openPreferencesAction(nil)
+                    return ["ok": self.preferencesWindow != nil,
+                            "title": self.preferencesWindow?.title ?? ""]
+                }
                 return win.debugPerform((params["action"] as? String) ?? "", params)
             }
         }
@@ -3798,6 +3811,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onDeleteProfile = { [weak self] key in
             self?.automationDeleteProfile(key) ?? ["ok": false, "error": "unavailable"]
+        }
+        server.onExportTemplate = { [weak self] in self?.automationTemplateExport() }
+        server.onUpdateTemplate = { [weak self] doc in
+            self?.automationUpdateTemplate(doc) ?? ["ok": false, "error": "unavailable"]
         }
         server.onRebootVM = { [weak self] idOrName, mode in
             await self?.automationRebootVM(idOrName: idOrName, mode: mode) ?? ["ok": false, "error": "unavailable"]
@@ -5611,6 +5628,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         if win === remoteConnectWindow { remoteConnectWindow = nil; return }
+        if win === preferencesWindow { preferencesWindow = nil; return }
         // Registration throwaway window: route to its own teardown (destroys
         // the scratch VM + dir) instead of the normal per-profile session
         // cleanup, which would suspend/save state and could terminate the app.
@@ -6583,23 +6601,92 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         pane(for: profile.id)?.model.fusionEngaged = engaged
     }
 
+    /// Which Bromure a Preferences window edits: this Mac's template, or a
+    /// connected remote's (its `/preferences` over the mirror's tunnel).
+    enum PreferencesTarget: Hashable {
+        case local
+        case remote(UUID)
+    }
+
+    /// Bromure → Preferences… (⌘,). With no mirror window open this is the
+    /// plain local editor. With remotes open, a picker at the top chooses
+    /// whose defaults the window edits — preselected to the remote whose
+    /// mirror window had focus when the menu fired, else this Mac — so ⌘,
+    /// from a fat-client window edits THAT server's settings, not this Mac's.
     @objc func openPreferencesAction(_ sender: Any?) {
         if let win = preferencesWindow {
             win.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
+        let focusedMirror = (NSApp.keyWindow as? RemoteHostWindow)
+            ?? (NSApp.mainWindow as? RemoteHostWindow)
+        let initial: PreferencesTarget = focusedMirror.map { .remote($0.controller.host.id) } ?? .local
+        let hosts = remoteHostWindows.values
+            .map { PreferencesRemoteHost(id: $0.controller.host.id, name: $0.controller.host.name) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: hosts.isEmpty ? 620 : 664),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
-        win.title = NSLocalizedString("Bromure — Preferences",
-                                       comment: "Preferences window title")
+        win.title = Self.preferencesTitle(for: initial, hosts: hosts)
         win.center()
         win.isReleasedWhenClosed = false
         win.delegate = self
+        win.contentView = NSHostingView(rootView: PreferencesWindowView(
+            hosts: hosts,
+            initialTarget: initial,
+            makeLocalEditor: { [weak self] in
+                self.map { AnyView($0.makeLocalPreferencesEditor()) } ?? AnyView(EmptyView())
+            },
+            loadRemote: { [weak self] hostID in
+                guard let self, let c = self.remoteController(for: hostID) else {
+                    throw GuestExecError.connectionFailed
+                }
+                let doc = try await c.fetchPreferencesDoc()
+                let data = try JSONSerialization.data(withJSONObject: doc)
+                let profile = try JSONDecoder.iso8601().decode(Profile.self, from: data)
+                let refs = (doc["configuredCredentialRefs"] as? [String])?
+                    .compactMap { CredentialRef(wireID: $0) }
+                return RemotePreferences(profile: profile, credentialRefs: refs)
+            },
+            makeRemoteEditor: { [weak self] hostID, prefs in
+                self.map { AnyView($0.makeRemotePreferencesEditor(hostID: hostID, prefs)) }
+                    ?? AnyView(EmptyView())
+            },
+            onTargetChange: { [weak win] target in
+                win?.title = Self.preferencesTitle(for: target, hosts: hosts)
+            }
+        ))
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        preferencesWindow = win
+    }
+
+    private static func preferencesTitle(for target: PreferencesTarget,
+                                         hosts: [PreferencesRemoteHost]) -> String {
+        if case .remote(let id) = target, let h = hosts.first(where: { $0.id == id }) {
+            return String(format: NSLocalizedString("Preferences — %@",
+                                                    comment: "Preferences window title for a remote host"),
+                          h.name)
+        }
+        return NSLocalizedString("Bromure — Preferences", comment: "Preferences window title")
+    }
+
+    /// The mirror controller for an open remote-host window.
+    private func remoteController(for hostID: UUID) -> RemoteHostController? {
+        remoteHostWindows[hostID]?.controller
+    }
+
+    private func closePreferencesWindow() {
+        preferencesWindow?.close()
+        preferencesWindow = nil
+    }
+
+    /// The editor over THIS Mac's template — what Preferences… always was.
+    private func makeLocalPreferencesEditor() -> ProfileEditorView {
         let template = store.loadTemplate()
-        win.contentView = NSHostingView(rootView: ProfileEditorView(
+        return ProfileEditorView(
             profile: template,
             terminalDefaults: terminalDefaults,
             storageContext: nil,
@@ -6612,13 +6699,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                     message: "Couldn't save preferences.")
                     return
                 }
-                self.preferencesWindow?.close()
-                self.preferencesWindow = nil
+                self.closePreferencesWindow()
             },
-            onCancel: { [weak self] in
-                self?.preferencesWindow?.close()
-                self?.preferencesWindow = nil
-            },
+            onCancel: { [weak self] in self?.closePreferencesWindow() },
             claudeAccountSavedAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt },
             onRegisterClaude: { [weak self] in
                 self?.beginSubscriptionRegistration(provider: .claude, scope: .alwaysShared)
@@ -6658,10 +6741,56 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     await MainActor.run { completion(m) }
                 }
             }
-        ))
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        preferencesWindow = win
+        )
+    }
+
+    /// The same editor over a REMOTE's template, round-tripped through its
+    /// `/preferences` (secrets blanked on the way in, preserved on save —
+    /// exactly like the mirror window's workspace editor). Subscription
+    /// registration runs on the remote into its SHARED store (profile nil);
+    /// the Local Models pane targets the remote's engine. Host-only affordances
+    /// with no remote counterpart (forget, SSH-key import) stay hidden.
+    private func makeRemotePreferencesEditor(hostID: UUID, _ prefs: RemotePreferences) -> ProfileEditorView {
+        let controller = remoteController(for: hostID)
+        let window = remoteHostWindows[hostID]
+        return ProfileEditorView(
+            profile: prefs.profile,
+            isNew: false,
+            terminalDefaults: terminalDefaults,
+            storageContext: nil,
+            remoteCredentialRefs: prefs.credentialRefs,
+            onSave: { [weak self] edited, _ in
+                guard let self, let controller else { return }
+                guard var doc = Self.codableToDict(edited) else { return }
+                // An empty kubeconfigs array is omitted by the encoder; send it
+                // explicitly so removing the last context sticks server-side.
+                if edited.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
+                Task { @MainActor [weak self] in
+                    do {
+                        try await controller.savePreferencesDoc(doc)
+                        self?.closePreferencesWindow()
+                    } catch {
+                        self?.showError(error, message: String(
+                            format: NSLocalizedString("Couldn't save the preferences on %@.", comment: ""),
+                            controller.host.name))
+                    }
+                }
+            },
+            onCancel: { [weak self] in self?.closePreferencesWindow() },
+            claudeAccountSavedAt: { [weak controller] in controller?.subscriptionStatus["claude"]?.registeredAt },
+            claudeReauthRequiredAt: { [weak controller] in controller?.subscriptionStatus["claude"]?.reauthRequiredAt },
+            codexReauthRequiredAt: { [weak controller] in controller?.subscriptionStatus["codex"]?.reauthRequiredAt },
+            grokReauthRequiredAt: { [weak controller] in controller?.subscriptionStatus["grok"]?.reauthRequiredAt },
+            kimiReauthRequiredAt: { [weak controller] in controller?.subscriptionStatus["kimi"]?.reauthRequiredAt },
+            onRegisterClaude: { [weak window] in window?.beginRemoteRegistration(.claude, nil) },
+            codexAccountSavedAt: { [weak controller] in controller?.subscriptionStatus["codex"]?.registeredAt },
+            onRegisterCodex: { [weak window] in window?.beginRemoteRegistration(.codex, nil) },
+            grokAccountSavedAt: { [weak controller] in controller?.subscriptionStatus["grok"]?.registeredAt },
+            onRegisterGrok: { [weak window] in window?.beginRemoteRegistration(.grok, nil) },
+            kimiAccountSavedAt: { [weak controller] in controller?.subscriptionStatus["kimi"]?.registeredAt },
+            onRegisterKimi: { [weak window] in window?.beginRemoteRegistration(.kimi, nil) },
+            localModelsRemoteAny: controller?.modelBackend()
+        )
     }
 
     @objc func openRemoteAccessAction(_ sender: Any?) {
@@ -7821,6 +7950,61 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // the REAL profile so a remote pane can render every configured credential.
         dict["configuredCredentialRefs"] = p.configuredCredentials().map(\.id)
         return dict
+    }
+
+    /// The preferences template (Bromure → Preferences…) in the same redacted
+    /// full-document shape as `automationProfileExport`, so a fat client's
+    /// Preferences window can edit THIS host's defaults with the same editor
+    /// and PUT them back through `automationUpdateTemplate`.
+    @MainActor
+    func automationTemplateExport() -> [String: Any]? {
+        let p = store.loadTemplate()
+        var stripped = p
+        _ = ProfileSecrets.extract(stripping: &stripped)   // blank all secrets
+        stripped.kubeconfigs = p.kubeconfigs.map { $0.redactedIdentity() }
+        guard let data = try? JSONEncoder.iso8601().encode(stripped),
+              var dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        dict["_secretsRedacted"] = true
+        dict["configuredCredentialRefs"] = p.configuredCredentials().map(\.id)
+        return dict
+    }
+
+    /// Replace the preferences template from a document round-tripped through
+    /// `automationTemplateExport`: blank secrets keep their stored value, typed
+    /// ones replace it (the same merge `automationUpsertProfile` does for a
+    /// workspace). `saveTemplate` re-forces the template's identity, so a
+    /// client can't turn the template into a shadow of a real workspace.
+    @MainActor
+    func automationUpdateTemplate(_ rawDoc: [String: Any]) -> [String: Any] {
+        var doc = rawDoc
+        doc.removeValue(forKey: "_secretsRedacted")
+        doc.removeValue(forKey: "generateSSH")
+        doc.removeValue(forKey: "configuredCredentialRefs")
+        guard let data = try? JSONSerialization.data(withJSONObject: doc),
+              var incoming = try? JSONDecoder.iso8601().decode(Profile.self, from: data) else {
+            return ["ok": false, "error": "Invalid preferences document"]
+        }
+        var existing = store.loadTemplate()
+        let existingSecrets = ProfileSecrets.extract(stripping: &existing)
+        var incomingCopy = incoming
+        let incomingSecrets = ProfileSecrets.extract(stripping: &incomingCopy)
+        var merged = existingSecrets
+        merged.overlay(with: incomingSecrets)
+        merged.apply(to: &incoming)
+        // Only an explicitly-sent kubeconfigs array is authoritative (removing a
+        // context in the redacted editor must stick); an absent key = untouched.
+        if let sentKube = rawDoc["kubeconfigs"] as? [[String: Any]] {
+            let keep = Set(sentKube.compactMap { ($0["id"] as? String).flatMap { UUID(uuidString: $0) } })
+            incoming.kubeconfigs.removeAll { !keep.contains($0.id) }
+        }
+        do {
+            try store.saveTemplate(incoming)
+        } catch {
+            return ["ok": false, "error": error.localizedDescription]
+        }
+        return ["ok": true]
     }
 
     /// Per-field categories that change behaviour inside the booted
