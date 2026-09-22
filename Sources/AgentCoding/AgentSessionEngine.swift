@@ -49,8 +49,10 @@ final class AgentSessionEngine {
     /// Create the session record and launch it. The record is on screen
     /// immediately (the chat surface with the opening message); the tab
     /// binds to it as soon as the workspace reports it.
+    /// `remotely`: a fat client asked (over the control socket) — the boot
+    /// this may need routes its decision prompts to that client.
     @discardableResult
-    func start(_ req: NewSessionRequest) -> UUID {
+    func start(_ req: NewSessionRequest, remotely: Bool = false) -> UUID {
         let message = req.openingMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
         var cwd = req.cwd.trimmingCharacters(in: .whitespaces)
         // No folder named: every session gets a fresh one of its own in the
@@ -70,7 +72,7 @@ final class AgentSessionEngine {
         s.launchingSince = Date()
         store.upsert(s)
         BACDebug.log("sessions", "start “\(title)” (\(req.tool.rawValue) in \(cwd))")
-        launch(s.id, prompt: message ?? "", flags: "", attachments: req.attachments)
+        launch(s.id, prompt: message ?? "", flags: "", attachments: req.attachments, remotely: remotely)
         return s.id
     }
 
@@ -106,7 +108,7 @@ final class AgentSessionEngine {
     /// from that tab. nil when the parent has no folder to branch.
     @discardableResult
     func startWorktree(from parentID: UUID, name: String, tool: Profile.Tool,
-                       message: String?) -> UUID? {
+                       message: String?, remotely: Bool = false) -> UUID? {
         guard let parent = store.session(parentID), SessionHome.hasFolder(parent) else { return nil }
         let title = name.trimmingCharacters(in: .whitespaces).nonEmpty
             ?? String(format: NSLocalizedString("Worktree of %@", comment: "session title"), parent.title)
@@ -118,7 +120,8 @@ final class AgentSessionEngine {
         s.launchingSince = Date()
         store.upsert(s)
         BACDebug.log("sessions", "start worktree “\(title)” off “\(parent.title)” (\(tool.rawValue))")
-        launch(s.id, prompt: message ?? "", flags: "", worktreeSlug: Self.worktreeSlug(title))
+        launch(s.id, prompt: message ?? "", flags: "", worktreeSlug: Self.worktreeSlug(title),
+               remotely: remotely)
         return s.id
     }
 
@@ -163,7 +166,8 @@ final class AgentSessionEngine {
     /// Reopen the agent's last conversation — and say `message`, when there
     /// is one, the moment the agent can hear it: right away if it's alive,
     /// else once the relaunch has it running.
-    func resume(_ id: UUID, message: String? = nil, quietly: Bool = false) {
+    /// `remotely`: a fat client asked — see `start`.
+    func resume(_ id: UUID, message: String? = nil, quietly: Bool = false, remotely: Bool = false) {
         guard let s = store.session(id), let delegate else { return }
         if s.folderMissing == true {
             store.mutate(id) { $0.lastError = NSLocalizedString(
@@ -176,7 +180,7 @@ final class AgentSessionEngine {
         BACDebug.log("sessions", "resume “\(s.title)”\(message == nil ? "" : " with a message")")
         Task { [weak self] in
             guard let self else { return }
-            guard await self.ensureUp(s.profileID, quietly: quietly) else {
+            guard await self.ensureUp(s.profileID, quietly: quietly, remotely: remotely) else {
                 self.store.mutate(id) { $0.lastError = NSLocalizedString(
                     "The workspace did not start in time", comment: "session resume") }
                 return
@@ -365,7 +369,8 @@ final class AgentSessionEngine {
     /// `worktreeSlug`: branch the folder into a worktree (the guest's
     /// worktree-create) instead of opening the agent in it (agent-tab).
     private func launch(_ id: UUID, prompt: String, flags: String, alreadyUp: Bool = false,
-                        worktreeSlug: String? = nil, attachments: [DroppedFile] = []) {
+                        worktreeSlug: String? = nil, attachments: [DroppedFile] = [],
+                        remotely: Bool = false) {
         Task { [weak self] in
             guard let self, let delegate = self.delegate, let s = self.store.session(id) else { return }
             @MainActor func fail(_ reason: String) {
@@ -375,7 +380,7 @@ final class AgentSessionEngine {
                 // A delegate's workspace is booted by an agent, not by a
                 // click: quietly, with the user's stage left where it is.
                 let quietly = self.store.session(id)?.parentSessionID != nil
-                guard await self.ensureUp(s.profileID, quietly: quietly) else {
+                guard await self.ensureUp(s.profileID, quietly: quietly, remotely: remotely) else {
                     fail(NSLocalizedString("The workspace did not start in time", comment: "session start"))
                     return
                 }
@@ -789,20 +794,32 @@ final class AgentSessionEngine {
     /// isn't. The interactive start, alerts and all, when this is the user's
     /// own click; `quietly` for what an agent set off (a delegate elsewhere,
     /// a peer woken for a notice): no prompts, and the booted workspace
-    /// stays off the stage — the user is looking at something else.
-    func ensureUp(_ profileID: UUID, quietly: Bool = false) async -> Bool {
+    /// stays off the stage — the user is looking at something else;
+    /// `remotely` for a fat client's click: the start's prompts go to that
+    /// client (`PendingPromptBroker`), never a modal on this Mac. Time the
+    /// client spends on such a prompt doesn't count against the boot.
+    func ensureUp(_ profileID: UUID, quietly: Bool = false, remotely: Bool = false) async -> Bool {
         guard let delegate else { return false }
         if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
             return true
         }
         if !pendingBoots.contains(profileID) {
             pendingBoots.insert(profileID)
-            if quietly { delegate.startProfileQuietly(profileID) } else { delegate.startProfile(profileID) }
+            if quietly {
+                delegate.startProfileQuietly(profileID)
+            } else if remotely {
+                delegate.startProfileRemotely(profileID)
+            } else {
+                delegate.startProfile(profileID)
+            }
         }
         defer { pendingBoots.remove(profileID) }
-        let deadline = Date().addingTimeInterval(Self.bootTimeout)
+        var deadline = Date().addingTimeInterval(Self.bootTimeout)
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: Self.bootPollInterval)
+            if remotely, PendingPromptBroker.shared.hasPending(profileID: profileID) {
+                deadline = Date().addingTimeInterval(Self.bootTimeout)
+            }
             if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
                 return true
             }

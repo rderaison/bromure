@@ -73,6 +73,12 @@ final class PendingPromptBroker {
         }
     }
 
+    /// True while a prompt about this workspace is still waiting for its
+    /// answer — a boot's watchdog holds off while the user reads it.
+    func hasPending(profileID: UUID) -> Bool {
+        prompts.values.contains { $0.profileID == profileID && $0.answer == nil }
+    }
+
     /// Deliver a client's answer. False for unknown/expired prompts or an
     /// out-of-range choice.
     func answer(id: String, choice: Int) -> Bool {

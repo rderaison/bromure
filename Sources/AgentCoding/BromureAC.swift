@@ -1121,6 +1121,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         launch(profile)
     }
 
+    /// A fat client's start (a session started or resumed over the control
+    /// socket): the same launch, but its decision prompts (compromise wipe,
+    /// base-image drift) go to that client through `PendingPromptBroker`
+    /// instead of an NSAlert on the server — a modal raised from the control
+    /// socket's main-queue callout holds the whole control plane, and the
+    /// client then reads "the server dropped the connection" while the
+    /// server sits on "A newer base image is available" until someone at
+    /// the Mac answers it.
+    func startProfileRemotely(_ id: Profile.ID) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        launch(profile, remoteInitiated: true)
+    }
+
     /// Automation-initiated start: boots an off workspace and resumes a
     /// suspended one, but never trades saved state for a cold boot — if the
     /// snapshot won't restore (config drift after an update, bad state), the
@@ -3947,16 +3960,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // the machine is up, like a local drop.
                     let attachments = ((body["attachments"] as? [[String: Any]]) ?? [])
                         .compactMap(DroppedFile.init(wire:))
+                    // `remotely`: the workspace boot this may need asks its
+                    // questions (base-image drift, compromise wipe) on the
+                    // client's screen, not in a modal on the server.
                     let sid = self.agentSessionEngine.start(.init(
                         profileID: profile.id, tool: tool,
                         cwd: body["cwd"] as? String ?? "~",
                         cloneURL: body["cloneURL"] as? String,
                         openingMessage: body["message"] as? String,
-                        attachments: attachments))
+                        attachments: attachments), remotely: true)
                     return ["ok": true, "id": sid.uuidString]
                 case (let sid?, "resume"):
                     guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
-                    self.agentSessionEngine.resume(sid, message: body["message"] as? String)
+                    self.agentSessionEngine.resume(sid, message: body["message"] as? String, remotely: true)
                     return ["ok": true]
                 case (let sid?, "close"):
                     guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
@@ -3970,7 +3986,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     else { return ["error": "name required"] }
                     let tool = (body["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) ?? parent.tool
                     guard let newID = self.agentSessionEngine.startWorktree(
-                        from: sid, name: name, tool: tool, message: body["message"] as? String)
+                        from: sid, name: name, tool: tool, message: body["message"] as? String,
+                        remotely: true)
                     else { return ["error": "the session has no folder to branch"] }
                     return ["ok": true, "id": newID.uuidString]
                 case (let sid?, "rename"):
@@ -4954,7 +4971,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 visible: host?.isVisible ?? false
             )
         }
-        launch(profile)
+        // Control-socket driven: decision prompts go to the broker (or take
+        // their safe fallback when nobody is listening), never a modal here.
+        launch(profile, remoteInitiated: true)
         // launch() is fire-and-forget; the pane appears asynchronously when the
         // VM pool warms up. Wait up to 30s for it to register so the API caller
         // gets a meaningful response.
@@ -8736,6 +8755,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if detached { detachSession(profile.id) } else if !quiet { revealSession(profile.id) }
             return
         }
+        // Running but detached (window was closed, VM kept alive). Asked to
+        // detach → it already is, nothing to do. Otherwise reattach a fresh
+        // window onto the live VM, with its tabs intact. Checked before the
+        // remote preflight: a live workspace is never asked the drift
+        // question (its answer would reset the disk under a running VM).
+        if let session = runningSessions[profile.id] {
+            if !detached { attachWindow(to: session, quiet: quiet) }
+            return
+        }
         // Remote-initiated launches arrive on a main-queue callout (the control
         // socket's Task job), where the sync prompt broker's run-loop pump
         // can't drain the main queue — /state and the answer route wedge, so
@@ -8749,13 +8777,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 await self?.resolveRemoteLaunchPrompts(
                     profile, detached: detached, freshBootFallback: freshBootFallback)
             }
-            return
-        }
-        // Running but detached (window was closed, VM kept alive). Asked to
-        // detach → it already is, nothing to do. Otherwise reattach a fresh
-        // window onto the live VM, with its tabs intact.
-        if let session = runningSessions[profile.id] {
-            if !detached { attachWindow(to: session, quiet: quiet) }
             return
         }
 
