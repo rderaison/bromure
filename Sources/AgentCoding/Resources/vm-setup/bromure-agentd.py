@@ -1963,6 +1963,17 @@ def _pretrust(tool, *dirs):
     concurrently-running interactive claude rewriting the file from memory
     (same caveat as _preaccept_yolo) — worst case the dialog appears,
     which is exactly today's behavior."""
+    if tool == "kimi":
+        # Bromure runs the agent in a disposable VM on a folder the user
+        # chose, so the "trust this folder" gate (an agent's protection for
+        # a HOST machine against an untrusted repo) has nothing to protect
+        # here — and a one-shot `kimi --prompt` never even asks: it silently
+        # skips every project-level MCP server (delegation, browser, board)
+        # and prints a warning. Trust every run directory up front.
+        for d in dirs:
+            if d:
+                _pretrust_kimi(d)
+        return
     if tool != "claude":
         return
     path = os.path.join(HOME, ".claude.json")
@@ -2175,6 +2186,51 @@ def _claude_nudge_keys():
     except OSError:
         pass
     return keys
+
+
+def _kimi_workdir_key(path):
+    """Kimi's `encodeWorkDirKey`: `wd_<slug>_<sha256(path)[:12]>` — the
+    slug is the lowercased basename with runs outside [a-z0-9._-] collapsed
+    to '-', trimmed, first 40 chars, trailing '-' trimmed ('workspace' for
+    an empty/dot name); the hash is over the path with trailing slashes
+    stripped. Same scheme as its sessions/wd_* directories."""
+    import hashlib
+    import re
+    p = path.rstrip("/") or path
+    base = os.path.basename(p).lower()
+    slug = re.sub(r"[^a-z0-9._-]+", "-", base).strip("-")[:40].rstrip("-")
+    if slug in ("", ".", ".."):
+        slug = "workspace"
+    return "wd_%s_%s" % (slug, hashlib.sha256(p.encode()).hexdigest()[:12])
+
+
+def _pretrust_kimi(cwd):
+    """Kimi Code remembers a trusted folder as a JSON document at
+    ~/.kimi-code/workspace-trust/<wd key> = {"root": <path>, "trustedAt":
+    <ms>} (verified live against 2.0.2: accepting the dialog wrote exactly
+    that file). It keys on `path.resolve(cwd)` (no symlink resolution) but
+    also honors a legacy key for the raw path, so write under both the
+    resolved and the realpath forms when they differ — a Bromure share is a
+    symlink into /mnt/bromure-share-N. Write-if-missing; never touches an
+    existing record."""
+    try:
+        tdir = os.path.join(HOME, ".kimi-code", "workspace-trust")
+        os.makedirs(tdir, exist_ok=True)
+        roots = [os.path.abspath(cwd)]
+        real = os.path.realpath(cwd)
+        if real != roots[0]:
+            roots.append(real)
+        now_ms = int(time.time() * 1000)
+        for root in roots:
+            path = os.path.join(tdir, _kimi_workdir_key(root))
+            if os.path.exists(path):
+                continue
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"root": root, "trustedAt": now_ms}, f)
+            os.replace(tmp, path)
+    except Exception as e:
+        log("worktree", "kimi pretrust failed:", e)
 
 
 def _pretrust_codex(cwd):

@@ -17,14 +17,17 @@ public enum KimiRegion {
     /// The token endpoint the host refreshes against.
     public static let tokenURL = URL(string: "https://auth.kimi.ai/api/oauth/token")!
 
-    /// Whether `host` is Kimi subscription traffic the proxy should swap the
-    /// bearer on. Matches BOTH the international `.ai` (what Bromure uses now)
-    /// and the legacy `.com` (a credential registered before the switch), so a
-    /// stale session keeps working until it re-registers.
+    /// Whether `host` is Kimi subscription API traffic the proxy should swap
+    /// the bearer on: the managed API host on the international `.ai` (what
+    /// Bromure uses now) and the legacy `.com` (a credential registered before
+    /// the switch), so a stale session keeps working until it re-registers.
+    /// Deliberately NOT every `*.kimi.ai` host — the CLI also posts to
+    /// `telemetry-logs.kimi.ai`, and a suffix match injected the real
+    /// subscription token into those (verified in a live run); the auth host is
+    /// handled by the stand-in refresh step, not the swap.
     public static func isSubscriptionHost(_ host: String) -> Bool {
         let h = host.lowercased()
-        return h == "kimi.ai" || h.hasSuffix(".kimi.ai")
-            || h == "kimi.com" || h.hasSuffix(".kimi.com")
+        return h == "api.kimi.ai" || h == "api.kimi.com"
     }
 }
 
@@ -57,6 +60,72 @@ public enum KimiRegion {
 
 /// Credentials filename (sans `.json`) the managed OAuth flow stores under.
 public let kimiManagedCredentialName = "kimi-code"
+
+/// The stand-in (bogus) tokens a workspace's guest holds in place of the real
+/// Kimi credential, derived deterministically from the real one + the profile
+/// id — so the seed that writes `~/.kimi-code/credentials/<slot>.json`, the
+/// proxy's bearer swap, and the proxy's answer to a guest refresh all agree
+/// on the exact strings without sharing state.
+public enum KimiStandIn {
+    /// A JWT-shaped bogus access token (real claims, far-future `exp`, fake
+    /// signature) so the CLI can decode it locally; an opaque placeholder
+    /// would make it treat the session as logged out.
+    public static func access(realAccess: String, profileID: UUID) -> String {
+        let salt = Data("kimi-bogus-access:\(profileID)".utf8)
+        return SubscriptionFakeMint.mintNoRefreshJWTFake(realJWT: realAccess, salt: salt)
+            ?? SessionTokenPlan.deriveFake(prefix: "kimi-brm-", real: realAccess, salt: salt,
+                                           targetLength: max(40, realAccess.count))
+    }
+
+    /// The bogus refresh token. The guest is never meant to use it — but kimi
+    /// 2.0.x FORCES a refresh whenever its managed-models provisioning call
+    /// gets a 401, and a refresh that `auth.kimi.ai` rejects is persisted as a
+    /// revoked tombstone (empty access token), which reads as "requires login"
+    /// from then on. The proxy therefore recognizes this exact string on a
+    /// `grant_type=refresh_token` POST and answers it itself (see
+    /// `KimiRefreshAnswer`), performing the real refresh host-side.
+    public static func refresh(realRefresh: String, profileID: UUID) -> String {
+        let salt = Data("kimi-bogus-refresh:\(profileID)".utf8)
+        return SessionTokenPlan.deriveFake(prefix: "kimirt-brm-", real: realRefresh, salt: salt,
+                                           targetLength: max(40, realRefresh.count))
+    }
+
+    /// `expires_in` / `expires_at` the guest is told. Far future so the CLI's
+    /// own threshold (`expiresAt − now < max(300, expiresIn/2)`) never trips a
+    /// proactive refresh; the host owns refresh.
+    public static let lifetime: TimeInterval = 10 * 365 * 24 * 3600
+}
+
+/// The token reply the proxy hands the guest when kimi refreshes its stand-in
+/// (kimi's `tokenFromResponse` requires a non-empty `access_token` and
+/// `refresh_token` and a finite `expires_in > 0`; it derives `expires_at`
+/// itself as `now + expires_in`). Pure so it's unit-tested.
+public enum KimiRefreshAnswer {
+    /// Build the reply for `profileID` from its (freshly refreshed) real
+    /// record, and the new bogus access token to register for the swap.
+    public static func build(record: KimiSubscriptionRecord, profileID: UUID)
+        -> (json: [String: Any], bogusAccess: String) {
+        let bogusAccess = KimiStandIn.access(realAccess: record.accessToken, profileID: profileID)
+        let bogusRefresh = KimiStandIn.refresh(realRefresh: record.refreshToken, profileID: profileID)
+        let lifetime = Int(KimiStandIn.lifetime)
+        var json: [String: Any] = [
+            "access_token": bogusAccess,
+            "refresh_token": bogusRefresh,
+            "token_type": "Bearer",
+            "expires_in": lifetime,
+            "expires_at": Int(Date().timeIntervalSince1970) + lifetime,
+        ]
+        // Carry the captured scope/token_type through so the stored entry keeps
+        // the fields the CLI's loader expects.
+        if let t = record.templateJSON,
+           let obj = (try? JSONSerialization.jsonObject(with: t)) as? [String: Any] {
+            if let scope = obj["scope"] as? String { json["scope"] = scope }
+            if let tt = obj["token_type"] as? String { json["token_type"] = tt }
+        }
+        if json["scope"] == nil { json["scope"] = "kimi-code" }
+        return (json, bogusAccess)
+    }
+}
 
 public struct KimiSubscriptionRecord: Codable, Sendable, Equatable {
     public var accessToken: String

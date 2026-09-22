@@ -574,9 +574,24 @@ extension ACAppDelegate {
             let name = url.deletingPathExtension().lastPathComponent
             let toml = try? String(
                 contentsOf: kimiHome.appendingPathComponent("config.toml"), encoding: .utf8)
+            // The credential lands FIRST; `kimi login` then provisions the
+            // managed models over the network and only after that writes the
+            // provider + models + default_model into config.toml. Accepting
+            // the instant the credential appears captured an empty config
+            // (and tore the VM down mid-provisioning), so every session that
+            // re-seeded it died at "No model configured". Keep polling until
+            // the managed provider is on disk; the caller's budget covers it.
+            guard let toml, Self.kimiConfigIsProvisioned(toml) else { continue }
             return (access, refresh, name, template, toml)
         }
         return nil
+    }
+
+    /// Whether a captured `~/.kimi-code/config.toml` carries the managed
+    /// subscription provider `kimi login` writes once provisioning finished —
+    /// the part a seeded session needs to have a model at all.
+    static func kimiConfigIsProvisioned(_ toml: String) -> Bool {
+        toml.contains("managed:kimi-code")
     }
 
     /// Persist the captured tokens per the scope, then tear down + confirm.

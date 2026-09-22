@@ -650,6 +650,57 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
 
+        // 5f′. Kimi stand-in refresh. The guest's credential file holds a
+        //     bogus refresh token it is never meant to use — but kimi 2.0.x
+        //     FORCES a refresh (`ensureFresh({force:true})`) the moment its
+        //     managed-models provisioning call gets a 401, and a refresh that
+        //     auth.kimi.ai rejects is persisted as a revoked tombstone (empty
+        //     access token): the CLI reports "requires login" from then on,
+        //     until the next re-seed. So when the guest POSTs
+        //     `grant_type=refresh_token` with OUR stand-in, answer it here:
+        //     refresh the REAL credential host-side, hand back a fresh
+        //     stand-in access token (registered for the bearer swap) and the
+        //     same stand-in refresh, far-future expiry. The real refresh token
+        //     never enters the VM; a genuine (non-stand-in) refresh — e.g.
+        //     the registration VM's own login — passes through untouched.
+        if !insecure, bodyFile == nil, reqMethod.uppercased() == "POST",
+           host == "auth.kimi.ai" || host == "auth.kimi.com",
+           reqPath.hasPrefix("/api/oauth/token"),
+           let provider = Self.kimiSubscriptionProvider, let (store, refresher) = provider(),
+           let real = store.record(for: profileID),
+           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)) {
+            let form = "?" + String(decoding: swap.modified.subdata(
+                in: bodyStart.upperBound..<swap.modified.count), as: UTF8.self)
+            if Self.urlQueryParam("grant_type", inPath: form) == "refresh_token",
+               let sent = Self.urlQueryParam("refresh_token", inPath: form),
+               sent == KimiStandIn.refresh(realRefresh: real.refreshToken, profileID: profileID) {
+                let reply: Data
+                do {
+                    _ = try await refresher.accessToken(for: profileID)
+                    // The refresher persists the renewed real tokens; re-read
+                    // so the stand-in is minted from the CURRENT real access.
+                    let fresh = store.record(for: profileID) ?? real
+                    let answer = KimiRefreshAnswer.build(record: fresh, profileID: profileID)
+                    store.registerBogusKey(answer.bogusAccess, for: profileID)
+                    reply = SignInCapture.response(status: 200, reason: "OK", json: answer.json)
+                    FileHandle.standardError.write(Data(
+                        "[mitm] answered Kimi stand-in refresh for \(profileID.uuidString.prefix(8)) (host refreshed the real credential)\n".utf8))
+                } catch {
+                    // The REAL refresh was rejected (or unreachable): tell the
+                    // CLI the truth so its existing re-login path runs, and the
+                    // store has already flagged reauth for the UI.
+                    reply = SignInCapture.response(status: 401, reason: "Unauthorized", json: [
+                        "error": "invalid_grant",
+                        "error_description": "Bromure could not refresh the Kimi subscription on the host: \(error)",
+                    ])
+                    FileHandle.standardError.write(Data(
+                        "[mitm] Kimi stand-in refresh for \(profileID.uuidString.prefix(8)) failed host-side: \(error)\n".utf8))
+                }
+                try tls.write(reply)
+                return
+            }
+        }
+
         // 5f. Sign-in capture. The workspace's CLI is running its login for
         //     the user; the token exchange's reply is the one response the
         //     host keeps for itself: the real credential goes to the host

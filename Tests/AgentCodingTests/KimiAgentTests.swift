@@ -290,13 +290,45 @@ struct KimiAgentTests {
         #expect(KimiRegion.oauthHost == "auth.kimi.ai")
         #expect(KimiRegion.baseURL == "https://api.kimi.ai/coding/v1")
         #expect(KimiRegion.tokenURL.absoluteString == "https://auth.kimi.ai/api/oauth/token")
-        // The proxy bearer swap must recognize the international host AND the
-        // legacy China host (a credential registered before the switch).
+        // The proxy bearer swap must recognize the international API host AND
+        // the legacy China one (a credential registered before the switch) —
+        // and ONLY those: a suffix match leaked the real token into the CLI's
+        // telemetry-logs.kimi.ai posts.
         #expect(KimiRegion.isSubscriptionHost("api.kimi.ai"))
-        #expect(KimiRegion.isSubscriptionHost("kimi.ai"))
         #expect(KimiRegion.isSubscriptionHost("api.kimi.com"))
+        #expect(!KimiRegion.isSubscriptionHost("kimi.ai"))
+        #expect(!KimiRegion.isSubscriptionHost("telemetry-logs.kimi.ai"))
+        #expect(!KimiRegion.isSubscriptionHost("auth.kimi.ai"))
         #expect(!KimiRegion.isSubscriptionHost("kimi.example.com"))
         #expect(!KimiRegion.isSubscriptionHost("api.moonshot.ai"))
+    }
+
+    @Test("The registration VM's staged proxy.env carries the region override")
+    @MainActor
+    func registrationStagesRegionEnvEndToEnd() throws {
+        // Reproduce the registration coordinator's staging: a scratch Kimi
+        // subscription profile, registrationMode, mitmAssets set — then read
+        // the meta-share proxy.env the guest sources before `kimi login`.
+        let root = try tempDir()
+        let store = ProfileStore(rootDir: root)
+        let scratch = Profile(name: "Register with Kimi", tool: .kimi,
+                              authMode: .subscription, homeModel: .virtiofs)
+        try store.save(scratch)
+        let disk = SessionDisk(profile: scratch, store: store,
+                               baseDiskURL: root.appendingPathComponent("base.img"))
+        disk.registrationMode = true
+        // A dummy bridge script — prepareMetadataShare copies it; the content
+        // is irrelevant to proxy.env.
+        let bridge = root.appendingPathComponent("bridge.py")
+        try "print('x')".write(to: bridge, atomically: true, encoding: .utf8)
+        disk.mitmAssets = SessionDisk.MitmSessionAssets(
+            caCertificatePEM: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+            bridgeScriptURL: bridge)
+        let share = try disk.prepareMetadataShare()
+        let proxyEnv = try String(contentsOf: share.appendingPathComponent("proxy.env"),
+                                  encoding: .utf8)
+        #expect(proxyEnv.contains("export KIMI_CODE_OAUTH_HOST=https://auth.kimi.ai"))
+        #expect(proxyEnv.contains("export KIMI_CODE_BASE_URL=https://api.kimi.ai/coding/v1"))
     }
 
     @Test("A Kimi subscription stages the global-region env for the guest CLI")
@@ -316,5 +348,80 @@ struct KimiAgentTests {
         let claude = SessionDisk.kimiRegionEnvExports(
             for: Profile(name: "ws", tool: .claude, authMode: .subscription))
         #expect(claude.isEmpty)
+    }
+
+    // MARK: - Stand-in refresh (kimi 2.0.x forces a refresh on a provisioning 401)
+
+    @Test("The stand-in REFRESH token is deterministic per profile — the proxy matches on it")
+    func standInRefreshDeterministic() {
+        let pid = UUID()
+        let realJWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1IiwiZXhwIjoxNzAwMDAwMDAwfQ.sig"
+        // The refresh stand-in is what the proxy compares the guest's
+        // `grant_type=refresh_token` body against, so two derivations from the
+        // same real token + profile MUST agree byte-for-byte.
+        let r1 = KimiStandIn.refresh(realRefresh: "real-refresh-token-value", profileID: pid)
+        let r2 = KimiStandIn.refresh(realRefresh: "real-refresh-token-value", profileID: pid)
+        #expect(r1 == r2)
+        #expect(r1 != "real-refresh-token-value")
+        #expect(r1.hasPrefix("kimirt-brm-"))
+        // A different workspace gets a different stand-in (the proxy scopes
+        // the match to the profile the connection belongs to).
+        #expect(KimiStandIn.refresh(realRefresh: "real-refresh-token-value", profileID: UUID()) != r1)
+        // The access stand-in need not be byte-stable across mints (its JWT
+        // payload is re-encoded each time); it only has to be a fake, since
+        // whoever mints it registers that exact string for the bearer swap.
+        let a = KimiStandIn.access(realAccess: realJWT, profileID: pid)
+        #expect(a != realJWT)
+        #expect(SubscriptionFakeMint.isJWTFake(a))
+    }
+
+    @Test("Proxy's refresh answer satisfies kimi's tokenFromResponse and stays a stand-in")
+    func refreshAnswerShape() throws {
+        let pid = UUID()
+        let record = KimiSubscriptionRecord(
+            accessToken: "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1IiwiZXhwIjoxNzAwMDAwMDAwfQ.sig",
+            refreshToken: "real-refresh-token-value", expiresAt: Date(), savedAt: Date(),
+            templateJSON: try JSONSerialization.data(withJSONObject: ["scope": "kimi-code", "token_type": "Bearer"]))
+        let out = KimiRefreshAnswer.build(record: record, profileID: pid)
+        // kimi's parser: non-empty access_token + refresh_token, finite expires_in > 0.
+        let access = try #require(out.json["access_token"] as? String)
+        let refresh = try #require(out.json["refresh_token"] as? String)
+        let expiresIn = try #require(out.json["expires_in"] as? Int)
+        #expect(!access.isEmpty && !refresh.isEmpty && expiresIn > 0)
+        // Never the real credential; the same stand-in refresh the seed wrote,
+        // so the guest's stored token keeps matching what the proxy recognizes.
+        #expect(access != record.accessToken)
+        #expect(refresh == KimiStandIn.refresh(realRefresh: record.refreshToken, profileID: pid))
+        #expect(access == out.bogusAccess)
+        #expect(out.json["scope"] as? String == "kimi-code")
+        #expect(out.json["token_type"] as? String == "Bearer")
+    }
+
+    // MARK: - Registration capture waits for the provisioned config
+
+    @Test("Registration capture holds until kimi login has written the managed provider")
+    @MainActor
+    func captureWaitsForProvisionedConfig() throws {
+        let home = try tempDir()
+        let cred = home.appendingPathComponent("credentials", isDirectory: true)
+        try FileManager.default.createDirectory(at: cred, withIntermediateDirectories: true)
+        try #"{"access_token":"eyJreal","refresh_token":"rt","expires_at":1,"scope":"kimi-code","token_type":"Bearer","expires_in":900}"#
+            .write(to: cred.appendingPathComponent("kimi-code-env-0e4f99c69cc27850.json"),
+                   atomically: true, encoding: .utf8)
+        let cfg = home.appendingPathComponent("config.toml")
+
+        // Credential present, no config yet (login still provisioning) → keep waiting.
+        #expect(ACAppDelegate.readKimiCredentials(in: home) == nil)
+        // Hooks-only config (what the guest merge creates) → still not provisioned.
+        try "# >>> bromure-kimi\n[[hooks]]\nevent = \"Stop\"\n# <<< bromure-kimi\n"
+            .write(to: cfg, atomically: true, encoding: .utf8)
+        #expect(ACAppDelegate.readKimiCredentials(in: home) == nil)
+        // The managed provider landed → capture, carrying that config and the slot name.
+        try "[providers.\"managed:kimi-code\"]\ntype = \"kimi-code\"\n[models.\"kimi-code/k3\"]\nprovider = \"managed:kimi-code\"\n"
+            .write(to: cfg, atomically: true, encoding: .utf8)
+        let got = try #require(ACAppDelegate.readKimiCredentials(in: home))
+        #expect(got.name == "kimi-code-env-0e4f99c69cc27850")
+        #expect(got.access == "eyJreal")
+        #expect(got.configTOML?.contains("managed:kimi-code") == true)
     }
 }

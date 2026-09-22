@@ -195,7 +195,10 @@ extension ACAppDelegate {
         var grokFile: [String: Any]?
         var kimiFiles: [(name: String, obj: [String: Any])] = []
         var kimiTOML: String?
-        for _ in 0..<5 {
+        // Up to ~45s: Kimi writes its credential first and only after its
+        // model-provisioning round-trip fills config.toml with the managed
+        // provider — capturing before that seeds a session with no model.
+        for _ in 0..<30 {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             if s.provider == .grok {
                 if let out = try? await guestExec(profileID: pid,
@@ -221,7 +224,8 @@ extension ACAppDelegate {
                             kimiFiles.append((name: name, obj: obj))
                         }
                     }
-                    if !kimiFiles.isEmpty { break }
+                    if !kimiFiles.isEmpty,
+                       let t = kimiTOML, ACAppDelegate.kimiConfigIsProvisioned(t) { break }
                 }
             }
         }

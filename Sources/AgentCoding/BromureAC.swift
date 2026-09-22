@@ -12728,19 +12728,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let engine = mitmEngine,
               profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription }),
               let real = engine.kimiSubscriptionStore.record(for: profile.id) else { return }
-        let saltA = Data("kimi-bogus-access:\(profile.id)".utf8)
-        let saltR = Data("kimi-bogus-refresh:\(profile.id)".utf8)
-        // Kimi's access token is a JWT — mint a JWT-shaped bogus (real claims,
-        // far-future exp, fake signature) so the CLI can decode it locally;
-        // an opaque placeholder makes it treat the session as logged out.
-        let bogusAccess = SubscriptionFakeMint.mintNoRefreshJWTFake(
-                realJWT: real.accessToken, salt: saltA)
-            ?? SessionTokenPlan.deriveFake(
-                prefix: "kimi-brm-", real: real.accessToken, salt: saltA,
-                targetLength: max(40, real.accessToken.count))
-        let bogusRefresh = SessionTokenPlan.deriveFake(
-            prefix: "kimirt-brm-", real: real.refreshToken, salt: saltR,
-            targetLength: max(40, real.refreshToken.count))
+        // Derived through the shared helper so the proxy's bearer swap AND its
+        // answer to a guest refresh (KimiRefreshAnswer) see the same strings.
+        let bogusAccess = KimiStandIn.access(realAccess: real.accessToken, profileID: profile.id)
+        let bogusRefresh = KimiStandIn.refresh(realRefresh: real.refreshToken, profileID: profile.id)
         engine.kimiSubscriptionStore.registerBogusKey(bogusAccess, for: profile.id)
 
         // Rebuild the credentials entry from the captured template (scope /
@@ -12754,6 +12745,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         entry["access_token"] = bogusAccess
         entry["refresh_token"] = bogusRefresh
         entry["expires_at"] = Int(farFuture)
+        // The captured template carries the SERVER's short `expires_in` (900s).
+        // kimi's refresh threshold is `expiresAt − now < max(300, expiresIn/2)`,
+        // which the far-future expires_at already clears — but keep the two
+        // fields consistent so nothing reads the token as short-lived.
+        entry["expires_in"] = Int(KimiStandIn.lifetime)
 
         let kimiHome = (homeRoot ?? store.homeDirectory(for: profile))
             .appendingPathComponent(".kimi-code", isDirectory: true)
@@ -12772,7 +12768,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // block the .bashrc appends) owns the file from then on.
         if let toml = real.configTOML, !toml.isEmpty {
             let cfg = kimiHome.appendingPathComponent("config.toml")
-            if !FileManager.default.fileExists(atPath: cfg.path) {
+            // Write when missing — OR when what's there has no managed
+            // provider: the guest's hooks merge creates a hooks-only
+            // config.toml on first boot, and a re-registration (e.g. after
+            // the switch to the .ai region) must land its provider block
+            // even though a file exists. The hooks block is re-merged by
+            // the guest on every shell (marker-guarded), so overwriting
+            // loses nothing Bromure doesn't put back.
+            let existing = (try? String(contentsOf: cfg, encoding: .utf8)) ?? ""
+            if existing.isEmpty || !Self.kimiConfigIsProvisioned(existing) {
                 try? toml.write(to: cfg, atomically: true, encoding: .utf8)
             }
         }

@@ -50,6 +50,54 @@ struct SessionFailureTests {
             "Skipped refreshing managed:kimi-code: OAuth provider \"managed:kimi-code\" requires login before it can be used.")?.kind == .auth)
     }
 
+    @Test("Kimi's one-shot 'folder is not trusted' warning is not a trust prompt — the error after it is the state")
+    func kimiWarningIsNotATrustDialog() {
+        // Real capture from a worktree run: the warning mentions "Trust this
+        // folder" and the screen's only /path is the LOG file. The old code
+        // showed a trust card pointing at kimi-code.log and told the user to
+        // go answer it in Linux — there was nothing to answer.
+        let screen = """
+        [bromure-ac] starting kimi in worktree…
+        kimi version 2.0.2
+        Warning: this folder is not trusted; skipped 1 project-level MCP server: bromure-delegation (stdio: python3 /mnt/bromure-meta/bromure-delegation-mcp.py).
+          Run `kimi` here and choose "Trust this folder" to enable them.
+
+        error: failed to run prompt: No model configured. Run `kimi` and use /login to sign in, then retry; or set default_model in config.toml.
+        See log: /home/ubuntu/.kimi-code/logs/kimi-code.log
+        [bromure-ac] kimi exited with status 133
+        ubuntu@defaultworkspace:~/hello-260922-0813$
+        """
+        #expect(TerminalPrompt.detect(inScreen: screen, agent: "kimi") == nil)
+        let state = TerminalScan.classify(screen, agent: "kimi")
+        guard case .failure(let f)? = state else { Issue.record("expected a failure, got \(String(describing: state))"); return }
+        #expect(f.kind == .generic)
+        // Bottom-up scan: the launcher's exit line is the latest state and wins
+        // over the "No model configured" error above it — either is the right
+        // headline; what matters is that neither reads as a trust dialog.
+        let d = f.detail.lowercased()
+        #expect(d.contains("exited with status") || d.contains("no model configured"))
+    }
+
+    @Test("Kimi's real trust dialog IS a trust prompt, answerable inline with Enter")
+    func kimiTrustDialogIsAnswerable() throws {
+        // Real capture (kimi 2.0.2) of the interactive dialog.
+        let screen = """
+          Trust this folder?
+          ↑↓ navigate · Enter select · Esc exit
+          /home/ubuntu/trustprobe
+          Project-level MCP servers are disabled until you explicitly choose Trust.
+           ❯ Trust this folder
+             Enable project MCP servers. Remembered for this folder.
+             Don't trust
+             Exit Kimi Code. Asked again next launch.
+        """
+        let p = try #require(TerminalPrompt.detect(inScreen: screen, agent: "kimi"))
+        #expect(p.kind == .trust)
+        #expect(p.detail == "/home/ubuntu/trustprobe")
+        #expect(p.canAnswerTrust)
+        #expect(p.trustKeys == ["Enter"])
+    }
+
     @Test("Credit/usage banners are read as a quota failure")
     func quotaBanner() {
         #expect(SessionFailure.detect(inScreen: "Credit balance is too low.")?.kind == .quota)

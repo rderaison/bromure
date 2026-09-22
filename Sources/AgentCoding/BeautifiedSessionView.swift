@@ -2052,8 +2052,17 @@ struct SessionFailure: Equatable {
         }
         if let d = match(quotaNeedles) { return SessionFailure(kind: .quota, detail: d) }
         if let d = match(authNeedles)  { return SessionFailure(kind: .auth,  detail: d) }
+        if let d = match(genericNeedles) { return SessionFailure(kind: .generic, detail: d) }
         return nil
     }
+
+    // The agent stopped before it could start a turn — a run that died on
+    // configuration (Kimi: "No model configured", "failed to run prompt") or a
+    // launcher that reported a non-zero exit. Without these the chat sat on
+    // "Thinking…" (or, worse, mis-read a nearby warning as a trust dialog).
+    private static let genericNeedles = [
+        "no model configured", "failed to run prompt", "exited with status",
+    ]
 
     /// Strip a TUI box/bullet gutter and clamp length so the line reads cleanly.
     private static func clean(_ line: String) -> String {
@@ -2170,10 +2179,20 @@ struct TerminalPrompt: Equatable {
 
         // Folder-trust dialog (Claude's picker, Codex's "Do you trust the
         // contents of this directory?").
-        if trustNeedles.contains(where: { low.contains($0) }) {
+        // Kimi's ONE-SHOT runs never ask — they print a warning ("this
+        // folder is not trusted; skipped N project-level MCP servers … Run
+        // `kimi` here and choose Trust") and carry on. That text hits the
+        // trust needles but there is nothing to answer, and the real state is
+        // whatever error follows (e.g. "No model configured"). Only a live
+        // dialog (its option rows on screen) is a trust prompt.
+        let kimiWarningOnly = low.contains("folder is not trusted")
+            && !low.contains("don't trust") && !low.contains("❯ trust")
+        if trustNeedles.contains(where: { low.contains($0) }), !kimiWarningOnly {
             // The folder: a line that is just a path (Claude), else the first
-            // absolute path mentioned ("You are in /home/…" — Codex).
-            let folder = trimmed.first(where: { $0.hasPrefix("/") && !$0.contains(" ") })
+            // absolute path mentioned ("You are in /home/…" — Codex). Never a
+            // file the screen happens to mention (a log path).
+            let isFile: (Substring) -> Bool = { $0.hasSuffix(".log") || $0.contains("/logs/") }
+            let folder = trimmed.first(where: { $0.hasPrefix("/") && !$0.contains(" ") && !isFile($0[...]) })
                 ?? trimmed.joined(separator: " ").split(separator: " ")
                     .first(where: { $0.hasPrefix("/home/") || $0.hasPrefix("/root/") })
                     .map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: ".,:;)")) }
@@ -2500,8 +2519,11 @@ private struct PromptCard: View {
             }
             .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
         } else {
+            // A dialog we can't drive from here. Say what's happening rather
+            // than sending the user into the VM; the terminal is one click
+            // away in the toolbar if they want it.
             Text(NSLocalizedString(
-                "Open Linux (⌥⌘U) to answer in the terminal.",
+                "Waiting for the agent's trust dialog — it will continue once answered.",
                 comment: "prompt hint"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
