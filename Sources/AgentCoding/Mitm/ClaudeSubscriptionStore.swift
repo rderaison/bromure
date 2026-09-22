@@ -101,23 +101,36 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
     /// Flag/clear the credential behind `profileID`. Writes through the same
     /// shared-vs-override resolution `record(for:)` reads, so a profile using
     /// the shared credential flags the shared one.
+    ///
+    /// The change notification is posted AFTER the lock is released (like the
+    /// Kimi/Codex/Grok stores): an observer registered with `queue: .main`
+    /// makes `post` block until the main thread has run it, and the main
+    /// thread may be inside `record(for:)` waiting for this very lock — a
+    /// `/state` snapshot racing a refresher's re-auth flag deadlocked the
+    /// whole app that way.
     public func setReauthRequired(_ flagged: Bool, for profileID: UUID?) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         var file = loadLocked()
         let stamp = flagged ? Date() : nil
+        var changed = false
         if let pid = profileID, var r = file.perProfile[pid.uuidString] {
-            if r.reauthRequiredAt == stamp || (flagged && r.reauthRequiredAt != nil) { return }
-            r.reauthRequiredAt = stamp
-            file.perProfile[pid.uuidString] = r
+            if !(r.reauthRequiredAt == stamp || (flagged && r.reauthRequiredAt != nil)) {
+                r.reauthRequiredAt = stamp
+                file.perProfile[pid.uuidString] = r
+                changed = true
+            }
         } else if var shared = file.shared {
-            if shared.reauthRequiredAt == stamp || (flagged && shared.reauthRequiredAt != nil) { return }
-            shared.reauthRequiredAt = stamp
-            file.shared = shared
-        } else {
-            return
+            if !(shared.reauthRequiredAt == stamp || (flagged && shared.reauthRequiredAt != nil)) {
+                shared.reauthRequiredAt = stamp
+                file.shared = shared
+                changed = true
+            }
         }
-        try? persistLocked(file)
-        NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+        if changed { try? persistLocked(file) }
+        lock.unlock()
+        if changed {
+            NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+        }
     }
 
     private func persistLocked(_ file: ClaudeSubscriptionFile) throws {
