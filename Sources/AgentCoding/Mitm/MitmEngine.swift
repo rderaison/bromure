@@ -26,6 +26,9 @@ public final class MitmEngine {
     /// Sign-ins the proxy is answering itself (SignInCapture.swift).
     let signInCaptures = SignInCaptureRegistry()
     public let kimiRefresher: KimiSubscriptionRefresher
+    /// Writes the managed provider + model list into a Kimi record that
+    /// registration didn't capture one for (KimiProvisioning.swift).
+    public let kimiProvisioner: KimiProvisioner
     public let sshAgent: SSHAgentServer
     public let awsCreds: AWSCredentialServer
     /// Strips the (intentionally invalid) signature on AWS-bound
@@ -334,6 +337,7 @@ public final class MitmEngine {
         let kimiStore = KimiSubscriptionStore()
         self.kimiSubscriptionStore = kimiStore
         self.kimiRefresher = KimiSubscriptionRefresher(store: kimiStore)
+        self.kimiProvisioner = KimiProvisioner(store: kimiStore, refresher: self.kimiRefresher)
         self.sshAgent = SSHAgentServer(consent: broker)
         self.awsCreds = AWSCredentialServer(consent: broker)
         self.awsResigner = AWSResigner(credServer: awsCreds)

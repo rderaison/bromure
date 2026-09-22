@@ -260,9 +260,14 @@ extension ACAppDelegate {
                     obj.removeValue(forKey: "expires_at")
                     template = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
                 }
+                // A config without the managed provider (the loop above gave
+                // up before `kimi login` provisioned) is worth nothing to a
+                // seed: store none, and the host provisions one from /models
+                // itself (KimiProvisioner) before the next boot.
+                let provisioned = kimiTOML.flatMap { ACAppDelegate.kimiConfigIsProvisioned($0) ? $0 : nil }
                 try engine.kimiSubscriptionStore.setShared(KimiSubscriptionRecord(
                     accessToken: access, refreshToken: refresh, expiresAt: expiresAt, savedAt: Date(),
-                    credentialName: name, templateJSON: template, configTOML: kimiTOML))
+                    credentialName: name, templateJSON: template, configTOML: provisioned))
             }
             endProxySignIn(s, success: true, message: nil)
         } catch {

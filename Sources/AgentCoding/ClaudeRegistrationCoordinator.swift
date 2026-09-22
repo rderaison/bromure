@@ -587,11 +587,12 @@ extension ACAppDelegate {
         return nil
     }
 
-    /// Whether a captured `~/.kimi-code/config.toml` carries the managed
-    /// subscription provider `kimi login` writes once provisioning finished —
-    /// the part a seeded session needs to have a model at all.
+    /// Whether a captured `~/.kimi-code/config.toml` carries what `kimi
+    /// login` writes once provisioning finished — the managed provider AND
+    /// a `default_model` (they land in separate writes; a provider block
+    /// alone still starts the CLI with "LLM not set").
     static func kimiConfigIsProvisioned(_ toml: String) -> Bool {
-        toml.contains("managed:kimi-code")
+        KimiProvisioner.isProvisioned(toml)
     }
 
     /// Persist the captured tokens per the scope, then tear down + confirm.

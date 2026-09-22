@@ -2427,6 +2427,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         ModelSettingsStore.shared.seedIfEmpty(from: profiles + [store.loadTemplate()])
         migrateBedrockWorkspaces()
         installLiveModelRefresh()
+        provisionKimiRecordsIfNeeded()
+        NotificationCenter.default.addObserver(
+            forName: .bromureSubscriptionStoresChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.provisionKimiRecordsIfNeeded() }
+        }
         // Console-presence arbitration: track local input so agent browser
         // streams land on the console used last (server window vs a fat
         // client), and re-route live streams the moment the user changes
@@ -8741,10 +8747,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// ask one take the safe answer (a base-image drift launches as-is) or
     /// refuse with a reason (`unattendedLaunchRefusal`) instead of blocking
     /// on a modal until the caller's boot timeout reads as "did not boot".
+    /// `kimiProvisioned`: the async Kimi config provisioning below already
+    /// ran for this launch (it re-enters with the flag set).
     func launch(_ profile: Profile, detached: Bool = false,
                 freshBootFallback: Bool = true, remoteInitiated: Bool = false,
                 preflightResolved: Bool = false, unattended: Bool = false,
-                quiet: Bool = false) {
+                quiet: Bool = false, kimiProvisioned: Bool = false) {
         if unattended { unattendedLaunchRefusals[profile.id] = nil }
         // Already shown → just focus + select it (unless we were asked to detach,
         // in which case drop the window and leave the VM running headless).
@@ -8762,6 +8770,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // question (its answer would reset the disk under a running VM).
         if let session = runningSessions[profile.id] {
             if !detached { attachWindow(to: session, quiet: quiet) }
+            return
+        }
+        // A Kimi subscription whose record has no managed config (registration
+        // captured the credential but not what `kimi login` provisions) would
+        // boot a guest that can't start its agent at all — "LLM not set". Ask
+        // /models with the real credential first (a second or two, once per
+        // credential; the result is stored on the record), then re-enter.
+        if !kimiProvisioned, kimiNeedsProvisioning(profile) {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.mitmEngine?.kimiProvisioner.ensureProvisioned(for: profile.id)
+                self.launch(profile, detached: detached, freshBootFallback: freshBootFallback,
+                            remoteInitiated: remoteInitiated, preflightResolved: preflightResolved,
+                            unattended: unattended, quiet: quiet, kimiProvisioned: true)
+            }
             return
         }
         // Remote-initiated launches arrive on a main-queue callout (the control
@@ -12290,6 +12313,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
             var profile = profile
             self.populateMCPBearerTokens(in: &profile)
+            // The reboot restages the home seed: give a Kimi record its
+            // managed config first if registration never captured one.
+            if self.kimiNeedsProvisioning(profile) {
+                await self.mitmEngine?.kimiProvisioner.ensureProvisioned(for: profile.id)
+            }
 
             let sessionDisk = SessionDisk(
                 profile: profile,
@@ -12995,6 +13023,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// bogus token carries a far-future `expires_at` so the guest never
     /// refreshes; the host owns refresh and the proxy swaps the bogus Bearer
     /// for the live one on api.kimi.ai. `homeRoot`: see seedCodexAuthFile.
+    /// A Kimi subscription workspace whose record carries no managed config
+    /// — the seed would leave the guest without a `default_model`.
+    func kimiNeedsProvisioning(_ profile: Profile) -> Bool {
+        guard let engine = mitmEngine,
+              profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription }),
+              let real = engine.kimiSubscriptionStore.record(for: profile.id) else { return false }
+        return !Self.kimiConfigIsProvisioned(real.configTOML ?? "")
+    }
+
+    /// Provision every Kimi record that lacks its managed config — at launch
+    /// and whenever a subscription store changes (a registration or an
+    /// in-session sign-in just landed). Each credential is fetched once; the
+    /// boot-time gate in `launch` covers whatever this misses.
+    func provisionKimiRecordsIfNeeded() {
+        guard let engine = mitmEngine else { return }
+        var scopes: [UUID?] = []
+        if engine.kimiSubscriptionStore.record(for: nil) != nil { scopes.append(nil) }
+        for p in profiles where engine.kimiSubscriptionStore.hasProfileRecord(p.id) { scopes.append(p.id) }
+        for scope in scopes where !engine.kimiProvisioner.isProvisioned(for: scope) {
+            Task { await engine.kimiProvisioner.ensureProvisioned(for: scope) }
+        }
+    }
+
     func seedKimiAuthFile(for profile: Profile, homeRoot: URL? = nil) {
         guard let engine = mitmEngine,
               profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription }),
@@ -13037,7 +13088,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // The managed provider + model list `/login` wrote in the registration
         // VM. Create-if-missing: the guest's own config.toml (and the marker
         // block the .bashrc appends) owns the file from then on.
-        if let toml = real.configTOML, !toml.isEmpty {
+        if let toml = real.configTOML, Self.kimiConfigIsProvisioned(toml) {
             let cfg = kimiHome.appendingPathComponent("config.toml")
             // Write when missing — OR when what's there has no managed
             // provider: the guest's hooks merge creates a hooks-only
