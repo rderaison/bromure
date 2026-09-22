@@ -2386,3 +2386,7 @@
 "This Mac" = "Ce Mac";
 "Couldn't load the remote preferences" = "Impossible de charger les préférences du serveur distant";
 "Loading preferences from %@…" = "Chargement des préférences depuis %@…";
+
+/* Added 2026-09-22 — layered workspace model settings */
+"Inherited from Preferences → Models (%@)." = "Hérité des Préférences → Modèles (%@).";
+"Couldn't save the model settings on %@." = "Impossible d’enregistrer les réglages de modèles sur %@.";

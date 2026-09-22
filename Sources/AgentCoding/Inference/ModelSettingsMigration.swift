@@ -102,22 +102,22 @@ public extension Profile {
     }
 
     /// The per-workspace override that keeps a Bedrock workspace on Bedrock
-    /// after the redesign: the global settings plus Bedrock registered and
-    /// Claude Code's model pointed at it (its old default model id, or the
-    /// placeholder the picker showed). nil when the workspace isn't Bedrock or
-    /// already has an override of its own.
-    func bedrockModelOverride(global: ModelSettings) -> ModelSettings? {
+    /// after the redesign: a LAYER over the global settings that registers
+    /// Bedrock (unless the global settings already do) and points Claude
+    /// Code's model at it (its old default model id, or the placeholder the
+    /// picker showed). Everything else keeps inheriting. nil when the
+    /// workspace isn't Bedrock or already has an override of its own.
+    func bedrockModelOverride(global: ModelSettings) -> ModelOverride? {
         guard modelOverride == nil, usesBedrockAuth else { return nil }
-        var s = global
-        if !(s.credential(.bedrock)?.isUsable ?? false) {
-            s.providers.append(ProviderCredential(provider: .bedrock))
+        var layer = ModelSettings()
+        if !(global.credential(.bedrock)?.isUsable ?? false) {
+            layer.providers.append(ProviderCredential(provider: .bedrock))
         }
         let id = bedrockModelID.trimmingCharacters(in: .whitespaces)
-        var claude = s.agentTiers[.claude] ?? [:]
-        claude[.medium] = ModelRef(source: .provider(.bedrock),
-                                   modelID: id.isEmpty ? ProviderModels.bedrockPlaceholder : id)
-        s.agentTiers[.claude] = claude
-        return s
+        layer.agentTiers[.claude] = [.medium: ModelRef(
+            source: .provider(.bedrock),
+            modelID: id.isEmpty ? ProviderModels.bedrockPlaceholder : id)]
+        return ModelOverride(inheritsGlobal: true, settings: layer)
     }
 }
 

@@ -12,6 +12,8 @@ struct PreferencesRemoteHost: Identifiable, Hashable {
 struct RemotePreferences {
     let profile: Profile
     let credentialRefs: [CredentialRef]?
+    /// The remote's global model settings (keys redacted) for its Models pane.
+    let modelSettings: ModelSettings
 }
 
 /// Content of Bromure → Preferences…. With remote mirror windows open, a

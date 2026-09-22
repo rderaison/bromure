@@ -2386,3 +2386,7 @@
 "This Mac" = "この Mac";
 "Couldn't load the remote preferences" = "リモートの環境設定を読み込めませんでした";
 "Loading preferences from %@…" = "%@ から環境設定を読み込み中…";
+
+/* Added 2026-09-22 — layered workspace model settings */
+"Inherited from Preferences → Models (%@)." = "環境設定 → モデルから継承（%@）。";
+"Couldn't save the model settings on %@." = "%@ にモデル設定を保存できませんでした。";

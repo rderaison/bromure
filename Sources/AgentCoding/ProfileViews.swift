@@ -339,8 +339,22 @@ struct EnvImportReviewView: View {
     }
 }
 
+/// What the editor's Models pane edits.
+enum ModelsPaneMode {
+    /// Preferences on this Mac: the global `ModelSettingsStore`, saved live.
+    case globalStore
+    /// Preferences for a REMOTE host: its global settings as fetched (keys
+    /// redacted), edited as a draft and handed to `onSaveGlobalModels` on Save.
+    case remoteGlobal(ModelSettings)
+    /// A workspace editor: the workspace's override of `global` (this Mac's
+    /// store, or the remote's settings for a fat-client editor).
+    case workspace(global: ModelSettings)
+}
+
 struct ProfileEditorView: View {
     @State private var draft: Profile
+    /// `.remoteGlobal`: the remote's global model settings being edited.
+    @State private var remoteGlobalDraft: ModelSettings = ModelSettings()
     /// Terminal bg/text as live `Color`s the ColorPicker binds to directly.
     /// Binding a ColorPicker to an inline `Binding(get:{Color(hex:…)},set:…)`
     /// round-trips through a freshly-built Color every render, and the picker
@@ -358,6 +372,8 @@ struct ProfileEditorView: View {
     /// turning local mode back off restores it instead of clobbering it.
     @State private var preLocalAuthModes: [Profile.Tool: Profile.AuthMode] = [:]
     private let isNew: Bool
+    private let modelsPane: ModelsPaneMode?
+    private let onSaveGlobalModels: ((ModelSettings) -> Void)?
     private let terminalDefaults: TerminalAppDefaults
     /// Where the profile's bytes live + how to reset them. Optional
     /// because the Preferences-window flavour of this editor binds to
@@ -512,7 +528,9 @@ struct ProfileEditorView: View {
         onRegisterKimi: (() -> Void)? = nil,
         onForgetKimi: (() -> Void)? = nil,
         onFetchFusionModels: ((Profile.Tool, Profile.AuthMode, String?, @escaping ([String]) -> Void) -> Void)? = nil,
-        localModelsRemoteAny: Any? = nil
+        localModelsRemoteAny: Any? = nil,
+        modelsPane: ModelsPaneMode? = nil,
+        onSaveGlobalModels: ((ModelSettings) -> Void)? = nil
     ) {
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
@@ -534,6 +552,16 @@ struct ProfileEditorView: View {
         self.onForgetKimi = onForgetKimi
         self.onFetchFusionModels = onFetchFusionModels
         self.localModelsRemoteAny = localModelsRemoteAny
+        self.modelsPane = modelsPane
+        self.onSaveGlobalModels = onSaveGlobalModels
+        // E2E / doc-screenshot hook: open on a given pane ("Models", …).
+        if let raw = ProcessInfo.processInfo.environment["BROMURE_EDITOR_CATEGORY"],
+           let cat = EditorCategory(rawValue: raw) {
+            _selectedCategory = State(initialValue: cat)
+        }
+        if case .remoteGlobal(let initial)? = modelsPane {
+            _remoteGlobalDraft = State(initialValue: initial)
+        }
         var p = profile ?? Profile(name: "", tool: .claude, authMode: .token)
         // New profiles: pre-fill custom appearance fields with Terminal.app
         // defaults so the editor opens with sensible, editable starting
@@ -706,14 +734,19 @@ struct ProfileEditorView: View {
             : NSLocalizedString("Edit workspace", comment: "editor title, unnamed")
     }
 
+    /// Save: a remote Preferences window also hands back its global-models
+    /// draft (the pane can't save it live the way the local store does).
+    private func commitSave() {
+        if case .remoteGlobal? = modelsPane { onSaveGlobalModels?(remoteGlobalDraft) }
+        onSave(draft, generateSSH)
+    }
+
     private var bottomBar: some View {
         HStack {
             Button("Cancel", action: onCancel)
                 .keyboardShortcut(.cancelAction)
             Spacer()
-            Button(isNew ? "Create" : "Save") {
-                onSave(draft, generateSSH)
-            }
+            Button(isNew ? "Create" : "Save") { commitSave() }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
             .disabled(!isValid)
@@ -806,7 +839,7 @@ struct ProfileEditorView: View {
     }
 
     private var phoneSaveButton: some View {
-        Button(isNew ? "Create" : "Save") { onSave(draft, generateSSH) }
+        Button(isNew ? "Create" : "Save") { commitSave() }
             .disabled(!isValid)
     }
     #endif
@@ -882,11 +915,14 @@ struct ProfileEditorView: View {
         // Global config in Preferences (storageContext == nil); a per-workspace
         // OVERRIDE of it in a workspace editor. Filtered out on iOS.
         #if os(macOS)
-        if storageContext == nil {
+        switch resolvedModelsPane {
+        case .globalStore:
             GlobalModelsSettingsView(subscription: modelsSubscriptionHooks)
-        } else {
+        case .remoteGlobal:
+            ModelsSettingsView(settings: $remoteGlobalDraft, subscription: modelsSubscriptionHooks)
+        case .workspace(let global):
             WorkspaceModelsSettingsView(override: $draft.modelOverride,
-                                        globalSettings: ModelSettingsStore.shared.settings,
+                                        globalSettings: global,
                                         subscription: modelsSubscriptionHooks)
         }
         #else
@@ -895,6 +931,13 @@ struct ProfileEditorView: View {
     }
 
     #if os(macOS)
+    /// The caller's pane mode, else the legacy rule: no storage context means
+    /// Preferences on this Mac; a workspace overrides this Mac's global store.
+    private var resolvedModelsPane: ModelsPaneMode {
+        if let modelsPane { return modelsPane }
+        return storageContext == nil ? .globalStore : .workspace(global: ModelSettingsStore.shared.settings)
+    }
+
     /// Bridge the editor's per-tool subscription register/forget/savedAt closures
     /// to the Models pane's provider-keyed hooks. nil closures → no-op, so the
     /// pane hides sign-in for providers the host can't register here.

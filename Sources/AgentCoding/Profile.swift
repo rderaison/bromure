@@ -1387,7 +1387,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Non-nil ⇒ a complete `ModelSettings` (seeded from the global one when the
     /// override is turned on) that this workspace uses instead. Edited via the
     /// Models pane inside the workspace editor and committed with Save/Cancel.
-    public var modelOverride: ModelSettings? = nil
+    public var modelOverride: ModelOverride? = nil
 
     /// `localEngineURL` normalized to a server-root base URL, or nil when the
     /// built-in engine serves this profile.
@@ -2102,7 +2102,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         modelRouting = try c.decodeIfPresent(Routing.self, forKey: .modelRouting) ?? .cloud
         activeModelID = try c.decodeIfPresent(String.self, forKey: .activeModelID)
         localEngineURL = try c.decodeIfPresent(String.self, forKey: .localEngineURL)
-        modelOverride = try c.decodeIfPresent(ModelSettings.self, forKey: .modelOverride)
+        modelOverride = try c.decodeIfPresent(ModelOverride.self, forKey: .modelOverride)
         localEngineAPIKey = try c.decodeIfPresent(String.self, forKey: .localEngineAPIKey)
         subscriptionTokenSwap = try c.decodeIfPresent(SubscriptionTokenSwapState.self,
                                                       forKey: .subscriptionTokenSwap) ?? .unset
@@ -2552,6 +2552,11 @@ struct ProfileSecrets: Codable {
     /// Twilio Auth Token / API Key secret (the SID is identity and stays in
     /// profile.json). Optional so older `secrets.enc` blobs keep decoding.
     var twilioSecret: String?
+    /// The workspace's own model-provider API keys (Models pane override),
+    /// keyed by `ModelProvider.rawValue`, plus its own custom-server key.
+    /// Optional so older `secrets.enc` blobs keep decoding.
+    var modelProviderKeys: [String: String]?
+    var modelLocalServerKey: String?
     /// Keyed by `DockerRegistryCredential.id.uuidString`. Holds the
     /// raw registry password / access token; the host + username live
     /// in profile.json since they're identity, not secret. Optional so
@@ -2594,6 +2599,8 @@ struct ProfileSecrets: Codable {
             && (awsSecretAccessKey?.isEmpty ?? true)
             && (awsSessionToken?.isEmpty ?? true)
             && (twilioSecret?.isEmpty ?? true)
+            && (modelProviderKeys?.isEmpty ?? true)
+            && (modelLocalServerKey?.isEmpty ?? true)
             && (dockerRegistryPasswords?.isEmpty ?? true)
             && defaultClaudeTokens == nil
             && defaultCodexTokens == nil
@@ -2661,6 +2668,21 @@ struct ProfileSecrets: Codable {
         if !profile.twilioCredential.secret.isEmpty {
             s.twilioSecret = profile.twilioCredential.secret
             profile.twilioCredential.secret = ""
+        }
+        if var o = profile.modelOverride {
+            var keys: [String: String] = [:]
+            for k in o.settings.providers.indices {
+                if let key = o.settings.providers[k].apiKey, !key.isEmpty {
+                    keys[o.settings.providers[k].provider.rawValue] = key
+                    o.settings.providers[k].apiKey = ""
+                }
+            }
+            if let key = o.settings.localServer?.apiKey, !key.isEmpty {
+                s.modelLocalServerKey = key
+                o.settings.localServer?.apiKey = ""
+            }
+            if !keys.isEmpty { s.modelProviderKeys = keys }
+            profile.modelOverride = o
         }
 
         for (i, reg) in profile.dockerRegistries.enumerated() {
@@ -2750,6 +2772,19 @@ struct ProfileSecrets: Codable {
         if let sk = awsSecretAccessKey { profile.awsCredentials.secretAccessKey = sk }
         if let st = awsSessionToken { profile.awsCredentials.sessionToken = st }
         if let tw = twilioSecret { profile.twilioCredential.secret = tw }
+        if var o = profile.modelOverride {
+            for k in o.settings.providers.indices {
+                if let key = modelProviderKeys?[o.settings.providers[k].provider.rawValue],
+                   ModelSettings.isRedactedSecret(o.settings.providers[k].apiKey) {
+                    o.settings.providers[k].apiKey = key
+                }
+            }
+            if let key = modelLocalServerKey, o.settings.localServer != nil,
+               ModelSettings.isRedactedSecret(o.settings.localServer?.apiKey) {
+                o.settings.localServer?.apiKey = key
+            }
+            profile.modelOverride = o
+        }
         if let map = dockerRegistryPasswords {
             for (i, reg) in profile.dockerRegistries.enumerated() {
                 if let p = map[reg.id.uuidString] {
@@ -2845,6 +2880,12 @@ struct ProfileSecrets: Codable {
         if let v = newer.awsSecretAccessKey { awsSecretAccessKey = v }
         if let v = newer.awsSessionToken { awsSessionToken = v }
         if let v = newer.twilioSecret { twilioSecret = v }
+        if let v = newer.modelProviderKeys {
+            var merged = modelProviderKeys ?? [:]
+            for (k, key) in v { merged[k] = key }
+            modelProviderKeys = merged
+        }
+        if let v = newer.modelLocalServerKey { modelLocalServerKey = v }
         if let m = newer.dockerRegistryPasswords {
             dockerRegistryPasswords = (dockerRegistryPasswords ?? [:]).merging(m) { _, n in n }
         }

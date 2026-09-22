@@ -160,6 +160,12 @@ final class ACAutomationServer {
     /// Replace the preferences template (full-document, secret-preserving —
     /// blank secrets keep their stored value). Returns `{ok}` or `{ok:false, error}`.
     var onUpdateTemplate: ((_ doc: [String: Any]) -> [String: Any])?
+    /// The global model settings (Preferences → Models) with API keys redacted
+    /// to `ModelSettings.redactedSecret`, for the fat client's editors.
+    var onExportModelSettings: (() -> [String: Any]?)?
+    /// Replace the global model settings from a redacted document (a blank or
+    /// redacted key keeps the stored one). Returns `{ok}` or `{ok:false, error}`.
+    var onUpdateModelSettings: ((_ doc: [String: Any]) -> [String: Any])?
 
     // MITM trace inspection (CLI `trace …`) + fusion toggle (`vm fusion`).
     var onListTrace: ((_ profileKey: String?) -> [[String: Any]])?
@@ -536,6 +542,30 @@ final class ACAutomationServer {
                 return
             }
             let result = DispatchQueue.main.sync(execute: { self.onUpdateTemplate?(bodyJSON) })
+                ?? ["ok": false, "error": "unavailable"]
+            let ok = (result["ok"] as? Bool) ?? false
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: result)
+
+        // The global model settings (Preferences → Models), keys redacted:
+        // what a fat client's workspace editor inherits from and what its
+        // remote Preferences window edits.
+        case ("GET", "/models/settings"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            if let d = DispatchQueue.main.sync(execute: { self.onExportModelSettings?() }) {
+                sendResponse(fd: fd, status: 200, body: d)
+            } else {
+                sendResponse(fd: fd, status: 503, body: ["error": "unavailable"])
+            }
+
+        case ("PUT", "/models/settings"), ("PATCH", "/models/settings"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            let result = DispatchQueue.main.sync(execute: { self.onUpdateModelSettings?(bodyJSON) })
                 ?? ["ok": false, "error": "unavailable"]
             let ok = (result["ok"] as? Bool) ?? false
             sendResponse(fd: fd, status: ok ? 200 : 400, body: result)

@@ -1463,6 +1463,37 @@ final class RemoteHostController {
         return resp.json
     }
 
+    /// The remote's global model settings (Preferences → Models), API keys
+    /// redacted — what its workspace editors inherit from.
+    func fetchModelSettings() async throws -> ModelSettings {
+        let host = self.host
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("GET", "/models/settings")
+        }.value
+        guard resp.status == 200 else {
+            throw ACAppDelegate.GuestExecError.commandFailed(
+                exitCode: 1, stderr: (resp.json["error"] as? String) ?? "model settings fetch failed")
+        }
+        let data = try JSONSerialization.data(withJSONObject: resp.json)
+        return try JSONDecoder().decode(ModelSettings.self, from: data)
+    }
+
+    /// Replace the remote's global model settings (redacted keys keep the
+    /// stored ones server-side).
+    func saveModelSettings(_ settings: ModelSettings) async throws {
+        let host = self.host
+        let data = try JSONEncoder().encode(settings)
+        guard let doc = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("PUT", "/models/settings", body: doc)
+        }.value
+        guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
+            throw ACAppDelegate.GuestExecError.commandFailed(
+                exitCode: 1, stderr: (resp.json["error"] as? String) ?? "save failed (HTTP \(resp.status))")
+        }
+        DispatchQueue.main.async { [weak self] in self?.pollOnce() }
+    }
+
     /// True when a save changed a field that's baked into the VM at boot (so
     /// only a fresh launch applies it). Mirrors the local window's
     /// `restartRequiringChanges` — the live-refreshable fields (env, guardrails,
@@ -2659,8 +2690,12 @@ final class RemoteHostWindow: NSWindow {
             guard let self else { return }
             let profile: Profile
             var credentialRefs: [CredentialRef]? = nil
+            let remoteGlobalModels: ModelSettings
             do {
                 let doc = try await c.fetchProfileDoc(id)
+                // The remote's global Models settings — the base this
+                // workspace's Models pane inherits from / overrides.
+                remoteGlobalModels = try await c.fetchModelSettings()
                 let data = try JSONSerialization.data(withJSONObject: doc)
                 let dec = JSONDecoder()
                 dec.dateDecodingStrategy = .iso8601
@@ -2719,7 +2754,8 @@ final class RemoteHostWindow: NSWindow {
                 onRegisterGrok: { [weak self] in self?.beginRemoteRegistration(.grok, id) },
                 kimiAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["kimi"]?.registeredAt },
                 onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, id) },
-                localModelsRemoteAny: modelBackend))
+                localModelsRemoteAny: modelBackend,
+                modelsPane: .workspace(global: remoteGlobalModels)))
             win.makeKeyAndOrderFront(nil)
             self.settingsWindows[id] = win
         }
@@ -2892,6 +2928,17 @@ final class RemoteHostWindow: NSWindow {
 
     private func presentNewWorkspaceEditor(draft: Profile) {
         if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }
+        // The remote's global Models settings first: the new workspace's
+        // Models pane inherits from THEM, not this Mac's store.
+        let c = controller
+        Task { @MainActor [weak self] in
+            let global = (try? await c.fetchModelSettings()) ?? ModelSettings()
+            self?.presentNewWorkspaceEditor(draft: draft, remoteGlobalModels: global)
+        }
+    }
+
+    private func presentNewWorkspaceEditor(draft: Profile, remoteGlobalModels: ModelSettings) {
+        if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 620),
             styleMask: [.titled, .closable],
@@ -2913,7 +2960,8 @@ final class RemoteHostWindow: NSWindow {
             },
             onCancel: { [weak self] in self?.closeNewWorkspaceWindow() },
             onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
-            localModelsRemoteAny: remoteModelBackend()))
+            localModelsRemoteAny: remoteModelBackend(),
+            modelsPane: .workspace(global: remoteGlobalModels)))
         win.makeKeyAndOrderFront(nil)
         newWorkspaceWindow = win
     }
@@ -3967,6 +4015,20 @@ final class RemoteHostWindow: NSWindow {
             let c = controller
             Task { @MainActor in _ = try? await c.createProfileDoc(doc) }
             return ["ok": true]
+        case "open-settings":
+            // E2E hook: open the remote workspace's settings editor (fetches
+            // the profile + the remote's global models over the tunnel).
+            guard let id = resolveID() else { return ["error": "workspace required"] }
+            openWorkspaceSettings(id)
+            return ["ok": true]
+        case "shot-settings":
+            // E2E hook: render that editor window to a PNG (`path`).
+            guard let id = resolveID(), let win = settingsWindows[id] else {
+                return ["error": "settings window not open"]
+            }
+            let path = (p["path"] as? String) ?? "/tmp/bromure-remote-settings.png"
+            guard let app = NSApp.delegate as? ACAppDelegate else { return ["error": "no app"] }
+            return app.debugRenderWindow(win, to: path)
         case "edit-workspace":
             guard let id = resolveID(), let doc = p["doc"] as? [String: Any] else {
                 return ["error": "workspace + doc required"]

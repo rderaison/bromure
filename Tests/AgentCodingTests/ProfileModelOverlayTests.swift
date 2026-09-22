@@ -308,14 +308,15 @@ struct ProfileModelOverlayTests {
         global.providers = [ProviderCredential(provider: .anthropic, apiKey: "sk-ant")]
         var p = Profile(name: "t", tool: .claude, authMode: .bedrock)
         p.bedrockModelID = "eu.anthropic.claude-sonnet-4-6-v1:0"
-        let o = p.bedrockModelOverride(global: global)
+        let o = p.bedrockModelOverride(global: global)?.resolved(over: global)
         #expect(o?.credential(.bedrock)?.isUsable == true)
-        #expect(o?.credential(.anthropic)?.apiKey == "sk-ant")
+        #expect(o?.credential(.anthropic)?.apiKey == "sk-ant")   // inherited, not copied
+        #expect(p.bedrockModelOverride(global: global)?.settings.credential(.anthropic) == nil)
         #expect(o?.agentTiers[.claude]?[.medium]?.source == .provider(.bedrock))
         #expect(o?.agentTiers[.claude]?[.medium]?.modelID == "eu.anthropic.claude-sonnet-4-6-v1:0")
         // Not Bedrock → nothing; already overridden → nothing.
         #expect(Profile(name: "u", tool: .claude, authMode: .token).bedrockModelOverride(global: global) == nil)
-        p.modelOverride = global
+        p.modelOverride = .standalone(global)
         #expect(p.bedrockModelOverride(global: global) == nil)
     }
 

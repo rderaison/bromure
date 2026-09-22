@@ -33,9 +33,22 @@ struct ModelsSubscriptionHooks {
                        @escaping ([String]) -> Void) -> Void)?
 }
 
+/// A workspace's LAYER over the global settings (see `ModelOverride`): the
+/// pane then reads the resolved result (global + layer, exclusions applied)
+/// and writes only the layer — so an untouched provider or tier keeps
+/// inheriting, live.
+struct ModelsLayerContext {
+    /// The global settings the layer sits on.
+    var global: ModelSettings
+    /// Global providers the workspace opts out of (`.custom` = the custom server).
+    var excluded: Binding<[ModelProvider]>
+}
+
 struct ModelsSettingsView: View {
     @Binding var settings: ModelSettings
     var subscription: ModelsSubscriptionHooks? = nil
+    /// Non-nil: `settings` is a workspace layer over `layer.global`.
+    var layer: ModelsLayerContext? = nil
     /// The pane's own "Models" heading. Off when the host already titles the
     /// screen (the onboarding wizard's step heading).
     var showsTitle: Bool = true
@@ -87,6 +100,32 @@ struct ModelsSettingsView: View {
         var s = settings; f(&s); settings = s
     }
 
+    /// What's in effect: the bound settings themselves, or — for a workspace
+    /// layer — the global settings with the layer applied. Every READ of a
+    /// credential / tier / server goes through this; writes go to `settings`.
+    private var resolved: ModelSettings {
+        guard let layer else { return settings }
+        return ModelOverride(inheritsGlobal: true, settings: settings,
+                             excludedProviders: layer.excluded.wrappedValue)
+            .resolved(over: layer.global)
+    }
+    private var excluded: [ModelProvider] {
+        get { layer?.excluded.wrappedValue ?? [] }
+    }
+    private func setExcluded(_ provider: ModelProvider, _ on: Bool) {
+        guard let layer else { return }
+        var list = layer.excluded.wrappedValue
+        list.removeAll { $0 == provider }
+        if on { list.append(provider) }
+        layer.excluded.wrappedValue = list
+    }
+    /// A layered workspace's relationship to one provider.
+    private func providerStatus(_ provider: ModelProvider) -> ModelOverride.ProviderStatus? {
+        guard let layer else { return nil }
+        return ModelOverride(inheritsGlobal: true, settings: settings, excludedProviders: excluded)
+            .providerStatus(provider, global: layer.global)
+    }
+
     // Custom is a UI concept (the custom server), not a listed cloud provider.
     private let cloudProviders: [ModelProvider] =
         ModelProvider.allCases.filter { $0 != .custom }
@@ -113,7 +152,7 @@ struct ModelsSettingsView: View {
         }
         .padding(18)
         .onAppear {
-            if settings.localServer != nil { probeLocalServer() }
+            if resolved.localServer != nil { probeLocalServer() }
             syncSubscriptions()
             fetchUsableProviderModels()
             // A provider registered outside this pane (an API key the
@@ -202,8 +241,11 @@ struct ModelsSettingsView: View {
             Text(ModelProvider.bedrock.displayName).font(.headline)
             Text("Any agent can run on Amazon Bedrock: Claude Code natively, the others through Bedrock's OpenAI-compatible API. Sign requests with each workspace's own AWS credentials (Credentials → AWS), or paste a Bedrock API key.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let status = providerStatus(.bedrock), status == .inherited || status == .excluded {
+                layerStatusHeader(.bedrock, status)
+            }
             Toggle("Use Amazon Bedrock", isOn: bedrockEnabled)
-            if settings.credential(.bedrock)?.isUsable == true {
+            if resolved.credential(.bedrock)?.isUsable == true {
                 TextField("AWS region", text: bedrockRegion,
                           prompt: Text(verbatim: "\(Bedrock.defaultRegion) — empty: each workspace's AWS region"))
                     .textFieldStyle(.roundedBorder)
@@ -219,17 +261,71 @@ struct ModelsSettingsView: View {
     // MARK: Source popovers
 
     @ViewBuilder private func providerPopover(_ provider: ModelProvider) -> some View {
-        // A dedicated, self-observing subview: it re-reads sign-in status on the
-        // subscription-store change notification itself, so logging out reliably
-        // flips it back to "Sign in…" even though a parent popover isn't always
-        // re-evaluated on SwiftUI state changes.
-        ProviderConfigPopover(
-            provider: provider,
-            hasCapture: provider.supportsSubscription && subscription != nil,
-            savedAt: { subscription?.savedAt(provider) },
-            onSignIn: { subscription?.register(provider) },
-            onLogOut: { subscription?.forget(provider) },
-            apiKey: providerKeyBinding(provider, settings.credential(provider)))
+        let status = providerStatus(provider)
+        VStack(alignment: .leading, spacing: 0) {
+            if let status, status == .inherited || status == .excluded {
+                // Layered workspace, nothing of its own for this provider: say
+                // where it comes from and offer to override / opt out. The
+                // credential form below is what "override" reveals.
+                layerStatusHeader(provider, status).padding([.horizontal, .top], 16)
+            }
+            if status != .excluded {
+                // A dedicated, self-observing subview: it re-reads sign-in status on the
+                // subscription-store change notification itself, so logging out reliably
+                // flips it back to "Sign in…" even though a parent popover isn't always
+                // re-evaluated on SwiftUI state changes.
+                ProviderConfigPopover(
+                    provider: provider,
+                    hasCapture: provider.supportsSubscription && subscription != nil,
+                    savedAt: { subscription?.savedAt(provider) },
+                    onSignIn: { subscription?.register(provider) },
+                    onLogOut: { subscription?.forget(provider) },
+                    apiKey: providerKeyBinding(provider, settings.credential(provider)),
+                    ownOverride: status == .overridden ? { useGlobalCredential(provider) } : nil,
+                    inheritedHint: status == .inherited)
+            } else {
+                Spacer(minLength: 16)
+            }
+        }
+    }
+
+    /// Layered workspace: how this provider is sourced, with the switch to
+    /// opt out of / back into the global one.
+    @ViewBuilder private func layerStatusHeader(_ provider: ModelProvider,
+                                                _ status: ModelOverride.ProviderStatus) -> some View {
+        let globalCred = layer?.global.credential(provider)
+        let how: String = {
+            if provider.isBedrock { return "AWS credentials" }
+            if globalCred?.useSubscription == true { return "subscription" }
+            return "API key"
+        }()
+        VStack(alignment: .leading, spacing: 6) {
+            if status == .inherited {
+                Label(String(format: NSLocalizedString("Inherited from Preferences → Models (%@).", comment: "layered provider status"), how),
+                      systemImage: "arrow.down.to.line")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Button("Don't use in this workspace") { setExcluded(provider, true) }
+                        .controlSize(.small)
+                    Text("— or override it below.").font(.caption2).foregroundStyle(.tertiary)
+                }
+            } else {
+                Label("Not used in this workspace — the global settings have it.",
+                      systemImage: "nosign")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Use the global provider") { setExcluded(provider, false) }
+                    .controlSize(.small)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Layered workspace: drop the workspace's own credential so the provider
+    /// inherits the global one again (its layer tiers stay).
+    private func useGlobalCredential(_ provider: ModelProvider) {
+        mutate { s in s.providers.removeAll { $0.provider == provider } }
+        setExcluded(provider, false)
+        fetchProviderModels(provider)
     }
 
     @ViewBuilder private var customServerPopover: some View {
@@ -237,15 +333,35 @@ struct ModelsSettingsView: View {
             Text("Custom server").font(.headline)
             Text("Any OpenAI-compatible server (vLLM, Ollama, LM Studio, llama-server), on this Mac or another. Recommended for local models.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if layer != nil, settings.localServer == nil, layer?.global.localServer != nil {
+                Label(excluded.contains(.custom)
+                      ? "Not used in this workspace — the global settings have one."
+                      : "Inherited from Preferences → Models. Editing it below makes it this workspace's own.",
+                      systemImage: excluded.contains(.custom) ? "nosign" : "arrow.down.to.line")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if layer != nil, settings.localServer != nil {
+                HStack {
+                    Label("This workspace's own server.", systemImage: "pencil")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if layer?.global.localServer != nil {
+                        Button("Use the global server") {
+                            mutate { $0.localServer = nil }
+                            setExcluded(.custom, false)
+                            localServerModels = []; localServerProbe = .idle
+                        }.controlSize(.small)
+                    }
+                }
+            }
             Toggle("Enabled", isOn: localServerEnabled)
-            if settings.localServer != nil {
+            if resolved.localServer != nil {
                 TextField("Server URL", text: localServerURL,
                           prompt: Text(verbatim: "http://127.0.0.1:11434/v1")).textFieldStyle(.roundedBorder)
                 SecureField("API key (optional)", text: localServerKey).textFieldStyle(.roundedBorder)
                 HStack(spacing: 8) {
                     Button("Test Connection") { probeLocalServer() }
                         .controlSize(.small)
-                        .disabled(URL(string: settings.localServer?.baseURL ?? "") == nil
+                        .disabled(URL(string: resolved.localServer?.baseURL ?? "") == nil
                                   || localServerProbe == .probing)
                     switch localServerProbe {
                     case .idle:    EmptyView()
@@ -387,7 +503,9 @@ struct ModelsSettingsView: View {
     @ViewBuilder private func tierChip(_ agent: ModelAgent?, _ tier: ModelTier) -> some View {
         let explicit = explicitRef(agent, tier)
         let effective = effectiveRef(agent, tier)
-        let inherited = (agent != nil) && explicit == nil && effective != nil
+        // "inherited": from the Default row (an agent), or — in a workspace
+        // layer — from the global settings (any row, the Default included).
+        let inherited = (agent != nil || layer != nil) && explicit == nil && effective != nil
         HStack(spacing: 4) {
             Menu {
                 ForEach(usableProviders.filter { providerAllowed($0, for: agent) }, id: \.self) { p in
@@ -399,7 +517,7 @@ struct ModelsSettingsView: View {
                         Button("Custom id…") { beginCustomID(agent, tier, source: .provider(p)) }
                     }
                 }
-                if settings.localServer != nil {
+                if resolved.localServer != nil {
                     Menu("Custom server") {
                         if localServerModels.isEmpty {
                             Text("Test the connection to list models").foregroundStyle(.secondary)
@@ -420,7 +538,7 @@ struct ModelsSettingsView: View {
                     }
                 }
                 let allowed = usableProviders.filter { providerAllowed($0, for: agent) }
-                if allowed.isEmpty, settings.localServer == nil, installedOnDevice.isEmpty {
+                if allowed.isEmpty, resolved.localServer == nil, installedOnDevice.isEmpty {
                     // Distinguish "nothing registered" from "registered, but a
                     // subscription can't power this agent" (EULA).
                     if usableProviders.isEmpty {
@@ -429,8 +547,9 @@ struct ModelsSettingsView: View {
                         Text("A subscription can only power its own agent").foregroundStyle(.secondary)
                     }
                 }
-                if agent != nil, explicit != nil {
-                    Divider(); Button("Use Default") { assignRef(agent, tier, nil) }
+                if agent != nil || layer != nil, explicit != nil {
+                    Divider()
+                    Button(agent != nil ? "Use Default" : "Use the global setting") { assignRef(agent, tier, nil) }
                 }
             } label: {
                 modelChip(effective, inherited: inherited)
@@ -441,7 +560,7 @@ struct ModelsSettingsView: View {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.borderless)
-                .help(agent == nil ? "Clear" : "Inherit Default")
+                .help(agent == nil ? (layer == nil ? "Clear" : "Inherit the global setting") : "Inherit Default")
             }
         }
     }
@@ -476,14 +595,14 @@ struct ModelsSettingsView: View {
         return ids.joined(separator: " · ")
     }
     private var usableProviders: [ModelProvider] {
-        cloudProviders.filter { settings.credential($0)?.isUsable ?? false }
+        cloudProviders.filter { resolved.credential($0)?.isUsable ?? false }
     }
     /// Whether a usable provider may power `agent`. A provider in SUBSCRIPTION
     /// mode is bound to its own agent only — a Claude/ChatGPT subscription can't
     /// legally drive another agent, and can't be a Default (which feeds all
     /// agents). API-key providers are unrestricted (pay-per-use).
     private func providerAllowed(_ provider: ModelProvider, for agent: ModelAgent?) -> Bool {
-        guard let cred = settings.credential(provider), cred.isUsable else { return false }
+        guard let cred = resolved.credential(provider), cred.isUsable else { return false }
         if cred.useSubscription {
             return agent != nil && agent == provider.nativeAgent
         }
@@ -514,8 +633,9 @@ struct ModelsSettingsView: View {
         return settings.tiers[tier]
     }
     private func effectiveRef(_ agent: ModelAgent?, _ tier: ModelTier) -> ModelRef? {
-        if let a = agent { return settings.ref(for: a, tier: tier) }
-        return settings.tiers[tier]
+        let r = resolved
+        if let a = agent { return r.ref(for: a, tier: tier) }
+        return r.tiers[tier]
     }
 
     // Source presentation
@@ -529,13 +649,23 @@ struct ModelsSettingsView: View {
     private func sourceSubtitle(_ source: Source) -> String? {
         switch source {
         case .provider(let p):
-            if p.isBedrock { return settings.credential(p)?.isUsable == true ? "AWS credentials" : nil }
+            let r = resolved
+            switch providerStatus(p) {
+            case .excluded?:   return "off here"
+            case .overridden?: return r.credential(p)?.isUsable == true ? "overridden here" : "override (not configured)"
+            case .inherited?:
+                if p.isBedrock { return "inherited" }
+                return r.credential(p)?.useSubscription == true ? "inherited subscription" : "inherited API key"
+            default: break
+            }
+            if p.isBedrock { return r.credential(p)?.isUsable == true ? "AWS credentials" : nil }
             if subscription?.savedAt(p) != nil { return "subscription" }
-            if settings.credential(p)?.isUsable == true { return "API key" }
+            if r.credential(p)?.isUsable == true { return "API key" }
             return nil
         case .customServer:
-            return settings.localServer?.baseURL.isEmpty == false
-                ? URL(string: settings.localServer!.baseURL)?.host : nil
+            if layer != nil, excluded.contains(.custom), settings.localServer == nil { return "off here" }
+            return resolved.localServer?.baseURL.isEmpty == false
+                ? URL(string: resolved.localServer!.baseURL)?.host : nil
         case .onDevice:
             let n = installedOnDevice.count
             return n > 0 ? "\(n) installed" : nil
@@ -544,10 +674,12 @@ struct ModelsSettingsView: View {
     private func sourceStatusColor(_ source: Source) -> Color {
         switch source {
         case .provider(let p):
-            let usable = (settings.credential(p)?.isUsable ?? false) || subscription?.savedAt(p) != nil
+            if providerStatus(p) == .excluded { return .secondary.opacity(0.4) }
+            let usable = (resolved.credential(p)?.isUsable ?? false)
+                || (subscription?.savedAt(p) != nil && providerStatus(p) != .overridden)
             return usable ? .green : .secondary.opacity(0.4)
         case .customServer:
-            return (settings.localServer?.baseURL.isEmpty == false) ? .mint : .secondary.opacity(0.4)
+            return (resolved.localServer?.baseURL.isEmpty == false) ? .mint : .secondary.opacity(0.4)
         case .onDevice:
             return installedOnDevice.isEmpty ? .secondary.opacity(0.4) : .purple
         }
@@ -571,11 +703,17 @@ struct ModelsSettingsView: View {
     /// set explicitly (never clobbers a deliberate choice).
     private func autofillAgent(for provider: ModelProvider) {
         guard let agent = provider.nativeAgent else { return }   // z.ai / custom: no native agent
+        // A workspace layer only pre-fills for a provider IT registered; an
+        // inherited provider's agent keeps inheriting whatever the global
+        // settings say (or don't) — opening the editor must not write overrides.
+        if layer != nil, settings.credential(provider) == nil { return }
         // Bedrock pins one model (Claude Code's ANTHROPIC_MODEL); the other
         // tiers keep inheriting.
         let tiers: [ModelTier] = (agent.usesAllTiers && !provider.isBedrock)
             ? [.large, .medium, .small] : [.medium]
-        for tier in tiers where explicitRef(agent, tier) == nil {
+        // A workspace layer only fills a tier NOTHING resolves for — an
+        // inherited choice must not be copied into the layer as an override.
+        for tier in tiers where (layer == nil ? explicitRef(agent, tier) : effectiveRef(agent, tier)) == nil {
             if let id = modelOptions(for: provider, tier: tier).first {
                 assign(agent, tier, source: .provider(provider), modelID: id)
             }
@@ -589,6 +727,9 @@ struct ModelsSettingsView: View {
     private func syncSubscriptions() {
         guard let subscription else { return }
         for p in cloudProviders where p.supportsSubscription {
+            // A layered workspace inheriting this provider: the (shared) login
+            // belongs to the global settings — don't turn it into an override.
+            if let st = providerStatus(p), st == .inherited || st == .excluded { continue }
             let signedIn = subscription.savedAt(p) != nil
             let cred = settings.credential(p)
             let hasKey = !((cred?.apiKey ?? "").isEmpty)
@@ -638,8 +779,8 @@ struct ModelsSettingsView: View {
 
     private func fetchUsableProviderModels() { for p in usableProviders { fetchProviderModels(p) } }
     private func fetchProviderModels(_ p: ModelProvider) {
-        guard settings.credential(p)?.isUsable ?? false else { providerModels[p] = nil; return }
-        let cred = settings.credential(p)
+        guard resolved.credential(p)?.isUsable ?? false else { providerModels[p] = nil; return }
+        let cred = resolved.credential(p)
         subscription?.fetchModels?(p, cred?.useSubscription ?? false, cred?.apiKey) { ids in
             providerModels[p] = ids
         }
@@ -659,7 +800,7 @@ struct ModelsSettingsView: View {
                 applyProbed(caps, agent, tier)
             }
         case .localServer:
-            guard let s = settings.localServer, let base = URL(string: s.baseURL) else { return }
+            guard let s = resolved.localServer, let base = URL(string: s.baseURL) else { return }
             let key = s.apiKey, model = ref.modelID
             Task {
                 let meta = await ExternalEngine.modelMeta(base: base, apiKey: key, model: model)
@@ -684,7 +825,7 @@ struct ModelsSettingsView: View {
     }
 
     private func probeLocalServer() {
-        guard let s = settings.localServer, let base = URL(string: s.baseURL) else { return }
+        guard let s = resolved.localServer, let base = URL(string: s.baseURL) else { return }
         localServerProbe = .probing
         let key = s.apiKey
         Task {
@@ -726,8 +867,14 @@ struct ModelsSettingsView: View {
     }
     private var bedrockEnabled: Binding<Bool> {
         Binding(
-            get: { settings.credential(.bedrock)?.isUsable ?? false },
+            get: { resolved.credential(.bedrock)?.isUsable ?? false },
             set: { on in
+                // Layered workspace with nothing of its own: opt out of / back
+                // into the GLOBAL Bedrock rather than editing the layer.
+                if let st = providerStatus(.bedrock), st == .inherited || st == .excluded {
+                    setExcluded(.bedrock, !on)
+                    return
+                }
                 mutate { s in
                     s.providers.removeAll { $0.provider == .bedrock }
                     if on { s.providers.append(ProviderCredential(provider: .bedrock)) }
@@ -745,19 +892,27 @@ struct ModelsSettingsView: View {
                 if on { autofillAgent(for: .bedrock) }
             })
     }
+    /// Layered workspace editing an INHERITED Bedrock's region/key: copy the
+    /// global credential into the layer first so the edit lands on its own.
+    private func materializeBedrock(_ s: inout ModelSettings) {
+        guard s.credential(.bedrock) == nil, let g = layer?.global.credential(.bedrock) else { return }
+        s.providers.append(g)
+    }
     private var bedrockRegion: Binding<String> {
-        Binding(get: { settings.credential(.bedrock)?.region ?? "" },
+        Binding(get: { resolved.credential(.bedrock)?.region ?? "" },
                 set: { txt in
                     mutate { s in
+                        materializeBedrock(&s)
                         guard let i = s.providers.firstIndex(where: { $0.provider == .bedrock }) else { return }
                         s.providers[i].region = txt.trimmingCharacters(in: .whitespaces).isEmpty ? nil : txt
                     }
                 })
     }
     private var bedrockKey: Binding<String> {
-        Binding(get: { settings.credential(.bedrock)?.apiKey ?? "" },
+        Binding(get: { resolved.credential(.bedrock)?.apiKey ?? "" },
                 set: { txt in
                     mutate { s in
+                        materializeBedrock(&s)
                         guard let i = s.providers.firstIndex(where: { $0.provider == .bedrock }) else { return }
                         s.providers[i].apiKey = txt.isEmpty ? nil : txt
                     }
@@ -765,19 +920,31 @@ struct ModelsSettingsView: View {
     }
     private var localServerEnabled: Binding<Bool> {
         Binding(
-            get: { settings.localServer != nil },
+            get: { resolved.localServer != nil },
             set: { on in
-                mutate { s in s.localServer = on ? (s.localServer ?? LocalServer(baseURL: "")) : nil }
+                if let layer, settings.localServer == nil, layer.global.localServer != nil {
+                    // Inherited: the switch opts out of / back into the global one.
+                    setExcluded(.custom, !on)
+                } else {
+                    mutate { s in s.localServer = on ? (s.localServer ?? LocalServer(baseURL: "")) : nil }
+                    if !on, layer?.global.localServer != nil { setExcluded(.custom, true) }
+                    if on { setExcluded(.custom, false) }
+                }
                 if !on { localServerModels = []; localServerProbe = .idle }
             })
     }
+    /// Layered workspace editing the INHERITED server: copy it into the layer
+    /// first so the edit becomes the workspace's own.
+    private func materializeLocalServer(_ s: inout ModelSettings) {
+        if s.localServer == nil, let g = layer?.global.localServer { s.localServer = g }
+    }
     private var localServerURL: Binding<String> {
-        Binding(get: { settings.localServer?.baseURL ?? "" },
-                set: { txt in mutate { $0.localServer?.baseURL = txt } })
+        Binding(get: { resolved.localServer?.baseURL ?? "" },
+                set: { txt in mutate { materializeLocalServer(&$0); $0.localServer?.baseURL = txt } })
     }
     private var localServerKey: Binding<String> {
-        Binding(get: { settings.localServer?.apiKey ?? "" },
-                set: { txt in mutate { $0.localServer?.apiKey = txt.isEmpty ? nil : txt } })
+        Binding(get: { resolved.localServer?.apiKey ?? "" },
+                set: { txt in mutate { materializeLocalServer(&$0); $0.localServer?.apiKey = txt.isEmpty ? nil : txt } })
     }
 }
 
@@ -794,13 +961,30 @@ private struct ProviderConfigPopover: View {
     let onSignIn: () -> Void
     let onLogOut: () -> Void
     @Binding var apiKey: String
+    /// Layered workspace with its OWN credential for this provider: the action
+    /// that drops it and inherits the global one again. nil otherwise.
+    var ownOverride: (() -> Void)? = nil
+    /// Layered workspace inheriting this provider: the form below overrides it.
+    var inheritedHint: Bool = false
     @State private var tick = 0
 
     var body: some View {
         let _ = tick
         let saved = hasCapture ? savedAt() : nil
         return VStack(alignment: .leading, spacing: 12) {
-            Text(provider.displayName).font(.headline)
+            HStack {
+                Text(provider.displayName).font(.headline)
+                Spacer()
+                if let ownOverride {
+                    Button("Use the global provider") { ownOverride() }.controlSize(.small)
+                }
+            }
+            if inheritedHint {
+                Text("Override for this workspace:").font(.caption).foregroundStyle(.secondary)
+            } else if ownOverride != nil {
+                Label("This workspace's own credential.", systemImage: "pencil")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
 
             if hasCapture {
                 if let saved {
@@ -855,32 +1039,44 @@ struct GlobalModelsSettingsView: View {
     }
 }
 
-/// Workspace editor: an optional per-workspace override of the global settings.
-/// Off → the workspace inherits Preferences → Models. On → it edits its own copy
-/// (seeded from the global settings), committed with the editor's Save/Cancel.
+/// Workspace editor: an optional per-workspace override of the global settings —
+/// layered (inherit, change what's set here) or standalone.
 struct WorkspaceModelsSettingsView: View {
-    @Binding var override: ModelSettings?
+    @Binding var override: ModelOverride?
     var globalSettings: ModelSettings
     var subscription: ModelsSubscriptionHooks? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Toggle(isOn: overrideEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Custom model settings for this workspace").font(.body.weight(.medium))
-                    Text(override == nil
-                         ? "Inheriting the global settings (Preferences → Models)."
-                         : "This workspace has its own providers, logins and model choices below.")
-                        .font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle(isOn: overrideEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Custom model settings for this workspace").font(.body.weight(.medium))
+                        Text(override == nil
+                             ? "Inheriting the global settings (Preferences → Models)."
+                             : (override?.inheritsGlobal == true
+                                ? "Starts from the global settings; only what you set below is different here."
+                                : "This workspace has its own providers, logins and model choices below — the global settings are ignored."))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if override != nil {
+                    Picker("", selection: modeBinding) {
+                        Text("Inherit, with changes").tag(true)
+                        Text("Standalone").tag(false)
+                    }
+                    .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 300)
                 }
             }
             .padding(18)
             Divider()
-            if override != nil {
+            if let o = override {
                 ModelsSettingsView(
-                    settings: Binding(get: { override ?? globalSettings },
-                                      set: { override = $0 }),
-                    subscription: subscription)
+                    settings: layerSettings,
+                    subscription: subscription,
+                    layer: o.inheritsGlobal
+                        ? ModelsLayerContext(global: globalSettings, excluded: excludedBinding)
+                        : nil)
             } else {
                 inheritedSummary.padding(18)
                 Spacer(minLength: 0)
@@ -889,10 +1085,33 @@ struct WorkspaceModelsSettingsView: View {
     }
 
     private var overrideEnabled: Binding<Bool> {
+        // On: a layered override with nothing set yet — everything still
+        // inherits until the user changes something.
         Binding(get: { override != nil },
-                // Seed the override from the current global settings so the user
-                // starts from what's live, not a blank slate.
-                set: { on in override = on ? globalSettings : nil })
+                set: { on in override = on ? ModelOverride(inheritsGlobal: true) : nil })
+    }
+    private var modeBinding: Binding<Bool> {
+        Binding(get: { override?.inheritsGlobal ?? true },
+                set: { layered in
+                    guard var o = override, o.inheritsGlobal != layered else { return }
+                    if layered {
+                        // Back to inheriting: start from an empty layer.
+                        o = ModelOverride(inheritsGlobal: true)
+                    } else {
+                        // Standalone: seed from what's live so the user starts
+                        // from the current effective setup, not a blank slate.
+                        o = .standalone(o.resolved(over: globalSettings))
+                    }
+                    override = o
+                })
+    }
+    private var layerSettings: Binding<ModelSettings> {
+        Binding(get: { override?.settings ?? ModelSettings() },
+                set: { override?.settings = $0 })
+    }
+    private var excludedBinding: Binding<[ModelProvider]> {
+        Binding(get: { override?.excludedProviders ?? [] },
+                set: { override?.excludedProviders = $0 })
     }
 
     @ViewBuilder private var inheritedSummary: some View {
@@ -905,7 +1124,12 @@ struct WorkspaceModelsSettingsView: View {
                     Spacer()
                 }.font(.callout)
             }
-            Text("Turn on the switch above to give this workspace different models.")
+            let providers = globalSettings.providers.filter(\.isUsable).map(\.provider.displayName)
+            if !providers.isEmpty {
+                Text("Providers: " + providers.joined(separator: ", "))
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            Text("Turn on the switch above to give this workspace its own keys, logins or models — for some providers or all of them.")
                 .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
         }
     }

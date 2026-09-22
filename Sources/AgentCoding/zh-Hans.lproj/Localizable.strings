@@ -2386,3 +2386,7 @@
 "This Mac" = "此 Mac";
 "Couldn't load the remote preferences" = "无法加载远程偏好设置";
 "Loading preferences from %@…" = "正在从 %@ 加载偏好设置…";
+
+/* Added 2026-09-22 — layered workspace model settings */
+"Inherited from Preferences → Models (%@)." = "继承自偏好设置 → 模型（%@）。";
+"Couldn't save the model settings on %@." = "无法在 %@ 上保存模型设置。";

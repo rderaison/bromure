@@ -419,3 +419,142 @@ public struct ModelSettings: Codable, Equatable, Sendable {
         }
     }
 }
+
+// MARK: - Per-workspace override, layered over the global settings
+
+public extension ModelSettings {
+    /// The stand-in a redacted document carries for a stored API key (a
+    /// remote's `/models/settings`, a workspace export): non-empty, so the
+    /// credential still reads as usable, and recognisable, so a save that
+    /// carries it back means "keep the stored key".
+    static let redactedSecret = "••••••••"
+
+    /// True for a value that must NOT replace a stored secret: empty (the
+    /// field was left blank) or the redaction stand-in.
+    static func isRedactedSecret(_ value: String?) -> Bool {
+        let v = (value ?? "").trimmingCharacters(in: .whitespaces)
+        return v.isEmpty || v == redactedSecret
+    }
+
+    /// A copy with every API key replaced by `redactedSecret` — what leaves
+    /// the host over the control API. `restoringSecrets(from:)` reverses it.
+    func redacted() -> ModelSettings {
+        var s = self
+        for i in s.providers.indices where !(s.providers[i].apiKey ?? "").isEmpty {
+            s.providers[i].apiKey = Self.redactedSecret
+        }
+        if s.localServer != nil, !(s.localServer?.apiKey ?? "").isEmpty {
+            s.localServer?.apiKey = Self.redactedSecret
+        }
+        return s
+    }
+
+    /// The counterpart of `redacted()`: a document round-tripped through an
+    /// editor comes back with blank / stand-in keys for everything the user
+    /// didn't retype. Put the stored ones back; a typed key replaces it.
+    func restoringSecrets(from stored: ModelSettings) -> ModelSettings {
+        var s = self
+        for i in s.providers.indices where Self.isRedactedSecret(s.providers[i].apiKey) {
+            let kept = stored.credential(s.providers[i].provider)?.apiKey
+            s.providers[i].apiKey = (kept ?? "").isEmpty ? nil : kept
+        }
+        if s.localServer != nil, Self.isRedactedSecret(s.localServer?.apiKey) {
+            let kept = stored.localServer?.apiKey
+            s.localServer?.apiKey = (kept ?? "").isEmpty ? nil : kept
+        }
+        return s
+    }
+}
+
+/// A workspace's model settings relative to the global ones (Preferences →
+/// Models). Two shapes:
+///
+///   • **layered** (`inheritsGlobal == true`, the default for a new override):
+///     the workspace starts from the global settings and changes only what it
+///     sets here — its own credential for a provider (`settings.providers`),
+///     a provider it must NOT use (`excludedProviders`), its own custom
+///     server, its own model choice for a tier / an agent. Everything else
+///     inherits, live: a provider registered globally later shows up here too.
+///   • **standalone** (`inheritsGlobal == false`): the global settings are
+///     ignored entirely and `settings` is the whole configuration — the
+///     original "custom model settings for this workspace".
+///
+/// `ModelProvider.custom` in `excludedProviders` means "don't inherit the
+/// global custom server" (the custom server is that provider's UI form).
+public struct ModelOverride: Codable, Equatable, Sendable {
+    public var inheritsGlobal: Bool
+    /// This workspace's own layer (layered) or its whole configuration (standalone).
+    public var settings: ModelSettings
+    /// Global providers this workspace must not use (layered mode only).
+    public var excludedProviders: [ModelProvider]
+
+    public init(inheritsGlobal: Bool = true,
+                settings: ModelSettings = ModelSettings(),
+                excludedProviders: [ModelProvider] = []) {
+        self.inheritsGlobal = inheritsGlobal
+        self.settings = settings
+        self.excludedProviders = excludedProviders
+    }
+
+    /// The original all-or-nothing override: `settings` is everything.
+    public static func standalone(_ settings: ModelSettings) -> ModelOverride {
+        ModelOverride(inheritsGlobal: false, settings: settings)
+    }
+
+    /// The settings the workspace actually runs with.
+    public func resolved(over global: ModelSettings) -> ModelSettings {
+        guard inheritsGlobal else { return settings }
+        var out = global
+        out.providers.removeAll { excludedProviders.contains($0.provider) }
+        for own in settings.providers {
+            out.providers.removeAll { $0.provider == own.provider }
+            out.providers.append(own)
+        }
+        if let own = settings.localServer {
+            out.localServer = own
+        } else if excludedProviders.contains(.custom) {
+            out.localServer = nil
+        }
+        for id in settings.localRunModels where !out.localRunModels.contains(id) {
+            out.localRunModels.append(id)
+        }
+        for (tier, ref) in settings.tiers { out.tiers[tier] = ref }
+        for (agent, tiers) in settings.agentTiers {
+            var merged = out.agentTiers[agent] ?? [:]
+            for (tier, ref) in tiers { merged[tier] = ref }
+            out.agentTiers[agent] = merged.isEmpty ? nil : merged
+        }
+        return out
+    }
+
+    /// How the workspace treats one global provider (layered mode).
+    public enum ProviderStatus: Equatable, Sendable { case inherited, overridden, excluded, unset }
+    public func providerStatus(_ provider: ModelProvider, global: ModelSettings) -> ProviderStatus {
+        if settings.credential(provider) != nil { return .overridden }
+        if excludedProviders.contains(provider) { return .excluded }
+        if !inheritsGlobal { return .unset }
+        return global.credential(provider) != nil ? .inherited : .unset
+    }
+
+    // Tolerant decoding: a document written before layering existed is a bare
+    // `ModelSettings` (the full override) — read it as standalone.
+    enum CodingKeys: String, CodingKey { case inheritsGlobal, settings, excludedProviders }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if c.contains(.inheritsGlobal) || c.contains(.settings) {
+            inheritsGlobal = try c.decodeIfPresent(Bool.self, forKey: .inheritsGlobal) ?? true
+            settings = try c.decodeIfPresent(ModelSettings.self, forKey: .settings) ?? ModelSettings()
+            excludedProviders = try c.decodeIfPresent([ModelProvider].self, forKey: .excludedProviders) ?? []
+        } else {
+            inheritsGlobal = false
+            settings = try ModelSettings(from: decoder)
+            excludedProviders = []
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(inheritsGlobal, forKey: .inheritsGlobal)
+        try c.encode(settings, forKey: .settings)
+        try c.encode(excludedProviders, forKey: .excludedProviders)
+    }
+}

@@ -3813,6 +3813,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             self?.automationDeleteProfile(key) ?? ["ok": false, "error": "unavailable"]
         }
         server.onExportTemplate = { [weak self] in self?.automationTemplateExport() }
+        server.onExportModelSettings = { [weak self] in self?.automationModelSettingsExport() }
+        server.onUpdateModelSettings = { [weak self] doc in
+            self?.automationUpdateModelSettings(doc) ?? ["ok": false, "error": "unavailable"]
+        }
         server.onUpdateTemplate = { [weak self] doc in
             self?.automationUpdateTemplate(doc) ?? ["ok": false, "error": "unavailable"]
         }
@@ -6648,7 +6652,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let profile = try JSONDecoder.iso8601().decode(Profile.self, from: data)
                 let refs = (doc["configuredCredentialRefs"] as? [String])?
                     .compactMap { CredentialRef(wireID: $0) }
-                return RemotePreferences(profile: profile, credentialRefs: refs)
+                let models = try await c.fetchModelSettings()
+                return RemotePreferences(profile: profile, credentialRefs: refs, modelSettings: models)
             },
             makeRemoteEditor: { [weak self] hostID, prefs in
                 self.map { AnyView($0.makeRemotePreferencesEditor(hostID: hostID, prefs)) }
@@ -6789,7 +6794,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             onRegisterGrok: { [weak window] in window?.beginRemoteRegistration(.grok, nil) },
             kimiAccountSavedAt: { [weak controller] in controller?.subscriptionStatus["kimi"]?.registeredAt },
             onRegisterKimi: { [weak window] in window?.beginRemoteRegistration(.kimi, nil) },
-            localModelsRemoteAny: controller?.modelBackend()
+            localModelsRemoteAny: controller?.modelBackend(),
+            // The remote's Preferences → Models: edited as a draft here, PUT
+            // back on Save (keys the user didn't retype stay redacted → kept).
+            modelsPane: .remoteGlobal(prefs.modelSettings),
+            onSaveGlobalModels: { [weak self] settings in
+                guard let controller else { return }
+                Task { @MainActor [weak self] in
+                    do {
+                        try await controller.saveModelSettings(settings)
+                    } catch {
+                        self?.showError(error, message: String(
+                            format: NSLocalizedString("Couldn't save the model settings on %@.", comment: ""),
+                            controller.host.name))
+                    }
+                }
+            }
         )
     }
 
@@ -7938,6 +7958,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // identity with its auth + CA redacted so the remote guardrails pane can
         // list it; the save round-trip keeps the stored secret (see overlay).
         stripped.kubeconfigs = p.kubeconfigs.map { $0.redactedIdentity() }
+        Self.markRedactedModelKeys(&stripped, from: p)
         guard let data = try? JSONEncoder.iso8601().encode(stripped),
               var dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return nil
@@ -7962,6 +7983,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var stripped = p
         _ = ProfileSecrets.extract(stripping: &stripped)   // blank all secrets
         stripped.kubeconfigs = p.kubeconfigs.map { $0.redactedIdentity() }
+        Self.markRedactedModelKeys(&stripped, from: p)
         guard let data = try? JSONEncoder.iso8601().encode(stripped),
               var dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return nil
@@ -7969,6 +7991,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         dict["_secretsRedacted"] = true
         dict["configuredCredentialRefs"] = p.configuredCredentials().map(\.id)
         return dict
+    }
+
+    /// A workspace's own model-provider keys leave the host as the redaction
+    /// stand-in rather than blank, so the remote Models pane still shows the
+    /// provider as configured ("overridden here"); `ProfileSecrets.apply`
+    /// treats the stand-in like a blank — keep the stored key.
+    private static func markRedactedModelKeys(_ stripped: inout Profile, from real: Profile) {
+        guard var o = stripped.modelOverride, let realO = real.modelOverride else { return }
+        for i in o.settings.providers.indices {
+            let prov = o.settings.providers[i].provider
+            if !(realO.settings.credential(prov)?.apiKey ?? "").isEmpty {
+                o.settings.providers[i].apiKey = ModelSettings.redactedSecret
+            }
+        }
+        if o.settings.localServer != nil, !(realO.settings.localServer?.apiKey ?? "").isEmpty {
+            o.settings.localServer?.apiKey = ModelSettings.redactedSecret
+        }
+        stripped.modelOverride = o
     }
 
     /// Replace the preferences template from a document round-tripped through
@@ -8004,6 +8044,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         } catch {
             return ["ok": false, "error": error.localizedDescription]
         }
+        return ["ok": true]
+    }
+
+    /// The global model settings with API keys redacted — what a fat client's
+    /// workspace editor inherits from and its remote Preferences window edits.
+    @MainActor
+    func automationModelSettingsExport() -> [String: Any]? {
+        guard let data = try? JSONEncoder().encode(ModelSettingsStore.shared.settings.redacted()),
+              let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        return dict
+    }
+
+    /// Replace the global model settings from a document round-tripped
+    /// through `automationModelSettingsExport`: a blank or redacted key keeps
+    /// the stored one, a typed key replaces it.
+    @MainActor
+    func automationUpdateModelSettings(_ doc: [String: Any]) -> [String: Any] {
+        guard let data = try? JSONSerialization.data(withJSONObject: doc),
+              let incoming = try? JSONDecoder().decode(ModelSettings.self, from: data) else {
+            return ["ok": false, "error": "Invalid model settings document"]
+        }
+        let store = ModelSettingsStore.shared
+        let merged = incoming.restoringSecrets(from: store.settings)
+        store.update { $0 = merged }
         return ["ok": true]
     }
 

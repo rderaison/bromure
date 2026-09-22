@@ -104,11 +104,11 @@ public final class ModelSettingsStore: ObservableObject {
         update { s in s.agentTiers[agent] = nil }
     }
 
-    /// The settings a workspace actually runs with: its own complete override
-    /// (providers, credentials, local server, AND model choices) when it has one,
-    /// otherwise the global settings. A workspace can register its own keys and
-    /// subscriptions independently of the global config.
+    /// The settings a workspace actually runs with: the global settings, or
+    /// its override resolved over them — layered (its own providers, keys,
+    /// subscriptions and model choices on top of the global ones, exclusions
+    /// applied) or standalone (its own complete configuration).
     public func effective(for profile: Profile) -> ModelSettings {
-        profile.modelOverride ?? settings
+        profile.modelOverride?.resolved(over: settings) ?? settings
     }
 }
