@@ -80,6 +80,35 @@ struct ProfileLocalHostsTests {
         #expect(p.localProviderCloudHosts == ["anthropic.com", "x.ai", "grok.com"])
     }
 
+    @Test("Cloud claude + local omp (private server): anthropic.com stays cloud")
+    func cloudClaudeLocalOmp() {
+        var p = Profile(name: "t", tool: .claude, authMode: .token, apiKey: "sk-ant-x")
+        p.additionalTools = [Profile.ToolSpec(tool: .omp, authMode: .local, localModelID: "deepseek-v4-flash")]
+        #expect(!p.localProviderCloudHosts.contains("anthropic.com"))
+        #expect(p.localProviderCloudHosts.isEmpty)
+    }
+
+    @Test("A host a cloud agent speaks to is never local, even when a local agent shares it")
+    func cloudAgentWinsSharedHost() {
+        var p = Profile(name: "t", tool: .codex, authMode: .token, apiKey: "sk-x")
+        p.additionalTools = [Profile.ToolSpec(tool: .claude, authMode: .local, localModelID: "m"),
+                             Profile.ToolSpec(tool: .omp, authMode: .token, ompProvider: .anthropic)]
+        #expect(!p.localProviderCloudHosts.contains("anthropic.com"))
+        #expect(!p.localProviderCloudHosts.contains("openai.com"))
+    }
+
+    @Test("The launch overlay's shape: cloud claude, every other agent local, only their hosts")
+    func overlayShape() {
+        var p = Profile(name: "t", tool: .claude, authMode: .subscription)
+        p.additionalTools = [Profile.ToolSpec(tool: .codex, authMode: .local, localModelID: "m"),
+                             Profile.ToolSpec(tool: .grok, authMode: .local, localModelID: "m"),
+                             Profile.ToolSpec(tool: .kimi, authMode: .local, localModelID: "m"),
+                             Profile.ToolSpec(tool: .omp, authMode: .local, localModelID: "m")]
+        let hosts = p.localProviderCloudHosts
+        #expect(!hosts.contains("anthropic.com"))
+        #expect(hosts.isSuperset(of: ["openai.com", "x.ai", "moonshot.ai"]))
+    }
+
     @Test("Mixed profile: cloud claude + local codex — only codex's hosts")
     func mixedClaudeCloudCodexLocal() {
         var p = Profile(name: "t", tool: .claude, authMode: .token, apiKey: "sk-ant-x")

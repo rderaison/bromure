@@ -416,8 +416,13 @@ struct KimiAgentTests {
         try "# >>> bromure-kimi\n[[hooks]]\nevent = \"Stop\"\n# <<< bromure-kimi\n"
             .write(to: cfg, atomically: true, encoding: .utf8)
         #expect(ACAppDelegate.readKimiCredentials(in: home) == nil)
-        // The managed provider landed → capture, carrying that config and the slot name.
+        // The managed provider without its default model (a write in
+        // between) → still not something a seeded session can start on.
         try "[providers.\"managed:kimi-code\"]\ntype = \"kimi-code\"\n[models.\"kimi-code/k3\"]\nprovider = \"managed:kimi-code\"\n"
+            .write(to: cfg, atomically: true, encoding: .utf8)
+        #expect(ACAppDelegate.readKimiCredentials(in: home) == nil)
+        // Provider + default model landed → capture, carrying that config and the slot name.
+        try "default_model = \"kimi-code/k3\"\n[providers.\"managed:kimi-code\"]\ntype = \"kimi-code\"\n[models.\"kimi-code/k3\"]\nprovider = \"managed:kimi-code\"\n"
             .write(to: cfg, atomically: true, encoding: .utf8)
         let got = try #require(ACAppDelegate.readKimiCredentials(in: home))
         #expect(got.name == "kimi-code-env-0e4f99c69cc27850")

@@ -2415,27 +2415,50 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// circuited / rerouted to the engine, so a subscription Claude sharing a
     /// VM with a local Codex still reaches `api.anthropic.com`.
     public var localProviderCloudHosts: Set<String> {
-        var hosts: Set<String> = []
-        for spec in allToolSpecs where spec.authMode == .local {
-            switch spec.tool {
-            case .claude: hosts.insert("anthropic.com")
-            case .codex:  hosts.formUnion(["openai.com", "chatgpt.com"])
-            case .grok:   hosts.formUnion(["x.ai", "grok.com"])
-            case .kimi:   hosts.formUnion(["moonshot.ai", "kimi.com", "kimi.ai"])
-            case .omp:
-                switch spec.effectiveOmpProvider {
-                case .anthropic: hosts.insert("anthropic.com")
-                case .openai:    hosts.formUnion(["openai.com", "chatgpt.com"])
-                case .xai:       hosts.formUnion(["x.ai", "grok.com"])
-                case .zai:       hosts.insert("z.ai")
-                case .custom:
-                    if let h = spec.ompBaseURL.flatMap({ URL(string: $0)?.host }) {
-                        hosts.insert(h)
-                    }
-                }
+        // A workspace can mix agents: Claude on an Anthropic API key or
+        // subscription next to omp (or Codex, Kimi…) on a private server.
+        // A host is only "local" when no agent that is NOT local speaks to
+        // it — a cloud agent's traffic always wins. Without this, a local
+        // omp (Anthropic is its default provider) put anthropic.com in the
+        // set, and a token/subscription Claude in the same workspace had its
+        // /v1/messages rerouted to the private server and its management
+        // calls answered with `{}` ("API returned an empty or malformed
+        // response"). The launch overlay enables every agent, so that hit
+        // every Claude workspace once omp was set to a local model.
+        var local: Set<String> = []
+        var cloud: Set<String> = []
+        for spec in allToolSpecs {
+            if spec.authMode == .local {
+                // A local omp is configured against the bromure.llm sentinel
+                // (omp-models.yml `bromure` provider) and never calls its
+                // provider's real host; it claims none.
+                if spec.tool == .omp { continue }
+                local.formUnion(Self.providerHosts(spec))
+            } else {
+                cloud.formUnion(Self.providerHosts(spec))
             }
         }
-        return hosts
+        return local.subtracting(cloud)
+    }
+
+    /// The cloud hosts an agent speaks to natively (omp: its provider's).
+    static func providerHosts(_ spec: ToolSpec) -> Set<String> {
+        switch spec.tool {
+        case .claude: return ["anthropic.com"]
+        case .codex:  return ["openai.com", "chatgpt.com"]
+        case .grok:   return ["x.ai", "grok.com"]
+        case .kimi:   return ["moonshot.ai", "kimi.com", "kimi.ai"]
+        case .omp:
+            switch spec.effectiveOmpProvider {
+            case .anthropic: return ["anthropic.com"]
+            case .openai:    return ["openai.com", "chatgpt.com"]
+            case .xai:       return ["x.ai", "grok.com"]
+            case .zai:       return ["z.ai"]
+            case .custom:
+                if let h = spec.ompBaseURL.flatMap({ URL(string: $0)?.host }) { return [h.lowercased()] }
+                return []
+            }
+        }
     }
 
     /// The model id the on-host engine should serve for this profile, or
