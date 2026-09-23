@@ -144,16 +144,30 @@ extension ACAppDelegate {
             "[sign-in] captured \(s.provider.displayName) tokens for \(pid.uuidString.prefix(8)) at the proxy\n".utf8))
         do {
             switch s.provider {
+            // A sign-in from inside a workspace replaces the record THAT
+            // workspace reads: its own per-workspace login when it has one
+            // (which would otherwise shadow a new shared one), else the
+            // shared login.
             case .claude:
-                try engine.claudeSubscriptionStore.setShared(ClaudeSubscriptionRecord(
-                    accessToken: access, refreshToken: refresh, expiresAt: expiresAt, savedAt: Date()))
+                let rec = ClaudeSubscriptionRecord(
+                    accessToken: access, refreshToken: refresh, expiresAt: expiresAt, savedAt: Date())
+                if engine.claudeSubscriptionStore.hasProfileRecord(pid) {
+                    try engine.claudeSubscriptionStore.setOverride(rec, for: pid)
+                } else {
+                    try engine.claudeSubscriptionStore.setShared(rec)
+                }
                 endProxySignIn(s, success: true, message: nil)
                 return Self.keptOnHostReply()
             case .codex:
-                try engine.codexSubscriptionStore.setShared(CodexSubscriptionRecord(
+                let rec = CodexSubscriptionRecord(
                     accessToken: access, refreshToken: refresh,
                     idToken: (json["id_token"] as? String) ?? "",
-                    expiresAt: expiresAt, savedAt: Date()))
+                    expiresAt: expiresAt, savedAt: Date())
+                if engine.codexSubscriptionStore.hasProfileRecord(pid) {
+                    try engine.codexSubscriptionStore.setOverride(rec, for: pid)
+                } else {
+                    try engine.codexSubscriptionStore.setShared(rec)
+                }
                 endProxySignIn(s, success: true, message: nil)
                 return Self.keptOnHostReply()
             case .grok, .kimi:
@@ -245,9 +259,14 @@ extension ACAppDelegate {
                         break
                     }
                 }
-                try engine.grokSubscriptionStore.setShared(GrokSubscriptionRecord(
+                let rec = GrokSubscriptionRecord(
                     accessToken: access, refreshToken: refresh, expiresAt: expiresAt, savedAt: Date(),
-                    scopeKey: scopeKey, templateJSON: template))
+                    scopeKey: scopeKey, templateJSON: template)
+                if engine.grokSubscriptionStore.hasProfileRecord(pid) {
+                    try engine.grokSubscriptionStore.setOverride(rec, for: pid)
+                } else {
+                    try engine.grokSubscriptionStore.setShared(rec)
+                }
             } else {
                 var name = kimiManagedCredentialName
                 var template = Data()
@@ -265,9 +284,14 @@ extension ACAppDelegate {
                 // seed: store none, and the host provisions one from /models
                 // itself (KimiProvisioner) before the next boot.
                 let provisioned = kimiTOML.flatMap { ACAppDelegate.kimiConfigIsProvisioned($0) ? $0 : nil }
-                try engine.kimiSubscriptionStore.setShared(KimiSubscriptionRecord(
+                let rec = KimiSubscriptionRecord(
                     accessToken: access, refreshToken: refresh, expiresAt: expiresAt, savedAt: Date(),
-                    credentialName: name, templateJSON: template, configTOML: provisioned))
+                    credentialName: name, templateJSON: template, configTOML: provisioned)
+                if engine.kimiSubscriptionStore.hasProfileRecord(pid) {
+                    try engine.kimiSubscriptionStore.setOverride(rec, for: pid)
+                } else {
+                    try engine.kimiSubscriptionStore.setShared(rec)
+                }
             }
             endProxySignIn(s, success: true, message: nil)
         } catch {

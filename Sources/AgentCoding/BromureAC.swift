@@ -4335,23 +4335,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // registered and whether the provider has since rejected it.
         server.onSubscriptionStatus = { [weak self] profileID in
             MainActor.assumeIsolated {
-                guard let engine = self?.mitmEngine else { return [:] }
+                guard let self, let engine = self.mitmEngine else { return [:] }
                 let pid = profileID.flatMap(UUID.init(uuidString:))
-                func entry(_ savedAt: Date?, _ reauth: Date?) -> [String: Any]? {
+                let allProfiles = self.profiles
+                // Per workspace: `scope` says whether it reads its own sign-in
+                // ("workspace") or the shared one. Globally: `overrides` lists
+                // the workspaces whose own sign-in shadows the shared record —
+                // the invisible state behind "I re-registered and nothing
+                // changed".
+                func entry(_ savedAt: Date?, _ reauth: Date?, hasOwn: (UUID) -> Bool) -> [String: Any]? {
                     guard let savedAt else { return nil }
                     var d: [String: Any] = ["registeredAt": savedAt.timeIntervalSince1970]
                     if let reauth { d["reauthRequiredAt"] = reauth.timeIntervalSince1970 }
+                    if let pid {
+                        d["scope"] = hasOwn(pid) ? "workspace" : "shared"
+                    } else {
+                        let overrides = allProfiles.filter { hasOwn($0.id) }.map { $0.id.uuidString }
+                        if !overrides.isEmpty { d["overrides"] = overrides }
+                    }
                     return d
                 }
                 var out: [String: Any] = [:]
                 if let e = entry(engine.claudeSubscriptionStore.record(for: pid)?.savedAt,
-                                 engine.claudeSubscriptionStore.reauthRequiredAt(for: pid)) { out["claude"] = e }
+                                 engine.claudeSubscriptionStore.reauthRequiredAt(for: pid),
+                                 hasOwn: engine.claudeSubscriptionStore.hasProfileRecord) { out["claude"] = e }
                 if let e = entry(engine.codexSubscriptionStore.record(for: pid)?.savedAt,
-                                 engine.codexSubscriptionStore.reauthRequiredAt(for: pid)) { out["codex"] = e }
+                                 engine.codexSubscriptionStore.reauthRequiredAt(for: pid),
+                                 hasOwn: engine.codexSubscriptionStore.hasProfileRecord) { out["codex"] = e }
                 if let e = entry(engine.grokSubscriptionStore.record(for: pid)?.savedAt,
-                                 engine.grokSubscriptionStore.reauthRequiredAt(for: pid)) { out["grok"] = e }
+                                 engine.grokSubscriptionStore.reauthRequiredAt(for: pid),
+                                 hasOwn: engine.grokSubscriptionStore.hasProfileRecord) { out["grok"] = e }
                 if let e = entry(engine.kimiSubscriptionStore.record(for: pid)?.savedAt,
-                                 engine.kimiSubscriptionStore.reauthRequiredAt(for: pid)) { out["kimi"] = e }
+                                 engine.kimiSubscriptionStore.reauthRequiredAt(for: pid),
+                                 hasOwn: engine.kimiSubscriptionStore.hasProfileRecord) { out["kimi"] = e }
                 return out
             }
         }

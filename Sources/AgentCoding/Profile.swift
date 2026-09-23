@@ -4200,15 +4200,37 @@ public final class ProfileStore {
             [ -n "$pane" ] || exit 0
             idx=$(tmux display-message -p -t "$pane" '#{window_index}' 2>/dev/null)
             [ -n "$idx" ] || exit 0
-            printf '%s' "${1:-}" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
+            signal="${1:-}"
+            # Claude hands the hook its JSON on stdin. Read it once: it names
+            # the transcript file (kept per tab, below) and, for a
+            # Notification, WHICH notification. Not a terminal → nothing to read.
+            hook_json=""
+            if [ ! -t 0 ]; then hook_json=$(cat 2>/dev/null); fi
+            # Claude's Notification hook fires for more than questions: an
+            # idle_prompt comes after the agent has merely sat at its prompt
+            # for a while. Reporting that as "needs input" made every idle
+            # agent look like it had a dialog up, and the host then held its
+            # delegation notices indefinitely (that is the state it never
+            # types over). Only a real prompt is needsInput; idle is done;
+            # anything else (auth_success, elicitation bookkeeping, quota
+            # notices) says nothing about the turn.
+            if [ "$signal" = "needsInput" ] && [ -n "$hook_json" ]; then
+              ntype=$(printf '%s' "$hook_json" | sed -n 's/.*"notification_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+              case "$ntype" in
+                "") ;;
+                permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input) ;;
+                idle_prompt) signal="done" ;;
+                *) exit 0 ;;
+              esac
+            fi
+            printf '%s' "$signal" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
               && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
-            # Claude hands the hook its JSON on stdin, naming the transcript
-            # file. Remember it per tab: the host then reads THIS agent's
-            # transcript even when another agent in the same folder (a
-            # delegate) writes newer files there. A /clear records the new
-            # file on the next prompt. Not a terminal → nothing to read.
-            if [ ! -t 0 ]; then
-              tp=$(sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' 2>/dev/null | head -1)
+            # Remember the transcript per tab: the host then reads THIS
+            # agent's transcript even when another agent in the same folder
+            # (a delegate) writes newer files there. A /clear records the new
+            # file on the next prompt.
+            if [ -n "$hook_json" ]; then
+              tp=$(printf '%s' "$hook_json" | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' 2>/dev/null | head -1)
               if [ -n "$tp" ]; then
                 printf '%s' "$tp" > "$HOME/.bromure/.transcript-$idx.tmp" 2>/dev/null \
                   && mv -f "$HOME/.bromure/.transcript-$idx.tmp" "$HOME/.bromure/transcript-$idx.path" 2>/dev/null || true

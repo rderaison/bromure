@@ -455,23 +455,23 @@ extension ACAppDelegate {
             for _ in 0..<240 {
                 if Task.isCancelled { return }
                 if let claude = state.claudeBridge, let t = try? await claude.read() {
-                    self.finishClaudeRegistration(state: state,
+                    await self.finishClaudeRegistration(state: state,
                         record: .claude(access: t.access, refresh: t.refresh))
                     return
                 }
                 if let codex = state.codexBridge, let t = try? await codex.read() {
-                    self.finishClaudeRegistration(state: state,
+                    await self.finishClaudeRegistration(state: state,
                         record: .codex(access: t.access, refresh: t.refresh, idToken: t.idToken))
                     return
                 }
                 if state.provider == .grok, let g = Self.readGrokAuthFile(at: grokAuthURL) {
-                    self.finishClaudeRegistration(state: state,
+                    await self.finishClaudeRegistration(state: state,
                         record: .grok(access: g.access, refresh: g.refresh,
                                       scopeKey: g.scopeKey, template: g.template))
                     return
                 }
                 if state.provider == .kimi, let k = Self.readKimiCredentials(in: kimiHome) {
-                    self.finishClaudeRegistration(state: state,
+                    await self.finishClaudeRegistration(state: state,
                         record: .kimi(access: k.access, refresh: k.refresh, name: k.name,
                                       template: k.template, configTOML: k.configTOML))
                     return
@@ -595,9 +595,36 @@ extension ACAppDelegate {
         KimiProvisioner.isProvisioned(toml)
     }
 
+    /// Drop every workspace's own sign-in for `provider`, so a login the user
+    /// just chose to share is the one every workspace reads.
+    func forgetProviderOverrides(_ provider: SubscriptionProvider) {
+        guard let engine = mitmEngine else { return }
+        for p in profiles {
+            switch provider {
+            case .claude:
+                if engine.claudeSubscriptionStore.hasProfileRecord(p.id) { try? engine.claudeSubscriptionStore.forget(for: p.id) }
+            case .codex:
+                if engine.codexSubscriptionStore.hasProfileRecord(p.id) { try? engine.codexSubscriptionStore.forget(for: p.id) }
+            case .grok:
+                if engine.grokSubscriptionStore.hasProfileRecord(p.id) { try? engine.grokSubscriptionStore.forget(for: p.id) }
+            case .kimi:
+                if engine.kimiSubscriptionStore.hasProfileRecord(p.id) { try? engine.kimiSubscriptionStore.forget(for: p.id) }
+            }
+        }
+    }
+
     /// Persist the captured tokens per the scope, then tear down + confirm.
+    ///
+    /// Scope matters more than it looks: a workspace reads its own
+    /// per-workspace sign-in first and the shared one only when it has none,
+    /// so a stale per-workspace login silently shadows every later shared
+    /// registration ("I re-registered and the proxy still uses the old
+    /// token"). Hence: the question is asked over the fat client too (it
+    /// used to default to per-workspace without asking), and "Every
+    /// workspace" also drops that provider's per-workspace logins so the
+    /// new sign-in really is what every workspace uses.
     private func finishClaudeRegistration(state: ClaudeRegistrationState,
-                                          record captured: CapturedSubscription) {
+                                          record captured: CapturedSubscription) async {
         guard !state.finished, let engine = mitmEngine else {
             teardownClaudeRegistration(reason: .failure)
             return
@@ -607,24 +634,29 @@ extension ACAppDelegate {
         var sharedEverywhere = true
         var overrideProfile: UUID? = nil
         if case .askPerSession(let pid) = state.scope {
+            let title = NSLocalizedString("Share with every workspace?", comment: "")
+            let body = String(format: NSLocalizedString(
+                "Use this %@ sign-in for every Bromure workspace (replacing any workspace's own %@ sign-in), or only for this one?",
+                comment: ""), state.provider.displayName, state.provider.displayName)
+            let buttons = [NSLocalizedString("Every workspace", comment: ""),
+                           NSLocalizedString("Just this workspace", comment: "")]
             if RemoteRegistrationBroker.shared.pending != nil {
-                // Remote flow: nobody is at the server to answer, and runModal
-                // would wedge the control loop. Default to the conservative
-                // choice — scope the sign-in to the workspace the client
-                // registered from, rather than silently sharing it everywhere.
-                sharedEverywhere = false
-                overrideProfile = pid
+                // Remote flow: the client that registered gets the question
+                // (a runModal here would wedge the control loop). Nobody
+                // answering keeps the conservative choice — just this
+                // workspace.
+                let choice = await PendingPromptBroker.shared.askAsync(
+                    profileID: pid, title: title, message: body, buttons: buttons, fallback: 1)
+                guard !state.finished else { return }
+                sharedEverywhere = (choice == 0)
             } else {
                 let ask = NSAlert()
-                ask.messageText = NSLocalizedString("Share with every workspace?", comment: "")
-                ask.informativeText = String(format: NSLocalizedString(
-                    "Use this %@ sign-in for every Bromure workspace, or only for this one?",
-                    comment: ""), state.provider.displayName)
-                ask.addButton(withTitle: NSLocalizedString("Every workspace", comment: ""))
-                ask.addButton(withTitle: NSLocalizedString("Just this workspace", comment: ""))
+                ask.messageText = title
+                ask.informativeText = body
+                for b in buttons { ask.addButton(withTitle: b) }
                 sharedEverywhere = (ask.runModal() == .alertFirstButtonReturn)
-                if !sharedEverywhere { overrideProfile = pid }
             }
+            if !sharedEverywhere { overrideProfile = pid }
         }
 
         do {
@@ -660,6 +692,7 @@ extension ACAppDelegate {
                 if let pid = overrideProfile { try engine.grokSubscriptionStore.setOverride(rec, for: pid) }
                 else { try engine.grokSubscriptionStore.setShared(rec) }
             }
+            if sharedEverywhere { forgetProviderOverrides(state.provider) }
         } catch {
             if RemoteRegistrationBroker.shared.pending == nil {
                 showError(error, message: NSLocalizedString(

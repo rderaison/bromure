@@ -940,17 +940,27 @@ final class DelegationEngine {
               timeout: TimeInterval) async -> [(Delegation, DelegationMessage)] {
         let now = inbox(for: sessionID, in: delegationID)
         if !now.isEmpty { return now }
-        let waiter = Waiter()
-        waiters[sessionID, default: []].append(waiter)
         let t = min(max(timeout, 1), Self.waitCap)
-        let timer = Task { [weak waiter] in
-            try? await Task.sleep(nanoseconds: UInt64(t * 1_000_000_000))
-            waiter?.resume()
+        let deadline = Date().addingTimeInterval(t)
+        // A wake with nothing to take (a message another waiter of this
+        // session already took — a `request` still running alongside this
+        // `wait`; one for a delegation this call isn't watching) is not a
+        // timeout: keep waiting for what's left of the budget.
+        while true {
+            let waiter = Waiter()
+            waiters[sessionID, default: []].append(waiter)
+            let left = deadline.timeIntervalSinceNow
+            guard left > 0 else { waiters[sessionID]?.removeAll { $0 === waiter }; return [] }
+            let timer = Task { [weak waiter] in
+                try? await Task.sleep(nanoseconds: UInt64(left * 1_000_000_000))
+                waiter?.resume()
+            }
+            await waiter.wait()
+            timer.cancel()
+            waiters[sessionID]?.removeAll { $0 === waiter }
+            let got = inbox(for: sessionID, in: delegationID)
+            if !got.isEmpty || Date() >= deadline { return got }
         }
-        await waiter.wait()
-        timer.cancel()
-        waiters[sessionID]?.removeAll { $0 === waiter }
-        return inbox(for: sessionID, in: delegationID)
     }
 
     private func wake(_ sessionID: UUID) {
@@ -1070,6 +1080,11 @@ final class DelegationEngine {
     /// that never came back to "done" mustn't hold a message forever. A
     /// TUI question up (needsInput) holds it as long as it takes.
     static let holdWhileWorking: TimeInterval = 90
+    /// A TUI question up (needsInput) holds a notice longer — typing into a
+    /// dialog could answer it — but not forever: a status that never came
+    /// back (a hook that misfired, a dialog nobody will answer) was holding
+    /// messages for hours. Past this the line is typed anyway; it queues.
+    static let holdWhileNeedsInput: TimeInterval = 600
 
     /// A message reached the record; make sure its recipient hears it. A
     /// waiter takes it at once. Otherwise anything that interrupts is typed
@@ -1088,13 +1103,14 @@ final class DelegationEngine {
     /// can take it now. The messages stay unread — the notice points at
     /// read_inbox for the full text.
     private func deliverNotices(to sessionID: UUID) {
-        var items = store.unnoticed(for: sessionID).filter { DelegationNotice.interrupts($0.1.kind, request: $0.0.isRequest) }
+        let now = Date()
+        var items = store.unnoticed(for: sessionID, now: now, interrupts: DelegationNotice.interrupts)
         // What remote hosts hold for a session of ours (as its parent),
         // once any files have landed here.
         var remote: [(RemoteDelegationLink, Delegation, DelegationMessage)] = []
         for link in remoteLinks() {
-            for (d, m) in link.remoteDelegations.unnoticed(for: sessionID)
-            where d.parentSessionID == sessionID && DelegationNotice.interrupts(m.kind, request: d.isRequest)
+            for (d, m) in link.remoteDelegations.unnoticed(for: sessionID, now: now, interrupts: DelegationNotice.interrupts)
+            where d.parentSessionID == sessionID
                 && ((m.files ?? []).isEmpty || remoteLanded[m.id] != nil) {
                 remote.append((link, d, localized(m)))
                 items.append((d, localized(m)))
@@ -1125,9 +1141,12 @@ final class DelegationEngine {
         }
         guard let w = s.windowIndex else { return }
         let status = tabStatus(s)
-        let oldest = items.map { $0.1.at }.min() ?? Date()
+        // How long the oldest owed message has waited since it was posted
+        // or last noticed — the hold is per attempt, not per message.
+        let waited = items.map { now.timeIntervalSince($0.1.noticedAt ?? $0.1.at) }.max() ?? 0
         let canType = status == nil || status == .done
-            || (status == .working && Date().timeIntervalSince(oldest) > Self.holdWhileWorking)
+            || (status == .working && waited > Self.holdWhileWorking)
+            || (status == .needsInput && waited > Self.holdWhileNeedsInput)
         guard canType else { return }
         markNoticed()
         Task {
@@ -1149,13 +1168,14 @@ final class DelegationEngine {
         return delegate.pane(for: s.profileID)?.model.tabs.first { $0.index == w }?.agentStatus
     }
 
-    /// Sessions the host still owes a notice.
+    /// Sessions the host still owes a notice — a first one, or a repeat
+    /// for a message still unread (see `DelegationStore.owesNotice`).
     private func recipientsOwed() -> Set<UUID> {
         var out: Set<UUID> = []
+        let now = Date()
         for d in store.delegations {
             for m in d.messages
-            where m.readAt == nil && m.noticedAt == nil && m.isDelivered
-                && DelegationNotice.interrupts(m.kind, request: d.isRequest) {
+            where DelegationStore.owesNotice(m, interrupts: DelegationNotice.interrupts(m.kind, request: d.isRequest), now: now) {
                 out.insert(m.to == .parent ? d.parentSessionID : d.childSessionID)
             }
         }

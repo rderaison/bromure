@@ -65,6 +65,9 @@ struct DelegationMessage: Identifiable, Codable, Equatable, Sendable {
     /// unread message heard. nil while it's still waiting for a free
     /// prompt; survives a restart, unlike a queue.
     var noticedAt: Date?
+    /// How many notices of it have been typed — a message still unread
+    /// after a notice is noticed again, a bounded number of times.
+    var noticeCount: Int?
     /// The ask this answers.
     var answers: UUID?
     /// The prompt-injection scan flagged this text: the snippet that tripped
@@ -299,22 +302,48 @@ final class DelegationStore {
         stamp(ids, now) { $0.readAt == nil ? { $0.readAt = now } : nil }
     }
 
-    /// Delivered messages for a session nobody has read or typed a notice
-    /// of yet, oldest first — what the host still owes the session.
-    func unnoticed(for sessionID: UUID) -> [(Delegation, DelegationMessage)] {
+    /// A notice is typed again for a message still unread this long after
+    /// the last one — a notice the agent read past, or that landed in a
+    /// dialog, was otherwise the end of the road for the message.
+    static let renoticeAfter: TimeInterval = 180
+    /// …and at most this many times: past that the agent is not listening,
+    /// and the record keeps the message for a read_inbox.
+    static let maxNotices = 3
+    /// A message that doesn't interrupt (a delegate's progress report) is
+    /// still noticed once it has waited this long unread — a parent that
+    /// never looks would otherwise never hear it.
+    static let quietGrace: TimeInterval = 180
+
+    /// Whether the host owes the session a notice of `m` right now:
+    /// delivered, unread, and either never noticed or due a repeat.
+    static func owesNotice(_ m: DelegationMessage, interrupts: Bool, now: Date = Date()) -> Bool {
+        guard m.readAt == nil, m.isDelivered else { return false }
+        guard interrupts || now.timeIntervalSince(m.at) >= quietGrace else { return false }
+        guard let last = m.noticedAt else { return true }
+        return (m.noticeCount ?? 1) < maxNotices && now.timeIntervalSince(last) >= renoticeAfter
+    }
+
+    /// Delivered messages for a session the host owes a notice of, oldest
+    /// first: never noticed, or noticed but still unread long enough for a
+    /// repeat (see `owesNotice`). `interrupts` says which kinds a fresh
+    /// message is typed for at once; the rest wait `quietGrace`.
+    func unnoticed(for sessionID: UUID, now: Date = Date(),
+                   interrupts: (DelegationMessage.Kind, Bool) -> Bool = { _, _ in true })
+        -> [(Delegation, DelegationMessage)] {
         var out: [(Delegation, DelegationMessage)] = []
         for d in delegations(involving: sessionID) {
             guard let party = d.party(of: sessionID) else { continue }
             for m in d.messages
-            where m.to == party && m.readAt == nil && m.noticedAt == nil && m.isDelivered {
+            where m.to == party && Self.owesNotice(m, interrupts: interrupts(m.kind, d.isRequest), now: now) {
                 out.append((d, m))
             }
         }
         return out.sorted { $0.1.at < $1.1.at }
     }
 
+    /// A notice was typed (or handed to a resume): stamp it, and count it.
     func markNoticed(_ ids: [UUID], now: Date = Date()) {
-        stamp(ids, now) { $0.noticedAt == nil ? { $0.noticedAt = now } : nil }
+        stamp(ids, now) { _ in { m in m.noticedAt = now; m.noticeCount = (m.noticeCount ?? 0) + 1 } }
     }
 
     private func stamp(_ ids: [UUID], _ now: Date,
@@ -536,16 +565,16 @@ enum DelegationNotice {
         let did = shortID(d.id)
         switch m.kind {
         case .ask:
-            return "\(prefix) \(who) asks: \(oneLine(m.text))\(filesClause(m)) — answer with the delegation tool "
-                + "answer(ask_id: \"\(shortID(m.id))\", text) ; read_inbox has the full text."
+            return "\(prefix) \(who) asks: \(oneLine(m.text))\(filesClause(m)) — call read_inbox now for the full text, then answer with the delegation tool "
+                + "answer(ask_id: \"\(shortID(m.id))\", text)."
         case .deliver where d.isRequest:
             return "\(prefix) \(who) replied to your request \(did): \(oneLine(m.text))\(filesClause(m)) — "
-                + "read_inbox has the full text; steer(delegation_id: \"\(did)\", text) to follow up, close_delegation to close it."
+                + "call read_inbox now for the full text; then steer(delegation_id: \"\(did)\", text) to follow up, or close_delegation to close it."
         case .deliver:
-            return "\(prefix) \(who) delivered: \(oneLine(m.text))\(filesClause(m)) — review it, then "
+            return "\(prefix) \(who) delivered: \(oneLine(m.text))\(filesClause(m)) — call read_inbox now for the full text and review it, then "
                 + "close_delegation(delegation_id: \"\(did)\", verdict) or steer(delegation_id: \"\(did)\", text)."
         case .report:
-            return "\(prefix) \(who) reports: \(oneLine(m.text))\(filesClause(m))"
+            return "\(prefix) \(who) reports: \(oneLine(m.text))\(filesClause(m)) — call read_inbox to take it (delegation \(did))."
         case .note:
             return "\(prefix) \(who): \(oneLine(m.text)) (delegation \(did))"
         case .brief, .answer, .steer, .cancel:
@@ -562,7 +591,7 @@ enum DelegationNotice {
         case .brief:
             // A request: the whole ask, in one line, with the way back.
             return "\(prefix) \(from) asks you (request \(did)): \(oneLine(m.text))\(filesClause(m)) — "
-                + "reply with the delegation tool deliver(delegation_id: \"\(did)\", summary) ; ask(delegation_id: \"\(did)\", question) if something is unclear ; read_inbox has the full text."
+                + "call read_inbox now for the full text, then reply with the delegation tool deliver(delegation_id: \"\(did)\", summary), or ask(delegation_id: \"\(did)\", question) if something is unclear."
         case .answer:
             return "\(prefix) answer from \(from): \(oneLine(m.text))\(filesClause(m))"
         case .steer:

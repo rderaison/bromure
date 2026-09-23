@@ -731,4 +731,61 @@ struct DelegationTests {
         let joined = "[Delegation notice] a" + DelegationNoticeRow.joiner + "[Delegation notice] b"
         #expect(DelegationNotice.strip(joined) != nil)
     }
+
+    // MARK: Getting heard — notices are owed until read, not typed once
+
+    @Test("a message is owed a notice until it is read: once at first, again after a while, a bounded number of times")
+    func owesNoticeUntilRead() {
+        let t0 = Date()
+        var m = DelegationMessage(kind: .deliver, from: .child, to: .parent, text: "done", at: t0)
+        #expect(DelegationStore.owesNotice(m, interrupts: true, now: t0))
+        m.noticedAt = t0; m.noticeCount = 1
+        #expect(!DelegationStore.owesNotice(m, interrupts: true, now: t0.addingTimeInterval(10)))
+        #expect(DelegationStore.owesNotice(m, interrupts: true, now: t0.addingTimeInterval(DelegationStore.renoticeAfter + 1)))
+        m.noticeCount = DelegationStore.maxNotices
+        #expect(!DelegationStore.owesNotice(m, interrupts: true, now: t0.addingTimeInterval(3600)))
+        m.noticeCount = 1; m.readAt = t0.addingTimeInterval(5)
+        #expect(!DelegationStore.owesNotice(m, interrupts: true, now: t0.addingTimeInterval(3600)))
+        // A report never interrupts a fresh turn — but it is not lost either.
+        let r = DelegationMessage(kind: .report, from: .child, to: .parent, text: "halfway", at: t0)
+        #expect(!DelegationStore.owesNotice(r, interrupts: false, now: t0.addingTimeInterval(10)))
+        #expect(DelegationStore.owesNotice(r, interrupts: false, now: t0.addingTimeInterval(DelegationStore.quietGrace + 1)))
+    }
+
+    @Test("markNoticed stamps every time and counts; unnoticed(for:) follows the same rule")
+    func markNoticedCounts() async {
+        let f = fixture()
+        let (d, child) = await delegated(f)
+        _ = try? await f.engine.post(d.id, from: .child, kind: .deliver, text: "delivered")
+        let first = f.store.unnoticed(for: f.parentID, interrupts: DelegationNotice.interrupts)
+        #expect(first.count == 1)
+        let id = first[0].1.id
+        let t1 = Date()
+        f.store.markNoticed([id], now: t1)
+        var m = f.store.delegation(d.id)!.messages.first { $0.id == id }!
+        #expect(m.noticedAt == t1 && m.noticeCount == 1)
+        #expect(f.store.unnoticed(for: f.parentID, now: t1.addingTimeInterval(1), interrupts: DelegationNotice.interrupts).isEmpty)
+        let t2 = t1.addingTimeInterval(DelegationStore.renoticeAfter + 1)
+        #expect(f.store.unnoticed(for: f.parentID, now: t2, interrupts: DelegationNotice.interrupts).count == 1)
+        f.store.markNoticed([id], now: t2)
+        m = f.store.delegation(d.id)!.messages.first { $0.id == id }!
+        #expect(m.noticedAt == t2 && m.noticeCount == 2)
+        _ = child
+    }
+
+    @Test("a wait woken with nothing to take keeps waiting for the rest of its budget")
+    func waitSurvivesSpuriousWake() async {
+        let f = fixture()
+        let (d, _) = await delegated(f)
+        let started = Date()
+        // Two waits on the same session; one message. The one that takes it
+        // returns at once; the other must not report a timeout early.
+        async let a = f.engine.wait(for: f.parentID, timeout: 2)
+        async let b = f.engine.wait(for: f.parentID, timeout: 2)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        _ = try? await f.engine.post(d.id, from: .child, kind: .deliver, text: "one message")
+        let (ra, rb) = await (a, b)
+        #expect(ra.count + rb.count == 1)
+        #expect(Date().timeIntervalSince(started) >= 1.5, "the empty wait must run out its budget, not return on the wake")
+    }
 }
