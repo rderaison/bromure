@@ -11832,13 +11832,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 await Self.forceStop(vm)
                 break
             }
-            let deadline = Date().addingTimeInterval(15)
+            // A cluster node or a registry (containerd, etcd, Longhorn)
+            // takes longer to power off than a workspace; cutting it at 15 s
+            // left its filesystem dirty for the next boot.
+            let grace: TimeInterval = session.kubeClusterID != nil ? 60 : 15
+            let deadline = Date().addingTimeInterval(grace)
             while vm.state == .running && Date() < deadline {
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
             if vm.state == .running {
                 FileHandle.standardError.write(Data(
-                    "[ac] '\(name)' didn't poweroff in 15s — forcing stop\n".utf8))
+                    "[ac] '\(name)' didn't poweroff in \(Int(grace))s — forcing stop\n".utf8))
                 await Self.forceStop(vm)
             }
         case .ask, .background:

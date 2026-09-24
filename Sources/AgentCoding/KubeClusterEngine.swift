@@ -209,6 +209,7 @@ final class KubeClusterEngine {
         // Agents first so the control plane sees clean node departures.
         let ordered = rt.nodes.values.sorted { ($0.record.role == .server ? 1 : 0) < ($1.record.role == .server ? 1 : 0) }
         for node in ordered {
+            await quiesceForShutdown(node.record.id)
             await app.stopSession(node.record.id, action: .shutdown)
             node.up = false
         }
@@ -659,7 +660,8 @@ final class KubeClusterEngine {
             dataDiskGB: cluster.spec.storageEnabled ? cluster.spec.storageDiskGB : nil,
             comment: "Kubernetes node of cluster “\(cluster.name)” — managed by Bromure.",
             scripts: [("bromure-k8s-node.sh", app.kubeNodeScriptURL), ("bromure-k8s-probe.py", app.kubeProbeScriptURL)],
-            ipCommand: "bash \(Self.scriptPath) ip"), rt: rt)
+            ipCommand: "bash \(Self.scriptPath) ip",
+            restoreSavedState: cluster.provisioned), rt: rt)
     }
 
     /// One managed VM: a cluster node or a registry.
@@ -674,21 +676,40 @@ final class KubeClusterEngine {
         let scripts: [(String, URL?)]
         /// Guest command printing the VM's IPv4 (fallback for the outbox report).
         let ipCommand: String
+        /// Resume the RAM snapshot the app saved when it quit, if there is
+        /// one. Only for a machine that finished provisioning — a snapshot
+        /// taken mid-provisioning is dropped and the machine boots fresh
+        /// (provisioning is re-run from the top anyway).
+        var restoreSavedState: Bool = true
+        /// Host folders shared into the guest at /mnt/bromure-share-<N>.
+        var folders: [String] = []
+    }
+
+    /// The console showed the machine's boot dying on filesystem errors.
+    final class BootFSFailure: @unchecked Sendable {
+        var detail: String?
     }
 
     /// Boot a managed VM and wait until its shell channel answers. Returns
     /// the guest's IP.
-    func bootMachine(_ m: MachineSpec, rt: ClusterRuntime) async throws -> String {
+    func bootMachine(_ m: MachineSpec, rt: ClusterRuntime, repairAttempted: Bool = false) async throws -> String {
         let id = m.ownerID
         let node = m.record
         let nodes = nodeStore(id)
         var profile = Profile(id: node.id, name: node.name, tool: .claude, authMode: .token,
                               homeModel: .virtiofs)
         profile.memoryGB = m.memoryGB
-        profile.closeAction = .shutdown
+        // Quitting the app suspends the machine (RAM snapshot, like a
+        // workspace), and the next start resumes it. It used to shut down on
+        // quit with the workspace's 15 s grace: a k3s node (containerd, etcd,
+        // Longhorn) routinely takes longer, was force-stopped mid-shutdown,
+        // and came back with a dirty filesystem. An explicit Stop still
+        // shuts down (with a longer grace — see stopSession).
+        profile.closeAction = .suspend
         profile.color = .gray
         profile.nativeTerminal = true
         profile.comments = m.comment
+        profile.folderPaths = m.folders
 
         let sessionDisk = SessionDisk(profile: profile, store: nodes, baseDiskURL: app.imageManager.baseDiskURL)
         sessionDisk.tokenPlan = nil
@@ -723,12 +744,37 @@ final class KubeClusterEngine {
         sandbox.onStopped = { [weak self] error in
             Task { @MainActor in self?.nodeStopped(clusterID: id, nodeID: node.id, error: error) }
         }
+        // A boot-time fsck the guest's initramfs can't finish drops it to an
+        // emergency shell nobody can answer; the console scanner catches it
+        // (the workspace path's detector) and the wait below repairs the
+        // disks on the Mac and boots again.
+        let fsFailure = BootFSFailure()
+        sandbox.onBootFilesystemFailure = { detail in
+            Task { @MainActor in if fsFailure.detail == nil { fsFailure.detail = detail } }
+        }
 
         log(id, "Booting \(node.name)…")
         try nodes.prepareHomeDirectory(for: profile, terminalDefaults: app.terminalDefaults)
         try sandbox.prepare()
         try stageScripts(m.scripts, into: nodes.profileDirectory(for: profile))
-        try await sandbox.start()
+        if sandbox.hasSavedState, m.restoreSavedState, !repairAttempted {
+            do {
+                try await sandbox.restore()
+                log(id, "\(node.name) resumed from its saved state")
+            } catch {
+                // Same fallback as a workspace: a snapshot that won't restore
+                // (an app or base-image update since the quit, VZ refused)
+                // can't come back by any path — boot fresh from the disk.
+                let drift = sandbox.lastRestoreDrift.map { " (configuration changed: \($0))" } ?? ""
+                log(id, "\(node.name): saved state didn't restore\(drift) — booting fresh")
+                sessionDisk.clearSavedState()
+                try sandbox.prepare()
+                try await sandbox.start()
+            }
+        } else {
+            sessionDisk.clearSavedState()
+            try await sandbox.start()
+        }
 
         guard let dev = sandbox.socketDevice else {
             throw KubeError.message("\(node.name): no vsock device")
@@ -745,12 +791,28 @@ final class KubeClusterEngine {
         var alive = false
         for _ in 0..<360 {   // ≤ 3 minutes
             try Task.checkCancellation()
+            if fsFailure.detail != nil { break }
             if (app.shellBridges[node.id]?.poolSize ?? 0) > 0,
                (try? await exec(node.id, "true", timeout: 10)) != nil {
                 alive = true
                 break
             }
             try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        if let detail = fsFailure.detail, !alive {
+            log(id, "✗ \(node.name) failed its boot-time filesystem check: \(detail)")
+            await stopForRepair(node.id, sandbox: sandbox, rt: rt)
+            guard !repairAttempted else {
+                throw KubeError.message("\(node.name)'s disk still fails its filesystem check after a repair")
+            }
+            step(id, "Repairing \(node.name)'s disks")
+            if await !repairDisks(of: profile, in: nodes, ownerID: id) {
+                // Damage past a journal replay / error-flag clear (a corrupt
+                // inode, bad bitmaps): the real e2fsck -y, in a throwaway VM.
+                step(id, "Repairing \(node.name)'s disks with e2fsck")
+                try await fsckInRescueVM(profile: profile, in: nodes, ownerID: id)
+            }
+            return try await bootMachine(m, rt: rt, repairAttempted: true)
         }
         guard alive else { throw KubeError.message("\(node.name) never answered on its shell channel") }
         runtime.up = true
@@ -774,6 +836,134 @@ final class KubeClusterEngine {
         store.setStatus(id) { $0.nodesUp = rt.nodes.values.filter(\.up).count }
         log(id, "\(node.name) is up at \(ip)")
         return ip
+    }
+
+    /// Take a machine wedged in its emergency shell down for a disk repair:
+    /// drop it from the runtime first, so its stop isn't read as the
+    /// cluster losing a node, and forget any snapshot (it's worthless, and
+    /// invalid once the disk changes).
+    private func stopForRepair(_ nodeID: UUID, sandbox: UbuntuSandboxVM, rt: ClusterRuntime) async {
+        rt.nodes.removeValue(forKey: nodeID)
+        sandbox.sessionDisk?.clearSavedState()
+        if let vm = sandbox.vm, vm.state != .stopped {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                vm.stop { _ in cont.resume() }
+            }
+        }
+        app.handleSessionStopped(profileID: nodeID)
+    }
+
+    /// Replay the journal and repair the machine's system disk — and its
+    /// data disk (Longhorn / registry storage), which the guest checks at
+    /// boot too — with the Mac-side ext4 checker the workspaces use.
+    /// True when every ext4 image came out clean or repaired.
+    @discardableResult
+    private func repairDisks(of profile: Profile, in nodes: ProfileStore, ownerID: UUID) async -> Bool {
+        var ok = true
+        var images = [nodes.diskURL(for: profile)]
+        let data = nodes.profileDirectory(for: profile).appendingPathComponent("data.img")
+        if FileManager.default.fileExists(atPath: data.path) { images.append(data) }
+        for url in images {
+            let path = url.path
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<Ext4Fsck.Result, Error> in
+                do { return .success(try Ext4Fsck.check(imagePath: path, autoFix: true)) }
+                catch { return .failure(error) }
+            }.value
+            switch result {
+            case .success(let r):
+                if !(r.clean || r.repaired) { ok = false }
+                log(ownerID, "fsck \(url.lastPathComponent): \(r.summary)")
+                FileHandle.standardError.write(Data(
+                    "[kube] fsck \(profile.name) \(url.lastPathComponent): \(r.summary)\n\(r.output)\n".utf8))
+            case .failure(let error):
+                // A data disk the guest never formatted is not ext4 yet —
+                // nothing to check there.
+                log(ownerID, "fsck \(url.lastPathComponent): skipped (\(error))")
+            }
+        }
+        return ok
+    }
+
+    /// e2fsck in the guest, over every ext4 filesystem in the images it is
+    /// given (whole-disk or partitioned, attached as loop devices AFTER boot).
+    /// Exit 0-3 = consistent now; 4+ = errors left.
+    static let rescueFsckScript = #"""
+    set -u
+    rc=0
+    for img in "$@"; do
+      [ -f "$img" ] || continue
+      L=$(sudo losetup -fP --show "$img") || { echo "fsck: cannot attach $img"; rc=8; continue; }
+      sudo udevadm settle 2>/dev/null || sleep 1
+      for dev in "$L" "$L"p*; do
+        [ -b "$dev" ] || continue
+        [ "$(sudo blkid -p -o value -s TYPE "$dev" 2>/dev/null)" = ext4 ] || continue
+        sudo e2fsck -fy "$dev" >/tmp/bromure-fsck.log 2>&1; r=$?
+        echo "fsck: $(basename "$img") $(basename "$dev") exit=$r"
+        tail -n 3 /tmp/bromure-fsck.log | sed 's/^/  /'
+        [ "$r" -ge 4 ] && rc=4
+      done
+      sudo losetup -d "$L"
+    done
+    sync
+    exit $rc
+    """#
+
+    /// The Mac-side checker only replays journals and clears the error flag;
+    /// anything past that needs the real e2fsck. Boot a throwaway machine
+    /// from the base image with the damaged machine's folder shared in, and
+    /// check its images through loop devices set up after boot — never as
+    /// block devices at boot: every clone of the base carries the same
+    /// filesystem UUID and label, so the rescue could come up on the damaged
+    /// disk. The throwaway is deleted afterwards either way.
+    private func fsckInRescueVM(profile: Profile, in nodes: ProfileStore, ownerID: UUID) async throws {
+        let dir = nodes.profileDirectory(for: profile)
+        var names = ["disk.img"]
+        if FileManager.default.fileExists(atPath: dir.appendingPathComponent("data.img").path) {
+            names.append("data.img")
+        }
+        let rescue = KubeNodeRecord(name: "rescue-\(profile.name)", role: .agent, index: 0)
+        let scratch = ClusterRuntime(id: ownerID)   // keep it out of the cluster's node list
+        defer {
+            try? FileManager.default.removeItem(at: nodes.profileDirectory(
+                for: Profile(id: rescue.id, name: rescue.name, tool: .claude, authMode: .token, homeModel: .virtiofs)))
+            MACBindings.shared.release(profileID: rescue.id)
+        }
+        do {
+            _ = try await bootMachine(MachineSpec(
+                ownerID: ownerID, record: rescue, cpus: 2, memoryGB: 2, dataDiskGB: nil,
+                comment: "Disk repair for \(profile.name) — managed by Bromure, deleted when done.",
+                scripts: [], ipCommand: "hostname -I | awk '{print $1}'",
+                restoreSavedState: false, folders: [dir.path]), rt: scratch, repairAttempted: true)
+            let args = names.map { "/mnt/bromure-share-1/\($0)" }.joined(separator: " ")
+            let b64 = Data(Self.rescueFsckScript.utf8).base64EncodedString()
+            let out = try await exec(rescue.id,
+                "echo \(b64) | base64 -d > /tmp/bromure-rescue-fsck.sh && bash /tmp/bromure-rescue-fsck.sh \(args); echo \"rc=$?\"",
+                timeout: 900)
+            for line in out.split(separator: "\n") where line.hasPrefix("fsck:") { log(ownerID, String(line)) }
+            FileHandle.standardError.write(Data("[kube] rescue e2fsck for \(profile.name):\n\(out)\n".utf8))
+            await app.stopSession(rescue.id, action: .shutdown)
+            if out.contains("rc=4") || out.contains("rc=8") {
+                throw KubeError.message("e2fsck couldn't make \(profile.name)'s disk consistent")
+            }
+        } catch {
+            if app.runningSessions[rescue.id] != nil { await app.stopSession(rescue.id, action: .shutdown) }
+            throw error
+        }
+    }
+
+    /// Before the power button: stop what makes a machine's own shutdown
+    /// hang. systemd waits on k3s's leftover containers (and a registry's
+    /// docker) until its stop timeouts expire, so a node never powered off
+    /// in time and was force-stopped with a dirty filesystem on every Stop.
+    /// k3s-killall.sh (installed with k3s) stops k3s and every container and
+    /// unmounts their volumes in seconds; then flush the disks.
+    static let quiesceCommand = "sudo sh -c '"
+        + "if [ -x /usr/local/bin/k3s-killall.sh ]; then /usr/local/bin/k3s-killall.sh >/dev/null 2>&1; fi; "
+        + "if command -v docker >/dev/null 2>&1; then docker ps -q | xargs -r docker stop -t 10 >/dev/null 2>&1; fi; "
+        + "sync'"
+
+    func quiesceForShutdown(_ nodeID: UUID) async {
+        _ = try? await exec(nodeID, Self.quiesceCommand, timeout: 90)
     }
 
     func nodeStopped(clusterID: UUID, nodeID: UUID, error: Error?) {

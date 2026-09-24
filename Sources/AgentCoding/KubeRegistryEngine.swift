@@ -113,7 +113,8 @@ extension KubeClusterEngine {
                     dataDiskGB: registry.diskGB,
                     comment: "Container registry “\(registry.name)” — managed by Bromure.",
                     scripts: [("bromure-registry.sh", app.kubeRegistryScriptURL)],
-                    ipCommand: "bash \(Self.registryScriptPath) ip"), rt: rt)
+                    ipCommand: "bash \(Self.registryScriptPath) ip",
+                    restoreSavedState: registry.provisioned), rt: rt)
             }
             registry.node.lastIP = ip
             store.upsert(registry)
