@@ -110,6 +110,11 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// file's name), as its hook reported it while it ran — what a resume
     /// targets, so two agents in one folder never pick up each other's.
     var agentTranscriptID: String?
+    /// The guest boot its tab was seen in (the kernel's boot_id, read by
+    /// the liveness probe). Window indices start over when the machine
+    /// boots fresh, so a binding from another boot names somebody else's
+    /// tab — see `AgentSessionStore.checkBoot`.
+    var bootID: String?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -296,6 +301,30 @@ final class AgentSessionStore {
     /// Record a liveness probe result. In memory every tick; persisted only
     /// when the verdict flips, so the poll doesn't rewrite the file every
     /// few seconds.
+    /// The liveness probe read the guest's boot id. A session bound in an
+    /// earlier boot lost its tab with that boot — the index it holds now
+    /// belongs to whatever opened since (a new session, a relaunch), and
+    /// trusting it typed notices into that agent and showed its transcript.
+    /// Unbind it (Ended, resumable); a binding without a boot yet takes
+    /// this one. False when the session is no longer bound here.
+    @discardableResult
+    func checkBoot(_ id: UUID, bootID: String, now: Date = Date()) -> Bool {
+        guard !bootID.isEmpty, let i = sessions.firstIndex(where: { $0.id == id }),
+              sessions[i].windowIndex != nil else { return false }
+        if sessions[i].bootID == nil {
+            sessions[i].bootID = bootID
+            save()
+            return true
+        }
+        guard sessions[i].bootID != bootID else { return true }
+        sessions[i].windowIndex = nil
+        sessions[i].bootID = nil
+        sessions[i].endedAt = now
+        sessions[i].agentAlive = nil
+        save()
+        return false
+    }
+
     func setLiveness(_ id: UUID, alive: Bool, now: Date = Date()) {
         guard let i = sessions.firstIndex(where: { $0.id == id }) else { return }
         if alive {
@@ -400,19 +429,21 @@ final class AgentSessionStore {
                     // 2. A launch waiting for its tab — only once the tab
                     // command is out (the baseline is set then; before that
                     // the workspace's own shell would be mistaken for it):
-                    // the new tab carrying the session's name, else the
-                    // first new agent tab past the baseline nobody owns.
-                    // Window indices are per machine: another workspace's
-                    // session on index 1 says nothing about this one's tab 1.
+                    // the new tab carrying the session's name (see
+                    // `launchTab`). Window indices are per machine: another
+                    // workspace's session on index 1 says nothing about
+                    // this one's tab 1.
                     let bound = Set(sessions.filter { $0.profileID == entry.id }.compactMap { $0.windowIndex })
                     let candidates = tabs.filter { t in
                         t.index > baseline && !bound.contains(t.index) && t.containerID == nil
                     }
-                    if let tab = candidates.first(where: { $0.display == s.title })
-                        ?? candidates.first(where: {
-                            BromureIcons.agentKind(forLabel: $0.shownLabel) == s.tool.rawValue })
-                        ?? candidates.first {
+                    let soleLaunch = !sessions.contains { o in
+                        o.id != s.id && o.profileID == entry.id && o.windowIndex == nil
+                            && o.launchingSince != nil && o.launchBaselineIndex != nil
+                    }
+                    if let tab = Self.launchTab(for: s, in: candidates, soleLaunch: soleLaunch) {
                         s.windowIndex = tab.index
+                        s.bootID = nil   // stamped by the next probe
                         s.launchingSince = nil
                         s.launchBaselineIndex = nil
                         s.endedAt = nil
@@ -439,7 +470,14 @@ final class AgentSessionStore {
             // tab is a session of ours that lost its binding (a roster
             // hiccup, a relaunch): that one gets its tab back, no twin.
             let bound = Set(sessions.filter { $0.profileID == entry.id }.compactMap { $0.windowIndex })
+            let pending = sessions.filter {
+                $0.profileID == entry.id && $0.windowIndex == nil
+                    && $0.launchingSince != nil && $0.launchBaselineIndex != nil
+            }
             for tab in tabs where !bound.contains(tab.index) && tab.containerID == nil {
+                // A tab a waiting launch may still claim — named for it, or
+                // not named yet — is that launch's, not a stranger to adopt.
+                if pending.contains(where: { Self.mayBeLaunchTab(tab, of: $0) }) { continue }
                 guard let kind = BromureIcons.agentKind(forLabel: tab.label)
                         ?? BromureIcons.agentKind(forLabel: tab.shownLabel),
                       let tool = Profile.Tool(rawValue: kind) else { continue }
@@ -459,6 +497,7 @@ final class AgentSessionStore {
                     return cand.title == title && SessionHome.guestPath(cand.cwd) == guestCwd
                 }) {
                     sessions[i].windowIndex = tab.index
+                    sessions[i].bootID = nil
                     sessions[i].endedAt = nil
                     sessions[i].lastError = nil
                     sessions[i].lastSeenAt = now
@@ -478,6 +517,38 @@ final class AgentSessionStore {
             sessions.sort { activity($0) > activity($1) }
             save()
         }
+    }
+
+    /// The tab a launch opened, among the unowned tabs past its baseline:
+    /// the one carrying its launch name (the guest sets @display on the
+    /// window it opens), in the session's folder first when two share the
+    /// name. A tab named for anything else is another launch's — two
+    /// launches racing on one machine (a new session while a notice resumes
+    /// a sleeping peer) used to swap tabs through a "first agent tab past
+    /// the baseline" fallback, and each session showed, and was typed
+    /// into, the other's agent. A tab not named yet (the roster caught it
+    /// between new-window and set-option) is ours only when no other
+    /// launch is waiting on the machine.
+    static func launchTab(for s: AgentSession, in candidates: [TabsModel.Tab],
+                          soleLaunch: Bool) -> TabsModel.Tab? {
+        let name = s.launchDisplay ?? s.title
+        let named = candidates.filter { $0.display == name }
+        let mine = SessionHome.guestPath(s.cwd)
+        if let tab = named.first(where: { $0.cwd.map(SessionHome.guestPath) == mine }) ?? named.first {
+            return tab
+        }
+        guard soleLaunch else { return nil }
+        let unnamed = candidates.filter { ($0.display ?? "").isEmpty }
+        return unnamed.first { BromureIcons.agentKind(forLabel: $0.shownLabel) == s.tool.rawValue }
+            ?? unnamed.first
+    }
+
+    /// Whether `tab` may yet turn out to be `launch`'s: past its baseline,
+    /// and named for it or not named at all.
+    static func mayBeLaunchTab(_ tab: TabsModel.Tab, of launch: AgentSession) -> Bool {
+        guard let baseline = launch.launchBaselineIndex, tab.index > baseline else { return false }
+        let d = tab.display ?? ""
+        return d.isEmpty || d == (launch.launchDisplay ?? launch.title)
     }
 
     /// Two sessions on one tmux window: one is a twin. Which one, and what

@@ -496,6 +496,22 @@ enum AgentSessionLocator {
             + "-name '*.jsonl' -newermt @\(since) 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); "
     }
 
+    /// Sets `$varName` to the transcript the agent in tmux window `window`
+    /// recorded for itself (agent-status.sh, per window index), or empty
+    /// when that record isn't this tab's. The record's second line names
+    /// the pane and guest boot it came from; a mismatch means the index was
+    /// reused — the last tab closed and a new one took its number, or the
+    /// machine booted fresh — and the path is the previous occupant's. A
+    /// one-line record (an older reporter) is taken as is. `window` is a
+    /// shell word: a number, or `$i` inside a loop.
+    nonisolated static func pinnedTranscriptBlock(window: String, into varName: String) -> String {
+        "pp=\"$HOME/.bromure/transcript-\(window).path\"; \(varName)=\"\"; "
+            + "if [ -f \"$pp\" ]; then \(varName)=$(sed -n 1p \"$pp\" 2>/dev/null); "
+            + "pk=$(sed -n 2p \"$pp\" 2>/dev/null); "
+            + "if [ -n \"$pk\" ] && [ \"$pk\" != \"$(tmux display-message -p -t bromure:\(window) '#{pane_id}' 2>/dev/null) "
+            + "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\" ]; then \(varName)=\"\"; fi; fi; "
+    }
+
     /// RFC 3986 percent-encoding with an empty safe set ('/' included) —
     /// the rule Grok uses to name a cwd's session folder.
     nonisolated static func grokPercentEncode(_ s: String) -> String {
@@ -1509,10 +1525,9 @@ final class CodingTaskEngine {
         // delegator) would otherwise take turns owning each other's view.
         // Still floored: a file older than this process is another's.
         if let w = pinnedWindow {
-            cmd += "pp=\"$HOME/.bromure/transcript-\(w).path\"; "
-                + "if [ -f \"$pp\" ]; then c=$(cat \"$pp\" 2>/dev/null); "
+            cmd += AgentSessionLocator.pinnedTranscriptBlock(window: String(w), into: "c")
                 + "if [ -n \"$c\" ] && [ -f \"$c\" ] && [ -n \"$(find \"$c\" -newermt @\(since) 2>/dev/null)\" ]; "
-                + "then f=\"$c\"; fi; fi; "
+                + "then f=\"$c\"; fi; "
         }
         cmd += "if [ -z \"$f\" ]; then "
             + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
@@ -2410,10 +2425,9 @@ enum CodingTaskEngine {
         // delegator) would otherwise take turns owning each other's view.
         // Still floored: a file older than this process is another's.
         if let w = pinnedWindow {
-            cmd += "pp=\"$HOME/.bromure/transcript-\(w).path\"; "
-                + "if [ -f \"$pp\" ]; then c=$(cat \"$pp\" 2>/dev/null); "
+            cmd += AgentSessionLocator.pinnedTranscriptBlock(window: String(w), into: "c")
                 + "if [ -n \"$c\" ] && [ -f \"$c\" ] && [ -n \"$(find \"$c\" -newermt @\(since) 2>/dev/null)\" ]; "
-                + "then f=\"$c\"; fi; fi; "
+                + "then f=\"$c\"; fi; "
         }
         cmd += "if [ -z \"$f\" ]; then "
             + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)

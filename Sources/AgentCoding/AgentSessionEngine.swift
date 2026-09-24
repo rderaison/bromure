@@ -198,6 +198,13 @@ final class AgentSessionEngine {
                     alive = await self.probeAlive(profileID: s.profileID, window: w)
                         ?? SessionHome.agentRunning(s, in: tab)
                 }
+                // The probe may just have found the binding stale (the tab
+                // went with an earlier boot): that index is somebody else's
+                // now — open a fresh tab instead of typing into it.
+                if self.store.session(id)?.windowIndex != w {
+                    self.relaunchInFreshTab(id, s, message: message)
+                    return
+                }
                 if alive {
                     // Alive: the conversation is simply back on stage. Only
                     // something the user actually said gets typed.
@@ -231,24 +238,28 @@ final class AgentSessionEngine {
                 if !alive, let message { self.deliverWhenAlive(id, message) }
                 return
             }
-            // Tab gone (or workspace was rebooted): a fresh tab in the same
-            // folder, resuming the last conversation there.
-            self.store.mutate(id) {
-                $0.windowIndex = nil
-                $0.endedAt = nil
-                $0.launchingSince = Date()
-                $0.launchBaselineIndex = nil
-                $0.resumedAt = Date()
-                $0.agentAlive = nil
-                $0.changesSeenAt = nil
-            }
-            // Claude and Oh My Pi take the message on the command line next
-            // to their resume flag; Codex and Kimi don't, so it's typed once
-            // they're up.
-            let inline = message != nil && (s.tool == .claude || s.tool == .omp)
-            self.launch(id, prompt: inline ? (message ?? "") : "", flags: Self.resumeFlags(for: s), alreadyUp: true)
-            if !inline, let message { self.deliverWhenAlive(id, message) }
+            self.relaunchInFreshTab(id, s, message: message)
         }
+    }
+
+    /// Tab gone (or workspace was rebooted): a fresh tab in the same
+    /// folder, resuming the last conversation there.
+    private func relaunchInFreshTab(_ id: UUID, _ s: AgentSession, message: String?) {
+        store.mutate(id) {
+            $0.windowIndex = nil
+            $0.endedAt = nil
+            $0.launchingSince = Date()
+            $0.launchBaselineIndex = nil
+            $0.resumedAt = Date()
+            $0.agentAlive = nil
+            $0.changesSeenAt = nil
+        }
+        // Claude and Oh My Pi take the message on the command line next
+        // to their resume flag; Codex and Kimi don't, so it's typed once
+        // they're up.
+        let inline = message != nil && (s.tool == .claude || s.tool == .omp)
+        launch(id, prompt: inline ? (message ?? "") : "", flags: Self.resumeFlags(for: s), alreadyUp: true)
+        if !inline, let message { deliverWhenAlive(id, message) }
     }
 
     /// The agent sat at its sign-in screen; the host now holds the account
@@ -509,6 +520,8 @@ final class AgentSessionEngine {
 
     private var probing: Set<UUID> = []
     private var lastProbeAt: [UUID: Date] = [:]
+    /// Each workspace's guest boot as the last probe read it.
+    private var bootIDs: [UUID: String] = [:]
 
     // MARK: Local transcript copies
 
@@ -542,10 +555,12 @@ final class AgentSessionEngine {
     /// there. The transcript id is the file the agent's own hook named for
     /// this window (agent-status.sh; Claude only), sans path and extension:
     /// what a resume targets.
-    private static func probeCommand(window: String) -> String {
+    static func probeCommand(window: String) -> String {
         // A fresh shell's title is the hostname until the agent speaks up —
-        // never a session name.
-        "h=$(hostname 2>/dev/null); "
+        // never a session name. The boot id leads (its own `boot` line):
+        // window indices are only meaningful within one boot.
+        "printf 'boot\\t%s\\n' \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\"; "
+            + "h=$(hostname 2>/dev/null); "
             + "tmux list-panes -s -t bromure -F '#{window_index} #{pane_tty} #{pane_title}' 2>/dev/null "
             + "| while read -r i t title; do \(window.isEmpty ? "" : "[ \"$i\" = \(window) ] || continue; ")"
             + "[ \"$title\" = \"$h\" ] && title=''; "
@@ -553,7 +568,8 @@ final class AgentSessionEngine {
             + "| grep -v -E '\(shellNames)' "
             + "| grep -E -o -m1 '\(agentNames)' "
             + "| head -1); "
-            + "tp=$(cat \"$HOME/.bromure/transcript-$i.path\" 2>/dev/null); tid=\"${tp##*/}\"; tid=\"${tid%.jsonl}\"; "
+            + AgentSessionLocator.pinnedTranscriptBlock(window: "$i", into: "tp")
+            + "tid=\"${tp##*/}\"; tid=\"${tid%.jsonl}\"; "
             + "printf '%s\\t%s\\t%s\\t%s\\n' \"$i\" \"${a:-none}\" \"$tid\" \"$title\"; done"
     }
 
@@ -563,6 +579,16 @@ final class AgentSessionEngine {
         var transcriptID: String? = nil
         let title: String
     }
+    /// The guest boot id the probe leads with (nil from an older probe, or
+    /// when the guest couldn't read it).
+    static func parseBootID(_ out: String) -> String? {
+        for line in out.split(whereSeparator: \.isNewline) where line.hasPrefix("boot\t") {
+            let id = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            return id.isEmpty ? nil : id
+        }
+        return nil
+    }
+
     static func parseProbe(_ out: String) -> [ProbeLine] {
         out.split(whereSeparator: \.isNewline).compactMap { line in
             let parts = line.split(separator: "\t", maxSplits: 3, omittingEmptySubsequences: false)
@@ -615,7 +641,15 @@ final class AgentSessionEngine {
                                                        command: Self.probeCommand(window: String(window)),
                                                        timeout: 10) else { return nil }
         guard let p = Self.parseProbe(out).first(where: { $0.index == window }) else { return nil }
-        if let s = store.session(profileID: profileID, windowIndex: window) { apply(p, to: s) }
+        if let s = store.session(profileID: profileID, windowIndex: window) {
+            if let boot = Self.parseBootID(out) {
+                bootIDs[profileID] = boot
+                // The session's tab went with an earlier boot: whatever
+                // runs at this index now isn't its agent.
+                guard store.checkBoot(s.id, bootID: boot) else { return nil }
+            }
+            apply(p, to: s)
+        }
         return p.alive
     }
 
@@ -633,8 +667,14 @@ final class AgentSessionEngine {
         // tab — that's what purges it.
         for s in store.sessions where (s.isArchived || s.isDeleted) && s.windowIndex != nil {
             guard let entry = entries.first(where: { $0.id == s.profileID }), entry.model.rosterLive,
-                  entry.model.tabs.contains(where: { $0.index == s.windowIndex })
+                  let tab = entry.model.tabs.first(where: { $0.index == s.windowIndex })
             else { continue }
+            // Kill only a tab that is provably this session's: bound in the
+            // boot the probe sees now (after a fresh boot the index belongs
+            // to whatever opened since — a new session's tab, once) and,
+            // when we named it, still carrying that name.
+            guard let boot = bootIDs[s.profileID], s.bootID == boot else { continue }
+            if let mine = s.launchDisplay, let d = tab.display, !d.isEmpty, d != mine { continue }
             if s.isDeleted {
                 killTabIfShown(s)
             } else {
@@ -657,7 +697,12 @@ final class AgentSessionEngine {
                       let self else { return }
                 let lines = Dictionary(Self.parseProbe(out).map { ($0.index, $0) },
                                        uniquingKeysWith: { a, _ in a })
+                let boot = Self.parseBootID(out)
+                if let boot { self.bootIDs[profileID] = boot }
                 for s in self.store.sessions where s.profileID == profileID {
+                    guard s.windowIndex != nil else { continue }
+                    // A binding from an earlier boot is unbound, not probed.
+                    if let boot, !self.store.checkBoot(s.id, bootID: boot) { continue }
                     guard let w = s.windowIndex, let p = lines[w] else { continue }
                     self.apply(p, to: s)
                 }

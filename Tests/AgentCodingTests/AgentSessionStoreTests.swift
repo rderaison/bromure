@@ -173,4 +173,120 @@ struct AgentSessionStoreTests {
         store.setArchived(s.id, false)
         #expect(SessionHome.orderedAll(store.sessions, in: model).count == 1)
     }
+
+    private func roster(_ id: UUID, _ tabs: [TabsModel.Tab]) -> SessionListModel.VMEntry {
+        let model = TabsModel()
+        model.tabs = tabs
+        model.rosterLive = true
+        return SessionListModel.VMEntry(id: id, name: "ws", accentHex: "#000000", model: model)
+    }
+
+    private func launching(_ ws: UUID, _ title: String, cwd: String, baseline: Int) -> AgentSession {
+        var s = AgentSession(profileID: ws, tool: .claude, title: title, cwd: cwd)
+        s.launchingSince = Date()
+        s.launchBaselineIndex = baseline
+        s.launchDisplay = title
+        return s
+    }
+
+    @Test("two launches racing on one machine each bind their own tab",
+          arguments: [false, true])
+    func racingLaunchesDontSwapTabs(peerFirst: Bool) {
+        let store = tempStore()
+        let ws = UUID()
+        // A notice resumes a sleeping peer while the user starts a new
+        // session: both wait past the same baseline, and the new session's
+        // tab is the one that shows up first. Whichever the store walks
+        // first, neither may take the other's tab.
+        let peer = launching(ws, "Wago", cwd: "~/wago", baseline: 0)
+        let fresh = launching(ws, "hello", cwd: "~/hello-260924-1003", baseline: 0)
+        for s in peerFirst ? [fresh, peer] : [peer, fresh] { store.upsert(s) }
+        let shell = TabsModel.Tab(label: "bash", index: 0, cwd: "/home/ubuntu")
+        let helloTab = TabsModel.Tab(label: "claude", index: 1, cwd: "/home/ubuntu/hello-260924-1003",
+                                     display: "hello")
+        store.reconcile(entries: [roster(ws, [shell, helloTab])])
+        #expect(store.session(peer.id)?.windowIndex == nil)
+        #expect(store.session(fresh.id)?.windowIndex == 1)
+        let wagoTab = TabsModel.Tab(label: "claude", index: 2, cwd: "/home/ubuntu/wago", display: "Wago")
+        store.reconcile(entries: [roster(ws, [shell, helloTab, wagoTab])])
+        #expect(store.session(peer.id)?.windowIndex == 2)
+        #expect(store.session(fresh.id)?.windowIndex == 1)
+        #expect(store.sessions.count == 2)
+    }
+
+    @Test("a tab not named yet waits while another launch is pending, and isn't adopted")
+    func unnamedTabWaitsForItsLaunch() {
+        let store = tempStore()
+        let ws = UUID()
+        let a = launching(ws, "Wago", cwd: "~/wago", baseline: 0)
+        let b = launching(ws, "hello", cwd: "~/hello", baseline: 0)
+        store.upsert(a)
+        store.upsert(b)
+        let shell = TabsModel.Tab(label: "bash", index: 0, cwd: "/home/ubuntu")
+        // Caught between new-window and set-option: no @display yet.
+        let early = TabsModel.Tab(label: "claude", index: 1, cwd: "/home/ubuntu/hello")
+        store.reconcile(entries: [roster(ws, [shell, early])])
+        #expect(store.sessions.count == 2)
+        #expect(store.sessions.allSatisfy { $0.windowIndex == nil })
+        // Named on the next tick: it goes to its own launch.
+        let named = TabsModel.Tab(label: "claude", index: 1, cwd: "/home/ubuntu/hello", display: "hello")
+        store.reconcile(entries: [roster(ws, [shell, named])])
+        #expect(store.session(b.id)?.windowIndex == 1)
+        #expect(store.session(a.id)?.windowIndex == nil)
+
+        // A lone launch still takes an unnamed agent tab (a guest that
+        // never names it).
+        let solo = tempStore()
+        let s = launching(ws, "Lux", cwd: "~/lux", baseline: 0)
+        solo.upsert(s)
+        solo.reconcile(entries: [roster(ws, [shell, early])])
+        #expect(solo.session(s.id)?.windowIndex == 1)
+    }
+
+    @Test("a binding from an earlier guest boot is dropped, not trusted")
+    func staleBootUnbinds() {
+        let store = tempStore()
+        let ws = UUID()
+        var s = AgentSession(profileID: ws, tool: .claude, title: "Wago", cwd: "~/wago", windowIndex: 2)
+        s.launchDisplay = "Wago"
+        store.upsert(s)
+        // First probe: the binding takes this boot.
+        #expect(store.checkBoot(s.id, bootID: "boot-a"))
+        #expect(store.session(s.id)?.bootID == "boot-a")
+        #expect(store.checkBoot(s.id, bootID: "boot-a"))
+        #expect(store.session(s.id)?.windowIndex == 2)
+        // The machine booted fresh: index 2 is whatever opened since.
+        #expect(!store.checkBoot(s.id, bootID: "boot-b"))
+        #expect(store.session(s.id)?.windowIndex == nil)
+        #expect(store.session(s.id)?.endedAt != nil)
+        // Rebound (a resume's tab): the stamp starts over.
+        store.reconcile(entries: [roster(ws, [
+            TabsModel.Tab(label: "bash", index: 0, cwd: "/home/ubuntu"),
+            TabsModel.Tab(label: "claude", index: 3, cwd: "/home/ubuntu/wago", display: "Wago")])])
+        #expect(store.session(s.id)?.windowIndex == 3)
+        #expect(store.session(s.id)?.bootID == nil)
+    }
+
+    @Test("the liveness probe's boot line parses and doesn't read as a window")
+    func probeBootLine() {
+        let out = "boot\t6f1c2d3e-aaaa-bbbb-cccc-0123456789ab\n2\tclaude\t\tWago\n"
+        #expect(AgentSessionEngine.parseBootID(out) == "6f1c2d3e-aaaa-bbbb-cccc-0123456789ab")
+        #expect(AgentSessionEngine.parseProbe(out).map(\.index) == [2])
+        #expect(AgentSessionEngine.parseBootID("boot\t\n2\tclaude\t\t\n") == nil)
+        #expect(AgentSessionEngine.parseBootID("2\tclaude\t\t\n") == nil)
+    }
+
+    @Test("the liveness probe is valid shell, all windows or one")
+    func probeCommandParses() throws {
+        for window in ["", "3"] {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = ["-n", "-c", AgentSessionEngine.probeCommand(window: window)]
+            let err = Pipe(); proc.standardError = err
+            try proc.run()
+            let diag = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            proc.waitUntilExit()
+            #expect(proc.terminationStatus == 0, "bash -n: \(diag)")
+        }
+    }
 }

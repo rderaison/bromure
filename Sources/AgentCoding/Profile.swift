@@ -4253,11 +4253,15 @@ public final class ProfileStore {
             # Remember the transcript per tab: the host then reads THIS
             # agent's transcript even when another agent in the same folder
             # (a delegate) writes newer files there. A /clear records the new
-            # file on the next prompt.
+            # file on the next prompt. Line 2 = the pane and boot it was
+            # written from: window indices get reused (a closed last tab, a
+            # fresh boot), and the next tab at this index must not inherit
+            # the record — readers drop it when those don't match.
             if [ -n "$hook_json" ]; then
               tp=$(printf '%s' "$hook_json" | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' 2>/dev/null | head -1)
               if [ -n "$tp" ]; then
-                printf '%s' "$tp" > "$HOME/.bromure/.transcript-$idx.tmp" 2>/dev/null \
+                boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+                printf '%s\n%s %s\n' "$tp" "$pane" "$boot" > "$HOME/.bromure/.transcript-$idx.tmp" 2>/dev/null \
                   && mv -f "$HOME/.bromure/.transcript-$idx.tmp" "$HOME/.bromure/transcript-$idx.path" 2>/dev/null || true
               fi
             fi

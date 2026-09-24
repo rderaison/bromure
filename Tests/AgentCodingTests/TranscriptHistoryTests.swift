@@ -126,4 +126,46 @@ struct TranscriptHistoryTests {
         #expect(any.contains("PI_CODING_AGENT_DIR"))
         #expect(any.contains(".claude/projects"))
     }
+
+    /// Runs `pinnedTranscriptBlock` under bash against a temp HOME holding
+    /// `record` (nil = no file) and a stub `tmux` whose tab is pane %5.
+    private func pinned(_ record: String?) throws -> String {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pin-\(UUID().uuidString)", isDirectory: true)
+        let bin = dir.appendingPathComponent("bin", isDirectory: true)
+        let bromure = dir.appendingPathComponent(".bromure", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: bromure, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let tmux = bin.appendingPathComponent("tmux")
+        try "#!/bin/sh\necho %5\n".write(to: tmux, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tmux.path)
+        if let record {
+            try record.write(to: bromure.appendingPathComponent("transcript-3.path"),
+                             atomically: true, encoding: .utf8)
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c", AgentSessionLocator.pinnedTranscriptBlock(window: "3", into: "c")
+                          + "printf '%s' \"$c\""]
+        proc.environment = ["HOME": dir.path, "PATH": bin.path + ":/usr/bin:/bin"]
+        let out = Pipe(); proc.standardOutput = out
+        try proc.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    @Test("a window's transcript record is dropped once its index is reused")
+    func pinnedRecordIsPaneScoped() throws {
+        let path = "/home/ubuntu/.claude/projects/-home-ubuntu-x/abc.jsonl"
+        // Written from this tab's pane (the boot id reads empty off-Linux,
+        // on both sides): taken.
+        #expect(try pinned(path + "\n%5 \n") == path)
+        // Written from the tab that held index 3 before: not this tab's.
+        #expect(try pinned(path + "\n%4 \n") == "")
+        // An older reporter's one-line record: taken as before.
+        #expect(try pinned(path) == path)
+        #expect(try pinned(nil) == "")
+    }
 }

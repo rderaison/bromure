@@ -1139,7 +1139,11 @@ final class DelegationEngine {
             sessionEngine.resume(sessionID, message: line, quietly: true)
             return
         }
-        guard let w = s.windowIndex else { return }
+        // Typed only into a tab the liveness probe has seen this agent in:
+        // unknown (nil) is the app just launched, or a machine just booted
+        // with the session still holding an index from its last boot — a
+        // tab somebody else may have opened since. The next tick retries.
+        guard let w = s.windowIndex, s.agentAlive == true else { return }
         let status = tabStatus(s)
         // How long the oldest owed message has waited since it was posted
         // or last noticed — the hold is per attempt, not per message.
