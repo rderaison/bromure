@@ -1349,7 +1349,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
 
     /// **Routing** — top-level, per-profile backend selection for the
     /// coding agent's LLM traffic. Orthogonal to Fusion (which is an
-    /// *identity* concern). Selecting `.local` or `.hybrid` auto-engages
+    /// *identity* concern). Selecting `.local` auto-engages
     /// MITM interception; the user never flips a separate "mitm on" switch.
     public enum Routing: String, Codable, CaseIterable, Sendable {
         /// Pass-through to the real cloud upstream (today's behaviour).
@@ -1369,7 +1369,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var modelRouting: Routing
 
     /// Catalog id (or raw HF repo) of the model the local engine should
-    /// serve when routing is `.local`/`.hybrid`. nil → engine default /
+    /// serve when routing is `.local`. nil → engine default /
     /// no model selected yet.
     public var activeModelID: String?
 
@@ -2101,7 +2101,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         fusionJudgeModel = try c.decodeIfPresent(String.self, forKey: .fusionJudgeModel)
         fusionLocalLeg = try c.decodeIfPresent(String.self, forKey: .fusionLocalLeg)
         fusionJudgeLocal = try c.decodeIfPresent(Bool.self, forKey: .fusionJudgeLocal) ?? false
-        modelRouting = try c.decodeIfPresent(Routing.self, forKey: .modelRouting) ?? .cloud
+        // Leniently: a value this build doesn't know — "hybrid", dropped
+        // 2026-09-12, was "cloud, falling back to local" — reads as cloud
+        // instead of failing the whole workspace (it vanished from the list).
+        modelRouting = (try? c.decodeIfPresent(String.self, forKey: .modelRouting))
+            .flatMap { $0 }.flatMap(Routing.init(rawValue:)) ?? .cloud
         activeModelID = try c.decodeIfPresent(String.self, forKey: .activeModelID)
         localEngineURL = try c.decodeIfPresent(String.self, forKey: .localEngineURL)
         modelOverride = try c.decodeIfPresent(ModelOverride.self, forKey: .modelOverride)

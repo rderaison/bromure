@@ -44,6 +44,33 @@ final class ACAutomationServer {
     private let snapshotLock = NSLock()
     private var snapshotCache: [String: Any]?
     private var snapshotCacheAt = Date.distantPast
+    /// The mutation generation the cached snapshot was captured at.
+    private var snapshotCacheGeneration = -1
+
+    // Read-after-write for /state: a mutating request (anything but GET/HEAD)
+    // bumps this as it starts and again just before its response goes out, so
+    // a snapshot captured before the change can't be served after it — even
+    // within the TTL, and even when the write came through the OTHER server
+    // (the TCP API and the control socket each have their own cache but one
+    // app behind them). A client that acts then polls at once (the fat client
+    // does) otherwise got the pre-change state for up to the TTL.
+    private static let mutationLock = NSLock()
+    nonisolated(unsafe) private static var mutationGeneration = 0
+    static func noteMutation() {
+        mutationLock.lock(); mutationGeneration &+= 1; mutationLock.unlock()
+    }
+    static var currentMutationGeneration: Int {
+        mutationLock.lock(); defer { mutationLock.unlock() }
+        return mutationGeneration
+    }
+    /// Guest commands and guest file ops (`…/exec`, `…/file`) are POSTs that
+    /// change nothing /state reports — and the chat view polls them about
+    /// once a second, which would otherwise defeat the snapshot cache.
+    static func isMutating(_ method: String, path: String) -> Bool {
+        guard method != "GET", method != "HEAD" else { return false }
+        let bare = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        return !(bare.hasSuffix("/exec") || bare.hasSuffix("/file"))
+    }
     let port: UInt16
     let bindAddress: String
     /// When non-nil, bind an AF_UNIX socket at this path instead of TCP — the
@@ -179,9 +206,8 @@ final class ACAutomationServer {
     /// read them — it decrypts and ships plaintext over the (encrypted) tunnel.
     var onLoadTraceBody: ((_ id: UUID, _ kind: TraceStore.BodyKind) -> Data?)?
     var onSetFusion: ((_ idOrName: String, _ engaged: Bool) -> [String: Any])?
-    // Local-inference routing (vLLM.md): `vm routing`, `vm hybrid`, `model use`.
+    // Local-inference routing (vLLM.md): `vm routing`, `model use`.
     var onSetRouting: ((_ idOrName: String, _ mode: String) -> [String: Any])?
-    var onSetHybrid: ((_ idOrName: String, _ knob: String, _ value: Double) -> [String: Any])?
     var onSetModel: ((_ idOrName: String, _ modelID: String) -> [String: Any])?
 
     // Remote access (optional SSH front door) — CLI `remote …` + Preferences.
@@ -499,7 +525,12 @@ final class ACAutomationServer {
         // Local shadow so every `sendResponse` in this switch honors the client's
         // gzip capability without threading a flag through ~50 call sites. The
         // real 4-arg method is reached via `self.sendResponse`.
+        let mutating = Self.isMutating(method, path: path)
+        if mutating { Self.noteMutation() }
         func sendResponse(fd: Int32, status: Int, body: [String: Any]) {
+            // The change is applied by now: invalidate before the client can
+            // read the response and poll.
+            if mutating { Self.noteMutation() }
             self.sendResponse(fd: fd, status: status, body: body, gzip: acceptGzip)
         }
         switch (method, path) {
@@ -1388,19 +1419,6 @@ final class ACAutomationServer {
             sendResponse(fd: fd, status: ok ? 200 : 409, body: result)
             return
         }
-        if rest.hasSuffix("/hybrid") {
-            guard method == "POST" else {
-                sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
-            }
-            let id = decode(String(rest.dropLast("/hybrid".count)))
-            let knob = (bodyJSON["knob"] as? String) ?? ""
-            let value = (bodyJSON["value"] as? Double) ?? Double((bodyJSON["value"] as? Int) ?? 0)
-            let result = DispatchQueue.main.sync { self.onSetHybrid?(id, knob, value) }
-                ?? ["ok": false, "error": "unavailable"]
-            let ok = (result["ok"] as? Bool) ?? false
-            sendResponse(fd: fd, status: ok ? 200 : 409, body: result)
-            return
-        }
         if rest.hasSuffix("/model") {
             guard method == "POST" else {
                 sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"]); return
@@ -2026,7 +2044,11 @@ final class ACAutomationServer {
         // so a lone subscriber still refreshes every wake.
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
-        if let cache = snapshotCache, Date().timeIntervalSince(snapshotCacheAt) < 0.4 {
+        // Read BEFORE capturing: a bump that lands during the capture marks
+        // this build stale (conservative), never a stale build fresh.
+        let generation = Self.currentMutationGeneration
+        if let cache = snapshotCache, snapshotCacheGeneration == generation,
+           Date().timeIntervalSince(snapshotCacheAt) < 0.4 {
             return cache
         }
         var snapshot: [String: Any] = DispatchQueue.main.sync {
@@ -2061,6 +2083,7 @@ final class ACAutomationServer {
         }
         snapshotCache = snapshot
         snapshotCacheAt = Date()
+        snapshotCacheGeneration = generation
         return snapshot
     }
 

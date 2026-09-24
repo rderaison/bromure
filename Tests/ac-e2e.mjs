@@ -751,17 +751,19 @@ async function main() {
       }
     });
 
-    await test("5.7 POST /sessions/.../exec 403 when debug is off, 502 'no shell connection' when on (Phase 2b)", async () => {
+    await test("5.7 POST /sessions/.../exec 403 when debug is off; with debug, an off workspace answers 409 at once", async () => {
       const h = await api("GET", "/health");
       const id = createProfile("ACE2E_Exec");
       try {
         const r = await api("POST", `/sessions/${id}/exec`, { command: "echo hi" });
         if (h.debugEnabled) {
-          // Until ShellBridge is wired in Phase 2b we expect 502 from
-          // the bridge plumbing; the request reached the right handler.
+          // The workspace was never started: since 4d1f3ffc an off or
+          // suspended workspace says so at once (409 + its state) instead of
+          // waiting 10s for a shell agent that can't appear (502). 200 if
+          // something did boot it.
           assert(
-            r._status === 502 || r._status === 200,
-            `Expected 502 or 200 (Phase 2b), got ${r._status}`
+            (r._status === 409 && r.state === "off") || r._status === 200,
+            `Expected 409 {state:"off"} (or 200), got ${r._status} ${JSON.stringify(r).slice(0, 160)}`
           );
         } else {
           assertEq(r._status, 403);
@@ -1949,7 +1951,7 @@ async function main() {
 
   await test("17.1 routing rejects a bad mode (validated before any VM lookup)", async () => {
     const out = cli(["workspaces", "routing", "notamode", "whatever"], { allowFail: true });
-    assert(/Mode must be 'cloud', 'local', or 'hybrid'/i.test(out),
+    assert(/Mode must be 'cloud' or 'local'/i.test(out),
            `expected a mode rejection, got: ${out}`);
   });
 
@@ -1957,7 +1959,7 @@ async function main() {
     // `routing <vm> <mode>` parses the first positional as the mode → rejected.
     // Pins the documented order without needing a running VM.
     const out = cli(["workspaces", "routing", "some-workspace", "cloud"], { allowFail: true });
-    assert(/Mode must be 'cloud', 'local', or 'hybrid'/i.test(out),
+    assert(/Mode must be 'cloud' or 'local'/i.test(out),
            `expected the first positional parsed as the mode, got: ${out}`);
   });
 
@@ -1968,12 +1970,26 @@ async function main() {
       assert(before.modelRouting === undefined || before.modelRouting === "cloud",
              "default routing should be cloud (omitted)");
       const p = getProfileJSON(id);
-      p.modelRouting = "hybrid";
+      p.modelRouting = "local";
       p.activeModelID = "ACE2E-fake-model-id";
       setProfileJSON(id, p);
       const after = getProfileJSON(id);
-      assertEq(after.modelRouting, "hybrid");
+      assertEq(after.modelRouting, "local");
       assertEq(after.activeModelID, "ACE2E-fake-model-id");
+    } finally { deleteProfile(id); }
+  });
+
+  await test("17.3b a legacy \"hybrid\" routing (dropped 2026-09-12) loads as cloud, not as an unreadable workspace", async () => {
+    const id = createProfile("ACE2E_Route_Legacy");
+    try {
+      const p = getProfileJSON(id);
+      p.modelRouting = "hybrid";
+      p.activeModelID = "ACE2E-fake-model-id";
+      setProfileJSON(id, p);   // used to fail: "The data couldn't be read…"
+      const after = getProfileJSON(id);
+      assert(after.modelRouting === undefined || after.modelRouting === "cloud",
+             `hybrid should read as cloud, got ${after.modelRouting}`);
+      assertEq(after.activeModelID, "ACE2E-fake-model-id", "the rest of the workspace must survive");
     } finally { deleteProfile(id); }
   });
 
@@ -1997,43 +2013,6 @@ async function main() {
   await test("17.5 routing a correct <mode> at an unknown VM reports not-found", async () => {
     const out = cli(["workspaces", "routing", "cloud", "ACE2E-no-such-vm-zzz"], { allowFail: true });
     assert(/not found|Couldn't set routing/i.test(out),
-           `expected a VM-not-found style error, got: ${out}`);
-  });
-
-  // ======================================================================
-  // 18. Hybrid knobs (CLI validation + budget/ttft/split JSON round-trip)
-  // ======================================================================
-  console.log("\n--- 18. Hybrid knobs ---");
-
-  await test("18.1 hybrid split rejects an out-of-range percent (validated locally)", async () => {
-    const out = cli(["workspaces", "hybrid", "split", "150", "whatever"], { allowFail: true });
-    assert(/Split must be between 0 and 100/i.test(out), `expected a range rejection, got: ${out}`);
-  });
-
-  await test("18.2 hybrid knobs round-trip via profile JSON", async () => {
-    const id = createProfile("ACE2E_Hybrid_RT");
-    try {
-      const p = getProfileJSON(id);
-      // Defaults are omitted from JSON: budget 0, ttft 5, split 0.
-      assert(p.hybridCloudTokenBudget === undefined || p.hybridCloudTokenBudget === 0, "budget default");
-      assert(p.hybridSoftTTFTSeconds === undefined || p.hybridSoftTTFTSeconds === 5, "ttft default");
-      assert(p.hybridLocalSplitPercent === undefined || p.hybridLocalSplitPercent === 0, "split default");
-      p.modelRouting = "hybrid";
-      p.hybridCloudTokenBudget = 250000;
-      p.hybridSoftTTFTSeconds = 8.5;
-      p.hybridLocalSplitPercent = 25;
-      setProfileJSON(id, p);
-      const after = getProfileJSON(id);
-      assertEq(after.modelRouting, "hybrid");
-      assertEq(after.hybridCloudTokenBudget, 250000);
-      assertEq(after.hybridSoftTTFTSeconds, 8.5);
-      assertEq(after.hybridLocalSplitPercent, 25);
-    } finally { deleteProfile(id); }
-  });
-
-  await test("18.3 hybrid budget at an unknown VM surfaces an agent-side error", async () => {
-    const out = cli(["workspaces", "hybrid", "budget", "1000", "ACE2E-no-such-vm-zzz"], { allowFail: true });
-    assert(/not found|Couldn't set hybrid/i.test(out),
            `expected a VM-not-found style error, got: ${out}`);
   });
 

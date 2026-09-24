@@ -1903,7 +1903,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// selected set intersected with usable providers (falling back to all
     /// usable if the selection is too small); judge falls back to the first
     /// usable provider + engine default model.
-    /// Push the profile's routing mode + hybrid policy knobs into the MITM
+    /// Push the profile's routing mode into the MITM
     /// engine at session launch (vLLM.md §4). The model label (catalog id
     /// or repo) is what the `served-by` trace marker shows.
     /// Providers with a real interactive-subscription login usable by this
@@ -3896,10 +3896,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             self?.automationSetRouting(idOrName: idOrName, mode: mode)
                 ?? ["ok": false, "error": "unavailable"]
         }
-        server.onSetHybrid = { [weak self] idOrName, knob, value in
-            self?.automationSetHybrid(idOrName: idOrName, knob: knob, value: value)
-                ?? ["ok": false, "error": "unavailable"]
-        }
         server.onSetModel = { [weak self] idOrName, modelID in
             self?.automationSetModel(idOrName: idOrName, modelID: modelID)
                 ?? ["ok": false, "error": "unavailable"]
@@ -4531,14 +4527,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return ["ok": true, "engaged": engaged]
     }
 
-    /// `vm routing cloud|local|hybrid` — set the per-profile backend
+    /// `vm routing cloud|local` — set the per-profile backend
     /// routing and push it live to the MITM engine (vLLM.md §4.2).
     @MainActor private func automationSetRouting(idOrName: String, mode: String) -> [String: Any] {
         guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
             return ["ok": false, "error": "VM not found: \(idOrName)"]
         }
         guard let routing = Profile.Routing(rawValue: mode.lowercased()) else {
-            return ["ok": false, "error": "Routing must be 'cloud', 'local', or 'hybrid'."]
+            return ["ok": false, "error": "Routing must be 'cloud' or 'local'."]
         }
         var profile = session.profile
         profile.modelRouting = routing
@@ -4548,18 +4544,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return ["ok": true, "routing": routing.rawValue]
     }
 
-    /// `vm hybrid budget|ttft|split <value>` — tune the hybrid policy
-    /// knobs (vLLM.md §4.3.1) and push them live.
-    @MainActor private func automationSetHybrid(idOrName: String, knob: String, value: Double) -> [String: Any] {
-        guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
-            return ["ok": false, "error": "VM not found: \(idOrName)"]
-        }
-        _ = (session, value)
-        return ["ok": false, "error": "Hybrid routing has been removed (knob: \(knob))"]
-    }
-
     /// `model use <id>` — set the profile's active local model (drives the
-    /// served-by marker + which weights the engine loads under local/hybrid).
+    /// served-by marker + which weights the engine loads under local routing).
     @MainActor private func automationSetModel(idOrName: String, modelID: String) -> [String: Any] {
         guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
             return ["ok": false, "error": "VM not found: \(idOrName)"]

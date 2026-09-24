@@ -59,9 +59,9 @@ enum ProgressBar {
 struct VMRouting: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "routing",
-        abstract: "Set LLM backend routing for a running VM: cloud | local | hybrid.")
+        abstract: "Set LLM backend routing for a running VM: cloud | local.")
 
-    @Argument(help: "cloud | local | hybrid")
+    @Argument(help: "cloud | local")
     var mode: String
 
     @Argument(help: "VM id or workspace name.")
@@ -69,8 +69,8 @@ struct VMRouting: ParsableCommand {
 
     func run() throws {
         let m = mode.lowercased()
-        guard ["cloud", "local", "hybrid"].contains(m) else {
-            throw ValidationError("Mode must be 'cloud', 'local', or 'hybrid'.")
+        guard ["cloud", "local"].contains(m) else {
+            throw ValidationError("Mode must be 'cloud' or 'local'.")
         }
         let client = ControlClient()
         try client.ensureAgentRunning()
@@ -80,64 +80,6 @@ struct VMRouting: ParsableCommand {
             throw ValidationError(resp.json["error"] as? String ?? "Couldn't set routing for \(vm).")
         }
         print("Routing set to \(m) for \(vm).")
-    }
-}
-
-// MARK: - `vm hybrid <knob>`
-
-struct VMHybrid: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "hybrid",
-        abstract: "Tune hybrid-routing policy knobs for a running VM.",
-        subcommands: [VMHybridBudget.self, VMHybridTTFT.self, VMHybridSplit.self])
-}
-
-private func setHybrid(knob: String, value: Double, vm: String) throws {
-    let client = ControlClient()
-    try client.ensureAgentRunning()
-    let resp = try client.request("POST", "/vms/\(ControlClient.encodeSegment(vm))/hybrid",
-                                  body: ["knob": knob, "value": value])
-    guard resp.status == 200, (resp.json["ok"] as? Bool) == true else {
-        throw ValidationError(resp.json["error"] as? String ?? "Couldn't set hybrid \(knob) for \(vm).")
-    }
-}
-
-struct VMHybridBudget: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "budget",
-        abstract: "Cloud token cap per rolling 24 h window (0 = unlimited).")
-    @Argument(help: "Max cloud tokens per window (0 = unlimited).") var tokens: Int
-    @Argument(help: "VM id or workspace name.") var vm: String
-    func run() throws {
-        try setHybrid(knob: "budget", value: Double(tokens), vm: vm)
-        print("Hybrid cloud token budget set to \(tokens == 0 ? "unlimited" : String(tokens)) for \(vm).")
-    }
-}
-
-struct VMHybridTTFT: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "ttft",
-        abstract: "Soft fallback threshold in seconds (default 5).")
-    @Argument(help: "Seconds before falling back to local.") var seconds: Double
-    @Argument(help: "VM id or workspace name.") var vm: String
-    func run() throws {
-        try setHybrid(knob: "ttft", value: seconds, vm: vm)
-        print("Hybrid soft TTFT set to \(seconds)s for \(vm).")
-    }
-}
-
-struct VMHybridSplit: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "split",
-        abstract: "Percentage (0–100) of new sessions pinned to local.")
-    @Argument(help: "Percent of new sessions to route local (0–100).") var percent: Int
-    @Argument(help: "VM id or workspace name.") var vm: String
-    func run() throws {
-        guard (0...100).contains(percent) else {
-            throw ValidationError("Split must be between 0 and 100.")
-        }
-        try setHybrid(knob: "split", value: Double(percent), vm: vm)
-        print("Hybrid local split set to \(percent)% for \(vm).")
     }
 }
 

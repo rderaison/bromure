@@ -303,17 +303,6 @@ pipeline {
             }
         }
 
-        stage('18. Hybrid knobs') {
-            // `workspaces hybrid split/budget/ttft` validation + the
-            // hybridCloudTokenBudget/hybridSoftTTFTSeconds/hybridLocalSplitPercent
-            // profile-JSON round-trip. No VM required.
-            steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                    sh 'node Tests/ac-e2e.mjs --filter "^18\\."'
-                }
-            }
-        }
-
         stage('19. Remote access') {
             // `remote --help`, default-disabled status (bind 0.0.0.0), and a
             // throwaway authorized-key add/ls/rm. Never enables remote access.

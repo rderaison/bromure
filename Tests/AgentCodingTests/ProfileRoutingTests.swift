@@ -118,3 +118,30 @@ struct ProfileLocalHostsTests {
         #expect(!hosts.contains("anthropic.com"))   // subscription/token Claude reaches cloud
     }
 }
+
+@Suite("Profile routing decode")
+struct ProfileRoutingDecodeTests {
+    private func roundTrip(routing: String?) throws -> Profile {
+        let base = Profile(name: "Legacy", tool: .claude, authMode: .token)
+        var obj = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(base)) as? [String: Any])
+        obj["modelRouting"] = routing
+        obj["activeModelID"] = "some-model"
+        return try JSONDecoder().decode(Profile.self, from: JSONSerialization.data(withJSONObject: obj))
+    }
+
+    @Test("a workspace saved with the dropped \"hybrid\" routing still loads, as cloud")
+    func legacyHybridReadsAsCloud() throws {
+        let p = try roundTrip(routing: "hybrid")
+        #expect(p.modelRouting == .cloud)
+        #expect(p.name == "Legacy")
+        #expect(p.activeModelID == "some-model")   // the rest of the workspace survives
+    }
+
+    @Test("known routings decode as themselves; unknown or missing reads as cloud")
+    func routingValues() throws {
+        #expect(try roundTrip(routing: "local").modelRouting == .local)
+        #expect(try roundTrip(routing: "cloud").modelRouting == .cloud)
+        #expect(try roundTrip(routing: "quantum").modelRouting == .cloud)
+        #expect(try roundTrip(routing: nil).modelRouting == .cloud)
+    }
+}

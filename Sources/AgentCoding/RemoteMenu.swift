@@ -660,12 +660,8 @@ final class RemoteMenuApp {
     private func editLocalModels(_ doc: inout [String: Any]) -> Bool {
         editFields(title: "Local Models", doc: &doc, fields: [
             ("modelRouting", "Routing", .pickLabeled([
-                ("Cloud", "cloud"), ("Local — always on-device", "local"),
-                ("Hybrid — cloud, fall back to local", "hybrid")])),
+                ("Cloud", "cloud"), ("Local — always on-device", "local")])),
             ("activeModelID", "Active local model", .modelPick),
-            ("hybridCloudTokenBudget", "Hybrid: cloud token budget / 24h (0 = ∞)", .int),
-            ("hybridSoftTTFTSeconds", "Hybrid: soft TTFT fallback (seconds)", .double),
-            ("hybridLocalSplitPercent", "Hybrid: % of sessions pinned local", .int),
         ])
     }
 
@@ -1329,12 +1325,12 @@ final class RemoteMenuApp {
         if let putResult { tui.pager(title: "Edit \(name)", body: putResult) }
     }
 
-    /// `vm routing cloud|local|hybrid` from the menu.
+    /// `vm routing cloud|local` from the menu.
     private func chooseRouting(id: String, name: String, current: String) {
-        let modes = ["cloud", "local", "hybrid"]
+        let modes = ["cloud", "local"]
         let initial = modes.firstIndex(of: current) ?? 0
         guard let sel = tui.menu(title: "Routing for \(name)",
-                                 items: ["Cloud", "Local", "Hybrid"],
+                                 items: ["Cloud", "Local"],
                                  footer: "Enter select · q back", initial: initial) else { return }
         tui.pager(title: "Routing · \(name)", body: runSelf(["vm", "routing", modes[sel], id]))
     }

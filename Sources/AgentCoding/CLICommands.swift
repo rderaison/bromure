@@ -523,7 +523,7 @@ struct Profiles: ParsableCommand {
                       VMRun.self, VMKill.self, WorkspacesReboot.self, Exec.self,
                       VMAttach.self, ProfilesDescribe.self, ProfilesRemove.self,
                       WorkspacesSSHKeygen.self, WorkspacePorts.self, WorkspacesFsck.self,
-                      VMFusion.self, VMRouting.self, VMHybrid.self],
+                      VMFusion.self, VMRouting.self],
         // Default subcommand so `vm <workspace> -L` works docker-style: an
         // unrecognized first token falls through to `ports` as its argument.
         // Bare `vm` still shows the group help (ports with no workspace
