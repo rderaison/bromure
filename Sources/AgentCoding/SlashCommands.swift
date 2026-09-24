@@ -23,6 +23,20 @@ struct SlashCommand: Identifiable, Hashable {
     var id: String { source.rawValue + ":" + name }
 }
 
+extension PeerMentionCompletion {
+    /// Matching sessions as rows of the "@" palette (a session the pick would
+    /// nickname on the spot is tagged "new name").
+    static func paletteRows(_ query: String, in peers: [PeerMention]) -> [SlashCommand] {
+        matches(query, in: peers).map { p in
+            var c = SlashCommand(name: p.nick,
+                                 description: p.title + (p.workspace.isEmpty ? "" : " · " + p.workspace),
+                                 source: .builtIn)
+            if !p.assigned { c.tag = NSLocalizedString("new name", comment: "mention palette tag") }
+            return c
+        }
+    }
+}
+
 enum SlashCommandCatalog {
     /// The built-in commands of an agent, in the order its own /help lists
     /// them (roughly: everyday first).

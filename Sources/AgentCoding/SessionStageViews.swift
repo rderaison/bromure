@@ -720,6 +720,11 @@ struct NewSessionView: View {
     /// machine's own tools. nil (a mirror, which can't see the host's model
     /// settings) falls back to the machine's saved tool list.
     let readyTools: ((Profile) -> Set<Profile.Tool>)?
+    /// The sessions the "@" palette offers for a message started in a
+    /// workspace ("ask @seclio to…"), and naming one on the spot when it has
+    /// no nickname yet. nil: no palette.
+    let peerMentions: ((UUID) -> [PeerMention])?
+    let assignNickname: ((UUID, String) -> Void)?
 
     private enum Where: String, CaseIterable, Identifiable {
         case home, folder, repository
@@ -786,6 +791,12 @@ struct NewSessionView: View {
     /// The folder picker sheet ("Choose…" in the Where popover).
     @State private var folderPicker = false
     @FocusState private var messageFocused: Bool
+    /// Keyboard highlight in the "@" palette.
+    @State private var mentionIndex = 0
+    #if os(macOS)
+    @State private var editorHeight: CGFloat = 24
+    @State private var editorFocused = false
+    #endif
 
     static let lastProfileKey = "sessions.lastProfileID"
     static let lastToolKey = "sessions.lastTool"
@@ -812,7 +823,9 @@ struct NewSessionView: View {
          onCancel: @escaping () -> Void,
          onNewMachine: @escaping () -> Void = {},
          listFolders: ((UUID, String) async -> [String]?)? = nil,
-         readyTools: ((Profile) -> Set<Profile.Tool>)? = nil) {
+         readyTools: ((Profile) -> Set<Profile.Tool>)? = nil,
+         peerMentions: ((UUID) -> [PeerMention])? = nil,
+         assignNickname: ((UUID, String) -> Void)? = nil) {
         self.profiles = profiles
         self.runningIDs = runningIDs
         self.recentFolders = recentFolders
@@ -821,6 +834,8 @@ struct NewSessionView: View {
         self.onNewMachine = onNewMachine
         self.listFolders = listFolders
         self.readyTools = readyTools
+        self.peerMentions = peerMentions
+        self.assignNickname = assignNickname
         let remembered = UserDefaults.standard.string(forKey: Self.lastProfileKey)
             .flatMap { UUID(uuidString: $0) }
         let pid = remembered.flatMap { id in profiles.first { $0.id == id }?.id }
@@ -925,6 +940,9 @@ struct NewSessionView: View {
                     if profiles.isEmpty {
                         firstMachineCard
                     } else {
+                        #if os(macOS)
+                        if !mentionRows.isEmpty { mentionPalette }
+                        #endif
                         composer
                             .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { handleDrop($0) }
                             .overlay {
@@ -981,6 +999,80 @@ struct NewSessionView: View {
 
     // MARK: The composer
 
+    /// macOS: the chat's own text view, so the "@" palette gets the arrow,
+    /// Tab, Return and Escape keys before the field acts on them (Return
+    /// otherwise starts the session). Elsewhere a plain field.
+    private var fieldFocused: Bool {
+        #if os(macOS)
+        editorFocused
+        #else
+        messageFocused
+        #endif
+    }
+
+    @ViewBuilder private var messageField: some View {
+        #if os(macOS)
+        ComposerTextView(text: $message, placeholder: placeholderText,
+                         font: .systemFont(ofSize: 15), lineSpacing: 4, maxLines: 14,
+                         autofocus: true, height: $editorHeight, focused: $editorFocused,
+                         onKey: { handleMentionKey($0) }, onSubmit: start)
+            .frame(maxWidth: .infinity)
+            .frame(height: max(editorHeight, 66))   // three lines, as the field had
+        #else
+        TextField(placeholderText, text: $message, axis: .vertical)
+            .textFieldStyle(.plain)
+            .font(.system(size: 15))
+            .lineSpacing(4)
+            .lineLimit(3...14)
+            .focused($messageFocused)
+            .onSubmit(start)
+        #endif
+    }
+
+    #if os(macOS)
+    /// The sessions the "@…" being typed could mean, for the message's
+    /// workspace (a new session is nobody yet, so none is left out).
+    private var mentionRows: [SlashCommand] {
+        guard let peerMentions, let q = PeerMentionCompletion.query(in: message) else { return [] }
+        return PeerMentionCompletion.paletteRows(q, in: peerMentions(profileID))
+    }
+
+    private func completeMention(_ c: SlashCommand) {
+        // A session without a nickname gets the proposed one now, so the
+        // "@name" typed is one the agent can resolve.
+        if let peer = peerMentions?(profileID).first(where: { $0.nick == c.name }), !peer.assigned {
+            assignNickname?(peer.sessionID, peer.nick)
+        }
+        message = PeerMentionCompletion.complete(message, with: c.name)
+        mentionIndex = 0
+    }
+
+    /// The palette's keys, before the field acts on them. False = the field's own.
+    private func handleMentionKey(_ key: ComposerKey) -> Bool {
+        let rows = mentionRows
+        guard !rows.isEmpty else { return false }
+        switch key {
+        case .up: mentionIndex = max(0, mentionIndex - 1)
+        case .down: mentionIndex = min(rows.count - 1, mentionIndex + 1)
+        case .tab, .enter: completeMention(rows[min(mentionIndex, rows.count - 1)])
+        case .escape: message = PeerMentionCompletion.dismiss(message); mentionIndex = 0
+        }
+        return true
+    }
+
+    private var mentionPalette: some View {
+        SlashCommandPalette(
+            commands: mentionRows,
+            agentName: NSLocalizedString("sessions you can ask", comment: "mention palette"),
+            highlighted: mentionIndex,
+            onPick: { completeMention($0) },
+            onHover: { mentionIndex = $0 },
+            prefix: "@",
+            title: NSLocalizedString("Sessions", comment: "mention palette"))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+    #endif
+
     private var composer: some View {
         VStack(alignment: .leading, spacing: 12) {
             if !attachments.isEmpty {
@@ -990,16 +1082,11 @@ struct NewSessionView: View {
                 .padding(.horizontal, 4)
                 .padding(.top, 4)
             }
-            TextField(placeholderText, text: $message, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 15))
-                .lineSpacing(4)
-                .lineLimit(3...14)
-                .focused($messageFocused)
-                .onSubmit(start)
+            messageField
                 // A drop that lands ON the field pastes the file's host path
                 // (the field takes the drag first): turn it into a chip.
                 .onChange(of: message) { _, text in
+                    mentionIndex = 0
                     let (rest, files) = DroppedFile.absorbHostPaths(in: text)
                     guard !files.isEmpty else { return }
                     attachments.append(contentsOf: files)
@@ -1079,9 +1166,9 @@ struct NewSessionView: View {
             .fill(Color.platformTextBackground)
             .shadow(color: .black.opacity(0.04), radius: 10, y: 3))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .strokeBorder(messageFocused ? Color.accentColor.opacity(0.6) : Color.acHairline,
-                          lineWidth: messageFocused ? 1.5 : 1))
-        .animation(.easeOut(duration: 0.12), value: messageFocused)
+            .strokeBorder(fieldFocused ? Color.accentColor.opacity(0.6) : Color.acHairline,
+                          lineWidth: fieldFocused ? 1.5 : 1))
+        .animation(.easeOut(duration: 0.12), value: fieldFocused)
     }
 
     /// Folders earlier sessions on this machine ran in — one click to work

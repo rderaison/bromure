@@ -1446,35 +1446,15 @@ struct BeautifiedSessionView: View {
     /// that match, for the composer to complete ("Ask @seclio to…"). Never
     /// inside a slash command; gone once the word is closed with a space.
     private var mentionQuery: String? {
-        let t = model.composerText
-        guard !t.hasPrefix("/"), !t.isEmpty, model.peerMentions != nil else { return nil }
-        let word = t[Self.lastWordStart(of: t)...]
-        guard word.hasPrefix("@") else { return nil }
-        return String(word.dropFirst())
-    }
-    private static func lastWordStart(of t: String) -> String.Index {
-        t.lastIndex(where: { $0 == " " || $0.isNewline }).map { t.index(after: $0) } ?? t.startIndex
+        guard model.peerMentions != nil else { return nil }
+        return PeerMentionCompletion.query(in: model.composerText)
     }
     /// Every session but this one: by its nickname, or by the name it
     /// would get (tagged so), matched on the name or the title. Named
     /// sessions first.
     private var mentionMatches: [SlashCommand] {
-        guard let q = mentionQuery?.lowercased(), let peers = model.peerMentions?() else { return [] }
-        func rank(_ p: PeerMention) -> (Int, Int, String) {
-            // A name that starts with what's typed beats a title that merely
-            // contains it; a session already named beats one that would be.
-            (q.isEmpty || p.nick.lowercased().hasPrefix(q) ? 0 : 1, p.assigned ? 0 : 1, p.nick.lowercased())
-        }
-        return peers
-            .filter { q.isEmpty || $0.nick.lowercased().hasPrefix(q) || $0.title.lowercased().contains(q) }
-            .sorted { rank($0) < rank($1) }
-            .map { p in
-                var c = SlashCommand(name: p.nick,
-                                     description: p.title + (p.workspace.isEmpty ? "" : " · " + p.workspace),
-                                     source: .builtIn)
-                if !p.assigned { c.tag = NSLocalizedString("new name", comment: "mention palette tag") }
-                return c
-            }
+        guard let q = mentionQuery, let peers = model.peerMentions?() else { return [] }
+        return PeerMentionCompletion.paletteRows(q, in: peers)
     }
     private var mentionMode: Bool { paletteQuery == nil && mentionQuery != nil }
     private var paletteCommands: [SlashCommand] {
@@ -1499,8 +1479,7 @@ struct BeautifiedSessionView: View {
             if let peer = model.peerMentions?().first(where: { $0.nick == c.name }), !peer.assigned {
                 model.assignNickname?(peer.sessionID, peer.nick)
             }
-            let t = model.composerText
-            model.composerText = String(t[..<Self.lastWordStart(of: t)]) + "@" + c.name + " "
+            model.composerText = PeerMentionCompletion.complete(model.composerText, with: c.name)
             return
         }
         model.composerText = "/" + c.name + (c.takesArgument ? " " : "")
@@ -1530,8 +1509,7 @@ struct BeautifiedSessionView: View {
             guard paletteVisible else { return false }
             if mentionMode {
                 // Drop just the "@…" being typed; the sentence stays.
-                let t = model.composerText
-                model.composerText = String(t[..<Self.lastWordStart(of: t)])
+                model.composerText = PeerMentionCompletion.dismiss(model.composerText)
             } else {
                 model.composerText = ""
             }

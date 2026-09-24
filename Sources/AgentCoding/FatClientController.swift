@@ -3637,7 +3637,13 @@ final class RemoteHostWindow: NSWindow {
                 self.selectSession(s.id)
             },
             onNewMachine: { [weak self] in self?.createWorkspace(withWizard: false) },
-            listFolders: { pid, path in await c.listSessionFolders(profileID: pid, path: path) })
+            listFolders: { pid, path in await c.listSessionFolders(profileID: pid, path: path) },
+            peerMentions: { [weak c] _ in
+                guard let c else { return [] }
+                return PeerMention.candidates(c.sessionStore.sessions, excluding: nil,
+                                              workspace: { c.profile(for: $0)?.name ?? "" })
+            },
+            assignNickname: { [weak c] sid, nick in c?.sessionCommand(sid, "nickname", body: ["nickname": nick]) })
         showSessionOverlay(view)
     }
 

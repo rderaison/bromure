@@ -1513,6 +1513,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             readyTools: { [weak delegate] p in
                 p.agentsReadyToStart(ModelSettingsStore.shared.effective(for: p),
                                      subscribed: delegate?.subscribedProviders(for: p) ?? [])
+            },
+            peerMentions: { [weak delegate] pid in
+                delegate?.peerMentions(forWorkspace: pid, excluding: nil) ?? []
+            },
+            assignNickname: { [weak delegate] id, nick in
+                delegate?.agentSessionStore.setNickname(id, nick)
             })
         showSessionOverlay(view)
         makeKeyAndOrderFront(nil)

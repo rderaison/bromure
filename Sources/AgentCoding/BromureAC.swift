@@ -1612,6 +1612,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func remoteDelegationLinks() -> [RemoteDelegationLink] {
         remoteHostWindows.values.map(\.controller).filter(\.connected)
     }
+
+    /// Who the "@" palette offers to a composer in workspace `profileID`:
+    /// every session here but `me` — nicknamed as it is, the rest with the
+    /// name it would get — then, when the workspace's reach isn't pinned to
+    /// named workspaces, the nicknamed ones on the remote hosts this Mac
+    /// mirrors. The chat composer and the new-session screen both ask.
+    func peerMentions(forWorkspace profileID: UUID, excluding me: UUID?) -> [PeerMention] {
+        let links = profile(for: profileID)?.agentReach == nil ? remoteDelegationLinks() : []
+        var taken: Set<String> = []
+        for link in links {
+            for s in link.remoteSessions.sessions { if let n = s.nickname { taken.insert(n.lowercased()) } }
+        }
+        var out = PeerMention.candidates(agentSessionStore.sessions, excluding: me,
+                                         workspace: { [weak self] in self?.profile(for: $0)?.name ?? "" },
+                                         taken: taken)
+        for link in links {
+            out += link.remoteSessions.sessions
+                .filter { $0.nickname != nil && !$0.isDeleted && !$0.isArchived }
+                .map { PeerMention(sessionID: $0.id, nick: $0.nickname ?? "", title: $0.title,
+                                   workspace: link.hostName + " · " + link.remoteWorkspaceName($0.profileID)) }
+        }
+        return out
+    }
     private(set) lazy var codingTaskEngine =
         CodingTaskEngine(store: codingTaskStore, delegate: self)
     /// Kubernetes clusters — shared machines (node VMs) next to the

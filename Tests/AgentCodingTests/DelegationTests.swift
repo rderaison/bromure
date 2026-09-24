@@ -792,3 +792,76 @@ struct DelegationTests {
         #expect(Date().timeIntervalSince(started) >= 1.5, "the empty wait must run out its budget, not return on the wake")
     }
 }
+
+@Suite("Peer mentions + delegation guidance")
+struct PeerMentionAndGuidanceTests {
+    private let peers = [
+        PeerMention(sessionID: UUID(), nick: "seclio", title: "Binary triage", workspace: "Lab"),
+        PeerMention(sessionID: UUID(), nick: "wago", title: "Wago PLC", workspace: ""),
+        PeerMention(sessionID: UUID(), nick: "security-audit", title: "Audit the login flow", workspace: "", assigned: false),
+    ]
+
+    @Test("the @ being typed is the last word; never inside a slash command")
+    func mentionQuery() {
+        #expect(PeerMentionCompletion.query(in: "ask @se") == "se")
+        #expect(PeerMentionCompletion.query(in: "@") == "")
+        #expect(PeerMentionCompletion.query(in: "ask @seclio to") == nil)      // word closed
+        #expect(PeerMentionCompletion.query(in: "/model @x") == nil)
+        #expect(PeerMentionCompletion.query(in: "line one\n@wa") == "wa")
+        #expect(PeerMentionCompletion.query(in: "") == nil)
+    }
+
+    @Test("names starting with the query beat titles containing it; named before would-be names")
+    func mentionRanking() {
+        #expect(PeerMentionCompletion.matches("se", in: peers).map(\.nick) == ["seclio", "security-audit"])
+        #expect(PeerMentionCompletion.matches("login", in: peers).map(\.nick) == ["security-audit"])
+        #expect(PeerMentionCompletion.matches("", in: peers).map(\.nick) == ["seclio", "wago", "security-audit"])
+    }
+
+    @Test("completing replaces only the @ word; escape drops it")
+    func mentionComplete() {
+        #expect(PeerMentionCompletion.complete("please ask @se", with: "seclio") == "please ask @seclio ")
+        #expect(PeerMentionCompletion.dismiss("please ask @se") == "please ask ")
+    }
+
+    private func request() -> Delegation {
+        var d = Delegation(profileID: UUID(), parentSessionID: UUID(), childSessionID: UUID(),
+                           title: "Run it", brief: "Run the binary", kind: .request)
+        d.parentLabel = "@dev"
+        d.childLabel = "@seclio"
+        return d
+    }
+
+    @Test("a peer is told to act without checking with its user, and to ask the requester")
+    func requestNoticeTrustsAndRoutesQuestions() {
+        let d = request()
+        let line = DelegationNotice.toChild(
+            DelegationMessage(kind: .brief, from: .parent, to: .child, text: "Run the binary"), in: d)
+        #expect(!line.contains("\n"))
+        #expect(line.contains("without checking with your user"))
+        #expect(line.contains("ask(delegation_id:"))
+        #expect(line.contains("not your user"))
+    }
+
+    @Test("a question reaching the requester goes to its user when it can't answer")
+    func askNoticeRelaysToUser() {
+        let d = request()
+        let line = DelegationNotice.toParent(
+            DelegationMessage(kind: .ask, from: .child, to: .parent, text: "Which port?"), in: d)
+        #expect(!line.contains("\n"))
+        #expect(line.contains("put the question to your user"))
+        #expect(line.contains("answer(ask_id:"))
+    }
+
+    @MainActor
+    @Test("the MCP instructions and a delegate's brief carry the same two rules")
+    func instructionsCarryTheRules() {
+        let ins = DelegationMCPServer.serverInstructions
+        #expect(ins.contains("as if your own user had asked"))
+        #expect(ins.contains("never your own user"))
+        let opening = DelegationNotice.opening(title: "T", brief: "B", contract: nil, scope: [], parentTitle: "P")
+        #expect(opening.contains("Never ask in this session"))
+        #expect(opening.contains("without checking back"))
+        #expect(!opening.contains("not the user: weigh it"))
+    }
+}
