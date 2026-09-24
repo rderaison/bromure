@@ -106,7 +106,11 @@ pipeline {
                     pkill -x bromure-ac 2>/dev/null || true
                     pkill -x bromure 2>/dev/null || true
                     sleep 2
-                    BROMURE_DEBUG_CLAUDE=1 "$APP_BUNDLE/Contents/MacOS/bromure-ac" > bromure-ac.log 2>&1 &
+                    # BROMURE_TRANSCRIPT_HISTORY_BYTES shrinks the beautified
+                    # view's 24 MB history window so section 30.6 can exercise
+                    # "load earlier" on a small transcript (the harness's own
+                    # launcher sets the same value).
+                    BROMURE_DEBUG_CLAUDE=1 BROMURE_TRANSCRIPT_HISTORY_BYTES=20000 "$APP_BUNDLE/Contents/MacOS/bromure-ac" > bromure-ac.log 2>&1 &
                     echo $! > .bromure_ac_pid
                     # Wait up to 60s for the HTTP automation server to come up.
                     for i in $(seq 1 60); do
@@ -434,6 +438,64 @@ pipeline {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                     sh 'node Tests/ac-e2e.mjs --filter "^28\\."'
+                }
+            }
+        }
+
+        stage('29. Agent sessions (sessions-first home)') {
+            // Sections 29–32 run a STUB `claude` inside the guest (a
+            // deterministic stand-in, installed by the harness) — no Claude
+            // login, no model. Here: start-session with and without an opening
+            // message / folder, binding by @display, the liveness probe and
+            // its pinned transcript id, resume of a live and of an exited
+            // agent (--resume <id> in the same tab), archive/unarchive, and
+            // delete (tab killed, record purged, no stray re-adoption). Needs
+            // the base image; self-skips (SKIP) without one.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^29\\."'
+                }
+            }
+        }
+
+        stage('30. Beautified session view') {
+            // The chat view over a live agent tab: mounts on the session's
+            // OWN transcript and swaps with the session on stage, a composer
+            // message lands in that agent's transcript only, a slash command
+            // gets a command card that recognises a TUI picker and folds when
+            // it closes, and "load earlier" (needs BROMURE_TRANSCRIPT_HISTORY_BYTES,
+            // set in Start App above). Base image required; SKIP without.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^30\\."'
+                }
+            }
+        }
+
+        stage('31. Inter-agent delegation + requests') {
+            // The bromure-delegation MCP (vsock 5835) driven from inside the
+            // guest as each session's tmux window: @nicknames + list_peers,
+            // request with a file (inbox copy, notice typed into the PEER's
+            // tab only), read_inbox → deliver → the requester's notice/inbox/
+            // file, close_delegation, a parent→child delegate (own tab, opens
+            // with the brief, report + deliver, close archives it), and the
+            // sleeping-peer notice racing a fresh launch. Base image required.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^31\\."'
+                }
+            }
+        }
+
+        stage('32. Launch race (two sessions at once)') {
+            // Regression for 02821f1c: two start-session calls fired together
+            // in one workspace must each bind their own tab (@display == its
+            // launch name), open with their own message, serve their own
+            // transcript and show their own conversation in the beautified
+            // view — two rounds. Base image required; SKIP without.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^32\\."'
                 }
             }
         }

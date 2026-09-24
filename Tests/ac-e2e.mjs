@@ -19,10 +19,14 @@
  *   node Tests/ac-e2e.mjs                 # run all
  *   node Tests/ac-e2e.mjs --filter mcp    # run tests matching "mcp" (case-insensitive)
  *   node Tests/ac-e2e.mjs --no-sessions   # skip the session-launch tests
+ *
+ * Env: BROMURE_AC_API_URL (automation API), BROMURE_AC_BIN (CLI binary),
+ * BROMURE_AC_CONTROL_SOCK (control socket; default follows CFFIXED_USER_HOME).
  */
 
 import { execSync, execFileSync, spawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync } from "fs";
+import http from "http";
 import os from "os";
 
 const APP_NAME = "Bromure Agentic Coding";
@@ -103,6 +107,46 @@ async function api(method, path, body, { timeoutMs = 60000 } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Control socket (owner-only Unix socket) — the routes the HTTP API refuses
+// ("Local only"), e.g. GET /state with the raw AgentSession records. Same
+// response shape as api(). The path follows CFFIXED_USER_HOME like the app's
+// own support dir, so an isolated instance is reached, not the user's.
+// ---------------------------------------------------------------------------
+
+const CTL_SOCK = process.env.BROMURE_AC_CONTROL_SOCK ||
+  `${process.env.CFFIXED_USER_HOME || os.homedir()}/Library/Application Support/BromureAC/control.sock`;
+
+function ctl(method, path, body, { timeoutMs = 30000 } = {}) {
+  return new Promise((resolve) => {
+    const data = body === undefined ? null : JSON.stringify(body);
+    const headers = { Connection: "close" };
+    if (data) {
+      headers["Content-Type"] = "application/json";
+      headers["Content-Length"] = Buffer.byteLength(data);
+    }
+    const req = http.request({ socketPath: CTL_SOCK, method, path, headers, agent: false }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf-8");
+        if (!text) return resolve({ _status: res.statusCode, _empty: true });
+        try {
+          const json = JSON.parse(text);
+          json._status = res.statusCode;
+          resolve(json);
+        } catch {
+          resolve({ _status: res.statusCode, _error: `Invalid JSON: ${text.slice(0, 200)}` });
+        }
+      });
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`timed out after ${timeoutMs}ms`)));
+    req.on("error", (e) => resolve({ _status: 0, _error: `${method} ${path} (control socket): ${e.message}` }));
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // CLI bridge (`bromure-ac` subcommands over the owner-only control socket)
 // ---------------------------------------------------------------------------
 
@@ -159,7 +203,14 @@ async function ensureAppRunning() {
   spawn(AC_BIN, [], {
     detached: true,
     stdio: ["ignore", log, log],
-    env: { ...process.env, BROMURE_DEBUG_CLAUDE: process.env.BROMURE_DEBUG_CLAUDE || "1" },
+    env: {
+      ...process.env,
+      BROMURE_DEBUG_CLAUDE: process.env.BROMURE_DEBUG_CLAUDE || "1",
+      // Section 30.5 exercises the beautified view's "load earlier" on a
+      // small transcript: scale its 24 MB history window down (same value
+      // as the CI Start App stage).
+      BROMURE_TRANSCRIPT_HISTORY_BYTES: process.env.BROMURE_TRANSCRIPT_HISTORY_BYTES || "20000",
+    },
   }).unref();
   for (let i = 0; i < 30; i++) {         // up to 60s, same budget as CI
     await sleep(2000);
@@ -3403,6 +3454,1000 @@ echo "ISSUER=$ISSUER"; echo "POST443=$POST443"`,
           assert(n >= 100, `expected many SUCCESSFUL (non-error) CDP evaluates in the burst, got ${n}`);
         });
       });
+    }
+  }
+
+  // ======================================================================
+  // 29–32 shared fixture: agent sessions driven by a STUB agent (no LLM)
+  //
+  // Sections 29–32 exercise the sessions-first home, the beautified chat
+  // view, agent-to-agent delegation and the two-launch race through the real
+  // host machinery (AgentSessionEngine, the reconcile binder, the liveness
+  // probe, the delegation MCP on vsock 5835) — but with a deterministic
+  // stand-in for the agent, so they need no credentials and no model. The
+  // throwaway workspace's guest gets a `claude` stub first on the managed
+  // PATH (~/.local/bin): it parses the flags the host launches Claude with
+  // (`-- <prompt>`, `--resume <id>`, `--continue`), writes a Claude-format
+  // transcript for its folder, reports each turn through the per-tab status
+  // hook (~/.bromure/agent-status.sh — which also pins the transcript to the
+  // tab, exactly as Claude's own hooks do), answers every typed line with a
+  // canned reply, draws a picker for `/ace2e-menu`, and logs every start and
+  // every line it received — with its tmux window — to ~/.ace2e-stub.log.
+  // That log is the ground truth for "which tab got this text".
+  // ======================================================================
+
+  const STUB_AGENT_PY = String.raw`#!/usr/bin/env python3
+# ACE2E stub agent — installed as ~/.local/bin/claude by Tests/ac-e2e.mjs
+# (sections 29-32). A deterministic stand-in for Claude Code; see the harness.
+import datetime, glob, json, os, re, subprocess, sys, time, uuid
+
+HOME = os.path.expanduser("~")
+LOG = os.path.join(HOME, ".ace2e-stub.log")
+
+def window():
+    try:
+        return subprocess.run(["tmux", "display-message", "-p", "-t", os.environ.get("TMUX_PANE", ""),
+                               "#{window_index}"], capture_output=True, text=True, timeout=5).stdout.strip() or "?"
+    except Exception:
+        return "?"
+
+args = sys.argv[1:]
+resume, cont, prompt = None, False, None
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "--":
+        prompt = " ".join(args[i + 1:]); break
+    if a == "--resume" and i + 1 < len(args):
+        resume = args[i + 1]; i += 2; continue
+    if a.startswith("--resume="):
+        resume = a.split("=", 1)[1]; i += 1; continue
+    if a in ("--continue", "-c"):
+        cont = True; i += 1; continue
+    if a.startswith("-"):
+        i += 1; continue
+    prompt = " ".join(args[i:]); break
+
+cwd = os.getcwd()
+proj = os.path.join(HOME, ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", cwd))
+os.makedirs(proj, exist_ok=True)
+sid = resume
+if not sid and cont:
+    files = sorted(glob.glob(os.path.join(proj, "*.jsonl")), key=os.path.getmtime)
+    if files:
+        sid = os.path.basename(files[-1])[:-len(".jsonl")]
+if not sid:
+    sid = str(uuid.uuid4())
+path = os.path.join(proj, sid + ".jsonl")
+W = window()
+
+def log(line):
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
+
+log("start w%s sid=%s cwd=%s argv=%s" % (W, sid, cwd, json.dumps(args)))
+
+def status(signal):
+    hook = json.dumps({"session_id": sid, "transcript_path": path, "cwd": cwd, "hook_event_name": signal})
+    try:
+        subprocess.run(["sh", os.path.join(HOME, ".bromure", "agent-status.sh"), signal],
+                       input=hook, text=True, timeout=10)
+    except Exception:
+        pass
+
+def stamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+def record(kind, text):
+    content = text if kind == "user" else [{"type": "text", "text": text}]
+    line = {"type": kind, "uuid": str(uuid.uuid4()), "sessionId": sid, "cwd": cwd,
+            "timestamp": stamp(), "message": {"role": kind, "content": content}}
+    with open(path, "a") as f:
+        f.write(json.dumps(line) + "\n")
+
+def turn(text):
+    status("working")
+    record("user", text)
+    time.sleep(0.5)
+    record("assistant", "ace2e-stub reply: " + text[:300])
+    print("ace2e-stub reply: " + text[:100], flush=True)
+    status("done")
+
+def menu():
+    # A picker the chat's command card must recognise (footer hint + a
+    # highlighted row inside a list); it closes itself after a few seconds,
+    # back to the idle prompt, so the card can fold.
+    print("", flush=True)
+    print(" ace2e picker", flush=True)
+    print(" ❯ ace2e option one", flush=True)
+    print("   ace2e option two", flush=True)
+    print(" ↑/↓ to navigate · Enter to select · Esc to cancel", flush=True)
+    time.sleep(7)
+    sys.stdout.write("\033[2J\033[H")
+    print("ace2e stub agent idle", flush=True)
+
+CTRL = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|[\x00-\x1f\x7f]")
+print("ace2e stub agent (%s)" % sid[:8], flush=True)
+if prompt:
+    turn(prompt)
+while True:
+    sys.stdout.write("ace2e-stub: "); sys.stdout.flush()
+    raw = sys.stdin.readline()
+    if not raw:
+        break
+    text = CTRL.sub("", raw).strip()
+    if not text:
+        continue
+    log("line w%s sid=%s %s" % (W, sid, json.dumps(text)))
+    if text in ("/exit", "/quit"):
+        break
+    if text == "/ace2e-menu":
+        menu()
+        continue
+    if text.startswith("/"):
+        print("ace2e-stub: no such command", flush=True)
+        continue
+    turn(text)
+status("done")
+`;
+
+  // JSON-RPC client for the delegation MCP (vsock 5835), run IN the guest:
+  // announces a tmux window ("bromure-hello w<idx>") — the identity the host
+  // binds the caller to — then sends each tools/call and prints one JSON
+  // line per reply ({id, name, text, isError}).
+  const MCP_DRIVER_PY = String.raw`import base64, json, socket, sys
+win, calls, tmo = int(sys.argv[1]), json.loads(base64.b64decode(sys.argv[2])), float(sys.argv[3])
+s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+s.settimeout(tmo)
+s.connect((2, 5835))
+s.sendall(("bromure-hello w%d\n" % win).encode())
+f = s.makefile("rb")
+for n, c in enumerate(calls, 1):
+    s.sendall((json.dumps({"jsonrpc": "2.0", "id": n, "method": "tools/call",
+                           "params": {"name": c["name"], "arguments": c.get("arguments", {})}}) + "\n").encode())
+    reply = {}
+    while True:
+        line = f.readline()
+        if not line:
+            break
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if m.get("id") == n:
+            reply = m
+            break
+    res = reply.get("result") or {}
+    text = "".join(b.get("text", "") for b in res.get("content", []) if isinstance(b, dict))
+    print(json.dumps({"id": n, "name": c["name"], "text": text, "isError": bool(res.get("isError")),
+                      "answered": bool(reply)}), flush=True)
+`;
+
+  const toB64 = (s) => Buffer.from(s, "utf8").toString("base64");
+  const nonce = () => Math.random().toString(16).slice(2, 8);
+  const dbg = (action, extra = {}) => api("POST", "/debug/editor", { action, ...extra });
+  const guestPath = (p) => (p === "~" ? "/home/ubuntu" : p.startsWith("~/") ? `/home/ubuntu/${p.slice(2)}` : p);
+  const SESSION_SHOT = "/tmp/ace2e-session-shot.png";
+  const sameID = (a, b) => String(a || "").toUpperCase() === String(b || "").toUpperCase();
+
+  // The same tmux typing the host does (CodingTaskEngine.typeCommand).
+  const typeInto = (w, text) =>
+    `echo ${toB64(text)} | base64 -d | xargs -0 tmux send-keys -t bromure:${w} -l && sleep 1 && ` +
+    `tmux send-keys -t bromure:${w} Enter`;
+
+  const STUB_INSTALL =
+    `install -d -m 755 /home/ubuntu/.local/bin && ` +
+    `{ [ ! -e /home/ubuntu/.local/bin/claude ] || [ -e /home/ubuntu/.local/bin/claude.ace2e-real ] || ` +
+    `mv /home/ubuntu/.local/bin/claude /home/ubuntu/.local/bin/claude.ace2e-real; } && ` +
+    `echo ${toB64(STUB_AGENT_PY)} | base64 -d > /home/ubuntu/.local/bin/claude && ` +
+    `chmod 755 /home/ubuntu/.local/bin/claude && : > /home/ubuntu/.ace2e-stub.log && ` +
+    `{ [ "$(id -u)" != 0 ] || chown -R ubuntu:ubuntu /home/ubuntu/.local /home/ubuntu/.ace2e-stub.log; }`;
+
+  const debugShellTest = async () => {
+    const h = await api("GET", "/health");
+    assertEq(h.status, "ok");
+    assert(h.debugEnabled === true,
+           "app is running without BROMURE_DEBUG_CLAUDE=1 — quit it and rerun; the harness relaunches it with the flag");
+  };
+
+  // Sections 29–32 stay off the AppleScript bridge (which addresses the app
+  // by NAME, so with two instances up it may reach the wrong one): the
+  // workspace is created/deleted over the automation API, and the "is there
+  // a base image" gate is /app/state's hasBaseImage — skip, don't hang,
+  // without one.
+  async function canBootSessions() {
+    const s = await api("GET", "/app/state");
+    return s._status === 200 && s.hasBaseImage === true;
+  }
+
+  // A throwaway workspace that closes non-interactively (see createProfile).
+  async function createWorkspace(name) {
+    const stale = await api("GET", "/profiles");
+    for (const p of stale.profiles || []) {
+      if (p.name === name) await api("DELETE", `/profiles/${p.id}`);
+    }
+    const r = await api("POST", "/profiles", { name, closeAction: "shutdown" });
+    if (r.ok !== true || !r.id) throw new Error(`POST /profiles: ${r._status} ${r.error || r._error || JSON.stringify(r).slice(0, 200)}`);
+    return r.id;
+  }
+  // Refused while the VM still runs — retry through the shutdown.
+  async function deleteWorkspace(id) {
+    for (let i = 0; i < 20; i++) {
+      const r = await api("DELETE", `/profiles/${id}`);
+      if (r.ok === true || /not found/i.test(r.error || "")) return;
+      await sleep(1000);
+    }
+  }
+
+  // Boot a throwaway workspace and install the stub. Never throws: a failed
+  // bring-up comes back as {error}, reported by the section's first test.
+  async function stubVMUp(profileName) {
+    let id;
+    try { id = await createWorkspace(profileName); } catch (e) { return { error: e.message }; }
+    const vm = { id, name: profileName };
+    await api("POST", "/sessions", { profile: id }, { timeoutMs: 120000 });
+    let up = false, lastErr = "";
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const r = await api("POST", `/sessions/${id}/exec`, { command: "true", timeout: 5 });
+      if (r._status === 200) { up = true; break; }
+      lastErr = `status=${r._status} error=${r.error || r._error}`;
+      await sleep(3000);
+    }
+    if (!up) return { ...vm, error: `VM shell never came up: ${lastErr}` };
+    const inst = await api("POST", `/sessions/${id}/exec`, { command: STUB_INSTALL, timeout: 20 });
+    if (inst._status !== 200 || inst.exitCode !== 0) {
+      return { ...vm, error: `stub agent install failed: exit ${inst.exitCode} ${(inst.stderr || inst._error || "").slice(0, 200)}` };
+    }
+    return vm;
+  }
+
+  // Tear down everything a stub section created: open delegations are
+  // cancelled (records persist on the host), the VM is stopped, then every
+  // session record of the workspace is forgotten — AFTER the VM is down, so
+  // no still-running tab gets re-adopted as a fresh session — and the
+  // workspace deleted.
+  async function stubVMDown(vm) {
+    if (!vm || !vm.id) return;
+    const dl = await dbg("delegations");
+    for (const d of dl.delegations || []) {
+      if (sameID(d.profileID, vm.id) && ["starting", "working", "waitingForParent", "delivered"].includes(d.status)) {
+        await dbg("delegation-post", { id: d.id, from: "user", kind: "cancel", text: "ace2e teardown" });
+      }
+    }
+    await api("DELETE", `/sessions/${vm.id}`);
+    for (let i = 0; i < 30; i++) {
+      const r = await api("GET", "/vms");
+      const v = (Array.isArray(r?.vms) ? r.vms : []).find((x) => sameID(x.id, vm.id));
+      if (!v || v.state !== "running") break;
+      await sleep(750);
+    }
+    await sleep(1000);
+    const st = await ctl("GET", "/state");
+    for (const s of st.agentSessions || []) {
+      if (sameID(s.profileID, vm.id)) await api("POST", `/agent-sessions/${s.id}/forget`, {});
+    }
+    await deleteWorkspace(vm.id);
+  }
+
+  // Guest command; asserts HTTP 200 (+ exit 0 unless ok:false); stdout.
+  async function gx(vmID, command, { timeout = 20, ok = true } = {}) {
+    const r = await api("POST", `/sessions/${vmID}/exec`, { command, timeout },
+                        { timeoutMs: (timeout + 30) * 1000 });
+    assertEq(r._status, 200, `exec HTTP ${r._status}: ${r.error || r._error}`);
+    if (ok) assertEq(r.exitCode, 0, `\`${command.slice(0, 120)}\` exit ${r.exitCode}: ${(r.stderr || "").slice(0, 200)}`);
+    return r.stdout || "";
+  }
+
+  // The raw AgentSession records (GET /state over the control socket —
+  // launchDisplay, parentSessionID, delegationID, bootID are only there).
+  async function sessionRecords() {
+    const st = await ctl("GET", "/state", undefined, { timeoutMs: 45000 });
+    assert(st._status === 200, `GET /state over ${CTL_SOCK}: ${st._status} ${st._error || st.error || ""}`);
+    return st.agentSessions || [];
+  }
+  const sessionRec = async (sid) => (await sessionRecords()).find((s) => sameID(s.id, sid)) || null;
+
+  async function waitRec(sid, pred, tries = 60, gapMs = 1000) {
+    for (let i = 0; i < tries; i++) {
+      const rec = await sessionRec(sid);
+      if (rec && pred(rec)) return rec;
+      await sleep(gapMs);
+    }
+    return null;
+  }
+
+  // Launch → bound: a window index, the launch over. Fails fast on the
+  // engine's own launch error.
+  async function waitBound(sid, tries = 90) {
+    let rec = null;
+    for (let i = 0; i < tries; i++) {
+      rec = await sessionRec(sid);
+      if (rec && rec.windowIndex != null && !rec.launchingSince) return rec;
+      if (rec && rec.lastError && !rec.launchingSince) throw new Error(`session ${sid} failed to launch: ${rec.lastError}`);
+      await sleep(1000);
+    }
+    throw new Error(`session ${sid} never bound a tab: ${JSON.stringify(rec).slice(0, 300)}`);
+  }
+
+  // What agentd set on the tab at launch (`@display`) — the binder's key.
+  const tabDisplay = async (vmID, w) =>
+    (await gx(vmID, `tmux display-message -p -t bromure:${w} '#{@display}'`)).trim();
+  const tmuxWindows = async (vmID) =>
+    (await gx(vmID, `tmux list-windows -t bromure -F '#{window_index}' 2>/dev/null; true`))
+      .split("\n").map((s) => s.trim()).filter(Boolean).map(Number);
+
+  // The session's conversation as the host serves it (base64 → text).
+  async function sessionTranscript(sid) {
+    const r = await api("GET", `/agent-sessions/${sid}/transcript`, undefined, { timeoutMs: 100000 });
+    return r._status === 200 ? Buffer.from(r.transcript || "", "base64").toString("utf-8") : "";
+  }
+  async function waitTranscript(sid, pred, tries = 40, gapMs = 1500) {
+    let t = "";
+    for (let i = 0; i < tries; i++) {
+      t = await sessionTranscript(sid);
+      if (pred(t)) return t;
+      await sleep(gapMs);
+    }
+    return t;
+  }
+
+  // ~/.ace2e-stub.log, from line `from` on (callers note the length first:
+  // tmux reuses window indices, so only lines after an action count).
+  const stubLog = async (vmID) =>
+    (await gx(vmID, "cat /home/ubuntu/.ace2e-stub.log 2>/dev/null; true")).split("\n").filter(Boolean);
+  async function waitStubLog(vmID, from, pred, tries = 40, gapMs = 1000) {
+    let lines = [];
+    for (let i = 0; i < tries; i++) {
+      lines = (await stubLog(vmID)).slice(from);
+      if (pred(lines)) return lines;
+      await sleep(gapMs);
+    }
+    return lines;
+  }
+  const inWindow = (lines, w) => lines.filter((l) => l.startsWith(`start w${w} `) || l.startsWith(`line w${w} `));
+
+  // Put a session on stage (sessions-first `selectSession`) — the ui-shot
+  // hook does it, and renders the stage for good measure.
+  const showSession = (sid) =>
+    api("GET", `/debug/ui-shot?which=${encodeURIComponent(`session:${sid}`)}&path=${encodeURIComponent(SESSION_SHOT)}`,
+        undefined, { timeoutMs: 60000 });
+
+  // The beautified view's history for the session on stage, once it reads
+  // the transcript of the folder `folderName` (and holds ≥ minItems turns).
+  async function beautifiedOn(sid, folderName, { minItems = 1, tries = 40 } = {}) {
+    await showSession(sid);
+    let st = null;
+    for (let i = 0; i < tries; i++) {
+      st = await dbg("transcript-history", { do: "state" });
+      if (st && typeof st.path === "string" && st.path.includes(`/${folderName}`.replace(/\//g, "-"))
+          && (st.items || 0) >= minItems) return st;
+      if (i % 8 === 7) await showSession(sid);
+      await sleep(1000);
+    }
+    return st;
+  }
+
+  // Delegation MCP calls as the session in tmux window `win`.
+  async function mcp(vmID, win, calls, { timeout = 30 } = {}) {
+    const f = `/tmp/ace2e-mcp-${nonce()}.py`;
+    const cmd = `echo ${toB64(MCP_DRIVER_PY)} | base64 -d > ${f} && ` +
+                `python3 ${f} ${win} ${toB64(JSON.stringify(calls))} ${timeout}; rc=$?; rm -f ${f}; exit $rc`;
+    const r = await api("POST", `/sessions/${vmID}/exec`, { command: cmd, timeout: timeout + 20 },
+                        { timeoutMs: (timeout + 45) * 1000 });
+    assertEq(r._status, 200, `MCP driver exec HTTP ${r._status}: ${r.error || r._error}`);
+    const out = [];
+    for (const line of (r.stdout || "").split("\n")) {
+      try { const j = JSON.parse(line); if (j && j.id) out.push(j); } catch {}
+    }
+    assertEq(out.length, calls.length,
+             `MCP driver answered ${out.length}/${calls.length}: ${(r.stdout || "").slice(0, 300)} ${(r.stderr || "").slice(0, 300)}`);
+    return out.map((o) => {
+      let json = null;
+      try { json = JSON.parse(o.text); } catch {}
+      return { ...o, json };
+    });
+  }
+
+  const delegationRec = async (did) =>
+    ((await dbg("delegations")).delegations || []).find((d) => sameID(d.id, did)) || null;
+
+  // ======================================================================
+  // 29. Agent sessions — the sessions-first home (VM-side, stub agent)
+  //
+  // start-session with an opening message in a brand-new folder, and with
+  // neither (a synthetic folder of its own); the binder puts each on its
+  // own tab (`@display` == launchDisplay); the liveness probe sees the agent
+  // and pins its transcript id; resume of an EXITED agent relaunches it in
+  // the same tab with `--resume <that id>` and delivers the message; resume
+  // of a LIVE agent types the message into its tab; archive closes the tab
+  // (unarchive brings the record back); delete kills the tab and purges the
+  // record without a stray re-adoption. All asserted on the raw records
+  // (GET /state on the control socket) and in the guest (tmux + stub log).
+  // ======================================================================
+  if (!SKIP_SESSIONS && sectionActive("29.")) {
+    console.log("\n--- 29. Agent sessions (sessions-first home) ---");
+
+    await test("29.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", debugShellTest);
+
+    if (!(await canBootSessions())) {
+      console.log("  \x1b[33mSKIP\x1b[0m  Agent-session tests (no base image — run `bromure-ac init` first)");
+    } else {
+      const vm = await stubVMUp("ACE2E_Sessions");
+      try {
+        await test("29.1 workspace boots with the stub agent first on the managed PATH", async () => {
+          if (vm.error) throw new Error(vm.error);
+          const which = await gx(vm.id, "bash -ic 'type -P claude' 2>/dev/null | tail -1", { ok: false });
+          assertIncludes(which, "/home/ubuntu/.local/bin/claude", "the stub doesn't shadow the real claude");
+        });
+
+        if (!vm.error) {
+          const n = nonce();
+          const F1 = `~/ace2e-sess-${n}`;
+          const MSG1 = `ace2e opening ${n}: hello from the sessions e2e`;
+          let s1 = null, s2 = null;
+
+          await test("29.2 start-session with an opening message in a brand-new folder binds its own tab", async () => {
+            const r = await dbg("start-session", { profile: vm.name, tool: "claude", cwd: F1, message: MSG1 });
+            assert(r.ok === true && r.id, `start-session: ${JSON.stringify(r)}`);
+            s1 = r.id;
+            const rec = await waitBound(s1);
+            assertEq(rec.cwd, F1, "session cwd is not the folder it was started in");
+            assertEq(rec.tool, "claude");
+            assert(rec.launchDisplay, "no launchDisplay recorded at launch");
+            assertEq(await tabDisplay(vm.id, rec.windowIndex), rec.launchDisplay,
+                     "the bound tab isn't the one launched for this session (@display mismatch)");
+            // A folder that didn't exist is created — as a git repository.
+            await gx(vm.id, `test -d ${guestPath(F1)}/.git`);
+            const live = await waitRec(s1, (x) => x.agentAlive === true && !!x.agentTranscriptID, 40);
+            assert(live, "liveness probe never saw the agent alive with a pinned transcript id");
+            const tr = await waitTranscript(s1, (t) => t.includes(MSG1) && t.includes(`ace2e-stub reply: ${MSG1}`));
+            assertIncludes(tr, MSG1, "the opening message isn't in the session's transcript");
+            assertIncludes(tr, live.agentTranscriptID, "the served transcript isn't the pinned conversation");
+          });
+
+          await test("29.3 start-session with no message and no folder gets a fresh folder and tab of its own", async () => {
+            const r = await dbg("start-session", { profile: vm.name, tool: "claude", cwd: "~" });
+            assert(r.ok === true && r.id, `start-session: ${JSON.stringify(r)}`);
+            s2 = r.id;
+            const rec = await waitBound(s2);
+            assert(/^~\/claude-\d{6}-\d{4}$/.test(rec.cwd),
+                   `expected a synthetic ~/claude-yyMMdd-HHmm folder, got ${rec.cwd}`);
+            await gx(vm.id, `test -d ${guestPath(rec.cwd)}`);
+            assertEq(await tabDisplay(vm.id, rec.windowIndex), rec.launchDisplay, "@display mismatch");
+            const other = s1 && (await sessionRec(s1));
+            if (other && other.windowIndex != null) {
+              assert(other.windowIndex !== rec.windowIndex, "two sessions bound the same tab");
+            }
+          });
+
+          await test("29.4 resume of a live agent types the message into its own tab only", async () => {
+            assert(s2, "no session from 29.3");
+            const rec = await waitRec(s2, (x) => x.agentAlive === true, 40);
+            assert(rec, "the agent in 29.3's tab never read as alive");
+            const from = (await stubLog(vm.id)).length;
+            const M = `ace2e live resume ${n}`;
+            const rr = await dbg("resume-session", { id: s2, message: M });
+            assert(rr.ok === true, `resume-session: ${JSON.stringify(rr)}`);
+            const lines = await waitStubLog(vm.id, from, (ls) => ls.some((l) => l.includes(M)));
+            const hits = lines.filter((l) => l.includes(M));
+            assert(hits.length > 0, "the message never reached any agent");
+            assert(hits.every((l) => l.startsWith(`line w${rec.windowIndex} `)),
+                   `the message was typed into another tab: ${hits.join(" | ")}`);
+            const after = await sessionRec(s2);
+            assertEq(after.windowIndex, rec.windowIndex, "a live resume moved the session to another tab");
+          });
+
+          await test("29.5 resume of an EXITED agent relaunches it in its tab with --resume <its id> and delivers the message", async () => {
+            assert(s1, "no session from 29.2");
+            const before = await waitRec(s1, (x) => x.agentAlive === true && !!x.agentTranscriptID, 30);
+            assert(before, "29.2's agent isn't alive with a pinned transcript");
+            const w = before.windowIndex, tid = before.agentTranscriptID;
+            await gx(vm.id, typeInto(w, "/exit"));
+            const dead = await waitRec(s1, (x) => x.agentAlive === false, 45);
+            assert(dead, "the liveness probe never saw the agent exit");
+            const from = (await stubLog(vm.id)).length;
+            const M = `ace2e resume ${n}`;
+            const rr = await dbg("resume-session", { id: s1, message: M });
+            assert(rr.ok === true, `resume-session: ${JSON.stringify(rr)}`);
+            const tr = await waitTranscript(s1, (t) => t.includes(`ace2e-stub reply: ${M}`), 40);
+            assertIncludes(tr, M, "the resume message never reached the relaunched agent");
+            const lines = await stubLog(vm.id).then((ls) => ls.slice(from));
+            assert(lines.some((l) => l.startsWith(`start w${w} `) && l.includes('"--resume"') && l.includes(tid)),
+                   `the agent wasn't relaunched in its tab with --resume ${tid}: ${lines.join(" | ")}`);
+            const after = await sessionRec(s1);
+            assertEq(after.windowIndex, w, "resume opened another tab although the session's shell was still there");
+            assertEq(after.agentTranscriptID, tid, "resume switched to another conversation");
+            assert(!after.endedAt, "the resumed session still reads as ended");
+          });
+
+          await test("29.6 archive closes the session's tab; unarchive brings the record back", async () => {
+            assert(s2, "no session from 29.3");
+            const w = (await sessionRec(s2)).windowIndex;
+            const a = await dbg("archive-session", { id: s2 });
+            assert(a.ok === true && a.archived === true, `archive-session: ${JSON.stringify(a)}`);
+            const rec = await waitRec(s2, (x) => x.windowIndex == null && !!x.archivedAt, 20);
+            assert(rec, "archive left the session bound / not archived");
+            let gone = false;
+            for (let i = 0; i < 20 && !gone; i++) {
+              gone = !(await tmuxWindows(vm.id)).includes(w);
+              if (!gone) await sleep(1000);
+            }
+            assert(gone, `the archived session's tab ${w} is still open`);
+            const listed = ((await dbg("sessions")).sessions || []).find((x) => sameID(x.id, s2));
+            assert(listed && listed.archived === true, "the sessions list doesn't show it archived");
+            const u = await dbg("unarchive-session", { id: s2 });
+            assert(u.ok === true && u.archived === false, `unarchive-session: ${JSON.stringify(u)}`);
+            const back = await sessionRec(s2);
+            assert(back && !back.archivedAt, "unarchive didn't clear archivedAt");
+          });
+
+          await test("29.7 delete of a live session kills its tab and purges the record (no stray re-adoption)", async () => {
+            assert(s1, "no session from 29.2");
+            const w = (await sessionRec(s1)).windowIndex;
+            assert(w != null, "29.2's session isn't bound");
+            const d = await dbg("delete-session", { id: s1 });
+            assert(d.ok === true && (d.present === false || d.deleted === true), `delete-session: ${JSON.stringify(d)}`);
+            let purged = false;
+            for (let i = 0; i < 40 && !purged; i++) {
+              purged = !(await sessionRec(s1));
+              if (!purged) await sleep(1000);
+            }
+            assert(purged, "the deleted session's record was never purged");
+            assert(!(await tmuxWindows(vm.id)).includes(w), `the deleted session's tab ${w} is still open`);
+            // The dying tab must not come back as a session of its own.
+            await sleep(6000);
+            const strays = (await sessionRecords()).filter(
+              (x) => sameID(x.profileID, vm.id) && x.windowIndex === w && !x.deletedAt);
+            assertEq(strays.length, 0, `a stray session re-adopted tab ${w}: ${JSON.stringify(strays).slice(0, 200)}`);
+          });
+        }
+      } finally {
+        await stubVMDown(vm);
+      }
+    }
+  }
+
+  // ======================================================================
+  // 30. Beautified session view (the chat over a live agent tab)
+  //
+  // Mounting for a session reads THAT session's transcript (the pinned
+  // file of its own folder), switching sessions swaps it — the regression
+  // behind 02821f1c was a new session showing another's conversation —
+  // the composer's message lands in the right agent's transcript, a slash
+  // command gets a command card that recognises a TUI picker and folds when
+  // it closes, and "load earlier" pulls history in front of the window. The
+  // last one needs the app launched with BROMURE_TRANSCRIPT_HISTORY_BYTES
+  // (CI's Start App and the harness launcher set 20000); SKIP otherwise.
+  // ======================================================================
+  if (!SKIP_SESSIONS && sectionActive("30.")) {
+    console.log("\n--- 30. Beautified session view ---");
+
+    await test("30.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", debugShellTest);
+
+    if (!(await canBootSessions())) {
+      console.log("  \x1b[33mSKIP\x1b[0m  Beautified-view tests (no base image — run `bromure-ac init` first)");
+    } else {
+      const vm = await stubVMUp("ACE2E_Beautified");
+      try {
+        const n = nonce();
+        const FA = `ace2e-bv-a-${n}`, FB = `ace2e-bv-b-${n}`;
+        const MA = `ace2e alpha ${n}: first conversation`, MB = `ace2e beta ${n}: second conversation`;
+        let sa = null, sb = null, wa = null;
+
+        await test("30.1 two sessions with their own folders start and bind", async () => {
+          if (vm.error) throw new Error(vm.error);
+          const a = await dbg("start-session", { profile: vm.name, tool: "claude", cwd: `~/${FA}`, message: MA });
+          assert(a.ok === true && a.id, `start-session A: ${JSON.stringify(a)}`);
+          sa = a.id;
+          wa = (await waitBound(sa)).windowIndex;
+          const b = await dbg("start-session", { profile: vm.name, tool: "claude", cwd: `~/${FB}`, message: MB });
+          assert(b.ok === true && b.id, `start-session B: ${JSON.stringify(b)}`);
+          sb = b.id;
+          await waitBound(sb);
+          assert(await waitRec(sa, (x) => !!x.agentTranscriptID, 40), "A's transcript never got pinned");
+          assert(await waitRec(sb, (x) => !!x.agentTranscriptID, 40), "B's transcript never got pinned");
+        });
+
+        if (sa && sb) {
+          await test("30.2 the beautified view mounts on the session's OWN transcript", async () => {
+            const st = await beautifiedOn(sa, FA, { minItems: 2 });
+            assert(st && typeof st.path === "string" && st.path.includes(FA),
+                   `beautified view never read A's transcript: ${JSON.stringify(st).slice(0, 300)}`);
+            assert(!st.path.includes(FB), "A's view reads B's transcript");
+            const rec = await sessionRec(sa);
+            assertIncludes(st.path, rec.agentTranscriptID, "A's view isn't on its pinned conversation");
+            assert(st.items >= 2, `expected the opening turn + reply, got ${st.items} item(s)`);
+          });
+
+          await test("30.3 switching sessions swaps the conversation (and back)", async () => {
+            const stB = await beautifiedOn(sb, FB, { minItems: 2 });
+            assert(stB && typeof stB.path === "string" && stB.path.includes(FB) && !stB.path.includes(FA),
+                   `B's view isn't B's transcript: ${JSON.stringify(stB).slice(0, 300)}`);
+            const stA = await beautifiedOn(sa, FA, { minItems: 2 });
+            assert(stA && typeof stA.path === "string" && stA.path.includes(FA) && !stA.path.includes(FB),
+                   `back on A, the view isn't A's transcript: ${JSON.stringify(stA).slice(0, 300)}`);
+          });
+
+          await test("30.4 a message sent from the composer lands in THIS agent's transcript", async () => {
+            const st0 = await beautifiedOn(sa, FA, { minItems: 2 });
+            const items0 = (st0 && st0.items) || 0;
+            const from = (await stubLog(vm.id)).length;
+            const M = `ace2e composer ${n}`;
+            const c = await dbg("compose", { text: M });
+            assert(c.ok === true, `compose: ${JSON.stringify(c)}`);
+            const s = await dbg("send");
+            assert(s.ok === true, `send: ${JSON.stringify(s)}`);
+            const tr = await waitTranscript(sa, (t) => t.includes(`ace2e-stub reply: ${M}`));
+            assertIncludes(tr, `ace2e-stub reply: ${M}`, "the composer's message never reached A's agent");
+            const hits = (await stubLog(vm.id)).slice(from).filter((l) => l.includes(M));
+            assert(hits.length > 0 && hits.every((l) => l.startsWith(`line w${wa} `)),
+                   `the composer typed into another tab: ${hits.join(" | ")}`);
+            assert(!(await sessionTranscript(sb)).includes(M), "the composer's message leaked into B's transcript");
+            let items = items0;
+            for (let i = 0; i < 20 && items < items0 + 2; i++) {
+              items = ((await dbg("transcript-history", { do: "state" })).items) || 0;
+              if (items < items0 + 2) await sleep(1000);
+            }
+            assert(items >= items0 + 2, `the view didn't pick up the new turn + reply (${items0} → ${items})`);
+          });
+
+          await test("30.5 a slash command gets a command card that sees the TUI picker and folds when it closes", async () => {
+            await beautifiedOn(sa, FA);
+            const from = (await stubLog(vm.id)).length;
+            assert((await dbg("compose", { text: "/ace2e-menu" })).ok === true, "compose failed");
+            assert((await dbg("send")).ok === true, "send failed");
+            let card = null, sawMenu = false, sawLive = false;
+            for (let i = 0; i < 24 && !sawMenu; i++) {
+              card = await dbg("card", { do: "state" });
+              if (card.card === true && card.command === "/ace2e-menu") {
+                sawMenu = sawMenu || card.menu === true;
+                sawLive = sawLive || card.live === true;
+              }
+              if (!sawMenu) await sleep(300);
+            }
+            assert(card && card.card === true && card.command === "/ace2e-menu",
+                   `no command card for the slash command: ${JSON.stringify(card)}`);
+            assert(sawMenu, `the card never recognised the picker: ${JSON.stringify(card)}`);
+            const got = (await stubLog(vm.id)).slice(from);
+            assert(got.some((l) => l.startsWith(`line w${wa} `) && l.includes('"/ace2e-menu"')),
+                   `the command didn't reach A's agent: ${got.join(" | ")}`);
+            // The stub closes its picker after ~7s: the card folds (inline
+            // terminal handed back, or the watch settles on the idle screen).
+            let folded = null;
+            for (let i = 0; i < 30 && !folded; i++) {
+              const c = await dbg("card", { do: "state" });
+              if (c.card === true && c.live !== true && c.settled === true && c.menu !== true) folded = c;
+              else await sleep(1000);
+            }
+            assert(folded, `the card never folded after the picker closed (live seen: ${sawLive})`);
+            const d = await dbg("card", { do: "dismiss" });
+            assert(d.ok === true && d.card === false, `dismiss left the card up: ${JSON.stringify(d)}`);
+          });
+
+          await test("30.6 \"load earlier\" pulls history in front of the held window", async () => {
+            const st = await beautifiedOn(sa, FA, { minItems: 2 });
+            assert(st && st.path, "no beautified view on A");
+            if (!(st.budget > 0) || st.budget > 4_000_000) {
+              console.log("  \x1b[33mSKIP\x1b[0m  30.6 (app not launched with BROMURE_TRANSCRIPT_HISTORY_BYTES — the history window is the full 24 MB)");
+              return;
+            }
+            // Grow the pinned transcript to ~3× the trim budget with filler
+            // turns, so the held window slides and earlier history exists.
+            const filler = [
+              "import json, sys, datetime",
+              "p = sys.argv[1]; n = int(sys.argv[2])",
+              "t0 = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)",
+              "with open(p, 'a') as f:",
+              "    for i in range(n):",
+              "        ts = (t0 + datetime.timedelta(seconds=i)).strftime('%Y-%m-%dT%H:%M:%S.000Z')",
+              "        kind = 'user' if i % 2 == 0 else 'assistant'",
+              "        body = 'ace2e filler %d ' % i + 'x' * 700",
+              "        content = body if kind == 'user' else [{'type': 'text', 'text': body}]",
+              "        f.write(json.dumps({'type': kind, 'timestamp': ts, 'message': {'role': kind, 'content': content}}) + chr(10))",
+            ].join("\n");
+            const lines = Math.ceil((st.budget * 3) / 800);
+            await gx(vm.id, `echo ${toB64(filler)} | base64 -d | python3 - ${JSON.stringify(st.path)} ${lines}`);
+            let slid = null;
+            for (let i = 0; i < 40 && !slid; i++) {
+              const s = await dbg("transcript-history", { do: "state" });
+              if (s.path === st.path && s.canLoadEarlier === true && s.base > 0) slid = s;
+              else await sleep(1000);
+            }
+            assert(slid, "the held window never slid past the file's start (canLoadEarlier stayed false)");
+            await dbg("transcript-history", { do: "earlier" });
+            let earlier = null;
+            for (let i = 0; i < 30 && !earlier; i++) {
+              const s = await dbg("transcript-history", { do: "state" });
+              if (s.path === st.path && s.base < slid.base) earlier = s;
+              else await sleep(1000);
+            }
+            assert(earlier, `"load earlier" didn't prepend anything (base stayed ${slid.base})`);
+            assert(earlier.held > slid.held, "the history didn't grow on load earlier");
+          });
+        }
+      } finally {
+        await stubVMDown(vm);
+      }
+    }
+  }
+
+  // ======================================================================
+  // 31. Inter-agent dialogue — delegation + @nickname requests (MCP 5835)
+  //
+  // Driven over the real bromure-delegation MCP channel from inside the
+  // guest, each call announcing the caller's tmux window (its identity):
+  // list_peers resolves @nicknames; a request to @peer copies the attached
+  // file into the peer's ~/.bromure/inbox/<id>/ and types a one-line notice
+  // into the PEER's tab (and no other); read_inbox → deliver (with a file)
+  // → the requester's notice + inbox + landed file; close_delegation; a
+  // parent→child `delegate` whose child binds its own tab, opens with the
+  // brief, reports and delivers; and the regression where a notice owed to
+  // a SLEEPING peer (its relaunch racing a fresh session in the same
+  // workspace) was typed into the fresh session's tab.
+  // ======================================================================
+  if (!SKIP_SESSIONS && sectionActive("31.")) {
+    console.log("\n--- 31. Inter-agent delegation + requests ---");
+
+    await test("31.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", debugShellTest);
+
+    if (!(await canBootSessions())) {
+      console.log("  \x1b[33mSKIP\x1b[0m  Delegation tests (no base image — run `bromure-ac init` first)");
+    } else {
+      const vm = await stubVMUp("ACE2E_Delegation");
+      try {
+        const n = nonce();
+        const FA = `~/ace2e-dg-a-${n}`, FB = `~/ace2e-dg-b-${n}`, FC = `~/ace2e-dg-c-${n}`;
+        const NA = `ace2e-a${n}`, NB = `ace2e-b${n}`;
+        let A = null, B = null, reqID = null;
+
+        await test("31.1 two sessions bind and take @nicknames; list_peers resolves them", async () => {
+          if (vm.error) throw new Error(vm.error);
+          const a = await dbg("start-session", { profile: vm.name, tool: "claude", cwd: FA, message: `ace2e alpha opening ${n}` });
+          assert(a.ok === true && a.id, `start-session A: ${JSON.stringify(a)}`);
+          const ra = await waitBound(a.id);
+          const b = await dbg("start-session", { profile: vm.name, tool: "claude", cwd: FB, message: `ace2e beta opening ${n}` });
+          assert(b.ok === true && b.id, `start-session B: ${JSON.stringify(b)}`);
+          const rb = await waitBound(b.id);
+          A = { id: a.id, w: ra.windowIndex };
+          B = { id: b.id, w: rb.windowIndex };
+          // Notices are typed only into a tab the probe has seen the agent in.
+          assert(await waitRec(A.id, (x) => x.agentAlive === true, 40), "A's agent never read as alive");
+          assert(await waitRec(B.id, (x) => x.agentAlive === true, 40), "B's agent never read as alive");
+          for (const [sid, nick] of [[A.id, NA], [B.id, NB]]) {
+            const r = await dbg("nickname", { id: sid, nickname: nick });
+            assert(r.ok === true && r.nickname === nick, `nickname ${nick}: ${JSON.stringify(r)}`);
+          }
+          const [peers] = await mcp(vm.id, A.w, [{ name: "list_peers" }]);
+          assert(!peers.isError && peers.json, `list_peers: ${peers.text.slice(0, 200)}`);
+          const pb = (peers.json.peers || []).find((p) => sameID(p.session_id, B.id));
+          assert(pb, `B missing from A's peers: ${peers.text.slice(0, 300)}`);
+          assertEq(pb.nickname, `@${NB}`, "B's @nickname not listed");
+          assert(!(peers.json.peers || []).some((p) => sameID(p.session_id, A.id)), "list_peers lists the caller itself");
+          // A tab with no session bound has no identity.
+          const [anon] = await mcp(vm.id, 999, [{ name: "list_peers" }]);
+          assert(anon.isError && /identity/i.test(anon.text), `an unbound window got an identity: ${anon.text.slice(0, 200)}`);
+        });
+
+        if (A && B) {
+          const payload = `ace2e payload ${n}`;
+          await test("31.2 request to @peer: file lands in its inbox, notice typed into the PEER's tab only", async () => {
+            await gx(vm.id, `printf '%s\\n' '${payload}' > ${guestPath(FA)}/payload.txt`);
+            const from = (await stubLog(vm.id)).length;
+            const text = `ace2e request ${n}: please send back the reply file`;
+            const [r] = await mcp(vm.id, A.w, [{ name: "request", arguments: {
+              to: `@${NB}`, text, files: ["payload.txt"], timeout_seconds: 3 } }]);
+            assert(!r.isError && r.json && r.json.request_id, `request: ${r.text.slice(0, 300)}`);
+            reqID = r.json.request_id;
+            const d = await delegationRec(reqID);
+            assert(d, "no delegation record for the request");
+            assertEq(d.kind, "request");
+            assert(sameID(d.parentSessionID, A.id) && sameID(d.childSessionID, B.id), "request recorded between the wrong sessions");
+            const landed = ((d.messages || [])[0] || {}).files || [];
+            assertEq(landed.length, 1, `expected one landed file, got ${JSON.stringify(landed)}`);
+            assert(landed[0].startsWith(`/home/ubuntu/.bromure/inbox/${reqID.slice(0, 8).toLowerCase()}/`),
+                   `file not in the request's inbox: ${landed[0]}`);
+            assertEq((await gx(vm.id, `cat ${JSON.stringify(landed[0])}`)).trim(), payload, "inbox copy differs from the sent file");
+            const lines = await waitStubLog(vm.id, from, (ls) => ls.some((l) => l.includes(`ace2e request ${n}`)));
+            const hits = lines.filter((l) => l.includes(`ace2e request ${n}`));
+            assert(hits.length > 0, "the request's notice was never typed into any tab");
+            assert(hits.every((l) => l.startsWith(`line w${B.w} `)),
+                   `the notice went to the wrong tab (B is w${B.w}): ${hits.join(" | ")}`);
+            assert(!(await sessionTranscript(A.id)).includes("asks you (request"), "the requester got its own notice");
+          });
+
+          await test("31.3 peer read_inbox → deliver with a file; requester gets the notice, the reply, and the file", async () => {
+            assert(reqID, "no request from 31.2");
+            const [inbox] = await mcp(vm.id, B.w, [{ name: "read_inbox" }]);
+            assert(!inbox.isError && inbox.json, `read_inbox: ${inbox.text.slice(0, 300)}`);
+            const brief = (inbox.json.messages || []).find((m) => sameID(m.delegation_id, reqID));
+            assert(brief && brief.kind === "brief" && brief.text.includes(`ace2e request ${n}`),
+                   `the request isn't in B's inbox: ${inbox.text.slice(0, 300)}`);
+            assert(brief.request === true, "inbox item not flagged as a request");
+            const reply = `ace2e reply ${n}`;
+            await gx(vm.id, `printf '%s\\n' '${reply} file' > ${guestPath(FB)}/reply.txt`);
+            const from = (await stubLog(vm.id)).length;
+            const [del] = await mcp(vm.id, B.w, [{ name: "deliver", arguments: {
+              summary: reply, files: ["reply.txt"], delegation_id: reqID } }]);
+            assert(!del.isError && del.json && del.json.delivered === true, `deliver: ${del.text.slice(0, 300)}`);
+            // The requester's notice lands in A's tab — and nowhere else.
+            const lines = await waitStubLog(vm.id, from, (ls) => ls.some((l) => l.includes(`replied to your request`)));
+            const hits = lines.filter((l) => l.includes("replied to your request"));
+            assert(hits.length > 0, "the reply's notice never reached the requester");
+            assert(hits.every((l) => l.startsWith(`line w${A.w} `)),
+                   `the reply's notice went to the wrong tab (A is w${A.w}): ${hits.join(" | ")}`);
+            const [aIn] = await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: reqID } }]);
+            const got = ((aIn.json && aIn.json.messages) || []).find((m) => m.kind === "deliver");
+            assert(got && got.text.includes(reply), `the reply isn't in A's inbox: ${aIn.text.slice(0, 300)}`);
+            const f = (got.files || [])[0];
+            assert(f && f.includes(`/.bromure/inbox/${reqID.slice(0, 8).toLowerCase()}/reply.txt`), `reply file not landed: ${JSON.stringify(got.files)}`);
+            assertEq((await gx(vm.id, `cat ${JSON.stringify(f)}`)).trim(), `${reply} file`, "landed reply differs");
+            const d = await delegationRec(reqID);
+            assertEq(d.status, "delivered", "the request isn't marked delivered");
+            // Reading takes it: a second look is empty.
+            const [again] = await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: reqID } }]);
+            assertIncludes(again.text, "Nothing waiting", "read_inbox didn't take the messages");
+          });
+
+          await test("31.4 close_delegation closes the request; the peer's session is left alone", async () => {
+            assert(reqID, "no request from 31.2");
+            const [c] = await mcp(vm.id, A.w, [{ name: "close_delegation", arguments: {
+              delegation_id: reqID, verdict: "accepted", note: "thanks" } }]);
+            assert(!c.isError && /Closed \(accepted\)/.test(c.text), `close_delegation: ${c.text.slice(0, 200)}`);
+            const d = await delegationRec(reqID);
+            assertEq(d.status, "done");
+            assertEq(d.verdict, "accepted");
+            const rb = await sessionRec(B.id);
+            assert(rb && !rb.archivedAt && rb.windowIndex === B.w, "closing a request touched the peer's session");
+          });
+
+          await test("31.5 delegate: the child binds its own tab, opens with the brief, reports + delivers; close archives it", async () => {
+            const from = (await stubLog(vm.id)).length;
+            const title = `ace2e child ${n}`;
+            const [dg] = await mcp(vm.id, A.w, [{ name: "delegate", arguments: {
+              title, brief: `ace2e brief ${n}: write a short note in NOTE.md`, contract: "NOTE.md exists", worktree: false } }]);
+            assert(!dg.isError && dg.json && dg.json.delegation_id && dg.json.child_session, `delegate: ${dg.text.slice(0, 300)}`);
+            const did = dg.json.delegation_id, cid = dg.json.child_session;
+            const child = await waitBound(cid);
+            assert(sameID(child.parentSessionID, A.id), "child not linked to its parent");
+            assert(sameID(child.delegationID, did), "child not linked to its delegation");
+            assertEq(child.cwd, FA, "worktree:false child should run in the parent's folder");
+            assert(child.windowIndex !== A.w && child.windowIndex !== B.w, "the child took another session's tab");
+            assertEq(await tabDisplay(vm.id, child.windowIndex), child.launchDisplay, "child @display mismatch");
+            const started = await waitStubLog(vm.id, from,
+              (ls) => ls.some((l) => l.startsWith(`start w${child.windowIndex} `) && l.includes(`ace2e brief ${n}`)));
+            assert(started.some((l) => l.startsWith(`start w${child.windowIndex} `) && l.includes(`ace2e brief ${n}`)),
+                   `the child didn't open with its brief: ${started.join(" | ")}`);
+            assert(await waitRec(cid, (x) => x.agentAlive === true, 40), "the child's agent never read as alive");
+            const d0 = await delegationRec(did);
+            assert(d0 && ["starting", "working"].includes(d0.status), `unexpected status ${d0 && d0.status}`);
+            const from2 = (await stubLog(vm.id)).length;
+            const res = await mcp(vm.id, child.windowIndex, [
+              { name: "report", arguments: { text: `ace2e progress ${n}` } },
+              { name: "deliver", arguments: { summary: `ace2e done ${n}` } },
+            ]);
+            assert(!res[0].isError && /Noted/.test(res[0].text), `report: ${res[0].text.slice(0, 200)}`);
+            assert(!res[1].isError && res[1].json && res[1].json.delivered === true, `deliver: ${res[1].text.slice(0, 200)}`);
+            const lines = await waitStubLog(vm.id, from2, (ls) => ls.some((l) => l.includes(`delivered: ace2e done ${n}`)));
+            const hits = lines.filter((l) => l.includes(`ace2e done ${n}`));
+            assert(hits.length > 0 && hits.every((l) => l.startsWith(`line w${A.w} `)),
+                   `the delivery notice didn't go (only) to the parent's tab w${A.w}: ${hits.join(" | ")}`);
+            const [inb] = await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: did } }]);
+            const kinds = ((inb.json && inb.json.messages) || []).map((m) => m.kind);
+            assert(kinds.includes("report") && kinds.includes("deliver"), `parent inbox kinds: ${JSON.stringify(kinds)}`);
+            const [cl] = await mcp(vm.id, A.w, [{ name: "close_delegation", arguments: { delegation_id: did, verdict: "accepted" } }]);
+            assert(!cl.isError, `close_delegation: ${cl.text.slice(0, 200)}`);
+            const retired = await waitRec(cid, (x) => !!x.archivedAt, 20);
+            assert(retired, "closing the delegation didn't archive the delegate's session");
+          });
+
+          await test("31.6 a notice owed to a SLEEPING peer goes to the peer's relaunch, not a session launched at the same moment", async () => {
+            const cl = await api("POST", `/agent-sessions/${B.id}/close`, {});
+            assert(cl.ok === true, `close B: ${JSON.stringify(cl)}`);
+            const asleep = await waitRec(B.id, (x) => x.windowIndex == null, 20);
+            assert(asleep, "B never lost its tab");
+            for (let i = 0; i < 15 && (await tmuxWindows(vm.id)).includes(B.w); i++) await sleep(1000);
+            const from = (await stubLog(vm.id)).length;
+            const WAKE = `ace2e wake ${n}`;
+            const MC = `ace2e gamma opening ${n}`;
+            // The race: the notice's resume of B and a fresh session C both
+            // launch into this workspace at once.
+            const [[req], started] = await Promise.all([
+              mcp(vm.id, A.w, [{ name: "request", arguments: { to: `@${NB}`, text: `${WAKE}: are you there?`, timeout_seconds: 3 } }]),
+              dbg("start-session", { profile: vm.name, tool: "claude", cwd: FC, message: MC }),
+            ]);
+            assert(!req.isError && req.json && req.json.request_id, `request: ${req.text.slice(0, 200)}`);
+            assert(started.ok === true && started.id, `start-session C: ${JSON.stringify(started)}`);
+            const rc = await waitBound(started.id);
+            const rb = await waitRec(B.id, (x) => x.windowIndex != null && !x.launchingSince, 90);
+            assert(rb, "the notice never woke B into a tab");
+            assert(rb.windowIndex !== rc.windowIndex, "B and C bound the same tab");
+            assertEq(await tabDisplay(vm.id, rb.windowIndex), rb.launchDisplay, "B bound a tab that isn't its own");
+            assertEq(await tabDisplay(vm.id, rc.windowIndex), rc.launchDisplay, "C bound a tab that isn't its own");
+            const lines = await waitStubLog(vm.id, from, (ls) => ls.some((l) => l.includes(WAKE)), 60);
+            const wake = lines.filter((l) => l.includes(WAKE));
+            assert(wake.length > 0, "the owed notice never reached anyone");
+            assert(wake.every((l) => (l.startsWith(`start w${rb.windowIndex} `) || l.startsWith(`line w${rb.windowIndex} `))),
+                   `the notice for B landed in another tab (B w${rb.windowIndex}, C w${rc.windowIndex}): ${wake.join(" | ")}`);
+            assert(!inWindow(lines, rc.windowIndex).some((l) => l.includes(WAKE)), "C's agent got B's notice");
+            assert(inWindow(lines, rc.windowIndex).some((l) => l.startsWith(`start w${rc.windowIndex} `) && l.includes(MC)),
+                   "C didn't open with its own message");
+            const tc = await waitTranscript(started.id, (t) => t.includes(MC));
+            assert(tc.includes(MC) && !tc.includes(WAKE), "C's transcript carries B's notice (or not its own opening)");
+            await mcp(vm.id, A.w, [{ name: "close_delegation", arguments: { delegation_id: req.json.request_id, verdict: "accepted" } }]);
+          });
+        }
+      } finally {
+        await stubVMDown(vm);
+      }
+    }
+  }
+
+  // ======================================================================
+  // 32. Launch race — two sessions started at once in one workspace
+  //
+  // Regression for 02821f1c: two launches racing in the same workspace used
+  // to swap tabs in the binder (first-claude-tab-past-baseline fallback), so
+  // a new session showed another's conversation. Two rounds of two
+  // simultaneous start-session calls; each session must bind a tab of its
+  // own whose @display is its own launch name, open with its OWN message
+  // (stub log per window), serve its own transcript, and show its own
+  // folder's transcript in the beautified view.
+  // ======================================================================
+  if (!SKIP_SESSIONS && sectionActive("32.")) {
+    console.log("\n--- 32. Launch race (two sessions at once) ---");
+
+    await test("32.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", debugShellTest);
+
+    if (!(await canBootSessions())) {
+      console.log("  \x1b[33mSKIP\x1b[0m  Launch-race tests (no base image — run `bromure-ac init` first)");
+    } else {
+      const vm = await stubVMUp("ACE2E_Race");
+      try {
+        await test("32.1 workspace boots with the stub agent", async () => {
+          if (vm.error) throw new Error(vm.error);
+        });
+        if (!vm.error) {
+          for (const round of [1, 2]) {
+            await test(`32.${round + 1} round ${round}: two simultaneous launches each bind their own tab and conversation`, async () => {
+              const n = nonce();
+              const specs = ["x", "y"].map((k) => ({
+                folder: `ace2e-race-${k}-${n}`, message: `ace2e race ${k} ${n}: which tab is mine`,
+              }));
+              const from = (await stubLog(vm.id)).length;
+              const starts = await Promise.all(specs.map((s) =>
+                dbg("start-session", { profile: vm.name, tool: "claude", cwd: `~/${s.folder}`, message: s.message })));
+              starts.forEach((r, i) => assert(r.ok === true && r.id, `start-session ${i}: ${JSON.stringify(r)}`));
+              const recs = [];
+              for (const r of starts) recs.push(await waitBound(r.id));
+              assert(recs[0].windowIndex !== recs[1].windowIndex, "both sessions bound the same tab");
+              const lines = await waitStubLog(vm.id, from,
+                (ls) => specs.every((s) => ls.some((l) => l.startsWith("start ") && l.includes(s.message))));
+              for (let i = 0; i < 2; i++) {
+                const me = specs[i], other = specs[1 - i], rec = recs[i];
+                assertEq(rec.cwd, `~/${me.folder}`, `session ${i} got the other's folder`);
+                assertEq(await tabDisplay(vm.id, rec.windowIndex), rec.launchDisplay,
+                         `session ${i} bound a tab launched for someone else (@display mismatch)`);
+                const mine = inWindow(lines, rec.windowIndex);
+                assert(mine.some((l) => l.startsWith(`start w${rec.windowIndex} `) && l.includes(me.message)),
+                       `session ${i}'s tab w${rec.windowIndex} didn't open with its own message: ${mine.join(" | ")}`);
+                assert(!mine.some((l) => l.includes(other.message)), `session ${i}'s tab got the other's message`);
+                const tr = await waitTranscript(rec.id, (t) => t.includes(me.message));
+                assert(tr.includes(me.message) && !tr.includes(other.message),
+                       `session ${i} serves the wrong transcript`);
+              }
+              // The chat each one shows is its own folder's conversation.
+              for (let i = 0; i < 2; i++) {
+                const st = await beautifiedOn(recs[i].id, specs[i].folder, { minItems: 2 });
+                assert(st && typeof st.path === "string" && st.path.includes(specs[i].folder)
+                       && !st.path.includes(specs[1 - i].folder),
+                       `session ${i}'s beautified view isn't its own conversation: ${JSON.stringify(st).slice(0, 300)}`);
+              }
+            });
+          }
+        }
+      } finally {
+        await stubVMDown(vm);
+      }
     }
   }
 
