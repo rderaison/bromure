@@ -1230,7 +1230,7 @@ struct ProfileManagerTests {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("bromure-pm-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let pm = ProfileManager(storageDir: dir)
+        let pm = ProfileManager(storageDir: dir, managedProfiles: false)
         // Wait for async init to complete (iCloud discovery)
         // ProfileManager loads synchronously from local dir as fallback
         Thread.sleep(forTimeInterval: 0.5)
@@ -1320,7 +1320,7 @@ struct ProfileManagerTests {
         let p = pm.createProfile(name: "Persisted", color: .green)
 
         // Create a fresh manager pointing at the same directory
-        let pm2 = ProfileManager(storageDir: dir)
+        let pm2 = ProfileManager(storageDir: dir, managedProfiles: false)
         Thread.sleep(forTimeInterval: 0.5)
 
         let found = pm2.profile(withID: p.id)
@@ -1332,39 +1332,26 @@ struct ProfileManagerTests {
 
 // MARK: - E2E CLI Tests
 
-@Suite("E2E CLI")
-struct E2ETests {
-    static let binaryPath: String = {
-        let projectRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        return projectRoot
-            .appendingPathComponent(".build/arm64-apple-macosx/release/bromure.app/Contents/MacOS/bromure")
-            .path
-    }()
+// Needs the app bundle `./build.sh` makes (see CLAUDE.md). Not built here:
+// `swift test` holds the .build lock, so running build.sh from inside a test
+// blocked on it forever — a fresh checkout's `swift test` never finished.
+private let e2eBinaryPath = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent(".build/arm64-apple-macosx/release/bromure.app/Contents/MacOS/bromure")
+    .path
+private let e2eAppBuilt = FileManager.default.isExecutableFile(atPath: e2eBinaryPath)
 
-    static let ensureBuilt: Bool = {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: binaryPath) { return true }
-        let projectRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [projectRoot.appendingPathComponent("build.sh").path]
-        process.currentDirectoryURL = projectRoot
-        try? process.run()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
-    }()
+@Suite("E2E CLI", .enabled(if: e2eAppBuilt,
+                           "needs .build/arm64-apple-macosx/release/bromure.app — run ./build.sh first"))
+struct E2ETests {
+    static let binaryPath = e2eBinaryPath
 
     private func run(
         _ arguments: [String] = [],
         timeout: TimeInterval = 30
     ) throws -> (stdout: String, stderr: String, exitCode: Int32) {
-        guard Self.ensureBuilt else { throw CocoaError(.fileNoSuchFile) }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.binaryPath)

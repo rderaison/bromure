@@ -1474,7 +1474,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if let initialURL {
             config.homePage = initialURL.absoluteString
         }
-        Task { @MainActor in
+        Task { @MainActor [self] in
             guard let warm = await state.pool?.claim(config: config) else {
                 if let url = initialURL { self.pendingURL = url }
                 self.showSessionError()
@@ -1595,7 +1595,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             MediaDevices.setDefaultAudioOutput(deviceID: speakerID)
         }
 
-        Task { @MainActor in
+        Task { @MainActor [self] in
             guard let warm = await state.pool?.claim(
                 config: config,
                 profileID: profile.id,

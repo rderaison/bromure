@@ -45,14 +45,15 @@ public final class CDPWheelInjector {
     private var stopped = false
     private var restartAttempts = 0
 
-    // io-queue state
-    private var wsConn: VZVirtioSocketConnection?
-    private var wsFD: Int32 = -1
-    private var nextID = 1
-    private var sessions: [String: String] = [:]        // targetId → sessionId
-    private var attachInFlight: [Int: String] = [:]     // command id → targetId
-    private var queued: [String: [Wheel]] = [:]         // target awaiting attach → events
-    private var readerGeneration = 0
+    // io-queue state: touched only on `io`, which serialises it — hence
+    // nonisolated(unsafe) rather than the class's main-actor isolation.
+    nonisolated(unsafe) private var wsConn: VZVirtioSocketConnection?
+    nonisolated(unsafe) private var wsFD: Int32 = -1
+    nonisolated(unsafe) private var nextID = 1
+    nonisolated(unsafe) private var sessions: [String: String] = [:]        // targetId → sessionId
+    nonisolated(unsafe) private var attachInFlight: [Int: String] = [:]     // command id → targetId
+    nonisolated(unsafe) private var queued: [String: [Wheel]] = [:]         // target awaiting attach → events
+    nonisolated(unsafe) private var readerGeneration = 0
 
     private struct Wheel {
         var x: Double, y: Double, dx: Double, dy: Double, modifiers: Int
@@ -73,8 +74,10 @@ public final class CDPWheelInjector {
             return
         }
         starting = true
+        // Handed to the io queue and used only there.
+        nonisolated(unsafe) let probeConn = probe, wsSock = ws
         io.async { [self] in
-            let ok = handshake(probe: probe, ws: ws)
+            let ok = handshake(probe: probeConn, ws: wsSock)
             DispatchQueue.main.async {
                 self.starting = false
                 self.isReady = ok
@@ -139,10 +142,10 @@ public final class CDPWheelInjector {
         let v = UserDefaults.standard.object(forKey: "vm.scrollCoalesceMs") as? Double
         return v ?? 0
     }()
-    private var pendingCoalesced: [String: Wheel] = [:]
-    private var lastSendNanos: [String: UInt64] = [:]
+    nonisolated(unsafe) private var pendingCoalesced: [String: Wheel] = [:]
+    nonisolated(unsafe) private var lastSendNanos: [String: UInt64] = [:]
 
-    private func dispatch(_ ev: Wheel, targetId: String) {
+    nonisolated private func dispatch(_ ev: Wheel, targetId: String) {
         if let sessionId = sessions[targetId] {
             send(ev, sessionId: sessionId)
         } else {
@@ -159,7 +162,7 @@ public final class CDPWheelInjector {
 
     // MARK: - io queue
 
-    private func send(_ ev: Wheel, sessionId: String) {
+    nonisolated private func send(_ ev: Wheel, sessionId: String) {
         var params: [String: Any] = [
             "type": "mouseWheel",
             "x": ev.x, "y": ev.y,
@@ -170,7 +173,7 @@ public final class CDPWheelInjector {
     }
 
     @discardableResult
-    private func sendCommand(_ method: String, params: [String: Any], sessionId: String? = nil) -> Int {
+    nonisolated private func sendCommand(_ method: String, params: [String: Any], sessionId: String? = nil) -> Int {
         let id = nextID
         nextID += 1
         var msg: [String: Any] = ["id": id, "method": method, "params": params]
@@ -183,7 +186,7 @@ public final class CDPWheelInjector {
         return id
     }
 
-    private func handleMessage(_ json: [String: Any]) {
+    nonisolated private func handleMessage(_ json: [String: Any]) {
         if let id = json["id"] as? Int, let targetId = attachInFlight.removeValue(forKey: id) {
             if let result = json["result"] as? [String: Any],
                let sessionId = result["sessionId"] as? String {
@@ -212,7 +215,7 @@ public final class CDPWheelInjector {
         }
     }
 
-    private func socketLost() {
+    nonisolated private func socketLost() {
         closeSocket()
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.stopped else { return }
@@ -221,7 +224,7 @@ public final class CDPWheelInjector {
         }
     }
 
-    private func closeSocket() {
+    nonisolated private func closeSocket() {
         readerGeneration += 1
         if wsFD >= 0 { wsConn?.close() }
         wsFD = -1
@@ -239,7 +242,7 @@ public final class CDPWheelInjector {
 
     // MARK: - Handshake (io queue)
 
-    private func handshake(probe: VZVirtioSocketConnection, ws: VZVirtioSocketConnection) -> Bool {
+    nonisolated private func handshake(probe: VZVirtioSocketConnection, ws: VZVirtioSocketConnection) -> Bool {
         defer { probe.close() }
         // 1. Browser WebSocket path.
         let req = "GET /json/version HTTP/1.1\r\nHost: 127.0.0.1:9222\r\nConnection: close\r\n\r\n"
@@ -277,7 +280,7 @@ public final class CDPWheelInjector {
 
     // MARK: - Reader thread
 
-    private func startReader(fd: Int32, generation: Int, initial: Data) {
+    nonisolated private func startReader(fd: Int32, generation: Int, initial: Data) {
         let thread = Thread { [weak self] in
             var buf = initial
             var chunk = [UInt8](repeating: 0, count: 65536)
@@ -327,9 +330,9 @@ public final class CDPWheelInjector {
     private struct Frame { let opcode: UInt8; let payload: Data }
 
     /// Client → server frames must be masked.
-    static func frame(text: Data) -> Data { frame(payload: text, opcode: 0x1) }
+    nonisolated static func frame(text: Data) -> Data { frame(payload: text, opcode: 0x1) }
 
-    static func frame(payload: Data, opcode: UInt8) -> Data {
+    nonisolated static func frame(payload: Data, opcode: UInt8) -> Data {
         var out = Data()
         out.append(0x80 | opcode)
         let len = payload.count
@@ -357,7 +360,7 @@ public final class CDPWheelInjector {
 
     /// One complete server frame from the front of `buf`, or nil if more
     /// bytes are needed. Returns (frame, bytesConsumed).
-    private static func parseFrame(_ buf: Data) -> (Frame, Int)? {
+    nonisolated private static func parseFrame(_ buf: Data) -> (Frame, Int)? {
         guard buf.count >= 2 else { return nil }
         let b0 = buf[buf.startIndex], b1 = buf[buf.startIndex + 1]
         let opcode = b0 & 0x0F
@@ -389,7 +392,7 @@ public final class CDPWheelInjector {
 
     // MARK: - Socket helpers
 
-    private static func writeAll(fd: Int32, _ data: Data) -> Bool {
+    nonisolated private static func writeAll(fd: Int32, _ data: Data) -> Bool {
         var off = 0
         return data.withUnsafeBytes { buf -> Bool in
             guard let base = buf.baseAddress else { return false }
@@ -405,12 +408,12 @@ public final class CDPWheelInjector {
         }
     }
 
-    private static func waitReadable(fd: Int32, timeout: TimeInterval) -> Bool {
+    nonisolated private static func waitReadable(fd: Int32, timeout: TimeInterval) -> Bool {
         var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
         return poll(&p, 1, Int32(timeout * 1000)) > 0
     }
 
-    private static func readUntilEOF(fd: Int32, timeout: TimeInterval) -> Data? {
+    nonisolated private static func readUntilEOF(fd: Int32, timeout: TimeInterval) -> Data? {
         var out = Data()
         var chunk = [UInt8](repeating: 0, count: 16384)
         let deadline = Date().addingTimeInterval(timeout)
@@ -428,7 +431,7 @@ public final class CDPWheelInjector {
 
     /// Reads up to and including the blank line ending the response head;
     /// returns the head and any bytes read past it.
-    private static func readHTTPHead(fd: Int32, timeout: TimeInterval) -> (String, Data)? {
+    nonisolated private static func readHTTPHead(fd: Int32, timeout: TimeInterval) -> (String, Data)? {
         var out = Data()
         var chunk = [UInt8](repeating: 0, count: 4096)
         let deadline = Date().addingTimeInterval(timeout)
@@ -444,12 +447,12 @@ public final class CDPWheelInjector {
         return (head, Data(out[r.upperBound...]))
     }
 
-    private static func httpBody(_ resp: Data) -> Data? {
+    nonisolated private static func httpBody(_ resp: Data) -> Data? {
         guard let r = resp.range(of: Data("\r\n\r\n".utf8)) else { return nil }
         return Data(resp[r.upperBound...])
     }
 
-    private static func contentLength(_ resp: Data) -> Int? {
+    nonisolated private static func contentLength(_ resp: Data) -> Int? {
         guard let r = resp.range(of: Data("\r\n\r\n".utf8)) else { return nil }
         let head = String(decoding: resp[resp.startIndex..<r.lowerBound], as: UTF8.self)
         for line in head.split(separator: "\r\n") where line.lowercased().hasPrefix("content-length:") {

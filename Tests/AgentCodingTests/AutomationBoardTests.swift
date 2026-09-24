@@ -99,7 +99,7 @@ struct AutomationRunArchiveTests {
 
     @Test("Archive round-trips records, newest first")
     func roundTrip() throws {
-        try withScratch {
+        withScratch {
             let a = AutomationRunRecord(automationID: UUID(),
                                         firedAt: Date(timeIntervalSinceNow: -60),
                                         outcome: .launched, detail: "older")

@@ -93,7 +93,7 @@ final class DelegationEngine {
         ticker = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
-                await self?.tick()
+                self?.tick()
             }
         }
     }

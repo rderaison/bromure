@@ -2655,7 +2655,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // instant a sign-in completes and back to "Log in…" on sign-out.
         NotificationCenter.default.addObserver(
             forName: .p2pIdentityChanged, object: nil, queue: .main) { [weak self] _ in
-            self?.refreshEnrollmentMenuTitle()
+            // queue: .main — delivered on the main thread.
+            MainActor.assumeIsolated { self?.refreshEnrollmentMenuTitle() }
         }
 
         // Wire signal handlers BEFORE the MITM engine spawns its
@@ -4207,8 +4208,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.pumpQueue()
                 case "destroy":
                     self.codingTaskEngine.destroy(id)
-                case "resume":
-                    self.codingTaskEngine.resumeSession(id)
                 case "plan-events":
                     // Fat-client relay: the streamed plan session's rendered
                     // items from `since` on (a growing-log cursor).
@@ -9160,7 +9159,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             win.model.tabs = [TabsModel.Tab(label: "shell")]
         }
 
-        Task { @MainActor in
+        Task { @MainActor [self] in
             let sessionDisk = SessionDisk(
                 profile: profile,
                 store: store,
@@ -12329,7 +12328,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.model.rosterLive = false
         win.model.tabs = [TabsModel.Tab(label: "shell")]
 
-        Task { @MainActor in
+        Task { @MainActor [self] in
             // A queued boot-failure remedy (native fsck / disk reset) runs
             // first, against the stopped VM's disk, with the pane's boot
             // overlay narrating. Only then does the fresh VM build.

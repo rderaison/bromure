@@ -19,6 +19,11 @@ public final class ProfileManager {
     private var managedProfiles: [Profile] = []
     private var managedOrgSlugs: [UUID: String] = [:]
     private var iCloudReady = false
+    /// Whether the org-managed profiles (this Mac's enrollment, via
+    /// `ManagedProfileStore.shared`) join the list. Off for a manager over
+    /// a scratch directory — the store is process-global, so a test's
+    /// manager otherwise lists whatever org this machine is enrolled in.
+    private let includesManaged: Bool
 
     /// Called on the main thread once iCloud discovery completes and profiles are loaded.
     public var onReady: (() -> Void)?
@@ -26,7 +31,8 @@ public final class ProfileManager {
     /// Directory containing profile data.
     public static let profilesDirName = "profiles"
 
-    public init(storageDir: URL? = nil) {
+    public init(storageDir: URL? = nil, managedProfiles: Bool = true) {
+        self.includesManaged = managedProfiles
         let base = storageDir ?? VMConfig.defaultStorageDirectory
         self.localDir = base.appendingPathComponent(Self.profilesDirName)
         self.metadataBaseDir = localDir  // temporary until iCloud check completes
@@ -219,6 +225,7 @@ public final class ProfileManager {
     /// Refresh the managed-profiles list from `ManagedProfileStore`.
     /// Called after enrollment and after each successful sync.
     public func reloadManaged() {
+        guard includesManaged else { return }
         let managed = ManagedProfileStore.shared.loadAll()
         let identity = InstallIdentityStore.load()
         managedProfiles = managed.map { mp in

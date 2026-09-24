@@ -187,7 +187,7 @@ final class LoopbackCallbackForwarder {
         // Cap the wait so an idle preconnect doesn't pin a thread forever.
         var tv = timeval(tv_sec: 60, tv_usec: 0)
         setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        q.async {
+        q.async { [weak self] in
             var firstBuf = [UInt8](repeating: 0, count: 65536)
             let n = Darwin.read(cfd, &firstBuf, firstBuf.count)
             guard n > 0 else {

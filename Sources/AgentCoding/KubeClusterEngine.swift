@@ -1018,7 +1018,7 @@ final class KubeClusterEngine {
 
     // MARK: Guest exec + detached steps
 
-    static let scriptPath = "/mnt/bromure-meta/bromure-k8s-node.sh"
+    nonisolated static let scriptPath = "/mnt/bromure-meta/bromure-k8s-node.sh"
     private static let probePath = "/mnt/bromure-meta/bromure-k8s-probe.py"
     static let registryScriptPath = "/mnt/bromure-meta/bromure-registry.sh"
     /// Private ranges + cluster-internal names: node↔node and pod traffic

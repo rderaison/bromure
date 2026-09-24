@@ -50,7 +50,7 @@ struct PadHostMirror: View {
             AppBadge.set(waitingCount)
             tryDeepLink()
         }
-        .onChange(of: waitingCount) { AppBadge.set($0) }
+        .onChange(of: waitingCount) { _, count in AppBadge.set(count) }
         .onChange(of: controller.revision) { tryDeepLink(); pickInitialSession() }
         // Foreground snap-back: after a long absence the P2P path is almost
         // certainly dead — drop it so the next dial re-establishes fresh.

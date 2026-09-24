@@ -328,7 +328,7 @@ final class CloudflareTunnelSupervisor {
         p.standardOutput = pipe
         p.standardError = pipe
         let scan = ScanBuffer()
-        pipe.fileHandleForReading.readabilityHandler = { handle in
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
             scan.data.append(chunk)
@@ -345,7 +345,7 @@ final class CloudflareTunnelSupervisor {
             }
         }
 
-        p.terminationHandler = { proc in
+        p.terminationHandler = { [weak self] proc in
             let status = proc.terminationStatus
             Task { @MainActor [weak self] in
                 guard let self, self.generations[id] == gen else { return }

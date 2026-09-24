@@ -116,7 +116,7 @@ struct HostMirrorScreen: View {
             tryDeepLink()
         }
         // Mirror the "agents waiting for input" count onto the app-icon badge.
-        .onChange(of: waitingAgents.count) { AppBadge.set($0) }
+        .onChange(of: waitingAgents.count) { _, count in AppBadge.set(count) }
         // Once the mirror connects and the workspaces load, a tapped
         // notification pushes straight to the waiting agent's window.
         .onChange(of: controller.revision) {

@@ -63,8 +63,12 @@ final class PushManager {
     // MARK: Incoming
 
     /// A silent "clear" push: the question was answered — withdraw its card.
-    func handleClear(_ userInfo: [AnyHashable: Any]) {
-        guard let event = userInfo["clear"] as? String ?? userInfo["event"] as? String else { return }
+    /// The notification a silent "clear" push names, if any.
+    static func clearedEvent(in userInfo: [AnyHashable: Any]) -> String? {
+        userInfo["clear"] as? String ?? userInfo["event"] as? String
+    }
+
+    func handleClear(event: String) {
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [event])
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [event])
     }
@@ -148,11 +152,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     // Silent "clear" pushes (content-available) land here in the background.
+    // The completion-handler form, not the async one: UIKit calls it on the
+    // main actor, so the (non-Sendable) payload never crosses an actor hop.
     func application(_ application: UIApplication,
-                     didReceiveRemoteNotification userInfo: [AnyHashable: Any]) async
-        -> UIBackgroundFetchResult {
-        await MainActor.run { PushManager.shared.handleClear(userInfo) }
-        return .noData
+                     didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                     fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        if let event = PushManager.clearedEvent(in: userInfo) {
+            PushManager.shared.handleClear(event: event)
+        }
+        completionHandler(.noData)
     }
 
     // Foreground presentation — still show it (the user may not be in that VM).

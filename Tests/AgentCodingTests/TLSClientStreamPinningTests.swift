@@ -15,6 +15,14 @@ import Security
 /// These tests stand up an openssl server with the same shape as a k8s API
 /// server — serving cert issued by a private CA, client cert required — and
 /// assert that `TLSClientStream` reaches it only when handed both.
+// The code under test (TLSClientStream) is deprecated on purpose — it wraps
+// SecureTransport, which the MiTM needs, and the product confines that
+// deprecation to the MiTM layer. Swift Testing refuses a deprecated suite,
+// so the warning is silenced here instead (compilers without @diagnose
+// skip the attribute and just warn).
+#if hasAttribute(diagnose)
+@diagnose(DeprecatedDeclaration, as: ignored)
+#endif
 @Suite("TLSClientStream cluster pinning", .serialized)
 struct TLSClientStreamPinningTests {
 

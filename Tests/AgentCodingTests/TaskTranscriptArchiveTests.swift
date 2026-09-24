@@ -21,7 +21,7 @@ struct TaskTranscriptArchiveTests {
 
     @Test("save / load / remove roundtrip")
     func roundtrip() throws {
-        try withTempArchive {
+        withTempArchive {
             let id = UUID()
             #expect(!TaskTranscriptArchive.has(id))
             #expect(TaskTranscriptArchive.load(id) == nil)
@@ -40,7 +40,7 @@ struct TaskTranscriptArchiveTests {
 
     @Test("an empty transcript is never written")
     func emptyIgnored() throws {
-        try withTempArchive {
+        withTempArchive {
             let id = UUID()
             TaskTranscriptArchive.save("", taskID: id)
             #expect(!TaskTranscriptArchive.has(id))

@@ -120,7 +120,7 @@ struct WorkspaceScreen: View {
             }
         }
         // Serve the browser MCP for this workspace while its screen is open.
-        .onAppear {
+        .onAppear { [controller] in
             browserBridge.start()
             // The file pane resolves "the active tab's repo" through the
             // shared listModel selection, exactly like the macOS windows.

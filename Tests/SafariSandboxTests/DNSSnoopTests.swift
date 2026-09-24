@@ -17,7 +17,7 @@ struct DNSSnoopTests {
         let qnamePtr: UInt8 = 0x0C   // offset 12
         // Answer 1: name=ptr(12), CNAME → cdn.example.net
         b += [0xC0, qnamePtr, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2C]  // type CNAME, ttl 300
-        var rd: [UInt8] = [3] + Array("cdn".utf8) + [7] + Array("example".utf8) + [3] + Array("net".utf8) + [0]
+        let rd: [UInt8] = [3] + Array("cdn".utf8) + [7] + Array("example".utf8) + [3] + Array("net".utf8) + [0]
         b += [0x00, UInt8(rd.count)] + rd
         let cnameOff = b.count - rd.count
         // Answer 2: name=ptr(cname target), A 1.2.3.4, ttl 300

@@ -232,7 +232,7 @@ final class AppState: @unchecked Sendable {
         let scale = defaults.object(forKey: "vm.displayScale") as? Int
         let kernelOpts = defaults.string(forKey: "vm.extraKernelOptions") ?? VMConfig.defaultExtraKernelOptions
 
-        initTask = Task {
+        initTask = Task { [self] in
             // Download path: one continuous phase-weighted bar for the
             // whole install (download → verify → expand → boot files →
             // postinstall/personalisation), driven by the shared

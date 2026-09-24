@@ -158,7 +158,7 @@ final class RemoteConnectModel {
         host.pinnedHostKey = info.fingerprint
         let host = self.host
         phase = .working("Connecting…")
-        work.async {
+        work.async { [weak self] in
             if let alias = host.hostKeyAlias {
                 RemoteTransport.pinHostKey(alias: alias, info: info)
             } else {

@@ -106,7 +106,8 @@ extension ACAppDelegate {
                 guard status == 200,
                       let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
                       let access = json["access_token"] as? String, !access.isEmpty else { return nil }
-                return await MainActor.run { self?.proxySignInCaptured(signIn, json: json, access: access) }
+                let owner = self   // a constant for the hop — not the captured weak var
+                return await MainActor.run { owner?.proxySignInCaptured(signIn, json: json, access: access) }
             }))
 
         // Leave whatever the agent shows (Ctrl-C twice exits every supported

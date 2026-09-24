@@ -596,24 +596,33 @@ actor MLXEngine {
             let start = Date()
             var firstTokenAt: Date?
 
-            // Deliberately the callback form, not the AsyncStream `generate`
-            // that deprecates it: the stream yields decoded text only, and this
-            // engine needs the raw token ids below to keep `session.tokens`
-            // aligned with the KV-cache offset for prefix reuse across turns.
-            let info = MLXLMCommon.generate(
-                input: lmInput, context: context, iterator: iterator
-            ) { (token: Int) in
+            // A synchronous loop straight over the iterator — what MLXLMCommon's
+            // callback `generate(input:context:iterator:didGenerate:)` does,
+            // minus its deprecation. Not the AsyncStream API: this engine needs
+            // the raw token ids (to keep `session.tokens` aligned with the
+            // KV-cache offset for prefix reuse across turns), and a stop must
+            // take effect on THIS thread, before the ledger below is
+            // reconciled — not in a detached generation task.
+            var stopIds = context.configuration.eosTokenIds
+            if let eos = context.tokenizer.eosTokenId { stopIds.insert(eos) }
+            for t in context.configuration.extraEOSTokens {
+                if let id = context.tokenizer.convertTokenToId(t) { stopIds.insert(id) }
+            }
+            var tokens = iterator
+            while let token = tokens.next() {
+                if token == context.tokenizer.unknownTokenId || stopIds.contains(token) { break }
                 if firstTokenAt == nil { firstTokenAt = Date() }
                 generatedIds.append(token)
                 detok.append(token: token)
                 if let piece = detok.next(), !piece.isEmpty {
                     text += piece
-                    if !onDelta(piece) { cancelled = true; return .stop }
+                    if !onDelta(piece) { cancelled = true; break }
                 }
-                if generatedIds.count >= maxTokens { return .stop }
-                return .more
+                if generatedIds.count >= maxTokens { break }
             }
-            _ = info
+            // TokenIterator keeps the pipeline full with asyncEval(); let that
+            // work land before the cache offsets are read below.
+            Stream().synchronize()
 
             // Keep the ledger exactly aligned with the cache offset: the iterator
             // may advance the cache past the tokens we counted (the EOS step / an

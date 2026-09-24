@@ -221,7 +221,9 @@ struct CodingTasksTests {
     @Test("answerKeysCommand: gated digits, named keys, beats between")
     func answerKeys() {
         let probe = "tmux capture-pane -p -t bromure:3 2>/dev/null "
-            + "| grep -q 'Enter to select'"
+            // Both Claude footers: single-select "Enter to select",
+            // multi-select "… Enter to confirm".
+            + "| grep -qE 'Enter to (select|confirm)'"
         let cmd = CodingTaskEngine.answerKeysCommand(
             tabIndex: 3, keys: ["1", "Right", "Enter"])
         // Digits fire only while the picker is on screen (instant-commit can

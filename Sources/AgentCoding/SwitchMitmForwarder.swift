@@ -19,7 +19,7 @@ final class SwitchMitmForwarder: VMNetTCPInterceptor, @unchecked Sendable {
         let key: UtunForwarder.FlowKey
     }
 
-    private let engine: MitmEngine
+    private let engine: any TransparentFlowAccepting
     private let sw: VMNetSwitch
     /// Emitted-segment MSS: guest NIC MTU (1280) − IP(20) − TCP(20).
     private let mss: Int
@@ -65,7 +65,6 @@ final class SwitchMitmForwarder: VMNetTCPInterceptor, @unchecked Sendable {
 
     // MARK: -
 
-    @available(macOS, deprecated: 10.15)
     private func openFlow(_ ref: FlowRef, profileID: UUID?, seg: UtunPacket.TCPSegment) {
         let destIP = UtunPacket.ipString(seg.dstIP)
         let destPort = Int(seg.dstPort)
@@ -118,3 +117,14 @@ final class SwitchMitmForwarder: VMNetTCPInterceptor, @unchecked Sendable {
         sw.injectIPToPort(portID, ipPacket: UtunPacket.build(rst))
     }
 }
+
+/// Where the forwarder hands an intercepted flow. The engine's side drives
+/// SecureTransport — deprecated, and kept on purpose (the MiTM needs it) —
+/// so its entry points are marked deprecated all the way up. Reaching it
+/// through this requirement ends that chain here, the way the vsock path's
+/// listener-delegate callback does, instead of warning at every caller.
+protocol TransparentFlowAccepting: AnyObject {
+    nonisolated func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int)
+}
+
+extension MitmEngine: TransparentFlowAccepting {}

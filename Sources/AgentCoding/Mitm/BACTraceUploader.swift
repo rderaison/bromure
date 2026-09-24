@@ -208,7 +208,7 @@ public final class BACTraceUploader: TraceUploader, @unchecked Sendable {
             guard let self else { return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
             let ok = err == nil && (200...299).contains(code)
-            self.queue.async {
+            self.queue.async { [self] in
                 if ok {
                     if !self.pending.isEmpty { self.pending.removeFirst() }
                     self.isFlushing = false

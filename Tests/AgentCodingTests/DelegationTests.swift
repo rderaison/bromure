@@ -239,7 +239,10 @@ struct DelegationTests {
         let resp = parse(await f.server.handle(line: call("wait", ["timeout_seconds": 1]), branch: "w3"))
         #expect(!isError(resp))
         #expect(text(resp).contains("Nothing arrived"))
-        #expect(Date().timeIntervalSince(t0) < 5)
+        // The 1s timeout was honoured, not the 50s default. Loose on
+        // purpose: the full suite runs in parallel and a starved main actor
+        // stretched this 1s wait to 18s of wall clock.
+        #expect(Date().timeIntervalSince(t0) < 40)
         let c = parse(await f.server.handle(line: call("cancel", ["delegation_id": d.id.uuidString, "reason": "changed plan"]), branch: "w3"))
         #expect(!isError(c), Comment(rawValue: text(c)))
         #expect(f.store.delegation(d.id)?.status == .cancelled)

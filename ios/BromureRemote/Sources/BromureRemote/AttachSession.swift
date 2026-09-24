@@ -507,7 +507,7 @@ struct RemoteTerminalView: UIViewRepresentable {
         } else {
             context.coordinator.justActivated = true   // arm for the next activation
             context.coordinator.stopKeepingFocus()
-            if uiView.isFirstResponder { uiView.resignFirstResponder() }
+            if uiView.isFirstResponder { _ = uiView.resignFirstResponder() }
         }
     }
 

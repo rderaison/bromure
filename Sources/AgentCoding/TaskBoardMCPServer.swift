@@ -377,7 +377,7 @@ final class TaskBoardMCPServer: MCPLineHandler {
 /// shim announced with "bromure-hello <branch>" (the board binds on it).
 @MainActor
 final class TaskMCPVsockBridge: NSObject {
-    static let vsockPort = SessionDisk.taskBoardMCPVsockPort
+    nonisolated static let vsockPort = SessionDisk.taskBoardMCPVsockPort
 
     private weak var socketDevice: VZVirtioSocketDevice?
     private var listenerDelegate: TaskMCPListenerDelegate?

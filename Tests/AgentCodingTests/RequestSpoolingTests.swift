@@ -10,6 +10,14 @@ import Testing
 /// was truncated (digest mismatch / EOF), and it treated a chunked request as
 /// having no body at all. These pin both fixes, including the parsing edges of
 /// the chunk grammar (extensions, trailers) and the inline↔spill boundary.
+// The code under test (readRequestSpooling) is deprecated on purpose — it wraps
+// SecureTransport, which the MiTM needs, and the product confines that
+// deprecation to the MiTM layer. Swift Testing refuses a deprecated suite,
+// so the warning is silenced here instead (compilers without @diagnose
+// skip the attribute and just warn).
+#if hasAttribute(diagnose)
+@diagnose(DeprecatedDeclaration, as: ignored)
+#endif
 @Suite("MITM request spooling + de-chunking")
 struct RequestSpoolingTests {
 

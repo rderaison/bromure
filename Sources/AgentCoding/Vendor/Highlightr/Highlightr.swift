@@ -58,7 +58,6 @@ open class Highlightr
     public init?(highlightPath: String? = nil)
     {
         guard let jsContext = JSContext() else { return nil }
-        let window = JSValue(newObjectIn: jsContext)
 
         // bromure-ac: resources live in the app's own SPM bundle under
         // "highlightr/" (see Resources/highlightr), found via acResourceBundle.
@@ -70,7 +69,7 @@ open class Highlightr
         }
 
         guard let hgJs = try? String.init(contentsOfFile: hgPath) else { return nil }
-        let value = jsContext.evaluateScript(hgJs)
+        _ = jsContext.evaluateScript(hgJs)
         guard let hljs = jsContext.objectForKeyedSubscript("hljs") else { return nil }
 
         self.hljs = hljs
@@ -203,55 +202,62 @@ open class Highlightr
     {
         let scanner = Scanner(string: string)
         scanner.charactersToBeSkipped = nil
-        var scannedString: NSString?
+        var scannedString: String?
         let resultString = NSMutableAttributedString(string: "")
         var propStack = ["hljs"]
-        
+        // bromure-ac: the NSString-offset Scanner API (scanUpTo(_:into:),
+        // scanLocation) is deprecated; the markup is walked by UTF-16 offset
+        // exactly as before, through currentIndex.
+        let text = scanner.string
+        func advance(_ n: Int) {
+            scanner.currentIndex = text.utf16.index(scanner.currentIndex, offsetBy: n)
+        }
+
         while !scanner.isAtEnd
         {
             var ended = false
-            if scanner.scanUpTo(htmlStart, into: &scannedString)
+            if let s = scanner.scanUpToString(htmlStart)
             {
+                scannedString = s
                 if scanner.isAtEnd
                 {
                     ended = true
                 }
             }
-            
-            if scannedString != nil && scannedString!.length > 0 {
-                let attrScannedString = theme.applyStyleToString(scannedString! as String, styleList: propStack)
+
+            if let scanned = scannedString, !scanned.isEmpty {
+                let attrScannedString = theme.applyStyleToString(scanned, styleList: propStack)
                 resultString.append(attrScannedString)
                 if ended
                 {
                     continue
                 }
             }
-            
-            scanner.scanLocation += 1
-            
-            let string = scanner.string as NSString
-            let nextChar = string.substring(with: NSMakeRange(scanner.scanLocation, 1))
-            if(nextChar == "s")
+
+            advance(1)
+
+            let nextChar = text.utf16[scanner.currentIndex]
+            if(nextChar == UInt16(UInt8(ascii: "s")))
             {
-                scanner.scanLocation += (spanStart as NSString).length
-                scanner.scanUpTo(spanStartClose, into:&scannedString)
-                scanner.scanLocation += (spanStartClose as NSString).length
-                propStack.append(scannedString! as String)
+                advance(spanStart.utf16.count)
+                scannedString = scanner.scanUpToString(spanStartClose)
+                advance(spanStartClose.utf16.count)
+                propStack.append(scannedString ?? "")
             }
-            else if(nextChar == "/")
+            else if(nextChar == UInt16(UInt8(ascii: "/")))
             {
-                scanner.scanLocation += (spanEnd as NSString).length
+                advance(spanEnd.utf16.count)
                 propStack.removeLast()
             }else
             {
                 let attrScannedString = theme.applyStyleToString("<", styleList: propStack)
                 resultString.append(attrScannedString)
-                scanner.scanLocation += 1
+                advance(1)
             }
-            
+
             scannedString = nil
         }
-        
+
         let results = htmlEscape.matches(in: resultString.string,
                                                options: [.reportCompletion],
                                                range: NSMakeRange(0, resultString.length))

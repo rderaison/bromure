@@ -51,7 +51,7 @@ struct TaskBoardMCPTests {
         ((resp["result"] as? [String: Any])?["isError"] as? Bool) == true
     }
 
-    @Test("initialize and tools/list expose the four board tools")
+    @Test("initialize and tools/list expose the five board tools")
     func handshake() async {
         let (server, _, _, branch) = makeFixture()
         let ini = parse(await server.handle(line: rpc("initialize"), branch: branch))
@@ -60,8 +60,8 @@ struct TaskBoardMCPTests {
         let list = parse(await server.handle(line: rpc("tools/list"), branch: branch))
         let tools = ((list["result"] as? [String: Any])?["tools"] as? [[String: Any]]) ?? []
         #expect(Set(tools.compactMap { $0["name"] as? String })
-            == ["board_get_task", "board_set_plan",
-                "board_create_subtasks", "board_ready_for_review"])
+            == ["board_get_task", "board_set_plan", "board_create_subtasks",
+                "board_set_dependencies", "board_ready_for_review"])
     }
 
     @Test("Tool calls without a bound task error instead of guessing")

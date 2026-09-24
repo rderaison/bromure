@@ -66,7 +66,7 @@ final class LocalStreamEmitter {
 
     private func write(_ s: String) {
         guard !closed else { return }
-        var data = Data(s.utf8)
+        let data = Data(s.utf8)
         let ok = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
             guard var base = raw.baseAddress else { return false }
             var remaining = raw.count

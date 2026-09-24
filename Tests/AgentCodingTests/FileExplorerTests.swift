@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Testing
 @testable import bromure_ac
 
@@ -173,5 +174,29 @@ struct FileExplorerTests {
         #expect((attributed?.length ?? 0) > 0)
         #expect(highlightr?.setTheme(to: "atom-one-dark") == true)
         #expect(highlightr?.theme.themeBackgroundColor != nil)
+    }
+
+    /// Code that stresses the span walker: non-ASCII and astral characters
+    /// (UTF-16 offsets ≠ Character counts), literal `<` / `&` the markup
+    /// escapes, and nested spans (an interpolation inside a string).
+    static let highlightSamples: [(code: String, lang: String)] = [
+        ("let café = \"naïve 👩‍💻 \\(a < b && c > d)\" // é\nif x<y { print(\"<tag> & &amp;\") }", "swift"),
+        ("def f(x):\n    return x < 1 and \"日本語 😀\" or f'{x!r}' # <b>", "python"),
+        ("<div class=\"a\">&lt;ü&gt; <span>🙂</span></div>", "xml"),
+    ]
+
+    @Test("Highlightr keeps the code's text exactly, whatever it contains")
+    func highlightrRoundTrips() throws {
+        let highlightr = try #require(Highlightr())
+        for (code, lang) in Self.highlightSamples {
+            let attributed = try #require(highlightr.highlight(code, as: lang, fastRender: true))
+            #expect(attributed.string == code, "\(lang)")
+            // Highlighted, not one flat run.
+            var colors = Set<String>()
+            attributed.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: attributed.length)) { v, _, _ in
+                if let v { colors.insert("\(v)") }
+            }
+            #expect(colors.count > 1, "\(lang)")
+        }
     }
 }

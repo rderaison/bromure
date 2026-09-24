@@ -3198,7 +3198,6 @@ private func emitSupplyChainFetch(profileID: UUID,
         eventData: data)
 }
 
-@available(macOS, deprecated: 10.15)
 /// Map a URLSession upstream failure to a diagnosis the guest can act on.
 /// `isTrust` marks the cases that mean "the host running Bromure AC did not
 /// trust / accept the upstream's certificate" — the one class an operator fixes

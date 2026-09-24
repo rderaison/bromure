@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 #endif
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 

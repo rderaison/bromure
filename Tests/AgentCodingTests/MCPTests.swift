@@ -59,7 +59,6 @@ struct MCPSecretsTests {
     func applyRestores() {
         let oauth = sampleOAuth()
         var profile = makeProfile(bearerToken: oauth.accessToken, oauthState: oauth)
-        let serverID = profile.mcpServers[0].id.uuidString
         let secrets = ProfileSecrets.extract(stripping: &profile)
         #expect(profile.mcpServers[0].bearerToken.isEmpty)
         #expect(profile.mcpServers[0].oauthState == nil)

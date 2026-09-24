@@ -197,8 +197,8 @@ public final class BACEventEmitter: @unchecked Sendable {
         // Local Security Timeline — ALWAYS, before either gate below. It's an
         // on-device view of what the engines did on the user's own machine,
         // independent of the enrolled-only, cloud-bound telemetry.
-        SecurityTimeline.shared.record(profileID: profileID,
-                                       eventType: eventType, eventData: eventData)
+        await SecurityTimeline.shared.record(profileID: profileID,
+                                             eventType: eventType, eventData: eventData)
 
         // Hard gate: no install identity → nothing to authenticate
         // as, nothing to upload.
