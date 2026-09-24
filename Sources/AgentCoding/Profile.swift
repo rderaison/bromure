@@ -1555,7 +1555,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Claude Code through an Anthropic-compatible gateway (OpenRouter):
     /// ANTHROPIC_BASE_URL, and the gateway's model id per tier (`small` /
     /// `medium` / `large`) pinned into its env. Set by the launch-time model
-    /// overlay; nil = Claude talks to Anthropic itself.
+    /// overlay; nil = Claude talks to Anthropic itself — the models map then
+    /// holds the Anthropic models chosen in Preferences → Models (empty =
+    /// Claude Code's own default).
     public var claudeGatewayBaseURL: String?
     public var claudeGatewayModels: [String: String]
 

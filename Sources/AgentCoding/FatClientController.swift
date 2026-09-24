@@ -140,7 +140,16 @@ final class RemoteHostController {
         /// Non-nil = the provider rejected this credential; re-register.
         let reauthRequiredAt: Date?
     }
-    private(set) var subscriptionStatus: [String: SubscriptionState] = [:]
+    private(set) var subscriptionStatus: [String: SubscriptionState] = [:] {
+        // The editor's sign-in controls re-read on this notification (the
+        // local stores post it too), so a remote sign-in / log-out / expiry
+        // shows up without reopening the window.
+        didSet {
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+            }
+        }
+    }
     /// The local listener bridging the OAuth callback to the remote VM, and the
     /// registration it belongs to. Torn down when the flow leaves /state.
     private var registrationCallback: RegistrationCallbackTunnel?
@@ -220,6 +229,14 @@ final class RemoteHostController {
         var body: [String: Any] = ["provider": provider]
         if let profileID { body["profileId"] = profileID.uuidString }
         send("POST", "/subscriptions/register", body: body)
+    }
+
+    /// Ask the remote to log a subscription out (its store, its scope rules);
+    /// the next poll's /state reflects it.
+    func forgetRemoteSubscription(provider: String, profileID: UUID?) {
+        var body: [String: Any] = ["provider": provider]
+        if let profileID { body["profileId"] = profileID.uuidString }
+        send("POST", "/subscriptions/forget", body: body)
     }
 
     private func applySubscriptions(_ dict: [String: Any]) {
@@ -2748,12 +2765,16 @@ final class RemoteHostWindow: NSWindow {
                 grokReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["grok"]?.reauthRequiredAt },
                 kimiReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["kimi"]?.reauthRequiredAt },
                 onRegisterClaude: { [weak self] in self?.beginRemoteRegistration(.claude, id) },
+                onForgetClaude: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "claude", profileID: id) },
                 codexAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["codex"]?.registeredAt },
                 onRegisterCodex: { [weak self] in self?.beginRemoteRegistration(.codex, id) },
+                onForgetCodex: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "codex", profileID: id) },
                 grokAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["grok"]?.registeredAt },
                 onRegisterGrok: { [weak self] in self?.beginRemoteRegistration(.grok, id) },
+                onForgetGrok: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "grok", profileID: id) },
                 kimiAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["kimi"]?.registeredAt },
                 onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, id) },
+                onForgetKimi: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "kimi", profileID: id) },
                 localModelsRemoteAny: modelBackend,
                 modelsPane: .workspace(global: remoteGlobalModels)))
             win.makeKeyAndOrderFront(nil)

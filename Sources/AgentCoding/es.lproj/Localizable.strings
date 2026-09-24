@@ -1166,11 +1166,7 @@
 "Get 1Password CLI" = "Obtener la CLI de 1Password";
 "Couldn't load a 1Password secret for “%@”" = "No se pudo cargar un secreto de 1Password para “%@”";
 "Make sure you're signed in to 1Password (run `op signin`) and the referenced item exists, then restart the workspace." = "Asegúrate de haber iniciado sesión en 1Password (ejecuta `op signin`) y de que el elemento referenciado exista; luego reinicia el espacio de trabajo.";
-"Give this Mac its own private VM subnet?" = "¿Asignar a este Mac su propia subred de VM privada?";
-"Every Bromure install uses the same 192.168.64.0/24 network for its workspace VMs. If you connect to more than one remote from the rich client, those identical subnets collide and the VPN can't tell them apart.\n\nBromure can move this Mac's VMs onto a private, randomly chosen 172.16.x.x network instead. You can change or re-randomize it later in Settings › Resources." = "Cada instalación de Bromure usa la misma red 192.168.64.0/24 para las VM de sus espacios de trabajo. Si te conectas a más de un remoto desde el cliente enriquecido, esas subredes idénticas entran en conflicto y la VPN no puede distinguirlas.\n\nEn su lugar, Bromure puede mover las VM de este Mac a una red privada 172.16.x.x elegida al azar. Puedes cambiarla o volver a aleatorizarla más tarde en Settings › Resources.";
-"Migrate Now" = "Migrar ahora";
 "Later" = "Más tarde";
-"Don’t Ask Again" = "No volver a preguntar";
 "Restart “%@” to apply these changes?" = "¿Reiniciar “%@” para aplicar estos cambios?";
 "Some settings you changed (like networking, memory, or shared folders) are baked into the VM at boot, so the running workspace won't pick them up until it restarts." = "Algunos ajustes que cambiaste (como la red, la memoria o las carpetas compartidas) se integran en la VM durante el arranque, por lo que el espacio de trabajo en ejecución no los aplicará hasta que se reinicie.";
 "Restart Now" = "Reiniciar ahora";
@@ -2392,3 +2388,30 @@
 /* Added 2026-09-22 — layered workspace model settings */
 "Inherited from Preferences → Models (%@)." = "Heredado de Preferencias → Modelos (%@).";
 "Couldn't save the model settings on %@." = "No se pudo guardar la configuración de modelos en %@.";
+
+/* Added since 2026-09-24: Install Command-Line Tool menu */
+"Install Command-Line Tool…" = "Instalar herramienta de línea de comandos…";
+"The command-line tool can only be installed from the Bromure app bundle." = "La herramienta de línea de comandos solo se puede instalar desde el paquete de la app Bromure.";
+"Couldn't install the command-line tool" = "No se pudo instalar la herramienta de línea de comandos";
+"Command-line tool installed" = "Herramienta de línea de comandos instalada";
+"Run “%@ --help” in Terminal to get started." = "Ejecuta «%@ --help» en Terminal para empezar.";
+
+/* Added since 2026-09-24: Models pane sign-in state + main-model picker */
+"%@ rejected the saved sign-in (from %@). Sessions can't use it until you sign in again." = "%@ rechazó el inicio de sesión guardado (de %@). Las sesiones no pueden usarlo hasta que vuelvas a iniciar sesión.";
+"Sign in again" = "Volver a iniciar sesión";
+"Sign in again…" = "Volver a iniciar sesión…";
+"Log out…" = "Cerrar sesión…";
+"Log Out" = "Cerrar sesión";
+"Log out of %@?" = "¿Cerrar sesión en %@?";
+"Workspaces using this sign-in stop working until you sign in again." = "Los espacios de trabajo que usan este inicio de sesión dejarán de funcionar hasta que vuelvas a iniciar sesión.";
+"Signed in %@" = "Sesión iniciada %@";
+"Sizes" = "Tamaños";
+"Optional: different models for Claude Code's large (opus) and small/background (haiku) slots. Unset, they follow Claude Code's own defaults." = "Opcional: modelos distintos para las ranuras grande (opus) y pequeña/en segundo plano (haiku) de Claude Code. Sin definir, siguen los valores predeterminados de Claude Code.";
+"%@ default" = "Predeterminado de %@";
+"default" = "predeterminado";
+"Use %@’s default" = "Usar el predeterminado de %@";
+"Use Default" = "Usar predeterminado";
+"Use the global setting" = "Usar el ajuste global";
+"sign-in expired" = "inicio de sesión caducado";
+"Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "Registra una fuente a la izquierda. Cada agente usa el modelo predeterminado de su proveedor salvo que elijas otro a la derecha.";
+"Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "Inicia sesión en los proveedores que quieras usar o pega claves de API. Cada agente usará el modelo predeterminado de su proveedor; si quieres, elige uno concreto a la derecha, ahora o más tarde en Preferencias → Modelos.";

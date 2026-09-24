@@ -118,9 +118,7 @@ enum ConfigScan {
         for probe in [detectGitConfig, detectGitCredentials, detectDocker,
                       detectAWSStatic, detectAWSSSO, detectKube, detectNPM,
                       detectGHCLI, detectGlabCLI, detectNetrc, detectDoctl,
-                      detectPyPI, detectCargo, detectClaudeSubscription,
-                      detectCodexSubscription, detectGrokSubscription,
-                      detectKimiSubscription, detectClaudeSettingsKeys] {
+                      detectPyPI, detectCargo, detectClaudeSettingsKeys] {
             if let f = probe() { out.append(f) }
         }
         out.append(contentsOf: detectSSHKeys())
@@ -443,94 +441,16 @@ enum ConfigScan {
         return nil
     }
 
-    // MARK: agent subscriptions (the user's own CLI logins)
-
-    /// Claude Code on macOS keeps its OAuth tokens in the LOGIN KEYCHAIN
-    /// ("Claude Code-credentials"), not in `~/.claude/.credentials.json` —
-    /// that path is where the *Linux* build (and our guest) stores them. Check
-    /// the keychain first, then fall back to the file.
-    private static let claudeKeychainService = "Claude Code-credentials"
-
-    private static func detectClaudeSubscription() -> Finding? {
-        if keychainItemExists(service: claudeKeychainService) {
-            return Finding(id: Kind.claudeSubscription.rawValue, kind: .claudeSubscription,
-                           path: URL(fileURLWithPath: "/Keychain/\(claudeKeychainService)"),
-                           title: NSLocalizedString("Claude subscription", comment: "scan finding"),
-                           detail: NSLocalizedString("your Claude Code login, from the login keychain", comment: ""),
-                           credentialCount: 1, symbol: "sparkles",
-                           payload: .keychainSubscription(provider: "claude",
-                                                          service: claudeKeychainService))
-        }
-        let url = home.appendingPathComponent(".claude/.credentials.json")
-        guard let d = try? Data(contentsOf: url),
-              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
-              let oauth = obj["claudeAiOauth"] as? [String: Any],
-              let access = oauth["accessToken"] as? String,
-              let refresh = oauth["refreshToken"] as? String,
-              !access.isEmpty, !refresh.isEmpty else { return nil }
-        return Finding(id: Kind.claudeSubscription.rawValue, kind: .claudeSubscription, path: url,
-                       title: NSLocalizedString("Claude subscription", comment: "scan finding"),
-                       detail: NSLocalizedString("your Claude Code login — skips the register-with-Claude step", comment: ""),
-                       credentialCount: 1, symbol: "sparkles",
-                       payload: .subscription(provider: "claude", access: access, refresh: refresh))
-    }
-
-    private static func detectCodexSubscription() -> Finding? {
-        let url = home.appendingPathComponent(".codex/auth.json")
-        guard let d = try? Data(contentsOf: url),
-              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
-              let tokens = obj["tokens"] as? [String: Any],
-              let access = tokens["access_token"] as? String,
-              let refresh = tokens["refresh_token"] as? String,
-              !access.isEmpty, !refresh.isEmpty else { return nil }
-        return Finding(id: Kind.codexSubscription.rawValue, kind: .codexSubscription, path: url,
-                       title: NSLocalizedString("ChatGPT subscription", comment: "scan finding"),
-                       detail: NSLocalizedString("your Codex CLI login — skips the register-with-ChatGPT step", comment: ""),
-                       credentialCount: 1, symbol: "sparkles",
-                       payload: .subscription(provider: "codex", access: access, refresh: refresh))
-    }
-
-    /// Grok CLI: `~/.grok/auth.json` — `{ "<scope>": { key, refresh_token, … } }`.
-    /// The scope key is account-specific, so take the first entry that carries
-    /// a token pair rather than guessing its name.
-    private static func detectGrokSubscription() -> Finding? {
-        let url = home.appendingPathComponent(".grok/auth.json")
-        guard let d = try? Data(contentsOf: url),
-              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return nil }
-        for (_, raw) in obj {
-            guard let e = raw as? [String: Any],
-                  let access = e["key"] as? String,
-                  let refresh = e["refresh_token"] as? String,
-                  !access.isEmpty, !refresh.isEmpty else { continue }
-            return Finding(id: Kind.grokSubscription.rawValue, kind: .grokSubscription, path: url,
-                           title: NSLocalizedString("Grok subscription", comment: "scan finding"),
-                           detail: NSLocalizedString("your Grok CLI login — skips the register-with-Grok step", comment: ""),
-                           credentialCount: 1, symbol: "sparkles",
-                           payload: .subscription(provider: "grok", access: access, refresh: refresh))
-        }
-        return nil
-    }
-
-    /// Kimi CLI: `~/.kimi-code/credentials/<name>.json` — one file per
-    /// credential, `{ access_token, refresh_token, … }`.
-    private static func detectKimiSubscription() -> Finding? {
-        let dir = home.appendingPathComponent(".kimi-code/credentials", isDirectory: true)
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return nil }
-        for name in names.sorted() where name.hasSuffix(".json") {
-            let url = dir.appendingPathComponent(name)
-            guard let d = try? Data(contentsOf: url),
-                  let e = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
-                  let access = e["access_token"] as? String,
-                  let refresh = e["refresh_token"] as? String,
-                  !access.isEmpty, !refresh.isEmpty else { continue }
-            return Finding(id: Kind.kimiSubscription.rawValue, kind: .kimiSubscription, path: url,
-                           title: NSLocalizedString("Kimi subscription", comment: "scan finding"),
-                           detail: NSLocalizedString("your Kimi CLI login — skips the register-with-Kimi step", comment: ""),
-                           credentialCount: 1, symbol: "sparkles",
-                           payload: .subscription(provider: "kimi", access: access, refresh: refresh))
-        }
-        return nil
-    }
+    // MARK: agent subscriptions (the user's own CLI logins) — never imported
+    //
+    // A CLI login on this Mac (Claude Code's "Claude Code-credentials"
+    // keychain item, ~/.codex/auth.json, …) is an OAuth grant whose refresh
+    // token ROTATES on every refresh. Copying it into Bromure's host store
+    // makes two independent refreshers share one grant: whichever refreshes
+    // second presents a spent refresh token and is logged out — the Mac's CLI
+    // or every Bromure workspace, alternately. So the scan doesn't offer them;
+    // Bromure's own sign-in mints a separate grant. (`Payload.subscription` /
+    // `.keychainSubscription` stay decodable for `apply`, but nothing emits them.)
 
     /// Agent API keys that live in a CLI's own settings rather than the shell:
     /// Claude Code keeps an `env` block in `~/.claude/settings.json`, and Codex

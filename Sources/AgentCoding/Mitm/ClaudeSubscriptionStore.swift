@@ -50,6 +50,11 @@ public struct ClaudeSubscriptionRecord: Codable, Sendable, Equatable {
 private struct ClaudeSubscriptionFile: Codable {
     var shared: ClaudeSubscriptionRecord?
     var perProfile: [String: ClaudeSubscriptionRecord]  // profileID UUID string → record
+    /// profileID → the profile whose credential it uses (an automation clone
+    /// → its base). One OAuth grant must live in exactly ONE slot: refresh
+    /// tokens rotate, so two copies refreshed independently log each other
+    /// out. Optional so files written before this existed still decode.
+    var aliases: [String: String]?
 }
 
 public final class ClaudeSubscriptionStore: @unchecked Sendable {
@@ -66,27 +71,86 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
     private var bogusKeys: [String: UUID] = [:]
 
     /// `claude-subscription.enc` next to `fake-salt.bin` under app support.
-    public init() {
+    /// Tests pass their own `fileURL` — never the user's real store.
+    public init(fileURL: URL? = nil) {
         let supportDir = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!.appendingPathComponent("BromureAC", isDirectory: true)
-        self.fileURL = supportDir.appendingPathComponent("claude-subscription.enc")
+        self.fileURL = fileURL ?? supportDir.appendingPathComponent("claude-subscription.enc")
     }
 
     // MARK: - Records
 
     private func loadLocked() -> ClaudeSubscriptionFile {
         if let cache { return cache }
-        guard let blob = try? Data(contentsOf: fileURL),
-              let plain = try? SecretsVault.decrypt(blob),
+        let empty = ClaudeSubscriptionFile(shared: nil, perProfile: [:])
+        guard let blob = try? Data(contentsOf: fileURL) else {
+            cache = empty          // no file yet: genuinely empty
+            return empty
+        }
+        guard let plain = try? SecretsVault.decrypt(blob),
               let file = try? JSONDecoder().decode(ClaudeSubscriptionFile.self, from: plain)
         else {
-            let empty = ClaudeSubscriptionFile(shared: nil, perProfile: [:])
-            cache = empty
+            // The file exists but can't be read (a keychain hiccup handing
+            // back no/other vault key). Don't CACHE the emptiness — that
+            // would hide the login for the rest of the process and let the
+            // next write replace the real file. Retry on the next read.
+            FileHandle.standardError.write(Data(
+                "[claude-sub] couldn't decrypt \(fileURL.lastPathComponent); will retry\n".utf8))
             return empty
         }
         cache = file
         return file
+    }
+
+    /// The storage slot a profile's credential lives in — its own override
+    /// (following an automation clone's alias to its base), else the shared
+    /// one — or nil when there's no credential at all. Refresh is
+    /// single-flighted and compare-and-swapped per SLOT, since many profiles
+    /// share one.
+    private func slotLocked(_ file: ClaudeSubscriptionFile, _ profileID: UUID?)
+        -> (key: String, record: ClaudeSubscriptionRecord)? {
+        if let pid = profileID {
+            let owner = file.aliases?[pid.uuidString] ?? pid.uuidString
+            if let r = file.perProfile[owner] { return (owner, r) }
+        }
+        return file.shared.map { ("shared", $0) }
+    }
+
+    private func slotLocked(_ file: ClaudeSubscriptionFile, key: String)
+        -> (key: String, record: ClaudeSubscriptionRecord)? {
+        let r = key == "shared" ? file.shared : file.perProfile[key]
+        return r.map { (key, $0) }
+    }
+
+    /// The record in a slot by key (the refresher re-reads its slot this way).
+    func slot(forKey key: String) -> ClaudeSubscriptionRecord? {
+        lock.lock(); defer { lock.unlock() }
+        return slotLocked(loadLocked(), key: key)?.record
+    }
+
+    private func writeSlot(_ file: inout ClaudeSubscriptionFile, _ key: String,
+                           _ record: ClaudeSubscriptionRecord) {
+        if key == "shared" { file.shared = record } else { file.perProfile[key] = record }
+    }
+
+    /// The slot + record backing `profileID` (see `slotLocked`).
+    public func slot(for profileID: UUID?) -> (key: String, record: ClaudeSubscriptionRecord)? {
+        lock.lock(); defer { lock.unlock() }
+        return slotLocked(loadLocked(), profileID)
+    }
+
+    /// Make `profileID` (an automation clone) use `base`'s credential — the
+    /// base's override if it has one, else the shared login — WITHOUT copying
+    /// the grant. `forget(for: profileID)` drops the alias again.
+    public func alias(_ profileID: UUID, to base: UUID) throws {
+        lock.lock(); defer { lock.unlock() }
+        var file = loadLocked()
+        let owner = file.aliases?[base.uuidString] ?? base.uuidString
+        var aliases = file.aliases ?? [:]
+        aliases[profileID.uuidString] = owner
+        file.aliases = aliases
+        try persistLocked(file)
     }
 
     // MARK: - Re-auth state
@@ -109,20 +173,27 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
     /// `/state` snapshot racing a refresher's re-auth flag deadlocked the
     /// whole app that way.
     public func setReauthRequired(_ flagged: Bool, for profileID: UUID?) {
+        setReauth(flagged, expected: nil) { self.slotLocked($0, profileID) }
+    }
+
+    /// The refresher's variant: flag the slot it refreshed, and only while it
+    /// still holds the refresh token that was rejected.
+    func setReauthRequired(_ flagged: Bool, slotKey: String, ifRefreshTokenIs expected: String) {
+        setReauth(flagged, expected: expected) { self.slotLocked($0, key: slotKey) }
+    }
+
+    private func setReauth(_ flagged: Bool, expected: String?,
+                           resolve: (ClaudeSubscriptionFile) -> (key: String, record: ClaudeSubscriptionRecord)?) {
         lock.lock()
         var file = loadLocked()
         let stamp = flagged ? Date() : nil
         var changed = false
-        if let pid = profileID, var r = file.perProfile[pid.uuidString] {
+        if let (key, r0) = resolve(file),
+           expected == nil || r0.refreshToken == expected {
+            var r = r0
             if !(r.reauthRequiredAt == stamp || (flagged && r.reauthRequiredAt != nil)) {
                 r.reauthRequiredAt = stamp
-                file.perProfile[pid.uuidString] = r
-                changed = true
-            }
-        } else if var shared = file.shared {
-            if !(shared.reauthRequiredAt == stamp || (flagged && shared.reauthRequiredAt != nil)) {
-                shared.reauthRequiredAt = stamp
-                file.shared = shared
+                writeSlot(&file, key, r)
                 changed = true
             }
         }
@@ -157,10 +228,7 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
     }
 
     public func record(for profileID: UUID?) -> ClaudeSubscriptionRecord? {
-        lock.lock(); defer { lock.unlock() }
-        let file = loadLocked()
-        if let pid = profileID, let r = file.perProfile[pid.uuidString] { return r }
-        return file.shared
+        slot(for: profileID)?.record
     }
 
     /// True when any usable credential exists (shared or an override for this
@@ -188,12 +256,28 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
     public func update(_ record: ClaudeSubscriptionRecord, for profileID: UUID?) throws {
         lock.lock(); defer { lock.unlock() }
         var file = loadLocked()
-        if let pid = profileID, file.perProfile[pid.uuidString] != nil {
-            file.perProfile[pid.uuidString] = record
-        } else {
-            file.shared = record
-        }
+        writeSlot(&file, slotLocked(file, profileID)?.key ?? "shared", record)
         try persistLocked(file)
+    }
+
+    /// Persist a refresh's rotated tokens into `slotKey` — but only while that
+    /// slot still holds `sentRefresh`, the refresh token the grant was spent
+    /// with. If the user re-registered (or signed out) meanwhile, the slot
+    /// holds a different grant that must not be clobbered: returns false.
+    /// The in-memory cache takes the tokens even when the disk write fails, so
+    /// this process keeps using the live grant (the spent one is dead).
+    public func commitRefresh(_ record: ClaudeSubscriptionRecord, slotKey: String,
+                              replacing sentRefresh: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        var file = loadLocked()
+        let current = slotKey == "shared" ? file.shared : file.perProfile[slotKey]
+        guard current?.refreshToken == sentRefresh else { return false }
+        writeSlot(&file, slotKey, record)
+        do { try persistLocked(file) } catch {
+            FileHandle.standardError.write(Data(
+                "[claude-sub] couldn't persist the rotated token (kept in memory): \(error)\n".utf8))
+        }
+        return true
     }
 
     /// Forget the per-profile override (and, when `profileID == nil`, the
@@ -203,6 +287,7 @@ public final class ClaudeSubscriptionStore: @unchecked Sendable {
         var file = loadLocked()
         if let pid = profileID {
             file.perProfile[pid.uuidString] = nil
+            file.aliases?[pid.uuidString] = nil
         } else {
             file.shared = nil
         }
@@ -243,12 +328,31 @@ public enum ClaudeSubscriptionError: Error, CustomStringConvertible {
         case .malformedRefreshResponse: return "Claude OAuth refresh returned an unexpected body"
         }
     }
+
+    /// The provider REJECTED the grant (as opposed to a transient failure):
+    /// only a new sign-in fixes it.
+    public var isRejection: Bool {
+        switch self {
+        case .noCredential: return true
+        case .refreshHTTP(let code): return (400...403).contains(code)
+        case .malformedRefreshResponse: return false
+        }
+    }
 }
 
-/// Serializes Claude OAuth refresh across all sessions. Being an `actor` means
-/// two VMs hitting an expired token concurrently queue here, and the second one
-/// sees the already-rotated token (via the `expiresAt` / `knownStale` checks)
-/// instead of issuing a duplicate refresh.
+/// The ONE place a Claude OAuth grant is refreshed, for every session.
+///
+/// Refresh tokens rotate: each refresh spends the one it presents. So a grant
+/// must be refreshed by exactly one party at a time, and the rotated pair
+/// stored before anyone refreshes again — two refreshes presenting the same
+/// refresh token make the second one fail (and may get the grant revoked),
+/// which surfaces as a Claude logout in every VM.
+///
+/// An `actor` alone does NOT give that: it is reentrant at every `await`, so
+/// while one refresh waits on the network, every other caller walks in, still
+/// sees the expired record and fires its own refresh. Hence the explicit
+/// single-flight: one in-flight `Task` per storage slot, which every
+/// concurrent caller (any VM, any request, Fusion) awaits.
 public actor ClaudeSubscriptionRefresher {
     private let store: ClaudeSubscriptionStore
     /// Claude Code's public PKCE OAuth client (verified against CLI 2.1.178).
@@ -256,80 +360,125 @@ public actor ClaudeSubscriptionRefresher {
     private static let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     /// Refresh this many seconds before the access token actually expires.
     private static let refreshMargin: TimeInterval = 300
+    /// A 401-driven refresh at most this often per slot, so an upstream that
+    /// 401s for some other reason can't turn every request into a refresh.
+    private static let forcedRefreshFloor: TimeInterval = 60
 
-    public init(store: ClaudeSubscriptionStore) {
+    /// The refresh currently running for each slot (see `store.slot(for:)`).
+    private var inflight: [String: Task<String, Error>] = [:]
+    private var lastRefreshAt: [String: Date] = [:]
+
+    /// The HTTP stack the refresh goes out on (tests stub it).
+    private let sessionConfiguration: URLSessionConfiguration
+
+    public init(store: ClaudeSubscriptionStore,
+                sessionConfiguration: URLSessionConfiguration = .ephemeral) {
         self.store = store
+        self.sessionConfiguration = sessionConfiguration
     }
 
     /// A currently-valid access token for `profileID`, refreshing proactively
-    /// if it is at/near expiry. Throws if no credential is registered.
+    /// if it is at/near expiry. Throws if no credential is registered, or if
+    /// the token is expired and can't be renewed.
     public func accessToken(for profileID: UUID?) async throws -> String {
-        guard let record = store.record(for: profileID) else {
+        guard let (slot, record) = store.slot(for: profileID) else {
             throw ClaudeSubscriptionError.noCredential
         }
         if record.expiresAt.timeIntervalSinceNow > Self.refreshMargin {
             return record.accessToken
         }
-        return try await performRefresh(for: profileID)
+        return try await refresh(slot: slot, force: false)
     }
 
-    /// Reactive path for an upstream 401: refresh unless another caller already
-    /// rotated past `stale` while we were queued on the actor. Fire-and-forget
-    /// from the proxy's streaming path — the next request picks up the result.
+    /// Reactive path for an upstream 401 on `stale`: force a refresh unless
+    /// the slot already moved past that token (another caller refreshed) or
+    /// was refreshed moments ago. Fire-and-forget from the proxy's streaming
+    /// path — the next request picks up the result.
     public func noteUnauthorized(stale: String, for profileID: UUID?) async {
-        guard let record = store.record(for: profileID) else { return }
-        if record.accessToken != stale { return }   // someone else already refreshed
-        _ = try? await performRefresh(for: profileID)
+        guard let (slot, record) = store.slot(for: profileID),
+              record.accessToken == stale else { return }
+        if let last = lastRefreshAt[slot],
+           Date().timeIntervalSince(last) < Self.forcedRefreshFloor { return }
+        _ = try? await refresh(slot: slot, force: true)
+    }
+
+    /// Join the slot's in-flight refresh, or start it.
+    private func refresh(slot: String, force: Bool) async throws -> String {
+        if let running = inflight[slot] { return try await running.value }
+        // Unstructured on purpose: a caller giving up (its guest connection
+        // dropped) must not cancel a refresh that already spent the old
+        // refresh token — its result has to be stored.
+        let task = Task { try await self.performRefresh(slot: slot, force: force) }
+        inflight[slot] = task
+        defer { inflight[slot] = nil }
+        return try await task.value
     }
 
     /// POST the refresh_token grant to platform.claude.com, persist the rotated
     /// tokens, return the new access token. Goes direct (not via the MITM).
-    private func performRefresh(for profileID: UUID?) async throws -> String {
-        // Re-read inside the actor so concurrent callers serialized behind us
-        // observe the freshly-persisted token rather than a stale snapshot.
-        guard let record = store.record(for: profileID) else {
+    private func performRefresh(slot: String, force: Bool) async throws -> String {
+        guard let record = store.slot(forKey: slot) else {
             throw ClaudeSubscriptionError.noCredential
         }
-        if record.expiresAt.timeIntervalSinceNow > Self.refreshMargin {
+        if !force, record.expiresAt.timeIntervalSinceNow > Self.refreshMargin {
             return record.accessToken
         }
+        let sent = record.refreshToken
 
         var req = URLRequest(url: Self.tokenURL)
         req.httpMethod = "POST"
+        req.timeoutInterval = 30
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: String] = [
             "grant_type": "refresh_token",
-            "refresh_token": record.refreshToken,
+            "refresh_token": sent,
             "client_id": Self.clientID,
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let config = URLSessionConfiguration.ephemeral
-        let session = URLSession(configuration: config)
-        let (data, response) = try await session.data(for: req)
+        // A still-valid token outlives a failed PROACTIVE refresh (we start
+        // 5 min early): keep serving it rather than failing the request.
+        func fallback(_ error: Error) throws -> String {
+            if record.expiresAt.timeIntervalSinceNow > 10 { return record.accessToken }
+            throw error
+        }
+
+        let session = URLSession(configuration: sessionConfiguration)
+        let data: Data, response: URLResponse
+        do {
+            (data, response) = try await session.data(for: req)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[claude-sub] refresh (\(slot)) unreachable: \(error.localizedDescription)\n".utf8))
+            return try fallback(error)
+        }
+        lastRefreshAt[slot] = Date()
         guard let http = response as? HTTPURLResponse else {
-            throw ClaudeSubscriptionError.malformedRefreshResponse
+            return try fallback(ClaudeSubscriptionError.malformedRefreshResponse)
         }
         guard http.statusCode == 200 else {
-            // 400/401/403 = the provider rejected the REFRESH TOKEN itself
-            // (revoked, expired, signed out elsewhere). Nothing retries out of
-            // that — flag the credential so the UI can say "sign-in expired"
-            // instead of every session failing with an opaque auth error. A
-            // 5xx or a rate-limit is transient and must NOT flag.
+            let detail = String(decoding: data.prefix(300), as: UTF8.self)
+            FileHandle.standardError.write(Data(
+                "[claude-sub] refresh (\(slot)) HTTP \(http.statusCode): \(detail)\n".utf8))
+            // 400–403 = the provider rejected the REFRESH TOKEN itself
+            // (revoked, expired, signed out elsewhere) — flag it so the UI
+            // says "sign-in expired". Only if the slot still holds the token
+            // we presented: if it moved on (a re-registration landed while we
+            // waited), this rejection is about a grant nobody uses any more.
+            // A 5xx or a rate-limit is transient and must NOT flag.
             if (400...403).contains(http.statusCode) {
-                store.setReauthRequired(true, for: profileID)
+                store.setReauthRequired(true, slotKey: slot, ifRefreshTokenIs: sent)
+                throw ClaudeSubscriptionError.refreshHTTP(http.statusCode)
             }
-            throw ClaudeSubscriptionError.refreshHTTP(http.statusCode)
+            return try fallback(ClaudeSubscriptionError.refreshHTTP(http.statusCode))
         }
         guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let newAccess = json["access_token"] as? String,
-              newAccess.hasPrefix("sk-ant-oat01-")
+              let newAccess = json["access_token"] as? String, !newAccess.isEmpty
         else { throw ClaudeSubscriptionError.malformedRefreshResponse }
 
-        // Anthropic rotates the refresh token on every refresh; keep the new
-        // one if present, else carry the old one forward.
-        let newRefresh = (json["refresh_token"] as? String)
-            .flatMap { $0.hasPrefix("sk-ant-ort01-") ? $0 : nil } ?? record.refreshToken
+        // The refresh token rotates on every refresh; carry the old one
+        // forward only if the server didn't send a new one.
+        let newRefresh = (json["refresh_token"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sent
         let expiresIn = (json["expires_in"] as? Double)
             ?? ((json["expires_in"] as? Int).map(Double.init))
             ?? 3600
@@ -339,12 +488,21 @@ public actor ClaudeSubscriptionRefresher {
             refreshToken: newRefresh,
             expiresAt: Date().addingTimeInterval(expiresIn),
             savedAt: Date())
-        // Persist BEFORE returning. A rotated refresh token that we fail to
-        // store would brick auth for every VM on the next refresh, so surface
-        // a persistence failure rather than handing back a token we lost.
-        try store.update(updated, for: profileID)
-        // Refresh worked — any earlier rejection is stale.
-        store.setReauthRequired(false, for: profileID)
+        guard store.commitRefresh(updated, slotKey: slot, replacing: sent) else {
+            // The slot changed under us (re-registered / signed out): serve
+            // whatever it holds now rather than resurrect the old grant.
+            FileHandle.standardError.write(Data(
+                "[claude-sub] refresh (\(slot)) superseded by a newer sign-in; discarded\n".utf8))
+            if let now = store.slot(forKey: slot) { return now.accessToken }
+            throw ClaudeSubscriptionError.noCredential
+        }
+        FileHandle.standardError.write(Data(
+            "[claude-sub] refreshed (\(slot)); next expiry in \(Int(expiresIn))s\n".utf8))
+        // The refresh worked, so any earlier "sign-in expired" is stale (the
+        // committed record carries no flag); tell the UI.
+        if record.reauthRequiredAt != nil {
+            NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+        }
         return newAccess
     }
 }

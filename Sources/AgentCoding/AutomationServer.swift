@@ -239,6 +239,10 @@ final class ACAutomationServer {
     /// Start a subscription registration on this host for a remote client.
     /// (provider, optional profile id) -> ok.
     var onBeginRegistration: ((_ provider: String, _ profileID: String?) -> Bool)?
+    /// Log a subscription out on this host for a remote client: the
+    /// workspace's own sign-in if it has one, else the shared one.
+    /// (provider, optional profile id) -> ok.
+    var onForgetSubscription: ((_ provider: String, _ profileID: String?) -> Bool)?
     /// Per-tool subscription status for the editor: registered-at + whether
     /// the provider rejected the credential (sign-in expired).
     var onSubscriptionStatus: ((_ profileID: String?) -> [String: Any])?
@@ -656,6 +660,15 @@ final class ACAutomationServer {
             sendResponse(fd: fd, status: ok ? 202 : 409,
                          body: ["ok": ok,
                                 "error": ok ? "" : "couldn't start registration (one may be in flight)"])
+
+        case ("POST", "/subscriptions/forget"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let provider = (bodyJSON["provider"] as? String) ?? ""
+            let profileID = bodyJSON["profileId"] as? String
+            let ok = DispatchQueue.main.sync {
+                self.onForgetSubscription?(provider, profileID) ?? false
+            }
+            sendResponse(fd: fd, status: ok ? 200 : 400, body: ["ok": ok])
 
         case ("GET", "/workspaces"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }

@@ -572,6 +572,27 @@ final class HTTPMitmConnection: @unchecked Sendable {
             } catch {
                 FileHandle.standardError.write(Data(
                     "[mitm] Claude subscription token unavailable for \(host): \(error)\n".utf8))
+                // Never forward the bogus key: Anthropic would answer "invalid
+                // x-api-key" and Claude Code would tell the user to /login —
+                // which, in the guest, would mint a separate grant inside the
+                // VM. Answer here instead: a transient failure (network, 5xx,
+                // 429) as a retryable 529 that Claude Code backs off and
+                // retries; a rejected grant as a 401 that says where to fix it.
+                let rejected = (error as? ClaudeSubscriptionError)?.isRejection ?? false
+                let reply = rejected
+                    ? SignInCapture.response(status: 401, reason: "Unauthorized", json: [
+                        "type": "error",
+                        "error": ["type": "authentication_error",
+                                  "message": "Your Claude sign-in expired. Sign in again from Bromure (the workspace's sign-in card or Preferences → Models) — not with /login inside the VM."],
+                    ])
+                    : SignInCapture.response(status: 529, reason: "Overloaded", json: [
+                        "type": "error",
+                        "error": ["type": "overloaded_error",
+                                  "message": "Bromure couldn't renew the Claude sign-in just now; retrying."],
+                    ])
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                try tls.write(reply)
+                return
             }
         }
 

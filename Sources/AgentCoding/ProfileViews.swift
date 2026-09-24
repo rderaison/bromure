@@ -980,6 +980,24 @@ struct ProfileEditorView: View {
                     return
                 }
                 fetch(tool, useSubscription ? .subscription : .token, apiKey, completion)
+            },
+            reauthAt: { provider in
+                switch provider {
+                case .anthropic: return claudeReauthRequiredAt?()
+                case .openai:    return codexReauthRequiredAt?()
+                case .xai:       return grokReauthRequiredAt?()
+                case .moonshot:  return kimiReauthRequiredAt?()
+                case .zai, .bedrock, .openrouter, .custom: return nil
+                }
+            },
+            canForget: { provider in
+                switch provider {
+                case .anthropic: return onForgetClaude != nil
+                case .openai:    return onForgetCodex != nil
+                case .xai:       return onForgetGrok != nil
+                case .moonshot:  return onForgetKimi != nil
+                case .zai, .bedrock, .openrouter, .custom: return false
+                }
             })
     }
     #endif

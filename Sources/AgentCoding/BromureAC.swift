@@ -514,6 +514,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     rebuildItem.target = delegate
     appMenu.addItem(rebuildItem)
 
+    let cliItem = NSMenuItem(title: L("Install Command-Line Tool…"),
+                             action: #selector(ACAppDelegate.installCLIAction(_:)),
+                             keyEquivalent: "")
+    cliItem.target = delegate
+    appMenu.addItem(cliItem)
+
     appMenu.addItem(NSMenuItem.separator())
     appMenu.addItem(withTitle: String(format: L("Hide %@"), appName),
                     action: #selector(NSApplication.hide(_:)),
@@ -1194,22 +1200,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 try? store.save(clone)
             }
             // Subscription credentials (Claude, Codex, Grok alike) live in
-            // the engine's stores keyed by profile id, not in profile.json —
-            // mirror the base's effective records onto the clone so
-            // subscription-mode agents keep working in it without a login
-            // (destroyAutomationClone forgets them again).
+            // the engine's stores keyed by profile id, not in profile.json.
+            // A clone must use the base's credential WITHOUT copying it: an
+            // OAuth refresh token rotates, so two copies of one grant
+            // refreshed independently log each other out. A base on the
+            // shared login needs nothing (the clone has no override, so it
+            // resolves to shared too); a base with its own login gets an
+            // alias (destroyAutomationClone forgets it again).
             if let engine = mitmEngine {
-                if let rec = engine.claudeSubscriptionStore.record(for: baseID) {
-                    try? engine.claudeSubscriptionStore.setOverride(rec, for: clone.id)
+                if engine.claudeSubscriptionStore.hasProfileRecord(baseID) {
+                    try? engine.claudeSubscriptionStore.alias(clone.id, to: baseID)
                 }
-                if let rec = engine.codexSubscriptionStore.record(for: baseID) {
-                    try? engine.codexSubscriptionStore.setOverride(rec, for: clone.id)
+                if engine.codexSubscriptionStore.hasProfileRecord(baseID) {
+                    try? engine.codexSubscriptionStore.alias(clone.id, to: baseID)
                 }
-                if let rec = engine.grokSubscriptionStore.record(for: baseID) {
-                    try? engine.grokSubscriptionStore.setOverride(rec, for: clone.id)
+                if engine.grokSubscriptionStore.hasProfileRecord(baseID) {
+                    try? engine.grokSubscriptionStore.alias(clone.id, to: baseID)
                 }
-                if let rec = engine.kimiSubscriptionStore.record(for: baseID) {
-                    try? engine.kimiSubscriptionStore.setOverride(rec, for: clone.id)
+                if engine.kimiSubscriptionStore.hasProfileRecord(baseID) {
+                    try? engine.kimiSubscriptionStore.alias(clone.id, to: baseID)
                 }
             }
             profiles = store.loadAll()
@@ -1243,8 +1252,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             do {
                 try self.store.delete(profile)
-                // Drop the subscription overrides + bogus-key registrations
-                // mirrored onto the clone at creation.
+                // Drop the subscription aliases + bogus-key registrations
+                // made for the clone at creation.
                 if let engine = self.mitmEngine {
                     try? engine.claudeSubscriptionStore.forget(for: id)
                     try? engine.codexSubscriptionStore.forget(for: id)
@@ -2457,11 +2466,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         VMNetSwitch.shared.enablePersistentLeases(
             at: acSupport.appendingPathComponent("dhcp-leases.sqlite"))
 
-        // Opt this install onto a persisted random 172.16/12 subnet (instead of
-        // the shared 192.168.64.0/24) once the user has accepted the migration —
-        // so a rich client VPNing to several remotes doesn't get confused by
-        // overlapping subnets. Synchronous + before any VM boots, so the switch
-        // starts on the right network. AC-only; Bromure Web never calls this.
+        // Put this install on a persisted random 172.16/12 subnet (instead of
+        // the shared 192.168.64.0/24) so a rich client VPNing to several
+        // remotes doesn't get confused by overlapping subnets. The default for
+        // any install that never chose; an explicit opt-out (Settings ›
+        // Resources toggle, or the old migration prompt's "Don't Ask Again")
+        // is kept. Synchronous + before any VM boots, so the switch starts on
+        // the right network. AC-only; Bromure Web never calls this.
+        if UserDefaults.standard.object(forKey: "vmnet.useRandom172") == nil {
+            let declined = UserDefaults.standard.bool(forKey: "vmnet.migrateSubnet.declined")
+            UserDefaults.standard.set(!declined, forKey: "vmnet.useRandom172")
+            if !declined { VMNetSwitch.ensureRandom172Base() }
+        }
         if UserDefaults.standard.bool(forKey: "vmnet.useRandom172") {
             VMNetSwitch.shared.setSubnetStrategy(.randomClassB172)
         }
@@ -2508,12 +2524,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ])
             }
         }
-
-        // Offer to install the `bromure-cli` command-line tool (admin prompt).
-        // Deferred so the main window appears first; no-op for the headless agent.
-        DispatchQueue.main.async { [weak self] in self?.offerCLISymlinkIfNeeded() }
-        // Offer the one-time VM-subnet migration (once the window is up).
-        DispatchQueue.main.async { [weak self] in self?.offerSubnetMigrationIfNeeded() }
 
         // Refresh the MLX model catalog from the hosted manifest in the
         // background (vLLM.md §5.1). Non-fatal — falls back to the bundled
@@ -4331,6 +4341,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return true
             }
         }
+        server.onForgetSubscription = { [weak self] provider, profileID in
+            MainActor.assumeIsolated {
+                guard let self, let p = SubscriptionProvider(rawValue: provider) else { return false }
+                self.forgetSubscription(p, profileID: profileID.flatMap(UUID.init(uuidString:)))
+                return true
+            }
+        }
         // Per-tool subscription state for the remote editor: when it was
         // registered and whether the provider has since rejected it.
         server.onSubscriptionStatus = { [weak self] profileID in
@@ -4374,6 +4391,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onAnswerPrompt = { id, choice in
             MainActor.assumeIsolated { PendingPromptBroker.shared.answer(id: id, choice: choice) }
         }
+    }
+
+    /// Log a subscription out. With a workspace: clear the scope actually in
+    /// effect for it — its own sign-in if it has one, otherwise the shared
+    /// one it inherits — so "Log out" is never a no-op. Without: the shared one.
+    @MainActor func forgetSubscription(_ provider: SubscriptionProvider, profileID: UUID?) {
+        guard let e = mitmEngine else { return }
+        switch provider {
+        case .claude:
+            let s = e.claudeSubscriptionStore
+            try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
+        case .codex:
+            let s = e.codexSubscriptionStore
+            try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
+        case .grok:
+            let s = e.grokSubscriptionStore
+            try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
+        case .kimi:
+            let s = e.kimiSubscriptionStore
+            try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
+        }
+        FileHandle.standardError.write(Data(
+            "[subscription] logged out \(provider.rawValue) (\(profileID.map { "workspace \($0.uuidString.prefix(8))" } ?? "shared"))\n".utf8))
+        NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
     }
 
     /// MITM trace records for `trace …`, optionally filtered to one profile.
@@ -5497,22 +5538,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - `bromure-cli` command-line tool
 
-    /// Offer to symlink `/usr/local/bin/bromure-cli` → this app's binary so the
-    /// user can drive Bromure from the terminal. Prompts once; "Don't Ask Again"
-    /// is remembered. Skipped for the headless agent and dev (`swift run`) builds.
-    @MainActor private func offerCLISymlinkIfNeeded() {
-        guard !headless else { return }
-        // A pure fat client (auto-opening remote mirror windows) must not be
-        // interrupted by a launch-time modal — it blocks the run loop before
-        // the remote windows open.
-        guard ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"] == nil else { return }
+    /// App menu › "Install Command-Line Tool…": symlink
+    /// `/usr/local/bin/bromure-cli` → this app's binary so the user can drive
+    /// Bromure from the terminal. Opt-in only — never offered at launch.
+    @objc func installCLIAction(_ sender: Any?) {
         let linkPath = "/usr/local/bin/bromure-cli"
-        guard !FileManager.default.fileExists(atPath: linkPath) else { return }
-        guard !UserDefaults.standard.bool(forKey: "cliSymlinkDeclined") else { return }
-        // Only when running from an installed .app, not a dev `swift run`.
         guard Bundle.main.bundleURL.pathExtension == "app",
-              let exe = Bundle.main.executableURL?.path else { return }
-
+              let exe = Bundle.main.executableURL?.path else {
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString(
+                "The command-line tool can only be installed from the Bromure app bundle.", comment: "")
+            alert.runModal()
+            return
+        }
         let alert = NSAlert()
         alert.messageText = NSLocalizedString(
             "Install the “bromure-cli” command-line tool?", comment: "")
@@ -5520,16 +5558,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "This creates a symlink at /usr/local/bin/bromure-cli so you can drive Bromure from the terminal (vm, exec, trace, …). It needs your admin password once.",
             comment: "")
         alert.addButton(withTitle: NSLocalizedString("Install", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Not Now", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Don’t Ask Again", comment: ""))
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            installCLISymlink(target: exe, at: linkPath)
-        case .alertThirdButtonReturn:
-            UserDefaults.standard.set(true, forKey: "cliSymlinkDeclined")
-        default:
-            break   // Not Now — offer again next launch
-        }
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        installCLISymlink(target: exe, at: linkPath)
     }
 
     /// Surface a first-resolution failure of a 1Password `op://` reference:
@@ -5567,43 +5598,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    /// One-time offer to move this Mac's workspace VMs off the shared
-    /// `192.168.64.0/24` NAT subnet onto a private random `172.16/12` one, so a
-    /// rich client mirroring several remotes isn't confused by overlapping
-    /// subnets. "Migrate Now" applies immediately when no VM has booted yet this
-    /// session, otherwise on the next launch; "Don't Ask Again" is remembered.
-    /// The subnet can be changed or re-randomized later in Settings › Resources.
-    @MainActor private func offerSubnetMigrationIfNeeded() {
-        guard !headless else { return }
-        guard ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"] == nil else { return }
-        guard !UserDefaults.standard.bool(forKey: "vmnet.useRandom172") else { return }   // already migrated
-        guard !UserDefaults.standard.bool(forKey: "vmnet.migrateSubnet.declined") else { return }
-        guard Bundle.main.bundleURL.pathExtension == "app" else { return }   // not dev `swift run`
-
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = NSLocalizedString(
-            "Give this Mac its own private VM subnet?", comment: "")
-        alert.informativeText = NSLocalizedString(
-            "Every Bromure install uses the same 192.168.64.0/24 network for its workspace VMs. If you connect to more than one remote from the rich client, those identical subnets collide and the VPN can't tell them apart.\n\nBromure can move this Mac's VMs onto a private, randomly chosen 172.16.x.x network instead. You can change or re-randomize it later in Settings › Resources.",
-            comment: "")
-        alert.addButton(withTitle: NSLocalizedString("Migrate Now", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Don’t Ask Again", comment: ""))
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            UserDefaults.standard.set(true, forKey: "vmnet.useRandom172")
-            VMNetSwitch.ensureRandom172Base()               // pick + persist now
-            VMNetSwitch.shared.setSubnetStrategy(.randomClassB172)   // applies now if no VM booted yet, else next launch
-        case .alertThirdButtonReturn:
-            UserDefaults.standard.set(true, forKey: "vmnet.migrateSubnet.declined")
-        default:
-            break   // Later — offer again next launch
-        }
-    }
-
     /// Create the symlink via AppleScript so macOS shows the standard admin
-    /// authorization prompt (no embedded privileged helper needed).
+    /// authorization prompt (no embedded privileged helper needed), then report
+    /// the outcome (a cancelled admin prompt is silent).
     @MainActor private func installCLISymlink(target: String, at linkPath: String) {
         let cmd = "mkdir -p /usr/local/bin && ln -sf \\\"\(target)\\\" \(linkPath)"
         let script = "do shell script \"\(cmd)\" with administrator privileges"
@@ -5616,10 +5613,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if code != -128 {
                 FileHandle.standardError.write(Data(
                     "[cli] symlink install failed: \(error)\n".utf8))
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = NSLocalizedString(
+                    "Couldn't install the command-line tool", comment: "")
+                alert.informativeText = (error[NSAppleScript.errorMessage] as? String) ?? "\(error)"
+                alert.runModal()
             }
         } else {
             FileHandle.standardError.write(Data(
                 "[cli] installed \(linkPath) → \(target)\n".utf8))
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString(
+                "Command-line tool installed", comment: "")
+            alert.informativeText = String(format: NSLocalizedString(
+                "Run “%@ --help” in Terminal to get started.", comment: ""), "bromure-cli")
+            alert.runModal()
         }
     }
 
@@ -6749,6 +6758,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             },
             onCancel: { [weak self] in self?.closePreferencesWindow() },
             claudeAccountSavedAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt },
+            claudeReauthRequiredAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.reauthRequiredAt(for: nil) },
+            codexReauthRequiredAt: { [weak self] in self?.mitmEngine?.codexSubscriptionStore.reauthRequiredAt(for: nil) },
+            grokReauthRequiredAt: { [weak self] in self?.mitmEngine?.grokSubscriptionStore.reauthRequiredAt(for: nil) },
+            kimiReauthRequiredAt: { [weak self] in self?.mitmEngine?.kimiSubscriptionStore.reauthRequiredAt(for: nil) },
             onRegisterClaude: { [weak self] in
                 self?.beginSubscriptionRegistration(provider: .claude, scope: .alwaysShared)
             },
@@ -6829,12 +6842,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             grokReauthRequiredAt: { [weak controller] in controller?.subscriptionStatus["grok"]?.reauthRequiredAt },
             kimiReauthRequiredAt: { [weak controller] in controller?.subscriptionStatus["kimi"]?.reauthRequiredAt },
             onRegisterClaude: { [weak window] in window?.beginRemoteRegistration(.claude, nil) },
+            onForgetClaude: { [weak controller] in controller?.forgetRemoteSubscription(provider: "claude", profileID: nil) },
             codexAccountSavedAt: { [weak controller] in controller?.subscriptionStatus["codex"]?.registeredAt },
             onRegisterCodex: { [weak window] in window?.beginRemoteRegistration(.codex, nil) },
+            onForgetCodex: { [weak controller] in controller?.forgetRemoteSubscription(provider: "codex", profileID: nil) },
             grokAccountSavedAt: { [weak controller] in controller?.subscriptionStatus["grok"]?.registeredAt },
             onRegisterGrok: { [weak window] in window?.beginRemoteRegistration(.grok, nil) },
+            onForgetGrok: { [weak controller] in controller?.forgetRemoteSubscription(provider: "grok", profileID: nil) },
             kimiAccountSavedAt: { [weak controller] in controller?.subscriptionStatus["kimi"]?.registeredAt },
             onRegisterKimi: { [weak window] in window?.beginRemoteRegistration(.kimi, nil) },
+            onForgetKimi: { [weak controller] in controller?.forgetRemoteSubscription(provider: "kimi", profileID: nil) },
             localModelsRemoteAny: controller?.modelBackend(),
             // The remote's Preferences → Models: edited as a draft here, PUT
             // back on Save (keys the user didn't retype stay redacted → kept).

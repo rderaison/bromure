@@ -1164,11 +1164,7 @@
 "Get 1Password CLI" = "1Password CLI を入手";
 "Couldn't load a 1Password secret for “%@”" = "“%@” の 1Password シークレットを読み込めませんでした";
 "Make sure you're signed in to 1Password (run `op signin`) and the referenced item exists, then restart the workspace." = "1Password にサインインしていること（`op signin` を実行）と、参照先のアイテムが存在することを確認してから、ワークスペースを再起動してください。";
-"Give this Mac its own private VM subnet?" = "この Mac に専用のプライベート VM サブネットを割り当てますか？";
-"Every Bromure install uses the same 192.168.64.0/24 network for its workspace VMs. If you connect to more than one remote from the rich client, those identical subnets collide and the VPN can't tell them apart.\n\nBromure can move this Mac's VMs onto a private, randomly chosen 172.16.x.x network instead. You can change or re-randomize it later in Settings › Resources." = "すべての Bromure インストールは、ワークスペース VM に同じ 192.168.64.0/24 ネットワークを使用します。リッチクライアントから複数のリモートに接続すると、これらの同一のサブネットが衝突し、VPN はそれらを区別できません。\n\nBromure は代わりに、この Mac の VM をプライベートでランダムに選ばれた 172.16.x.x ネットワークへ移動できます。この設定は後から Settings › Resources で変更または再ランダム化できます。";
-"Migrate Now" = "今すぐ移行";
 "Later" = "後で";
-"Don’t Ask Again" = "今後表示しない";
 "Restart “%@” to apply these changes?" = "“%@” を再起動して変更を適用しますか？";
 "Some settings you changed (like networking, memory, or shared folders) are baked into the VM at boot, so the running workspace won't pick them up until it restarts." = "変更した一部の設定（ネットワーク、メモリ、共有フォルダなど）は起動時に VM へ組み込まれるため、実行中のワークスペースは再起動するまでそれらを反映しません。";
 "Restart Now" = "今すぐ再起動";
@@ -2390,3 +2386,30 @@
 /* Added 2026-09-22 — layered workspace model settings */
 "Inherited from Preferences → Models (%@)." = "環境設定 → モデルから継承（%@）。";
 "Couldn't save the model settings on %@." = "%@ にモデル設定を保存できませんでした。";
+
+/* Added since 2026-09-24: Install Command-Line Tool menu */
+"Install Command-Line Tool…" = "コマンドラインツールをインストール…";
+"The command-line tool can only be installed from the Bromure app bundle." = "コマンドラインツールは Bromure アプリバンドルからのみインストールできます。";
+"Couldn't install the command-line tool" = "コマンドラインツールをインストールできませんでした";
+"Command-line tool installed" = "コマンドラインツールをインストールしました";
+"Run “%@ --help” in Terminal to get started." = "ターミナルで「%@ --help」を実行して始めましょう。";
+
+/* Added since 2026-09-24: Models pane sign-in state + main-model picker */
+"%@ rejected the saved sign-in (from %@). Sessions can't use it until you sign in again." = "%@ が保存済みのサインイン（%@）を拒否しました。再度サインインするまで、セッションはこれを使用できません。";
+"Sign in again" = "再度サインイン";
+"Sign in again…" = "再度サインイン…";
+"Log out…" = "ログアウト…";
+"Log Out" = "ログアウト";
+"Log out of %@?" = "%@ からログアウトしますか？";
+"Workspaces using this sign-in stop working until you sign in again." = "このサインインを使用しているワークスペースは、再度サインインするまで動作しなくなります。";
+"Signed in %@" = "サインイン済み（%@）";
+"Sizes" = "サイズ";
+"Optional: different models for Claude Code's large (opus) and small/background (haiku) slots. Unset, they follow Claude Code's own defaults." = "オプション：Claude Code の大（opus）と小／バックグラウンド（haiku）のスロットに別のモデルを使います。未設定の場合は Claude Code の既定値に従います。";
+"%@ default" = "%@ の既定";
+"default" = "既定";
+"Use %@’s default" = "%@ の既定を使用";
+"Use Default" = "デフォルトを使用";
+"Use the global setting" = "グローバル設定を使用";
+"sign-in expired" = "サインインの期限切れ";
+"Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "左側でソースを登録してください。右側で選ばない限り、各エージェントはプロバイダの既定モデルを使います。";
+"Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "使用するプロバイダにサインインするか、API キーを貼り付けてください。各エージェントはプロバイダの既定モデルを使います。特定のモデルを使う場合は右側で選択できます（後から「環境設定 → モデル」でも変更できます）。";

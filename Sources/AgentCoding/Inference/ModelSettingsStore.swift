@@ -23,6 +23,17 @@ public final class ModelSettingsStore: ObservableObject {
         let resolved = url ?? Self.defaultURL
         self.url = resolved
         self.settings = Self.load(resolved) ?? ModelSettings()
+        // One-time: clear the native-provider model pre-fills older builds
+        // wrote on sign-in (never used at launch — see
+        // `dropNativeCloudAgentRefs`), so the pane shows "<agent> default"
+        // and an upgrade doesn't suddenly pin Claude to a pre-filled model.
+        let migratedKey = "models.nativeAgentRefsDropped.v1"
+        if url == nil, !UserDefaults.standard.bool(forKey: migratedKey) {
+            var s = settings
+            s.dropNativeCloudAgentRefs()
+            if s != settings { settings = s; save() }
+            UserDefaults.standard.set(true, forKey: migratedKey)
+        }
     }
 
     static var defaultURL: URL {

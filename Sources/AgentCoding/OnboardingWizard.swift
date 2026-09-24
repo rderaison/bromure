@@ -422,7 +422,7 @@ struct OnboardingWizardView: View {
     private var models: some View {
         VStack(alignment: .leading, spacing: 4) {
             heading(NSLocalizedString("Your models", comment: ""),
-                    NSLocalizedString("Sign in to the providers you want to use, or paste API keys. Each agent picks its model on the right — you can change all of this later in Preferences → Models.", comment: ""))
+                    NSLocalizedString("Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models.", comment: ""))
                 .padding(.horizontal, 28)
                 .padding(.top, 28)
             if let signIn = model.signIn {

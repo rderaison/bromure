@@ -65,7 +65,8 @@ public extension Profile {
         // Claude Code through an Anthropic-compatible gateway (OpenRouter):
         // ANTHROPIC_BASE_URL + the gateway's model ids per tier, applied to
         // `p` after the pass for the same reason.
-        var gateway: (base: String, models: [String: String])?
+        // A nil base = Anthropic itself, with its pinned models only.
+        var gateway: (base: String?, models: [String: String])?
 
         // Resolve one agent: set its auth (+ return its local model id, if local).
         func applyAgent(tool: Tool, ompProvider: OmpProvider?, ompBaseURL: String?,
@@ -141,7 +142,18 @@ public extension Profile {
                 authMode = mode
                 apiKey = key
                 // Settings moved Claude off Bedrock / a gateway: drop their env.
-                if tool == .claude { bedrock = (false, ""); gateway = nil }
+                // Claude on Anthropic itself: pin the model(s) chosen in the
+                // pane (carried in `claudeGatewayModels` with no gateway base);
+                // none chosen = Claude Code's own default, like /model.
+                if tool == .claude {
+                    bedrock = (false, "")
+                    var models: [String: String] = [:]
+                    for tier in ModelTier.allCases {
+                        if let r = settings.ref(for: .claude, tier: tier),
+                           case .provider(.anthropic) = r.source { models[tier.rawValue] = r.modelID }
+                    }
+                    gateway = models.isEmpty ? nil : (base: nil, models: models)
+                }
             }
             return nil
         }

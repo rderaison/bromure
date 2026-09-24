@@ -462,6 +462,26 @@ public final class SessionDisk {
         if let bogus = tokenPlan?.claudeSubscriptionBogusKey, profile.claudeGatewayBaseURL == nil {
             lines.append("export ANTHROPIC_API_KEY=\(shellQuote(bogus))")
         }
+        // Claude on Anthropic itself (API key or subscription): the model(s)
+        // chosen in Preferences → Models. Only what was picked is pinned —
+        // nothing picked = Claude Code's own default, and an in-session
+        // /model still wins.
+        if profile.claudeGatewayBaseURL == nil, !profile.bedrockEnabled,
+           profile.allToolSpecs.contains(where: {
+               $0.tool == .claude && ($0.authMode == .token || $0.authMode == .subscription)
+           }) {
+            let m = profile.claudeGatewayModels
+            if let main = m["medium"] {
+                lines.append("export ANTHROPIC_MODEL=\(shellQuote(main))")
+            }
+            if let large = m["large"] {
+                lines.append("export ANTHROPIC_DEFAULT_OPUS_MODEL=\(shellQuote(large))")
+            }
+            if let small = m["small"] {
+                lines.append("export ANTHROPIC_DEFAULT_HAIKU_MODEL=\(shellQuote(small))")
+                lines.append("export ANTHROPIC_SMALL_FAST_MODEL=\(shellQuote(small))")
+            }
+        }
         // Manual tokens defined in the editor's Advanced section.
         // Same trick as above: we inject the fake; the host swaps it
         // for the real value at the proxy.

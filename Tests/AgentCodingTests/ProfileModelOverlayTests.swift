@@ -354,4 +354,38 @@ struct ProfileModelOverlayTests {
         #expect(timeout?.value == "1800000")
         #expect(env.contains { $0.name == "OPENAI_API_KEY" })   // still exports the dummy key
     }
+
+    @Test("Claude on Anthropic: no pick = Claude Code default; a pick is pinned")
+    func claudeNativeModelPin() {
+        var s = ModelSettings()
+        s.providers = [ProviderCredential(provider: .anthropic, useSubscription: true)]
+        let p = Profile(name: "t", tool: .claude, authMode: .token, apiKey: nil)
+        let bare = p.overlaidWithGlobalModels(s)
+        #expect(bare.authMode == .subscription)
+        #expect(bare.claudeGatewayBaseURL == nil)
+        #expect(bare.claudeGatewayModels.isEmpty)
+
+        s.agentTiers[.claude] = [.medium: ModelRef(source: .provider(.anthropic), modelID: "claude-opus-5")]
+        let pinned = p.overlaidWithGlobalModels(s)
+        #expect(pinned.authMode == .subscription)
+        #expect(pinned.claudeGatewayBaseURL == nil)
+        #expect(pinned.claudeGatewayModels == ["medium": "claude-opus-5"])
+        #expect(LiveModelRefresh.agentsNeedingRestart(from: bare, to: pinned).contains(.claude))
+    }
+
+    @Test("Stale native pre-fills are dropped; other routes are kept")
+    func dropNativePrefills() {
+        var s = ModelSettings()
+        s.tiers[.medium] = ModelRef(source: .provider(.anthropic), modelID: "claude-sonnet-5")
+        s.agentTiers[.claude] = [.medium: ModelRef(source: .provider(.anthropic), modelID: "claude-sonnet-5"),
+                                 .large: ModelRef(source: .provider(.openrouter), modelID: "anthropic/claude-opus-4.8")]
+        s.agentTiers[.codex] = [.medium: ModelRef(source: .provider(.openai), modelID: "gpt-5.5")]
+        s.agentTiers[.kimi] = [.medium: ModelRef(source: .localServer, modelID: "qwen")]
+        s.dropNativeCloudAgentRefs()
+        #expect(s.tiers[.medium]?.modelID == "claude-sonnet-5")          // Default row untouched
+        #expect(s.agentTiers[.claude] == [.large: ModelRef(source: .provider(.openrouter),
+                                                           modelID: "anthropic/claude-opus-4.8")])
+        #expect(s.agentTiers[.codex] == nil)
+        #expect(s.agentTiers[.kimi]?[.medium]?.modelID == "qwen")
+    }
 }

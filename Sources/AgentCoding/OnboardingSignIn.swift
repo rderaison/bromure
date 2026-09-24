@@ -52,6 +52,16 @@ extension ACAppDelegate {
                                                     apiKey: apiKey, profileID: nil)
                     await MainActor.run { completion(m) }
                 }
+            },
+            reauthAt: { [weak self] provider in
+                guard let e = self?.mitmEngine else { return nil }
+                switch provider {
+                case .anthropic: return e.claudeSubscriptionStore.reauthRequiredAt(for: nil)
+                case .openai:    return e.codexSubscriptionStore.reauthRequiredAt(for: nil)
+                case .xai:       return e.grokSubscriptionStore.reauthRequiredAt(for: nil)
+                case .moonshot:  return e.kimiSubscriptionStore.reauthRequiredAt(for: nil)
+                case .zai, .bedrock, .openrouter, .custom: return nil
+                }
             })
     }
 

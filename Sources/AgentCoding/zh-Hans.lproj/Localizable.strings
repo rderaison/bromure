@@ -1164,11 +1164,7 @@
 "Get 1Password CLI" = "获取 1Password CLI";
 "Couldn't load a 1Password secret for “%@”" = "无法为“%@”加载 1Password 密钥";
 "Make sure you're signed in to 1Password (run `op signin`) and the referenced item exists, then restart the workspace." = "请确认你已登录 1Password（运行 `op signin`）且引用的项目存在，然后重启工作区。";
-"Give this Mac its own private VM subnet?" = "为这台 Mac 分配专属的私有虚拟机子网？";
-"Every Bromure install uses the same 192.168.64.0/24 network for its workspace VMs. If you connect to more than one remote from the rich client, those identical subnets collide and the VPN can't tell them apart.\n\nBromure can move this Mac's VMs onto a private, randomly chosen 172.16.x.x network instead. You can change or re-randomize it later in Settings › Resources." = "每个 Bromure 安装都为其工作区虚拟机使用相同的 192.168.64.0/24 网络。如果你从富客户端连接到多个远程实例，这些相同的子网就会发生冲突，VPN 无法将它们区分开来。\n\nBromure 可以改为将这台 Mac 的虚拟机迁移到一个随机选择的私有 172.16.x.x 网络上。之后你可以在 Settings › Resources 中更改或重新随机分配。";
-"Migrate Now" = "立即迁移";
 "Later" = "稍后";
-"Don’t Ask Again" = "不再询问";
 "Restart “%@” to apply these changes?" = "重启“%@”以应用这些更改？";
 "Some settings you changed (like networking, memory, or shared folders) are baked into the VM at boot, so the running workspace won't pick them up until it restarts." = "你更改的某些设置（如网络、内存或共享文件夹）会在启动时写入虚拟机，因此正在运行的工作区需要重启后才会应用这些更改。";
 "Restart Now" = "立即重启";
@@ -2390,3 +2386,30 @@
 /* Added 2026-09-22 — layered workspace model settings */
 "Inherited from Preferences → Models (%@)." = "继承自偏好设置 → 模型（%@）。";
 "Couldn't save the model settings on %@." = "无法在 %@ 上保存模型设置。";
+
+/* Added since 2026-09-24: Install Command-Line Tool menu */
+"Install Command-Line Tool…" = "安装命令行工具…";
+"The command-line tool can only be installed from the Bromure app bundle." = "只能从 Bromure 应用包安装命令行工具。";
+"Couldn't install the command-line tool" = "无法安装命令行工具";
+"Command-line tool installed" = "命令行工具已安装";
+"Run “%@ --help” in Terminal to get started." = "在终端中运行“%@ --help”即可开始。";
+
+/* Added since 2026-09-24: Models pane sign-in state + main-model picker */
+"%@ rejected the saved sign-in (from %@). Sessions can't use it until you sign in again." = "%@ 拒绝了已保存的登录（%@）。在你重新登录之前，会话无法使用它。";
+"Sign in again" = "重新登录";
+"Sign in again…" = "重新登录…";
+"Log out…" = "登出…";
+"Log Out" = "登出";
+"Log out of %@?" = "要登出 %@ 吗？";
+"Workspaces using this sign-in stop working until you sign in again." = "使用此登录的工作区将停止工作，直到你重新登录。";
+"Signed in %@" = "已登录（%@）";
+"Sizes" = "尺寸";
+"Optional: different models for Claude Code's large (opus) and small/background (haiku) slots. Unset, they follow Claude Code's own defaults." = "可选：为 Claude Code 的大（opus）和小/后台（haiku）槽位指定不同模型。未设置时沿用 Claude Code 自己的默认值。";
+"%@ default" = "%@ 默认";
+"default" = "默认";
+"Use %@’s default" = "使用 %@ 的默认值";
+"Use Default" = "使用默认";
+"Use the global setting" = "使用全局设置";
+"sign-in expired" = "登录已过期";
+"Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "在左侧注册一个来源。除非你在右侧另选，每个代理都使用其提供商的默认模型。";
+"Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "登录你要使用的提供商，或粘贴 API 密钥。每个代理随后使用其提供商的默认模型——如有需要，可在右侧选择特定模型，现在或以后在“偏好设置 → 模型”中设置。";

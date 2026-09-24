@@ -1164,11 +1164,7 @@
 "Get 1Password CLI" = "Obtenir la 1Password CLI";
 "Couldn't load a 1Password secret for “%@”" = "Impossible de charger un secret 1Password pour « %@ »";
 "Make sure you're signed in to 1Password (run `op signin`) and the referenced item exists, then restart the workspace." = "Assurez-vous d’être connecté à 1Password (exécutez `op signin`) et que l’élément référencé existe, puis redémarrez l’espace de travail.";
-"Give this Mac its own private VM subnet?" = "Attribuer à ce Mac son propre sous-réseau de VM privé ?";
-"Every Bromure install uses the same 192.168.64.0/24 network for its workspace VMs. If you connect to more than one remote from the rich client, those identical subnets collide and the VPN can't tell them apart.\n\nBromure can move this Mac's VMs onto a private, randomly chosen 172.16.x.x network instead. You can change or re-randomize it later in Settings › Resources." = "Chaque installation de Bromure utilise le même réseau 192.168.64.0/24 pour ses VM d’espace de travail. Si vous vous connectez à plusieurs instances distantes depuis le client enrichi, ces sous-réseaux identiques entrent en conflit et le VPN ne peut pas les distinguer.\n\nBromure peut à la place déplacer les VM de ce Mac vers un réseau privé 172.16.x.x choisi au hasard. Vous pourrez le modifier ou le régénérer aléatoirement plus tard dans Settings › Resources.";
-"Migrate Now" = "Migrer maintenant";
 "Later" = "Plus tard";
-"Don’t Ask Again" = "Ne plus demander";
 "Restart “%@” to apply these changes?" = "Redémarrer « %@ » pour appliquer ces modifications ?";
 "Some settings you changed (like networking, memory, or shared folders) are baked into the VM at boot, so the running workspace won't pick them up until it restarts." = "Certains réglages que vous avez modifiés (réseau, mémoire ou dossiers partagés) sont intégrés à la VM au démarrage ; l’espace de travail en cours ne les prendra donc en compte qu’après un redémarrage.";
 "Restart Now" = "Redémarrer maintenant";
@@ -2390,3 +2386,30 @@
 /* Added 2026-09-22 — layered workspace model settings */
 "Inherited from Preferences → Models (%@)." = "Hérité des Préférences → Modèles (%@).";
 "Couldn't save the model settings on %@." = "Impossible d’enregistrer les réglages de modèles sur %@.";
+
+/* Added since 2026-09-24: Install Command-Line Tool menu */
+"Install Command-Line Tool…" = "Installer l’outil en ligne de commande…";
+"The command-line tool can only be installed from the Bromure app bundle." = "L’outil en ligne de commande ne peut être installé que depuis le bundle de l’app Bromure.";
+"Couldn't install the command-line tool" = "Impossible d’installer l’outil en ligne de commande";
+"Command-line tool installed" = "Outil en ligne de commande installé";
+"Run “%@ --help” in Terminal to get started." = "Lancez « %@ --help » dans Terminal pour commencer.";
+
+/* Added since 2026-09-24: Models pane sign-in state + main-model picker */
+"%@ rejected the saved sign-in (from %@). Sessions can't use it until you sign in again." = "%@ a refusé la connexion enregistrée (enregistrée %@). Les sessions ne peuvent plus l’utiliser tant que vous ne vous reconnectez pas.";
+"Sign in again" = "Se reconnecter";
+"Sign in again…" = "Se reconnecter…";
+"Log out…" = "Se déconnecter…";
+"Log Out" = "Se déconnecter";
+"Log out of %@?" = "Se déconnecter de %@ ?";
+"Workspaces using this sign-in stop working until you sign in again." = "Les espaces de travail qui utilisent cette connexion cesseront de fonctionner jusqu’à ce que vous vous reconnectiez.";
+"Signed in %@" = "Connecté %@";
+"Sizes" = "Tailles";
+"Optional: different models for Claude Code's large (opus) and small/background (haiku) slots. Unset, they follow Claude Code's own defaults." = "Facultatif : des modèles distincts pour les emplacements grand (opus) et petit/arrière-plan (haiku) de Claude Code. Non définis, ils suivent les valeurs par défaut de Claude Code.";
+"%@ default" = "%@ par défaut";
+"default" = "par défaut";
+"Use %@’s default" = "Utiliser le modèle par défaut de %@";
+"Use Default" = "Utiliser la valeur par défaut";
+"Use the global setting" = "Utiliser le réglage global";
+"sign-in expired" = "connexion expirée";
+"Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "Enregistrez une source à gauche. Chaque agent utilise le modèle par défaut de son fournisseur, sauf si vous en choisissez un à droite.";
+"Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "Connectez-vous aux fournisseurs que vous voulez utiliser, ou collez des clés d’API. Chaque agent utilise alors le modèle par défaut de son fournisseur — choisissez-en un précis à droite si vous le souhaitez, maintenant ou plus tard dans Préférences → Modèles.";

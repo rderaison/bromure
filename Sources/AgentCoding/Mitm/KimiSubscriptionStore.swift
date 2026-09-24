@@ -168,6 +168,10 @@ public struct KimiSubscriptionRecord: Codable, Sendable, Equatable {
 private struct KimiSubscriptionFile: Codable {
     var shared: KimiSubscriptionRecord?
     var perProfile: [String: KimiSubscriptionRecord]
+    /// profileID → the profile whose credential it uses (an automation clone
+    /// → its base): one OAuth grant lives in ONE slot, never copied, since a
+    /// rotating refresh token refreshed from two copies logs one of them out.
+    var aliases: [String: String]?
 }
 
 public final class KimiSubscriptionStore: @unchecked Sendable {
@@ -176,21 +180,23 @@ public final class KimiSubscriptionStore: @unchecked Sendable {
     private var cache: KimiSubscriptionFile?
     private var bogusKeys: [String: UUID] = [:]
 
-    public init() {
+    /// Tests pass their own `fileURL` — never the user's real store.
+    public init(fileURL: URL? = nil) {
         let supportDir = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!.appendingPathComponent("BromureAC", isDirectory: true)
-        self.fileURL = supportDir.appendingPathComponent("kimi-subscription.enc")
+        self.fileURL = fileURL ?? supportDir.appendingPathComponent("kimi-subscription.enc")
     }
 
     private func loadLocked() -> KimiSubscriptionFile {
         if let cache { return cache }
-        guard let blob = try? Data(contentsOf: fileURL),
-              let plain = try? SecretsVault.decrypt(blob),
+        let empty = KimiSubscriptionFile(shared: nil, perProfile: [:])
+        guard let blob = try? Data(contentsOf: fileURL) else { cache = empty; return empty }
+        guard let plain = try? SecretsVault.decrypt(blob),
               let file = try? JSONDecoder().decode(KimiSubscriptionFile.self, from: plain)
         else {
-            let empty = KimiSubscriptionFile(shared: nil, perProfile: [:])
-            cache = empty
+            // Exists but unreadable (keychain hiccup): don't cache the
+            // emptiness — it would hide the login and let a write clobber it.
             return empty
         }
         cache = file
@@ -214,10 +220,10 @@ public final class KimiSubscriptionStore: @unchecked Sendable {
         var file = loadLocked()
         let stamp: Date? = flagged ? Date() : nil
         var changed = false
-        if let pid = profileID, var r = file.perProfile[pid.uuidString] {
+        if let key = ownerKeyLocked(file, profileID), var r = file.perProfile[key] {
             if (r.reauthRequiredAt != nil) != flagged {
                 r.reauthRequiredAt = stamp
-                file.perProfile[pid.uuidString] = r
+                file.perProfile[key] = r
                 changed = true
             }
         } else if var shared = file.shared {
@@ -253,10 +259,36 @@ public final class KimiSubscriptionStore: @unchecked Sendable {
         return loadLocked().perProfile[profileID.uuidString] != nil
     }
 
+    /// The per-profile key holding `profileID`'s own credential (following an
+    /// automation clone's alias), or nil when it uses the shared one.
+    private func ownerKeyLocked(_ file: KimiSubscriptionFile, _ profileID: UUID?) -> String? {
+        guard let pid = profileID else { return nil }
+        let owner = file.aliases?[pid.uuidString] ?? pid.uuidString
+        return file.perProfile[owner] != nil ? owner : nil
+    }
+
+    /// The storage slot backing `profileID` ("shared" or a profile id) —
+    /// what the refresher single-flights on.
+    public func slotKey(for profileID: UUID?) -> String {
+        lock.lock(); defer { lock.unlock() }
+        return ownerKeyLocked(loadLocked(), profileID) ?? "shared"
+    }
+
+    /// Make `profileID` (an automation clone) use `base`'s own credential
+    /// without copying the grant. `forget(for: profileID)` drops the alias.
+    public func alias(_ profileID: UUID, to base: UUID) throws {
+        lock.lock(); defer { lock.unlock() }
+        var file = loadLocked()
+        var aliases = file.aliases ?? [:]
+        aliases[profileID.uuidString] = file.aliases?[base.uuidString] ?? base.uuidString
+        file.aliases = aliases
+        try persistLocked(file)
+    }
+
     public func record(for profileID: UUID?) -> KimiSubscriptionRecord? {
         lock.lock(); defer { lock.unlock() }
         let file = loadLocked()
-        if let pid = profileID, let r = file.perProfile[pid.uuidString] { return r }
+        if let key = ownerKeyLocked(file, profileID), let r = file.perProfile[key] { return r }
         return file.shared
     }
 
@@ -273,15 +305,18 @@ public final class KimiSubscriptionStore: @unchecked Sendable {
     public func update(_ record: KimiSubscriptionRecord, for profileID: UUID?) throws {
         lock.lock(); defer { lock.unlock() }
         var file = loadLocked()
-        if let pid = profileID, file.perProfile[pid.uuidString] != nil {
-            file.perProfile[pid.uuidString] = record
+        if let key = ownerKeyLocked(file, profileID) {
+            file.perProfile[key] = record
         } else { file.shared = record }
         try persistLocked(file)
     }
     public func forget(for profileID: UUID?) throws {
         lock.lock(); defer { lock.unlock() }
         var file = loadLocked()
-        if let pid = profileID { file.perProfile[pid.uuidString] = nil } else { file.shared = nil }
+        if let pid = profileID {
+            file.perProfile[pid.uuidString] = nil
+            file.aliases?[pid.uuidString] = nil
+        } else { file.shared = nil }
         try persistLocked(file)
     }
 
@@ -328,13 +363,28 @@ public actor KimiSubscriptionRefresher {
     public func accessToken(for profileID: UUID?) async throws -> String {
         guard let record = store.record(for: profileID) else { throw KimiSubscriptionError.noCredential }
         if record.expiresAt.timeIntervalSinceNow > Self.refreshMargin { return record.accessToken }
-        return try await performRefresh(for: profileID)
+        return try await singleFlight(profileID)
     }
 
     public func noteUnauthorized(stale: String, for profileID: UUID?) async {
         guard let record = store.record(for: profileID) else { return }
         if record.accessToken != stale { return }
-        _ = try? await performRefresh(for: profileID)
+        _ = try? await singleFlight(profileID)
+    }
+
+    /// One refresh per storage slot at a time. The actor alone doesn't
+    /// serialize it — it's reentrant at the network `await`, so concurrent
+    /// callers would each spend the same rotating refresh token (see
+    /// ``ClaudeSubscriptionRefresher``). Unstructured so a caller giving up
+    /// can't cancel a refresh whose rotated token must still be stored.
+    private var inflight: [String: Task<String, Error>] = [:]
+    private func singleFlight(_ profileID: UUID?) async throws -> String {
+        let slot = store.slotKey(for: profileID)
+        if let running = inflight[slot] { return try await running.value }
+        let task = Task { try await self.performRefresh(for: profileID) }
+        inflight[slot] = task
+        defer { inflight[slot] = nil }
+        return try await task.value
     }
 
     private func performRefresh(for profileID: UUID?) async throws -> String {

@@ -31,6 +31,11 @@ struct ModelsSubscriptionHooks {
     /// own key works, not just the global one. Empty on failure.
     var fetchModels: ((ModelProvider, _ useSubscription: Bool, _ apiKey: String?,
                        @escaping ([String]) -> Void) -> Void)?
+    /// When the provider REJECTED the saved sign-in (it must be redone), or nil.
+    var reauthAt: (ModelProvider) -> Date? = { _ in nil }
+    /// Whether this host can log the provider out here (a hook is wired) —
+    /// "Log out" is hidden rather than left as a button that does nothing.
+    var canForget: (ModelProvider) -> Bool = { _ in true }
 }
 
 /// A workspace's LAYER over the global settings (see `ModelOverride`): the
@@ -75,6 +80,8 @@ struct ModelsSettingsView: View {
     @State private var subTick = 0
     @State private var customIDContext: (agent: ModelAgent?, tier: ModelTier, source: ModelRef.Source)?
     @State private var customIDText = ""
+    /// Agents whose optional "Sizes" (large/small) section is expanded.
+    @State private var openSizes: Set<String> = []
 
     private let downloads = ModelDownloadManager.shared
     private var hostGB: Int { HostMemory.unifiedMemoryGB() }
@@ -140,7 +147,7 @@ struct ModelsSettingsView: View {
             if showsTitle {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Models").font(.title2.bold())
-                    Text("Register a source on the left, then give each agent a model on the right.")
+                    Text("Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
             }
@@ -278,8 +285,10 @@ struct ModelsSettingsView: View {
                     provider: provider,
                     hasCapture: provider.supportsSubscription && subscription != nil,
                     savedAt: { subscription?.savedAt(provider) },
+                    reauthAt: { subscription?.reauthAt(provider) },
                     onSignIn: { subscription?.register(provider) },
-                    onLogOut: { subscription?.forget(provider) },
+                    onLogOut: (subscription?.canForget(provider) ?? false)
+                        ? { subscription?.forget(provider) } : nil,
                     apiKey: providerKeyBinding(provider, settings.credential(provider)),
                     ownOverride: status == .overridden ? { useGlobalCredential(provider) } : nil,
                     inheritedHint: status == .inherited)
@@ -452,39 +461,44 @@ struct ModelsSettingsView: View {
         }
     }
 
+    /// One agent (nil = Default): its main model, like Claude Code's /model.
+    /// Claude Code (and the Default) can also pin separate small/large models
+    /// — tucked behind "Sizes", opened only when one is already set.
     @ViewBuilder private func agentRow(_ agent: ModelAgent?) -> some View {
-        if usesAllTiers(agent) {
-            DisclosureGroup {
-                VStack(spacing: 6) {
-                    ForEach([ModelTier.large, .medium, .small], id: \.self) { tier in
-                        tierLine(agent, tier)
-                    }
-                    if let agent, !(settings.agentTiers[agent]?.isEmpty ?? true) {
-                        HStack {
-                            Spacer()
-                            Button("Reset to Default") { mutate { $0.resetAgentOverrides(agent) } }
-                                .buttonStyle(.borderless).controlSize(.small)
-                        }
-                    }
-                }
-                .padding(.top, 4).padding(.leading, 4)
-            } label: {
-                HStack {
-                    Text(agentName(agent)).fontWeight(agent == nil ? .semibold : .regular)
-                    Spacer()
-                    Text(tierSummary(agent)).font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
-                }
-            }
-            .padding(.vertical, 5)
-        } else {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
-                Text(agentName(agent))
+                Text(agentName(agent)).fontWeight(agent == nil ? .semibold : .regular)
                 Spacer()
                 tierChip(agent, .medium)
             }
-            .padding(.vertical, 6)
+            if usesAllTiers(agent) {
+                let sizesSet = explicitRef(agent, .small) != nil || explicitRef(agent, .large) != nil
+                DisclosureGroup(isExpanded: sizesBinding(agent, forcedOpen: sizesSet)) {
+                    VStack(spacing: 6) {
+                        tierLine(agent, .large)
+                        tierLine(agent, .small)
+                        if let agent, !(settings.agentTiers[agent]?.isEmpty ?? true) {
+                            HStack {
+                                Spacer()
+                                Button("Reset to Default") { mutate { $0.resetAgentOverrides(agent) } }
+                                    .buttonStyle(.borderless).controlSize(.small)
+                            }
+                        }
+                    }
+                    .padding(.top, 2).padding(.leading, 4)
+                } label: {
+                    Text("Sizes").font(.caption).foregroundStyle(.secondary)
+                }
+                .help("Optional: different models for Claude Code's large (opus) and small/background (haiku) slots. Unset, they follow Claude Code's own defaults.")
+            }
         }
+        .padding(.vertical, 6)
+    }
+
+    private func sizesBinding(_ agent: ModelAgent?, forcedOpen: Bool) -> Binding<Bool> {
+        let key = agent?.rawValue ?? "default"
+        return Binding(get: { forcedOpen || openSizes.contains(key) },
+                       set: { if $0 { openSizes.insert(key) } else { openSizes.remove(key) } })
     }
 
     /// One tier's label + chip inside an expanded agent.
@@ -549,10 +563,11 @@ struct ModelsSettingsView: View {
                 }
                 if agent != nil || layer != nil, explicit != nil {
                     Divider()
-                    Button(agent != nil ? "Use Default" : "Use the global setting") { assignRef(agent, tier, nil) }
+                    Button(clearLabel(agent)) { assignRef(agent, tier, nil) }
                 }
             } label: {
-                modelChip(effective, inherited: inherited)
+                modelChip(effective, inherited: inherited,
+                          placeholder: nativeDefaultLabel(agent, tier))
             }
             .menuStyle(.borderlessButton).fixedSize()
             if explicit != nil {
@@ -565,11 +580,12 @@ struct ModelsSettingsView: View {
         }
     }
 
-    @ViewBuilder private func modelChip(_ ref: ModelRef?, inherited: Bool) -> some View {
-        let color = ref.map { sourceColor($0.source) } ?? .secondary
+    @ViewBuilder private func modelChip(_ ref: ModelRef?, inherited: Bool,
+                                        placeholder: String? = nil) -> some View {
+        let color = ref.map { sourceColor($0.source) } ?? (placeholder != nil ? .green : .secondary)
         HStack(spacing: 5) {
             Circle().fill(color).frame(width: 7, height: 7)
-            Text(ref?.modelID ?? "Choose…")
+            Text(ref?.modelID ?? placeholder ?? "Choose…")
                 .font(.callout)
                 .foregroundStyle(ref == nil ? Color.secondary : Color.primary)
                 .lineLimit(1).truncationMode(.middle)
@@ -583,16 +599,35 @@ struct ModelsSettingsView: View {
 
     // MARK: Derived
 
+    /// The agent's own provider is signed in / keyed, so with nothing chosen
+    /// it simply runs that provider's default model — no pick needed.
+    private func nativeProviderUsable(_ agent: ModelAgent?) -> Bool {
+        guard let p = agent?.nativeCloudProvider else { return false }
+        if providerStatus(p) == .excluded { return false }
+        return (resolved.credential(p)?.isUsable ?? false) || subscription?.savedAt(p) != nil
+    }
+    /// What an unset chip reads when the agent runs its own default:
+    /// "Claude Code default" (main model) / "default" (a size slot).
+    private func nativeDefaultLabel(_ agent: ModelAgent?, _ tier: ModelTier) -> String? {
+        guard let agent, nativeProviderUsable(agent) else { return nil }
+        return tier == .medium
+            ? String(format: NSLocalizedString("%@ default", comment: "model chip: the agent's own default model"),
+                     agent.displayName)
+            : NSLocalizedString("default", comment: "model chip: a size slot left at the agent's default")
+    }
+    private func clearLabel(_ agent: ModelAgent?) -> String {
+        guard let agent else { return NSLocalizedString("Use the global setting", comment: "") }
+        return nativeProviderUsable(agent) && effectiveDefaultTiersEmpty
+            ? String(format: NSLocalizedString("Use %@’s default", comment: "model menu"), agent.displayName)
+            : NSLocalizedString("Use Default", comment: "model menu")
+    }
+    private var effectiveDefaultTiersEmpty: Bool { resolved.tiers.isEmpty }
+
     private func usesAllTiers(_ agent: ModelAgent?) -> Bool {
         agent == nil || agent?.usesAllTiers == true
     }
     private func agentName(_ agent: ModelAgent?) -> String {
         agent?.displayName ?? "Default"
-    }
-    private func tierSummary(_ agent: ModelAgent?) -> String {
-        let ids = [ModelTier.large, .medium, .small].compactMap { effectiveRef(agent, $0)?.modelID }
-        if ids.isEmpty { return agent == nil ? "not set" : "inherits Default" }
-        return ids.joined(separator: " · ")
     }
     private var usableProviders: [ModelProvider] {
         cloudProviders.filter { resolved.credential($0)?.isUsable ?? false }
@@ -659,7 +694,10 @@ struct ModelsSettingsView: View {
             default: break
             }
             if p.isBedrock { return r.credential(p)?.isUsable == true ? "AWS credentials" : nil }
-            if subscription?.savedAt(p) != nil { return "subscription" }
+            if subscription?.savedAt(p) != nil {
+                return subscription?.reauthAt(p) != nil
+                    ? NSLocalizedString("sign-in expired", comment: "provider row subtitle") : "subscription"
+            }
             if r.credential(p)?.isUsable == true { return "API key" }
             return nil
         case .customServer:
@@ -675,6 +713,8 @@ struct ModelsSettingsView: View {
         switch source {
         case .provider(let p):
             if providerStatus(p) == .excluded { return .secondary.opacity(0.4) }
+            if subscription?.savedAt(p) != nil, subscription?.reauthAt(p) != nil,
+               providerStatus(p) != .overridden { return .orange }
             let usable = (resolved.credential(p)?.isUsable ?? false)
                 || (subscription?.savedAt(p) != nil && providerStatus(p) != .overridden)
             return usable ? .green : .secondary.opacity(0.4)
@@ -697,12 +737,15 @@ struct ModelsSettingsView: View {
 
     // MARK: Mutations
 
-    /// Pre-fill a provider's native agent with that provider's models when the
-    /// provider becomes usable — so logging into Anthropic configures Claude,
-    /// an OpenAI key configures Codex, etc. Only fills tiers that agent hasn't
-    /// set explicitly (never clobbers a deliberate choice).
+    /// Pre-fill a provider's native agent with a model when the provider
+    /// becomes usable. Only fills tiers that agent hasn't set explicitly (never
+    /// clobbers a deliberate choice).
     private func autofillAgent(for provider: ModelProvider) {
         guard let agent = provider.nativeAgent else { return }   // z.ai / custom: no native agent
+        // An agent on its OWN provider (Claude ← Anthropic, Codex ← OpenAI…)
+        // needs no pick: unset, it runs that provider's default model. Only
+        // Bedrock, which has no default to fall back on, is pre-filled.
+        guard provider.isBedrock else { return }
         // A workspace layer only pre-fills for a provider IT registered; an
         // inherited provider's agent keeps inheriting whatever the global
         // settings say (or don't) — opening the editor must not write overrides.
@@ -958,8 +1001,10 @@ private struct ProviderConfigPopover: View {
     let provider: ModelProvider
     let hasCapture: Bool
     let savedAt: () -> Date?
+    let reauthAt: () -> Date?
     let onSignIn: () -> Void
-    let onLogOut: () -> Void
+    /// nil: this host can't log the provider out from here.
+    let onLogOut: (() -> Void)?
     @Binding var apiKey: String
     /// Layered workspace with its OWN credential for this provider: the action
     /// that drops it and inherits the global one again. nil otherwise.
@@ -967,10 +1012,12 @@ private struct ProviderConfigPopover: View {
     /// Layered workspace inheriting this provider: the form below overrides it.
     var inheritedHint: Bool = false
     @State private var tick = 0
+    @State private var confirmLogOut = false
 
     var body: some View {
         let _ = tick
         let saved = hasCapture ? savedAt() : nil
+        let expired = saved != nil ? reauthAt() : nil
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(provider.displayName).font(.headline)
@@ -987,16 +1034,40 @@ private struct ProviderConfigPopover: View {
             }
 
             if hasCapture {
-                if let saved {
-                    HStack {
-                        Label("Signed in \(saved.formatted(.relative(presentation: .named)))",
-                              systemImage: "checkmark.circle.fill")
-                            .font(.caption).foregroundStyle(.green)
-                        Spacer()
-                        Button("Log out") { onLogOut() }.controlSize(.small)
+                if let saved, expired != nil {
+                    // The provider rejected the saved sign-in: nothing works
+                    // until it's redone, so this is the one thing to do here.
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Sign-in expired", systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout.weight(.semibold)).foregroundStyle(.orange)
+                        Text("\(provider.displayName) rejected the saved sign-in (from \(saved.formatted(.relative(presentation: .named)))). Sessions can't use it until you sign in again.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Button { onSignIn() } label: {
+                                Label("Sign in again", systemImage: "arrow.clockwise.circle")
+                            }
+                            .buttonStyle(.borderedProminent).tint(.orange)
+                            if onLogOut != nil {
+                                Button("Log out…") { confirmLogOut = true }
+                            }
+                        }
                     }
-                    Button("Sign in again…") { onSignIn() }
-                        .buttonStyle(.borderless).controlSize(.small)
+                    .padding(10)
+                    .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                } else if let saved {
+                    Label("Signed in \(saved.formatted(.relative(presentation: .named)))",
+                          systemImage: "checkmark.circle.fill")
+                        .font(.callout).foregroundStyle(.green)
+                    HStack {
+                        Button { onSignIn() } label: {
+                            Label("Sign in again…", systemImage: "arrow.clockwise")
+                        }
+                        if onLogOut != nil {
+                            Button("Log out…") { confirmLogOut = true }
+                        }
+                    }
+                    .controlSize(.small)
                 } else {
                     Button {
                         onSignIn()
@@ -1019,6 +1090,12 @@ private struct ProviderConfigPopover: View {
         .padding(16)
         .onReceive(NotificationCenter.default.publisher(for: .bromureSubscriptionStoresChanged)) { _ in
             tick &+= 1
+        }
+        .confirmationDialog("Log out of \(provider.displayName)?", isPresented: $confirmLogOut) {
+            Button("Log Out", role: .destructive) { onLogOut?() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Workspaces using this sign-in stop working until you sign in again.")
         }
     }
 }

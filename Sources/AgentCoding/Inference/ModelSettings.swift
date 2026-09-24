@@ -122,6 +122,20 @@ public enum ModelAgent: String, Codable, CaseIterable, Sendable {
     /// Only Claude Code resolves three distinct tiers (haiku/sonnet/opus). Every
     /// other agent is single-model and uses `medium` alone.
     public var usesAllTiers: Bool { self == .claude }
+
+    /// The provider this agent reaches on its own (no translation, no
+    /// gateway). With no model chosen, the agent runs on that provider with
+    /// its OWN default model — what its `/model` "Default" means — so picking
+    /// one is optional. nil for omp, whose provider is switchable.
+    public var nativeCloudProvider: ModelProvider? {
+        switch self {
+        case .claude: return .anthropic
+        case .codex:  return .openai
+        case .grok:   return .xai
+        case .kimi:   return .moonshot
+        case .omp:    return nil
+        }
+    }
 }
 
 /// A registered provider credential (global). Exactly one of an API key or a
@@ -377,6 +391,19 @@ public struct ModelSettings: Codable, Equatable, Sendable {
     /// Drop every override for an agent so it inherits the default entirely.
     public mutating func resetAgentOverrides(_ agent: ModelAgent) {
         agentTiers[agent] = nil
+    }
+
+    /// Drop every per-agent model that names the agent's own cloud provider
+    /// (Claude ← Anthropic, Codex ← OpenAI, …). Earlier builds pre-filled
+    /// these on sign-in, but the launch ignored them — a native agent always
+    /// ran its own default. Now that an explicit Claude choice is pinned at
+    /// launch, the stale pre-fills must go so upgrading changes nothing.
+    public mutating func dropNativeCloudAgentRefs() {
+        for agent in ModelAgent.allCases {
+            guard let native = agent.nativeCloudProvider, var t = agentTiers[agent] else { continue }
+            for (tier, ref) in t where ref.source == .provider(native) { t[tier] = nil }
+            agentTiers[agent] = t.isEmpty ? nil : t
+        }
     }
 
     /// The medium tier is the default any single-model agent uses; fall back to

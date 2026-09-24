@@ -58,10 +58,15 @@ struct SubscriptionReauthTests {
         // Compile-time coverage: every supported agent must have the pair, so
         // adding a provider without it fails here rather than silently
         // shipping an agent that can't report an expired sign-in.
-        let claude = ClaudeSubscriptionStore()
-        let codex = CodexSubscriptionStore()
-        let grok = GrokSubscriptionStore()
-        let kimi = KimiSubscriptionStore()
+        // Temp files: the default init is the USER'S real store, and flagging
+        // an unknown id resolves to (and would flag) their shared login.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sub-reauth-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let claude = ClaudeSubscriptionStore(fileURL: dir.appendingPathComponent("c.enc"))
+        let codex = CodexSubscriptionStore(fileURL: dir.appendingPathComponent("x.enc"))
+        let grok = GrokSubscriptionStore(fileURL: dir.appendingPathComponent("g.enc"))
+        let kimi = KimiSubscriptionStore(fileURL: dir.appendingPathComponent("k.enc"))
         let id = UUID()
         // No credential registered for a random id → nil, never a crash.
         #expect(claude.reauthRequiredAt(for: id) == nil)
