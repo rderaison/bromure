@@ -186,10 +186,20 @@ echo "bromure-ac" > /mnt/etc/hostname
 cat > /mnt/etc/hosts <<'EOH'
 127.0.0.1       localhost
 127.0.1.1       bromure-ac
-::1             localhost ip6-localhost ip6-loopback
+::1             ip6-localhost ip6-loopback
 ff02::1         ip6-allnodes
 ff02::2         ip6-allrouters
 EOH
+
+# No IPv6 in the guest: the host's v4-only NAT/filter path can't route a
+# v6 address, and a LAN that advertises v6 without working egress makes
+# every AAAA connect blackhole. With v6 off, `localhost` must resolve to
+# 127.0.0.1 only (tools that try ::1 first would stall on a dead address).
+mkdir -p /mnt/etc/sysctl.d
+cat > /mnt/etc/sysctl.d/99-bromure-noipv6.conf <<'EOSYSCTL'
+net.ipv6.conf.all.disable_ipv6=1
+net.ipv6.conf.default.disable_ipv6=1
+EOSYSCTL
 
 # Stash build-time vars so the chroot can read them back without us
 # having to interpolate through a quoted heredoc. ALPINE_REPO_BASE is

@@ -4614,8 +4614,10 @@ def task_apply_hostname():
     if not want or want == socket.gethostname():
         return
     # /etc/hosts first, so subsequent sudo calls can resolve the new name.
-    hosts = ("127.0.0.1\tlocalhost %s\n::1\tlocalhost %s\n127.0.1.1\t%s\n\n"
-             "# Bromure AC: managed at session boot.\n" % (want, want, want))
+    # No `localhost` on ::1: the guest runs without IPv6 (sysctl), and a
+    # tool that tries ::1 first would stall on a dead address.
+    hosts = ("127.0.0.1\tlocalhost %s\n127.0.1.1\t%s\n::1\tip6-localhost ip6-loopback\n\n"
+             "# Bromure AC: managed at session boot.\n" % (want, want))
     _sudo_write("/etc/hosts", hosts)
     _sudo(["hostname", want])
     _sudo_write("/etc/hostname", want + "\n")

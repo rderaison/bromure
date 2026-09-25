@@ -170,7 +170,7 @@ echo "bromure" > /mnt/etc/hostname
 cat > /mnt/etc/hosts <<'EOH'
 127.0.0.1       localhost
 127.0.1.1       bromure
-::1             localhost ip6-localhost ip6-loopback
+::1             ip6-localhost ip6-loopback
 EOH
 
 # The chroot needs a working resolver during the bake; the canonical
