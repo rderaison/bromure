@@ -1,21 +1,21 @@
 #if os(macOS)
 import Foundation
 
-// MARK: - Conductor MCP (vsock 5836)
+// MARK: - Switchboard MCP (vsock 5836)
 //
-// The Conductor's tools (Conductor.swift). Same transport as the delegation
+// The Switchboard's tools (Switchboard.swift). Same transport as the delegation
 // MCP — a stdio shim in the guest announces the tmux window it runs in, the
-// VM the connection came from fixes the workspace — but only the Conductor
+// VM the connection came from fixes the workspace — but only the Switchboard
 // session gets the shim on its command line (--mcp-config), and every call
-// is refused unless the caller IS the Conductor: any other tab that found
+// is refused unless the caller IS the Switchboard: any other tab that found
 // the shim on the meta share would be turned away here.
 
 @MainActor
-final class ConductorMCPServer: MCPLineHandler {
+final class SwitchboardMCPServer: MCPLineHandler {
     private let profileID: Profile.ID
-    private let engine: () -> ConductorEngine?
+    private let engine: () -> SwitchboardEngine?
 
-    init(profileID: Profile.ID, engine: @escaping () -> ConductorEngine?) {
+    init(profileID: Profile.ID, engine: @escaping () -> SwitchboardEngine?) {
         self.profileID = profileID
         self.engine = engine
     }
@@ -31,7 +31,7 @@ final class ConductorMCPServer: MCPLineHandler {
         case "initialize":
             return respond(id: id, result: [
                 "protocolVersion": "2025-03-26",
-                "serverInfo": ["name": "bromure-conductor", "version": "1.0.0"],
+                "serverInfo": ["name": "bromure-switchboard", "version": "1.0.0"],
                 "capabilities": ["tools": ["listChanged": false]],
                 "instructions": Self.serverInstructions,
             ])
@@ -52,7 +52,7 @@ final class ConductorMCPServer: MCPLineHandler {
     }
 
     static let serverInstructions = """
-    The Conductor's tools: see and drive every agent session on this Mac. \
+    The Switchboard's tools: see and drive every agent session on this Mac. \
     Your brief (CLAUDE.md in your folder) says how to use them. Answering a \
     blocked session, pressing keys at its prompt, and archiving need \
     on_behalf_of — the user's own words asking for it, quoted verbatim.
@@ -150,6 +150,13 @@ final class ConductorMCPServer: MCPLineHandler {
             ], "required": ["session"]],
         ],
         [
+            "name": "message_user",
+            "description": "Send a message to the user's phone (Signal or WhatsApp — the one they last wrote from). Use it to answer anything that came in as \"[Signal] …\" or \"[WhatsApp] …\", and to ping them when a session needs them while they're away. Short, plain text: no markdown, no tables.",
+            "inputSchema": ["type": "object", "properties": [
+                "text": ["type": "string"],
+            ], "required": ["text"]],
+        ],
+        [
             "name": "archive_session",
             "description": "Put a session away for the user: its agent stops, the conversation stays readable. Requires on_behalf_of.",
             "inputSchema": ["type": "object", "properties": [
@@ -160,10 +167,27 @@ final class ConductorMCPServer: MCPLineHandler {
     ]
 
     private func callTool(name: String, args: [String: Any], hello: String?) async -> [String: Any] {
-        guard let engine = engine() else { return errorResult("The Conductor isn't available on this host.") }
-        guard let w = DelegationMCPServer.windowIndex(fromHello: hello),
-              let me = engine.sessions.session(profileID: profileID, windowIndex: w), me.isConductor else {
-            return errorResult("These tools belong to the Conductor session only.")
+        guard let engine = engine() else { return errorResult("The Switchboard isn't available on this host.") }
+        guard let w = DelegationMCPServer.windowIndex(fromHello: hello) else {
+            return errorResult("These tools belong to the Switchboard session only.")
+        }
+        // Right after the app restarts (or the machine resumes), tab
+        // bindings are re-checked against the guest's boot before they're
+        // trusted again — a call in that window finds no session yet. Give
+        // the binding a moment rather than turning the Switchboard away.
+        var found = engine.sessions.session(profileID: profileID, windowIndex: w)
+        if found == nil {
+            for _ in 0..<15 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                found = engine.sessions.session(profileID: profileID, windowIndex: w)
+                if found != nil { break }
+            }
+        }
+        guard let me = found else {
+            return errorResult("Bromure is still reconnecting to this session (the app or the machine just restarted). Try again in a few seconds.")
+        }
+        guard me.isSwitchboard else {
+            return errorResult("These tools belong to the Switchboard session only.")
         }
         let iso = ISO8601DateFormatter()
         func session(_ key: String = "session") -> AgentSession? {
@@ -190,13 +214,25 @@ final class ConductorMCPServer: MCPLineHandler {
             return ["ok": true, "screen": await engine.screen(fresh, lines: 25) ?? "(no screen)"]
         }
 
+        // STOP from the phone: nothing that acts on a session until RESUME.
+        let acting: Set<String> = ["send_to_session", "answer_question", "press_keys",
+                                   "start_session", "resume_session", "archive_session"]
+        if engine.paused, acting.contains(name) {
+            return errorResult("The user paused you from their phone (STOP). You may answer questions, but don't act on any session until they send RESUME.")
+        }
         do {
             switch name {
+            case "message_user":
+                guard let text = (args["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !text.isEmpty else { return errorResult("text is required") }
+                if let why = await engine.messageUser(text) { return errorResult(why) }
+                return textResult("Sent.")
+
             case "list_sessions":
                 let all = (args["include_ended"] as? Bool) ?? false
                 let handles = engine.handles()
                 let list = engine.sessions.sessions
-                    .filter { !$0.isConductor && !$0.isDeleted }
+                    .filter { !$0.isSwitchboard && !$0.isDeleted }
                     .filter { s in
                         all || (!s.isArchived && ["needs_you", "working", "ready"].contains(state(s)))
                     }
@@ -216,13 +252,13 @@ final class ConductorMCPServer: MCPLineHandler {
                     // The last words only for sessions in flight — reading
                     // every transcript of every asleep session is slow.
                     if ["needs_you", "working", "ready"].contains(state(s)),
-                       let last = ConductorEngine.lastWords(await engine.transcript(s)) {
+                       let last = SwitchboardEngine.lastWords(await engine.transcript(s)) {
                         o["last_said"] = last
                     }
                     out.append(o)
                 }
                 let hidden = all ? 0 : engine.sessions.sessions
-                    .filter { !$0.isConductor && !$0.isDeleted }.count - list.count
+                    .filter { !$0.isSwitchboard && !$0.isDeleted }.count - list.count
                 engine.markAllSeen()
                 var res: [String: Any] = ["sessions": out]
                 if hidden > 0 { res["not_shown"] = "\(hidden) asleep, ended or archived — include_ended: true lists them" }
@@ -235,7 +271,7 @@ final class ConductorMCPServer: MCPLineHandler {
                 }
                 let items = await engine.transcript(s)
                 guard !items.isEmpty else { return textResult("(no transcript yet)") }
-                let text = ConductorEngine.render(items, turns: (args["turns"] as? Int) ?? 6,
+                let text = SwitchboardEngine.render(items, turns: (args["turns"] as? Int) ?? 6,
                                                   maxChars: (args["max_chars"] as? Int) ?? 6000)
                 return textResult("\(engine.label(s)) — \(state(s))\n\n" + text)
 
@@ -326,7 +362,7 @@ final class ConductorMCPServer: MCPLineHandler {
             default:
                 return errorResult("Unknown tool: \(name)")
             }
-        } catch ConductorEngine.ActError.refused(let why) {
+        } catch SwitchboardEngine.ActError.refused(let why) {
             return errorResult(why)
         } catch {
             return errorResult(error.localizedDescription)

@@ -38,7 +38,7 @@ public final class TraceStore {
     /// keyed by profile id. The UI uses it to animate the sidebar's thinking dots.
     @MainActor public var onConversationActivity: ((UUID) -> Void)?
     /// Every model-host response, with its host and HTTP status — what lets
-    /// the Conductor tell the user a session's key was refused.
+    /// the Switchboard tell the user a session's key was refused.
     @MainActor public var onConversationResult: ((UUID, String, Int) -> Void)?
 
     private let rootDir: URL

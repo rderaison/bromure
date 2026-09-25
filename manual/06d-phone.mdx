@@ -1,0 +1,63 @@
+---
+title: "From Your Phone"
+description: "Chat with Bromure about your sessions from Signal or WhatsApp: ask what's going on, answer a blocked session, start new work. Set up in File › Infrastructure › Signal / WhatsApp Connector."
+order: 6.8
+---
+
+# From Your Phone
+
+Once two or more sessions are running, a **Switchboard** row appears at the top of the Sessions list: one conversation that keeps track of all the others. It tells you what's working, what's stuck and what needs you; it carries your answers to the right session; and it can start, resume or put away sessions for you.
+
+You can also reach it from your phone, over **Signal** or **WhatsApp**:
+
+- *"what's going on?"* — a short status of every session in flight
+- *"api 2"* — answer a blocked session's question (it quotes the question and numbers the options for you)
+- *"start a codex session in infra to bump the coturn image"* — new work
+- **STOP** — the Switchboard stops acting on any session at once (it still answers questions); **RESUME** turns it back on
+
+The Switchboard never approves a permission prompt or answers a blocked session on its own: it only does so when you asked, and Bromure checks that your own words ask for it.
+
+## Setting it up
+
+Open **File › Infrastructure › Signal / WhatsApp Connector…** and click **Set Up the Connector**. Bromure creates a small machine of its own for it (listed under **Messaging** in the sidebar, with the other infrastructure). Your messaging account's keys live on that machine and nowhere else. It starts with Bromure and suspends when you quit, like a registry.
+
+Then click **Connect…** on Signal or WhatsApp and pick **where you want to chat with Bromure**:
+
+### Chat with yourself
+
+Bromure becomes a linked device of your own account, and you talk to it in your **"Message yourself"** chat (WhatsApp) or **"Note to Self"** (Signal).
+
+- Nothing else to set up: scan the QR code with your phone (**Settings › Linked devices › Link a device**). WhatsApp also offers a pairing code if scanning isn't practical.
+- **Replies don't notify you** — WhatsApp and Signal never notify you about your own chat. Open it to see them. (Bromure's replies start with ☎️.)
+- Only that chat reaches the Switchboard. A linked device receives your other conversations too (that's how linking works): they wait a few seconds in the connector's inbox, then are dropped — they never reach the Switchboard, and its log records only that a message was ignored, not what it said.
+
+### Chat with a Bromure contact
+
+Bromure uses a **second account** and shows up in your chats like a person, so its replies **notify you** like any message.
+
+**Signal** — you need a spare phone number that can receive one text or one call:
+
+1. Enter the spare number and click **Text Me a Code**.
+2. If Signal asks for a captcha, open its captcha page, solve it, right-click **Open Signal**, copy the link and paste it in.
+3. If no text arrives (landlines, some VoIP numbers), click **Call Me Instead** — Signal reads the code out. (Signal only calls a number it has tried to text first.)
+4. Enter the code, and your **own** Signal number: Bromure only answers messages from it.
+
+**WhatsApp** — Bromure can't create a WhatsApp account; it links to one you set up for it:
+
+1. Get a spare number: a second SIM or eSIM, or a landline (WhatsApp can verify it with a voice call).
+2. Install **WhatsApp Business** — it runs next to your regular WhatsApp on the same phone — and register it with the spare number.
+3. In Bromure, enter your **personal** WhatsApp number (Bromure only answers it), then scan the QR code with **WhatsApp Business** (**Settings › Linked devices**).
+
+Then write to that contact from your personal WhatsApp.
+
+> **WhatsApp note:** WhatsApp doesn't officially support linking a device this way, and may disconnect it. Signal is the more dependable channel.
+
+## Checking it works
+
+After connecting, **Send a Test Message**. With *Chat with yourself* it lands silently in your own chat — open it to check. The connector's **Log** (at the bottom of its window) records every message sent and every message ignored, without their content.
+
+## Privacy and security
+
+- Only you reach the Switchboard: your own number (a Bromure contact) or your own self-chat. Anything else is dropped by the connector before the Switchboard could see it; the log notes that a message was ignored, never its content.
+- Your messaging keys stay on the connector's machine; the rest of Bromure never holds them. Removing the connector deletes them.
+- What the Switchboard sends you is only what it chooses to relay; credentials inside your workspaces are stand-ins, never the real secrets.

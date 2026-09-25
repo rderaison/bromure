@@ -656,6 +656,11 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                      keyEquivalent: "")
     newRegistryItem.target = delegate
     infraMenu.addItem(newRegistryItem)
+    let connectorItem = NSMenuItem(title: L("Signal / WhatsApp Connector…"),
+                                   action: #selector(ACAppDelegate.showConnectorAction(_:)),
+                                   keyEquivalent: "")
+    connectorItem.target = delegate
+    infraMenu.addItem(connectorItem)
     let infraItem = NSMenuItem(title: L("Infrastructure"), action: nil, keyEquivalent: "")
     infraItem.submenu = infraMenu
     wsMenu.addItem(infraItem)
@@ -1679,12 +1684,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return e
     }()
 
-    /// The Conductor: one session that keeps track of all the others
-    /// (Conductor.swift).
-    private(set) lazy var conductorEngine: ConductorEngine = {
-        let e = ConductorEngine(sessions: agentSessionStore, sessionEngine: agentSessionEngine, delegate: self)
+    /// The Switchboard: one session that keeps track of all the others
+    /// (Switchboard.swift).
+    private(set) lazy var switchboardEngine: SwitchboardEngine = {
+        let e = SwitchboardEngine(sessions: agentSessionStore, sessionEngine: agentSessionEngine, delegate: self)
         e.profiles = { [weak self] in self?.profiles ?? [] }
         e.listModel = { [weak self] in self?.unifiedWindow?.listModel }
+        e.sendToPhone = { [weak self] text, kind in
+            await self?.kubeClusterEngine.sendToUser(text, via: kind) ?? false
+        }
+        e.phoneLinked = { [weak self] in !(self?.kubeClusterStore.connector?.channels.isEmpty ?? true) }
         return e
     }()
 
@@ -1721,8 +1730,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Kubernetes clusters — shared machines (node VMs) next to the
     /// workspaces; see KubeCluster.swift / KubeClusterEngine.swift.
     let kubeClusterStore = KubeClusterStore()
-    private(set) lazy var kubeClusterEngine =
-        KubeClusterEngine(app: self, store: kubeClusterStore)
+    private(set) lazy var kubeClusterEngine: KubeClusterEngine = {
+        let e = KubeClusterEngine(app: self, store: kubeClusterStore)
+        // The user's phone (Signal / WhatsApp connector) talks to the Switchboard.
+        e.onConnectorMessage = { [weak self] kind, text in
+            self?.switchboardEngine.phoneMessage(kind, text)
+        }
+        return e
+    }()
 
     /// Profiles created with `vm run --rm`: deleted (profile + disk) when their
     /// VM stops, mirroring `docker run --rm`.
@@ -1860,7 +1875,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.noteAgentActivity(pid)
             }
             e.traceStore.onConversationResult = { [weak self] pid, host, status in
-                self?.conductorEngine.noteAPIResult(profileID: pid, host: host, status: status)
+                self?.switchboardEngine.noteAPIResult(profileID: pid, host: host, status: status)
             }
             // Detailed HTTP logs → analytics.bromure.io/session_events,
             // same wire shape + admin view as the Web browser. Enrollment-
@@ -1953,6 +1968,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }()
     lazy var kubeRegistryScriptURL: URL? = {
         acResourceBundle.url(forResource: "vm-setup/bromure-registry", withExtension: "sh")
+    }()
+    /// The Signal / WhatsApp connector's guest script + relay.
+    lazy var connectorScriptURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/bromure-msgbridge", withExtension: "sh")
+    }()
+    lazy var connectorRelayURL: URL? = {
+        acResourceBundle.url(forResource: "vm-setup/bromure-msgbridge", withExtension: "py")
     }()
 
     /// Live host→guest loopback forwarders, one per detected OAuth login.
@@ -2301,7 +2323,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// and registries this workspace may use, and creating new ones.
     var kubeMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
     var delegationMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
-    var conductorMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
+    var switchboardMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
     /// Plan-stream listeners (vsock 5832), one per running workspace — the
     /// streamed planning drivers connect here (see PlanEventBridge).
     var planEventBridges: [Profile.ID: PlanEventBridge] = [:]
@@ -2660,9 +2682,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // routes fires missed while the app was quit through each
         // automation's missed-run policy.
         scheduledAutomationEngine.start()
-        // The Conductor's event log follows every session from launch on
+        // The Switchboard's event log follows every session from launch on
         // (its tick starts with the engine).
-        _ = conductorEngine
+        _ = switchboardEngine
         // Kubernetes clusters flagged to start with the app boot a few
         // seconds in, once the switch + control plane are settled.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
@@ -4094,31 +4116,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         openingMessage: body["message"] as? String,
                         attachments: attachments), remotely: true)
                     return ["ok": true, "id": sid.uuidString]
-                case (nil, "conductor"):
-                    // The Conductor, started (or woken) for a client that
+                case (nil, "switchboard"):
+                    // The Switchboard, started (or woken) for a client that
                     // clicked its row: {profile?} picks the workspace.
                     let preferred = (body["profile"] as? String).flatMap { key in
                         self.profiles.first { $0.id.uuidString == key || $0.name.lowercased() == key.lowercased() }?.id
                     }
-                    guard let cid = self.conductorEngine.ensureConductor(preferred: preferred, remotely: true)
-                    else { return ["error": "no workspace to run the Conductor in"] }
+                    guard let cid = self.switchboardEngine.ensureSwitchboard(preferred: preferred, remotely: true)
+                    else { return ["error": "no workspace to run the Switchboard in"] }
                     return ["ok": true, "id": cid.uuidString]
                 case (let sid?, "send"):
                     // {text}: typed into the live prompt (long text lands in
                     // the session's inbox with a pointer), or a resume with it.
                     guard let s = self.agentSessionStore.session(sid) else { return ["error": "unknown session"] }
                     guard let text = body["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
-                    let engine = self.conductorEngine
+                    let engine = self.switchboardEngine
                     Task { try? await engine.send(s, text) }
                     return ["ok": true]
                 case (let sid?, "keys"):
-                    // {keys: [...]}: named keys only (ConductorEngine.allowedKeys).
+                    // {keys: [...]}: named keys only (SwitchboardEngine.allowedKeys).
                     guard let s = self.agentSessionStore.session(sid) else { return ["error": "unknown session"] }
                     let keys = (body["keys"] as? [String]) ?? []
-                    guard !keys.isEmpty, keys.allSatisfy(ConductorEngine.allowedKeys.contains), keys.count <= 12 else {
-                        return ["error": "keys must be 1–12 of " + ConductorEngine.allowedKeys.sorted().joined(separator: " ")]
+                    guard !keys.isEmpty, keys.allSatisfy(SwitchboardEngine.allowedKeys.contains), keys.count <= 12 else {
+                        return ["error": "keys must be 1–12 of " + SwitchboardEngine.allowedKeys.sorted().joined(separator: " ")]
                     }
-                    let engine = self.conductorEngine
+                    let engine = self.switchboardEngine
                     Task { try? await engine.press(s, keys) }
                     return ["ok": true]
                 case (let sid?, "resume"):
@@ -4204,9 +4226,63 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let live = await self.fetchSessionTranscript(s), !live.isEmpty { return Data(live.utf8) }
             return await MainActor.run { self.agentSessionEngine.transcripts.load(s.id) }
         }
+        // The Signal / WhatsApp connector: POST /connector {action: create |
+        // start | stop | restart | delete | status | send {text, channel?} |
+        // inject {channel, text, from?, noteToSelf?, fromMe?, chat?}}.
+        // `inject` (debug builds / trusted local only) runs a fake inbound
+        // message through the same user filter and delivery as a real one.
+        server.onConnectorCommand = { [weak self] doc in
+            guard let self else { return ["ok": false, "error": "no app"] }
+            let engine = self.kubeClusterEngine
+            let action = doc["action"] as? String ?? "status"
+            if action == "create" {
+                let c = engine.ensureConnector()
+                return ["ok": true, "id": c.id.uuidString]
+            }
+            guard let c = self.kubeClusterStore.connector else { return ["ok": false, "error": "no connector"] }
+            switch action {
+            case "start": engine.startConnector(c.id)
+            case "stop": Task { await engine.stopConnector(c.id) }
+            case "restart": engine.restartConnector(c.id)
+            case "delete": Task { await engine.deleteConnector(c.id) }
+            case "status":
+                let st = self.kubeClusterStore.status(c.id)
+                var o: [String: Any] = ["ok": true, "id": c.id.uuidString, "phase": "\(st.phase)",
+                                        "step": st.step ?? "", "message": st.message ?? "",
+                                        "log": Array(st.log.suffix(40)),
+                                        "channels": c.channels.map { ["kind": $0.kind.rawValue, "mode": $0.mode.rawValue] }]
+                if let i = st.connector {
+                    o["info"] = ["signalUp": i.signalUp, "whatsappUp": i.whatsappUp,
+                                 "whatsappLoggedIn": i.whatsappLoggedIn, "signalAccounts": i.signalAccounts]
+                }
+                return o
+            case "send":
+                let kind = (doc["channel"] as? String).flatMap(ConnectorChannel.Kind.init(rawValue:))
+                let text = doc["text"] as? String ?? ""
+                Task { _ = await engine.sendToUser(text, via: kind) }
+            case "inject":
+                guard let kind = (doc["channel"] as? String).flatMap(ConnectorChannel.Kind.init(rawValue:)),
+                      let text = doc["text"] as? String else { return ["ok": false, "error": "channel and text required"] }
+                engine.injectConnectorMessage(kind, doc)
+                _ = text
+            case "set-channel":
+                // Test hook: record a channel as connected without a phone.
+                guard let kind = (doc["channel"] as? String).flatMap(ConnectorChannel.Kind.init(rawValue:)),
+                      let mode = (doc["mode"] as? String).flatMap(ConnectorChannel.Mode.init(rawValue:))
+                else { return ["ok": false, "error": "channel and mode required"] }
+                var cc = c
+                let ch = ConnectorChannel(kind: kind, mode: mode, account: doc["account"] as? String,
+                                          allowed: (doc["allowed"] as? [String]) ?? [], connected: true)
+                if kind == .signal { cc.signal = ch } else { cc.whatsapp = ch }
+                self.kubeClusterStore.upsert(cc)
+            default:
+                return ["ok": false, "error": "unknown action \(action)"]
+            }
+            return ["ok": true]
+        }
         server.onAgentSessionPending = { [weak self] sid in
             guard let self, let s = await MainActor.run(body: { self.agentSessionStore.session(sid) }) else { return nil }
-            return await self.conductorEngine.pending(s)
+            return await self.switchboardEngine.pending(s)
         }
         server.onAgentSessionFolders = { [weak self] key, path in
             guard let self else { return nil }
@@ -6588,6 +6664,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSApp.setActivationPolicy(.regular)
         w.makeKeyAndOrderFront(nil)
         w.showNewKubeCluster()
+    }
+
+    @objc func showConnectorAction(_ sender: Any?) {
+        NSApp.setActivationPolicy(.regular)
+        ConnectorWindowController.show()
     }
 
     @objc func newRegistryAction(_ sender: Any?) {
@@ -9479,14 +9560,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         sessions: { [weak self] in self?.agentSessionStore },
                         engine: { [weak self] in self?.delegationEngine }),
                     port: SessionDisk.delegationMCPVsockPort)
-                // Conductor MCP listener (vsock 5836): only the Conductor's
+                // Switchboard MCP listener (vsock 5836): only the Switchboard's
                 // tab is launched with its shim, and only it is answered.
-                self.conductorMCPBridges[pid] = TaskMCPVsockBridge(
+                self.switchboardMCPBridges[pid] = TaskMCPVsockBridge(
                     socketDevice: dev,
-                    server: ConductorMCPServer(
+                    server: SwitchboardMCPServer(
                         profileID: pid,
-                        engine: { [weak self] in self?.conductorEngine }),
-                    port: SessionDisk.conductorMCPVsockPort)
+                        engine: { [weak self] in self?.switchboardEngine }),
+                    port: SessionDisk.switchboardMCPVsockPort)
                 // Plan-stream listener (vsock 5832): streamed planning
                 // drivers (claude SDK / codex app-server / grok ACP).
                 let planBridge = PlanEventBridge(socketDevice: dev)
@@ -11877,8 +11958,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         kubeMCPBridges.removeValue(forKey: profile.id)
         delegationMCPBridges[profile.id]?.stop()
         delegationMCPBridges.removeValue(forKey: profile.id)
-        conductorMCPBridges[profile.id]?.stop()
-        conductorMCPBridges.removeValue(forKey: profile.id)
+        switchboardMCPBridges[profile.id]?.stop()
+        switchboardMCPBridges.removeValue(forKey: profile.id)
         planEventBridges[profile.id]?.stop()
         planEventBridges.removeValue(forKey: profile.id)
         planStreamHub.removeSessions(profileID: profile.id)
@@ -12636,13 +12717,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         sessions: { [weak self] in self?.agentSessionStore },
                         engine: { [weak self] in self?.delegationEngine }),
                     port: SessionDisk.delegationMCPVsockPort)
-                // Conductor MCP listener (vsock 5836) — see the warm-boot path.
-                self.conductorMCPBridges[pid] = TaskMCPVsockBridge(
+                // Switchboard MCP listener (vsock 5836) — see the warm-boot path.
+                self.switchboardMCPBridges[pid] = TaskMCPVsockBridge(
                     socketDevice: dev,
-                    server: ConductorMCPServer(
+                    server: SwitchboardMCPServer(
                         profileID: pid,
-                        engine: { [weak self] in self?.conductorEngine }),
-                    port: SessionDisk.conductorMCPVsockPort)
+                        engine: { [weak self] in self?.switchboardEngine }),
+                    port: SessionDisk.switchboardMCPVsockPort)
                 // Plan-stream listener (vsock 5832) — see the matching block
                 // on the warm-boot path.
                 let planBridge = PlanEventBridge(socketDevice: dev)

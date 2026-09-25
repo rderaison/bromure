@@ -142,7 +142,7 @@ Bromure Agentic Coding opens no fixed inbound ports by default. The two optional
 | dynamic | Local-inference tool-call repair proxy. | `127.0.0.1`. |
 | ephemeral | Per-remote-host SOCKS5 forwarder used by the rich client's browser pane. | Bound `0.0.0.0` but peer-filtered to loopback plus `192.168.127.x`. |
 
-Two loopback endpoints exist *inside* the guest, not on the Mac: `127.0.0.1:8080` (the in-VM HTTP(S) proxy every shell exports as `HTTPS_PROXY`) and `127.0.0.1:11434` (where the on-host local inference engine appears, via a vsock bridge).
+Two loopback endpoints exist *inside* the guest, not on the Mac: `127.0.0.1:65534` (the in-VM HTTP(S) proxy every shell exports as `HTTPS_PROXY`) and `127.0.0.1:11434` (where the on-host local inference engine appears, via a vsock bridge).
 
 Installation itself opens no TCP ports; the base-image build's package proxy binds an ephemeral localhost port per build.
 
@@ -246,7 +246,7 @@ Inside a running workspace VM you are `ubuntu`, an ordinary user (`sudo`-capable
 
 | Variable | Value / effect |
 |---|---|
-| `http_proxy`, `https_proxy`, `HTTPS_PROXY` | `http://127.0.0.1:8080` — the in-VM bridge that carries all guest HTTPS to the host MITM proxy. |
+| `http_proxy`, `https_proxy`, `HTTPS_PROXY` | `http://127.0.0.1:65534` — the in-VM bridge that carries all guest HTTPS to the host MITM proxy. |
 | `NO_PROXY` | `localhost,127.0.0.1,::1`. |
 | `SSH_AUTH_SOCK` | `/tmp/bromure-agent.sock` — bridged over vsock to the host ssh-agent (only per-workspace and explicitly-imported keys are reachable; your macOS login agent is never exposed). |
 | CA bundle variables | The re-signing root CA is trusted through the standard bundle variables for node, python, go, rust, curl, deno, and the AWS SDK. |

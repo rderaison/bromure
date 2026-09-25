@@ -1,23 +1,23 @@
 #if os(macOS)
 import Foundation
 
-// MARK: - Conductor (macOS)
+// MARK: - Switchboard (macOS)
 //
 // One agent session that keeps track of all the others: what's running,
 // what's stuck, what needs the user; it relays their answers and starts,
-// resumes or puts away sessions for them (CONDUCTOR_PLAN.md). Underneath
+// resumes or puts away sessions for them (SWITCHBOARD_PLAN.md). Underneath
 // it's an ordinary Claude session with a role — its own folder
-// (~/.bromure/conductor, whose CLAUDE.md is its brief) in one of the
-// user's workspaces, launched with the `bromure-conductor` MCP on its
-// command line (vsock 5836, ConductorMCPServer) so no other session ever
+// (~/.bromure/switchboard, whose CLAUDE.md is its brief) in one of the
+// user's workspaces, launched with the `bromure-switchboard` MCP on its
+// command line (vsock 5836, SwitchboardMCPServer) so no other session ever
 // sees those tools. The host keeps the event log the tools read, wakes the
-// Conductor with a one-line notice when something worth its attention
+// Switchboard with a one-line notice when something worth its attention
 // happens (the delegation engine's pattern — no long-poll, so a message
 // the user types is never stuck behind a blocked tool call), and checks
-// every answer the Conductor types into a blocked session against the
-// user's own words in the Conductor's conversation.
+// every answer the Switchboard types into a blocked session against the
+// user's own words in the Switchboard's conversation.
 
-struct ConductorEvent {
+struct SwitchboardEvent {
     enum Kind: String {
         case sessionStarted = "session_started"
         case sessionNeedsYou = "session_needs_you"
@@ -31,42 +31,51 @@ struct ConductorEvent {
     /// nil when the event is about a workspace, not one session.
     let sessionID: UUID?
     let text: String
-    /// Worth waking the Conductor for.
+    /// Worth waking the Switchboard for.
     let notable: Bool
 }
 
 @MainActor
-final class ConductorEngine {
+final class SwitchboardEngine {
     weak var delegate: ACAppDelegate?
     let sessions: AgentSessionStore
     let sessionEngine: AgentSessionEngine
     var profiles: () -> [Profile] = { [] }
     var listModel: () -> SessionListModel? = { nil }
+    /// The user's phone (MessagingConnectorEngine): send on a channel (nil =
+    /// whichever is connected); whether any channel is connected.
+    var sendToPhone: ((String, ConnectorChannel.Kind?) async -> Bool)?
+    var phoneLinked: () -> Bool = { false }
+    /// The channel the user last wrote from — where replies go.
+    private(set) var lastPhoneChannel: ConnectorChannel.Kind?
+    /// STOP from the phone: the Switchboard's act-tools refuse until RESUME.
+    /// Decided here, before the model ever sees the message.
+    private(set) var paused = false
 
-    /// The Conductor's folder in the guest; its CLAUDE.md is the brief.
-    static let folder = "~/.bromure/conductor"
+    /// The Switchboard's folder in the guest; its CLAUDE.md is the brief.
+    static let folder = "~/.bromure/switchboard"
     /// The guest-side MCP config (staged in the meta share by SessionDisk)
     /// and the allow rule that lets its tools run without a prompt each.
-    static let launchFlags = "--mcp-config \(SessionDisk.conductorMCPConfigGuestPath) --allowedTools mcp__conductor"
+    static let launchFlags = "--mcp-config \(SessionDisk.switchboardMCPConfigGuestPath) --allowedTools mcp__switchboard"
     /// Notices start with this, so the provenance check can tell them from
     /// what the user typed.
-    static let noticePrefix = "[Conductor]"
-    static let kickoff = "You are the Conductor — your brief is CLAUDE.md in this folder. Start by calling list_sessions and give me a short status (a few lines), then end your turn."
+    static let noticePrefix = "[Switchboard]"
+    static let kickoff = "You are the Switchboard — your brief is CLAUDE.md in this folder. Start by calling list_sessions and give me a short status (a few lines), then end your turn."
 
-    private(set) var events: [ConductorEvent] = []
+    private(set) var events: [SwitchboardEvent] = []
     private var nextSeq = 1
     /// Highest event seq `next_events` has handed out.
     private var consumedSeq = 0
     private var lastBuckets: [UUID: SessionBucket] = [:]
     private var primed = false
-    /// Sessions the Conductor acted on or started — their completion is
+    /// Sessions the Switchboard acted on or started — their completion is
     /// worth a notice.
     private var touched: Set<UUID> = []
     /// When a session turned "needs you" (the event waits for it to hold),
     /// and the sessions already reported — not reported again until they
     /// have worked in between. An idle agent's status can flap back to
     /// "needs you" with nothing on its screen; each flap used to wake the
-    /// Conductor for nothing.
+    /// Switchboard for nothing.
     private var needsYouSince: [UUID: Date] = [:]
     private var needsYouReported: Set<UUID> = []
     static let needsYouHold: TimeInterval = 8
@@ -91,16 +100,16 @@ final class ConductorEngine {
         }
     }
 
-    // MARK: The Conductor session
+    // MARK: The Switchboard session
 
-    var conductor: AgentSession? { ConductorGate.conductor(in: sessions.sessions) }
+    var switchboard: AgentSession? { SwitchboardGate.switchboard(in: sessions.sessions) }
 
-    /// The Conductor, started (or brought back) when need be: in
+    /// The Switchboard, started (or brought back) when need be: in
     /// `preferred`'s workspace, else where the user was last active, else
     /// the first workspace. nil when there's no workspace at all.
     @discardableResult
-    func ensureConductor(preferred: UUID? = nil, remotely: Bool = false) -> UUID? {
-        if let c = conductor {
+    func ensureSwitchboard(preferred: UUID? = nil, remotely: Bool = false) -> UUID? {
+        if let c = switchboard {
             if c.isArchived { sessionEngine.unarchive(c.id) }
             let model = listModel()
             let bucket = model.map { SessionHome.bucket(for: c, in: $0) }
@@ -110,7 +119,7 @@ final class ConductorEngine {
             return c.id
         }
         let recent = sessions.sessions
-            .filter { !$0.isConductor && !$0.isDeleted }
+            .filter { !$0.isSwitchboard && !$0.isDeleted }
             .max { SessionHome.lastActivity($0) < SessionHome.lastActivity($1) }
         let all = profiles()
         guard let pid = preferred.flatMap({ id in all.first { $0.id == id }?.id })
@@ -118,18 +127,18 @@ final class ConductorEngine {
         let id = sessionEngine.start(.init(
             profileID: pid, tool: .claude, cwd: Self.folder,
             openingMessage: Self.kickoff,
-            title: NSLocalizedString("Conductor", comment: "conductor session title"),
-            role: AgentSession.conductorRole), remotely: remotely)
+            title: NSLocalizedString("Switchboard", comment: "switchboard session title"),
+            role: AgentSession.switchboardRole), remotely: remotely)
         sessions.mutate(id) { $0.userTitled = true }
-        BACDebug.log("conductor", "started in workspace \(pid)")
+        BACDebug.log("switchboard", "started in workspace \(pid)")
         return id
     }
 
-    /// The shell line that writes the brief into the Conductor's folder
+    /// The shell line that writes the brief into the Switchboard's folder
     /// before its agent starts (AgentSessionEngine.launch).
     static func briefCommand(guestFolder: String) -> String {
         let q = "'" + guestFolder.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        let b64 = Data(ConductorBrief.text.utf8).base64EncodedString()
+        let b64 = Data(SwitchboardBrief.text.utf8).base64EncodedString()
         return "mkdir -p \(q) && echo \(b64) | base64 -d > \(q)/CLAUDE.md"
     }
 
@@ -138,7 +147,7 @@ final class ConductorEngine {
     private func tick() {
         guard let model = listModel() else { return }
         var seen: Set<UUID> = []
-        for s in sessions.sessions where !s.isConductor && !s.isDeleted && !s.isArchived {
+        for s in sessions.sessions where !s.isSwitchboard && !s.isDeleted && !s.isArchived {
             seen.insert(s.id)
             let b = SessionHome.bucket(for: s, in: model)
             let prev = lastBuckets[s.id]
@@ -177,15 +186,15 @@ final class ConductorEngine {
         deliverNotice()
     }
 
-    private func append(_ kind: ConductorEvent.Kind, _ s: AgentSession?, _ text: String, notable: Bool) {
-        events.append(ConductorEvent(seq: nextSeq, at: Date(), kind: kind, sessionID: s?.id,
+    private func append(_ kind: SwitchboardEvent.Kind, _ s: AgentSession?, _ text: String, notable: Bool) {
+        events.append(SwitchboardEvent(seq: nextSeq, at: Date(), kind: kind, sessionID: s?.id,
                                      text: text, notable: notable))
         nextSeq += 1
         if events.count > Self.eventCap { events.removeFirst(events.count - Self.eventCap) }
-        BACDebug.log("conductor", "event: \(text)")
+        BACDebug.log("switchboard", "event: \(text)")
     }
 
-    /// The Conductor just looked at everything (list_sessions): what was
+    /// The Switchboard just looked at everything (list_sessions): what was
     /// pending is no longer news, so no notice wakes it for that.
     func markAllSeen() {
         consumedSeq = max(consumedSeq, nextSeq - 1)
@@ -197,7 +206,7 @@ final class ConductorEngine {
     /// workspace, not the tab, so the session is named when only one of
     /// that workspace's sessions was working; otherwise the workspace is.
     /// Once per workspace per 10 minutes (per status), so a retry loop
-    /// doesn't flood the Conductor.
+    /// doesn't flood the Switchboard.
     func noteAPIResult(profileID: UUID, host: String, status: Int) {
         guard [401, 402, 403].contains(status) else { return }
         if let last = apiRefusals[profileID], last.status == status,
@@ -236,7 +245,7 @@ final class ConductorEngine {
 
     /// Events after `cursor` (default: what `next_events` hasn't handed out
     /// yet), waiting up to `timeout` for one when there's none.
-    func nextEvents(after cursor: Int?, timeout: TimeInterval) async -> [ConductorEvent] {
+    func nextEvents(after cursor: Int?, timeout: TimeInterval) async -> [SwitchboardEvent] {
         let from = cursor ?? consumedSeq
         let deadline = Date().addingTimeInterval(min(max(timeout, 0), 60))
         while true {
@@ -251,12 +260,12 @@ final class ConductorEngine {
         }
     }
 
-    /// Wake the Conductor with one line when events worth its attention
+    /// Wake the Switchboard with one line when events worth its attention
     /// are waiting and its prompt is free. Nothing is typed while it's
     /// mid-turn (it reads events when it acts anyway), asleep, or asking
     /// the user something.
     private func deliverNotice() {
-        guard let c = conductor, !c.isLaunching, !c.hasEnded, c.agentAlive == true,
+        guard let c = switchboard, !c.isLaunching, !c.hasEnded, c.agentAlive == true,
               let w = c.windowIndex, let delegate else { return }
         let pending = events.filter { $0.seq > consumedSeq && $0.notable }
         guard let newest = pending.last, newest.seq > noticedUpTo else { return }
@@ -275,14 +284,101 @@ final class ConductorEngine {
         }
     }
 
+    // MARK: The phone
+
+    static func phoneLabel(_ kind: ConnectorChannel.Kind) -> String {
+        kind == .signal ? "Signal" : "WhatsApp"
+    }
+
+    /// A message from the user's phone (already checked to be theirs).
+    /// STOP / RESUME are handled right here; anything else is typed into
+    /// the Switchboard as "[Signal] …" — a turn the user said, as far as the
+    /// provenance check goes — starting or waking the Switchboard if need be.
+    func phoneMessage(_ kind: ConnectorChannel.Kind, _ text: String) {
+        lastPhoneChannel = kind
+        let word = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/.!"))
+        if word == "stop" {
+            paused = true
+            BACDebug.log("switchboard", "paused from \(Self.phoneLabel(kind))")
+            if let c = switchboard, let w = c.windowIndex, c.agentAlive == true, let delegate {
+                Task { _ = try? await delegate.guestExec(profileID: c.profileID,
+                                                         command: "tmux send-keys -t bromure:\(w) Escape", timeout: 10) }
+            }
+            Task { _ = await sendToPhone?("Paused — I won't act on any session. Send RESUME to continue.", kind) }
+            return
+        }
+        if word == "resume" {
+            paused = false
+            BACDebug.log("switchboard", "resumed from \(Self.phoneLabel(kind))")
+            Task { _ = await sendToPhone?("Resumed.", kind) }
+            return
+        }
+        // One line: a newline would submit the prompt half-way.
+        let flat = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }.joined(separator: " / ")
+        let line = "[\(Self.phoneLabel(kind))] " + String(flat.prefix(1500))
+        // An existing Switchboard is woken by exactly one resume — the one that
+        // carries the message. (ensureSwitchboard would resume it too, and two
+        // relaunches typed at once interleave their keystrokes on one line.)
+        let existing = switchboard
+        if let e = existing, e.isArchived { sessionEngine.unarchive(e.id) }
+        guard let id = existing?.id ?? ensureSwitchboard(), let c = sessions.session(id) else {
+            Task { _ = await sendToPhone?("There's no workspace to run the Switchboard in.", kind) }
+            return
+        }
+        if existing == nil {
+            deliverAfterLaunch(id, line)
+        } else if let w = c.windowIndex, !c.hasEnded, c.agentAlive == true, !c.isLaunching, let delegate {
+            // Typed even mid-turn: the agent queues it for its next turn.
+            Task {
+                _ = try? await delegate.guestExec(profileID: c.profileID,
+                                                  command: CodingTaskEngine.typeCommand(tabIndex: w, text: line),
+                                                  timeout: 15)
+            }
+        } else if c.isLaunching {
+            deliverAfterLaunch(id, line)
+        } else {
+            sessionEngine.resume(id, message: line, quietly: true)
+        }
+    }
+
+    /// A Switchboard just being started: type the message once its agent runs.
+    private func deliverAfterLaunch(_ id: UUID, _ line: String) {
+        Task { [weak self] in
+            for _ in 0..<120 {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self, let c = self.sessions.session(id) else { return }
+                if let w = c.windowIndex, c.agentAlive == true, !c.isLaunching, let delegate = self.delegate {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    _ = try? await delegate.guestExec(profileID: c.profileID,
+                                                      command: CodingTaskEngine.typeCommand(tabIndex: w, text: line),
+                                                      timeout: 15)
+                    return
+                }
+            }
+        }
+    }
+
+    /// Reply on the phone (the channel the user last wrote from).
+    func messageUser(_ text: String) async -> String? {
+        guard phoneLinked() else {
+            return "No phone is connected (File › Infrastructure › Signal / WhatsApp Connector). Answer in this conversation instead."
+        }
+        guard let send = sendToPhone, await send(text, lastPhoneChannel) else {
+            return "The message didn't go out — the connector may be stopped or the account disconnected."
+        }
+        return nil
+    }
+
     // MARK: Addressing sessions
 
-    /// What the Conductor and the user call a session: its @nickname when it
+    /// What the Switchboard and the user call a session: its @nickname when it
     /// has one, else a slug of its title (made unique).
     func handles() -> [UUID: String] {
         var out: [UUID: String] = [:]
         var taken: Set<String> = []
-        let list = sessions.sessions.filter { !$0.isConductor && !$0.isDeleted }
+        let list = sessions.sessions.filter { !$0.isSwitchboard && !$0.isDeleted }
             .sorted { $0.createdAt < $1.createdAt }
         for s in list {
             if let n = s.nickname, !n.isEmpty { out[s.id] = n; taken.insert(n.lowercased()) }
@@ -309,7 +405,7 @@ final class ConductorEngine {
     func resolve(_ key: String) -> AgentSession? {
         let k = key.trimmingCharacters(in: .whitespaces)
         let bare = k.hasPrefix("@") ? String(k.dropFirst()) : k
-        let candidates = sessions.sessions.filter { !$0.isConductor && !$0.isDeleted }
+        let candidates = sessions.sessions.filter { !$0.isSwitchboard && !$0.isDeleted }
         if let id = UUID(uuidString: bare), let s = candidates.first(where: { $0.id == id }) { return s }
         let hs = handles()
         if let s = candidates.first(where: { hs[$0.id]?.lowercased() == bare.lowercased() }) { return s }
@@ -439,12 +535,12 @@ final class ConductorEngine {
         markTouched(s.id)
         var line = trimmed
         if trimmed.contains("\n") || trimmed.count > 400 {
-            let dir = "/home/ubuntu/.bromure/inbox/conductor-\(Int(Date().timeIntervalSince1970))"
+            let dir = "/home/ubuntu/.bromure/inbox/switchboard-\(Int(Date().timeIntervalSince1970))"
             let b64 = Data(trimmed.utf8).base64EncodedString()
             _ = try await delegate.guestExec(
                 profileID: s.profileID,
                 command: "mkdir -p \(dir) && echo \(b64) | base64 -d > \(dir)/message.md", timeout: 20)
-            line = "A message from the user (relayed by the Conductor) is in \(dir)/message.md — read it and act on it."
+            line = "A message from the user (relayed by the Switchboard) is in \(dir)/message.md — read it and act on it."
         }
         let live = s.windowIndex != nil && !s.hasEnded && s.agentAlive != false
             && (bucket(s).map { $0 != .asleep && $0 != .ended } ?? true)
@@ -457,7 +553,7 @@ final class ConductorEngine {
         }
     }
 
-    /// Named keys the Conductor may press: enough to answer a TUI prompt,
+    /// Named keys the Switchboard may press: enough to answer a TUI prompt,
     /// nothing that can smuggle arbitrary text or escape sequences.
     static let allowedKeys: Set<String> = [
         "Enter", "Escape", "Tab", "BTab", "Space", "BSpace", "Up", "Down", "Left", "Right",
@@ -480,16 +576,16 @@ final class ConductorEngine {
     // MARK: Provenance
 
     /// An answer typed into a blocked session, keys pressed at one of its
-    /// prompts, a session put away — the Conductor may only do these for
+    /// prompts, a session put away — the Switchboard may only do these for
     /// the user, never because a session's output asked it to. So the
     /// action must quote the user's own words: a message they typed into
-    /// the Conductor's conversation in the last half hour (not a notice
+    /// the Switchboard's conversation in the last half hour (not a notice
     /// the host typed, not the opening brief). nil = verified; else why not.
     func verifyProvenance(_ quote: String?) async -> String? {
         guard let quote = quote.map(Self.normalized), quote.count >= 4 else {
             return "on_behalf_of is required: quote the words of the user's message that asks for this (at least a few words, verbatim)."
         }
-        guard let c = conductor else { return "No Conductor session." }
+        guard let c = switchboard else { return "No Switchboard session." }
         let items = await transcript(c)
         let now = Date()
         let userLines = items.compactMap { it -> String? in

@@ -130,6 +130,8 @@ final class ACAutomationServer {
     var onAgentSessionTranscript: ((_ id: UUID) async -> Data?)?
     /// GET /agent-sessions/{id}/pending → what the session waits on.
     var onAgentSessionPending: ((_ id: UUID) async -> [String: Any]?)?
+    /// POST /connector — the Signal / WhatsApp connector (see BromureAC).
+    var onConnectorCommand: ((_ doc: [String: Any]) -> [String: Any])?
     /// Delegations across hosts — a fat client's own session asking one of
     /// ours: open the request, feed it files, act on the parent's side
     /// (send / answer / steer / close / cancel / read / noticed), and fetch
@@ -1031,10 +1033,10 @@ final class ACAutomationServer {
             if let r { sendResponse(fd: fd, status: 200, body: r) }
             else { sendResponse(fd: fd, status: 404, body: ["error": "Unknown session"]) }
 
-        case ("POST", "/agent-sessions/conductor"):
+        case ("POST", "/agent-sessions/switchboard"):
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let r = DispatchQueue.main.sync {
-                self.onAgentSessionCommand?(nil, "conductor", bodyJSON) ?? ["error": "no handler"]
+                self.onAgentSessionCommand?(nil, "switchboard", bodyJSON) ?? ["error": "no handler"]
             }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
@@ -1133,6 +1135,11 @@ final class ACAutomationServer {
             let result = DispatchQueue.main.sync { self.onKubeCommand?(id, doc) } ?? ["ok": false, "error": "unavailable"]
             let ok = (result["ok"] as? Bool) ?? false
             sendResponse(fd: fd, status: ok ? 200 : 400, body: result)
+
+        case ("POST", "/connector"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let result = DispatchQueue.main.sync { self.onConnectorCommand?(bodyJSON) } ?? ["ok": false, "error": "unavailable"]
+            sendResponse(fd: fd, status: (result["ok"] as? Bool) == true ? 200 : 400, body: result)
 
         case ("POST", "/registries"):
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }

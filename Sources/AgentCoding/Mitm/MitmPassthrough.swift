@@ -11,7 +11,9 @@ struct PassthroughList {
     private let entries: [String]
 
     /// Domains known to pin certificates (MiTM breaks them), always bypassed.
-    static let builtins = ["google.com", "gstatic.com", "googleapis.com"]
+    /// Signal and WhatsApp pin theirs too (the messaging connector VM).
+    static let builtins = ["google.com", "gstatic.com", "googleapis.com",
+                           "signal.org", "whatsapp.net", "whatsapp.com"]
 
     init(extra: [String]) {
         var all = PassthroughList.builtins

@@ -95,7 +95,7 @@
   <text class="t" x="46" y="360">coding agent + shells in tmux</text>
   <text class="t" x="46" y="378">Bromure root CA in the trust store</text>
   <text class="mono" x="360" y="360">only fake credentials (brm_…)</text>
-  <text class="mono" x="360" y="378">HTTPS_PROXY=http://127.0.0.1:8080</text>
+  <text class="mono" x="360" y="378">HTTPS_PROXY=http://127.0.0.1:65534</text>
   <text class="mono" x="46" y="402">disk.img — system, APFS CoW clone</text>
   <text class="mono" x="360" y="402">home.img — /home/ubuntu, ext4</text>
 

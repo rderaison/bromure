@@ -310,7 +310,11 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             ?? Self.runtimeCPUs
         // Per-profile RAM. Default 8 GB if no profile (legacy CLI mode).
         let memGB = sessionDisk?.profile.memoryGB ?? 8
-        config.memorySize = UInt64(memGB) * 1024 * 1024 * 1024
+        if let mb = sessionDisk?.profile.memoryMB, mb >= 256 {
+            config.memorySize = UInt64(mb) * 1024 * 1024
+        } else {
+            config.memorySize = UInt64(memGB) * 1024 * 1024 * 1024
+        }
 
         let bootLoader = VZEFIBootLoader()
         bootLoader.variableStore = VZEFIVariableStore(url: imageManager.efiVarsURL)

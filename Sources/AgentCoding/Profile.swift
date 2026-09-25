@@ -1617,6 +1617,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// `Profile.defaultMemoryGB()` (sized to the host); user can bump
     /// up to 32 in the editor for memory-hungry agents/builds.
     public var memoryGB: Int
+    /// Runtime-only, never saved: RAM in MB for a managed machine smaller
+    /// than 1 GB (the messaging connector). Wins over `memoryGB` when set.
+    public var memoryMB: Int? = nil
 
     /// Sensible default RAM for a new profile, scaled to host memory.
     /// Same tier idea as the browser, bumped one notch since agent

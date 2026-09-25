@@ -630,6 +630,92 @@ public struct KubeRegistry: Codable, Identifiable, Equatable, Sendable {
     public static let diskRange = 10...2000
 }
 
+// MARK: - Signal / WhatsApp connector (a managed machine, like a registry)
+
+/// The small VM that links the Switchboard to the user's phone: Signal
+/// (signal-cli-rest-api) and WhatsApp (GOWA) under docker, a relay turning
+/// their messages into an inbox the host drains. One per Mac. Engine side:
+/// MessagingConnectorEngine.swift; guest side: vm-setup/bromure-msgbridge.*.
+public struct MessagingConnector: Codable, Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var createdAt: Date
+    public var memoryGB: Int
+    /// The VM's RAM in MB (nil = 512): Ubuntu + docker + Signal's native
+    /// build + GOWA + the relay fit comfortably.
+    public var memoryMB: Int?
+    public var effectiveMemoryMB: Int { memoryMB ?? 512 }
+    /// Sparse data disk holding the account keys and message stores.
+    public var diskGB: Int
+    public var node: KubeNodeRecord
+    public var autoStart: Bool
+    public var provisioned: Bool
+    public var signal: ConnectorChannel?
+    public var whatsapp: ConnectorChannel?
+
+    public init(id: UUID = UUID(), name: String = "Signal / WhatsApp", createdAt: Date = Date(),
+                memoryGB: Int = 2, diskGB: Int = 4, node: KubeNodeRecord? = nil,
+                autoStart: Bool = true, provisioned: Bool = false) {
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+        self.memoryGB = memoryGB
+        self.diskGB = diskGB
+        self.node = node ?? KubeNodeRecord(name: "connector", role: .server, index: 1)
+        self.autoStart = autoStart
+        self.provisioned = provisioned
+    }
+
+    public var channels: [ConnectorChannel] { [signal, whatsapp].compactMap { $0 }.filter(\.connected) }
+}
+
+/// One messaging channel of the connector, as the user set it up.
+public struct ConnectorChannel: Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Sendable { case signal, whatsapp }
+    /// ownNumber: the Switchboard is its own contact (a number registered or
+    /// linked for it); the user writes to it from `userAddress`.
+    /// linked: the connector is a linked device of the user's own account;
+    /// the conversation is their Note to Self / "Message yourself" chat.
+    public enum Mode: String, Codable, Sendable { case ownNumber, linked }
+    public var kind: Kind
+    public var mode: Mode
+    /// The account the connector runs: a Signal number (+15551234567) or a
+    /// WhatsApp JID (15551234567@s.whatsapp.net) once known.
+    public var account: String?
+    /// Who may talk to the Switchboard (own-number mode): the user's number or
+    /// JID. Linked mode: the account itself (Note to Self).
+    public var allowed: [String]
+    public var connected: Bool
+
+    public init(kind: Kind, mode: Mode, account: String? = nil, allowed: [String] = [], connected: Bool = false) {
+        self.kind = kind
+        self.mode = mode
+        self.account = account
+        self.allowed = allowed
+        self.connected = connected
+    }
+
+    /// Where replies go: the user (own number) or the account itself (linked).
+    public var replyAddress: String? {
+        mode == .linked ? account : allowed.first
+    }
+}
+
+/// What the connector VM reports (`bromure-msgbridge.sh probe`).
+public struct MessagingConnectorInfo: Codable, Equatable, Sendable {
+    public var signalUp: Bool
+    public var signalAccounts: [String]
+    public var whatsappUp: Bool
+    public var whatsappLoggedIn: Bool
+    public var whatsappConnected: Bool
+    public var inboxPending: Int
+    public var at: String
+
+    public static func decode(_ data: Data) -> MessagingConnectorInfo? {
+        try? JSONDecoder().decode(MessagingConnectorInfo.self, from: data)
+    }
+}
+
 /// What the registry VM reports (`bromure-registry.sh probe`).
 public struct KubeRegistryInfo: Codable, Equatable, Sendable {
     public struct Repository: Codable, Equatable, Identifiable, Sendable {
@@ -986,6 +1072,8 @@ public struct KubeClusterStatus: Codable, Equatable, Sendable {
     /// Registries: the address it answers on ("<ip>:<port>") and its catalog.
     public var address: String?
     public var registry: KubeRegistryInfo?
+    /// Connector: the services and accounts its VM reports.
+    public var connector: MessagingConnectorInfo?
 
     public init() {}
 
@@ -1034,7 +1122,9 @@ public extension KubeClusterStatus {
 public final class KubeClusterStore {
     public private(set) var clusters: [KubeCluster] = []
     public private(set) var registries: [KubeRegistry] = []
-    /// Keyed by cluster OR registry id.
+    /// At most one: the Signal / WhatsApp connector.
+    public private(set) var connectors: [MessagingConnector] = []
+    /// Keyed by cluster, registry OR connector id.
     public private(set) var status: [UUID: KubeClusterStatus] = [:]
 
     private let fileURL: URL?
@@ -1062,6 +1152,23 @@ public final class KubeClusterStore {
 
     public func cluster(_ id: UUID) -> KubeCluster? { clusters.first { $0.id == id } }
     public func registry(_ id: UUID) -> KubeRegistry? { registries.first { $0.id == id } }
+    public func connector(_ id: UUID) -> MessagingConnector? { connectors.first { $0.id == id } }
+    public var connector: MessagingConnector? { connectors.first }
+
+    public func upsert(_ connector: MessagingConnector) {
+        if let i = connectors.firstIndex(where: { $0.id == connector.id }) {
+            connectors[i] = connector
+        } else {
+            connectors.append(connector)
+        }
+        save()
+    }
+
+    public func removeConnector(_ id: UUID) {
+        connectors.removeAll { $0.id == id }
+        status[id] = nil
+        save()
+    }
     public func status(_ id: UUID) -> KubeClusterStatus { status[id] ?? KubeClusterStatus() }
 
     /// Clusters whose kubeconfig this workspace receives.
@@ -1129,9 +1236,11 @@ public final class KubeClusterStore {
     /// Fat-client mirror: replace clusters, registries + status from a
     /// `/state` snapshot.
     public func mirror(clusters newClusters: [KubeCluster], status newStatus: [UUID: KubeClusterStatus],
-                       registries newRegistries: [KubeRegistry] = []) {
+                       registries newRegistries: [KubeRegistry] = [],
+                       connectors newConnectors: [MessagingConnector] = []) {
         if clusters != newClusters { clusters = newClusters }
         if registries != newRegistries { registries = newRegistries }
+        if connectors != newConnectors { connectors = newConnectors }
         if status != newStatus { status = newStatus }
     }
 
@@ -1141,6 +1250,7 @@ public final class KubeClusterStore {
         var version = 1
         var clusters: [KubeCluster]
         var registries: [KubeRegistry]?
+        var connectors: [MessagingConnector]?
     }
 
     private func load() {
@@ -1150,6 +1260,7 @@ public final class KubeClusterStore {
         if let payload = try? dec.decode(FilePayload.self, from: data) {
             clusters = payload.clusters
             registries = payload.registries ?? []
+            connectors = payload.connectors ?? []
         }
     }
 
@@ -1158,7 +1269,8 @@ public final class KubeClusterStore {
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .iso8601
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? enc.encode(FilePayload(clusters: clusters, registries: registries)) else { return }
+        guard let data = try? enc.encode(FilePayload(clusters: clusters, registries: registries,
+                                                     connectors: connectors)) else { return }
         let dir = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? data.write(to: fileURL, options: .atomic)
@@ -1183,10 +1295,21 @@ public final class KubeClusterStore {
         return [
             "clusters": clusters.compactMap { dict($0) },
             "registries": registries.compactMap { dict($0) },
+            "connectors": connectors.compactMap { dict($0) },
             "status": Dictionary(uniqueKeysWithValues: status.compactMap { k, v in
                 dict(v).map { (k.uuidString, $0) }
             }),
         ]
+    }
+
+    /// The connectors in a `snapshot()` (older servers send none).
+    public static func decodeConnectors(_ payload: [String: Any]) -> [MessagingConnector] {
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        return ((payload["connectors"] as? [[String: Any]]) ?? []).compactMap { obj in
+            guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
+            return try? dec.decode(MessagingConnector.self, from: data)
+        }
     }
 
     /// Decode a snapshot produced by `snapshot()` (on the mirroring client).

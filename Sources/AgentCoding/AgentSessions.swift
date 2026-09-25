@@ -118,8 +118,8 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// tab — see `AgentSessionStore.checkBoot`.
     var bootID: String?
     /// What the session is for, beyond "an agent in a folder". nil = an
-    /// ordinary session; "conductor" = the one that watches and drives the
-    /// others (Conductor.swift) — never listed with them.
+    /// ordinary session; "switchboard" = the one that watches and drives the
+    /// others (Switchboard.swift) — never listed with them.
     var role: String?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
@@ -136,8 +136,10 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
         self.windowIndex = windowIndex
     }
 
-    static let conductorRole = "conductor"
-    var isConductor: Bool { role == Self.conductorRole }
+    static let switchboardRole = "switchboard"
+    /// "conductor" was the role's first name — a record saved under it is
+    /// the same session.
+    var isSwitchboard: Bool { role == Self.switchboardRole || role == "conductor" }
 
     var isLaunching: Bool { launchingSince != nil }
     var hasEnded: Bool { endedAt != nil && windowIndex == nil }
@@ -765,7 +767,7 @@ enum SessionHome {
     /// own fold (`archived(_:in:)`).
     @MainActor
     static func orderedAll(_ sessions: [AgentSession], in model: SessionListModel) -> [AgentSession] {
-        let sessions = sessions.filter { !$0.isArchived && !$0.isDeleted && !$0.isConductor }
+        let sessions = sessions.filter { !$0.isArchived && !$0.isDeleted && !$0.isSwitchboard }
         let groups = grouped(sessions.filter { !isGone($0, in: model) }, in: model)
         let gone = sessions.filter { isGone($0, in: model) }
             .sorted { lastActivity($0) > lastActivity($1) }
@@ -774,7 +776,7 @@ enum SessionHome {
 
     /// The put-away sessions, most recently archived first.
     static func archived(_ sessions: [AgentSession]) -> [AgentSession] {
-        sessions.filter { $0.isArchived && !$0.isDeleted && !$0.isConductor }
+        sessions.filter { $0.isArchived && !$0.isDeleted && !$0.isSwitchboard }
             .sorted { ($0.archivedAt ?? .distantPast) > ($1.archivedAt ?? .distantPast) }
     }
 
@@ -985,7 +987,7 @@ enum SessionHome {
     /// — what ⌘1–9 count.
     @MainActor
     static func ordered(_ sessions: [AgentSession], in model: SessionListModel) -> [AgentSession] {
-        let groups = grouped(sessions.filter { !$0.isArchived && !$0.isDeleted && !$0.isConductor }, in: model)
+        let groups = grouped(sessions.filter { !$0.isArchived && !$0.isDeleted && !$0.isSwitchboard }, in: model)
         return SessionBucket.allCases.filter { $0 != .ended }.flatMap { groups[$0] ?? [] }
     }
 
@@ -996,7 +998,7 @@ enum SessionHome {
     static func initialSession(in store: AgentSessionStore, model: SessionListModel,
                                remembered: UUID?) -> AgentSession? {
         if let id = remembered, let s = store.session(id), !s.hasEnded, !s.isArchived, !s.isDeleted { return s }
-        let groups = grouped(store.sessions.filter { !$0.isArchived && !$0.isDeleted && !$0.isConductor }, in: model)
+        let groups = grouped(store.sessions.filter { !$0.isArchived && !$0.isDeleted && !$0.isSwitchboard }, in: model)
         for b in SessionBucket.allCases {
             if let s = groups[b]?.first { return s }
         }
@@ -1004,22 +1006,22 @@ enum SessionHome {
     }
 }
 
-// MARK: - Conductor visibility
+// MARK: - Switchboard visibility
 
-/// When the Conductor earns a place in the list. It is a session like any
+/// When the Switchboard earns a place in the list. It is a session like any
 /// other underneath, but it only makes sense with several conversations to
 /// keep track of: with one (or none) in flight the user is already looking
 /// at the only thing that matters, and a second prompt would just be noise.
 /// So the row appears once two or more sessions are in flight — or while
-/// the Conductor itself has something going on (a turn under way, a
+/// the Switchboard itself has something going on (a turn under way, a
 /// question for the user), so what it's doing never vanishes mid-way.
-enum ConductorGate {
+enum SwitchboardGate {
     /// Sessions in flight: launching, working, ready or waiting on the
     /// user — not asleep, ended or put away.
     @MainActor
     static func activeCount(_ sessions: [AgentSession], in model: SessionListModel) -> Int {
         sessions.filter { s in
-            guard !s.isConductor, !s.isArchived, !s.isDeleted else { return false }
+            guard !s.isSwitchboard, !s.isArchived, !s.isDeleted else { return false }
             switch SessionHome.bucket(for: s, in: model) {
             case .needsYou, .working, .idle: return true
             case .asleep, .ended: return false
@@ -1027,14 +1029,14 @@ enum ConductorGate {
         }.count
     }
 
-    static func conductor(in sessions: [AgentSession]) -> AgentSession? {
-        sessions.first { $0.isConductor && !$0.isDeleted }
+    static func switchboard(in sessions: [AgentSession]) -> AgentSession? {
+        sessions.first { $0.isSwitchboard && !$0.isDeleted }
     }
 
     @MainActor
     static func isVisible(_ sessions: [AgentSession], in model: SessionListModel) -> Bool {
         if activeCount(sessions, in: model) >= 2 { return true }
-        guard let c = conductor(in: sessions) else { return false }
+        guard let c = switchboard(in: sessions) else { return false }
         let b = SessionHome.bucket(for: c, in: model)
         return b == .working || b == .needsYou
     }
@@ -1043,21 +1045,21 @@ enum ConductorGate {
     @MainActor
     static func summary(_ sessions: [AgentSession], in model: SessionListModel) -> String {
         var counts: [SessionBucket: Int] = [:]
-        for s in sessions where !s.isConductor && !s.isArchived && !s.isDeleted {
+        for s in sessions where !s.isSwitchboard && !s.isArchived && !s.isDeleted {
             counts[SessionHome.bucket(for: s, in: model), default: 0] += 1
         }
         var parts: [String] = []
         if let n = counts[.needsYou], n > 0 {
-            parts.append(String(format: NSLocalizedString("%d need you", comment: "conductor summary"), n))
+            parts.append(String(format: NSLocalizedString("%d need you", comment: "switchboard summary"), n))
         }
         if let n = counts[.working], n > 0 {
-            parts.append(String(format: NSLocalizedString("%d working", comment: "conductor summary"), n))
+            parts.append(String(format: NSLocalizedString("%d working", comment: "switchboard summary"), n))
         }
         if let n = counts[.idle], n > 0 {
-            parts.append(String(format: NSLocalizedString("%d ready", comment: "conductor summary"), n))
+            parts.append(String(format: NSLocalizedString("%d ready", comment: "switchboard summary"), n))
         }
         return parts.isEmpty
-            ? NSLocalizedString("Keeps track of your sessions", comment: "conductor summary")
+            ? NSLocalizedString("Keeps track of your sessions", comment: "switchboard summary")
             : parts.joined(separator: " · ")
     }
 }
@@ -1259,12 +1261,12 @@ struct SessionRowView: View {
     }
 }
 
-/// The Conductor's row: a baton instead of an avatar, a one-line tally of
+/// The Switchboard's row: a baton instead of an avatar, a one-line tally of
 /// the sessions it watches, and the status dot of its own conversation.
-struct ConductorRowView: View {
+struct SwitchboardRowView: View {
     let summary: String
     let dot: AgentStatus?
-    /// A Conductor session exists (else a click starts one).
+    /// A Switchboard session exists (else a click starts one).
     let started: Bool
     let selected: Bool
     let onSelect: () -> Void
@@ -1288,11 +1290,11 @@ struct ConductorRowView: View {
                 }
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(NSLocalizedString("Conductor", comment: "conductor row"))
+                Text(NSLocalizedString("Switchboard", comment: "switchboard row"))
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
                 Text(started ? summary
-                             : NSLocalizedString("Ask about all your sessions at once", comment: "conductor row"))
+                             : NSLocalizedString("Ask about all your sessions at once", comment: "switchboard row"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1317,7 +1319,7 @@ struct ConductorRowView: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }
-        .help(NSLocalizedString("The Conductor keeps track of every session: ask what's going on, answer them, start new work", comment: "conductor row"))
+        .help(NSLocalizedString("The Switchboard keeps track of every session: ask what's going on, answer them, start new work", comment: "switchboard row"))
     }
 }
 
@@ -1379,8 +1381,8 @@ struct SessionSectionsView: View {
                                  topPadding: 8)
 
             if open {
-                if filter.isEmpty, ConductorGate.isVisible(store.sessions, in: model) {
-                    conductorRow
+                if filter.isEmpty, SwitchboardGate.isVisible(store.sessions, in: model) {
+                    switchboardRow
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 if list.isEmpty { emptyHint }
@@ -1486,16 +1488,16 @@ struct SessionSectionsView: View {
         }
     }
 
-    /// The Conductor, pinned above the sessions it keeps track of — see
-    /// `ConductorGate` for when it shows at all.
-    private var conductorRow: some View {
-        let c = ConductorGate.conductor(in: store.sessions)
-        return ConductorRowView(
-            summary: ConductorGate.summary(store.sessions, in: model),
+    /// The Switchboard, pinned above the sessions it keeps track of — see
+    /// `SwitchboardGate` for when it shows at all.
+    private var switchboardRow: some View {
+        let c = SwitchboardGate.switchboard(in: store.sessions)
+        return SwitchboardRowView(
+            summary: SwitchboardGate.summary(store.sessions, in: model),
             dot: c.flatMap { SessionHome.dot(for: $0, in: model) },
             started: c != nil,
             selected: c.map { model.selectedSessionID == $0.id } ?? false,
-            onSelect: actions.openConductor)
+            onSelect: actions.openSwitchboard)
     }
 
     private var emptyHint: some View {

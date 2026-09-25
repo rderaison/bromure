@@ -1103,13 +1103,13 @@ final class RemoteHostController {
         return UUID(uuidString: idStr)
     }
 
-    /// POST /agent-sessions/conductor — the server's Conductor, started or
+    /// POST /agent-sessions/switchboard — the server's Switchboard, started or
     /// woken as need be. nil when the server can't (no workspace) or
     /// predates the verb.
-    func openConductor() async -> UUID? {
+    func openSwitchboard() async -> UUID? {
         let host = self.host
         let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request("POST", "/agent-sessions/conductor", body: [:])
+            try RemoteTransport.client(for: host).request("POST", "/agent-sessions/switchboard", body: [:])
         }.value
         pollOnce()
         guard let resp, resp.status == 200, let idStr = resp.json["id"] as? String else { return nil }
@@ -3595,16 +3595,16 @@ final class RemoteHostWindow: NSWindow {
                 self.sessionStageDidChange()
             },
             showMachine: { [weak self] pid in self?.showMachineDashboard(pid) },
-            openConductor: { [weak self] in
+            openSwitchboard: { [weak self] in
                 guard let self else { return }
                 let c = self.controller
-                if let existing = ConductorGate.conductor(in: c.sessionStore.sessions),
+                if let existing = SwitchboardGate.switchboard(in: c.sessionStore.sessions),
                    !existing.hasEnded, existing.windowIndex != nil {
                     self.selectSession(existing.id)
                     return
                 }
                 Task { @MainActor in
-                    guard let id = await c.openConductor() else { return }
+                    guard let id = await c.openSwitchboard() else { return }
                     if c.sessionStore.session(id) != nil { self.selectSession(id) }
                     else { self.pendingSelectSessionID = id }
                 }

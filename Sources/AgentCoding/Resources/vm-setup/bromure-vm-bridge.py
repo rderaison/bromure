@@ -5,7 +5,7 @@ Bromure AC in-VM bridge daemon.
 Listens for several kinds of clients inside the VM and bridges each to
 the host's MITM engine over vsock:
 
-  • HTTP proxy:  0.0.0.0:8080 (TCP)                →  vsock CID 2 port 8443
+  • HTTP proxy:  0.0.0.0:65534 (TCP; proxy_port)   →  vsock CID 2 port 8443
   • ssh-agent:   /tmp/bromure-agent.sock (Unix)    →  vsock CID 2 port 8444
   • AWS creds:   /tmp/bromure-aws-creds.sock (Unix) →  vsock CID 2 port 8445
   • Local LLM:   127.0.0.1:11434 (TCP)             →  vsock CID 2 port 8446
@@ -32,7 +32,20 @@ import threading
 import traceback
 
 HOST_CID = 2  # well-known CID for the macOS host in VZ
-HTTP_PROXY_TCP_PORT = 8080
+def _read_proxy_port():
+    # The port proxy.env points at this boot (the host writes both): 65534
+    # on a fresh boot, the legacy 8080 for a resumed older snapshot.
+    try:
+        with open("/mnt/bromure-meta/proxy_port") as f:
+            n = int(f.read().strip())
+            if 1 <= n <= 65535:
+                return n
+    except (OSError, ValueError):
+        pass
+    return 65534
+
+
+HTTP_PROXY_TCP_PORT = _read_proxy_port()
 HTTP_PROXY_VSOCK_PORT = 8443
 SSH_AGENT_VSOCK_PORT = 8444
 SSH_AGENT_UNIX_PATH = "/tmp/bromure-agent.sock"

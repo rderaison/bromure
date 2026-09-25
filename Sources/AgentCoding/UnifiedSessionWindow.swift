@@ -399,6 +399,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onSelectRegistry: { [weak self] id in self?.showRegistryDashboard(id) },
             onNewRegistry: { [weak self] in self?.showNewRegistry() },
             onRegistryAction: { [weak self] id, action in self?.performRegistryAction(id, action) },
+            onSelectConnector: { _ in ConnectorWindowController.show() },
+            onConnectorAction: { id, action in ConnectorWindowController.perform(id, action) },
             onRewindHome: { [weak self] id in self?.showRewindHome(id) })
         // NonMovable so a drag inside the sidebar — notably dragging a tab
         // row onto the Grid — selects/drags the row instead of moving the
@@ -1373,9 +1375,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self.sessionStageDidChange()
             },
             showMachine: { [weak self] pid in self?.showVMDashboard(pid) },
-            openConductor: { [weak self] in
+            openSwitchboard: { [weak self] in
                 guard let self, let delegate = self.acDelegate,
-                      let id = delegate.conductorEngine.ensureConductor() else { return }
+                      let id = delegate.switchboardEngine.ensureSwitchboard() else { return }
                 self.selectSession(id)
             })
     }
@@ -2740,6 +2742,9 @@ struct SessionSidebar: View {
     var onSelectRegistry: (UUID) -> Void = { _ in }
     var onNewRegistry: () -> Void = {}
     var onRegistryAction: (UUID, KubeRowAction) -> Void = { _, _ in }
+    /// The Signal / WhatsApp connector — the third kind of managed machine.
+    var onSelectConnector: (UUID) -> Void = { _ in }
+    var onConnectorAction: (UUID, KubeRowAction) -> Void = { _, _ in }
     /// A machine's "Rewind home…": the window puts up the sheet.
     var onRewindHome: (Profile.ID) -> Void = { _ in }
     @State private var sessionFilter = ""
@@ -2922,6 +2927,11 @@ struct SessionSidebar: View {
             if !kubeStore.registries.isEmpty {
                 KubeRegistriesSection(store: kubeStore, model: model,
                                       onSelect: onSelectRegistry, onNew: onNewRegistry, onAction: onRegistryAction)
+            }
+            if let c = kubeStore.connector {
+                ConnectorSection(connector: c, status: kubeStore.status(c.id),
+                                 onSelect: { onSelectConnector(c.id) },
+                                 onAction: { onConnectorAction(c.id, $0) })
             }
         }
     }
@@ -3325,6 +3335,38 @@ private struct KubeRegistriesSection: View {
             return st.step ?? st.phase.displayName
         default:
             return st.phase.displayName
+        }
+    }
+}
+
+/// "Messaging" — the Signal / WhatsApp connector, on or off like any
+/// managed machine, with which phone channels it carries.
+private struct ConnectorSection: View {
+    let connector: MessagingConnector
+    let status: KubeClusterStatus
+    let onSelect: () -> Void
+    let onAction: (KubeRowAction) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            SidebarSectionHeader(title: NSLocalizedString("Messaging", comment: "sidebar section"),
+                                 count: 1, onTitle: {})
+            KubeMachineRow(name: connector.name, status: status, icon: "message.fill",
+                           tint: .green, subline: subline,
+                           isSelected: false, onSelect: onSelect, onAction: onAction)
+        }
+    }
+
+    private var subline: String {
+        switch status.phase {
+        case .running:
+            let on = connector.channels.map { $0.kind == .signal ? "Signal" : "WhatsApp" }
+            return on.isEmpty ? NSLocalizedString("No phone connected", comment: "connector row")
+                              : on.joined(separator: " · ")
+        case .creating, .starting:
+            return status.step ?? status.phase.displayName
+        default:
+            return status.phase.displayName
         }
     }
 }

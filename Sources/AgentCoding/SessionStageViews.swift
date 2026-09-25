@@ -210,8 +210,8 @@ struct SessionStageActions {
     var represent: (UUID) -> Void = { _ in }
     /// The machine's dashboard (the header's machine name).
     var showMachine: (UUID) -> Void = { _ in }
-    /// Put the Conductor on stage — starting it first when there's none.
-    var openConductor: () -> Void = {}
+    /// Put the Switchboard on stage — starting it first when there's none.
+    var openSwitchboard: () -> Void = {}
 }
 
 // MARK: - Small chrome

@@ -396,6 +396,33 @@ public final class SessionDisk {
     /// see them — wedging the post-reboot kitty on a black screen.
     /// See `clearContents`.
     @MainActor
+    /// The guest's cooperative HTTP proxy (bromure-agentd's vm-bridge
+    /// listener). 65534: out of the way of anything people run (8080 was
+    /// forever colliding with dev servers and containers) and above the
+    /// kernel's ephemeral range. 8080 is what daemons before it listened on.
+    static let guestProxyPort = 65534
+    static let legacyGuestProxyPort = 8080
+
+    /// Which port this boot's guest proxy listens on, recorded when the
+    /// machine cold-boots so a snapshot restore — or a live re-stage of the
+    /// share — keeps pointing proxy.env at the daemon actually running. A
+    /// snapshot from before the record existed ran a daemon on 8080.
+    private var guestProxyPortURL: URL {
+        store.profileDirectory(for: profile).appendingPathComponent("guest-proxy-port")
+    }
+
+    private func guestProxyPort(coldBoot: Bool) -> Int {
+        if coldBoot {
+            try? String(Self.guestProxyPort).write(to: guestProxyPortURL, atomically: true, encoding: .utf8)
+            return Self.guestProxyPort
+        }
+        if let raw = try? String(contentsOf: guestProxyPortURL, encoding: .utf8),
+           let n = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)), (1...65535).contains(n) {
+            return n
+        }
+        return Self.legacyGuestProxyPort
+    }
+
     public func prepareMetadataShare(forRestore: Bool = false) throws -> URL {
         let tmp = store.profileDirectory(for: profile)
             .appendingPathComponent("meta-share", isDirectory: true)
@@ -403,6 +430,10 @@ public final class SessionDisk {
         if !forRestore {
             clearContents(of: tmp)
         }
+        // The daemon reads the port from here; proxy.env below points at it.
+        let proxyPort = guestProxyPort(coldBoot: !forRestore)
+        try String(proxyPort).write(to: tmp.appendingPathComponent("proxy_port"),
+                                    atomically: true, encoding: .utf8)
 
         // api_key.env — sourced by .bashrc inside the guest. Exports
         // the env var for every enabled tool in token mode. The values
@@ -672,10 +703,10 @@ public final class SessionDisk {
             // made "disable transparent interception" silently kill the proxy +
             // token swap entirely.)
             proxyLines += [
-                "export http_proxy=http://127.0.0.1:8080",
-                "export https_proxy=http://127.0.0.1:8080",
-                "export HTTP_PROXY=http://127.0.0.1:8080",
-                "export HTTPS_PROXY=http://127.0.0.1:8080",
+                "export http_proxy=http://127.0.0.1:\(proxyPort)",
+                "export https_proxy=http://127.0.0.1:\(proxyPort)",
+                "export HTTP_PROXY=http://127.0.0.1:\(proxyPort)",
+                "export HTTPS_PROXY=http://127.0.0.1:\(proxyPort)",
             ]
             let noProxy = (["localhost", "127.0.0.1", "::1"] + extraNoProxy).joined(separator: ",")
             proxyLines += [
@@ -918,14 +949,14 @@ public final class SessionDisk {
         try Self.delegationMCPShimScript.write(
             to: tmp.appendingPathComponent("bromure-delegation-mcp.py"),
             atomically: true, encoding: .utf8)
-        // Conductor MCP shim + the config its session's command line names
-        // (--mcp-config). No agent config lists it: only the Conductor is
+        // Switchboard MCP shim + the config its session's command line names
+        // (--mcp-config). No agent config lists it: only the Switchboard is
         // launched with it, and the host refuses every other caller.
-        try Self.conductorMCPShimScript.write(
-            to: tmp.appendingPathComponent("bromure-conductor-mcp.py"),
+        try Self.switchboardMCPShimScript.write(
+            to: tmp.appendingPathComponent("bromure-switchboard-mcp.py"),
             atomically: true, encoding: .utf8)
-        try Self.conductorMCPConfigJSON.write(
-            to: tmp.appendingPathComponent("bromure-conductor-mcp.json"),
+        try Self.switchboardMCPConfigJSON.write(
+            to: tmp.appendingPathComponent("bromure-switchboard-mcp.json"),
             atomically: true, encoding: .utf8)
 
         // Plan-stream driver assets — staged unconditionally, like the task
@@ -1230,21 +1261,21 @@ public final class SessionDisk {
             .replacingOccurrences(of: "HELLO = sys.argv[1] if len(sys.argv) > 1 else \"\"",
                                   with: delegationMCPHelloBlock)
     }
-    /// The Conductor's MCP (ConductorMCPServer): the delegation shim — same
+    /// The Switchboard's MCP (SwitchboardMCPServer): the delegation shim — same
     /// window announcement, since the host checks the caller is the
-    /// Conductor's tab — on its own port.
-    public static let conductorMCPVsockPort: UInt32 = 5836
-    static let conductorMCPShimGuestPath = "/mnt/bromure-meta/bromure-conductor-mcp.py"
-    static let conductorMCPConfigGuestPath = "/mnt/bromure-meta/bromure-conductor-mcp.json"
-    static var conductorMCPShimScript: String {
+    /// Switchboard's tab — on its own port.
+    public static let switchboardMCPVsockPort: UInt32 = 5836
+    static let switchboardMCPShimGuestPath = "/mnt/bromure-meta/bromure-switchboard-mcp.py"
+    static let switchboardMCPConfigGuestPath = "/mnt/bromure-meta/bromure-switchboard-mcp.json"
+    static var switchboardMCPShimScript: String {
         delegationMCPShimScript
-            .replacingOccurrences(of: "PORT = \(delegationMCPVsockPort)", with: "PORT = \(conductorMCPVsockPort)")
-            .replacingOccurrences(of: "bromure-delegation-mcp", with: "bromure-conductor-mcp")
-            .replacingOccurrences(of: "delegation MCP", with: "conductor MCP")
+            .replacingOccurrences(of: "PORT = \(delegationMCPVsockPort)", with: "PORT = \(switchboardMCPVsockPort)")
+            .replacingOccurrences(of: "bromure-delegation-mcp", with: "bromure-switchboard-mcp")
+            .replacingOccurrences(of: "delegation MCP", with: "switchboard MCP")
     }
-    static var conductorMCPConfigJSON: String {
-        let cfg: [String: Any] = ["mcpServers": ["conductor": [
-            "command": "python3", "args": [conductorMCPShimGuestPath]]]]
+    static var switchboardMCPConfigJSON: String {
+        let cfg: [String: Any] = ["mcpServers": ["switchboard": [
+            "command": "python3", "args": [switchboardMCPShimGuestPath]]]]
         let data = (try? JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys])) ?? Data()
         return String(decoding: data, as: UTF8.self)
     }

@@ -1,22 +1,22 @@
-# Conductor — one agent that runs the others, reachable from Signal / WhatsApp
+# Switchboard — one agent that runs the others, reachable from Signal / WhatsApp
 
-Status: **phase 1 implemented on branch `cdctor`** (in-app Conductor:
+Status: **phase 1 implemented on branch `cdctor`** (in-app Switchboard:
 session role, engine, MCP, control routes, sidebar row, provenance check).
 Phase 1 differs from the design below in these ways:
 
-- **No dedicated workspace.** The Conductor is an `AgentSession` with
-  `role = "conductor"` running in `~/.bromure/conductor` (CLAUDE.md = its
+- **No dedicated workspace.** The Switchboard is an `AgentSession` with
+  `role = "switchboard"` running in `~/.bromure/switchboard` (CLAUDE.md = its
   brief, rewritten each launch) inside one of your workspaces (where you
   were last active). Its MCP reaches only it: `--mcp-config` on its own
   command line, and the host refuses any other caller.
 - **No long-poll.** A blocked `next_events` would queue the user's typed
-  messages behind it, so the Conductor ends its turns and the host wakes
-  it with a `[Conductor] …` notice; `next_events` returns at once.
+  messages behind it, so the Switchboard ends its turns and the host wakes
+  it with a `[Switchboard] …` notice; `next_events` returns at once.
 - **Provenance without a message ledger.** Until a phone channel exists,
   `on_behalf_of` is a verbatim quote of the user, checked against the
-  user turns of the Conductor's own transcript from the last 30 minutes
+  user turns of the Switchboard's own transcript from the last 30 minutes
   (host notices and the kickoff excluded).
-- **UI:** the Conductor is never in the session list; a "Conductor" row
+- **UI:** the Switchboard is never in the session list; a "Switchboard" row
   pinned at the top of Sessions appears once 2+ sessions are in flight
   (or while it's itself busy), local app and fat client alike.
 
@@ -26,7 +26,7 @@ registries) and the egress firewall.
 
 ## 1. What it is
 
-The **Conductor** is a long-lived agent session — a pinned "master task" at
+The **Switchboard** is a long-lived agent session — a pinned "master task" at
 the top of the Sessions home — whose job is not to write code but to keep
 track of *every other* session: tell you what's running, what's stuck, what
 needs you; relay your answers; start, steer, resume and wrap up sessions.
@@ -38,7 +38,7 @@ never runs on the host or in a workspace.
 
 ```
  phone ──Signal/WhatsApp (E2E)──▶ ┌─────────────┐  vsock 5840   ┌──────────────────────────┐
-                                   │ bridge VM   │ ◀───NDJSON──▶ │ host: ConductorEngine     │
+                                   │ bridge VM   │ ◀───NDJSON──▶ │ host: SwitchboardEngine     │
                                    │ signal-cli /│               │  • sender allowlist, STOP │
                                    │ whatsmeow   │               │  • event feed + notices   │
                                    └─────────────┘               │  • provenance ledger      │
@@ -46,15 +46,15 @@ never runs on the host or in a workspace.
                                    *.whatsapp.net only                  │         │ AgentSessionEngine,
                                                         vsock 5836 MCP  │         │ typeCommand, transcripts,
                                               ┌─────────────────────────▼──┐      │ /tasks, delegation
-                                              │ Conductor workspace VM      │      ▼
-                                              │ claude + bromure-conductor  │   every other session
+                                              │ Switchboard workspace VM      │      ▼
+                                              │ claude + bromure-switchboard  │   every other session
                                               └─────────────────────────────┘   (any local workspace)   
 ```
 
 Two decisions carry the design:
 
-1. **The Conductor is an ordinary agent session**, not a host-side LLM
-   loop. It gets a Conductor-only host MCP server (`bromure-conductor`) and
+1. **The Switchboard is an ordinary agent session**, not a host-side LLM
+   loop. It gets a Switchboard-only host MCP server (`bromure-switchboard`) and
    a system prompt. Everything else — resume, transcripts, the beautified
    view, fat-client mirroring, model choice (Claude/Bedrock/local) — comes
    for free.
@@ -63,17 +63,17 @@ Two decisions carry the design:
    real message from you (§6). The prompt steers behavior, the host
    enforces limits.
 
-## 2. The Conductor workspace
+## 2. The Switchboard workspace
 
-- A workspace with `role = .conductor` (new `Profile` field), created on
+- A workspace with `role = .switchboard` (new `Profile` field), created on
   first enable: small VM (2 vCPU / 2 GB), no project folders required, its
   own `agentReach` list = which workspaces it may see/drive (default: all
-  local workspaces). **One Conductor per Mac**, local workspaces only —
+  local workspaces). **One Switchboard per Mac**, local workspaces only —
   agents can't reach other machines yet; revisit when they can.
 - Runs on a **strong model** (the workspace model setting, defaulting to
   the strongest configured Claude model): relaying nuanced questions and
   judging what deserves a ping is where a weak model fails.
-- One Conductor session inside it, pinned (Sessions home shows it first,
+- One Switchboard session inside it, pinned (Sessions home shows it first,
   never auto-archived). If its agent exits, the engine resumes it on the
   next event (`sessionEngine.resume(sessionID, message:)`, same as the
   delegation engine does for ended recipients).
@@ -84,7 +84,7 @@ Two decisions carry the design:
   + `bromure-hello w<idx>`) — nothing the agent says counts as proof of
   who it is.
 
-## 3. `bromure-conductor` MCP (vsock 5836)
+## 3. `bromure-switchboard` MCP (vsock 5836)
 
 Standard host MCP recipe (port const + shim from `taskMCPShimScript` +
 meta-share staging + `claudeCodeMCPConfig` / Codex TOML + bridge creation at
@@ -111,7 +111,7 @@ routes so the fat client and iOS gain them too.
 | `start_session(workspace, tool, cwd?, message, on_behalf_of?)` | `AgentSessionEngine.start` |
 | `resume / archive / close_session(id)` | engine actions |
 | `create_task(title, brief, workspace)` / `move_task(id, stage)` | `/tasks` upsert + stage actions |
-| `delegate(...)` | forwards to `DelegationEngine` — lets the Conductor hand a real job to a fresh worker session, with a contract, instead of typing into someone's prompt |
+| `delegate(...)` | forwards to `DelegationEngine` — lets the Switchboard hand a real job to a fresh worker session, with a contract, instead of typing into someone's prompt |
 
 ### 3.3 Events + the user channel
 
@@ -132,20 +132,20 @@ no send/keys route today; drivers use `resume{message}` or raw
 - `GET /events?cursor=` → the same event log, diffed from the state the
   `/state/subscribe` stream already computes.
 
-### 3.4 Waking the Conductor
+### 3.4 Waking the Switchboard
 
-Between events the Conductor sits idle at its prompt. When an event is
-worth its attention, `ConductorEngine` types a one-line notice —
-`[Conductor] 3 new events (1 message from you) — call next_events` —
+Between events the Switchboard sits idle at its prompt. When an event is
+worth its attention, `SwitchboardEngine` types a one-line notice —
+`[Switchboard] 3 new events (1 message from you) — call next_events` —
 using the delegation engine's owed-notice machinery unchanged: type only
 when idle (or working >90 s / needs-input >600 s), re-notice after 180 s,
 max 3, a 4 s ticker. A `user_message` bypasses the quiet grace. If the
-Conductor is mid-turn inside `next_events`, the long-poll returns instead
+Switchboard is mid-turn inside `next_events`, the long-poll returns instead
 (no typing at all — the common case once it's warmed up).
 
 Which events become notices follows `set_attention`: by default
 `user_message`, `session_needs_you`, `session_error`, and a `session_done`
-for sessions the user asked about or the Conductor started; routine
+for sessions the user asked about or the Switchboard started; routine
 `working↔idle` churn never wakes it.
 
 ## 4. The bridge VM
@@ -176,7 +176,7 @@ A service machine exactly like the registry VM (`MachineSpec` via
 | | Signal | WhatsApp |
 |---|---|---|
 | software | `signal-cli` (JSON-RPC daemon mode; needs a JRE in data.img) | a ~300-line Go daemon on `whatsmeow` (single static binary, sqlite store) |
-| identity: own number | **its own number** (`signal-cli register` + SMS/voice verify, once) — the Conductor is a contact | **its own number** (a second WhatsApp account, paired to whatsmeow) |
+| identity: own number | **its own number** (`signal-cli register` + SMS/voice verify, once) — the Switchboard is a contact | **its own number** (a second WhatsApp account, paired to whatsmeow) |
 | identity: linked | linked device of your account (QR from `signal-cli link`), chat in *Note to Self* | linked device of your account, *Message yourself* chat |
 | egress allowlist | `chat.signal.org`, `storage.signal.org`, `cdn.signal.org`, `cdn2.signal.org`, `cdn3.signal.org`, `sfu.voip.signal.org` :443 | `*.whatsapp.net`, `*.whatsapp.com`, `mmg.whatsapp.net`, `*.fbcdn.net` :443 (+ :5222) |
 | ToS / risk | fine (official protocol, open-source client) | **unofficial client** — WhatsApp can ban linked devices using it. Ship as opt-in with a clear warning; Signal is the recommended channel. The official WhatsApp Cloud API needs a Meta business account + a public webhook, which doesn't fit a local tiny VM. |
@@ -184,25 +184,25 @@ A service machine exactly like the registry VM (`MachineSpec` via
 **Both modes are supported, chosen at setup** (per channel; switchable
 later — switching re-registers/re-links and wipes the old identity).
 
-*Own number* — the Conductor is a contact. A linked device *is you*: anything
-the Conductor sends appears as a message you sent, so your phone doesn't
+*Own number* — the Switchboard is a contact. A linked device *is you*: anything
+the Switchboard sends appears as a message you sent, so your phone doesn't
 notify — "api-refactor needs you" would arrive silently in Note to Self
 (a group doesn't help; your own messages don't notify there either). With
-its own number the Conductor is a normal contact ("Bromure"): its messages
+its own number the Switchboard is a normal contact ("Bromure"): its messages
 notify, you can mute/pin it like any chat, and the sender allowlist is
 just your number. Cost: a number that can receive one SMS or voice call
 for registration (spare SIM, VoIP number). The linked-device mode stays as
 *Linked* — no extra number, the conversation lives in Note to Self /
 Message yourself. Replies arrive silently, so in this mode the host routes
-`urgency=high` messages (and every `session_needs_you` the Conductor
+`urgency=high` messages (and every `session_needs_you` the Switchboard
 relays) to the Bromure iPhone app's existing needs-input push as well,
 when the phone is enrolled; the setup screen says plainly that pings
 won't notify otherwise.
 
 The mode only changes the bridge's identity, the allowlist rule, and that
-push fallback — the protocol, the Conductor, and its tools are identical.
+push fallback — the protocol, the Switchboard, and its tools are identical.
 
-Setup UX: Settings › Conductor › Signal → two cards side by side:
+Setup UX: Settings › Switchboard › Signal → two cards side by side:
 "Give Bromure its own number — notifies like any chat" (enter number →
 code → "Your number" for the allowlist) and "Link to my account — no extra
 number, silent replies" (QR rendered natively from the link URI the bridge
@@ -218,7 +218,7 @@ the host wipes `data.img`.
   temporary `setup` policy (apt + GitHub releases), then the policy
   tightens to the list above.
 - `bridgePeers` off: the bridge VM can't reach any workspace VM. Its only
-  way to the Conductor is the host over 5840, and the host applies the
+  way to the Switchboard is the host over 5840, and the host applies the
   checks in §6 before anything reaches the model.
 - The bridge never sees session content except what `message_user` sends.
 
@@ -240,13 +240,13 @@ the host wipes `data.img`.
 ```
 
 The host acknowledges every inbound message with a 👀 reaction right away,
-so the phone shows it landed even while the Conductor is mid-turn.
+so the phone shows it landed even while the Switchboard is mid-turn.
 
 ## 5. Message flow examples
 
 **Status check.** You: *"what's going on?"* → bridge → host checks the
 sender allowlist and logs the message as `msg#91` → `user_message` event →
-the Conductor (in `next_events`) calls `list_sessions` →
+the Switchboard (in `next_events`) calls `list_sessions` →
 `message_user`:
 
 ```
@@ -259,18 +259,18 @@ Reply "api 2" or tell me what to do.
 ```
 
 **Answering a blocked session.** You: *"api 1 but only on staging-2"* →
-Conductor: `pending_question(api-refactor)` → it's an AskUserQuestion with
+Switchboard: `pending_question(api-refactor)` → it's an AskUserQuestion with
 free text allowed → `answer_question(id, text: "Yes — staging-2 only",
 on_behalf_of: "msg#92")` → host verifies `msg#92` (§6) → typed → later
 `session_done` → *"api-refactor finished: migrations applied on staging-2,
 PR #412 opened."*
 
 **New work from the phone.** You: *"start a codex session on bromure-infra
-to bump the coturn image, open a PR"* → Conductor uses `delegate(...)` (a
+to bump the coturn image, open a PR"* → Switchboard uses `delegate(...)` (a
 worker session with a contract and a worktree) rather than typing into an
 existing prompt → it reports back on `delegation_delivered`.
 
-**Voice note / screenshot.** Attachments are saved to the Conductor's inbox
+**Voice note / screenshot.** Attachments are saved to the Switchboard's inbox
 (`~/.bromure/inbox/msg-93/`). Voice notes are transcribed on the host with
 the local-models stack (Whisper-class) before the model sees them — the
 text goes in the event, the audio stays on disk.
@@ -288,20 +288,20 @@ output flows back to the phone. So:
    (`answer_question`, `press_keys`, `send_to_session` when the target is
    in `needsYou`) **require `on_behalf_of`**, and the host checks it names
    a real message from the last 30 minutes that hasn't been used for more
-   than N actions. The Conductor can't approve a permission prompt, pick a
+   than N actions. The Switchboard can't approve a permission prompt, pick a
    migration option, or unblock a session on its own initiative — even if
    a session's output tells it to (the prompt-injection path). Plain status
    reads and `message_user` need nothing.
 3. **Kill switch outside the model.** A message that is exactly `STOP`
-   (or `/stop`) is handled by `ConductorEngine` before the model:
-   Conductor tools are frozen (every write returns `paused`), the
-   Conductor session gets Escape, and the bridge replies "Paused. Send
+   (or `/stop`) is handled by `SwitchboardEngine` before the model:
+   Switchboard tools are frozen (every write returns `paused`), the
+   Switchboard session gets Escape, and the bridge replies "Paused. Send
    RESUME to continue." `RESUME` lifts it.
-4. **Scope.** `agentReach` on the Conductor workspace limits which
+4. **Scope.** `agentReach` on the Switchboard workspace limits which
    workspaces it sees (local only). Tool calls are checked
    against the connecting VM, not what the agent claims.
 5. **Rate limits** on outbound messages (≤ 20/min, bursts batched) and on
-   act-tools (≤ 30/min) — a looping Conductor can't flood your phone or
+   act-tools (≤ 30/min) — a looping Switchboard can't flood your phone or
    hammer sessions.
 6. **Audit.** Every inbound message, outbound message, and act-tool call
    goes to the security timeline (`/state.securityTimeline`) with the
@@ -315,14 +315,14 @@ output flows back to the phone. So:
    bridge VM's `data.img`; the bridge's egress is pinned to Signal /
    WhatsApp hosts.
 
-## 7. The Conductor prompt
+## 7. The Switchboard prompt
 
-Written by the host as the Conductor workspace's `~/CLAUDE.md` (and
-`AGENTS.md` for Codex-driven Conductors). `{{…}}` placeholders are filled
+Written by the host as the Switchboard workspace's `~/CLAUDE.md` (and
+`AGENTS.md` for Codex-driven Switchboards). `{{…}}` placeholders are filled
 at boot.
 
 ````markdown
-# You are the Conductor
+# You are the Switchboard
 
 You coordinate the coding agents running in Bromure for {{user_display}}.
 You don't write code yourself. You keep track of every session, tell
@@ -330,7 +330,7 @@ You don't write code yourself. You keep track of every session, tell
 and start or wrap up work when they ask. They often talk to you from a
 phone (Signal/WhatsApp), in short bursts, while doing something else.
 
-## Your tools (bromure-conductor MCP)
+## Your tools (bromure-switchboard MCP)
 - Observe: list_sessions, read_session, pending_question, list_tasks,
   list_automations, list_delegations.
 - Act: send_to_session, answer_question, press_keys, start_session,
@@ -339,7 +339,7 @@ phone (Signal/WhatsApp), in short bursts, while doing something else.
 
 ## Your loop
 1. When idle, call `next_events` (timeout 600). When you see a
-   "[Conductor] … call next_events" line, call it right away.
+   "[Switchboard] … call next_events" line, call it right away.
 2. For each batch of events, decide: reply to the user, act on a session,
    or do nothing. Most `session_done` / `working` churn deserves nothing
    unless the user asked about that session or you started it.
@@ -392,7 +392,7 @@ phone (Signal/WhatsApp), in short bursts, while doing something else.
 - If a tool call fails or a session isn't where you expected, say so.
 
 ## STOP
-If you're told the conductor is paused, stop acting; only answer
+If you're told the switchboard is paused, stop acting; only answer
 questions until you're told it's resumed.
 ````
 
@@ -400,17 +400,17 @@ questions until you're told it's resumed.
 
 | piece | where |
 |---|---|
-| `ConductorEngine` (event log, notices, provenance ledger, STOP/RESUME, rate limits, attention) | new `Sources/AgentCoding/Conductor/ConductorEngine.swift`; ticks alongside `DelegationEngine`; reuses its owed-notice helpers (factor out of `DelegationEngine` rather than copy) |
-| `ConductorMCPServer` (vsock 5836) | new, `MCPLineHandler` like `DelegationMCPServer` |
+| `SwitchboardEngine` (event log, notices, provenance ledger, STOP/RESUME, rate limits, attention) | new `Sources/AgentCoding/Switchboard/SwitchboardEngine.swift`; ticks alongside `DelegationEngine`; reuses its owed-notice helpers (factor out of `DelegationEngine` rather than copy) |
+| `SwitchboardMCPServer` (vsock 5836) | new, `MCPLineHandler` like `DelegationMCPServer` |
 | send / keys / pending / events routes | `AutomationServer.route()` + handlers next to the `/agent-sessions/*` ones |
 | bridge machine | `MessagingBridgeEngine` modeled on `KubeRegistryEngine` (`MachineSpec`, `bootMachine`, autoStart) + `vm-setup/bromure-msgbridge.sh` + the Go WhatsApp daemon source under `tools/msgbridge-whatsapp/` |
 | bridge link (vsock 5840) | `VZVirtioSocketListener` on the bridge VM's socket device |
-| settings | Settings › Conductor: enable, reach, linked channels (QR), allowlist, quiet hours, bridge egress view |
-| fat client / iOS | the Conductor is just a session there; the new routes make send/keys available to them too |
+| settings | Settings › Switchboard: enable, reach, linked channels (QR), allowlist, quiet hours, bridge egress view |
+| fat client / iOS | the Switchboard is just a session there; the new routes make send/keys available to them too |
 
 ## 9. Phases
 
-1. **Conductor in-app.** Conductor workspace + prompt + MCP (observe + act +
+1. **Switchboard in-app.** Switchboard workspace + prompt + MCP (observe + act +
    the new routes), `next_events` fed by session transitions, notices.
    Usable immediately from the app, the fat client and the iPhone app
    (which already has needs-input push).
@@ -424,9 +424,9 @@ questions until you're told it's resumed.
 ## 10. Decisions
 
 - **Model:** strong model (2026-09-25).
-- **Scope:** one Conductor per Mac, local workspaces only — agents can't
+- **Scope:** one Switchboard per Mac, local workspaces only — agents can't
   reach other machines yet (2026-09-25).
-- **STOP:** stops only the Conductor; worker sessions keep running
+- **STOP:** stops only the Switchboard; worker sessions keep running
   (2026-09-25). No `STOP ALL`.
 - **Chat identity:** support both — own number and linked device — chosen
   at setup per channel (2026-09-25). See §4.2.

@@ -28,6 +28,14 @@ final class KubeClusterEngine {
     /// on a fast cadence.
     var watched: Set<UUID> = []
     private var startedAutoClusters = false
+    /// Connector (MessagingConnectorEngine.swift): a message from the user
+    /// on Signal or WhatsApp, already checked to be theirs.
+    var onConnectorMessage: ((ConnectorChannel.Kind, String) -> Void)?
+    /// Recently sent replies, so their echo in a linked self-chat isn't
+    /// read back as the user speaking.
+    var connectorEchoes: Set<String> = [] {
+        didSet { if connectorEchoes.count > 200 { connectorEchoes.removeAll() } }
+    }
 
     init(app: ACAppDelegate, store: KubeClusterStore) {
         self.app = app
@@ -262,7 +270,9 @@ final class KubeClusterEngine {
         if on { watched.insert(id) } else { watched.remove(id) }
         if on, let rt = runtimes[id], rt.probeTask != nil {
             // Restart the loop so the first full probe lands immediately.
-            if store.registry(id) != nil { startRegistryProbeLoop(id) } else { startProbeLoop(id) }
+            if store.registry(id) != nil { startRegistryProbeLoop(id) }
+            else if store.connector(id) != nil { startConnectorLoop(id) }
+            else { startProbeLoop(id) }
         }
     }
 
@@ -277,6 +287,7 @@ final class KubeClusterEngine {
         guard !startedAutoClusters else { return }
         startedAutoClusters = true
         for r in store.registries where r.autoStart && r.provisioned { startRegistry(r.id) }
+        for c in store.connectors where c.autoStart && c.provisioned { startConnector(c.id) }
         for c in store.clusters where c.autoStart && c.provisioned { start(c.id) }
     }
 
@@ -284,6 +295,7 @@ final class KubeClusterEngine {
     func isNode(_ profileID: UUID) -> Bool {
         store.clusters.contains { $0.nodes.contains { $0.id == profileID } }
             || store.registries.contains { $0.node.id == profileID }
+            || store.connectors.contains { $0.node.id == profileID }
     }
 
     // MARK: Workspace integration
@@ -670,6 +682,8 @@ final class KubeClusterEngine {
         let record: KubeNodeRecord
         let cpus: Int
         let memoryGB: Int
+        /// Under-a-gigabyte machines (the connector): wins over memoryGB.
+        var memoryMB: Int? = nil
         let dataDiskGB: Int?
         let comment: String
         /// Files copied into the guest's read-only meta share.
@@ -699,6 +713,7 @@ final class KubeClusterEngine {
         var profile = Profile(id: node.id, name: node.name, tool: .claude, authMode: .token,
                               homeModel: .virtiofs)
         profile.memoryGB = m.memoryGB
+        profile.memoryMB = m.memoryMB
         // Quitting the app suspends the machine (RAM snapshot, like a
         // workspace), and the next start resumes it. It used to shut down on
         // quit with the workspace's 15 s grace: a k3s node (containerd, etcd,

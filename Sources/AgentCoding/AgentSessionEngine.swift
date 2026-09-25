@@ -206,6 +206,7 @@ final class AgentSessionEngine {
                     self.relaunchInFreshTab(id, s, message: message)
                     return
                 }
+                let inlineMessage = s.tool == .claude || s.tool == .omp
                 if alive {
                     // Alive: the conversation is simply back on stage. Only
                     // something the user actually said gets typed.
@@ -219,11 +220,26 @@ final class AgentSessionEngine {
                     // The agent exited, its shell is still there: relaunch
                     // in place so the conversation history is right at hand.
                     let words: [String] = [s.tool.rawValue, Self.resumeFlags(for: s), Self.roleFlags(for: s)]
-                    let cmd = words.filter { !$0.isEmpty }.joined(separator: " ")
+                    var cmd = words.filter { !$0.isEmpty }.joined(separator: " ")
+                    // Claude and Oh My Pi take the message on the command
+                    // line: typing it once the agent "looks alive" raced the
+                    // resumed conversation loading — text typed before its
+                    // input box is up is lost.
+                    if let message, inlineMessage {
+                        cmd += " '" + message.replacingOccurrences(of: "'", with: "'\\''") + "'"
+                    }
+                    // The Switchboard's brief is rewritten on every launch —
+                    // an in-place relaunch too, so an app update reaches it.
+                    if s.isSwitchboard {
+                        _ = try? await delegate.guestExec(
+                            profileID: s.profileID,
+                            command: SwitchboardEngine.briefCommand(
+                                guestFolder: ScheduledAutomationEngine.guestPath(s.cwd)),
+                            timeout: 15)
+                    }
                     _ = try? await delegate.guestExec(
                         profileID: s.profileID,
-                        command: "tmux send-keys -t bromure:\(w) -l '\(cmd)'; sleep 0.2; "
-                            + "tmux send-keys -t bromure:\(w) Enter",
+                        command: CodingTaskEngine.typeCommand(tabIndex: w, text: cmd),
                         timeout: 15)
                 }
                 // A fresh start of the agent in the tab: the "exited" verdict
@@ -236,7 +252,7 @@ final class AgentSessionEngine {
                     $0.resumedAt = Date(); $0.agentAlive = nil
                     $0.changesSeenAt = nil
                 }
-                if !alive, let message { self.deliverWhenAlive(id, message) }
+                if !alive, !inlineMessage, let message { self.deliverWhenAlive(id, message) }
                 return
             }
             self.relaunchInFreshTab(id, s, message: message)
@@ -472,13 +488,13 @@ final class AgentSessionEngine {
                                 url, error.localizedDescription))
                     return
                 }
-            } else if s.isConductor {
-                // The Conductor's folder holds its brief, rewritten on every
+            } else if s.isSwitchboard {
+                // The Switchboard's folder holds its brief, rewritten on every
                 // launch so an app update's brief reaches it. No repository:
                 // it works on sessions, not on files.
                 _ = try? await delegate.guestExec(
                     profileID: s.profileID,
-                    command: ConductorEngine.briefCommand(guestFolder: guestPath), timeout: 15)
+                    command: SwitchboardEngine.briefCommand(guestFolder: guestPath), timeout: 15)
             } else {
                 // A folder that doesn't exist yet is created — and starts as
                 // a git repository, so the agent's work is versioned from the
@@ -620,9 +636,9 @@ final class AgentSessionEngine {
     /// delegate beside its delegator) would otherwise `--continue` into
     /// each other's — else the tool's own "the latest".
     /// Flags a session's role adds to every launch of its agent (the
-    /// Conductor's MCP config), on top of any resume flags.
+    /// Switchboard's MCP config), on top of any resume flags.
     static func roleFlags(for s: AgentSession) -> String {
-        s.isConductor ? ConductorEngine.launchFlags : ""
+        s.isSwitchboard ? SwitchboardEngine.launchFlags : ""
     }
 
     static func resumeFlags(for s: AgentSession) -> String {

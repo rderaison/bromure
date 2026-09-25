@@ -39,7 +39,7 @@ Section index
   §1  Logging + service supervisor
   §2  Self-hash / hot-upgrade support
   §3  shell-agent   (vsock 5800 guest-initiated pool; exec + pty + views)
-  §4  vm-bridge     (127.0.0.1:8080 + unix sockets → host vsock MITM)
+  §4  vm-bridge     (127.0.0.1:65534 + unix sockets → host vsock MITM)
   §5  claude-token  (vsock 8446, ~/.claude/.credentials.json)
   §6  codex-token   (vsock 8447, ~/.codex/auth.json)
   §7  loopback-relay(vsock 5010, OAuth callback relay)
@@ -85,7 +85,23 @@ CODEX_TOKEN_PORT = 8447
 LOOPBACK_VSOCK_PORT = 5010
 
 # local listeners bridged to the host
-HTTP_PROXY_TCP_PORT = 8080
+def _read_proxy_port():
+    """The port the cooperative HTTP proxy listens on this boot. The host
+    decides it (the meta share's proxy_port, the same value proxy.env
+    points at): 65534 on a fresh boot — far from ports people run things
+    on, and above the kernel's ephemeral range — or the legacy 8080 when a
+    workspace resumes a snapshot taken under an older daemon."""
+    try:
+        with open("/mnt/bromure-meta/proxy_port") as f:
+            n = int(f.read().strip())
+            if 1 <= n <= 65535:
+                return n
+    except (OSError, ValueError):
+        pass
+    return 65534
+
+
+HTTP_PROXY_TCP_PORT = _read_proxy_port()
 SSH_AGENT_UNIX_PATH = "/tmp/bromure-agent.sock"
 AWS_CREDS_UNIX_PATH = "/tmp/bromure-aws-creds.sock"
 LLM_ENGINE_TCP_PORT = 11434
@@ -710,7 +726,7 @@ def shell_agent_service():
 
 # ─────────────── §4 vm-bridge (local listeners → host vsock MITM) ───────────
 # Bridges several in-VM clients to the host's MITM engine over vsock:
-#   • HTTP proxy:  0.0.0.0:8080 (TCP)                →  vsock CID 2 port 8443
+#   • HTTP proxy:  0.0.0.0:65534 (TCP; proxy_port)   →  vsock CID 2 port 8443
 #   • ssh-agent:   /tmp/bromure-agent.sock (Unix)    →  vsock CID 2 port 8444
 #   • AWS creds:   /tmp/bromure-aws-creds.sock (Unix) →  vsock CID 2 port 8445
 #   • Local LLM:   127.0.0.1:11434 (TCP)             →  vsock CID 2 port 8446
@@ -3662,10 +3678,10 @@ def _docker_binfmt(enable):
 
 
 _PROXY_ENV_LINES = (
-    'http_proxy=http://host.docker.internal:8080',
-    'https_proxy=http://host.docker.internal:8080',
-    'HTTP_PROXY=http://host.docker.internal:8080',
-    'HTTPS_PROXY=http://host.docker.internal:8080',
+    'http_proxy=http://host.docker.internal:%d' % HTTP_PROXY_TCP_PORT,
+    'https_proxy=http://host.docker.internal:%d' % HTTP_PROXY_TCP_PORT,
+    'HTTP_PROXY=http://host.docker.internal:%d' % HTTP_PROXY_TCP_PORT,
+    'HTTPS_PROXY=http://host.docker.internal:%d' % HTTP_PROXY_TCP_PORT,
     'no_proxy=localhost,127.0.0.1,::1',
     'NO_PROXY=localhost,127.0.0.1,::1',
     'NODE_EXTRA_CA_CERTS=/etc/ssl/certs/bromure-ca.pem',
@@ -4522,9 +4538,9 @@ def task_fstrim():
 DOCKER_PROXY_FRAGMENT = (
     "# Managed by Bromure Agentic Coding — rewritten on every launch.\n"
     "[Service]\n"
-    'Environment="HTTP_PROXY=http://127.0.0.1:8080"\n'
-    'Environment="HTTPS_PROXY=http://127.0.0.1:8080"\n'
-    'Environment="NO_PROXY=localhost,127.0.0.1,::1"\n')
+    'Environment="HTTP_PROXY=http://127.0.0.1:%d"\n'
+    'Environment="HTTPS_PROXY=http://127.0.0.1:%d"\n'
+    'Environment="NO_PROXY=localhost,127.0.0.1,::1"\n') % (HTTP_PROXY_TCP_PORT, HTTP_PROXY_TCP_PORT)
 
 
 def _sudo(args, **kw):
