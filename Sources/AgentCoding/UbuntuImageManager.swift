@@ -124,6 +124,38 @@ public final class UbuntuImageManager {
     /// we ever reach the login prompt where we used to clamp.
     private var shimmedInitrdURL: URL { storageDir.appendingPathComponent("alpine-initramfs-shimmed") }
 
+    /// The self-contained provisioner (build-provisioner.sh): the netboot
+    /// kernel + ONE initramfs carrying the modloop's modules and
+    /// e2fsprogs, published next to base.img.gz as the catalog's
+    /// `provisioner-vmlinuz` / `provisioner-initrd` boot artifacts. When
+    /// present it replaces the netboot for postinstall, so an install
+    /// never reaches dl-cdn.alpinelinux.org. Cached across runs (later
+    /// postinstall-step applies reuse it), like the netboot files.
+    public var provisionerKernelURL: URL { storageDir.appendingPathComponent("provisioner-vmlinuz") }
+    public var provisionerInitrdURL: URL { storageDir.appendingPathComponent("provisioner-initrd") }
+    private var provisionerShimmedInitrdURL: URL {
+        storageDir.appendingPathComponent("provisioner-initrd-shimmed")
+    }
+    /// Catalog `boot` artifact names the publish pipeline uses.
+    static let provisionerKernelArtifact = "provisioner-vmlinuz"
+    static let provisionerInitrdArtifact = "provisioner-initrd"
+
+    public var hasProvisioner: Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: provisionerKernelURL.path)
+            && fm.fileExists(atPath: provisionerInitrdURL.path)
+    }
+
+    /// What the one-shot provisioning VM boots.
+    enum InstallerEnvironment {
+        /// Alpine netboot: fetches modloop + alpine-base from the Alpine
+        /// CDN at boot. Required by the local bake (setup.sh apk-adds its
+        /// debootstrap toolchain); the postinstall fallback.
+        case netboot
+        /// The published self-contained initramfs — no boot-time fetches.
+        case provisioner(kernel: URL, initrd: URL)
+    }
+
     // MARK: - Status
 
     /// True when the on-disk artefacts exist, regardless of version
@@ -492,6 +524,7 @@ public final class UbuntuImageManager {
     ) async throws {
         let scale = Self.detectDisplayScale()
         try await runProvisioner(
+            environment: .netboot,
             targetDisk: targetDisk,
             script: "setup.sh",
             scriptArgs: "\(scale)",
@@ -513,6 +546,7 @@ public final class UbuntuImageManager {
     func runPostinstall(
         steps: [PostinstallStep],
         targetDisk: URL,
+        environmentOverride: InstallerEnvironment? = nil,
         progress: @escaping (String) -> Void,
         output: @escaping (String) -> Void
     ) async throws {
@@ -535,19 +569,32 @@ public final class UbuntuImageManager {
             try body.write(to: file, atomically: true, encoding: .utf8)
         }
 
-        // The Alpine netboot may not be cached yet — on the download path
-        // this runs on a fresh machine before any local build ever did.
-        if !fm.fileExists(atPath: alpineKernelURL.path) ||
-           !fm.fileExists(atPath: alpineInitrdURL.path) {
-            progress("Downloading Alpine netboot installer…")
-            try await downloadAlpineNetboot(progress: progress)
+        // Prefer the published provisioner (fetched alongside the image by
+        // the download path) — it boots with no network fetches at all.
+        // Otherwise the Alpine netboot, which may not be cached yet: on
+        // the download path this runs on a fresh machine before any local
+        // build ever did.
+        let environment: InstallerEnvironment
+        if let override = environmentOverride {
+            environment = override
+        } else if hasProvisioner {
+            environment = .provisioner(kernel: provisionerKernelURL,
+                                       initrd: provisionerInitrdURL)
+        } else {
+            if !fm.fileExists(atPath: alpineKernelURL.path) ||
+               !fm.fileExists(atPath: alpineInitrdURL.path) {
+                progress("Downloading Alpine netboot installer…")
+                try await downloadAlpineNetboot(progress: progress)
+            }
+            environment = .netboot
         }
 
         try await runProvisioner(
+            environment: environment,
             targetDisk: targetDisk,
             script: "postinstall.sh",
             scriptArgs: "",
-            extraShares: [("postinstall", shareDir)],
+            extraShares: [("postinstall", shareDir, true)],
             successMarker: "SANDBOX_POSTINSTALL_DONE",
             failureMarker: "SANDBOX_POSTINSTALL_FAILED:",
             markerTimeout: 20 * 60,
@@ -557,16 +604,67 @@ public final class UbuntuImageManager {
         )
     }
 
-    /// Shared Alpine provisioning driver: boot the netboot installer with
-    /// `targetDisk` attached as vda, log in over serial, mount the
-    /// vm-setup share (+ any `extraShares`, read-only), run
+    /// Publish-pipeline step: turn the Alpine netboot into the
+    /// self-contained provisioner (vm-setup/build-provisioner.sh) and land
+    /// it at `provisionerKernelURL` / `provisionerInitrdURL`. The kernel
+    /// is the netboot's own — the initramfs carries that kernel's modules,
+    /// so the two ship (and must be used) as a pair.
+    @MainActor
+    public func buildProvisioner(
+        progress: @escaping (String) -> Void,
+        output: @escaping (String) -> Void = { _ in }
+    ) async throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: storageDir, withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: alpineKernelURL.path) ||
+           !fm.fileExists(atPath: alpineInitrdURL.path) {
+            progress("Downloading Alpine netboot installer…")
+            try await downloadAlpineNetboot(progress: progress)
+        }
+
+        let outDir = storageDir.appendingPathComponent("provisioner-build", isDirectory: true)
+        try? fm.removeItem(at: outDir)
+        try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: outDir) }
+
+        progress("Building the self-contained Alpine provisioner…")
+        try await runProvisioner(
+            environment: .netboot,
+            targetDisk: nil,
+            script: "build-provisioner.sh",
+            scriptArgs: "",
+            extraShares: [("out", outDir, false)],
+            successMarker: "SANDBOX_PROVISIONER_DONE",
+            failureMarker: "SANDBOX_PROVISIONER_FAILED:",
+            markerTimeout: 15 * 60,
+            hardTimeout: 20 * 60,
+            progress: progress,
+            output: output
+        )
+
+        let builtInitrd = outDir.appendingPathComponent("provisioner-initrd")
+        guard fm.fileExists(atPath: builtInitrd.path) else {
+            throw UbuntuImageError.installerReportedFailure(
+                "build-provisioner.sh reported success but wrote no provisioner-initrd")
+        }
+        try? fm.removeItem(at: provisionerInitrdURL)
+        try fm.moveItem(at: builtInitrd, to: provisionerInitrdURL)
+        try? fm.removeItem(at: provisionerKernelURL)
+        try fm.copyItem(at: alpineKernelURL, to: provisionerKernelURL)
+        progress("Provisioner ready: \(provisionerKernelURL.lastPathComponent) + \(provisionerInitrdURL.lastPathComponent)")
+    }
+
+    /// Shared Alpine provisioning driver: boot `environment` with
+    /// `targetDisk` (if any) attached as vda, log in over serial, mount
+    /// the vm-setup share (+ any `extraShares`), run
     /// `/tmp/setup/<script>` and wait for its marker.
     @MainActor
     private func runProvisioner(
-        targetDisk: URL,
+        environment: InstallerEnvironment,
+        targetDisk: URL?,
         script: String,
         scriptArgs: String,
-        extraShares: [(tag: String, url: URL)],
+        extraShares: [(tag: String, url: URL, readOnly: Bool)],
         successMarker: String,
         failureMarker: String,
         markerTimeout: TimeInterval,
@@ -618,16 +716,40 @@ public final class UbuntuImageManager {
         // and `rdinit=` lets us point PID 1 at our shim instead of
         // Alpine's /init. Our shim sets MTU on each ethernet-style
         // sysfs node, then exec's /init to hand control to Alpine.
+        // The provisioner's own /init takes the same shim hand-off — it
+        // just has nothing left to fetch afterwards.
+        let kernelURL, initrdURL, shimmedURL: URL
+        let netbootArgs: [String]
+        switch environment {
+        case .netboot:
+            (kernelURL, initrdURL, shimmedURL) = (alpineKernelURL, alpineInitrdURL, shimmedInitrdURL)
+            netbootArgs = [
+                // Plain HTTP through our in-process proxy. Guest's apk /
+                // wget speak HTTP; the proxy speaks HTTPS upstream via
+                // URLSession. Integrity is preserved at the apk layer
+                // (RSA-signed packages + signed APKINDEX, keys in
+                // alpine-keys which ships in our app bundle).
+                "alpine_repo=\(alpineRepoBase)/alpine/v\(Self.alpineVersion)/main",
+                // Same proxy handles the modloop fetch (both Alpine's
+                // initramfs nlplug-findfs and the in-rootfs modloop
+                // OpenRC service hit it).
+                "modloop=\(alpineRepoBase)/alpine/v\(Self.alpineVersion)/releases/aarch64/netboot-\(Self.alpineRelease)/modloop-virt",
+                "modules=loop,squashfs,virtio-net,virtio-blk,virtiofs",
+            ]
+        case .provisioner(let kernel, let initrd):
+            (kernelURL, initrdURL, shimmedURL) = (kernel, initrd, provisionerShimmedInitrdURL)
+            netbootArgs = []
+        }
         let mtu = VMConfig.resolvedNICMTU()
         try InitrdShim.writeShimmedInitrd(
-            original: alpineInitrdURL,
+            original: initrdURL,
             mtu: mtu,
-            to: shimmedInitrdURL
+            to: shimmedURL
         )
 
-        let bootLoader = VZLinuxBootLoader(kernelURL: alpineKernelURL)
-        bootLoader.initialRamdiskURL = shimmedInitrdURL
-        bootLoader.commandLine = [
+        let bootLoader = VZLinuxBootLoader(kernelURL: kernelURL)
+        bootLoader.initialRamdiskURL = shimmedURL
+        bootLoader.commandLine = ([
             "console=hvc0",
             // No `ip=dhcp` here on purpose. Kernel autoconfig races
             // vmnet's bootpd, fails, and brings eth0 down — and if
@@ -638,31 +760,22 @@ public final class UbuntuImageManager {
             // no ip= on the cmdline, Alpine's /init sees the network
             // is already up and skips its own DHCP step.
             "rdinit=/init.bromure",
-            // Plain HTTP through our in-process proxy. Guest's apk /
-            // wget speak HTTP; the proxy speaks HTTPS upstream via
-            // URLSession. Integrity is preserved at the apk layer
-            // (RSA-signed packages + signed APKINDEX, keys in
-            // alpine-keys which ships in our app bundle).
-            "alpine_repo=\(alpineRepoBase)/alpine/v\(Self.alpineVersion)/main",
-            // Same proxy handles the modloop fetch (both Alpine's
-            // initramfs nlplug-findfs and the in-rootfs modloop
-            // OpenRC service hit it).
-            "modloop=\(alpineRepoBase)/alpine/v\(Self.alpineVersion)/releases/aarch64/netboot-\(Self.alpineRelease)/modloop-virt",
-            "modules=loop,squashfs,virtio-net,virtio-blk,virtiofs",
             // Disable ARM Scalable Matrix Extension. Same option the
             // installed image's GRUB cmdline uses — without it some
             // M3+ hosts crash the guest kernel on init.
             "arm64.nosme",
-        ].joined(separator: " ")
+        ] + netbootArgs).joined(separator: " ")
         config.bootLoader = bootLoader
         config.platform = VZGenericPlatformConfiguration()
 
-        let diskAttachment = try VZDiskImageStorageDeviceAttachment(
-            url: targetDisk, readOnly: false
-        )
-        config.storageDevices = [
-            VZVirtioBlockDeviceConfiguration(attachment: diskAttachment),
-        ]
+        if let targetDisk {
+            let diskAttachment = try VZDiskImageStorageDeviceAttachment(
+                url: targetDisk, readOnly: false
+            )
+            config.storageDevices = [
+                VZVirtioBlockDeviceConfiguration(attachment: diskAttachment),
+            ]
+        }
 
         // Claim a MAC from the shared pool so the installer reuses a
         // small set of addresses instead of asking VZ for a random
@@ -702,7 +815,7 @@ public final class UbuntuImageManager {
         for extra in extraShares {
             let fsDev = VZVirtioFileSystemDeviceConfiguration(tag: extra.tag)
             fsDev.share = VZSingleDirectoryShare(
-                directory: VZSharedDirectory(url: extra.url, readOnly: true)
+                directory: VZSharedDirectory(url: extra.url, readOnly: extra.readOnly)
             )
             shares.append(fsDev)
         }

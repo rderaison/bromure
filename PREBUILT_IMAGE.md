@@ -13,7 +13,7 @@ download plumbing, chroot postinstall — all in
 |---|---|---|
 | CDN prefix | `images/` | `browser-images/` |
 | Image | Ubuntu 24.04, 24 GB sparse, EFI/GRUB | Alpine + Chromium, 4.5 GB, direct kernel boot |
-| Artifacts | `base.img.gz` | `base.img.gz` + `vmlinuz.gz` + `initrd.gz` (catalog `boot` array) |
+| Artifacts | `base.img.gz` + `provisioner-vmlinuz.gz` + `provisioner-initrd.gz` (catalog `boot` array) | `base.img.gz` + `vmlinuz.gz` + `initrd.gz` (catalog `boot` array) |
 | Version constant | `UbuntuImageManager.imageVersion` | `LinuxImageManager.imageVersion` |
 | Baseline (canonical postinstall) | `Sources/AgentCoding/Resources/img-catalog.json` | `Sources/SandboxEngine/Resources/browser-img-catalog.json` |
 | Non-free postinstall | Claude Code, Codex, Grok, gcloud | Cloudflare WARP |
@@ -46,9 +46,33 @@ in the image catalog and executed on the end-user's machine:
   fonts are not redistributable; they're copied from the *user's own Mac*
   during postinstall (or during a local build), never shipped.
 
-Postinstall commands run as root in a chroot on `base.img`, driven by the
-same Alpine installer VM as the bake (`vm-setup/postinstall.sh`, serial
+Postinstall commands run as root in a chroot on `base.img`, driven by an
+Alpine VM over the serial console (`vm-setup/postinstall.sh`, serial
 markers `SANDBOX_POSTINSTALL_DONE/FAILED`).
+
+## The provisioner (no Alpine CDN at install time)
+
+That Alpine VM used to be the netboot: a tarball from
+dl-cdn.alpinelinux.org, then `modloop-virt`, APKINDEX, `alpine-base` and
+`e2fsprogs` fetched from the Alpine CDN while booting. The pipeline now
+publishes a **self-contained provisioner** next to the image instead —
+the netboot kernel plus one initramfs that already carries that kernel's
+modules and e2fsprogs (`vm-setup/build-provisioner.sh`, run in the
+netboot at the end of `init-foss-image`). It keeps the netboot's serial
+contract (`localhost login:` → root → `localhost:~#`), so the host driver
+is the same; it just boots with no `alpine_repo=`/`modloop=` and fetches
+nothing. A new installation is therefore two downloads from
+dl.bromure.io — the image and the provisioner — plus whatever the
+postinstall steps themselves fetch.
+
+The pair is declared as catalog `boot` artifacts `provisioner-vmlinuz` /
+`provisioner-initrd` (signed like the browser's boot files; older apps
+ignore them), fetched into `BromureAC/provisioner-{vmlinuz,initrd}` and
+kept for later postinstall-step applies. Kernel and initramfs are only
+valid as a pair (the modules match one `uname -r`), so they're replaced
+together. When a catalog carries no provisioner, or its download fails,
+postinstall falls back to the netboot. The local build (`setup.sh`) still
+uses the netboot — it `apk add`s its debootstrap toolchain.
 
 ## img-catalog.json
 
@@ -139,11 +163,16 @@ then `scripts/publish-image.sh <path-to-bromure-ac>`:
 
 1. `bromure-ac init-foss-image --output …` — build the image with the
    latest Ubuntu packages (no agents, no Apple fonts; writes
-   `build-info.json`).
-2. **Boot check** — `bromure-ac verify-image` boots an APFS *clone*
-   (`cp -c`) with a fresh EFI store and requires the serial `login:`
+   `build-info.json`), then the provisioner (`provisioner-vmlinuz`,
+   `provisioner-initrd`; `bromure-ac build-provisioner --output …` builds
+   just that, for iterating).
+2. **Provisioner + boot check** — `bromure-ac verify-image
+   --provisioner-kernel … --provisioner-initrd …` runs an empty
+   postinstall through the provisioner on an APFS *clone* (`cp -c`), then
+   boots it with a fresh EFI store and requires the serial `login:`
    prompt; the published artifact stays pristine.
-3. gzip + sha256, upload to `images/<uuid>/base.img.gz`.
+3. gzip + sha256, upload to `images/<uuid>/base.img.gz` and
+   `images/<uuid>/provisioner-{vmlinuz,initrd}.gz`.
 4. Download the previous `img-catalog.json` (to learn the retired uuid).
 5. Generate the new catalog (`tools/make-img-catalog.mjs` — baseline
    postinstall steps + new image block).

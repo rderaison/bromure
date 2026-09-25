@@ -50,7 +50,8 @@ struct BromureAC: ParsableCommand {
         if !asCLI {
             groups.append(ArgumentParser.CommandGroup(name: "Image management",
                                        subcommands: [Init.self, Info.self, Reset.self,
-                                                     InitFossImage.self, VerifyImage.self]))
+                                                     InitFossImage.self, BuildProvisioner.self,
+                                                     VerifyImage.self]))
         }
         groups.append(ArgumentParser.CommandGroup(name: "Workspaces", subcommands: [Profiles.self]))
         groups.append(ArgumentParser.CommandGroup(name: "Tracing", subcommands: [Trace.self]))
@@ -306,7 +307,7 @@ struct InitFossImage: ParsableCommand {
     )
 
     @Option(name: .long,
-            help: "Directory the artifacts land in (base.img, base.version, build-info.json).")
+            help: "Directory the artifacts land in (base.img, base.version, build-info.json, provisioner-vmlinuz, provisioner-initrd).")
     var output: String
 
     func run() throws {
@@ -318,13 +319,17 @@ struct InitFossImage: ParsableCommand {
         var result: Result<Void, Error>?
         Task {
             do {
+                let progress: (String) -> Void = { msg in
+                    FileHandle.standardError.write(Data("[init-foss-image] \(msg)\n".utf8))
+                }
                 try await imageManager.createBaseImage(
-                    progress: { msg in
-                        FileHandle.standardError.write(Data("[init-foss-image] \(msg)\n".utf8))
-                    },
+                    progress: progress,
                     force: true,
                     postinstallSteps: []
                 )
+                // Published next to the image so client postinstall
+                // boots never fetch from the Alpine CDN.
+                try await imageManager.buildProvisioner(progress: progress)
                 result = .success(())
             } catch {
                 result = .failure(error)
@@ -350,6 +355,44 @@ struct InitFossImage: ParsableCommand {
     }
 }
 
+// MARK: - build-provisioner
+
+/// Build only the self-contained Alpine provisioner (init-foss-image
+/// builds it too, after the image). For iterating on
+/// vm-setup/build-provisioner.sh without a full image bake.
+struct BuildProvisioner: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "build-provisioner",
+        abstract: "Build the self-contained Alpine provisioner (provisioner-vmlinuz + provisioner-initrd).",
+        shouldDisplay: false
+    )
+
+    @Option(name: .long, help: "Directory the provisioner-vmlinuz / provisioner-initrd pair lands in.")
+    var output: String
+
+    func run() throws {
+        let outputDir = URL(fileURLWithPath: output, isDirectory: true)
+        let imageManager = UbuntuImageManager(storageDir: outputDir,
+                                              setupDir: try locateSetupDir())
+        var result: Result<Void, Error>?
+        Task {
+            do {
+                try await imageManager.buildProvisioner(progress: { msg in
+                    FileHandle.standardError.write(Data("[build-provisioner] \(msg)\n".utf8))
+                })
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+        }
+        while result == nil {
+            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+        }
+        try result!.get()
+        print("Provisioner ready: \(imageManager.provisionerKernelURL.path) + \(imageManager.provisionerInitrdURL.path)")
+    }
+}
+
 // MARK: - verify-image
 
 /// Publish-pipeline gate: boot a base image headless and require the
@@ -369,16 +412,45 @@ struct VerifyImage: ParsableCommand {
     @Option(name: .long, help: "Boot timeout in seconds.")
     var timeout: Int = 300
 
+    @Option(name: .long,
+            help: "Provisioner kernel: first run an empty postinstall on the disk with this provisioner (needs --provisioner-initrd).")
+    var provisionerKernel: String?
+
+    @Option(name: .long, help: "Provisioner initramfs paired with --provisioner-kernel.")
+    var provisionerInitrd: String?
+
     func run() throws {
         let diskURL = URL(fileURLWithPath: disk)
         guard FileManager.default.fileExists(atPath: diskURL.path) else {
             throw ValidationError("no disk image at \(diskURL.path)")
+        }
+        guard (provisionerKernel == nil) == (provisionerInitrd == nil) else {
+            throw ValidationError("--provisioner-kernel and --provisioner-initrd go together")
+        }
+        let provisioner = provisionerKernel.flatMap { k in
+            provisionerInitrd.map { UbuntuImageManager.InstallerEnvironment.provisioner(
+                kernel: URL(fileURLWithPath: k), initrd: URL(fileURLWithPath: $0)) }
         }
         let imageManager = try makeImageManager()
         var result: Result<Void, Error>?
         let timeout = TimeInterval(self.timeout)
         Task {
             do {
+                // The provisioner gate: boot it exactly as a client
+                // install would (DHCP, login, virtiofs, chroot, e2fsck)
+                // with zero steps — then the boot check below also
+                // proves it left the disk bootable.
+                if let provisioner {
+                    try await imageManager.runPostinstall(
+                        steps: [],
+                        targetDisk: diskURL,
+                        environmentOverride: provisioner,
+                        progress: { msg in
+                            FileHandle.standardError.write(Data("[verify-image] \(msg)\n".utf8))
+                        },
+                        output: { _ in }
+                    )
+                }
                 try await imageManager.verifyImageBoots(
                     diskURL: diskURL,
                     timeout: timeout,

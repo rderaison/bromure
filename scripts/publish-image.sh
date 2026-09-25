@@ -9,6 +9,11 @@
 #
 #   images/<major>/img-catalog.json   ← the live image manifest (1s CDN TTL)
 #   images/<major>/<uuid>/base.img.gz ← the compressed prebuilt disk image
+#   images/<major>/<uuid>/provisioner-{vmlinuz,initrd}.gz
+#                                     ← the self-contained Alpine provisioner
+#                                       clients boot for postinstall (catalog
+#                                       `boot` artifacts), so an install never
+#                                       fetches from dl-cdn.alpinelinux.org
 #
 # <major> is the image version the binary bakes (build-info.json's
 # `version`, e.g. 201): one catalog per image major, the same path
@@ -24,11 +29,13 @@
 #
 # Sequence (mirrors the design):
 #   1. Build the image with the latest Ubuntu packages
-#      (bromure-ac init-foss-image — no agents, no Apple fonts).
-#   2. Boot-check an APFS CLONE of the image (bromure-ac verify-image):
-#      the disk must reach the serial login prompt, but the published
-#      artifact stays pristine — booting writes machine-id/journal.
-#   3. Compress + upload the image under images/<uuid>/.
+#      (bromure-ac init-foss-image — no agents, no Apple fonts), plus the
+#      provisioner.
+#   2. On an APFS CLONE of the image (bromure-ac verify-image): run an
+#      empty postinstall through the provisioner, then require the serial
+#      login prompt. The published artifact stays pristine — booting
+#      writes machine-id/journal.
+#   3. Compress + upload the image + provisioner under images/<uuid>/.
 #   4. Download the previous img-catalog.json (for the retired uuid).
 #   5. Generate the new img-catalog.json.
 #   6. Upload it with a 1-second cache expiry.
@@ -101,17 +108,23 @@ IMAGE_DIR="$STAGING/image"
 
 BASE_IMG="$IMAGE_DIR/base.img"
 BUILD_INFO="$IMAGE_DIR/build-info.json"
-[ -f "$BASE_IMG" ] || { echo "ERROR: $BASE_IMG missing after build"; exit 1; }
-[ -f "$BUILD_INFO" ] || { echo "ERROR: $BUILD_INFO missing after build"; exit 1; }
+PROV_KERNEL="$IMAGE_DIR/provisioner-vmlinuz"
+PROV_INITRD="$IMAGE_DIR/provisioner-initrd"
+for f in "$BASE_IMG" "$BUILD_INFO" "$PROV_KERNEL" "$PROV_INITRD"; do
+    [ -f "$f" ] || { echo "ERROR: $f missing after build"; exit 1; }
+done
 
 # --- 2. Boot-check a clone -----------------------------------------------
 # `cp -c` = clonefile(2): instant APFS copy-on-write. The boot dirties the
 # clone (journal, machine-id); the original stays byte-identical to what
 # gets checksummed + uploaded below.
-echo "=== Boot-checking the image (on a disposable clone) ==="
+# The provisioner is gated the same way: a broken one would fail every
+# client install at the postinstall step.
+echo "=== Provisioner postinstall + boot check (on a disposable clone) ==="
 VERIFY_IMG="$STAGING/verify.img"
 cp -c "$BASE_IMG" "$VERIFY_IMG"
-"$AC" verify-image --disk "$VERIFY_IMG" --timeout 300
+"$AC" verify-image --disk "$VERIFY_IMG" --timeout 300 \
+    --provisioner-kernel "$PROV_KERNEL" --provisioner-initrd "$PROV_INITRD"
 rm -f "$VERIFY_IMG"
 
 # --- 3. Compress + upload the image --------------------------------------
@@ -133,6 +146,18 @@ IMAGE_MAJOR="${IMAGE_VERSION%%.*}"
 [ -n "$IMAGE_MAJOR" ] || { echo "ERROR: $BUILD_INFO carries no version"; exit 1; }
 CHANNEL="images/$IMAGE_MAJOR"
 DISK_KEY="$CHANNEL/$UUID/base.img.gz"
+# Provisioner boot artifacts, as make-img-catalog.mjs --boot specs.
+BOOT_ARGS=()
+BOOT_UPLOADS=()
+for name in provisioner-vmlinuz provisioner-initrd; do
+    src="$IMAGE_DIR/$name"
+    gz="$STAGING/$name.gz"
+    gzip -9 -c "$src" > "$gz"
+    key="$CHANNEL/$UUID/$name.gz"
+    BOOT_ARGS+=(--boot "name=$name,path=$key,sha256=$(shasum -a 256 "$gz" | awk '{print $1}'),compressedBytes=$(stat -f%z "$gz"),uncompressedBytes=$(stat -f%z "$src")")
+    BOOT_UPLOADS+=("$gz" "$key")
+    echo "$name: $(stat -f%z "$gz") bytes compressed"
+done
 echo "image major:  $IMAGE_MAJOR (channel $CHANNEL)"
 echo "image uuid:   $UUID"
 echo "compressed:   $COMPRESSED_BYTES bytes (from $UNCOMPRESSED_BYTES logical)"
@@ -145,6 +170,10 @@ fi
 
 echo "=== Uploading image ($DISK_KEY) ==="
 put "$GZ" "$DISK_KEY" "application/gzip"
+for ((i = 0; i < ${#BOOT_UPLOADS[@]}; i += 2)); do
+    echo "=== Uploading ${BOOT_UPLOADS[i+1]} ==="
+    put "${BOOT_UPLOADS[i]}" "${BOOT_UPLOADS[i+1]}" "application/gzip"
+done
 
 # --- 4. Download the previous catalog ------------------------------------
 # Needed only to learn which build to retire in step 8. A 404 (first ever
@@ -170,6 +199,7 @@ node tools/make-img-catalog.mjs \
     --sha256 "$SHA256" \
     --compressed-bytes "$COMPRESSED_BYTES" \
     --uncompressed-bytes "$UNCOMPRESSED_BYTES" \
+    "${BOOT_ARGS[@]}" \
     --out "$NEW_CATALOG"
 
 # --- 6. Upload the catalog (1s cache expiry) ------------------------------
@@ -196,8 +226,10 @@ ORIGIN_BASE="https://${DO_SPACES_BUCKET}.${DO_SPACES_ENDPOINT#https://}"
 ORIGIN_UUID=$(catalog_uuid "$ORIGIN_BASE/$CHANNEL/img-catalog.json")
 [ "$ORIGIN_UUID" = "$UUID" ] \
     || { echo "ERROR: origin doesn't serve the new catalog (got '${ORIGIN_UUID:-<empty>}')"; exit 1; }
-curl -fsSIL "$ORIGIN_BASE/$DISK_KEY" >/dev/null \
-    || { echo "ERROR: image not reachable at origin ($ORIGIN_BASE/$DISK_KEY)"; exit 1; }
+for key in "$DISK_KEY" "$CHANNEL/$UUID/provisioner-vmlinuz.gz" "$CHANNEL/$UUID/provisioner-initrd.gz"; do
+    curl -fsSIL "$ORIGIN_BASE/$key" >/dev/null \
+        || { echo "ERROR: artifact not reachable at origin ($ORIGIN_BASE/$key)"; exit 1; }
+done
 echo "origin OK ($ORIGIN_BASE)."
 
 # 7b. Public CDN propagation: this is what real clients fetch, and the
@@ -216,8 +248,10 @@ for i in $(seq 1 "$CDN_ATTEMPTS"); do
     sleep 30
 done
 [ -n "$OK" ] || { echo "ERROR: CDN still serves the old catalog after 1 hour"; exit 1; }
-curl -fsSIL "$DO_SPACES_PUBLIC_BASE/$DISK_KEY" >/dev/null \
-    || { echo "ERROR: published image not reachable at $DISK_KEY"; exit 1; }
+for key in "$DISK_KEY" "$CHANNEL/$UUID/provisioner-vmlinuz.gz" "$CHANNEL/$UUID/provisioner-initrd.gz"; do
+    curl -fsSIL "$DO_SPACES_PUBLIC_BASE/$key" >/dev/null \
+        || { echo "ERROR: published artifact not reachable at $key"; exit 1; }
+done
 echo "smoke-test passed."
 
 # --- 8. Retire the previous image -----------------------------------------

@@ -76,9 +76,11 @@ IMAGE_DIR="$STAGING/image"
 BASE_IMG="$IMAGE_DIR/base.img"
 BUILD_INFO="$IMAGE_DIR/build-info.json"
 
-echo "=== [publisher] Boot-checking the image (clone) ==="
+echo "=== [publisher] Provisioner postinstall + boot-checking the image (clone) ==="
 cp -c "$BASE_IMG" "$STAGING/verify.img"
-"$AC" verify-image --disk "$STAGING/verify.img" --timeout 300
+"$AC" verify-image --disk "$STAGING/verify.img" --timeout 300 \
+    --provisioner-kernel "$IMAGE_DIR/provisioner-vmlinuz" \
+    --provisioner-initrd "$IMAGE_DIR/provisioner-initrd"
 rm -f "$STAGING/verify.img"
 
 # --- 2. Publisher side: fake-CDN layout ------------------------------------
@@ -101,6 +103,14 @@ fi
 COMPRESSED_BYTES=$(stat -f%z "$GZ")
 SHA256=$(shasum -a 256 "$GZ" | awk '{print $1}')
 
+BOOT_ARGS=()
+for name in provisioner-vmlinuz provisioner-initrd; do
+    src="$IMAGE_DIR/$name"
+    gz="$CDN/$CHANNEL/$UUID/$name.gz"
+    gzip -9 -c "$src" > "$gz"
+    BOOT_ARGS+=(--boot "name=$name,path=$CHANNEL/$UUID/$name.gz,sha256=$(shasum -a 256 "$gz" | awk '{print $1}'),compressedBytes=$(stat -f%z "$gz"),uncompressedBytes=$(stat -f%z "$src")")
+done
+
 # --allow-unsigned: no signing key locally. The client side skips
 # signature verification only because BROMURE_IMAGE_CATALOG_BASE is set —
 # production fetches always require a valid signature.
@@ -112,6 +122,7 @@ node tools/make-img-catalog.mjs \
     --sha256 "$SHA256" \
     --compressed-bytes "$COMPRESSED_BYTES" \
     --uncompressed-bytes "$UNCOMPRESSED_BYTES" \
+    "${BOOT_ARGS[@]}" \
     --allow-unsigned \
     --out "$CDN/$CHANNEL/img-catalog.json"
 
@@ -129,9 +140,14 @@ BROMURE_IMAGE_CATALOG_BASE="file://$CDN/" \
 
 # --- 4. Assertions ----------------------------------------------------------
 echo "=== [client] Checking installed artifacts ==="
-for f in base.img efivars.bin base.version image-state.json; do
+for f in base.img efivars.bin base.version image-state.json \
+         provisioner-vmlinuz provisioner-initrd; do
     [ -e "$CLIENT/$f" ] || { echo "ERROR: missing $CLIENT/$f"; exit 1; }
 done
+# The whole point of the provisioner: the client never fell back to the
+# Alpine netboot (which would have cached alpine-vmlinuz here).
+[ ! -e "$CLIENT/alpine-vmlinuz" ] \
+    || { echo "ERROR: client downloaded the Alpine netboot — the provisioner wasn't used"; exit 1; }
 
 EXPECTED_VERSION=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version)' "$BUILD_INFO")
 INSTALLED_VERSION=$(tr -d '[:space:]' < "$CLIENT/base.version")
