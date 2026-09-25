@@ -90,7 +90,7 @@ The preferred path downloads a prebuilt image published weekly to `https://dl.br
 1. **Catalog fetch.** The app fetches the signed [image catalog](18-glossary.mdx) at `https://dl.bromure.io/images/img-catalog.json`, which names the current image (UUID, version, SHA-256, sizes) and lists the postinstall steps. The catalog carries an ed25519 signature made with the same key that signs app updates (the Sparkle `SUPublicEDKey`); the signature covers the image identity, its checksum, and every postinstall command. Unsigned or invalid catalogs are refused, and a catalog signed earlier than one the app has already adopted is never accepted (rollback protection).
 2. **Download.** The gzipped image (about 3 GB compressed) is downloaded and its SHA-256 verified. Failed downloads retry up to 3 times, re-fetching the catalog between attempts — this closes the race with the weekly publish deleting the previous build mid-download.
 3. **Expansion.** The image is expanded sparse into `base.img.partial`: 24 GB logical, but only about 6–8 GB of physical disk space.
-4. **Postinstall.** The app boots a small [Alpine netboot installer](18-glossary.mdx) helper VM which runs the catalog's postinstall steps as root in a chroot on the image (see the next section).
+4. **Customizing the image.** The app downloads a small set of image tools published with the image (about 60 MB) and boots them in a throwaway helper VM, which runs the catalog's postinstall steps as root in a chroot on the image (see the next section). Progress reads "Customizing the image: waiting for the prompt…", "…: installing packages…", and so on. Nothing is fetched from third-party mirrors for this step; if the tools can't be downloaded, the app fetches equivalent ones from their upstream source instead.
 5. **Promotion.** A fresh EFI variable store is created, and `base.img`, `efivars.bin`, `base.version`, and `image-state.json` are promoted atomically.
 
 ### Postinstall steps: the recommended packages
@@ -112,12 +112,12 @@ If the download fails for a download-side reason — offline, CDN outage, checks
 
 The local build produces the same image on your own Mac:
 
-1. Downloads the Alpine 3.22 netboot kernel and initramfs (about 25 MB, cached in the support directory).
+1. Downloads the image build tools (about 25 MB, cached in the support directory).
 2. Allocates a fresh 24 GB sparse disk.
-3. Boots a one-shot Alpine installer VM (4 vCPUs, 4 GB RAM), driven over its serial console, which debootstraps Ubuntu noble, installs the free tooling and GRUB.
+3. Boots a one-shot builder VM (4 vCPUs, 4 GB RAM), driven over its serial console, which debootstraps Ubuntu noble, installs the free tooling and GRUB.
 4. Applies the same catalog postinstall steps as the download path.
 
-Progress messages include "Downloading Alpine netboot installer…", "Allocating 24GB sparse disk…", "Booting Alpine installer (this drives the Ubuntu install)…", and "Running setup.sh…". The progress bar on this path is driven by installer log lines and caps at 97% until the final "Base image ready" jump.
+Progress messages include "Building the image: downloading tools…", "Allocating 24GB sparse disk…", "Building the image: starting…", and "Building the image: installing Ubuntu and the tools…". The progress bar on this path is driven by installer log lines and caps at 97% until the final "Base image ready" jump.
 
 The local build includes VPN-resilience machinery: all guest package fetches route through an in-process host-side proxy, the installer clamps the VM NIC's MTU before any download, DHCP gets a second chance, a no-network condition aborts early, and a guest kernel panic triggers one automatic clean retry. Two related escape hatches:
 
@@ -133,7 +133,7 @@ For firewall and proxy administrators, installation talks to:
 | Endpoint | Purpose |
 |---|---|
 | `https://dl.bromure.io` | Image catalog (`images/img-catalog.json`) and image downloads |
-| `https://dl-cdn.alpinelinux.org` | Alpine 3.22 netboot files (local build and postinstall helper VM) |
+| `https://dl-cdn.alpinelinux.org` | Image build tools — only for the local build, or when the image tools published with the image can't be downloaded |
 | Package mirrors and vendor endpoints | Ubuntu packages, npm registry, Socket.dev, vendor install scripts, fetched by the installer through the app's host-side proxy |
 | `https://bromure.io/api/v1/release-agentic-coding` | Sparkle appcast for app updates (not part of image setup) |
 
@@ -167,7 +167,8 @@ Everything the app writes lives under your user account; nothing is installed sy
 | `~/Library/Application Support/BromureAC/image-state.json` | Image provenance and applied postinstall step UUIDs |
 | `~/Library/Application Support/BromureAC/img-catalog.json` | Cached copy of the downloaded image catalog |
 | `~/Library/Application Support/BromureAC/profiles/` | One directory per workspace: `profile.json`, `disk.img` (the workspace's copy-on-write clone of the base image), `home.img`, SSH keys |
-| `~/Library/Application Support/BromureAC/alpine-vmlinuz`, `alpine-initramfs`, `alpine-initramfs-shimmed` | Cached Alpine netboot installer files |
+| `~/Library/Application Support/BromureAC/provisioner-vmlinuz`, `provisioner-initrd` | Cached image tools (downloaded with the image) |
+| `~/Library/Application Support/BromureAC/alpine-vmlinuz`, `alpine-initramfs`, `alpine-initramfs-shimmed` | Cached build tools (local build and fallback) |
 | `~/Library/Application Support/BromureAC/browser/` | The app's own copy of the embedded browser image, if installed (`~/Library/Application Support/Bromure/` — the sibling browser app's directory — is reused when present) |
 | `~/Library/Application Support/BromureAC/base.img.partial`, `base.img.gz.partial`, `efivars.partial` | Transient install files; their presence means an install is running or was interrupted |
 | `~/Library/LaunchAgents/io.bromure.agentic-coding.boot.plist` | Boot-at-login LaunchAgent, written automatically when any workspace enables boot at startup (see [Workspaces](05-workspaces.mdx)) |

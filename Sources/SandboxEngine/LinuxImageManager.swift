@@ -101,15 +101,15 @@ public final class LinuxImageManager {
 
         if !fm.fileExists(atPath: netbootKernel.path) ||
            !fm.fileExists(atPath: netbootInitrd.path) {
-            progress(.stepStart("Downloading Alpine Linux netboot files"))
+            progress(.stepStart("Downloading the build tools"))
             try await downloadNetbootFiles(
                 kernelDest: netbootKernel,
                 initrdDest: netbootInitrd,
                 progress: progress
             )
-            progress(.stepDone("Downloading Alpine Linux netboot files"))
+            progress(.stepDone("Downloading the build tools"))
         } else {
-            progress(.stepDone("Using cached Alpine netboot files"))
+            progress(.stepDone("Build tools already downloaded"))
         }
 
         // 2. Create raw disk image
@@ -379,7 +379,7 @@ public final class LinuxImageManager {
         }
 
         // Download tarball
-        progress(.message("Downloading Alpine netboot tarball..."))
+        progress(.message("Downloading the tools…"))
         try await downloadFile(from: tarballURL, to: tarballDest, progress: progress)
 
         // Verify SHA-256 checksum
@@ -393,7 +393,7 @@ public final class LinuxImageManager {
         }
 
         // Extract vmlinuz-virt and initramfs-virt from netboot tarball
-        progress(.message("Extracting netboot files..."))
+        progress(.message("Unpacking the tools…"))
         let extractDir = storageDir.appendingPathComponent("netboot-extract")
         try? FileManager.default.removeItem(at: extractDir)
         try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
@@ -763,7 +763,7 @@ public final class LinuxImageManager {
 
         let writer = inputPipe.fileHandleForWriting
 
-        progress(.message("Waiting for Alpine to boot..."))
+        progress(.message("Building the image: waiting for the prompt…"))
         do {
             try await consoleOutput.waitFor(
                 marker: "localhost login:",
@@ -771,7 +771,7 @@ public final class LinuxImageManager {
                 progress: progress,
                 failMarkers: [
                     (marker: "OK: 0 B in 0 packages", error: .diskCreationFailed(
-                        "Alpine Linux could not download packages during boot. This usually means a VPN, firewall, or DNS issue is blocking network access from the VM. Try setting override DNS servers (e.g. 1.1.1.1, 8.8.8.8) in Settings \u{2192} Network \u{2192} DNS Servers."
+                        "The image builder could not download packages while starting. This usually means a VPN, firewall, or DNS issue is blocking network access from the VM. Try setting override DNS servers (e.g. 1.1.1.1, 8.8.8.8) in Settings \u{2192} Network \u{2192} DNS Servers."
                     ))
                 ]
             )
@@ -783,18 +783,18 @@ public final class LinuxImageManager {
             throw error
         }
 
-        progress(.message("Logging in..."))
+        progress(.message("Building the image: signing in…"))
         writer.write(Data("root\n".utf8))
         try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
 
         // Belt-and-suspenders: re-clamp the NIC MTU once more after login.
         // The initramfs shim already clamped it before /init (see above); this
         // catches the running interface in case Alpine's /init re-leased it.
-        progress(.message("Re-clamping installer MTU to \(installerMTU)..."))
+        progress(.message("Building the image: configuring the network…"))
         writer.write(Data("NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'); [ -n \"$NIC\" ] && ip link set dev \"$NIC\" mtu \(installerMTU) 2>/dev/null || true\n".utf8))
         try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 10, progress: progress)
 
-        progress(.message("Mounting setup files via VirtioFS..."))
+        progress(.message("Building the image: mounting setup files…"))
 
         // Mount the vm-setup resources shared from the host via VirtioFS.
         // This replaces the old base64-over-serial transfer which was very slow.
@@ -906,7 +906,7 @@ public final class LinuxImageManager {
         }
         try await consoleOutput.waitFor(marker: "EXTRACT_DONE", timeout: 60, progress: progress)
 
-        progress(.message("Shutting down installer VM..."))
+        progress(.message("Building the image: shutting down…"))
         writer.write(Data("poweroff\n".utf8))
         try await Task.sleep(for: .seconds(3))
 

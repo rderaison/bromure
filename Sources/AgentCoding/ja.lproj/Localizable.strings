@@ -480,7 +480,7 @@
 "Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "空き容量が %llu MB しかありません。モデルには約 %llu MB 必要です。空き容量を確保してから検出機能を再度有効にしてください。";
 "Download failed (HTTP %d)." = "ダウンロードに失敗しました（HTTP %d）。";
 "Checksum invalid: %@" = "チェックサムが無効です：%@";
-"Could not extract Alpine kernel: %@" = "Alpine カーネルを展開できませんでした：%@";
+"Could not unpack the image tools: %@" = "イメージ用ツールを展開できませんでした：%@";
 "%@ exited with status %d." = "%@ がステータス %d で終了しました。";
 "Installer reported failure: %@" = "インストーラーが失敗を報告しました：%@";
 "Installer VM stopped before reporting completion." = "インストーラー VM が完了を報告する前に停止しました。";

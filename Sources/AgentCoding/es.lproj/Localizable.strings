@@ -480,7 +480,7 @@
 "Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "Solo %llu MB libres — el modelo necesita unos %llu MB. Libere espacio y vuelva a activar el detector.";
 "Download failed (HTTP %d)." = "Error de descarga (HTTP %d).";
 "Checksum invalid: %@" = "Suma de comprobación no válida: %@";
-"Could not extract Alpine kernel: %@" = "No se pudo extraer el kernel de Alpine: %@";
+"Could not unpack the image tools: %@" = "No se pudieron descomprimir las herramientas de la imagen: %@";
 "%@ exited with status %d." = "%@ finalizó con el estado %d.";
 "Installer reported failure: %@" = "El instalador informó un error: %@";
 "Installer VM stopped before reporting completion." = "La VM del instalador se detuvo antes de informar que terminó.";

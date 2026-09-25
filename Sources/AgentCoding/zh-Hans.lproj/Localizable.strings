@@ -480,7 +480,7 @@
 "Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "仅剩 %llu MB 可用空间 — 该模型约需 %llu MB。请释放空间后重新启用检测器。";
 "Download failed (HTTP %d)." = "下载失败（HTTP %d）。";
 "Checksum invalid: %@" = "校验和无效：%@";
-"Could not extract Alpine kernel: %@" = "无法解压 Alpine 内核：%@";
+"Could not unpack the image tools: %@" = "无法解压镜像工具：%@";
 "%@ exited with status %d." = "%@ 以状态 %d 退出。";
 "Installer reported failure: %@" = "安装程序报告失败：%@";
 "Installer VM stopped before reporting completion." = "安装程序虚拟机在报告完成前已停止。";

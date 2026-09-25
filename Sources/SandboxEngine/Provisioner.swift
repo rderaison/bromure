@@ -56,9 +56,11 @@ public enum Provisioner {
         }
         let fm = FileManager.default
         let pairs = [(kernel, kernelDest), (initrd, initrdDest)]
+        var part = 0
         var fetched: [(partial: URL, final: URL)] = []
         do {
             for (file, dest) in pairs {
+                part += 1
                 let partial = dest.appendingPathExtension("partial")
                 let gz = dest.appendingPathExtension("gz.partial")
                 defer { try? fm.removeItem(at: gz) }
@@ -68,7 +70,9 @@ public enum Provisioner {
                     compression: file.compression,
                     compressedBytes: file.compressedBytes,
                     uncompressedBytes: file.uncompressedBytes,
-                    label: "Alpine provisioner (\(file.name))",
+                    // Never "image" in the label: the setup screens read
+                    // "Downloading … image … %" as the disk's own download.
+                    label: "customization tools (\(part) of 2)",
                     scratchGz: gz,
                     destination: partial,
                     progress: progress
@@ -81,7 +85,7 @@ public enum Provisioner {
             }
         } catch {
             for (partial, _) in fetched { try? fm.removeItem(at: partial) }
-            progress("Alpine provisioner download failed (\(error.localizedDescription)) — using the Alpine netboot instead.")
+            progress("Couldn't download the customization tools (\(error.localizedDescription)) — fetching them from the fallback source instead.")
         }
     }
 }

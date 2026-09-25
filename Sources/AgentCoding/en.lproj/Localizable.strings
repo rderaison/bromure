@@ -481,7 +481,7 @@
 "Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector." = "Only %llu MB free — the model needs about %llu MB. Free up space and re-enable the detector.";
 "Download failed (HTTP %d)." = "Download failed (HTTP %d).";
 "Checksum invalid: %@" = "Checksum invalid: %@";
-"Could not extract Alpine kernel: %@" = "Could not extract Alpine kernel: %@";
+"Could not unpack the image tools: %@" = "Could not unpack the image tools: %@";
 "%@ exited with status %d." = "%@ exited with status %d.";
 "Installer reported failure: %@" = "Installer reported failure: %@";
 "Installer VM stopped before reporting completion." = "Installer VM stopped before reporting completion.";

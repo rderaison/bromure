@@ -304,10 +304,10 @@ public final class UbuntuImageManager {
             // 1. Alpine netboot files. Cached across runs.
             if !fm.fileExists(atPath: alpineKernelURL.path) ||
                !fm.fileExists(atPath: alpineInitrdURL.path) {
-                progress("Downloading Alpine netboot installer…")
+                progress("Building the image: downloading tools…")
                 try await downloadAlpineNetboot(progress: progress)
             } else {
-                progress("Using cached Alpine netboot.")
+                progress("Building the image: tools already downloaded.")
             }
 
             // 2. Fresh raw target disk. Sparse — actual size on disk
@@ -325,7 +325,7 @@ public final class UbuntuImageManager {
             //    exactly one clean retry on a fresh disk before failing
             //    the build (setup.sh repartitions from scratch anyway,
             //    but a pristine sparse file keeps no half-written blocks).
-            progress("Booting Alpine installer (this drives the Ubuntu install)…")
+            progress("Building the image: starting…")
             do {
                 try await runInstaller(
                     targetDisk: scratchDisk,
@@ -493,7 +493,7 @@ public final class UbuntuImageManager {
         try? FileManager.default.removeItem(at: tarballDest)
         try? FileManager.default.removeItem(at: checksumDest)
 
-        progress("Alpine netboot extracted.")
+        progress("Tools ready.")
     }
 
     // MARK: - Installer VM
@@ -510,6 +510,8 @@ public final class UbuntuImageManager {
         let scale = Self.detectDisplayScale()
         try await runProvisioner(
             environment: .netboot,
+            stage: "Building the image",
+            runLabel: "installing Ubuntu and the tools",
             targetDisk: targetDisk,
             script: "setup.sh",
             scriptArgs: "\(scale)",
@@ -568,7 +570,7 @@ public final class UbuntuImageManager {
         } else {
             if !fm.fileExists(atPath: alpineKernelURL.path) ||
                !fm.fileExists(atPath: alpineInitrdURL.path) {
-                progress("Downloading Alpine netboot installer…")
+                progress("Customizing the image: downloading tools…")
                 try await downloadAlpineNetboot(progress: progress)
             }
             environment = .netboot
@@ -576,6 +578,8 @@ public final class UbuntuImageManager {
 
         try await runProvisioner(
             environment: environment,
+            stage: "Customizing the image",
+            runLabel: steps.isEmpty ? "finishing up" : "installing packages",
             targetDisk: targetDisk,
             script: "postinstall.sh",
             scriptArgs: "",
@@ -603,7 +607,7 @@ public final class UbuntuImageManager {
         try fm.createDirectory(at: storageDir, withIntermediateDirectories: true)
         if !fm.fileExists(atPath: alpineKernelURL.path) ||
            !fm.fileExists(atPath: alpineInitrdURL.path) {
-            progress("Downloading Alpine netboot installer…")
+            progress("Building the customization tools: downloading…")
             try await downloadAlpineNetboot(progress: progress)
         }
 
@@ -616,9 +620,11 @@ public final class UbuntuImageManager {
             throw UbuntuImageError.installerReportedFailure(
                 "SandboxEngine vm-setup resources (build-provisioner.sh) not found")
         }
-        progress("Building the self-contained Alpine provisioner…")
+        progress("Building the customization tools…")
         try await runProvisioner(
             environment: .netboot,
+            stage: "Building the customization tools",
+            runLabel: "packing",
             setupShare: engineSetupDir,
             targetDisk: nil,
             script: "build-provisioner.sh",
@@ -649,8 +655,13 @@ public final class UbuntuImageManager {
     /// the vm-setup share (`setupShare`, default this manager's; + any
     /// `extraShares`), run `/tmp/setup/<script>` and wait for its marker.
     @MainActor
+    /// `stage` names what the user is waiting on ("Customizing the image");
+    /// every progress line reads "<stage>: <what's happening>…", with
+    /// `runLabel` for the long part (the script itself).
     private func runProvisioner(
         environment: InstallerEnvironment,
+        stage: String,
+        runLabel: String,
         setupShare: URL? = nil,
         targetDisk: URL?,
         script: String,
@@ -883,14 +894,14 @@ public final class UbuntuImageManager {
             group.addTask { @MainActor in
                 try await vm.start()
 
-                progress("Waiting for Alpine login prompt…")
+                progress("\(stage): waiting for the prompt…")
                 try await buffer.wait(
                     for: "localhost login:",
                     timeout: 180,
                     failures: ["Kernel panic"]
                 )
 
-                progress("Logging in as root…")
+                progress("\(stage): signing in…")
                 send("root\n")
                 try await buffer.wait(for: "localhost:~#", timeout: 30, failures: [])
 
@@ -909,7 +920,7 @@ public final class UbuntuImageManager {
                 // Override via:
                 //   defaults write io.bromure.agentic-coding vm.mtu -int <value>
                 let mtu = VMConfig.resolvedNICMTU()
-                progress("Clamping installer MTU to \(mtu)…")
+                progress("\(stage): configuring the network…")
                 send("[ -n \"$NIC\" ] && ip link set dev \"$NIC\" mtu \(mtu) 2>/dev/null || true\n")
                 try await buffer.wait(for: "localhost:~#", timeout: 10, failures: [])
 
@@ -922,7 +933,7 @@ public final class UbuntuImageManager {
                 // confusing error. Alpine's busybox-udhcpc retries
                 // and usually picks up the lease the second time the
                 // host's DHCP server is ready.
-                progress("Verifying DHCP lease (refresh if missing)…")
+                progress("\(stage): checking the network…")
                 send("if [ -n \"$NIC\" ] && ! ip -4 -o addr show dev \"$NIC\" | grep -q 'inet '; then udhcpc -i \"$NIC\" -q -n 2>/dev/null || true; fi\n")
                 try await buffer.wait(for: "localhost:~#", timeout: 60, failures: [])
 
@@ -959,13 +970,13 @@ public final class UbuntuImageManager {
                     throw UbuntuImageError.noGuestNetwork
                 }
 
-                progress("Mounting host setup share…")
+                progress("\(stage): mounting setup files…")
                 send("modprobe virtiofs\n")
                 try await buffer.wait(for: "localhost:~#", timeout: 30, failures: [])
                 send("mkdir -p /tmp/setup && mount -t virtiofs setup /tmp/setup\n")
                 try await buffer.wait(for: "localhost:~#", timeout: 60, failures: [])
 
-                progress("Running \(script)…")
+                progress("\(stage): \(runLabel)…")
                 // Pass the Alpine mirror URL (our proxy if it's up,
                 // else direct CDN) so the guest script routes its
                 // fetches via the same channel apk's main repo uses.
@@ -982,7 +993,7 @@ public final class UbuntuImageManager {
                                "Internal error: Oops"]
                 )
 
-                progress("Powering off installer (Alpine OpenRC stop is 5-15s)…")
+                progress("\(stage): shutting down…")
                 send("poweroff\n")
 
                 // Poll for clean stop, force-stop after 30s grace period.
@@ -991,12 +1002,12 @@ public final class UbuntuImageManager {
                     try? await Task.sleep(nanoseconds: 250_000_000)
                 }
                 if vm.state != .stopped {
-                    progress("Force-stopping installer (Alpine took >30s to halt)…")
+                    progress("\(stage): forcing shutdown…")
                     await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                         vm.stop(completionHandler: { _ in cont.resume() })
                     }
                 }
-                progress("Installer stopped cleanly.")
+                progress("\(stage): done.")
             }
 
             // Wait for the driver to finish; cancel the timeout.
@@ -1268,7 +1279,7 @@ public enum UbuntuImageError: LocalizedError {
             return String(format: NSLocalizedString("Checksum invalid: %@",
                 comment: "Base-image build: downloaded file failed checksum"), why)
         case .kernelExtractionFailed(let why):
-            return String(format: NSLocalizedString("Could not extract Alpine kernel: %@",
+            return String(format: NSLocalizedString("Could not unpack the image tools: %@",
                 comment: "Base-image build: kernel extraction failed"), why)
         case .hostCommandFailed(let tool, let code):
             return String(format: NSLocalizedString("%@ exited with status %d.",

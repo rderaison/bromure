@@ -363,7 +363,7 @@ struct InitFossImage: ParsableCommand {
 struct BuildProvisioner: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "build-provisioner",
-        abstract: "Build the self-contained Alpine provisioner (provisioner-vmlinuz + provisioner-initrd).",
+        abstract: "Build the image customization tools (provisioner-vmlinuz + provisioner-initrd).",
         shouldDisplay: false
     )
 

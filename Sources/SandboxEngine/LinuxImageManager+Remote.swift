@@ -397,6 +397,8 @@ extension LinuxImageManager {
 
         try await runProvisioner(
             environment: environment,
+            stage: "Customizing the image",
+            runLabel: steps.isEmpty ? "applying your settings" : "installing packages",
             targetDisk: targetDisk,
             command: "sh /tmp/vm-setup/postinstall.sh \(fontsArg) \(personalizeArgs)",
             stepShareDir: shareDir,
@@ -415,7 +417,7 @@ extension LinuxImageManager {
         let fm = FileManager.default
         guard !fm.fileExists(atPath: netbootKernelURL.path) ||
               !fm.fileExists(atPath: netbootInitrdURL.path) else { return }
-        progress(.message("Downloading Alpine netboot installer…"))
+        progress(.message("Customizing the image: downloading tools…"))
         try await downloadNetbootFiles(
             kernelDest: netbootKernelURL,
             initrdDest: netbootInitrdURL,
@@ -439,9 +441,11 @@ extension LinuxImageManager {
         try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: outDir) }
 
-        progress(.message("Building the self-contained Alpine provisioner…"))
+        progress(.message("Building the customization tools…"))
         try await runProvisioner(
             environment: .netboot,
+            stage: "Building the customization tools",
+            runLabel: "packing",
             targetDisk: nil,
             command: "sh /tmp/vm-setup/build-provisioner.sh",
             stepShareDir: nil,
@@ -471,8 +475,13 @@ extension LinuxImageManager {
     /// marker. A lean sibling of `installLinux` — no transfer disk, and
     /// the target disk already carries a filesystem.
     @MainActor
+    /// `stage` names what the user is waiting on ("Customizing the image");
+    /// progress lines read "<stage>: <what's happening>…", `runLabel` for
+    /// the script itself.
     private func runProvisioner(
         environment: InstallerEnvironment,
+        stage: String,
+        runLabel: String,
         targetDisk: URL?,
         command: String,
         stepShareDir: URL?,
@@ -641,7 +650,7 @@ extension LinuxImageManager {
 
         let writer = inputPipe.fileHandleForWriting
 
-        progress(.message("Waiting for Alpine to boot..."))
+        progress(.message("\(stage): waiting for the prompt…"))
         do {
             try await consoleOutput.waitFor(
                 marker: "localhost login:", timeout: 120, progress: progress,
@@ -651,7 +660,7 @@ extension LinuxImageManager {
                 ]
             )
 
-            progress(.message("Logging in..."))
+            progress(.message("\(stage): signing in…"))
             writer.write(Data("root\n".utf8))
             try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
 
@@ -662,13 +671,13 @@ extension LinuxImageManager {
             writer.write(Data("NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'); [ -n \"$NIC\" ] && ip link set dev \"$NIC\" mtu \(installerMTU) 2>/dev/null || true\n".utf8))
             try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 10, progress: progress)
 
-            progress(.message("Mounting setup files via VirtioFS..."))
+            progress(.message("\(stage): mounting setup files…"))
             writer.write(Data("modprobe virtiofs\n".utf8))
             try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 30, progress: progress)
             writer.write(Data("mkdir -p /tmp/vm-setup && mount -t virtiofs setup /tmp/vm-setup\n".utf8))
             try await consoleOutput.waitFor(marker: "localhost:~#", timeout: 60, progress: progress)
 
-            progress(.message("Running postinstall…"))
+            progress(.message("\(stage): \(runLabel)…"))
             // ALPINE_REPO_BASE routes the chroot's package downloads
             // (apk, the pinned WARP deb) through the host proxy; unset,
             // postinstall.sh goes direct.
@@ -694,7 +703,7 @@ extension LinuxImageManager {
             throw error
         }
 
-        progress(.message("Shutting down postinstall VM..."))
+        progress(.message("\(stage): shutting down…"))
         writer.write(Data("poweroff\n".utf8))
         try await Task.sleep(for: .seconds(3))
         let deadline = Date().addingTimeInterval(30)

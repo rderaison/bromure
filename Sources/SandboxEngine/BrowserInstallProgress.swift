@@ -86,7 +86,8 @@ public final class BrowserInstallProgress {
             bump(to: 0.73 + 0.03 * (Self.trailingPercent(of: m) ?? 0.0))
             return
         }
-        if m.hasPrefix("downloading alpine netboot") {
+        if m.hasPrefix("customizing the image: downloading tools")
+            || m.hasPrefix("downloading customization tools") {
             bump(to: 0.78)
             return
         }
