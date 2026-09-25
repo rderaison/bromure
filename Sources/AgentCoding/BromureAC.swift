@@ -4116,6 +4116,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.delegationStore.delegations.compactMap(Self.codableToDict) ?? []
             }
         }
+        // Security Timeline rows carry the workspace's name.
+        SecurityTimeline.shared.workspaceName = { [weak self] id in
+            self?.profiles.first { $0.id == id }?.name
+        }
         server.onListAgentRooms = { [weak self] in
             MainActor.assumeIsolated {
                 self?.agentRoomStore.rooms.compactMap(Self.codableToDict) ?? []

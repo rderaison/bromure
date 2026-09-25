@@ -12,13 +12,18 @@ struct SecurityTimelineView: View {
 
     @State private var query = ""
     @State private var engineFilter: String?
+    /// "" = this Mac; a host's name = that mirrored host; nil = all.
+    @State private var machineFilter: String?
+
+    private var machines: [String] { timeline.remote.keys.sorted() }
 
     private var engines: [String] {
-        Array(Set(timeline.events.map(\.engine))).sorted()
+        Array(Set(timeline.allEvents.map(\.engine))).sorted()
     }
 
     private var rows: [SecurityTimeline.Event] {
-        var e = timeline.events
+        var e = timeline.allEvents
+        if let machineFilter { e = e.filter { ($0.machine ?? "") == machineFilter } }
         if let engineFilter { e = e.filter { $0.engine == engineFilter } }
         if !query.isEmpty {
             let q = query.lowercased()
@@ -26,6 +31,8 @@ struct SecurityTimelineView: View {
                 $0.engine.lowercased().contains(q)
                     || $0.condition.lowercased().contains(q)
                     || $0.decision.lowercased().contains(q)
+                    || ($0.workspace ?? "").lowercased().contains(q)
+                    || ($0.machine ?? "").lowercased().contains(q)
             }
         }
         return e.reversed()   // newest first
@@ -37,7 +44,7 @@ struct SecurityTimelineView: View {
             Divider()
             if rows.isEmpty {
                 ContentUnavailableView(
-                    timeline.events.isEmpty
+                    timeline.allEvents.isEmpty
                         ? NSLocalizedString("No security events yet", comment: "")
                         : NSLocalizedString("No matching events", comment: ""),
                     systemImage: "shield.lefthalf.filled",
@@ -65,6 +72,16 @@ struct SecurityTimelineView: View {
             .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.12)))
 
+            if !machines.isEmpty {
+                Picker("", selection: $machineFilter) {
+                    Text(NSLocalizedString("All machines", comment: "security timeline")).tag(String?.none)
+                    Text(NSLocalizedString("This Mac", comment: "security timeline")).tag(String?.some(""))
+                    ForEach(machines, id: \.self) { Text($0).tag(String?.some($0)) }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+
             Picker("", selection: $engineFilter) {
                 Text(NSLocalizedString("All engines", comment: "")).tag(String?.none)
                 ForEach(engines, id: \.self) { Text($0).tag(String?.some($0)) }
@@ -78,7 +95,7 @@ struct SecurityTimelineView: View {
                 .font(.caption).foregroundStyle(.secondary).monospacedDigit()
             Button(NSLocalizedString("Clear", comment: "")) { timeline.clear() }
                 .controlSize(.small)
-                .disabled(timeline.events.isEmpty)
+                .disabled(timeline.allEvents.isEmpty)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
@@ -92,6 +109,15 @@ struct SecurityTimelineView: View {
                     .foregroundStyle(.secondary)
             }
             .width(min: 150, ideal: 165, max: 190)
+
+            TableColumn(NSLocalizedString("Workspace", comment: "security timeline")) { e in
+                Text(machines.isEmpty ? (e.workspace ?? "—")
+                     : "\(e.machine ?? NSLocalizedString("This Mac", comment: "security timeline")) · \(e.workspace ?? "—")")
+                    .lineLimit(1).truncationMode(.tail)
+                    .foregroundStyle(.secondary)
+                    .help(e.workspace ?? "")
+            }
+            .width(min: 90, ideal: 130, max: 220)
 
             TableColumn(NSLocalizedString("Engine", comment: "")) { e in
                 Label {

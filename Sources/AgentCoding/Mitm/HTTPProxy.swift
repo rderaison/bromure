@@ -952,8 +952,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let depiKey = scPolicy?.depiAPIKey ?? ""
 
         let enforce = scPolicy?.isActive ?? false
-        if (enforce || BACEventEmitter.shared.isStreamingEnabled),
-           let kind = SupplyChainRegistry.classify(host: host, path: reqPath) {
+        // apt: observe-only, but every .deb an agent installs is recorded.
+        if reqMethod == "GET", let deb = SupplyChainRegistry.debPackage(path: reqPath) {
+            emitSupplyChainFetch(profileID: self.profileID, ecosystem: "apt", package: deb.name,
+                                 version: deb.version, kind: "artifact", outcome: "allowed")
+        }
+        // Classified always — not only when enforcing or enrolled: every
+        // package fetch belongs in this Mac's Security Timeline. With no
+        // active policy the branches below just record and forward.
+        if let kind = SupplyChainRegistry.classify(host: host, path: reqPath) {
             // Real policy when present; an all-off stand-in when we're
             // here purely to observe (so the enforcement predicates
             // below cleanly evaluate to "do nothing").

@@ -107,7 +107,12 @@ public final class VMNetSwitch: @unchecked Sendable {
     public typealias EgressObserver = @Sendable (EgressEvent) -> Void
     private var egressObserver: EgressObserver?
     private struct EgressKey: Hashable { let portID: Int; let dstIP: UInt32; let dstPort: UInt16; let proto: UInt8 }
-    private var egressSeen: Set<EgressKey> = []
+    /// When each flow was last reported: a repeat within `egressReportEvery`
+    /// isn't re-reported (a busy connection would flood the log), but one
+    /// after that is — every connection shows up in the timeline, not just
+    /// the first to a destination since launch.
+    private var egressSeen: [EgressKey: Date] = [:]
+    private static let egressReportEvery: TimeInterval = 60
     /// port id → firewall rules (nil = allow-all). Guarded by `lock`.
     private var portEgressPolicy: [Int: EgressPolicy] = [:]
     /// port ids that opted out of transparent interception (Profile
@@ -320,7 +325,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         portGuestMAC[id] = nil
         portEgressPolicy[id] = nil
         portInterceptDisabled.remove(id)
-        egressSeen = egressSeen.filter { $0.portID != id }
+        egressSeen = egressSeen.filter { $0.key.portID != id }
         let intercept = interceptor
         if releaseLease {
             for m in macsOnPort { dhcpLeases[m] = nil }
@@ -1116,9 +1121,14 @@ public final class VMNetSwitch: @unchecked Sendable {
                             proto: UInt8, port: UInt16, denied: Bool) {
         let key = EgressKey(portID: portID, dstIP: dstIP, dstPort: port, proto: denied ? proto | 0x80 : proto)
         lock.lock()
-        guard let observer = egressObserver, !egressSeen.contains(key) else { lock.unlock(); return }
-        if egressSeen.count > 8192 { egressSeen.removeAll() }
-        egressSeen.insert(key)
+        let now = Date()
+        guard let observer = egressObserver,
+              now.timeIntervalSince(egressSeen[key] ?? .distantPast) >= Self.egressReportEvery
+        else { lock.unlock(); return }
+        if egressSeen.count > 8192 {
+            egressSeen = egressSeen.filter { now.timeIntervalSince($0.value) < Self.egressReportEvery }
+        }
+        egressSeen[key] = now
         lock.unlock()
         observer(EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
                              proto: proto, port: port, denied: denied))

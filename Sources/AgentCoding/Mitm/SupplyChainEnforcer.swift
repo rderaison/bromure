@@ -99,6 +99,20 @@ public struct SupplyChainEnforcer {
 /// classifies a (host, path) into a `RequestKind` so the enforcer
 /// knows what kind of transform to apply.
 public enum SupplyChainRegistry {
+    /// A Debian/Ubuntu package download (`…/pool/…/<name>_<version>_<arch>.deb`,
+    /// what `apt install` fetches): its name and version, for the record.
+    /// Observe-only — apt has no metadata the age gate or OSV rewrite, but
+    /// every install shows in the Security Timeline.
+    public static func debPackage(path: String) -> (name: String, version: String)? {
+        let clean = path.split(separator: "?").first.map(String.init) ?? path
+        guard clean.hasSuffix(".deb"), clean.contains("/pool/"),
+              let file = clean.split(separator: "/").last else { return nil }
+        let parts = String(file.dropLast(4)).split(separator: "_", maxSplits: 2).map(String.init)
+        guard parts.count >= 2, !parts[0].isEmpty else { return nil }
+        let version = parts[1].removingPercentEncoding ?? parts[1]
+        return (parts[0], version)
+    }
+
 
     /// Classify a request based on (host, path). Returns nil when
     /// the URL doesn't belong to any recognised registry.
