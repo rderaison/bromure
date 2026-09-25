@@ -37,6 +37,9 @@ public final class TraceStore {
     /// model API call) — the host-side "this agent is working right now" signal,
     /// keyed by profile id. The UI uses it to animate the sidebar's thinking dots.
     @MainActor public var onConversationActivity: ((UUID) -> Void)?
+    /// Every model-host response, with its host and HTTP status — what lets
+    /// the Conductor tell the user a session's key was refused.
+    @MainActor public var onConversationResult: ((UUID, String, Int) -> Void)?
 
     private let rootDir: URL
     private let queue = DispatchQueue(label: "io.bromure.ac.trace-store",
@@ -96,6 +99,7 @@ public final class TraceStore {
                 if record.isConversation
                     || TraceLevel.aiHosts.contains(where: { host.contains($0) }) {
                     self.onConversationActivity?(record.profileID)
+                    self.onConversationResult?(record.profileID, record.host, record.statusCode)
                 }
             }
         }

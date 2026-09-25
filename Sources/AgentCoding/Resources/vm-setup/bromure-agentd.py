@@ -2072,7 +2072,36 @@ def _preonboard_claude():
         with open(tmp, "w") as f:
             json.dump(cfg, f, indent=2)
         os.replace(tmp, path)
+    # The key this launch will actually export: api_key.env is rewritten on
+    # every boot (a model/credential change rotates the stand-in key) while
+    # the seed spec that carries the approved suffix only lands when the
+    # seed itself changes — so a rotated key used to stop every new Claude
+    # tab at "Detected a custom API key… use it?", a dialog the chat can't
+    # answer. Approve it here, right before each launch.
+    suffix = _current_anthropic_key_suffix()
+    if suffix:
+        try:
+            _approve_claude_api_key(suffix)
+        except Exception as e:
+            log("worktree", "claude key approve failed:", e)
     _settle_claude_tui()
+
+
+def _current_anthropic_key_suffix():
+    """Last 20 chars of the ANTHROPIC_API_KEY in api_key.env (the shape
+    Claude Code keeps in customApiKeyResponses.approved), or None."""
+    try:
+        with open("/mnt/bromure-meta/api_key.env") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[len("export "):]
+                if line.startswith("ANTHROPIC_API_KEY="):
+                    v = line.split("=", 1)[1].strip().strip("'\"")
+                    return v[-20:] if len(v) >= 20 else None
+    except OSError:
+        pass
+    return None
 
 
 def _utc_now_iso():

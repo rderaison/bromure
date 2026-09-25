@@ -918,6 +918,15 @@ public final class SessionDisk {
         try Self.delegationMCPShimScript.write(
             to: tmp.appendingPathComponent("bromure-delegation-mcp.py"),
             atomically: true, encoding: .utf8)
+        // Conductor MCP shim + the config its session's command line names
+        // (--mcp-config). No agent config lists it: only the Conductor is
+        // launched with it, and the host refuses every other caller.
+        try Self.conductorMCPShimScript.write(
+            to: tmp.appendingPathComponent("bromure-conductor-mcp.py"),
+            atomically: true, encoding: .utf8)
+        try Self.conductorMCPConfigJSON.write(
+            to: tmp.appendingPathComponent("bromure-conductor-mcp.json"),
+            atomically: true, encoding: .utf8)
 
         // Plan-stream driver assets — staged unconditionally, like the task
         // MCP shim. bromure-plan-driver.py adapts codex/grok (and bridges
@@ -1220,6 +1229,24 @@ public final class SessionDisk {
                                   with: "import os, socket, subprocess, sys, threading, time")
             .replacingOccurrences(of: "HELLO = sys.argv[1] if len(sys.argv) > 1 else \"\"",
                                   with: delegationMCPHelloBlock)
+    }
+    /// The Conductor's MCP (ConductorMCPServer): the delegation shim — same
+    /// window announcement, since the host checks the caller is the
+    /// Conductor's tab — on its own port.
+    public static let conductorMCPVsockPort: UInt32 = 5836
+    static let conductorMCPShimGuestPath = "/mnt/bromure-meta/bromure-conductor-mcp.py"
+    static let conductorMCPConfigGuestPath = "/mnt/bromure-meta/bromure-conductor-mcp.json"
+    static var conductorMCPShimScript: String {
+        delegationMCPShimScript
+            .replacingOccurrences(of: "PORT = \(delegationMCPVsockPort)", with: "PORT = \(conductorMCPVsockPort)")
+            .replacingOccurrences(of: "bromure-delegation-mcp", with: "bromure-conductor-mcp")
+            .replacingOccurrences(of: "delegation MCP", with: "conductor MCP")
+    }
+    static var conductorMCPConfigJSON: String {
+        let cfg: [String: Any] = ["mcpServers": ["conductor": [
+            "command": "python3", "args": [conductorMCPShimGuestPath]]]]
+        let data = (try? JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+        return String(decoding: data, as: UTF8.self)
     }
     static let delegationMCPHelloBlock = """
     def _hello():

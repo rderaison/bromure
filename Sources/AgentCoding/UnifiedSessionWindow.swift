@@ -1372,7 +1372,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()
             },
-            showMachine: { [weak self] pid in self?.showVMDashboard(pid) })
+            showMachine: { [weak self] pid in self?.showVMDashboard(pid) },
+            openConductor: { [weak self] in
+                guard let self, let delegate = self.acDelegate,
+                      let id = delegate.conductorEngine.ensureConductor() else { return }
+                self.selectSession(id)
+            })
     }
 
     /// Delete a session — after a word when its agent is running; at once

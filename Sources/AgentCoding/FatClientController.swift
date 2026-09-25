@@ -1103,6 +1103,19 @@ final class RemoteHostController {
         return UUID(uuidString: idStr)
     }
 
+    /// POST /agent-sessions/conductor — the server's Conductor, started or
+    /// woken as need be. nil when the server can't (no workspace) or
+    /// predates the verb.
+    func openConductor() async -> UUID? {
+        let host = self.host
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", "/agent-sessions/conductor", body: [:])
+        }.value
+        pollOnce()
+        guard let resp, resp.status == 200, let idStr = resp.json["id"] as? String else { return nil }
+        return UUID(uuidString: idStr)
+    }
+
     /// POST /agent-sessions/folders — the subfolders of a folder on a
     /// workspace, for the new-session browser. nil when the machine can't
     /// be read right now, or the server predates the verb.
@@ -3581,7 +3594,21 @@ final class RemoteHostWindow: NSWindow {
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()
             },
-            showMachine: { [weak self] pid in self?.showMachineDashboard(pid) })
+            showMachine: { [weak self] pid in self?.showMachineDashboard(pid) },
+            openConductor: { [weak self] in
+                guard let self else { return }
+                let c = self.controller
+                if let existing = ConductorGate.conductor(in: c.sessionStore.sessions),
+                   !existing.hasEnded, existing.windowIndex != nil {
+                    self.selectSession(existing.id)
+                    return
+                }
+                Task { @MainActor in
+                    guard let id = await c.openConductor() else { return }
+                    if c.sessionStore.session(id) != nil { self.selectSession(id) }
+                    else { self.pendingSelectSessionID = id }
+                }
+            })
     }
 
     /// The new-session screen as the stage.

@@ -69,6 +69,7 @@ final class AgentSessionEngine {
         var s = AgentSession(profileID: req.profileID, tool: req.tool, title: title,
                              cwd: cwd, cloneURL: req.cloneURL?.nonEmpty,
                              openingMessage: message?.nonEmpty)
+        s.role = req.role
         s.launchingSince = Date()
         store.upsert(s)
         BACDebug.log("sessions", "start “\(title)” (\(req.tool.rawValue) in \(cwd))")
@@ -217,8 +218,8 @@ final class AgentSessionEngine {
                 } else {
                     // The agent exited, its shell is still there: relaunch
                     // in place so the conversation history is right at hand.
-                    let cmd = ([s.tool.rawValue] + Self.resumeFlags(for: s).split(separator: " ").map(String.init))
-                        .joined(separator: " ")
+                    let words: [String] = [s.tool.rawValue, Self.resumeFlags(for: s), Self.roleFlags(for: s)]
+                    let cmd = words.filter { !$0.isEmpty }.joined(separator: " ")
                     _ = try? await delegate.guestExec(
                         profileID: s.profileID,
                         command: "tmux send-keys -t bromure:\(w) -l '\(cmd)'; sleep 0.2; "
@@ -471,6 +472,13 @@ final class AgentSessionEngine {
                                 url, error.localizedDescription))
                     return
                 }
+            } else if s.isConductor {
+                // The Conductor's folder holds its brief, rewritten on every
+                // launch so an app update's brief reaches it. No repository:
+                // it works on sessions, not on files.
+                _ = try? await delegate.guestExec(
+                    profileID: s.profileID,
+                    command: ConductorEngine.briefCommand(guestFolder: guestPath), timeout: 15)
             } else {
                 // A folder that doesn't exist yet is created — and starts as
                 // a git repository, so the agent's work is versioned from the
@@ -485,9 +493,10 @@ final class AgentSessionEngine {
             let baseline = await self.tabBaseline(profileID: s.profileID, delegate: delegate)
             let display = s.title
             self.store.mutate(id) { $0.launchBaselineIndex = baseline; $0.launchDisplay = display }
+            let allFlags = [flags, Self.roleFlags(for: s)].filter { !$0.isEmpty }.joined(separator: " ")
             guard delegate.automationWorktreeCommand(
                 profileNameOrID: s.profileID.uuidString, action: "agent-tab",
-                args: [guestPath, display, s.tool.rawValue, prompt, flags] + self.backgroundArg(id)) else {
+                args: [guestPath, display, s.tool.rawValue, prompt, allFlags] + self.backgroundArg(id)) else {
                 fail(NSLocalizedString("Couldn't reach the workspace — is it running?", comment: "task start"))
                 return
             }
@@ -610,6 +619,12 @@ final class AgentSessionEngine {
     /// which conversation is this session's — two agents in one folder (a
     /// delegate beside its delegator) would otherwise `--continue` into
     /// each other's — else the tool's own "the latest".
+    /// Flags a session's role adds to every launch of its agent (the
+    /// Conductor's MCP config), on top of any resume flags.
+    static func roleFlags(for s: AgentSession) -> String {
+        s.isConductor ? ConductorEngine.launchFlags : ""
+    }
+
     static func resumeFlags(for s: AgentSession) -> String {
         if s.tool == .claude, let id = s.agentTranscriptID, isTranscriptID(id) {
             return "--resume \(id)"

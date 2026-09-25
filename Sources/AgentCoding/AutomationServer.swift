@@ -128,6 +128,8 @@ final class ACAutomationServer {
     var onListDelegations: (() -> [[String: Any]])?
     var onAgentSessionCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
     var onAgentSessionTranscript: ((_ id: UUID) async -> Data?)?
+    /// GET /agent-sessions/{id}/pending → what the session waits on.
+    var onAgentSessionPending: ((_ id: UUID) async -> [String: Any]?)?
     /// Delegations across hosts — a fat client's own session asking one of
     /// ours: open the request, feed it files, act on the parent's side
     /// (send / answer / steer / close / cancel / read / noticed), and fetch
@@ -1010,6 +1012,31 @@ final class ACAutomationServer {
             } else {
                 sendResponse(fd: fd, status: 404, body: ["error": "The machine's folders can't be read right now"])
             }
+
+        case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/pending"):
+            // What a session is waiting on: {question?, options?, screen}.
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let idStr = String(p.dropFirst("/agent-sessions/".count).dropLast("/pending".count))
+                .removingPercentEncoding ?? ""
+            guard let sid = UUID(uuidString: idStr) else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad session id"]); return
+            }
+            let sem = DispatchSemaphore(value: 0)
+            var r: [String: Any]?
+            Task { @MainActor [weak self] in
+                r = await self?.onAgentSessionPending?(sid)
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 60)
+            if let r { sendResponse(fd: fd, status: 200, body: r) }
+            else { sendResponse(fd: fd, status: 404, body: ["error": "Unknown session"]) }
+
+        case ("POST", "/agent-sessions/conductor"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let r = DispatchQueue.main.sync {
+                self.onAgentSessionCommand?(nil, "conductor", bodyJSON) ?? ["error": "no handler"]
+            }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
         case ("POST", "/agent-sessions/start"):
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }

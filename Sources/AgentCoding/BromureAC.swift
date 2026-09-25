@@ -1679,6 +1679,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return e
     }()
 
+    /// The Conductor: one session that keeps track of all the others
+    /// (Conductor.swift).
+    private(set) lazy var conductorEngine: ConductorEngine = {
+        let e = ConductorEngine(sessions: agentSessionStore, sessionEngine: agentSessionEngine, delegate: self)
+        e.profiles = { [weak self] in self?.profiles ?? [] }
+        e.listModel = { [weak self] in self?.unifiedWindow?.listModel }
+        return e
+    }()
+
     /// The connected remote-host mirrors, as the delegation engine reaches
     /// them.
     func remoteDelegationLinks() -> [RemoteDelegationLink] {
@@ -1849,6 +1858,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // animated "thinking" dots.
             e.traceStore.onConversationActivity = { [weak self] pid in
                 self?.noteAgentActivity(pid)
+            }
+            e.traceStore.onConversationResult = { [weak self] pid, host, status in
+                self?.conductorEngine.noteAPIResult(profileID: pid, host: host, status: status)
             }
             // Detailed HTTP logs → analytics.bromure.io/session_events,
             // same wire shape + admin view as the Web browser. Enrollment-
@@ -2289,6 +2301,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// and registries this workspace may use, and creating new ones.
     var kubeMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
     var delegationMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
+    var conductorMCPBridges: [Profile.ID: TaskMCPVsockBridge] = [:]
     /// Plan-stream listeners (vsock 5832), one per running workspace — the
     /// streamed planning drivers connect here (see PlanEventBridge).
     var planEventBridges: [Profile.ID: PlanEventBridge] = [:]
@@ -2647,6 +2660,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // routes fires missed while the app was quit through each
         // automation's missed-run policy.
         scheduledAutomationEngine.start()
+        // The Conductor's event log follows every session from launch on
+        // (its tick starts with the engine).
+        _ = conductorEngine
         // Kubernetes clusters flagged to start with the app boot a few
         // seconds in, once the switch + control plane are settled.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
@@ -4078,6 +4094,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         openingMessage: body["message"] as? String,
                         attachments: attachments), remotely: true)
                     return ["ok": true, "id": sid.uuidString]
+                case (nil, "conductor"):
+                    // The Conductor, started (or woken) for a client that
+                    // clicked its row: {profile?} picks the workspace.
+                    let preferred = (body["profile"] as? String).flatMap { key in
+                        self.profiles.first { $0.id.uuidString == key || $0.name.lowercased() == key.lowercased() }?.id
+                    }
+                    guard let cid = self.conductorEngine.ensureConductor(preferred: preferred, remotely: true)
+                    else { return ["error": "no workspace to run the Conductor in"] }
+                    return ["ok": true, "id": cid.uuidString]
+                case (let sid?, "send"):
+                    // {text}: typed into the live prompt (long text lands in
+                    // the session's inbox with a pointer), or a resume with it.
+                    guard let s = self.agentSessionStore.session(sid) else { return ["error": "unknown session"] }
+                    guard let text = body["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
+                    let engine = self.conductorEngine
+                    Task { try? await engine.send(s, text) }
+                    return ["ok": true]
+                case (let sid?, "keys"):
+                    // {keys: [...]}: named keys only (ConductorEngine.allowedKeys).
+                    guard let s = self.agentSessionStore.session(sid) else { return ["error": "unknown session"] }
+                    let keys = (body["keys"] as? [String]) ?? []
+                    guard !keys.isEmpty, keys.allSatisfy(ConductorEngine.allowedKeys.contains), keys.count <= 12 else {
+                        return ["error": "keys must be 1–12 of " + ConductorEngine.allowedKeys.sorted().joined(separator: " ")]
+                    }
+                    let engine = self.conductorEngine
+                    Task { try? await engine.press(s, keys) }
+                    return ["ok": true]
                 case (let sid?, "resume"):
                     guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
                     self.agentSessionEngine.resume(sid, message: body["message"] as? String, remotely: true)
@@ -4160,6 +4203,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // local copy — the same order the local Ended page uses.
             if let live = await self.fetchSessionTranscript(s), !live.isEmpty { return Data(live.utf8) }
             return await MainActor.run { self.agentSessionEngine.transcripts.load(s.id) }
+        }
+        server.onAgentSessionPending = { [weak self] sid in
+            guard let self, let s = await MainActor.run(body: { self.agentSessionStore.session(sid) }) else { return nil }
+            return await self.conductorEngine.pending(s)
         }
         server.onAgentSessionFolders = { [weak self] key, path in
             guard let self else { return nil }
@@ -9432,6 +9479,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         sessions: { [weak self] in self?.agentSessionStore },
                         engine: { [weak self] in self?.delegationEngine }),
                     port: SessionDisk.delegationMCPVsockPort)
+                // Conductor MCP listener (vsock 5836): only the Conductor's
+                // tab is launched with its shim, and only it is answered.
+                self.conductorMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: ConductorMCPServer(
+                        profileID: pid,
+                        engine: { [weak self] in self?.conductorEngine }),
+                    port: SessionDisk.conductorMCPVsockPort)
                 // Plan-stream listener (vsock 5832): streamed planning
                 // drivers (claude SDK / codex app-server / grok ACP).
                 let planBridge = PlanEventBridge(socketDevice: dev)
@@ -11822,6 +11877,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         kubeMCPBridges.removeValue(forKey: profile.id)
         delegationMCPBridges[profile.id]?.stop()
         delegationMCPBridges.removeValue(forKey: profile.id)
+        conductorMCPBridges[profile.id]?.stop()
+        conductorMCPBridges.removeValue(forKey: profile.id)
         planEventBridges[profile.id]?.stop()
         planEventBridges.removeValue(forKey: profile.id)
         planStreamHub.removeSessions(profileID: profile.id)
@@ -12579,6 +12636,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         sessions: { [weak self] in self?.agentSessionStore },
                         engine: { [weak self] in self?.delegationEngine }),
                     port: SessionDisk.delegationMCPVsockPort)
+                // Conductor MCP listener (vsock 5836) — see the warm-boot path.
+                self.conductorMCPBridges[pid] = TaskMCPVsockBridge(
+                    socketDevice: dev,
+                    server: ConductorMCPServer(
+                        profileID: pid,
+                        engine: { [weak self] in self?.conductorEngine }),
+                    port: SessionDisk.conductorMCPVsockPort)
                 // Plan-stream listener (vsock 5832) — see the matching block
                 // on the warm-boot path.
                 let planBridge = PlanEventBridge(socketDevice: dev)
