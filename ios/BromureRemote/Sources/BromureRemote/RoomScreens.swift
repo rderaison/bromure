@@ -1076,7 +1076,9 @@ struct RoomTranscriptView: View {
                                                              agent: agent, pinnedWindow: window)
             }
             if let cmd, let raw = try? await controller.guestExec(session.profileID, command: cmd, timeout: 15) {
-                items = AgentTranscript.parse(Data(raw.utf8), agent: agent)
+                let parsed = AgentTranscript.parse(Data(raw.utf8), agent: agent)
+                TranscriptMarkdownCache.prewarm(parsed)
+                if parsed != items { items = parsed }
                 RoomTranscriptCache.items[session.id] = items
             }
             loaded = true

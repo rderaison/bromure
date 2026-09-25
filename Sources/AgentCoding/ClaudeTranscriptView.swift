@@ -1458,6 +1458,53 @@ struct TranscriptQuestionBatchCard: View {
     }
 }
 
+extension TranscriptItem {
+    /// Roughly how much text the row shows (for sizing a render window).
+    var approximateLength: Int {
+        switch kind {
+        case .userText(let t), .assistantText(let t): return t.count
+        default: return 300
+        }
+    }
+}
+
+/// Parsed markdown by text. A transcript row is rebuilt often (a poll, a
+/// mirror push, a resize, a layout switch) and `Markdown(String)` parses
+/// again each time; the parse is kept here instead, and new messages are
+/// parsed ahead, off the main thread, as they arrive (`prewarm`).
+enum TranscriptMarkdownCache {
+    private final class Box {
+        let content: MarkdownContent
+        init(_ content: MarkdownContent) { self.content = content }
+    }
+    nonisolated(unsafe) private static let cache: NSCache<NSString, Box> = {
+        let c = NSCache<NSString, Box>()
+        c.countLimit = 4000
+        return c
+    }()
+
+    static func content(_ text: String) -> MarkdownContent {
+        let key = text as NSString
+        if let hit = cache.object(forKey: key) { return hit.content }
+        let parsed = MarkdownContent(text)
+        cache.setObject(Box(parsed), forKey: key)
+        return parsed
+    }
+
+    /// Parse the assistant prose among `items` in the background, so the
+    /// rows find it ready.
+    static func prewarm(_ items: [TranscriptItem]) {
+        let texts: [String] = items.compactMap {
+            if case .assistantText(let t) = $0.kind, cache.object(forKey: t as NSString) == nil { return t }
+            return nil
+        }
+        guard !texts.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            for t in texts { _ = content(t) }
+        }
+    }
+}
+
 struct TranscriptItemView: View {
     let item: TranscriptItem
     /// Pictures shown inside a user turn's bubble, under its words (the
@@ -1564,7 +1611,7 @@ struct TranscriptItemView: View {
         let bodySize: CGFloat = 14     // a dense dev tool on the Mac
         let serif = false
         #endif
-        Markdown(text)
+        Markdown(TranscriptMarkdownCache.content(text))
             .markdownTheme(.claudeReader(bodySize: bodySize, serif: serif))
             .markdownCodeSyntaxHighlighter(TranscriptCodeHighlighter(dark: colorScheme == .dark))
             .textSelection(.enabled)

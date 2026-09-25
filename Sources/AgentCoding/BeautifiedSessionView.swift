@@ -680,10 +680,10 @@ final class BeautifiedSessionModel: ObservableObject {
         let effective = gate.effective(w) && failure == nil && prompt == nil
         if effective {
             if workingSince == nil { workingSince = Date() }
-        } else {
+        } else if workingSince != nil {
             workingSince = nil
         }
-        working = effective
+        if working != effective { working = effective }
     }
 
     private func poll() async {
@@ -693,10 +693,14 @@ final class BeautifiedSessionModel: ObservableObject {
         // it must not sit behind the transcript fetch's early return.
         await scanTerminal()
         let known: TranscriptCursor? = currentPath.flatMap { p in buffers[p].map { (p, $0.end) } }
+        // Published fields are written only when they change: every write
+        // re-renders the whole chat (transcript included), and a poll runs
+        // every 0.4–1.2 s — five chats in a room re-laid out their text
+        // continuously for nothing.
         guard let fetch = await provider.fetchTranscript(known: known, mode: .tail, agent: agentKind) else {
-            setWorking(isWorking); loading = false; return
+            setWorking(isWorking); if loading { loading = false }; return
         }
-        loading = false
+        if loading { loading = false }
         ingest(fetch)
         flushSink(force: false)
         // Nothing new: nothing to parse. A long history parses off the main
@@ -754,7 +758,7 @@ final class BeautifiedSessionModel: ObservableObject {
         while bufferOrder.count > Self.maxBuffers {
             buffers.removeValue(forKey: bufferOrder.removeFirst())
         }
-        canLoadEarlier = buf.base > 0
+        if canLoadEarlier != (buf.base > 0) { canLoadEarlier = buf.base > 0 }
     }
 
     /// Drop the oldest lines so the buffer is back to `initialHistoryBytes`
@@ -790,6 +794,7 @@ final class BeautifiedSessionModel: ObservableObject {
 
     private func applyParsed(_ parsed: [TranscriptItem]) {
         guard parsed != parsedItems else { return }
+        TranscriptMarkdownCache.prewarm(parsed)
         parsedItems = parsed
         ensureDropImages()
         // Real transcript progress ⇒ any earlier terminal card is stale.
@@ -1391,6 +1396,70 @@ final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
     func isWorking() -> Bool { pane?.model.activeTab?.agentStatus == .working }
 }
 
+/// The last messages of a chat, bottom-anchored: what shows (and re-flows)
+/// while the window is being resized. Equatable, so it re-renders only when
+/// its messages change.
+private struct ResizePreview: View, Equatable {
+    let items: [TranscriptItem]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Spacer(minLength: 0)
+            ForEach(items) { TranscriptItemView(item: $0) }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        .clipped()
+        .background(Color.platformWindowBackground)
+    }
+}
+
+/// Reports its window's live resize (start / end) — AppKit tells every
+/// view in the window.
+private struct LiveResizeObserver: NSViewRepresentable {
+    let onChange: (Bool) -> Void
+
+    func makeNSView(context: Context) -> Probe {
+        let v = Probe()
+        v.onChange = onChange
+        return v
+    }
+
+    func updateNSView(_ v: Probe, context: Context) { v.onChange = onChange }
+
+    final class Probe: NSView {
+        var onChange: ((Bool) -> Void)?
+        override func viewWillStartLiveResize() {
+            super.viewWillStartLiveResize()
+            onChange?(true)
+        }
+        override func viewDidEndLiveResize() {
+            super.viewDidEndLiveResize()
+            onChange?(false)
+        }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
+/// The delegation panel under a chat, isolated in its own view so the
+/// store reads it needs (sessions, delegations — busy in a fat client's
+/// mirror) don't re-render the transcript.
+private struct DelegationPanelHost: View {
+    @ObservedObject var model: BeautifiedSessionModel
+
+    var body: some View {
+        if let store = model.delegationStore, let me = model.currentSession?() {
+            DelegationPanel(store: store, sessions: model.sessionStore, session: me,
+                            accent: model.accent,
+                            workspaceName: model.workspaceName,
+                            remote: model.remoteDelegations?() ?? [],
+                            open: { model.openSession?($0) },
+                            answer: model.answerDelegation)
+        }
+    }
+}
+
 /// The beautified pane: a live, auto-scrolling transcript of the agent + a
 /// Codex-desktop-style composer. Mounted into the pane's container by
 /// `SessionPane.updateNativeTerminalMount()` when the view mode is `.beautified`.
@@ -1409,6 +1478,30 @@ struct BeautifiedSessionView: View {
     /// it there. Scrolled up to read, it stays put — only the user's own
     /// turn (`localRevision`) or a card needing them pulls it back down.
     @State private var pinnedToBottom = true
+    /// The window is being live-resized: render the tail only.
+    @State private var liveResizing = false
+    /// Just mounted (a layout switch, a zoom, a tab): the first frame shows
+    /// the tail, the full history follows right after — the switch is
+    /// instant and the rest fills in behind it.
+    @State private var settled = false
+    /// The tail shown while the window is dragged, prepared ahead.
+    @State private var previewItems: [TranscriptItem] = []
+    /// The transcript's size, and the size it holds during a drag.
+    @State private var transcriptSize: CGSize = .zero
+    @State private var resizeFrozen: CGSize?
+
+    /// The last messages up to about two screens of text (by characters;
+    /// at most 12, at least 2): what re-flows while a window is dragged.
+    static func resizeTail(_ items: [TranscriptItem], limit: Int) -> [TranscriptItem] {
+        var chars = 0
+        var n = 0
+        for item in items.suffix(limit).reversed() {
+            n += 1
+            chars += item.approximateLength
+            if n >= 12 || (n >= 2 && chars >= 8_000) { break }
+        }
+        return Array(items.suffix(n))
+    }
     @State private var viewportHeight: CGFloat = 0
     @State private var contentHeight: CGFloat = 0
     private static let scrollSpace = "beautified-scroll"
@@ -1530,20 +1623,55 @@ struct BeautifiedSessionView: View {
     @ViewBuilder
     private var transcriptParts: some View {
             transcript
+                // A window drag: the full transcript holds its size (no
+                // re-layout) and hides; a small preview of its tail — kept
+                // built all along, refreshed every 2 s — takes over and
+                // re-flows live. No teardown or rebuild when the drag starts,
+                // one layout at the final size when it ends.
+                .frame(width: resizeFrozen?.width, height: resizeFrozen?.height, alignment: .topLeading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .opacity(liveResizing ? 0 : 1)
+                .overlay {
+                    ResizePreview(items: previewItems)
+                        .equatable()
+                        .opacity(liveResizing ? 1 : 0)
+                        .allowsHitTesting(false)
+                }
+                .clipped()
+                .background {
+                    GeometryReader { g in
+                        Color.clear
+                            .onAppear { transcriptSize = g.size }
+                            .onChange(of: g.size) { _, new in transcriptSize = new }
+                    }
+                }
+                .background(LiveResizeObserver { resizing in
+                    resizeFrozen = resizing ? transcriptSize : nil
+                    liveResizing = resizing
+                })
+                .task {
+                    // After the first frame is up: the whole history.
+                    if !settled {
+                        try? await Task.sleep(nanoseconds: 150_000_000)
+                        settled = true
+                    }
+                    // The resize preview, kept ready (at most 2 s behind).
+                    while !Task.isCancelled {
+                        let tail = Self.resizeTail(model.items, limit: model.renderLimit)
+                        if tail != previewItems { previewItems = tail }
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    }
+                }
             // omp keeps its TODO pinned at the bottom at all times; the inline
             // card otherwise scrolls up out of view (the transcript auto-sticks
             // to the tail). Pin the current todo here, above the composer.
             if let todo = pinnedTodo { todoPinPanel(todo) }
             // What this session delegated (and to whom it answers), kept
             // in sight the same way.
-            if let store = model.delegationStore, let me = model.currentSession?() {
-                DelegationPanel(store: store, sessions: model.sessionStore, session: me,
-                                accent: model.accent,
-                                workspaceName: model.workspaceName,
-                                remote: model.remoteDelegations?() ?? [],
-                                open: { model.openSession?($0) },
-                                answer: model.answerDelegation)
-            }
+            // Its own view: it reads the session and delegation stores,
+            // which change with every mirror push — only the panel should
+            // re-render then, not the whole transcript above it.
+            DelegationPanelHost(model: model)
     }
 
     @ViewBuilder
@@ -1617,7 +1745,12 @@ struct BeautifiedSessionView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        let visible = Array(model.items.suffix(model.renderLimit))
+                        // While the window is being resized, only the last
+                        // couple of screens re-flow live; the rest comes back
+                        // when the drag ends.
+                        let visible = !settled
+                            ? Self.resizeTail(model.items, limit: model.renderLimit)
+                            : Array(model.items.suffix(model.renderLimit))
                         let hidden = model.items.count - visible.count
                         if hidden > 0 || model.canLoadEarlier {
                             HStack {
