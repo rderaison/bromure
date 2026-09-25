@@ -6712,6 +6712,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// ⌘N — the new-session screen as the stage surface.
     @objc func newSessionAction(_ sender: Any?) {
+        if let rw = keyRemoteWindow { rw.showNewSession(); return }
         let w = ensureUnifiedWindow()
         NSApp.setActivationPolicy(.regular)
         w.makeKeyAndOrderFront(nil)
@@ -6719,6 +6720,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc func newRoomAction(_ sender: Any?) {
+        // A focused fat-client window: the room is made on the Mac it mirrors.
+        if let rw = keyRemoteWindow { rw.promptNewRoom(); return }
         let w = ensureUnifiedWindow()
         NSApp.setActivationPolicy(.regular)
         w.makeKeyAndOrderFront(nil)
@@ -6892,7 +6895,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// ⌃⌘R — the next room's grid (the first one from anywhere else).
     @objc func nextRoomAction(_ sender: Any?) {
-        let rooms = agentRoomStore.rooms
+        if let rw = keyRemoteWindow { rw.showNextRoom(); return }
+        let rooms = agentRoomStore.activeRooms
         guard !rooms.isEmpty else { newRoomAction(sender); return }
         let w = ensureUnifiedWindow()
         NSApp.setActivationPolicy(.regular)

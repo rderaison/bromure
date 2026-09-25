@@ -4010,6 +4010,34 @@ final class RemoteHostWindow: NSWindow {
         }
     }
 
+    /// Menu › New Room… with this window focused: name it, then the new
+    /// room (made on the server) takes the stage.
+    func promptNewRoom() {
+        guard sessionsFirst else { return }
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("New Room", comment: "room sheet")
+        alert.informativeText = NSLocalizedString("A room groups sessions that work on the same thing. Its own Switchboard keeps track of them — and only them.", comment: "room sheet")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.placeholderString = NSLocalizedString("e.g. Payments v2", comment: "room sheet")
+        alert.accessoryView = field
+        alert.addButton(withTitle: NSLocalizedString("Create", comment: "room sheet"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: self) { [weak self] resp in
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard resp == .alertFirstButtonReturn, !name.isEmpty else { return }
+            self?.roomCommandThenShow(nil, "create", ["name": name])
+        }
+    }
+
+    /// ⌃⌘R with this window focused: the server's next room.
+    func showNextRoom() {
+        let rooms = controller.roomStore.activeRooms
+        guard !rooms.isEmpty else { promptNewRoom(); return }
+        let at = controller.listModel.selectedRoomID.flatMap { id in rooms.firstIndex { $0.id == id } }
+        showRoom(rooms[at.map { ($0 + 1) % rooms.count } ?? 0].id)
+    }
+
     /// Run a room verb, then put the room it names on stage (create, group).
     private func roomCommandThenShow(_ id: UUID?, _ action: String, _ body: [String: Any]) {
         let c = controller
