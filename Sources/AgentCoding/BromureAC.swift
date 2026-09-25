@@ -428,7 +428,7 @@ struct VerifyImage: ParsableCommand {
             throw ValidationError("--provisioner-kernel and --provisioner-initrd go together")
         }
         let provisioner = provisionerKernel.flatMap { k in
-            provisionerInitrd.map { UbuntuImageManager.InstallerEnvironment.provisioner(
+            provisionerInitrd.map { InstallerEnvironment.provisioner(
                 kernel: URL(fileURLWithPath: k), initrd: URL(fileURLWithPath: $0)) }
         }
         let imageManager = try makeImageManager()

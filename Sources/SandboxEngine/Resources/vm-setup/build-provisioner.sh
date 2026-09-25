@@ -1,24 +1,26 @@
 #!/bin/sh
-# Bromure Agentic Coding — build the self-contained provisioner initramfs.
+# Bromure — build the self-contained provisioner initramfs (both channels).
 #
-# Runs inside the Alpine netboot installer (publish pipeline only:
-# `bromure-ac init-foss-image`), right after the image bake. It turns the
+# Runs inside the Alpine netboot installer (publish pipelines only:
+# `bromure-ac init-foss-image` / `bromure init-foss-image`, right after the
+# image bake; Sources/SandboxEngine/Provisioner.swift). It turns the
 # netboot environment into ONE initramfs that boots straight to the same
 # root serial login — with the kernel modules (normally the network-fetched
 # modloop) and e2fsprogs (normally an `apk add` at postinstall time)
-# already inside. The pipeline publishes it next to base.img.gz, so an
+# already inside. The pipelines publish it next to base.img.gz, so an
 # end-user install downloads the image + this provisioner from
 # dl.bromure.io and never touches dl-cdn.alpinelinux.org: the netboot
 # tarball, modloop-virt, APKINDEX and alpine-base fetches all disappear.
 #
-# The provisioner is only an execution environment for postinstall.sh
-# (mount vda, chroot into Ubuntu, run the catalog steps). It keeps the
-# netboot's observable contract so the host driver doesn't care which one
+# The provisioner is only an execution environment for the channels'
+# postinstall.sh (mount vda, chroot into the image, run the catalog steps).
+# It keeps the netboot's observable contract so the host drivers don't care which one
 # it booted: getty on hvc0 → `localhost login:` → root, passwordless →
 # `localhost:~#`, `modprobe virtiofs`, `poweroff`.
 #
 # Shares the host attaches:
-#   setup — this directory (read-only)
+#   setup — this directory (read-only; mounted wherever the channel's
+#           driver mounts its setup share — this script doesn't care)
 #   out   — writable; receives provisioner-initrd (gzip'd newc cpio) and
 #           provisioner-kernel-release (the `uname -r` it was built for —
 #           the modules only load under that exact kernel, which the host
@@ -28,7 +30,7 @@
 
 set -e
 
-log() { printf '[ac-provisioner] %s\n' "$*"; }
+log() { printf '[provisioner] %s\n' "$*"; }
 fail() { printf 'SANDBOX_PROVISIONER_FAILED: %s\n' "$*"; exit 1; }
 
 retry() {

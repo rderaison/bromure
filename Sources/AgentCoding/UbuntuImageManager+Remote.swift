@@ -97,7 +97,10 @@ extension UbuntuImageManager {
             //     so the postinstall boot below needs nothing from the
             //     Alpine CDN. Non-fatal: without it runPostinstall falls
             //     back to the netboot.
-            await fetchProvisioner(image: image, progress: progress)
+            await Provisioner.fetch(from: image,
+                                    kernelDest: provisionerKernelURL,
+                                    initrdDest: provisionerInitrdURL,
+                                    progress: progress)
 
             // 2. Postinstall: every catalog step, unprompted — the setup
             //    screen the user clicked through is the consent for the
@@ -201,53 +204,6 @@ extension UbuntuImageManager {
         } catch {
             try? fm.removeItem(at: scratchDisk)
             throw error
-        }
-    }
-
-    // MARK: - Provisioner
-
-    /// Download + verify the catalog's `provisioner-vmlinuz` /
-    /// `provisioner-initrd` boot artifacts into place (replacing any
-    /// cached pair — kernel and initramfs must stay matched). Best-effort:
-    /// catalogs published before the provisioner existed carry neither,
-    /// and any failure leaves runPostinstall on the Alpine netboot path.
-    func fetchProvisioner(image: RemoteBaseImage,
-                          progress: @escaping (String) -> Void) async {
-        guard let kernel = image.bootFile(named: Self.provisionerKernelArtifact),
-              let initrd = image.bootFile(named: Self.provisionerInitrdArtifact) else {
-            return
-        }
-        let fm = FileManager.default
-        let pairs = [(kernel, provisionerKernelURL), (initrd, provisionerInitrdURL)]
-        var fetched: [(partial: URL, final: URL)] = []
-        do {
-            for (file, dest) in pairs {
-                let partial = dest.appendingPathExtension("partial")
-                let gz = dest.appendingPathExtension("gz.partial")
-                defer { try? fm.removeItem(at: gz) }
-                try await ImageFetch.fetchVerifiedArtifact(
-                    path: file.path,
-                    sha256: file.sha256,
-                    compression: file.compression,
-                    compressedBytes: file.compressedBytes,
-                    uncompressedBytes: file.uncompressedBytes,
-                    label: "Alpine provisioner (\(file.name))",
-                    scratchGz: gz,
-                    destination: partial,
-                    progress: progress
-                )
-                fetched.append((partial, dest))
-            }
-            // Drop the old pair first: a half-swapped pair would boot a
-            // kernel against another build's modules, whereas a missing
-            // file just falls back to the netboot.
-            for (_, dest) in pairs { try? fm.removeItem(at: dest) }
-            for (partial, dest) in fetched {
-                try fm.moveItem(at: partial, to: dest)
-            }
-        } catch {
-            for (partial, _) in fetched { try? fm.removeItem(at: partial) }
-            progress("Alpine provisioner download failed (\(error.localizedDescription)) — using the Alpine netboot instead.")
         }
     }
 

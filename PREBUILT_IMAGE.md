@@ -13,7 +13,7 @@ download plumbing, chroot postinstall — all in
 |---|---|---|
 | CDN prefix | `images/` | `browser-images/` |
 | Image | Ubuntu 24.04, 24 GB sparse, EFI/GRUB | Alpine + Chromium, 4.5 GB, direct kernel boot |
-| Artifacts | `base.img.gz` + `provisioner-vmlinuz.gz` + `provisioner-initrd.gz` (catalog `boot` array) | `base.img.gz` + `vmlinuz.gz` + `initrd.gz` (catalog `boot` array) |
+| Artifacts | `base.img.gz` + `provisioner-vmlinuz.gz` + `provisioner-initrd.gz` (catalog `boot` array) | `base.img.gz` + `vmlinuz.gz` + `initrd.gz` + the provisioner pair (catalog `boot` array) |
 | Version constant | `UbuntuImageManager.imageVersion` | `LinuxImageManager.imageVersion` |
 | Baseline (canonical postinstall) | `Sources/AgentCoding/Resources/img-catalog.json` | `Sources/SandboxEngine/Resources/browser-img-catalog.json` |
 | Non-free postinstall | Claude Code, Codex, Grok, gcloud | Cloudflare WARP |
@@ -52,6 +52,9 @@ markers `SANDBOX_POSTINSTALL_DONE/FAILED`).
 
 ## The provisioner (no Alpine CDN at install time)
 
+*Both channels; shared code in `Sources/SandboxEngine/Provisioner.swift`
+and `Sources/SandboxEngine/Resources/vm-setup/build-provisioner.sh`.*
+
 That Alpine VM used to be the netboot: a tarball from
 dl-cdn.alpinelinux.org, then `modloop-virt`, APKINDEX, `alpine-base` and
 `e2fsprogs` fetched from the Alpine CDN while booting. The pipeline now
@@ -67,12 +70,13 @@ postinstall steps themselves fetch.
 
 The pair is declared as catalog `boot` artifacts `provisioner-vmlinuz` /
 `provisioner-initrd` (signed like the browser's boot files; older apps
-ignore them), fetched into `BromureAC/provisioner-{vmlinuz,initrd}` and
-kept for later postinstall-step applies. Kernel and initramfs are only
+ignore them), fetched into the channel's storage dir
+(`BromureAC/` or `Bromure/`, as `provisioner-{vmlinuz,initrd}`) and kept
+for later postinstall-step applies. Kernel and initramfs are only
 valid as a pair (the modules match one `uname -r`), so they're replaced
 together. When a catalog carries no provisioner, or its download fails,
-postinstall falls back to the netboot. The local build (`setup.sh`) still
-uses the netboot — it `apk add`s its debootstrap toolchain.
+postinstall falls back to the netboot. The local builds (`setup.sh`) still
+use the netboot — they `apk add` their debootstrap toolchain.
 
 ## img-catalog.json
 
@@ -316,9 +320,13 @@ go direct only when the proxy can't start or the VM is bridged.
 
 `Jenkinsfile.browser-image` (cron `H 4 * * 1`, an hour after the AC
 image job) runs `./build.sh bromure`, then
-`scripts/publish-browser-image.sh <path-to-bromure>`: init-foss-image →
+`scripts/publish-browser-image.sh <path-to-bromure>`: init-foss-image
+(image + provisioner; `bromure build-provisioner --output …` builds just
+the provisioner) → the browsers gate runs its catalog postinstall through
+the provisioner (`verify-browser-image.sh` fails if it fell back to the
+netboot) →
 boot-check a clone (`bromure verify-image --disk … --kernel … --initrd …`,
-waits for the root serial prompt) → gzip + sha256 ×3 → upload under
+waits for the root serial prompt) → gzip + sha256 ×5 → upload under
 `browser-images/<uuid>/` → catalog (make-img-catalog.mjs with `--boot` +
 `--payload-magic`) at a 1s TTL → origin + CDN smoke-test → delete the
 previous build. `DRY_RUN` / `KEEP_PREVIOUS` as in the AC pipeline. The

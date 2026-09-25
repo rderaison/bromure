@@ -14,7 +14,7 @@ struct Bromure: ParsableCommand {
         commandName: "bromure",
         abstract: "Run a browser in an isolated, ephemeral VM.",
         subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self, ListEnrollments.self,
-                      InitFossImage.self, VerifyImage.self, VerifyBrowsers.self],
+                      InitFossImage.self, BuildProvisioner.self, VerifyImage.self, VerifyBrowsers.self],
         defaultSubcommand: Launch.self
     )
 
@@ -4631,7 +4631,7 @@ struct InitFossImage: ParsableCommand {
     )
 
     @Option(name: .long,
-            help: "Directory the artifacts land in (linux-base.img, vmlinuz, initrd, build-info.json).")
+            help: "Directory the artifacts land in (linux-base.img, vmlinuz, initrd, build-info.json, provisioner-vmlinuz, provisioner-initrd).")
     var output: String
 
     func run() throws {
@@ -4654,6 +4654,11 @@ struct InitFossImage: ParsableCommand {
                     fossOnly: true,
                     postinstallSteps: []
                 ) { event in
+                    progress.handle(event)
+                }
+                // Published next to the image so client postinstall
+                // boots never fetch from the Alpine CDN.
+                try await manager.buildProvisioner { event in
                     progress.handle(event)
                 }
                 result = .success(())
@@ -4680,6 +4685,46 @@ struct InitFossImage: ParsableCommand {
             withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: outputDir.appendingPathComponent("build-info.json"))
         print("Free-software browser image ready: \(manager.linuxDiskURL.path)")
+    }
+}
+
+// MARK: - CLI: build-provisioner
+
+/// Build only the self-contained Alpine provisioner (init-foss-image
+/// builds it too, after the image). For iterating on
+/// vm-setup/build-provisioner.sh without a full image bake.
+struct BuildProvisioner: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "build-provisioner",
+        abstract: "Build the self-contained Alpine provisioner (provisioner-vmlinuz + provisioner-initrd).",
+        shouldDisplay: false
+    )
+
+    @Option(name: .long, help: "Directory the provisioner-vmlinuz / provisioner-initrd pair lands in.")
+    var output: String
+
+    func run() throws {
+        let outputDir = URL(fileURLWithPath: output, isDirectory: true)
+        let manager = LinuxImageManager(storageDir: outputDir)
+        let progress = TerminalProgress()
+        var result: Result<Void, Error>?
+        Task {
+            do {
+                try await manager.buildProvisioner { event in
+                    progress.handle(event)
+                }
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
+        while result == nil {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+        }
+        progress.finish()
+        try result!.get()
+        print("Provisioner ready: \(manager.provisionerKernelURL.path) + \(manager.provisionerInitrdURL.path)")
     }
 }
 
@@ -4773,7 +4818,7 @@ struct VerifyBrowsers: ParsableCommand {
     )
 
     @Option(name: .long,
-            help: "Directory holding linux-base.img, vmlinuz and initrd — a DISPOSABLE copy (postinstall and the session boots write into it).")
+            help: "Directory holding linux-base.img, vmlinuz and initrd — a DISPOSABLE copy (postinstall and the session boots write into it). A provisioner-vmlinuz/provisioner-initrd pair there runs the postinstall, as on a client install.")
     var dir: String
 
     @Option(name: .long, help: "Seconds to wait for each browser to come up once its session is claimed.")

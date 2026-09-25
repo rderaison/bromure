@@ -209,6 +209,22 @@ public final class LinuxImageManager {
         storageDir.appendingPathComponent("netboot-initramfs-shimmed")
     }
 
+    /// The self-contained Alpine provisioner (Provisioner.swift), published
+    /// next to the image. When present it replaces the netboot for
+    /// postinstall, so an install never reaches dl-cdn.alpinelinux.org.
+    /// Kept across runs so later postinstall-step applies reuse it.
+    public var provisionerKernelURL: URL { storageDir.appendingPathComponent(Provisioner.kernelName) }
+    public var provisionerInitrdURL: URL { storageDir.appendingPathComponent(Provisioner.initrdName) }
+    var provisionerInitrdShimmedURL: URL {
+        storageDir.appendingPathComponent("provisioner-initrd-shimmed")
+    }
+
+    public var hasProvisioner: Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: provisionerKernelURL.path)
+            && fm.fileExists(atPath: provisionerInitrdURL.path)
+    }
+
     // MARK: - VM Configuration
 
     /// Build a VZVirtualMachineConfiguration for a Linux VM.

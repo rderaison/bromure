@@ -7,7 +7,8 @@
 #   boot      bromure verify-image: the disk must boot to the root serial
 #             prompt — proves kernel, initramfs, rootfs and systemd.
 #   browsers  bromure verify-browsers: apply the catalog postinstall (Google
-#             Chrome, WARP) exactly as end-user installs do, then boot a
+#             Chrome, WARP) exactly as end-user installs do — through the
+#             provisioner when <image-dir> carries one — then boot a
 #             Chromium session and a Chrome session through the real VMPool
 #             path and require each browser to come up. Gates the incident
 #             where a published image booted fine but Chrome wouldn't install
@@ -63,7 +64,19 @@ verify_browsers() {
     cp -c "$KERNEL"   "$dir/vmlinuz"
     cp -c "$INITRD"   "$dir/initrd"
     if [ -f "$IMAGE_DIR/image-version" ]; then cp "$IMAGE_DIR/image-version" "$dir/image-version"; fi
+    # The provisioner gate: with the pair present the postinstall boots it,
+    # exactly like a client install — a broken provisioner fails here.
+    local prov=""
+    if [ -f "$IMAGE_DIR/provisioner-vmlinuz" ] && [ -f "$IMAGE_DIR/provisioner-initrd" ]; then
+        cp -c "$IMAGE_DIR/provisioner-vmlinuz" "$dir/provisioner-vmlinuz"
+        cp -c "$IMAGE_DIR/provisioner-initrd"  "$dir/provisioner-initrd"
+        prov=1
+    fi
     "$BROMURE" verify-browsers --dir "$dir" --browser-timeout 180
+    if [ -n "$prov" ] && [ -e "$dir/netboot-vmlinuz" ]; then
+        echo "ERROR: postinstall fell back to the Alpine netboot — the provisioner wasn't used" >&2
+        exit 1
+    fi
     rm -rf "$dir"
 }
 

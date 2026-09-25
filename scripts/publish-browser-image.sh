@@ -12,6 +12,10 @@
 #   browser-images/<uuid>/base.img.gz    ← the compressed raw disk image
 #   browser-images/<uuid>/vmlinuz.gz     ← the raw ARM64 kernel (direct boot)
 #   browser-images/<uuid>/initrd.gz      ← the mkinitfs initramfs
+#   browser-images/<uuid>/provisioner-{vmlinuz,initrd}.gz
+#                                        ← the self-contained Alpine
+#                                          provisioner clients boot for
+#                                          postinstall (no Alpine CDN)
 #
 # <uuid> is random per build. Unlike the AC image (EFI/GRUB, one disk
 # artifact — scripts/publish-image.sh), the browser image direct-kernel-
@@ -34,7 +38,8 @@
 #        browsers  — bromure verify-browsers: catalog postinstall (Google
 #                    Chrome) applies, then a Chromium session and a Chrome
 #                    session each bring their browser up.
-#   3. Compress + upload the three artifacts under browser-images/<uuid>/.
+#   3. Compress + upload the artifacts (disk, kernel, initrd, provisioner
+#      pair) under browser-images/<uuid>/.
 #   4. Download the previous img-catalog.json (for the retired uuid).
 #   5. Generate the new img-catalog.json (browser payload magic + boot files).
 #   6. Upload it with a 1-second cache expiry.
@@ -129,7 +134,8 @@ BASE_IMG="$IMAGE_DIR/linux-base.img"
 KERNEL="$IMAGE_DIR/vmlinuz"
 INITRD="$IMAGE_DIR/initrd"
 BUILD_INFO="$IMAGE_DIR/build-info.json"
-for f in "$BASE_IMG" "$KERNEL" "$INITRD" "$BUILD_INFO"; do
+for f in "$BASE_IMG" "$KERNEL" "$INITRD" "$BUILD_INFO" \
+         "$IMAGE_DIR/provisioner-vmlinuz" "$IMAGE_DIR/provisioner-initrd"; do
     [ -f "$f" ] || { echo "ERROR: $f missing after build"; exit 1; }
 done
 
@@ -166,6 +172,17 @@ gz_compress "$INITRD" "$INITRD_GZ"
 INITRD_GZ_BYTES=$(stat -f%z "$INITRD_GZ")
 INITRD_SHA256=$(sha256_of "$INITRD_GZ")
 
+# Provisioner boot artifacts (Provisioner.swift), as --boot specs.
+PROV_BOOT_ARGS=()
+PROV_KEYS=()
+for name in provisioner-vmlinuz provisioner-initrd; do
+    src="$IMAGE_DIR/$name"
+    gz="$STAGING/$name.gz"
+    gz_compress "$src" "$gz"
+    PROV_BOOT_ARGS+=(--boot "name=$name,path=$PREFIX/$name.gz,sha256=$(sha256_of "$gz"),compressedBytes=$(stat -f%z "$gz"),uncompressedBytes=$(stat -f%z "$src")")
+    PROV_KEYS+=("$PREFIX/$name.gz")
+done
+
 echo "image uuid:   $UUID"
 echo "disk:         $DISK_GZ_BYTES bytes gz (from $DISK_RAW_BYTES raw) sha256=$DISK_SHA256"
 echo "vmlinuz:      $KERNEL_GZ_BYTES bytes gz (from $KERNEL_RAW_BYTES raw) sha256=$KERNEL_SHA256"
@@ -180,6 +197,9 @@ echo "=== Uploading artifacts ($PREFIX/) ==="
 put "$DISK_GZ"   "$PREFIX/base.img.gz" "application/gzip"
 put "$KERNEL_GZ" "$PREFIX/vmlinuz.gz"  "application/gzip"
 put "$INITRD_GZ" "$PREFIX/initrd.gz"   "application/gzip"
+for key in "${PROV_KEYS[@]}"; do
+    put "$STAGING/$(basename "$key")" "$key" "application/gzip"
+done
 
 # --- 4. Download the previous catalog ------------------------------------
 # Needed only to learn which build to retire in step 8. A 404 (first ever
@@ -207,6 +227,7 @@ node tools/make-img-catalog.mjs \
     --uncompressed-bytes "$DISK_RAW_BYTES" \
     --boot "name=vmlinuz,path=$PREFIX/vmlinuz.gz,sha256=$KERNEL_SHA256,compressedBytes=$KERNEL_GZ_BYTES,uncompressedBytes=$KERNEL_RAW_BYTES" \
     --boot "name=initrd,path=$PREFIX/initrd.gz,sha256=$INITRD_SHA256,compressedBytes=$INITRD_GZ_BYTES,uncompressedBytes=$INITRD_RAW_BYTES" \
+    "${PROV_BOOT_ARGS[@]}" \
     --payload-magic "bromure-browser-img-catalog-v1" \
     --out "$NEW_CATALOG"
 
@@ -234,7 +255,7 @@ ORIGIN_BASE="https://${DO_SPACES_BUCKET}.${DO_SPACES_ENDPOINT#https://}"
 ORIGIN_UUID=$(catalog_uuid "$ORIGIN_BASE/browser-images/img-catalog.json")
 [ "$ORIGIN_UUID" = "$UUID" ] \
     || { echo "ERROR: origin doesn't serve the new catalog (got '${ORIGIN_UUID:-<empty>}')"; exit 1; }
-for key in "$PREFIX/base.img.gz" "$PREFIX/vmlinuz.gz" "$PREFIX/initrd.gz"; do
+for key in "$PREFIX/base.img.gz" "$PREFIX/vmlinuz.gz" "$PREFIX/initrd.gz" "${PROV_KEYS[@]}"; do
     curl -fsSIL "$ORIGIN_BASE/$key" >/dev/null \
         || { echo "ERROR: artifact not reachable at origin ($ORIGIN_BASE/$key)"; exit 1; }
 done
@@ -255,7 +276,7 @@ for i in $(seq 1 "$CDN_ATTEMPTS"); do
     sleep 30
 done
 [ -n "$OK" ] || { echo "ERROR: CDN still serves the old catalog after 1 hour"; exit 1; }
-for key in "$PREFIX/base.img.gz" "$PREFIX/vmlinuz.gz" "$PREFIX/initrd.gz"; do
+for key in "$PREFIX/base.img.gz" "$PREFIX/vmlinuz.gz" "$PREFIX/initrd.gz" "${PROV_KEYS[@]}"; do
     curl -fsSIL "$DO_SPACES_PUBLIC_BASE/$key" >/dev/null \
         || { echo "ERROR: published artifact not reachable at $key"; exit 1; }
 done

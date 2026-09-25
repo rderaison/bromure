@@ -168,6 +168,15 @@ extension LinuxImageManager {
             }
             guard let catalog, let image = catalog.image else { throw lastError }
 
+            // 1b. The self-contained provisioner published with the image,
+            //     so the postinstall boot below needs nothing from the
+            //     Alpine CDN. Non-fatal: without it runPostinstall falls
+            //     back to the netboot.
+            await Provisioner.fetch(from: image,
+                                    kernelDest: provisionerKernelURL,
+                                    initrdDest: provisionerInitrdURL,
+                                    progress: text)
+
             // 2. Postinstall: every catalog step, unprompted — the setup
             //    screen the user clicked through is the consent for the
             //    initial set. Runs even with zero steps: the same boot
@@ -334,6 +343,7 @@ extension LinuxImageManager {
         targetDisk: URL,
         copyFonts: Bool,
         personalize: Personalization?,
+        environmentOverride: InstallerEnvironment? = nil,
         progress: @escaping (ProgressEvent) -> Void
     ) async throws {
         // Materialise the steps as NNNN-<uuid8>.sh files in a temp dir the
@@ -355,18 +365,20 @@ extension LinuxImageManager {
             try body.write(to: file, atomically: true, encoding: .utf8)
         }
 
-        // The Alpine netboot may not be cached yet — on the download path
-        // this runs on a fresh machine before any local build ever did.
-        let netbootKernel = storageDir.appendingPathComponent("netboot-vmlinuz")
-        let netbootInitrd = storageDir.appendingPathComponent("netboot-initramfs")
-        if !fm.fileExists(atPath: netbootKernel.path) ||
-           !fm.fileExists(atPath: netbootInitrd.path) {
-            progress(.message("Downloading Alpine netboot installer…"))
-            try await downloadNetbootFiles(
-                kernelDest: netbootKernel,
-                initrdDest: netbootInitrd,
-                progress: progress
-            )
+        // Prefer the published provisioner (fetched alongside the image by
+        // the download path) — it boots with no network fetches at all.
+        // Otherwise the Alpine netboot, which may not be cached yet: on the
+        // download path this runs on a fresh machine before any local
+        // build ever did.
+        let environment: InstallerEnvironment
+        if let override = environmentOverride {
+            environment = override
+        } else if hasProvisioner {
+            environment = .provisioner(kernel: provisionerKernelURL,
+                                       initrd: provisionerInitrdURL)
+        } else {
+            try await ensureNetbootFiles(progress: progress)
+            environment = .netboot
         }
 
         // Script arguments. A nil personalization keeps whatever the
@@ -384,8 +396,7 @@ extension LinuxImageManager {
         }
 
         try await runProvisioner(
-            netbootKernel: netbootKernel,
-            netbootInitrd: netbootInitrd,
+            environment: environment,
             targetDisk: targetDisk,
             command: "sh /tmp/vm-setup/postinstall.sh \(fontsArg) \(personalizeArgs)",
             stepShareDir: shareDir,
@@ -397,19 +408,75 @@ extension LinuxImageManager {
         )
     }
 
-    /// Boot the Alpine netboot with `targetDisk` attached as vda, log in
-    /// over serial, mount the vm-setup share (+ postinstall steps +
-    /// fonts), run `command` and wait for its marker. A lean sibling of
-    /// `installLinux` — no transfer disk, no package proxy (the browser
-    /// bake has never proxied), and the target disk already carries a
-    /// filesystem.
+    var netbootKernelURL: URL { storageDir.appendingPathComponent("netboot-vmlinuz") }
+    var netbootInitrdURL: URL { storageDir.appendingPathComponent("netboot-initramfs") }
+
+    private func ensureNetbootFiles(progress: @escaping (ProgressEvent) -> Void) async throws {
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: netbootKernelURL.path) ||
+              !fm.fileExists(atPath: netbootInitrdURL.path) else { return }
+        progress(.message("Downloading Alpine netboot installer…"))
+        try await downloadNetbootFiles(
+            kernelDest: netbootKernelURL,
+            initrdDest: netbootInitrdURL,
+            progress: progress
+        )
+    }
+
+    /// Publish-pipeline step: turn the Alpine netboot into the
+    /// self-contained provisioner (vm-setup/build-provisioner.sh) and land
+    /// it at `provisionerKernelURL` / `provisionerInitrdURL`. The kernel
+    /// is the netboot's own — the initramfs carries that kernel's modules,
+    /// so the two ship (and must be used) as a pair.
+    @MainActor
+    public func buildProvisioner(progress: @escaping (ProgressEvent) -> Void) async throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: storageDir, withIntermediateDirectories: true)
+        try await ensureNetbootFiles(progress: progress)
+
+        let outDir = storageDir.appendingPathComponent("provisioner-build", isDirectory: true)
+        try? fm.removeItem(at: outDir)
+        try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: outDir) }
+
+        progress(.message("Building the self-contained Alpine provisioner…"))
+        try await runProvisioner(
+            environment: .netboot,
+            targetDisk: nil,
+            command: "sh /tmp/vm-setup/build-provisioner.sh",
+            stepShareDir: nil,
+            outShareDir: outDir,
+            shareFonts: false,
+            successMarker: "SANDBOX_PROVISIONER_DONE",
+            failureMarker: "SANDBOX_PROVISIONER_FAILED",
+            markerTimeout: 15 * 60,
+            progress: progress
+        )
+
+        let builtInitrd = outDir.appendingPathComponent(Provisioner.initrdName)
+        guard fm.fileExists(atPath: builtInitrd.path) else {
+            throw SandboxError.diskCreationFailed(
+                "build-provisioner.sh reported success but wrote no \(Provisioner.initrdName)")
+        }
+        try? fm.removeItem(at: provisionerInitrdURL)
+        try fm.moveItem(at: builtInitrd, to: provisionerInitrdURL)
+        try? fm.removeItem(at: provisionerKernelURL)
+        try fm.copyItem(at: netbootKernelURL, to: provisionerKernelURL)
+        progress(.message("Provisioner ready: \(Provisioner.kernelName) + \(Provisioner.initrdName)"))
+    }
+
+    /// Boot `environment` with `targetDisk` (if any) attached as vda, log
+    /// in over serial, mount the vm-setup share (+ postinstall steps +
+    /// fonts + a writable `out` share), run `command` and wait for its
+    /// marker. A lean sibling of `installLinux` — no transfer disk, and
+    /// the target disk already carries a filesystem.
     @MainActor
     private func runProvisioner(
-        netbootKernel: URL,
-        netbootInitrd: URL,
-        targetDisk: URL,
+        environment: InstallerEnvironment,
+        targetDisk: URL?,
         command: String,
-        stepShareDir: URL,
+        stepShareDir: URL?,
+        outShareDir: URL? = nil,
         shareFonts: Bool,
         successMarker: String,
         failureMarker: String,
@@ -426,10 +493,19 @@ extension LinuxImageManager {
         // vm.mtu preference, and throughput barely matters for its
         // ~100 MB of downloads.
         let installerMTU = 1280
+        // The provisioner's own /init takes the same shim hand-off — it
+        // just has nothing left to fetch afterwards.
+        let kernelURL, initrdURL, shimmedURL: URL
+        switch environment {
+        case .netboot:
+            (kernelURL, initrdURL, shimmedURL) = (netbootKernelURL, netbootInitrdURL, netbootInitrdShimmedURL)
+        case .provisioner(let kernel, let initrd):
+            (kernelURL, initrdURL, shimmedURL) = (kernel, initrd, provisionerInitrdShimmedURL)
+        }
         try InitrdShim.writeShimmedInitrd(
-            original: netbootInitrd,
+            original: initrdURL,
             mtu: installerMTU,
-            to: netbootInitrdShimmedURL
+            to: shimmedURL
         )
 
         // Same network path as the bake (VMNetSwitch + NetworkFilter,
@@ -463,21 +539,28 @@ extension LinuxImageManager {
         defer { proxy.stop() }
         let repoBase = alpineRepoBase ?? "https://dl-cdn.alpinelinux.org"
 
-        let bootLoader = VZLinuxBootLoader(kernelURL: netbootKernel)
-        bootLoader.initialRamdiskURL = netbootInitrdShimmedURL
-        bootLoader.commandLine = "console=hvc0 rdinit=/init.bromure alpine_repo=\(repoBase)/alpine/v\(LinuxImageManager.alpineVersion)/main modloop=\(repoBase)/alpine/v\(LinuxImageManager.alpineVersion)/releases/aarch64/netboot-\(LinuxImageManager.alpineRelease)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk"
+        let bootLoader = VZLinuxBootLoader(kernelURL: kernelURL)
+        bootLoader.initialRamdiskURL = shimmedURL
+        switch environment {
+        case .netboot:
+            bootLoader.commandLine = "console=hvc0 rdinit=/init.bromure alpine_repo=\(repoBase)/alpine/v\(LinuxImageManager.alpineVersion)/main modloop=\(repoBase)/alpine/v\(LinuxImageManager.alpineVersion)/releases/aarch64/netboot-\(LinuxImageManager.alpineRelease)/modloop-virt modules=loop,squashfs,virtio-net,virtio-blk"
+        case .provisioner:
+            bootLoader.commandLine = "console=hvc0 rdinit=/init.bromure"
+        }
         vzConfig.bootLoader = bootLoader
 
         vzConfig.platform = VZGenericPlatformConfiguration()
         vzConfig.cpuCount = max(2, ProcessInfo.processInfo.processorCount / 2)
         vzConfig.memorySize = 2 * 1024 * 1024 * 1024
 
-        let diskAttachment = try VZDiskImageStorageDeviceAttachment(
-            url: targetDisk, readOnly: false
-        )
-        vzConfig.storageDevices = [
-            VZVirtioBlockDeviceConfiguration(attachment: diskAttachment),
-        ]
+        if let targetDisk {
+            let diskAttachment = try VZDiskImageStorageDeviceAttachment(
+                url: targetDisk, readOnly: false
+            )
+            vzConfig.storageDevices = [
+                VZVirtioBlockDeviceConfiguration(attachment: diskAttachment),
+            ]
+        }
 
         let consolePipe = Pipe()
         let inputPipe = Pipe()
@@ -497,10 +580,19 @@ extension LinuxImageManager {
         let setupFS = VZVirtioFileSystemDeviceConfiguration(tag: "setup")
         setupFS.share = VZSingleDirectoryShare(
             directory: VZSharedDirectory(url: setupDir, readOnly: true))
-        let stepsFS = VZVirtioFileSystemDeviceConfiguration(tag: "postinstall")
-        stepsFS.share = VZSingleDirectoryShare(
-            directory: VZSharedDirectory(url: stepShareDir, readOnly: true))
-        var shares: [VZDirectorySharingDeviceConfiguration] = [setupFS, stepsFS]
+        var shares: [VZDirectorySharingDeviceConfiguration] = [setupFS]
+        if let stepShareDir {
+            let stepsFS = VZVirtioFileSystemDeviceConfiguration(tag: "postinstall")
+            stepsFS.share = VZSingleDirectoryShare(
+                directory: VZSharedDirectory(url: stepShareDir, readOnly: true))
+            shares.append(stepsFS)
+        }
+        if let outShareDir {
+            let outFS = VZVirtioFileSystemDeviceConfiguration(tag: "out")
+            outFS.share = VZSingleDirectoryShare(
+                directory: VZSharedDirectory(url: outShareDir, readOnly: false))
+            shares.append(outFS)
+        }
         if shareFonts {
             let fontsFS = VZVirtioFileSystemDeviceConfiguration(tag: "fonts")
             fontsFS.share = VZSingleDirectoryShare(

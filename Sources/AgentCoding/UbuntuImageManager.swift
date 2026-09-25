@@ -124,36 +124,21 @@ public final class UbuntuImageManager {
     /// we ever reach the login prompt where we used to clamp.
     private var shimmedInitrdURL: URL { storageDir.appendingPathComponent("alpine-initramfs-shimmed") }
 
-    /// The self-contained provisioner (build-provisioner.sh): the netboot
-    /// kernel + ONE initramfs carrying the modloop's modules and
-    /// e2fsprogs, published next to base.img.gz as the catalog's
-    /// `provisioner-vmlinuz` / `provisioner-initrd` boot artifacts. When
-    /// present it replaces the netboot for postinstall, so an install
+    /// The self-contained Alpine provisioner (SandboxEngine's
+    /// Provisioner / build-provisioner.sh), published next to base.img.gz.
+    /// When present it replaces the netboot for postinstall, so an install
     /// never reaches dl-cdn.alpinelinux.org. Cached across runs (later
     /// postinstall-step applies reuse it), like the netboot files.
-    public var provisionerKernelURL: URL { storageDir.appendingPathComponent("provisioner-vmlinuz") }
-    public var provisionerInitrdURL: URL { storageDir.appendingPathComponent("provisioner-initrd") }
+    public var provisionerKernelURL: URL { storageDir.appendingPathComponent(Provisioner.kernelName) }
+    public var provisionerInitrdURL: URL { storageDir.appendingPathComponent(Provisioner.initrdName) }
     private var provisionerShimmedInitrdURL: URL {
         storageDir.appendingPathComponent("provisioner-initrd-shimmed")
     }
-    /// Catalog `boot` artifact names the publish pipeline uses.
-    static let provisionerKernelArtifact = "provisioner-vmlinuz"
-    static let provisionerInitrdArtifact = "provisioner-initrd"
 
     public var hasProvisioner: Bool {
         let fm = FileManager.default
         return fm.fileExists(atPath: provisionerKernelURL.path)
             && fm.fileExists(atPath: provisionerInitrdURL.path)
-    }
-
-    /// What the one-shot provisioning VM boots.
-    enum InstallerEnvironment {
-        /// Alpine netboot: fetches modloop + alpine-base from the Alpine
-        /// CDN at boot. Required by the local bake (setup.sh apk-adds its
-        /// debootstrap toolchain); the postinstall fallback.
-        case netboot
-        /// The published self-contained initramfs — no boot-time fetches.
-        case provisioner(kernel: URL, initrd: URL)
     }
 
     // MARK: - Status
@@ -605,7 +590,7 @@ public final class UbuntuImageManager {
     }
 
     /// Publish-pipeline step: turn the Alpine netboot into the
-    /// self-contained provisioner (vm-setup/build-provisioner.sh) and land
+    /// self-contained provisioner (SandboxEngine's build-provisioner.sh) and land
     /// it at `provisionerKernelURL` / `provisionerInitrdURL`. The kernel
     /// is the netboot's own — the initramfs carries that kernel's modules,
     /// so the two ship (and must be used) as a pair.
@@ -627,9 +612,14 @@ public final class UbuntuImageManager {
         try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: outDir) }
 
+        guard let engineSetupDir = Provisioner.setupDir else {
+            throw UbuntuImageError.installerReportedFailure(
+                "SandboxEngine vm-setup resources (build-provisioner.sh) not found")
+        }
         progress("Building the self-contained Alpine provisioner…")
         try await runProvisioner(
             environment: .netboot,
+            setupShare: engineSetupDir,
             targetDisk: nil,
             script: "build-provisioner.sh",
             scriptArgs: "",
@@ -656,11 +646,12 @@ public final class UbuntuImageManager {
 
     /// Shared Alpine provisioning driver: boot `environment` with
     /// `targetDisk` (if any) attached as vda, log in over serial, mount
-    /// the vm-setup share (+ any `extraShares`), run
-    /// `/tmp/setup/<script>` and wait for its marker.
+    /// the vm-setup share (`setupShare`, default this manager's; + any
+    /// `extraShares`), run `/tmp/setup/<script>` and wait for its marker.
     @MainActor
     private func runProvisioner(
         environment: InstallerEnvironment,
+        setupShare: URL? = nil,
         targetDisk: URL?,
         script: String,
         scriptArgs: String,
@@ -806,7 +797,7 @@ public final class UbuntuImageManager {
         // VirtioFS share: setup.sh + any sibling files in vm-setup/.
         let setupFS = VZVirtioFileSystemDeviceConfiguration(tag: "setup")
         setupFS.share = VZSingleDirectoryShare(
-            directory: VZSharedDirectory(url: setupDir, readOnly: true)
+            directory: VZSharedDirectory(url: setupShare ?? setupDir, readOnly: true)
         )
 
         var shares: [VZDirectorySharingDeviceConfiguration] = [setupFS]

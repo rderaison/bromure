@@ -120,6 +120,17 @@ gz_compress "$INITRD" "$INITRD_GZ"
 INITRD_GZ_BYTES=$(stat -f%z "$INITRD_GZ")
 INITRD_SHA256=$(sha256_of "$INITRD_GZ")
 
+# Provisioner boot artifacts (Provisioner.swift), as --boot specs.
+PROV_BOOT_ARGS=()
+PROV_KEYS=()
+for name in provisioner-vmlinuz provisioner-initrd; do
+    src="$IMAGE_DIR/$name"
+    gz="$CDN/browser-images/$UUID/$name.gz"
+    gz_compress "$src" "$gz"
+    PROV_BOOT_ARGS+=(--boot "name=$name,path=browser-images/$UUID/$name.gz,sha256=$(sha256_of "$gz"),compressedBytes=$(stat -f%z "$gz"),uncompressedBytes=$(stat -f%z "$src")")
+    PROV_KEYS+=("browser-images/$UUID/$name.gz")
+done
+
 # --allow-unsigned: no signing key locally. The client side skips
 # signature verification only because BROMURE_IMAGE_CATALOG_BASE is set —
 # production fetches always require a valid signature.
@@ -133,18 +144,19 @@ node tools/make-img-catalog.mjs \
     --uncompressed-bytes "$DISK_RAW_BYTES" \
     --boot "name=vmlinuz,path=browser-images/$UUID/vmlinuz.gz,sha256=$KERNEL_SHA256,compressedBytes=$KERNEL_GZ_BYTES,uncompressedBytes=$KERNEL_RAW_BYTES" \
     --boot "name=initrd,path=browser-images/$UUID/initrd.gz,sha256=$INITRD_SHA256,compressedBytes=$INITRD_GZ_BYTES,uncompressedBytes=$INITRD_RAW_BYTES" \
+    "${PROV_BOOT_ARGS[@]}" \
     --payload-magic "bromure-browser-img-catalog-v1" \
     --allow-unsigned \
     --out "$CDN/browser-images/img-catalog.json"
 
 # Sanity: the inspect mode must read back the uuid we just wrote, and the
-# catalog must carry both boot artifacts.
+# catalog must carry every boot artifact (image kernel/initrd + provisioner).
 ROUND_TRIP=$(node tools/make-img-catalog.mjs --print-image-uuid "$CDN/browser-images/img-catalog.json")
 [ "$ROUND_TRIP" = "$UUID" ] || { echo "ERROR: catalog round-trip uuid mismatch"; exit 1; }
 node -e '
 const cat = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
 const names = (cat.image.boot ?? []).map((f) => f.name).sort();
-if (names.join(",") !== "initrd,vmlinuz") {
+if (names.join(",") !== "initrd,provisioner-initrd,provisioner-vmlinuz,vmlinuz") {
   console.error(`ERROR: catalog boot artifacts wrong: ${names}`);
   process.exit(1);
 }
@@ -160,9 +172,14 @@ BROMURE_IMAGE_CATALOG_BASE="file://$CDN/" \
 
 # --- 4. Assertions ----------------------------------------------------------
 echo "=== [client] Checking installed artifacts ==="
-for f in linux-base.img vmlinuz initrd image-version image-state.json; do
+for f in linux-base.img vmlinuz initrd image-version image-state.json \
+         provisioner-vmlinuz provisioner-initrd; do
     [ -e "$CLIENT/$f" ] || { echo "ERROR: missing $CLIENT/$f"; exit 1; }
 done
+# The whole point of the provisioner: the client never fell back to the
+# Alpine netboot (which would have cached netboot-vmlinuz here).
+[ ! -e "$CLIENT/netboot-vmlinuz" ] \
+    || { echo "ERROR: client downloaded the Alpine netboot — the provisioner wasn't used"; exit 1; }
 
 # The stamp is the app's own imageVersion constant (== build-info version
 # on the same binary), never the catalog's — see downloadBaseImage.

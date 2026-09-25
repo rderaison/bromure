@@ -69,11 +69,13 @@ esac
 log() { printf '[browser-postinstall] %s\n' "$*"; }
 fail() { printf 'SANDBOX_POSTINSTALL_FAILED: %s\n' "$*"; exit 1; }
 
-# e2fsprogs for the final integrity check below — the netboot initramfs
-# doesn't ship e2fsck. Best-effort: a transient apk failure skips the
-# check (setup.sh's own mkfs gated the artifact we started from) rather
-# than failing the whole postinstall.
-( apk update && apk add e2fsprogs ) >/dev/null 2>&1 || true
+# e2fsprogs for the final integrity check below — the published
+# provisioner initramfs ships it, the netboot fallback doesn't.
+# Best-effort: a transient apk failure skips the check (setup.sh's own
+# mkfs gated the artifact we started from) rather than failing the whole
+# postinstall.
+command -v e2fsck >/dev/null 2>&1 \
+    || ( apk update && apk add e2fsprogs ) >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # Mount the installed system. The browser image is a whole-disk ext4
