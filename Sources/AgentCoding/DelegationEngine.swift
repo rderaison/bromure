@@ -31,7 +31,10 @@ final class DelegationEngine {
     /// that tripped the detector and the message is withheld. Injected so
     /// the tests run without the model.
     var scan: @MainActor (String) async -> String? = { text in
-        await PromptInjectionClassifier.shared.detect(spans: [(id: nil, content: text)])
+        let t0 = Date()
+        let hit = await PromptInjectionClassifier.shared.detect(spans: [(id: nil, content: text)])
+        BACDebug.log("delegation", "scan \(text.count) chars took=\(BACDebug.ms(t0))")
+        return hit
     }
     /// Every message, delivered or withheld, goes to the Security Timeline
     /// (and the cloud audit for enrolled installs).
@@ -1125,6 +1128,11 @@ final class DelegationEngine {
         let line = lines.count == 1 ? lines[0] : lines.joined(separator: DelegationNoticeRow.joiner)
         func markNoticed() {
             store.markNoticed(items.map { $0.1.id })
+            // A request the line carried whole is read: no read_inbox needed,
+            // no repeat notice later.
+            store.markRead(items.filter { d, m in
+                DelegationNotice.carriesWhole(m) && remote.allSatisfy { $0.2.id != m.id }
+            }.map { $0.1.id })
             for (link, d, m) in remote {
                 link.remoteDelegations.markNoticed([m.id])
                 Task { _ = try? await link.remoteCommand(delegation: d.id, action: "noticed", body: ["ids": [m.id.uuidString]]) }
@@ -1154,10 +1162,21 @@ final class DelegationEngine {
         guard canType else { return }
         markNoticed()
         Task {
+            let t0 = Date()
             _ = try? await delegate.guestExec(
                 profileID: s.profileID,
                 command: CodingTaskEngine.typeCommand(tabIndex: w, text: line), timeout: 15)
+            BACDebug.log("delegation", "typed notice into “\(s.title)” took=\(BACDebug.ms(t0))")
         }
+    }
+
+    /// A tab's agent just finished its turn (its hook said so): what was
+    /// held for it while it worked goes now, not on the next tick — the
+    /// tick is only the fallback for what nothing else wakes.
+    func promptFreed(profileID: UUID, window: Int) {
+        guard let s = sessions.session(profileID: profileID, windowIndex: window),
+              recipientsOwed().contains(s.id) else { return }
+        deliverNotices(to: s.id)
     }
 
     /// The prompt is free: no turn under way, no TUI question up.

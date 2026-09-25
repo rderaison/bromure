@@ -1610,6 +1610,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     profileID: id, worktreeBranch: tab.worktreeBranch)
                 codingTaskEngine.agentFinished(
                     profileID: id, worktreeBranch: tab.worktreeBranch)
+                // A request or a reply held while this agent worked goes now.
+                delegationEngine.promptFreed(profileID: id, window: index)
             }
             return
         }
@@ -1625,6 +1627,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             profileID: id, worktreeBranch: tab.worktreeBranch)
         codingTaskEngine.agentFinished(
             profileID: id, worktreeBranch: tab.worktreeBranch)
+        delegationEngine.promptFreed(profileID: id, window: index)
     }
 
     /// Pop a VM out of the unified window into its own standalone window. The
@@ -1695,6 +1698,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         e.profiles = { [weak self] in self?.profiles ?? [] }
         // The remote hosts mirrored here: their sessions are peers too.
         e.remoteLinks = { [weak self] in self?.remoteDelegationLinks() ?? [] }
+        // The injection scan every message between agents goes through:
+        // its first inference pays a ~0.75 s warm-up (10 ms after) — take
+        // it now, off the critical path, not on the first request.
+        Task.detached(priority: .utility) {
+            _ = await PromptInjectionClassifier.shared.detect(spans: [(id: nil, content: "warm up")])
+        }
         return e
     }()
 

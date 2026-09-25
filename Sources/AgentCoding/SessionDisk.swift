@@ -1244,8 +1244,11 @@ public final class SessionDisk {
     /// another agent's session and hears back. Every agent tab gets it.
     public static let delegationMCPVsockPort: UInt32 = 5835
     static let delegationMCPShimGuestPath = "/mnt/bromure-meta/bromure-delegation-mcp.py"
+    /// `alwaysLoad`: Claude Code otherwise defers MCP tools behind its
+    /// ToolSearch tool, and every agent spent a whole model turn loading
+    /// these before its first request / deliver. They're few and small.
     static var delegationMCPClaudeEntry: [String: Any] {
-        ["command": "python3", "args": [delegationMCPShimGuestPath]]
+        ["command": "python3", "args": [delegationMCPShimGuestPath], "alwaysLoad": true]
     }
     /// The task shim on the delegation port, announcing not a branch but
     /// the tmux window it runs in — read from its own $TMUX_PANE, so the
@@ -1275,7 +1278,9 @@ public final class SessionDisk {
     }
     static var switchboardMCPConfigJSON: String {
         let cfg: [String: Any] = ["mcpServers": ["switchboard": [
-            "command": "python3", "args": [switchboardMCPShimGuestPath]]]]
+            "command": "python3", "args": [switchboardMCPShimGuestPath],
+            // Loaded up front, not behind ToolSearch (a turn saved).
+            "alwaysLoad": true]]]
         let data = (try? JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys])) ?? Data()
         return String(decoding: data, as: UTF8.self)
     }

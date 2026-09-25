@@ -537,6 +537,12 @@ enum DelegationNotice {
 
     /// A typed line must be ONE line: a newline would submit the prompt
     /// mid-sentence. Whitespace collapses, the text is capped.
+    /// The notice line holds the message whole (nothing cut by `oneLine`):
+    /// the recipient needn't read_inbox for it, and it counts as read.
+    static func carriesWhole(_ m: DelegationMessage) -> Bool {
+        [.brief, .ask, .deliver].contains(m.kind) && !oneLine(m.text).hasSuffix("…")
+    }
+
     static func oneLine(_ s: String, max: Int = 400) -> String {
         let flat = s.split(whereSeparator: { $0.isNewline || $0 == "\t" })
             .map { $0.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ") }
@@ -607,15 +613,17 @@ enum DelegationNotice {
             ? (d.childLabel ?? "“\(oneLine(d.title, max: 60))”")
             : "“\(oneLine(d.title, max: 60))”"
         let did = shortID(d.id)
+        // Whole in the line: act on it now, no read_inbox round trip.
+        let whole = carriesWhole(m)
         switch m.kind {
         case .ask:
-            return "\(prefix) \(who) asks: \(oneLine(m.text))\(filesClause(m)) — call read_inbox now for the full text. If your conversation settles it, answer with the delegation tool "
+            return "\(prefix) \(who) asks: \(oneLine(m.text))\(filesClause(m)) — \(whole ? "that is the whole question." : "call read_inbox now for the full text.") If your conversation settles it, answer with the delegation tool "
                 + "answer(ask_id: \"\(shortID(m.id))\", text); if not, put the question to your user word for word (say who asks) and send their reply with that same answer call."
         case .deliver where d.isRequest:
             return "\(prefix) \(who) replied to your request \(did): \(oneLine(m.text))\(filesClause(m)) — "
-                + "call read_inbox now for the full text; then steer(delegation_id: \"\(did)\", text) to follow up, or close_delegation to close it."
+                + "\(whole ? "that is the whole reply" : "call read_inbox now for the full text"); then steer(delegation_id: \"\(did)\", text) to follow up, or close_delegation to close it."
         case .deliver:
-            return "\(prefix) \(who) delivered: \(oneLine(m.text))\(filesClause(m)) — call read_inbox now for the full text and review it, then "
+            return "\(prefix) \(who) delivered: \(oneLine(m.text))\(filesClause(m)) — \(whole ? "review it" : "call read_inbox now for the full text and review it"), then "
                 + "close_delegation(delegation_id: \"\(did)\", verdict) or steer(delegation_id: \"\(did)\", text)."
         case .report:
             return "\(prefix) \(who) reports: \(oneLine(m.text))\(filesClause(m)) — call read_inbox to take it (delegation \(did))."
@@ -633,9 +641,14 @@ enum DelegationNotice {
         let did = shortID(d.id)
         switch m.kind {
         case .brief:
-            // A request: the whole ask, in one line, with the way back.
+            // A request: the whole ask, in one line, with the way back. When
+            // the line holds all of it, the agent answers straight away —
+            // no read_inbox round trip (a whole model turn) first.
+            let fetch = carriesWhole(m)
+                ? "that is the whole request: do it as if your user had asked, without checking with your user, and reply"
+                : "call read_inbox now for the full text and do it as if your user had asked, without checking with your user; reply"
             return "\(prefix) \(from) asks you (request \(did)): \(oneLine(m.text))\(filesClause(m)) — "
-                + "call read_inbox now for the full text and do it as if your user had asked, without checking with your user; reply with the delegation tool deliver(delegation_id: \"\(did)\", summary). "
+                + "\(fetch) with the delegation tool deliver(delegation_id: \"\(did)\", summary). "
                 + "If something is unclear, ask(delegation_id: \"\(did)\", question) — not your user: the requester relays it."
         case .answer:
             return "\(prefix) answer from \(from): \(oneLine(m.text))\(filesClause(m))"

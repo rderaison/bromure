@@ -219,6 +219,13 @@ final class DelegationMCPServer: MCPLineHandler {
     ]
 
     private func callTool(name: String, args: [String: Any], hello: String?) async -> [String: Any] {
+        let t0 = Date()
+        let result = await callToolTimed(name: name, args: args, hello: hello)
+        BACDebug.log("delegation", "tool \(name) took=\(BACDebug.ms(t0))")
+        return result
+    }
+
+    private func callToolTimed(name: String, args: [String: Any], hello: String?) async -> [String: Any] {
         guard let engine = engine() else { return errorResult("Delegations aren't available on this host.") }
         guard let me = me(hello) else {
             return errorResult("This agent isn't running in a Bromure session tab, so it has no identity here — the delegation tools need one.")

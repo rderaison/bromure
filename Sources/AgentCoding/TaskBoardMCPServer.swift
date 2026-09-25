@@ -461,9 +461,16 @@ final class TaskMCPVsockBridge: NSObject {
                     continue
                 }
                 let bound = branch
+                let arrived = Date()
+                if BACDebug.enabled, line.contains("\"tools/call\"") {
+                    BACDebug.log("mcp", "tools/call arrived on the host")
+                }
                 MainActor.assumeIsolated {
                     _ = Task { [weak self] in
                         guard let self else { return }
+                        if BACDebug.enabled, line.contains("\"tools/call\"") {
+                            BACDebug.log("mcp", "tools/call dispatched after \(BACDebug.ms(arrived))")
+                        }
                         if let resp = await self.server.handle(line: line, branch: bound) {
                             self.writeLine(resp)
                         }
