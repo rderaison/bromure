@@ -496,19 +496,66 @@ enum AgentSessionLocator {
             + "-name '*.jsonl' -newermt @\(since) 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); "
     }
 
+    /// The tab's folder and the transcript floor for its agent, as the
+    /// guest reports them: "<cwd>\n<epoch floor>". The floor is the agent
+    /// process's start (a newer transcript is this agent's; an older one a
+    /// previous run's) — 0 for a resumed agent, which reattaches an older
+    /// file, or when the foreground process can't be told. Shared by the
+    /// desktop chat and the mobile room cells.
+    nonisolated static func floorProbeCommand(window: Int) -> String {
+        "i=\(window); "
+        + "cwd=$(tmux display-message -p -t bromure:$i '#{pane_current_path}' 2>/dev/null); "
+        + "tty=$(tmux display-message -p -t bromure:$i '#{pane_tty}' 2>/dev/null); "
+        // The foreground process — but never the tab's SHELL: an agent
+        // launched by the managed .bashrc shares bash's foreground group,
+        // so bash reads as "+" too (and first, by pid). Its start time is
+        // the tab's, not the agent's, and its args carry no resume flag —
+        // a `--continue` relaunched in a fresh tab was floored out. Take
+        // the first "+" process that isn't a shell; a shell only if
+        // nothing else is in the foreground. Still the FIRST such process
+        // (pid order), so a short-lived tool child of the agent doesn't
+        // win either.
+        + "pid=$(ps -t \"${tty#/dev/}\" -o pid=,stat=,args= 2>/dev/null | awk '"
+        + "$2 ~ /\\+/ { if (first == \"\") first = $1; "
+        + "if (!found && $3 !~ /(^|\\/)-?(bash|sh|zsh|dash|fish|login)$/) { print $1; found = 1 } } "
+        + "END { if (!found) print first }'); "
+        + "et=$(ps -o etimes= -p \"$pid\" 2>/dev/null | tr -d ' '); "
+        + "if [ -n \"$et\" ]; then s=$(( $(date +%s) - et )); else s=0; fi; "
+        // Resuming reattaches an older transcript → don't floor it out. Match
+        // only the long flags: the args string also contains the (free-text)
+        // prompt, so short flags / bare words like `-c` or `resume` there
+        // would false-positive and resurrect a stale session on a FRESH run.
+        + "a=$(ps -ww -o args= -p \"$pid\" 2>/dev/null); "
+        + "case \"$a\" in "
+        + "*--resume*|*--continue*|*--restore*) s=0;; "
+        + "esac; "
+        + "printf '%s\\n%s\\n' \"$cwd\" \"$s\""
+    }
+
+    /// `floorProbeCommand`'s answer: (cwd, since), nil when unreadable.
+    nonisolated static func parseFloorProbe(_ out: String?) -> (cwd: String, since: Int)? {
+        let lines = (out ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.count >= 2 else { return nil }
+        let cwd = lines[0].trimmingCharacters(in: .whitespaces)
+        guard !cwd.isEmpty else { return nil }
+        return (cwd, Int(lines[1].trimmingCharacters(in: .whitespaces)) ?? 0)
+    }
+
     /// Sets `$varName` to the transcript the agent in tmux window `window`
     /// recorded for itself (agent-status.sh, per window index), or empty
     /// when that record isn't this tab's. The record's second line names
     /// the pane and guest boot it came from; a mismatch means the index was
     /// reused — the last tab closed and a new one took its number, or the
     /// machine booted fresh — and the path is the previous occupant's. A
-    /// one-line record (an older reporter) is taken as is. `window` is a
-    /// shell word: a number, or `$i` inside a loop.
+    /// one-line record is ignored too: the host re-stages agent-status.sh
+    /// every boot and it always stamps, so such a file predates the stamp
+    /// and survived on /home (it pinned two room cells to one old file).
+    /// `window` is a shell word: a number, or `$i` inside a loop.
     nonisolated static func pinnedTranscriptBlock(window: String, into varName: String) -> String {
         "pp=\"$HOME/.bromure/transcript-\(window).path\"; \(varName)=\"\"; "
             + "if [ -f \"$pp\" ]; then \(varName)=$(sed -n 1p \"$pp\" 2>/dev/null); "
             + "pk=$(sed -n 2p \"$pp\" 2>/dev/null); "
-            + "if [ -n \"$pk\" ] && [ \"$pk\" != \"$(tmux display-message -p -t bromure:\(window) '#{pane_id}' 2>/dev/null) "
+            + "if [ -z \"$pk\" ] || [ \"$pk\" != \"$(tmux display-message -p -t bromure:\(window) '#{pane_id}' 2>/dev/null) "
             + "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\" ]; then \(varName)=\"\"; fi; fi; "
     }
 

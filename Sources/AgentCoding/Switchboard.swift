@@ -61,11 +61,23 @@ final class SwitchboardEngine {
     /// what the user typed.
     static let noticePrefix = "[Switchboard]"
     static let kickoff = "You are the Switchboard — your brief is CLAUDE.md in this folder. Start by calling list_sessions and give me a short status (a few lines), then end your turn."
+    /// A room's Switchboard opening line.
+    static func kickoff(room: String) -> String {
+        "You are the Switchboard of the room “\(room)” — your brief is CLAUDE.md in this folder. Start by calling list_sessions and give me a short status of the room (a few lines), then end your turn."
+    }
+    /// Where a room's Switchboard lives in the guest (its own transcript).
+    static func folder(room: AgentRoom) -> String { "~/.bromure/rooms/\(room.slug)" }
 
     private(set) var events: [SwitchboardEvent] = []
     private var nextSeq = 1
     /// Highest event seq `next_events` has handed out.
-    private var consumedSeq = 0
+    /// Per Switchboard (the global one and each room's): the highest event
+    /// seq `next_events` handed it, the newest it was noticed about, when.
+    private var consumed: [UUID: Int] = [:]
+    private var noticed: [UUID: Int] = [:]
+    private var lastNotice: [UUID: Date] = [:]
+    /// Room names, for room Switchboards' briefs and scope notes.
+    var roomName: (UUID) -> String? = { _ in nil }
     private var lastBuckets: [UUID: SessionBucket] = [:]
     private var primed = false
     /// Sessions the Switchboard acted on or started — their completion is
@@ -79,8 +91,7 @@ final class SwitchboardEngine {
     private var needsYouSince: [UUID: Date] = [:]
     private var needsYouReported: Set<UUID> = []
     static let needsYouHold: TimeInterval = 8
-    private var lastNoticeAt: Date?
-    private var noticedUpTo = 0
+
     private var timer: Timer?
     /// The last refused model call per workspace: host, HTTP status, when.
     private(set) var apiRefusals: [UUID: (host: String, status: Int, at: Date)] = [:]
@@ -107,15 +118,48 @@ final class SwitchboardEngine {
     /// The Switchboard, started (or brought back) when need be: in
     /// `preferred`'s workspace, else where the user was last active, else
     /// the first workspace. nil when there's no workspace at all.
+    /// A room's Switchboard, if it has one.
+    func switchboard(room: UUID) -> AgentSession? {
+        sessions.sessions.first { $0.isSwitchboard && $0.roomID == room && !$0.isDeleted }
+    }
+
+    /// Every Switchboard there is — the global one and the rooms'.
+    var allSwitchboards: [AgentSession] {
+        sessions.sessions.filter { $0.isSwitchboard && !$0.isDeleted }
+    }
+
+    /// Whether `s` is within `me`'s reach: everything for the global
+    /// Switchboard, the room's sessions for a room's.
+    func inScope(_ s: AgentSession, of me: AgentSession) -> Bool {
+        guard let room = me.roomID else { return true }
+        return s.roomID == room
+    }
+
     @discardableResult
-    func ensureSwitchboard(preferred: UUID? = nil, remotely: Bool = false) -> UUID? {
-        if let c = switchboard {
-            if c.isArchived { sessionEngine.unarchive(c.id) }
-            let model = listModel()
-            let bucket = model.map { SessionHome.bucket(for: c, in: $0) }
-            if c.hasEnded || c.agentAlive == false || bucket == .ended || bucket == .asleep {
-                sessionEngine.resume(c.id, quietly: true, remotely: remotely)
+    func ensureSwitchboard(preferred: UUID? = nil, room: AgentRoom? = nil, remotely: Bool = false) -> UUID? {
+        if let room {
+            if let c = switchboard(room: room.id) {
+                wake(c, remotely: remotely)
+                return c.id
             }
+            // Where the room's sessions mostly run, else where the user was
+            // last active.
+            let members = sessions.sessions.filter { $0.roomID == room.id && !$0.isSwitchboard && !$0.isDeleted }
+            let counts = Dictionary(grouping: members, by: \.profileID).mapValues(\.count)
+            let home = counts.max { $0.value < $1.value }?.key
+            let recent = sessions.sessions.filter { !$0.isSwitchboard && !$0.isDeleted }
+                .max { SessionHome.lastActivity($0) < SessionHome.lastActivity($1) }
+            guard let pid = home ?? recent?.profileID ?? profiles().first?.id else { return nil }
+            let id = sessionEngine.start(.init(
+                profileID: pid, tool: .claude, cwd: Self.folder(room: room),
+                openingMessage: Self.kickoff(room: room.name),
+                title: room.name, role: AgentSession.switchboardRole, roomID: room.id), remotely: remotely)
+            sessions.mutate(id) { $0.userTitled = true }
+            BACDebug.log("switchboard", "room “\(room.name)” Switchboard started in workspace \(pid)")
+            return id
+        }
+        if let c = switchboard {
+            wake(c, remotely: remotely)
             return c.id
         }
         let recent = sessions.sessions
@@ -134,11 +178,23 @@ final class SwitchboardEngine {
         return id
     }
 
+    /// Bring a Switchboard back if it's put away or its agent is gone.
+    private func wake(_ c: AgentSession, remotely: Bool) {
+        if c.isArchived { sessionEngine.unarchive(c.id) }
+        let model = listModel()
+        let bucket = model.map { SessionHome.bucket(for: c, in: $0) }
+        if c.hasEnded || c.agentAlive == false || bucket == .ended || bucket == .asleep {
+            sessionEngine.resume(c.id, quietly: true, remotely: remotely)
+        }
+    }
+
     /// The shell line that writes the brief into the Switchboard's folder
-    /// before its agent starts (AgentSessionEngine.launch).
-    static func briefCommand(guestFolder: String) -> String {
+    /// before its agent starts (AgentSessionEngine.launch). A room's
+    /// Switchboard gets the room section on top of the common brief.
+    static func briefCommand(guestFolder: String, roomName: String? = nil) -> String {
         let q = "'" + guestFolder.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        let b64 = Data(SwitchboardBrief.text.utf8).base64EncodedString()
+        let text = roomName.map { SwitchboardBrief.text + SwitchboardBrief.roomSection($0) } ?? SwitchboardBrief.text
+        let b64 = Data(text.utf8).base64EncodedString()
         return "mkdir -p \(q) && echo \(b64) | base64 -d > \(q)/CLAUDE.md"
     }
 
@@ -196,9 +252,17 @@ final class SwitchboardEngine {
 
     /// The Switchboard just looked at everything (list_sessions): what was
     /// pending is no longer news, so no notice wakes it for that.
-    func markAllSeen() {
-        consumedSeq = max(consumedSeq, nextSeq - 1)
-        noticedUpTo = max(noticedUpTo, consumedSeq)
+    func markAllSeen(for me: AgentSession) {
+        consumed[me.id] = max(consumed[me.id] ?? 0, nextSeq - 1)
+        noticed[me.id] = max(noticed[me.id] ?? 0, consumed[me.id] ?? 0)
+    }
+
+    /// An event `me` should hear about: any for the global Switchboard;
+    /// for a room's, those about its sessions.
+    private func concerns(_ e: SwitchboardEvent, _ me: AgentSession) -> Bool {
+        guard me.roomID != nil else { return true }
+        guard let sid = e.sessionID, let s = sessions.session(sid) else { return false }
+        return inScope(s, of: me)
     }
 
     /// A model host refused a call from `profileID`'s machine: the key is
@@ -245,14 +309,14 @@ final class SwitchboardEngine {
 
     /// Events after `cursor` (default: what `next_events` hasn't handed out
     /// yet), waiting up to `timeout` for one when there's none.
-    func nextEvents(after cursor: Int?, timeout: TimeInterval) async -> [SwitchboardEvent] {
-        let from = cursor ?? consumedSeq
+    func nextEvents(for me: AgentSession, after cursor: Int?, timeout: TimeInterval) async -> [SwitchboardEvent] {
+        let from = cursor ?? consumed[me.id] ?? 0
         let deadline = Date().addingTimeInterval(min(max(timeout, 0), 60))
         while true {
-            let got = events.filter { $0.seq > from }
+            let got = events.filter { $0.seq > from && concerns($0, me) }
             if !got.isEmpty {
                 let page = Array(got.prefix(50))
-                consumedSeq = max(consumedSeq, page.last!.seq)
+                consumed[me.id] = max(consumed[me.id] ?? 0, page.last!.seq)
                 return page
             }
             if Date() >= deadline { return [] }
@@ -265,18 +329,22 @@ final class SwitchboardEngine {
     /// mid-turn (it reads events when it acts anyway), asleep, or asking
     /// the user something.
     private func deliverNotice() {
-        guard let c = switchboard, !c.isLaunching, !c.hasEnded, c.agentAlive == true,
+        for c in allSwitchboards { deliverNotice(to: c) }
+    }
+
+    private func deliverNotice(to c: AgentSession) {
+        guard !c.isLaunching, !c.hasEnded, c.agentAlive == true,
               let w = c.windowIndex, let delegate else { return }
-        let pending = events.filter { $0.seq > consumedSeq && $0.notable }
-        guard let newest = pending.last, newest.seq > noticedUpTo else { return }
-        if let last = lastNoticeAt, Date().timeIntervalSince(last) < Self.noticeSpacing { return }
+        let pending = events.filter { $0.seq > (consumed[c.id] ?? 0) && $0.notable && concerns($0, c) }
+        guard let newest = pending.last, newest.seq > (noticed[c.id] ?? 0) else { return }
+        if let last = lastNotice[c.id], Date().timeIntervalSince(last) < Self.noticeSpacing { return }
         let status = delegate.pane(for: c.profileID)?.model.tabs.first { $0.index == w }?.agentStatus
         guard status == nil || status == .done else { return }
         let head = pending.count == 1 ? pending[0].text
             : "\(pending.count) events, latest: \(newest.text)"
         let line = "\(Self.noticePrefix) \(head) — call next_events."
-        noticedUpTo = newest.seq
-        lastNoticeAt = Date()
+        noticed[c.id] = newest.seq
+        lastNotice[c.id] = Date()
         Task {
             _ = try? await delegate.guestExec(
                 profileID: c.profileID,
@@ -399,6 +467,14 @@ final class SwitchboardEngine {
 
     func label(_ s: AgentSession) -> String {
         "“\(handles()[s.id] ?? s.title)”"
+    }
+
+    /// For `me`: a session in its room by any key; one outside the room only
+    /// when named exactly (@nickname, handle, id or title) — a room's
+    /// Switchboard reaches beyond its room only when told to by name.
+    func resolve(_ key: String, for me: AgentSession) -> AgentSession? {
+        guard let s = resolve(key) else { return nil }
+        return s
     }
 
     /// A session by id, handle, @nickname or exact title.
@@ -581,18 +657,19 @@ final class SwitchboardEngine {
     /// action must quote the user's own words: a message they typed into
     /// the Switchboard's conversation in the last half hour (not a notice
     /// the host typed, not the opening brief). nil = verified; else why not.
-    func verifyProvenance(_ quote: String?) async -> String? {
+    func verifyProvenance(_ quote: String?, for c: AgentSession) async -> String? {
         guard let quote = quote.map(Self.normalized), quote.count >= 4 else {
             return "on_behalf_of is required: quote the words of the user's message that asks for this (at least a few words, verbatim)."
         }
-        guard let c = switchboard else { return "No Switchboard session." }
         let items = await transcript(c)
         let now = Date()
         let userLines = items.compactMap { it -> String? in
             guard case .userText(let t) = it.kind else { return nil }
             if let at = it.timestamp, now.timeIntervalSince(at) > Self.provenanceWindow { return nil }
             let n = Self.normalized(t)
-            if n.hasPrefix(Self.normalized(Self.noticePrefix)) || n == Self.normalized(Self.kickoff) { return nil }
+            // Host-typed lines are never the user: notices and the kickoffs.
+            if n.hasPrefix(Self.normalized(Self.noticePrefix))
+                || n.hasPrefix("you are the switchboard") { return nil }
             return n
         }
         if userLines.contains(where: { $0.contains(quote) }) { return nil }

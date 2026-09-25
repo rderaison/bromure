@@ -366,6 +366,8 @@ struct MobileNewSessionScreen: View {
     let controller: RemoteHostController
     let onStarted: (UUID) -> Void
     let onCancel: () -> Void
+    /// Started from a room: the session joins it.
+    var room: UUID? = nil
 
     @State private var workspaceEdit: WorkspaceEdit?
     @State private var starting = false
@@ -383,7 +385,7 @@ struct MobileNewSessionScreen: View {
                     let id = await controller.startSession(
                         profileID: req.profileID, tool: req.tool, cwd: req.cwd,
                         cloneURL: req.cloneURL, message: req.openingMessage,
-                        attachments: req.attachments)
+                        attachments: req.attachments, room: room)
                     starting = false
                     if let id { onStarted(id) } else { failed = true }
                 }
@@ -400,7 +402,9 @@ struct MobileNewSessionScreen: View {
                         .fill(.regularMaterial))
             }
         }
-        .navigationTitle("New session")
+        .navigationTitle(room.flatMap { controller.roomStore.room($0)?.name }
+            .map { String(format: NSLocalizedString("New session in “%@”", comment: "room new session banner"), $0) }
+            ?? NSLocalizedString("New session", comment: "mobile"))
         .navigationBarTitleDisplayMode(.inline)
         .alert("Couldn't start the session", isPresented: $failed) {
             Button("OK", role: .cancel) {}
@@ -425,6 +429,13 @@ struct MobileSessionsSection: View {
     let controller: RemoteHostController
     let onSelect: (UUID) -> Void
     let onNew: () -> Void
+    /// A room card tapped (or a room just made): open it.
+    var onSelectRoom: (UUID) -> Void = { _ in }
+    /// "New Session in Room".
+    var onNewInRoom: (UUID) -> Void = { _ in }
+    @State private var newRoomFor: AgentSession?
+    @State private var renamingRoom: AgentRoom?
+    @State private var deletingRoom: AgentRoom?
     @AppStorage("sessions.listExpanded") private var expanded = true
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
     /// A long-press Delete on a session whose agent is running asks first.
@@ -435,8 +446,10 @@ struct MobileSessionsSection: View {
     private var model: SessionListModel { controller.listModel }
 
     var body: some View {
-        let list = SessionHome.orderedAll(controller.sessionStore.sessions, in: model)
-        let needsYou = list.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
+        let all = SessionHome.orderedAll(controller.sessionStore.sessions, in: model)
+        let needsYou = all.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
+        let list = MobileRooms.loose(all, controller)
+        let rooms = controller.roomStore.activeRooms
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Button {
@@ -473,21 +486,35 @@ struct MobileSessionsSection: View {
                 .accessibilityLabel("New session")
             }
             if expanded {
-                if list.isEmpty {
+                // Rooms first: a card each, their sessions inside.
+                ForEach(rooms) { r in
+                    MobileRoomCard(controller: controller, room: r) { onSelectRoom(r.id) }
+                        .contextMenu {
+                            RoomMenu(controller: controller, room: r, onNewSession: onNewInRoom,
+                                     onRename: { renamingRoom = $0 }, onDelete: { deletingRoom = $0 })
+                        }
+                        .dropDestination(for: String.self) { items, _ in
+                            let ids = items.compactMap(UUID.init(uuidString:))
+                            for id in ids { MobileRooms.move(controller, id, to: r.id) }
+                            return !ids.isEmpty
+                        }
+                }
+                if list.isEmpty && rooms.isEmpty {
                     emptyCard
                 } else {
                     ForEach(list) { card($0) }
                 }
             }
-            let put = SessionHome.archived(controller.sessionStore.sessions)
-            if !put.isEmpty {
+            let put = MobileRooms.looseArchived(controller)
+            let putRooms = controller.roomStore.archivedRooms
+            if !put.isEmpty || !putRooms.isEmpty {
                 // Put away, not gone: folded by default.
                 Button {
                     withAnimation(.easeOut(duration: 0.18)) { archivedExpanded.toggle() }
                 } label: {
                     HStack(spacing: 6) {
                         Text("Archived").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-                        Text("\(put.count)")
+                        Text("\(put.count + putRooms.count)")
                             .font(.caption.weight(.medium)).monospacedDigit()
                             .foregroundStyle(.tertiary)
                         Image(systemName: "chevron.right")
@@ -501,6 +528,14 @@ struct MobileSessionsSection: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(archivedExpanded ? "Hide archived sessions" : "Show archived sessions")
                 if archivedExpanded {
+                    ForEach(putRooms) { r in
+                        MobileRoomCard(controller: controller, room: r) { onSelectRoom(r.id) }
+                            .opacity(0.75)
+                            .contextMenu {
+                                RoomMenu(controller: controller, room: r, onNewSession: onNewInRoom,
+                                         onRename: { renamingRoom = $0 }, onDelete: { deletingRoom = $0 })
+                            }
+                    }
                     ForEach(put) { card($0) }
                 }
             }
@@ -526,6 +561,9 @@ struct MobileSessionsSection: View {
         } message: {
             Text("The agent stops and the session leaves the list. Its folder stays on the machine.")
         }
+        .modifier(RoomPrompts(controller: controller, newRoomFor: $newRoomFor,
+                              renaming: $renamingRoom, deleting: $deletingRoom,
+                              onCreated: onSelectRoom))
     }
 
     /// Long-press: the same choices as the session's own menu.
@@ -552,6 +590,7 @@ struct MobileSessionsSection: View {
                     Label("End session", systemImage: "stop.circle")
                 }
             }
+            RoomSessionMenu(controller: controller, session: s, onNewRoom: { newRoomFor = $0 })
         }
         Divider()
         Button(role: .destructive) {
@@ -627,6 +666,20 @@ struct MobileSessionsSection: View {
         }
         .buttonStyle(.plain)
         .contextMenu { rowMenu(s) }
+        .draggable(s.id.uuidString)
+        .dropDestination(for: String.self) { items, _ in
+            // Another session dropped on this one: the two share a room.
+            let ids = items.compactMap(UUID.init(uuidString:)).filter { $0 != s.id }
+            guard controller.supportsRooms, !ids.isEmpty else { return false }
+            for id in ids {
+                Task {
+                    let r = await controller.roomCommand(nil, "group",
+                                                         body: ["dragged": id.uuidString, "onto": s.id.uuidString])
+                    if let rid = (r?["id"] as? String).flatMap(UUID.init(uuidString:)) { onSelectRoom(rid) }
+                }
+            }
+            return true
+        }
     }
 }
 
@@ -639,6 +692,13 @@ struct PadSessionSections: View {
     let controller: RemoteHostController
     /// A session a row spawned (a worktree off its folder): select it.
     var onOpen: (UUID) -> Void = { _ in }
+    /// A room just made (from a row's menu or a drop): select it.
+    var onOpenRoom: (UUID) -> Void = { _ in }
+    /// "New Session in Room".
+    var onNewInRoom: (UUID) -> Void = { _ in }
+    @State private var newRoomFor: AgentSession?
+    @State private var renamingRoom: AgentRoom?
+    @State private var deletingRoom: AgentRoom?
     @AppStorage("sessions.listExpanded") private var expanded = true
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
     /// A right-click / long-press Delete on a running agent asks first.
@@ -649,13 +709,23 @@ struct PadSessionSections: View {
     private var model: SessionListModel { controller.listModel }
 
     var body: some View {
-        let list = SessionHome.orderedAll(controller.sessionStore.sessions, in: model)
-        let needsYou = list.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
-        let put = SessionHome.archived(controller.sessionStore.sessions)
-        sessionsSection(list, needsYou: needsYou)
-        if !put.isEmpty {
+        let all = SessionHome.orderedAll(controller.sessionStore.sessions, in: model)
+        let needsYou = all.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
+        let put = MobileRooms.looseArchived(controller)
+        let putRooms = controller.roomStore.archivedRooms
+        sessionsSection(MobileRooms.loose(all, controller), needsYou: needsYou)
+        if !put.isEmpty || !putRooms.isEmpty {
             // Put away, not gone: folded by default.
             Section(isExpanded: $archivedExpanded) {
+                ForEach(putRooms) { r in
+                    PadRoomRow(controller: controller, room: r)
+                        .opacity(0.75)
+                        .tag(PadSelection.room(r.id))
+                        .contextMenu {
+                            RoomMenu(controller: controller, room: r, onNewSession: onNewInRoom,
+                                     onRename: { renamingRoom = $0 }, onDelete: { deletingRoom = $0 })
+                        }
+                }
                 ForEach(put) { s in
                     row(s).tag(PadSelection.session(s.id)).contextMenu { rowMenu(s) }
                 }
@@ -663,7 +733,7 @@ struct PadSessionSections: View {
                 HStack(spacing: 6) {
                     Text("Archived")
                     Spacer()
-                    Text("\(put.count)")
+                    Text("\(put.count + putRooms.count)")
                         .font(.footnote.weight(.semibold)).monospacedDigit()
                         .foregroundStyle(.secondary)
                         .textCase(nil)
@@ -701,15 +771,45 @@ struct PadSessionSections: View {
                 } message: {
                     Text("The agent stops and the session leaves the list. Its folder stays on the machine.")
                 }
-            if list.isEmpty {
+            if list.isEmpty && controller.roomStore.activeRooms.isEmpty {
                 Text(controller.hasSnapshot ? "No sessions yet." : "Loading sessions…")
                     .font(.callout).foregroundStyle(.secondary)
             }
+            // Rooms first; their sessions live inside them.
+            ForEach(controller.roomStore.activeRooms) { r in
+                PadRoomRow(controller: controller, room: r)
+                    .tag(PadSelection.room(r.id))
+                    .contextMenu {
+                        RoomMenu(controller: controller, room: r, onNewSession: onNewInRoom,
+                                 onRename: { renamingRoom = $0 }, onDelete: { deletingRoom = $0 })
+                    }
+                    .dropDestination(for: String.self) { items, _ in
+                        let ids = items.compactMap(UUID.init(uuidString:))
+                        for id in ids { MobileRooms.move(controller, id, to: r.id) }
+                        return !ids.isEmpty
+                    }
+            }
+            .modifier(RoomPrompts(controller: controller, newRoomFor: $newRoomFor,
+                                  renaming: $renamingRoom, deleting: $deletingRoom,
+                                  onCreated: onOpenRoom))
             ForEach(list) { s in
                 row(s)
                     .opacity(SessionHome.isGone(s, in: model) ? 0.5 : 1)
                     .tag(PadSelection.session(s.id))
                     .contextMenu { rowMenu(s) }
+                    .draggable(s.id.uuidString)
+                    .dropDestination(for: String.self) { items, _ in
+                        let ids = items.compactMap(UUID.init(uuidString:)).filter { $0 != s.id }
+                        guard controller.supportsRooms, !ids.isEmpty else { return false }
+                        for id in ids {
+                            Task {
+                                let r = await controller.roomCommand(
+                                    nil, "group", body: ["dragged": id.uuidString, "onto": s.id.uuidString])
+                                if let rid = (r?["id"] as? String).flatMap(UUID.init(uuidString:)) { onOpenRoom(rid) }
+                            }
+                        }
+                        return true
+                    }
             }
         } header: {
             HStack(spacing: 6) {
@@ -757,6 +857,7 @@ struct PadSessionSections: View {
                     Label("End session", systemImage: "stop.circle")
                 }
             }
+            RoomSessionMenu(controller: controller, session: s, onNewRoom: { newRoomFor = $0 })
         }
         Divider()
         Button(role: .destructive) {

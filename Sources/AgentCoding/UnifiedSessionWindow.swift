@@ -389,6 +389,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self.listModel.newTaskRequested = true
             },
             sessionStore: acDelegate.agentSessionStore,
+            roomStore: acDelegate.agentRoomStore,
             onNewSession: { [weak self] in self?.showNewSession() },
             onSelectSession: { [weak self] id in self?.selectSession(id) },
             sessionActions: sessionStageActions,
@@ -1379,7 +1380,57 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 guard let self, let delegate = self.acDelegate,
                       let id = delegate.switchboardEngine.ensureSwitchboard() else { return }
                 self.selectSession(id)
+            },
+            openRoom: { [weak self] id in self?.showRoom(id) },
+            newRoom: { [weak self] name, sid in
+                guard let self, let delegate = self.acDelegate else { return }
+                self.showRoom(delegate.roomCreate(name: name, sessions: sid.map { [$0] } ?? []).id)
+            },
+            moveToRoom: { [weak self] sid, rid in
+                self?.acDelegate?.roomMove(sid, to: rid)
+                self?.roomController?.refresh()
+            },
+            renameRoom: { [weak self] id, name in self?.acDelegate?.agentRoomStore.rename(id, to: name) },
+            setRoomColor: { [weak self] id, hex in self?.acDelegate?.agentRoomStore.setColor(id, hex) },
+            deleteRoom: { [weak self] id in self?.confirmDeleteRoom(id) },
+            archiveRoom: { [weak self] id in
+                self?.acDelegate?.roomArchive(id)
+                self?.roomController?.refresh()
+            },
+            unarchiveRoom: { [weak self] id in
+                self?.acDelegate?.roomUnarchive(id)
+                self?.roomController?.refresh()
+            },
+            ungroupRoom: { [weak self] id in
+                guard let self else { return }
+                if self.listModel.selectedRoomID == id { self.clearRoom(); self.selectInitialSession() }
+                self.acDelegate?.roomUngroup(id)
+            },
+            newSessionInRoom: { [weak self] id in self?.showNewSession(room: id) },
+            groupSessions: { [weak self] dragged, onto in
+                guard let self, let delegate = self.acDelegate,
+                      let rid = delegate.roomGroup(dragged: dragged, onto: onto) else { return }
+                if self.listModel.selectedRoomID == rid { self.roomController?.refresh() } else { self.showRoom(rid) }
             })
+    }
+
+    /// Delete a room: its sessions stay (back in the list), its Switchboard
+    /// is archived.
+    private func confirmDeleteRoom(_ id: UUID) {
+        guard let delegate = acDelegate, let room = delegate.agentRoomStore.room(id) else { return }
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Delete “%@” and every session in it?", comment: "delete room"), room.name)
+        alert.informativeText = NSLocalizedString("Their agents stop and the sessions leave the list. Their folders stay on the machines. To keep the sessions, ungroup the room instead.", comment: "delete room")
+        alert.addButton(withTitle: NSLocalizedString("Delete Room", comment: "delete room"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.beginSheetModal(for: self) { [weak self] resp in
+            guard resp == .alertFirstButtonReturn, let self else { return }
+            if self.listModel.selectedRoomID == id {
+                self.clearRoom()
+                self.selectInitialSession()
+            }
+            delegate.roomDelete(room.id)
+        }
     }
 
     /// Delete a session — after a word when its agent is running; at once
@@ -1465,10 +1516,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         showNewSession()
     }
 
-    func showNewSession() {
+    func showNewSession(room: UUID? = nil) {
         guard let delegate = acDelegate else { return }
         guard clearAutomationEditor() else { return }   // dirty draft kept
         newSessionWorkspacesKey = workspacesKey(delegate)
+        clearRoom()
         hideGrid()
         clearAutomationBoard()
         clearTaskBoard()
@@ -1500,8 +1552,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             onStart: { [weak self] req in
                 guard let self, let delegate = self.acDelegate else { return }
+                var req = req
+                if let room { req.roomID = room }
                 let id = delegate.agentSessionEngine.start(req)
-                self.selectSession(id)
+                // Started from a room: back to its grid, where it launches.
+                if let room, delegate.agentRoomStore.room(room) != nil {
+                    self.showRoom(room)
+                } else {
+                    self.selectSession(id)
+                }
             },
             onCancel: { [weak self] in
                 guard let self, let delegate = self.acDelegate,
@@ -1528,6 +1587,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 delegate?.agentSessionStore.setNickname(id, nick)
             })
         showSessionOverlay(view)
+        if let room, let name = delegate.agentRoomStore.room(room)?.name {
+            showRoomBanner(name)
+        }
         makeKeyAndOrderFront(nil)
     }
 
@@ -1550,6 +1612,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearKubeDashboard()
         clearRegistryDashboard()
         clearVMDashboard()
+        clearRoom()
         listModel.newSessionSelected = false
         selectedSessionID = id
         listModel.selectedSessionID = id
@@ -1626,9 +1689,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     delegate.agentSessionStore.mutate(s.id) { $0.openingShown = true }
                 }
             }
-            // selectTab clears the other overlays and mounts the pane; the
-            // session selection itself is untouched by it.
-            selectTab(profileID: s.profileID, index: livePosition)
+            // selectTab clears the other overlays and mounts the pane — as
+            // the session's chat, never passing through the terminal (the
+            // terminal-then-chat hop could strand a new session on Ghostty).
+            selectTab(profileID: s.profileID, index: livePosition, asTerminal: false)
             applySessionViewMode(pane)
             return
         }
@@ -1673,6 +1737,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let mode: SessionViewMode = .beautified
         // The session's tab hosts an agent even before its title says so.
         if let active = pane.model.activeTab { pane.agentWindows.insert(active.index) }
+        pane.sessionOnStage = true
         pane.setViewMode(mode, persist: false)
         if pane.viewMode == mode { pane.updateNativeTerminalMount() }   // re-evaluate the agent gate
         listModel.beautifiedActive = pane.viewMode == .beautified
@@ -1712,6 +1777,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             showVMDashboard(s.profileID)
         }
     }
+
+    private var roomController: RoomStageController?
+    var debugRoomController: RoomStageController? { roomController }
 
     private func showSessionOverlay<V: View>(_ view: V) {
         // One surface dissolving into the next (a layer transition: the
@@ -1760,7 +1828,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Leave the session surfaces — a machine row, a board or a dashboard
     /// took the stage. The remembered session survives for the next launch.
     func clearSessionStage() {
+        clearRoom()
         guard selectedSessionID != nil || listModel.newSessionSelected || !sessionSlot.isHidden else { return }
+        // Its machine, shown later from the Machines list or the grid, is a
+        // terminal again.
+        if let pid = listModel.selectedSessionProfileID { pane(pid)?.sessionOnStage = false }
         selectedSessionID = nil
         listModel.selectedSessionID = nil
         listModel.selectedSessionProfileID = nil
@@ -1769,6 +1841,90 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         sessionPresentationKey = nil
         hideSessionOverlay()
         setSessionHeader(visible: false)
+    }
+
+    // MARK: Rooms
+
+    /// A room on stage: its sessions as a grid of live chats, its
+    /// Switchboard docked underneath (RoomStage.swift).
+    func showRoom(_ id: UUID) {
+        guard let delegate = acDelegate, delegate.agentRoomStore.room(id) != nil else { return }
+        guard clearAutomationEditor() else { return }   // dirty draft kept
+        hideGrid()
+        clearAutomationBoard()
+        clearTaskBoard()
+        clearDockerDashboard()
+        clearKubeDashboard()
+        clearRegistryDashboard()
+        clearVMDashboard()
+        clearSessionStage()   // also drops a previous room
+        listModel.selectedRoomID = id
+        let controller = RoomStageController(roomID: id, backend: LocalRoomBackend(delegate), listModel: listModel)
+        controller.onNewSession = { [weak self] in self?.showNewSession(room: id) }
+        controller.onOpenSession = { [weak self] sid in self?.selectSession(sid) }
+        controller.onRemoveFromRoom = { [weak self] sid in
+            self?.acDelegate?.roomMove(sid, to: nil)
+            self?.roomController?.refresh()
+        }
+        controller.onResume = { [weak self] sid in self?.acDelegate?.agentSessionEngine.resume(sid) }
+        controller.onRename = { [weak self] name in self?.acDelegate?.agentRoomStore.rename(id, to: name) }
+        controller.onUnarchive = { [weak self] in
+            self?.acDelegate?.roomUnarchive(id)
+            self?.roomController?.refresh()
+        }
+        roomController = controller
+        setSessionHeader(visible: false)
+        showSessionOverlay(RoomStageView(controller: controller))
+        makeKeyAndOrderFront(nil)
+    }
+
+    /// Leave the room stage (its chat models stop polling).
+    func clearRoom() {
+        guard roomController != nil || listModel.selectedRoomID != nil else { return }
+        roomController?.stop()
+        roomController = nil
+        listModel.selectedRoomID = nil
+        listModel.roomFocusProfileID = nil
+        listModel.roomFocusCwd = nil
+        if !sessionSlot.isHidden, selectedSessionID == nil, !listModel.newSessionSelected {
+            hideSessionOverlay()
+        }
+    }
+
+    /// Menu › New Room…: name it, then its (empty) grid takes the stage.
+    func promptNewRoom() {
+        guard let delegate = acDelegate else { return }
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("New Room", comment: "room sheet")
+        alert.informativeText = NSLocalizedString("A room groups sessions that work on the same thing. Its own Switchboard keeps track of them — and only them.", comment: "room sheet")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.placeholderString = NSLocalizedString("e.g. Payments v2", comment: "room sheet")
+        alert.accessoryView = field
+        alert.addButton(withTitle: NSLocalizedString("Create", comment: "room sheet"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: self) { [weak self] resp in
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard resp == .alertFirstButtonReturn, !name.isEmpty else { return }
+            self?.showRoom(delegate.roomCreate(name: name).id)
+        }
+    }
+
+    /// The new-session screen, started from a room: a strip naming it.
+    private func showRoomBanner(_ name: String) {
+        guard let host = sessionHosting else { return }
+        let banner = NSHostingView(rootView:
+            Label(String(format: NSLocalizedString("New session in “%@”", comment: "room new session banner"), name),
+                  systemImage: "square.grid.2x2.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 12).padding(.vertical, 5)
+                .background(Capsule().fill(Color.accentColor.opacity(0.14))))
+        banner.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(banner)
+        NSLayoutConstraint.activate([
+            banner.topAnchor.constraint(equalTo: host.topAnchor, constant: 12),
+            banner.centerXAnchor.constraint(equalTo: host.centerXAnchor),
+        ])
     }
 
     // MARK: Docker dashboard overlay
@@ -2467,7 +2623,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     // MARK: Tab actions (forward to the pane)
 
-    func selectTab(profileID id: Profile.ID, index: Int) {
+    /// `asTerminal: false` — a session's chat is being put on stage; the
+    /// tab is switched but not flipped to the terminal.
+    func selectTab(profileID id: Profile.ID, index: Int, asTerminal: Bool = true) {
         guard clearAutomationEditor() else { return }   // dirty draft kept
         hideGrid()
         // The boards overlay the stage: without this, clicking a sidebar
@@ -2484,7 +2642,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         pane.switchTo(index: index)
         // Sessions-first: a tab picked by hand from the Machines list is a
         // terminal — the chat is what sessions are for.
-        if listModel.sessionsFirst {
+        if listModel.sessionsFirst, asTerminal {
+            pane.sessionOnStage = false
             pane.setViewMode(.terminal, persist: false)
             pane.updateNativeTerminalMount()
             listModel.beautifiedActive = false
@@ -2728,6 +2887,8 @@ struct SessionSidebar: View {
     var onNewTask: () -> Void = {}
     /// Agent sessions (host window only) — the sessions-first sidebar's list.
     var sessionStore: AgentSessionStore? = nil
+    /// Rooms of sessions (host window only).
+    var roomStore: AgentRoomStore? = nil
     /// Sessions-first sidebar (host window only): the new-session screen + selection.
     var onNewSession: () -> Void = {}
     var onSelectSession: (UUID) -> Void = { _ in }
@@ -2872,7 +3033,8 @@ struct SessionSidebar: View {
             VStack(alignment: .leading, spacing: 3) {
                 SessionSectionsView(store: sessionStore, model: model,
                                     filter: sessionFilter, onSelect: onSelectSession,
-                                    actions: sessionActions)
+                                    actions: sessionActions,
+                                    rooms: roomStore?.rooms ?? [])
                 CodingTasksSection(
                     store: taskStore,
                     model: model,

@@ -49,9 +49,17 @@ struct FileExplorerPane: View {
     /// ended session's folder is still there to browse). Otherwise the
     /// selected machine's active tab, as in the classic layout.
     private var sessionContext: (profile: Profile.ID, cwd: String)? {
-        guard listModel.sessionsFirst, listModel.selectedSessionID != nil,
-              let pid = listModel.selectedSessionProfileID,
-              let cwd = listModel.selectedSessionCwd else { return nil }
+        // A room on stage: the focused cell's session.
+        let pid: Profile.ID, cwd: String
+        if listModel.sessionsFirst, listModel.selectedRoomID != nil,
+           let p = listModel.roomFocusProfileID, let c = listModel.roomFocusCwd {
+            pid = p; cwd = c
+        } else {
+            guard listModel.sessionsFirst, listModel.selectedSessionID != nil,
+                  let p = listModel.selectedSessionProfileID,
+                  let c = listModel.selectedSessionCwd else { return nil }
+            pid = p; cwd = c
+        }
         let home = "/home/ubuntu"
         let abs: String
         if cwd.isEmpty || cwd == "~" { abs = home }

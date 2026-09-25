@@ -254,6 +254,23 @@ if [ "$TARGET" = "bromure-ac" ]; then
 PLIST
     echo "Bundled mlx.metallib (in-process MLX engine; no Python/uv)."
 
+    # The Rooms stage's SwiftUI shaders (shaders/RoomEffects.metal), compiled
+    # here rather than by SwiftPM. The Metal toolchain is a build-time
+    # requirement only (the .metallib ships in the bundle): fail loudly
+    # without it. Install: xcodebuild -downloadComponent MetalToolchain
+    SHADER_TMP="$(mktemp -d)"
+    if xcrun -sdk macosx metal -c "$SCRIPT_DIR/shaders/RoomEffects.metal" -o "$SHADER_TMP/RoomEffects.air" 2>"$SHADER_TMP/err" \
+       && xcrun -sdk macosx metallib "$SHADER_TMP/RoomEffects.air" -o "$RESOURCES_DIR/RoomEffects.metallib" 2>>"$SHADER_TMP/err"; then
+        echo "Compiled RoomEffects.metallib."
+    else
+        echo "error: couldn't compile shaders/RoomEffects.metal — is the Metal toolchain installed?" >&2
+        echo "  (xcodebuild -downloadComponent MetalToolchain)" >&2
+        sed 's/^/  /' "$SHADER_TMP/err" >&2
+        rm -rf "$SHADER_TMP"
+        exit 1
+    fi
+    rm -rf "$SHADER_TMP"
+
     # Ghostty runtime resources (shell-integration, themes + terminfo).
     # GhosttyRuntime points GHOSTTY_RESOURCES_DIR at Resources/ghostty; the
     # terminfo sibling matches Ghostty.app's own bundle layout.

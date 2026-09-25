@@ -622,6 +622,18 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                     keyEquivalent: "n")
     newSessionItem.target = delegate
     wsMenu.addItem(newSessionItem)
+    // Rooms: sessions grouped, side by side, with their own Switchboard.
+    let newRoomItem = NSMenuItem(title: L("New Room…"),
+                                 action: #selector(ACAppDelegate.newRoomAction(_:)),
+                                 keyEquivalent: "")
+    newRoomItem.target = delegate
+    wsMenu.addItem(newRoomItem)
+    let nextRoomItem = NSMenuItem(title: L("Next Room"),
+                                  action: #selector(ACAppDelegate.nextRoomAction(_:)),
+                                  keyEquivalent: "r")
+    nextRoomItem.keyEquivalentModifierMask = [.control, .command]
+    nextRoomItem.target = delegate
+    wsMenu.addItem(nextRoomItem)
     wsMenu.addItem(NSMenuItem.separator())
 
     let newWsItem = NSMenuItem(title: L("New Workspace…"),
@@ -1672,6 +1684,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     let agentSessionStore = AgentSessionStore()
     private(set) lazy var agentSessionEngine =
         AgentSessionEngine(store: agentSessionStore, delegate: self)
+    /// Rooms: named sets of sessions, each with a Switchboard of its own.
+    let agentRoomStore = AgentRoomStore()
     /// Delegations between sessions: one agent handing work to another.
     let delegationStore = DelegationStore()
     private(set) lazy var delegationEngine: DelegationEngine = {
@@ -1694,6 +1708,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             await self?.kubeClusterEngine.sendToUser(text, via: kind) ?? false
         }
         e.phoneLinked = { [weak self] in !(self?.kubeClusterStore.connector?.channels.isEmpty ?? true) }
+        e.roomName = { [weak self] id in self?.agentRoomStore.room(id)?.name }
         return e
     }()
 
@@ -3886,6 +3901,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onFatClientDebug = { [weak self] params in
             MainActor.assumeIsolated {
                 guard let self else { return ["error": "no app"] }
+                if let action = params["action"] as? String, action.hasPrefix("room-") {
+                    return self.roomDebug(action, params)
+                }
                 let key = (params["host"] as? String) ?? ""
                 let hosts = RemoteTransport.loadHosts()
                 let host = hosts.first(where: {
@@ -4089,6 +4107,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.delegationStore.delegations.compactMap(Self.codableToDict) ?? []
             }
         }
+        server.onListAgentRooms = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.agentRoomStore.rooms.compactMap(Self.codableToDict) ?? []
+            }
+        }
+        server.onAgentRoomCommand = { [weak self] id, action, body in
+            MainActor.assumeIsolated {
+                self?.roomCommand(id, action, body) ?? ["error": "no app"]
+            }
+        }
         server.onAgentSessionCommand = { [weak self] id, action, body in
             MainActor.assumeIsolated {
                 guard let self else { return ["error": "no app"] }
@@ -4109,12 +4137,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // `remotely`: the workspace boot this may need asks its
                     // questions (base-image drift, compromise wipe) on the
                     // client's screen, not in a modal on the server.
+                    // {room}: started from a room's "New Session".
+                    let room = (body["room"] as? String).flatMap(UUID.init(uuidString:))
+                        .flatMap { self.agentRoomStore.room($0)?.id }
                     let sid = self.agentSessionEngine.start(.init(
                         profileID: profile.id, tool: tool,
                         cwd: body["cwd"] as? String ?? "~",
                         cloneURL: body["cloneURL"] as? String,
                         openingMessage: body["message"] as? String,
-                        attachments: attachments), remotely: true)
+                        attachments: attachments, roomID: room), remotely: true)
                     return ["ok": true, "id": sid.uuidString]
                 case (nil, "switchboard"):
                     // The Switchboard, started (or woken) for a client that
@@ -6685,6 +6716,189 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSApp.setActivationPolicy(.regular)
         w.makeKeyAndOrderFront(nil)
         w.showNewSession()
+    }
+
+    @objc func newRoomAction(_ sender: Any?) {
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.promptNewRoom()
+    }
+
+    // MARK: Rooms — one implementation for the window and remote clients
+
+    /// A new room (named, made unique), with these sessions moved in.
+    @discardableResult
+    func roomCreate(name: String, sessions: [UUID] = []) -> AgentRoom {
+        let r = agentRoomStore.create(name: name)
+        for id in sessions { roomMove(id, to: r.id) }
+        return r
+    }
+
+    /// Into a room, or out of any (nil). A Switchboard never moves.
+    func roomMove(_ sid: UUID, to room: UUID?) {
+        guard let s = agentSessionStore.session(sid), !s.isSwitchboard,
+              room == nil || agentRoomStore.room(room) != nil else { return }
+        agentSessionStore.mutate(sid) { $0.roomID = room }
+    }
+
+    /// One session dropped on another: into the other's room, or a new room
+    /// (named after it) holding both. The room's id.
+    func roomGroup(dragged: UUID, onto: UUID) -> UUID? {
+        guard let target = agentSessionStore.session(onto), let moved = agentSessionStore.session(dragged),
+              !target.isSwitchboard, !moved.isSwitchboard, dragged != onto else { return nil }
+        if let rid = target.roomID, agentRoomStore.room(rid) != nil {
+            roomMove(dragged, to: rid)
+            return rid
+        }
+        let base = target.nickname.map { "@" + $0 } ?? target.title
+        let name = base.count > 32 ? String(base.prefix(31)) + "…" : base
+        return roomCreate(name: name, sessions: [onto, dragged]).id
+    }
+
+    /// The room goes; its sessions stay (back in the list), its Switchboard
+    /// is archived.
+    func roomUngroup(_ id: UUID) {
+        for s in agentSessionStore.sessions where s.roomID == id {
+            if s.isSwitchboard { agentSessionEngine.archive(s.id) }
+            agentSessionStore.mutate(s.id) { $0.roomID = nil }
+        }
+        agentRoomStore.remove(id)
+    }
+
+    /// Put the room away with every session in it (and its Switchboard),
+    /// like archiving a session: agents end, conversations stay readable.
+    func roomArchive(_ id: UUID) {
+        for s in agentSessionStore.sessions where s.roomID == id && !s.isDeleted && !s.isArchived {
+            agentSessionEngine.archive(s.id)
+        }
+        agentRoomStore.setArchived(id, true)
+    }
+
+    /// Bring an archived room back, with its sessions.
+    func roomUnarchive(_ id: UUID) {
+        for s in agentSessionStore.sessions where s.roomID == id && s.isArchived && !s.isDeleted {
+            agentSessionEngine.unarchive(s.id)
+        }
+        agentRoomStore.setArchived(id, false)
+    }
+
+    /// Delete the room and every session in it (its Switchboard too).
+    func roomDelete(_ id: UUID) {
+        for s in agentSessionStore.sessions where s.roomID == id && !s.isDeleted {
+            agentSessionEngine.delete(s.id)
+        }
+        agentRoomStore.remove(id)
+    }
+
+    /// The /agent-rooms verbs a remote client drives.
+    func roomCommand(_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any] {
+        func uuid(_ k: String) -> UUID? { (body[k] as? String).flatMap(UUID.init(uuidString:)) }
+        switch (id, action) {
+        case (nil, "create"):
+            let ids = ((body["sessions"] as? [String]) ?? []).compactMap(UUID.init(uuidString:))
+            return ["ok": true, "id": roomCreate(name: (body["name"] as? String) ?? "", sessions: ids).id.uuidString]
+        case (nil, "move"):
+            guard let sid = uuid("session") else { return ["error": "session required"] }
+            roomMove(sid, to: uuid("room"))
+            return ["ok": true]
+        case (nil, "group"):
+            guard let a = uuid("dragged"), let b = uuid("onto"), let rid = roomGroup(dragged: a, onto: b)
+            else { return ["error": "those sessions can't share a room"] }
+            return ["ok": true, "id": rid.uuidString]
+        case (let rid?, _) where agentRoomStore.room(rid) == nil:
+            return ["error": "unknown room"]
+        case (let rid?, "rename"):
+            agentRoomStore.rename(rid, to: (body["name"] as? String) ?? "")
+            return ["ok": true]
+        case (let rid?, "color"):
+            guard let hex = body["hex"] as? String else { return ["error": "hex required"] }
+            agentRoomStore.setColor(rid, hex)
+            return ["ok": true]
+        case (let rid?, "layout"):
+            agentRoomStore.setLayout(rid, (body["layout"] as? String).flatMap(RoomLayout.init)?.string)
+            return ["ok": true]
+        case (let rid?, "delete"):
+            roomDelete(rid)
+            return ["ok": true]
+        case (let rid?, "ungroup"):
+            roomUngroup(rid)
+            return ["ok": true]
+        case (let rid?, "archive"):
+            roomArchive(rid)
+            return ["ok": true]
+        case (let rid?, "unarchive"):
+            roomUnarchive(rid)
+            return ["ok": true]
+        case (let rid?, "switchboard"):
+            guard let room = agentRoomStore.room(rid),
+                  let sid = switchboardEngine.ensureSwitchboard(room: room, remotely: true)
+            else { return ["error": "no workspace to run the Switchboard in"] }
+            return ["ok": true, "id": sid.uuidString]
+        default:
+            return ["error": "unknown room action"]
+        }
+    }
+
+    /// E2E hooks for rooms (POST /debug/fatclient, no host needed):
+    /// room-create {name, sessions:[id]} · room-show {room} ·
+    /// room-zoom {session} (nil/absent = back) · room-focus {session} ·
+    /// room-delete {room} · room-list.
+    func roomDebug(_ action: String, _ p: [String: Any]) -> [String: Any] {
+        let w = ensureUnifiedWindow()
+        func uuid(_ k: String) -> UUID? { (p[k] as? String).flatMap(UUID.init(uuidString:)) }
+        switch action {
+        case "room-create":
+            let r = roomCreate(name: (p["name"] as? String) ?? "",
+                               sessions: ((p["sessions"] as? [String]) ?? []).compactMap(UUID.init(uuidString:)))
+            w.showRoom(r.id)
+            return ["ok": true, "room": r.id.uuidString, "name": r.name]
+        case "room-show":
+            guard let id = uuid("room") else { return ["error": "room?"] }
+            w.showRoom(id)
+            return ["ok": w.listModel.selectedRoomID == id]
+        case "room-zoom", "room-focus":
+            guard let c = w.debugRoomController else { return ["error": "no room on stage"] }
+            let id = uuid("session")
+            if action == "room-focus" { c.focus(id) } else {
+                if let id { c.focus(id) }
+                withAnimation(.spring(response: 0.46, dampingFraction: 0.84)) { c.zoomedID = id }
+            }
+            return ["ok": true, "focus": c.focusedID?.uuidString ?? "", "zoomed": c.zoomedID?.uuidString ?? "",
+                    "models": c.models.count, "members": c.members.count,
+                    "filesProfile": w.listModel.roomFocusProfileID?.uuidString ?? ""]
+        case "room-layout", "room-page":
+            guard let c = w.debugRoomController else { return ["error": "no room on stage"] }
+            if action == "room-layout", let l = (p["layout"] as? String).flatMap(RoomLayout.init) { c.setLayout(l) }
+            if action == "room-page", let n = p["page"] as? Int { c.show(page: n) }
+            return ["ok": true, "layout": c.layout.string, "page": c.page, "pages": c.pages.count]
+        case "room-delete":
+            guard let id = uuid("room") else { return ["error": "room?"] }
+            if w.listModel.selectedRoomID == id { w.clearRoom() }
+            roomUngroup(id)   // test cleanup: the sessions stay
+            return ["ok": true]
+        case "room-list":
+            return ["rooms": agentRoomStore.rooms.map { r in
+                ["id": r.id.uuidString, "name": r.name,
+                 "members": RoomTally.members(r, in: agentSessionStore.sessions).map(\.id.uuidString)] as [String: Any]
+            }, "sessions": agentSessionStore.sessions.filter { !$0.isDeleted && !$0.isArchived }.map {
+                ["id": $0.id.uuidString, "title": $0.title, "room": $0.roomID?.uuidString ?? "",
+                 "switchboard": $0.isSwitchboard, "window": $0.windowIndex ?? -1] as [String: Any]
+            }]
+        default:
+            return ["error": "unknown room action"]
+        }
+    }
+
+    /// ⌃⌘R — the next room's grid (the first one from anywhere else).
+    @objc func nextRoomAction(_ sender: Any?) {
+        let rooms = agentRoomStore.rooms
+        guard !rooms.isEmpty else { newRoomAction(sender); return }
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        let at = w.listModel.selectedRoomID.flatMap { id in rooms.firstIndex { $0.id == id } }
+        w.showRoom(rooms[at.map { ($0 + 1) % rooms.count } ?? 0].id)
     }
 
     /// ⌥⌘U — the selected session's terminal tab; from that terminal, the

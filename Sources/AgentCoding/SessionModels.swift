@@ -396,6 +396,11 @@ final class SessionListModel {
     var kubeSelectedID: UUID?
     /// The container registry whose dashboard is the active stage surface.
     var registrySelectedID: UUID?
+    /// The room on stage (its grid of sessions + its Switchboard), and the
+    /// focused cell's machine and folder — what the Files pane follows then.
+    var selectedRoomID: UUID?
+    var roomFocusProfileID: Profile.ID?
+    var roomFocusCwd: String?
 }
 
 /// Right-click actions on a tab row. Handled by the window, which reads the

@@ -70,6 +70,7 @@ final class AgentSessionEngine {
                              cwd: cwd, cloneURL: req.cloneURL?.nonEmpty,
                              openingMessage: message?.nonEmpty)
         s.role = req.role
+        s.roomID = req.roomID
         s.launchingSince = Date()
         store.upsert(s)
         BACDebug.log("sessions", "start “\(title)” (\(req.tool.rawValue) in \(cwd))")
@@ -234,7 +235,8 @@ final class AgentSessionEngine {
                         _ = try? await delegate.guestExec(
                             profileID: s.profileID,
                             command: SwitchboardEngine.briefCommand(
-                                guestFolder: ScheduledAutomationEngine.guestPath(s.cwd)),
+                                guestFolder: ScheduledAutomationEngine.guestPath(s.cwd),
+                                roomName: delegate.agentRoomStore.room(s.roomID)?.name),
                             timeout: 15)
                     }
                     _ = try? await delegate.guestExec(
@@ -362,6 +364,9 @@ final class AgentSessionEngine {
         guard let s = store.session(id) else { return }
         BACDebug.log("sessions", "unarchive “\(s.title)”")
         store.setArchived(id, false)
+        // Back from an archived room: the room comes back too (its other
+        // sessions stay put away).
+        if let rid = s.roomID { delegate?.agentRoomStore.setArchived(rid, false) }
     }
 
     /// Delete the session. No tab and no launch under way: the record (and
@@ -494,7 +499,9 @@ final class AgentSessionEngine {
                 // it works on sessions, not on files.
                 _ = try? await delegate.guestExec(
                     profileID: s.profileID,
-                    command: SwitchboardEngine.briefCommand(guestFolder: guestPath), timeout: 15)
+                    command: SwitchboardEngine.briefCommand(
+                        guestFolder: guestPath, roomName: delegate.agentRoomStore.room(s.roomID)?.name),
+                    timeout: 15)
             } else {
                 // A folder that doesn't exist yet is created — and starts as
                 // a git repository, so the agent's work is versioned from the

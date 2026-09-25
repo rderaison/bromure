@@ -126,6 +126,10 @@ final class ACAutomationServer {
     var onListAgentSessions: (() -> [[String: Any]])?
     /// Delegations between sessions, mirrored next to them.
     var onListDelegations: (() -> [[String: Any]])?
+    /// Rooms of sessions, for the fat client's mirror.
+    var onListAgentRooms: (() -> [[String: Any]])?
+    /// POST /agent-rooms/{action} (id nil) or /agent-rooms/{id}/{action}.
+    var onAgentRoomCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
     var onAgentSessionCommand: ((_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any])?
     var onAgentSessionTranscript: ((_ id: UUID) async -> Data?)?
     /// GET /agent-sessions/{id}/pending → what the session waits on.
@@ -1044,6 +1048,21 @@ final class ACAutomationServer {
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let r = DispatchQueue.main.sync {
                 self.onAgentSessionCommand?(nil, "start", bodyJSON) ?? ["error": "no handler"]
+            }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
+
+        // Rooms: POST /agent-rooms/{create|move|group} and
+        // /agent-rooms/{id}/{rename|color|layout|delete|switchboard}.
+        case ("POST", let p) where p.hasPrefix("/agent-rooms/"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let parts = String(p.dropFirst("/agent-rooms/".count))
+                .split(separator: "/", maxSplits: 1).map { String($0).removingPercentEncoding ?? String($0) }
+            let id = parts.count > 1 ? UUID(uuidString: parts[0]) : nil
+            guard let action = parts.last, parts.count == 1 || id != nil else {
+                sendResponse(fd: fd, status: 400, body: ["error": "Bad room id or action"]); return
+            }
+            let r = DispatchQueue.main.sync {
+                self.onAgentRoomCommand?(id, action, bodyJSON) ?? ["error": "no handler"]
             }
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
@@ -2107,6 +2126,7 @@ final class ACAutomationServer {
             // layout when it's missing.
             if let sessions = self.onListAgentSessions?() { d["agentSessions"] = sessions }
             if let delegations = self.onListDelegations?() { d["delegations"] = delegations }
+            if let rooms = self.onListAgentRooms?() { d["agentRooms"] = rooms }
             return d
         }
         // The workspace VM subnet, so a fat client can route/tunnel to it. nil

@@ -623,6 +623,7 @@ final class RemoteHostController {
         // Only when present: a partial snapshot must not wipe the clusters.
         if let kube = snapshot["kubeClusters"] as? [String: Any] { applyKubeClusters(kube) }
         applySessions(snapshot["agentSessions"] as? [[String: Any]])
+        applyRooms(snapshot["agentRooms"] as? [[String: Any]])
         applyDelegations(snapshot["delegations"] as? [[String: Any]])
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
@@ -1045,6 +1046,37 @@ final class RemoteHostController {
         sessionStore.applyMirror(sessions)
     }
 
+    /// The server's rooms of sessions. An older server sends none: no Rooms
+    /// UI, and the sessions' own `roomID`s are then simply unused.
+    let roomStore = AgentRoomStore(mirror: true)
+    private(set) var supportsRooms = false
+
+    private func applyRooms(_ list: [[String: Any]]?) {
+        guard let list else { supportsRooms = false; return }
+        supportsRooms = true
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        roomStore.applyMirror(list.compactMap { dict -> AgentRoom? in
+            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+            return try? dec.decode(AgentRoom.self, from: data)
+        })
+    }
+
+    /// POST /agent-rooms/{action} or /agent-rooms/{id}/{action} (create,
+    /// move, group; rename, color, layout, delete, switchboard). The
+    /// server's answer (an `id` for create / group / switchboard), nil on
+    /// failure. The mirror catches up with an immediate poll.
+    @discardableResult
+    func roomCommand(_ id: UUID?, _ action: String, body: [String: Any] = [:]) async -> [String: Any]? {
+        let host = self.host
+        let path = "/agent-rooms/" + (id.map { ControlClient.encodeSegment($0.uuidString) + "/" } ?? "") + action
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", path, body: body)
+        }.value
+        pollOnce()
+        guard let resp, resp.status == 200 else { return nil }
+        return resp.json
+    }
+
     /// Only when present: an older server sends none, and the mirror keeps
     /// what it has rather than reading that as "none".
     private func applyDelegations(_ list: [[String: Any]]?) {
@@ -1066,9 +1098,10 @@ final class RemoteHostController {
     /// POST /sessions/start — the new session's id once the server has it.
     func startSession(profileID: Profile.ID, tool: Profile.Tool, cwd: String,
                       cloneURL: String?, message: String?,
-                      attachments: [DroppedFile] = []) async -> UUID? {
+                      attachments: [DroppedFile] = [], room: UUID? = nil) async -> UUID? {
         let host = self.host
         var body: [String: Any] = ["profile": profileID.uuidString, "tool": tool.rawValue, "cwd": cwd]
+        if let room { body["room"] = room.uuidString }
         if let cloneURL, !cloneURL.isEmpty { body["cloneURL"] = cloneURL }
         if let message, !message.isEmpty { body["message"] = message }
         // Dropped files travel with the request; the server stages them in
@@ -2034,6 +2067,46 @@ final class RemoteToolbarDelegate: NSObject, NSToolbarDelegate {
 
 // MARK: - Fat-client mirror window
 
+/// A room stage over a remote server's mirror: its rooms and sessions,
+/// chats built like the window's own (RemoteTranscriptProvider over the
+/// tunnel), room verbs sent to the server.
+@MainActor
+final class RemoteRoomBackend: RoomStageBackend {
+    private weak var window: RemoteHostWindow?
+    private let fallback = AgentRoomStore(mirror: true)
+    init(_ window: RemoteHostWindow) { self.window = window }
+
+    var roomStore: AgentRoomStore { window?.controller.roomStore ?? fallback }
+    var roomSessions: [AgentSession] { window?.controller.sessionStore.sessions ?? [] }
+
+    func chatKey(for s: AgentSession) -> String? {
+        guard let c = window?.controller, let w = s.windowIndex, !s.hasEnded,
+              SessionHome.liveTabPosition(for: s, in: c.listModel) != nil,
+              SessionHome.bucket(for: s, in: c.listModel) != .ended else { return nil }
+        switch c.runState(for: s.profileID) {
+        case .running, .booting: return "\(s.profileID.uuidString)#\(w)"
+        default: return nil
+        }
+    }
+
+    func makeChat(for s: AgentSession) -> BeautifiedSessionModel? {
+        guard let w = s.windowIndex else { return nil }
+        return window?.makeRemoteChatModel(id: s.profileID, window: w)
+    }
+
+    func startSwitchboard(_ room: AgentRoom) {
+        guard let c = window?.controller else { return }
+        Task { @MainActor in await c.roomCommand(room.id, "switchboard") }
+    }
+
+    func setLayout(_ room: UUID, _ layout: String) {
+        guard let c = window?.controller else { return }
+        // At once on the mirror (the next poll confirms), and on the server.
+        c.roomStore.setLayout(room, layout)
+        Task { @MainActor in await c.roomCommand(room, "layout", body: ["layout": layout]) }
+    }
+}
+
 /// The fat-client window for one remote host. Reuses the EXACT same
 /// `SessionSidebar` and `GridStageView` the local window uses, driven by a
 /// `RemoteHostController`, so a remote bromure-ac renders 1:1. The stage shows
@@ -2106,6 +2179,8 @@ final class RemoteHostWindow: NSWindow {
     private var sessionHeaderHeight: NSLayoutConstraint!
     private var sessionOverlayHost: NSView?
     private var selectedSessionID: UUID?
+    /// The room on stage (its grid of the server's sessions).
+    private var roomController: RoomStageController?
     private var sessionPresentationKey: String?
     /// A session just started here: select it as soon as the mirror has it.
     private var pendingSelectSessionID: UUID?
@@ -3608,13 +3683,53 @@ final class RemoteHostWindow: NSWindow {
                     if c.sessionStore.session(id) != nil { self.selectSession(id) }
                     else { self.pendingSelectSessionID = id }
                 }
+            },
+            openRoom: { [weak self] id in self?.showRoom(id) },
+            newRoom: { [weak self] name, sid in
+                self?.roomCommandThenShow(nil, "create",
+                                          ["name": name, "sessions": sid.map { [$0.uuidString] } ?? []])
+            },
+            moveToRoom: { [weak self] sid, rid in
+                guard let c = self?.controller else { return }
+                var body: [String: Any] = ["session": sid.uuidString]
+                if let rid { body["room"] = rid.uuidString }
+                Task { @MainActor in await c.roomCommand(nil, "move", body: body) }
+            },
+            renameRoom: { [weak self] id, name in
+                guard let c = self?.controller else { return }
+                Task { @MainActor in await c.roomCommand(id, "rename", body: ["name": name]) }
+            },
+            setRoomColor: { [weak self] id, hex in
+                guard let c = self?.controller else { return }
+                Task { @MainActor in await c.roomCommand(id, "color", body: ["hex": hex]) }
+            },
+            deleteRoom: { [weak self] id in self?.confirmDeleteRoom(id) },
+            archiveRoom: { [weak self] id in
+                guard let c = self?.controller else { return }
+                Task { @MainActor in await c.roomCommand(id, "archive") }
+            },
+            unarchiveRoom: { [weak self] id in
+                guard let c = self?.controller else { return }
+                Task { @MainActor in await c.roomCommand(id, "unarchive") }
+            },
+            ungroupRoom: { [weak self] id in
+                guard let self else { return }
+                let c = self.controller
+                if c.listModel.selectedRoomID == id { self.clearRoom(); self.selectInitialSession() }
+                Task { @MainActor in await c.roomCommand(id, "ungroup") }
+            },
+            newSessionInRoom: { [weak self] id in self?.showNewSession(room: id) },
+            groupSessions: { [weak self] dragged, onto in
+                self?.roomCommandThenShow(nil, "group",
+                                          ["dragged": dragged.uuidString, "onto": onto.uuidString])
             })
     }
 
     /// The new-session screen as the stage.
-    func showNewSession() {
+    func showNewSession(room: UUID? = nil) {
         guard sessionsFirst else { return }
         newSessionWorkspacesKey = workspacesKey()
+        clearRoom()
         gridView?.removeFromSuperview()
         unmountTerminal()
         clearAutomationBoard()
@@ -3650,8 +3765,10 @@ final class RemoteHostWindow: NSWindow {
                 Task { @MainActor in
                     guard let id = await c.startSession(profileID: req.profileID, tool: req.tool, cwd: req.cwd,
                                                         cloneURL: req.cloneURL, message: req.openingMessage,
-                                                        attachments: req.attachments),
+                                                        attachments: req.attachments, room: room),
                           let self else { return }
+                    // Started from a room: back to its grid, where it launches.
+                    if let room, c.roomStore.room(room) != nil { self.showRoom(room); return }
                     // The mirror gets it with the next poll; select it then.
                     if c.sessionStore.session(id) != nil { self.selectSession(id) }
                     else { self.pendingSelectSessionID = id }
@@ -3690,6 +3807,7 @@ final class RemoteHostWindow: NSWindow {
         clearDockerDashboard()
         clearKubeDashboard()
         clearRegistryDashboard()
+        clearRoom()
         model.gridSelected = false
         model.newSessionSelected = false
         selectedSessionID = id
@@ -3811,6 +3929,7 @@ final class RemoteHostWindow: NSWindow {
     /// Leave the session surfaces — a machine row, a board or a dashboard
     /// took the stage.
     private func clearSessionStage() {
+        clearRoom()
         let model = controller.listModel
         guard selectedSessionID != nil || model.newSessionSelected || sessionOverlayHost != nil else { return }
         selectedSessionID = nil
@@ -3823,6 +3942,82 @@ final class RemoteHostWindow: NSWindow {
         sessionOverlayHost?.removeFromSuperview()
         sessionOverlayHost = nil
         setSessionHeader(visible: false)
+    }
+
+    // MARK: Rooms (the server's)
+
+    /// A room on stage: the server's sessions in it as a grid of live chats,
+    /// its Switchboard docked under them — the local window's RoomStageView
+    /// over this mirror.
+    func showRoom(_ id: UUID) {
+        guard sessionsFirst, controller.roomStore.room(id) != nil else { return }
+        gridView?.removeFromSuperview()
+        unmountTerminal()
+        clearAutomationBoard()
+        clearTaskBoard()
+        clearVMDashboard()
+        clearDockerDashboard()
+        clearKubeDashboard()
+        clearRegistryDashboard()
+        clearSessionStage()   // also drops a previous room
+        let model = controller.listModel
+        model.gridSelected = false
+        model.selectedRoomID = id
+        let c = controller
+        let rc = RoomStageController(roomID: id, backend: RemoteRoomBackend(self), listModel: model)
+        rc.onNewSession = { [weak self] in self?.showNewSession(room: id) }
+        rc.onOpenSession = { [weak self] sid in self?.selectSession(sid) }
+        rc.onRemoveFromRoom = { sid in
+            Task { @MainActor in await c.roomCommand(nil, "move", body: ["session": sid.uuidString]) }
+        }
+        rc.onResume = { sid in c.sessionCommand(sid, "resume") }
+        rc.onRename = { name in Task { @MainActor in await c.roomCommand(id, "rename", body: ["name": name]) } }
+        rc.onUnarchive = { Task { @MainActor in await c.roomCommand(id, "unarchive") } }
+        roomController = rc
+        setSessionHeader(visible: false)
+        showSessionOverlay(RoomStageView(controller: rc))
+    }
+
+    /// Leave the room stage (its chat models stop polling).
+    private func clearRoom() {
+        let model = controller.listModel
+        guard roomController != nil || model.selectedRoomID != nil else { return }
+        roomController?.stop()
+        roomController = nil
+        model.selectedRoomID = nil
+        model.roomFocusProfileID = nil
+        model.roomFocusCwd = nil
+        if selectedSessionID == nil, !model.newSessionSelected {
+            sessionOverlayHost?.removeFromSuperview()
+            sessionOverlayHost = nil
+        }
+    }
+
+    /// Delete a room after a word: its sessions stay, its Switchboard is
+    /// archived (on the server).
+    private func confirmDeleteRoom(_ id: UUID) {
+        guard let room = controller.roomStore.room(id) else { return }
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Delete “%@” and every session in it?", comment: "delete room"), room.name)
+        alert.informativeText = NSLocalizedString("Their agents stop and the sessions leave the list. Their folders stay on the machines. To keep the sessions, ungroup the room instead.", comment: "delete room")
+        alert.addButton(withTitle: NSLocalizedString("Delete Room", comment: "delete room"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        let c = controller
+        alert.beginSheetModal(for: self) { [weak self] resp in
+            guard resp == .alertFirstButtonReturn, let self else { return }
+            if c.listModel.selectedRoomID == id { self.clearRoom(); self.selectInitialSession() }
+            Task { @MainActor in await c.roomCommand(id, "delete") }
+        }
+    }
+
+    /// Run a room verb, then put the room it names on stage (create, group).
+    private func roomCommandThenShow(_ id: UUID?, _ action: String, _ body: [String: Any]) {
+        let c = controller
+        Task { @MainActor [weak self] in
+            guard let r = await c.roomCommand(id, action, body: body),
+                  let rid = (r["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
+            if c.roomStore.room(rid) != nil, c.listModel.selectedRoomID != rid { self?.showRoom(rid) }
+        }
     }
 
     /// Linux mode: the terminal for every tab, the machine's controls back,
@@ -3917,6 +4112,24 @@ final class RemoteHostWindow: NSWindow {
                 if c.sessionStore.session(id) != nil { self.selectSession(id) } else { self.pendingSelectSessionID = id }
             }
             return ["ok": true]
+        case "fc-room":
+            // {room?, layout?, zoom?, shot?}: the mirrored rooms; shows one.
+            if let r = (p["room"] as? String).flatMap(UUID.init(uuidString:)) { showRoom(r) }
+            if let l = (p["layout"] as? String).flatMap(RoomLayout.init) { roomController?.setLayout(l) }
+            if let z = p["zoom"] as? String { roomController?.zoomedID = UUID(uuidString: z) }
+            if let shot = p["shot"] as? String {
+                contentView?.layoutSubtreeIfNeeded()
+                writeSnapshot(to: shot)
+            }
+            return [
+                "ok": true,
+                "supportsRooms": controller.supportsRooms,
+                "rooms": controller.roomStore.rooms.map { ["id": $0.id.uuidString, "name": $0.name,
+                                                           "layout": $0.layout ?? ""] },
+                "selectedRoom": controller.listModel.selectedRoomID?.uuidString ?? "",
+                "members": roomController?.members.count ?? 0,
+                "models": roomController?.models.count ?? 0,
+            ]
         case "sessions", "select-session", "new-session", "linux":
             switch action {
             case "select-session":
@@ -4584,6 +4797,7 @@ final class RemoteHostWindow: NSWindow {
                 self.controller.listModel.newTaskRequested = true
             },
             sessionStore: c.sessionStore,
+            roomStore: c.roomStore,
             onNewSession: { [weak self] in self?.showNewSession() },
             onSelectSession: { [weak self] id in self?.selectSession(id) },
             sessionActions: sessionStageActions,
@@ -5068,7 +5282,11 @@ final class RemoteHostWindow: NSWindow {
         let activeIsAgent = controller.tabsModel(for: id)?.activeTab
             .map { BromureIcons.agentKind(forLabel: $0.shownLabel) != nil } ?? false
             || sessionAgentWindows.contains("\(id.uuidString):\(idx)")
-        if (sessionViewMode ?? viewMode) == .beautified && activeIsAgent { mountBeautified(for: id, window: idx); return }
+        // A session on stage is its chat, full stop — whatever the tab's
+        // foreground program says yet (a new session runs a plain shell for
+        // its first seconds, which used to leave the raw terminal up).
+        if sessionViewMode == .beautified { mountBeautified(for: id, window: idx); return }
+        if viewMode == .beautified && activeIsAgent { mountBeautified(for: id, window: idx); return }
         guard let profile = controller.profile(for: id) else {
             unmountTerminal(); return
         }
@@ -5194,13 +5412,29 @@ final class RemoteHostWindow: NSWindow {
         }
         unmountBeautified()
         mountedTermView?.removeFromSuperview(); mountedTermView = nil
+        let m = makeRemoteChatModel(id: id, window: idx)
+        beautifiedModel = m
+        beautifiedWorkspace = id
+        beautifiedTabIndex = tabIndex
+        m.start()
+        let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
+        host.translatesAutoresizingMaskIntoConstraints = false
+        mountedBeautifiedHost = host
+        mount(host)
+        shownWorkspace = id
+        shownWindowIndex = nil
+    }
+
+    /// A chat model for one tmux window of a remote workspace, wired like
+    /// the stage's own (delegations, mentions, slash commands, sign-in, the
+    /// inline terminal) — not started. The stage mounts one; a room's grid
+    /// builds one per session.
+    func makeRemoteChatModel(id: Profile.ID, window idx: Int) -> BeautifiedSessionModel {
+        let tabIndex: Int? = idx
         let accent = controller.profile(for: id).map { Color(hex: $0.color.hexInUI) } ?? .accentColor
         let provider = RemoteTranscriptProvider(controller: controller, workspaceID: id,
                                                 windowIndex: idx, accent: accent)
         let m = BeautifiedSessionModel(provider: provider)
-        beautifiedModel = m
-        beautifiedWorkspace = id
-        beautifiedTabIndex = tabIndex
         // Delegations this session is part of (read-only here: answering
         // for the agent is done on the server's own window), and the jump
         // to the other end's session.
@@ -5268,13 +5502,7 @@ final class RemoteHostWindow: NSWindow {
                 self?.termControllers[id]?.tmuxSessionName(forWindow: w)
             }
         }
-        m.start()
-        let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
-        host.translatesAutoresizingMaskIntoConstraints = false
-        mountedBeautifiedHost = host
-        mount(host)
-        shownWorkspace = id
-        shownWindowIndex = nil
+        return m
     }
 
     private func unmountBeautified() {

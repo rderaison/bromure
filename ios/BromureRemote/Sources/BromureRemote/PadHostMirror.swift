@@ -17,6 +17,10 @@ enum PadSelection: Hashable {
     /// Sessions-first (a server that reports agent sessions).
     case session(UUID)
     case newSession
+    /// A room of sessions (its grid).
+    case room(UUID)
+    /// The new-session composer, the session joining a room.
+    case newSessionInRoom(UUID)
 }
 
 struct PadHostMirror: View {
@@ -83,7 +87,9 @@ struct PadHostMirror: View {
 
             if controller.supportsSessions {
                 PadSessionSections(controller: controller,
-                                   onOpen: { selection = .session($0) })
+                                   onOpen: { selection = .session($0) },
+                                   onOpenRoom: { selection = .room($0) },
+                                   onNewInRoom: { selection = .newSessionInRoom($0) })
             }
 
             Section("Boards") {
@@ -254,6 +260,17 @@ struct PadHostMirror: View {
                                 onForget: { selection = .newSession },
                                 onOpen: { selection = .session($0) })
                 .id(id)
+        case .room(let id):
+            MobileRoomScreen(controller: controller, roomID: id,
+                             onOpenSession: { selection = .session($0) },
+                             onNewSession: { selection = .newSessionInRoom($0) },
+                             onGone: { selection = .newSession })
+                .id(id)
+        case .newSessionInRoom(let rid):
+            MobileNewSessionScreen(controller: controller,
+                                   onStarted: { _ in selection = .room(rid) },
+                                   onCancel: { selection = .room(rid) },
+                                   room: rid)
         case .newSession:
             MobileNewSessionScreen(controller: controller,
                                    onStarted: { selection = .session($0) },
@@ -289,6 +306,10 @@ struct PadHostMirror: View {
         if let id = env["BROMURE_DEBUG_OPEN_SESSION"].flatMap(UUID.init(uuidString:)),
            controller.sessionStore.session(id) != nil {
             selection = .session(id); return
+        }
+        if let id = env["BROMURE_DEBUG_OPEN_ROOM"].flatMap(UUID.init(uuidString:)),
+           controller.roomStore.room(id) != nil {
+            selection = .room(id); return
         }
         if env["BROMURE_DEBUG_NEW_SESSION"] == "1" { selection = .newSession; return }
         #endif

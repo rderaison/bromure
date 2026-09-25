@@ -325,6 +325,15 @@ final class SessionPane {
     /// beautified view mount from the first frame, where those prompts are
     /// surfaced as cards instead of a raw TUI.
     var agentWindows: Set<Int> = []
+    /// A session is on stage (sessions-first): the pane is its chat, full
+    /// stop — the beautified view mounts whatever the tab's foreground
+    /// program says yet (a new session's tab runs a plain shell for its
+    /// first seconds, which used to leave the raw terminal mounted). The
+    /// terminal is the Linux button's business, never this pane's while a
+    /// session is shown.
+    var sessionOnStage = false {
+        didSet { if sessionOnStage != oldValue { updateNativeTerminalMount() } }
+    }
     /// Opening messages to echo into the beautified view of a window the
     /// moment it mounts (keyed by tmux window index; consumed once) — a
     /// session started with a message shows it, with the thinking cue, before
@@ -524,6 +533,7 @@ final class SessionPane {
         let activeTab = model.tabs[model.activeIndex]
         let activeIsAgent = BromureIcons.agentKind(forLabel: activeTab.shownLabel) != nil
             || agentWindows.contains(activeTab.index)
+        if sessionOnStage && !beautifierLocked { mountBeautified(); return }
         if viewMode == .beautified && activeIsAgent { mountBeautified(); return }
         unmountBeautified()
         // Restore the profile's window translucency for the terminal.
@@ -558,28 +568,13 @@ final class SessionPane {
         endBootOverlay()
     }
 
-    /// Mount (or keep) the beautified transcript view, unmounting the terminal
-    /// surface (tmux keeps running behind it). Idempotent while the active tab is
-    /// unchanged (the live poll keeps that view current); a switch to a different
-    /// tab rebuilds it so the transcript matches the tab on screen.
-    private func mountBeautified() {
-        let windowIndex = model.tabs[model.activeIndex].index
-        // Idempotent for the frequent in-place re-mounts (roster ticks) that
-        // don't change the tab: keep the live host + model so the poll stays
-        // current. A *different* tab must rebuild — the shared model re-targets
-        // the active tab, so reusing the old host would show the previous tab's
-        // transcript until the next poll (a stale/blank flash the user had to
-        // toggle away). `remountForSelection` clears the index so a pane that
-        // was swapped out of the display slot always rebuilds too (a detached-
-        // then-reattached SwiftUI host comes back blank).
-        if mountedBeautifiedHost != nil, beautifiedTabIndex == windowIndex { return }
-        unmountBeautified()
-        mountedTerminalView?.removeFromSuperview()
-        mountedTerminalView = nil
-        containerView.layer?.opacity = 1   // opaque chat surface, never dimmed
-        let m = BeautifiedSessionModel(provider: LocalTranscriptProvider(pane: self))
-        beautifiedModel = m
-        beautifiedTabIndex = windowIndex
+    /// A beautified chat for the agent in tmux window `windowIndex`, wired
+    /// the way the pane's own is (seeds, transcript sink, inline terminal,
+    /// delegations, sign-in, slash commands) — not started. The pane mounts
+    /// one for its active tab; a room's grid builds one per session with a
+    /// provider pinned to that session's window.
+    func makeBeautifiedModel(windowIndex: Int, provider: BeautifiedTranscriptProvider) -> BeautifiedSessionModel {
+        let m = BeautifiedSessionModel(provider: provider)
         if let seed = beautifiedSeeds.removeValue(forKey: windowIndex) { m.seedOpening(seed) }
         m.transcriptSink = transcriptSinks[windowIndex]
         // The tab's own terminal surface, for an interactive slash command
@@ -626,7 +621,7 @@ final class SessionPane {
             guard let engine = self?.acDelegate?.delegationEngine else { return }
             Task { _ = try? await engine.post(delegationID, from: .user, kind: .answer, text: text, answering: askID) }
         }
-        let tab = model.tabs[model.activeIndex]
+        let tab = model.tabs.first { $0.index == windowIndex } ?? model.tabs[model.activeIndex]
         // Which agent's commands: the session's own tool, else the tab's
         // label, else the workspace's main agent — the palette always has
         // something to show (the label reads "bash" for agents under an
@@ -660,6 +655,31 @@ final class SessionPane {
             guard let self else { return }
             self.acDelegate?.sidebarEditProfile(self.profile.id)
         }
+        return m
+    }
+
+    /// Mount (or keep) the beautified transcript view, unmounting the terminal
+    /// surface (tmux keeps running behind it). Idempotent while the active tab is
+    /// unchanged (the live poll keeps that view current); a switch to a different
+    /// tab rebuilds it so the transcript matches the tab on screen.
+    private func mountBeautified() {
+        let windowIndex = model.tabs[model.activeIndex].index
+        // Idempotent for the frequent in-place re-mounts (roster ticks) that
+        // don't change the tab: keep the live host + model so the poll stays
+        // current. A *different* tab must rebuild — the shared model re-targets
+        // the active tab, so reusing the old host would show the previous tab's
+        // transcript until the next poll (a stale/blank flash the user had to
+        // toggle away). `remountForSelection` clears the index so a pane that
+        // was swapped out of the display slot always rebuilds too (a detached-
+        // then-reattached SwiftUI host comes back blank).
+        if mountedBeautifiedHost != nil, beautifiedTabIndex == windowIndex { return }
+        unmountBeautified()
+        mountedTerminalView?.removeFromSuperview()
+        mountedTerminalView = nil
+        containerView.layer?.opacity = 1   // opaque chat surface, never dimmed
+        let m = makeBeautifiedModel(windowIndex: windowIndex, provider: LocalTranscriptProvider(pane: self))
+        beautifiedModel = m
+        beautifiedTabIndex = windowIndex
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         host.translatesAutoresizingMaskIntoConstraints = false

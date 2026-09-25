@@ -21,6 +21,7 @@
 		817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74CD0F2B2F2F6347A584824B /* PushKeypair.swift */; };
 		53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */; };
 		4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */; };
+		27924ED0265F9707DA963FFA /* RoomScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5249E87106808C6BC0A63E0D /* RoomScreens.swift */; };
 		7EC1B722671DA37559798C32 /* SessionScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DA48C14DC93D09A6939B13A /* SessionScreens.swift */; };
 		95973F70B7D437345CD94939 /* SignInWebSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F318FD1C356FA5300DB74E7 /* SignInWebSheet.swift */; };
 		DFA9952B65FAE0782AD6D79F /* VisionGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8078F914F8C902B789A224E /* VisionGrid.swift */; };
@@ -158,6 +159,7 @@
 		74CD0F2B2F2F6347A584824B /* PushKeypair.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushKeypair.swift"; path = "Sources/BromureRemote/PushKeypair.swift"; sourceTree = "<group>"; };
 		D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushNotifications.swift"; path = "Sources/BromureRemote/PushNotifications.swift"; sourceTree = "<group>"; };
 		0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RemoteTransportMobile.swift"; path = "Sources/BromureRemote/RemoteTransportMobile.swift"; sourceTree = "<group>"; };
+		5249E87106808C6BC0A63E0D /* RoomScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RoomScreens.swift"; path = "Sources/BromureRemote/RoomScreens.swift"; sourceTree = "<group>"; };
 		9DA48C14DC93D09A6939B13A /* SessionScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SessionScreens.swift"; path = "Sources/BromureRemote/SessionScreens.swift"; sourceTree = "<group>"; };
 		1F318FD1C356FA5300DB74E7 /* SignInWebSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SignInWebSheet.swift"; path = "Sources/BromureRemote/SignInWebSheet.swift"; sourceTree = "<group>"; };
 		C8078F914F8C902B789A224E /* VisionGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "VisionGrid.swift"; path = "Sources/BromureRemote/VisionGrid.swift"; sourceTree = "<group>"; };
@@ -319,6 +321,7 @@
 				74CD0F2B2F2F6347A584824B /* PushKeypair.swift */,
 				D8C879E0E39C4B6B84825E3F /* PushNotifications.swift */,
 				0BC6EA89263D2E53A002C9B6 /* RemoteTransportMobile.swift */,
+				5249E87106808C6BC0A63E0D /* RoomScreens.swift */,
 				9DA48C14DC93D09A6939B13A /* SessionScreens.swift */,
 				1F318FD1C356FA5300DB74E7 /* SignInWebSheet.swift */,
 				C8078F914F8C902B789A224E /* VisionGrid.swift */,
@@ -533,6 +536,7 @@
 				817697B56D65708E7CB33572 /* PushKeypair.swift in Sources */,
 				53E106F8C4287023AD90A7B0 /* PushNotifications.swift in Sources */,
 				4DEAE29B769910609C07D483 /* RemoteTransportMobile.swift in Sources */,
+				27924ED0265F9707DA963FFA /* RoomScreens.swift in Sources */,
 				7EC1B722671DA37559798C32 /* SessionScreens.swift in Sources */,
 				95973F70B7D437345CD94939 /* SignInWebSheet.swift in Sources */,
 				DFA9952B65FAE0782AD6D79F /* VisionGrid.swift in Sources */,

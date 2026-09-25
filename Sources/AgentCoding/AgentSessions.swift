@@ -29,6 +29,8 @@ struct AgentSessionRequest {
     var attachments: [DroppedFile] = []
     /// `AgentSession.role` of the new session (nil = an ordinary one).
     var role: String? = nil
+    /// The room the new session joins (nil = none).
+    var roomID: UUID? = nil
 }
 
 struct AgentSession: Identifiable, Codable, Equatable, Sendable {
@@ -121,6 +123,9 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// ordinary session; "switchboard" = the one that watches and drives the
     /// others (Switchboard.swift) — never listed with them.
     var role: String?
+    /// The room it belongs to (Rooms: a named set of sessions with a
+    /// Switchboard of its own). nil = not in a room.
+    var roomID: UUID?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -137,9 +142,7 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     }
 
     static let switchboardRole = "switchboard"
-    /// "conductor" was the role's first name — a record saved under it is
-    /// the same session.
-    var isSwitchboard: Bool { role == Self.switchboardRole || role == "conductor" }
+    var isSwitchboard: Bool { role == Self.switchboardRole }
 
     var isLaunching: Bool { launchingSince != nil }
     var hasEnded: Bool { endedAt != nil && windowIndex == nil }
@@ -1006,6 +1009,210 @@ enum SessionHome {
     }
 }
 
+// MARK: - Rooms
+
+/// A named set of sessions — a project, a feature, a firefight — with a
+/// Switchboard of its own that keeps track of those sessions only. Borrowed
+/// from the Rooms window manager: pick a room and it's all that's in front
+/// of you; nothing outside it is closed, just out of the way. Membership
+/// lives on the session (`AgentSession.roomID`).
+struct AgentRoom: Identifiable, Codable, Equatable, Sendable {
+    var id: UUID
+    var name: String
+    var colorHex: String
+    var createdAt: Date
+    /// The grid the room shows, "<columns>x<rows>" (nil: sized to fit).
+    var layout: String?
+    /// Put away with all its sessions: the room sits in the Archived fold.
+    var archivedAt: Date?
+    var isArchived: Bool { archivedAt != nil }
+
+    init(id: UUID = UUID(), name: String, colorHex: String, createdAt: Date = Date()) {
+        self.id = id
+        self.name = name
+        self.colorHex = colorHex
+        self.createdAt = createdAt
+    }
+
+    /// Room tiles, handed out in turn.
+    static let palette = ["#6366F1", "#10B981", "#F59E0B", "#EC4899", "#06B6D4",
+                          "#8B5CF6", "#EF4444", "#84CC16"]
+
+    /// "Payments v2" → "payments-v2": the room Switchboard's folder name.
+    var slug: String {
+        let s = name.lowercased().map { $0.isLetter || $0.isNumber ? $0 : "-" }
+        let joined = String(s).split(separator: "-").joined(separator: "-")
+        return joined.isEmpty ? String(id.uuidString.prefix(8)).lowercased() : String(joined.prefix(40))
+    }
+}
+
+@MainActor
+@Observable
+final class AgentRoomStore {
+    private(set) var rooms: [AgentRoom] = []
+    private let fileURL: URL
+    private let isMirror: Bool
+
+    init(fileURL: URL? = nil) {
+        isMirror = false
+        self.fileURL = fileURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first!.appendingPathComponent("BromureAC", isDirectory: true)
+            .appendingPathComponent("rooms.json")
+        load()
+    }
+
+    init(mirror: Bool) {
+        isMirror = mirror
+        fileURL = FileManager.default.temporaryDirectory.appendingPathComponent("rooms-mirror.json")
+    }
+
+    func room(_ id: UUID?) -> AgentRoom? {
+        guard let id else { return nil }
+        return rooms.first { $0.id == id }
+    }
+
+    /// A new room, its name made unique ("Payments", "Payments 2", …).
+    @discardableResult
+    func create(name raw: String) -> AgentRoom {
+        let base = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let wanted = base.isEmpty ? NSLocalizedString("New Room", comment: "room default name") : base
+        var name = wanted
+        var n = 2
+        let taken = Set(rooms.map { $0.name.lowercased() })
+        while taken.contains(name.lowercased()) { name = "\(wanted) \(n)"; n += 1 }
+        let color = AgentRoom.palette[rooms.count % AgentRoom.palette.count]
+        let r = AgentRoom(name: name, colorHex: color)
+        rooms.append(r)
+        save()
+        return r
+    }
+
+    func rename(_ id: UUID, to raw: String) {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let i = rooms.firstIndex(where: { $0.id == id }) else { return }
+        rooms[i].name = name
+        save()
+    }
+
+    func setArchived(_ id: UUID, _ archived: Bool) {
+        guard let i = rooms.firstIndex(where: { $0.id == id }), rooms[i].isArchived != archived else { return }
+        rooms[i].archivedAt = archived ? Date() : nil
+        save()
+    }
+
+    /// Rooms on show, and the put-away ones.
+    var activeRooms: [AgentRoom] { rooms.filter { !$0.isArchived } }
+    var archivedRooms: [AgentRoom] { rooms.filter(\.isArchived) }
+
+    func setLayout(_ id: UUID, _ layout: String?) {
+        guard let i = rooms.firstIndex(where: { $0.id == id }), rooms[i].layout != layout else { return }
+        rooms[i].layout = layout
+        save()
+    }
+
+    func setColor(_ id: UUID, _ hex: String) {
+        guard let i = rooms.firstIndex(where: { $0.id == id }) else { return }
+        rooms[i].colorHex = hex
+        save()
+    }
+
+    func remove(_ id: UUID) {
+        rooms.removeAll { $0.id == id }
+        save()
+    }
+
+    func applyMirror(_ list: [AgentRoom]) {
+        if list != rooms { rooms = list }
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        rooms = (try? dec.decode([AgentRoom].self, from: data)) ?? []
+    }
+
+    private func save() {
+        guard !isMirror else { return }
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? enc.encode(rooms) else { return }
+        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? data.write(to: fileURL, options: .atomic)
+    }
+}
+
+/// A room's grid: columns × rows per page; more sessions than that go to
+/// further pages, each a tab.
+struct RoomLayout: Hashable {
+    let cols: Int
+    let rows: Int
+    var size: Int { cols * rows }
+    var string: String { "\(cols)x\(rows)" }
+
+    static let all: [RoomLayout] = [.init(cols: 1, rows: 1), .init(cols: 2, rows: 1), .init(cols: 2, rows: 2),
+                                    .init(cols: 3, rows: 2), .init(cols: 3, rows: 3), .init(cols: 4, rows: 4)]
+
+    init(cols: Int, rows: Int) { self.cols = cols; self.rows = rows }
+
+    init?(_ string: String) {
+        let p = string.split(separator: "x").compactMap { Int($0) }
+        guard p.count == 2, (1...6).contains(p[0]), (1...6).contains(p[1]) else { return nil }
+        self.init(cols: p[0], rows: p[1])
+    }
+
+    /// The smallest layout that shows `n` sessions at once (4×4 beyond).
+    static func fitting(_ n: Int) -> RoomLayout {
+        all.first { $0.size >= n } ?? all.last!
+    }
+
+    /// Chunked into pages of `size`.
+    func pages<T>(_ items: [T]) -> [[T]] {
+        stride(from: 0, to: items.count, by: size).map { Array(items[$0..<min($0 + size, items.count)]) }
+    }
+}
+
+/// What a room's row and header say about it.
+enum RoomTally {
+    /// The room's sessions, its own Switchboard left out. An archived room
+    /// keeps its (archived) sessions; a live one shows only live ones.
+    static func members(_ room: AgentRoom, in sessions: [AgentSession]) -> [AgentSession] {
+        sessions.filter {
+            $0.roomID == room.id && !$0.isSwitchboard && !$0.isDeleted && (room.isArchived || !$0.isArchived)
+        }
+    }
+
+    static func switchboard(of room: AgentRoom, in sessions: [AgentSession]) -> AgentSession? {
+        sessions.first { $0.isSwitchboard && $0.roomID == room.id && !$0.isDeleted }
+    }
+
+    /// "1 need you · 2 working", or how many sessions are in it.
+    @MainActor
+    static func summary(_ room: AgentRoom, _ sessions: [AgentSession], in model: SessionListModel) -> String {
+        let list = members(room, in: sessions)
+        guard !list.isEmpty else {
+            return NSLocalizedString("Empty — drag sessions here", comment: "room row")
+        }
+        let active = SwitchboardGate.summary(list, in: model)
+        if active != NSLocalizedString("Keeps track of your sessions", comment: "switchboard summary") { return active }
+        return list.count == 1
+            ? NSLocalizedString("1 session", comment: "room row")
+            : String(format: NSLocalizedString("%d sessions", comment: "room row"), list.count)
+    }
+
+    /// The most pressing state among the room's sessions, for its dot.
+    @MainActor
+    static func dot(_ room: AgentRoom, _ sessions: [AgentSession], in model: SessionListModel) -> AgentStatus? {
+        let buckets = members(room, in: sessions).map { SessionHome.bucket(for: $0, in: model) }
+        if buckets.contains(.needsYou) { return .needsInput }
+        if buckets.contains(.working) { return .working }
+        if buckets.contains(.idle) { return .done }
+        return nil
+    }
+}
+
 // MARK: - Switchboard visibility
 
 /// When the Switchboard earns a place in the list. It is a session like any
@@ -1029,8 +1236,9 @@ enum SwitchboardGate {
         }.count
     }
 
+    /// The global Switchboard — the one that isn't a room's.
     static func switchboard(in sessions: [AgentSession]) -> AgentSession? {
-        sessions.first { $0.isSwitchboard && !$0.isDeleted }
+        sessions.first { $0.isSwitchboard && !$0.isDeleted && $0.roomID == nil }
     }
 
     @MainActor
@@ -1323,6 +1531,104 @@ struct SwitchboardRowView: View {
     }
 }
 
+/// A room in the session list: a colored tile, its name and what its
+/// sessions are up to; a caret folds its members away.
+struct RoomRowView: View {
+    let room: AgentRoom
+    let summary: String
+    let dot: AgentStatus?
+    let folded: Bool
+    let hasMembers: Bool
+    let selected: Bool
+    let dropTargeted: Bool
+    let onSelect: () -> Void
+    let onFold: () -> Void
+    @State private var hovering = false
+
+    static func colorName(_ hex: String) -> String {
+        switch hex {
+        case "#6366F1": return NSLocalizedString("Indigo", comment: "room color")
+        case "#10B981": return NSLocalizedString("Green", comment: "room color")
+        case "#F59E0B": return NSLocalizedString("Amber", comment: "room color")
+        case "#EC4899": return NSLocalizedString("Pink", comment: "room color")
+        case "#06B6D4": return NSLocalizedString("Cyan", comment: "room color")
+        case "#8B5CF6": return NSLocalizedString("Violet", comment: "room color")
+        case "#EF4444": return NSLocalizedString("Red", comment: "room color")
+        case "#84CC16": return NSLocalizedString("Lime", comment: "room color")
+        default: return hex
+        }
+    }
+
+    var body: some View {
+        let tint = Color(hex: room.colorHex)
+        HStack(spacing: 9) {
+            ZStack(alignment: .bottomTrailing) {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(tint.gradient)
+                    .frame(width: 26, height: 26)
+                    .overlay(Image(systemName: "square.grid.2x2.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white))
+                if let dot {
+                    Circle()
+                        .fill(dot == .needsInput ? SessionBucket.needsYou.tint
+                              : dot == .working ? SessionBucket.working.tint
+                              : SessionBucket.idle.tint)
+                        .frame(width: 7, height: 7)
+                        .overlay(Circle().stroke(Color.primary.opacity(0.15), lineWidth: 0.5))
+                        .offset(x: 2, y: 2)
+                }
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(room.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                Text(summary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Spacer(minLength: 0)
+            if hasMembers {
+                Button(action: onFold) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .rotationEffect(.degrees(folded ? 0 : 90))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .opacity(hovering || folded ? 1 : 0.35)
+            }
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 8)
+        .frame(height: 44)
+        .background(RoundedRectangle(cornerRadius: 7)
+            .fill(selected ? Color.acSelection
+                           : (hovering ? Color.primary.opacity(0.04) : .clear)))
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 7).strokeBorder(tint, lineWidth: 2)
+            }
+        }
+        .overlay(alignment: .leading) {
+            if selected {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(tint)
+                    .frame(width: 3)
+                    .padding(.vertical, 9)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { hovering = $0 }
+        .help(NSLocalizedString("Open the room: all its sessions side by side, with its own Switchboard", comment: "room row"))
+    }
+}
+
 /// The session list: one "Sessions" section holding every session — what
 /// needs you first, then working, ready, asleep, ended, and last the ones
 /// whose machine or folder is gone — and, under it, an "Archived" fold for
@@ -1335,7 +1641,23 @@ struct SessionSectionsView: View {
     let onSelect: (UUID) -> Void
     /// What a row's context menu can do (archive, end, delete).
     var actions = SessionStageActions()
+    /// The rooms, shown above the loose sessions (host window only).
+    var rooms: [AgentRoom] = []
     @AppStorage("sessions.listExpanded") private var expanded = true
+    /// Rooms folded in the sidebar (their members hidden).
+    @State private var foldedRooms: Set<UUID> = []
+    /// The room a drag hovers.
+    @State private var dropRoom: UUID?
+    /// The session a drag hovers (dropping groups the two into a room).
+    @State private var dropSession: UUID?
+    /// The room naming sheet: new (with an optional session to move in) or rename.
+    @State private var roomSheet: RoomSheet?
+
+    private struct RoomSheet: Identifiable {
+        let id = UUID()
+        var renaming: AgentRoom?
+        var withSession: UUID?
+    }
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
     /// The session a "New worktree…" sheet is open for.
     @State private var worktreeFor: AgentSession?
@@ -1358,7 +1680,19 @@ struct SessionSectionsView: View {
     }
 
     private var sessions: [AgentSession] { SessionHome.orderedAll(matching, in: model) }
-    private var archived: [AgentSession] { SessionHome.archived(matching) }
+    private var roomIDs: Set<UUID> { Set(activeRooms.map(\.id)) }
+    /// Sessions in no (existing) room.
+    private func loose(_ list: [AgentSession]) -> [AgentSession] {
+        let ids = roomIDs
+        return list.filter { $0.roomID.map { !ids.contains($0) } ?? true }
+    }
+    /// Put-away sessions — those of an archived room show under its row.
+    private var archived: [AgentSession] {
+        let ids = Set(archivedRooms.map(\.id))
+        return SessionHome.archived(matching).filter { $0.roomID.map { !ids.contains($0) } ?? true }
+    }
+    private var activeRooms: [AgentRoom] { rooms.filter { !$0.isArchived } }
+    private var archivedRooms: [AgentRoom] { rooms.filter(\.isArchived) }
 
     private func workspaceName(_ id: UUID) -> String {
         model.profileRows.first { $0.id == id }?.name ?? ""
@@ -1385,12 +1719,14 @@ struct SessionSectionsView: View {
                     switchboardRow
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
-                if list.isEmpty { emptyHint }
-                ForEach(Self.nested(list), id: \.session.id) { row($0.session, depth: $0.depth) }
+                if list.isEmpty && activeRooms.isEmpty { emptyHint }
+                ForEach(activeRooms) { roomBlock($0, list) }
+                ForEach(Self.nested(loose(list)), id: \.session.id) { row($0.session, depth: $0.depth) }
             }
 
             let put = archived
-            if !put.isEmpty {
+            let putRooms = archivedRooms
+            if !put.isEmpty || !putRooms.isEmpty {
                 // Put away, not gone: the fold opens on a click or a search
                 // — and once, by itself, when the selection moves into it
                 // (see `revealSelectedArchived`), so the caret still folds
@@ -1398,10 +1734,11 @@ struct SessionSectionsView: View {
                 let openArchived = archivedExpanded || !filter.isEmpty
                 SidebarSectionHeader(title: NSLocalizedString("Archived", comment: "sidebar section"),
                                      expanded: openArchived,
-                                     count: put.count,
+                                     count: put.count + putRooms.count,
                                      help: NSLocalizedString("Conversations you put away — still readable, back with one message", comment: "sidebar"),
                                      onTitle: { withAnimation(.easeInOut(duration: 0.15)) { archivedExpanded.toggle() } })
                 if openArchived {
+                    ForEach(putRooms) { roomBlock($0, SessionHome.archived(matching)) }
                     ForEach(put) { row($0) }
                 }
             }
@@ -1410,6 +1747,18 @@ struct SessionSectionsView: View {
         .onChange(of: model.selectedSessionID) { _, id in revealSelectedArchived(id) }
         .sheet(item: $nicknameFor) { s in
             NicknameSheet(session: s) { actions.setNickname(s.id, $0) }
+        }
+        .sheet(item: $roomSheet) { sheet in
+            if let r = sheet.renaming {
+                RoomNameSheet(title: NSLocalizedString("Rename Room", comment: "room sheet"),
+                              action: NSLocalizedString("Rename", comment: "room sheet"),
+                              initial: r.name) { actions.renameRoom(r.id, $0) }
+            } else {
+                RoomNameSheet(title: NSLocalizedString("New Room", comment: "room sheet"),
+                              action: NSLocalizedString("Create", comment: "room sheet")) {
+                    actions.newRoom($0, sheet.withSession)
+                }
+            }
         }
         .sheet(item: $worktreeFor) { parent in
             NewWorktreeSheet(parent: parent) { name, tool, message in
@@ -1457,6 +1806,23 @@ struct SessionSectionsView: View {
             depth: depth,
             selected: model.selectedSessionID == s.id,
             onSelect: { onSelect(s.id) })
+        .overlay {
+            if dropSession == s.id {
+                RoundedRectangle(cornerRadius: 7).strokeBorder(Color.accentColor, lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .draggable(s.id.uuidString)
+        .dropDestination(for: String.self) { items, _ in
+            // Another session dropped on this one: the two share a room
+            // (this one's, or a new one).
+            let ids = items.compactMap(UUID.init(uuidString:)).filter { $0 != s.id }
+            guard !gone, !s.isArchived, !ids.isEmpty else { return false }
+            for id in ids { actions.groupSessions(id, s.id) }
+            return true
+        } isTargeted: { inside in
+            dropSession = inside ? s.id : (dropSession == s.id ? nil : dropSession)
+        }
         .contextMenu {
             // The header's ⋯ menu, one right-click away — minus Rename,
             // which is the title itself.
@@ -1478,6 +1844,7 @@ struct SessionSectionsView: View {
                 if SessionHome.hasFolder(s) {
                     Button(NSLocalizedString("New worktree…", comment: "session menu")) { worktreeFor = s }
                 }
+                if !s.isArchived { roomMenu(s) }
             } else if s.isArchived {
                 Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
             }
@@ -1498,6 +1865,82 @@ struct SessionSectionsView: View {
             started: c != nil,
             selected: c.map { model.selectedSessionID == $0.id } ?? false,
             onSelect: actions.openSwitchboard)
+    }
+
+    // MARK: Rooms
+
+    /// "Move to Room" for a session's context menu.
+    @ViewBuilder
+    private func roomMenu(_ s: AgentSession) -> some View {
+        Menu(NSLocalizedString("Move to Room", comment: "session menu")) {
+            ForEach(activeRooms) { r in
+                Button(r.name) { actions.moveToRoom(s.id, r.id) }
+                    .disabled(s.roomID == r.id)
+            }
+            if !activeRooms.isEmpty { Divider() }
+            Button(NSLocalizedString("New Room…", comment: "session menu")) {
+                roomSheet = RoomSheet(withSession: s.id)
+            }
+        }
+        if let rid = s.roomID, roomIDs.contains(rid) {
+            Button(NSLocalizedString("Remove from Room", comment: "session menu")) { actions.moveToRoom(s.id, nil) }
+        }
+    }
+
+    /// A room: its row (click → the room's grid), then its members nested
+    /// under it unless folded. Sessions dropped on it move in.
+    @ViewBuilder
+    private func roomBlock(_ r: AgentRoom, _ list: [AgentSession]) -> some View {
+        let members = list.filter { $0.roomID == r.id }
+        let folded = foldedRooms.contains(r.id) && filter.isEmpty
+        RoomRowView(
+            room: r,
+            summary: RoomTally.summary(r, store.sessions, in: model),
+            dot: RoomTally.dot(r, store.sessions, in: model),
+            folded: folded,
+            hasMembers: !members.isEmpty,
+            selected: model.selectedRoomID == r.id,
+            dropTargeted: dropRoom == r.id,
+            onSelect: { actions.openRoom(r.id) },
+            onFold: {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    if foldedRooms.contains(r.id) { foldedRooms.remove(r.id) } else { foldedRooms.insert(r.id) }
+                }
+            })
+        .dropDestination(for: String.self) { items, _ in
+            let ids = items.compactMap(UUID.init(uuidString:))
+            for id in ids { actions.moveToRoom(id, r.id) }
+            return !ids.isEmpty
+        } isTargeted: { inside in
+            dropRoom = inside ? r.id : (dropRoom == r.id ? nil : dropRoom)
+        }
+        .contextMenu {
+            Button(NSLocalizedString("New Session in Room", comment: "room menu")) { actions.newSessionInRoom(r.id) }
+            Divider()
+            Button(NSLocalizedString("Rename…", comment: "room menu")) { roomSheet = RoomSheet(renaming: r) }
+            Menu(NSLocalizedString("Color", comment: "room menu")) {
+                ForEach(AgentRoom.palette, id: \.self) { hex in
+                    Button {
+                        actions.setRoomColor(r.id, hex)
+                    } label: {
+                        Label(RoomRowView.colorName(hex),
+                              systemImage: r.colorHex == hex ? "checkmark.circle.fill" : "circle.fill")
+                    }
+                }
+            }
+            Divider()
+            if r.isArchived {
+                Button(NSLocalizedString("Unarchive Room", comment: "room menu")) { actions.unarchiveRoom(r.id) }
+            } else {
+                Button(NSLocalizedString("Archive Room", comment: "room menu")) { actions.archiveRoom(r.id) }
+            }
+            Button(NSLocalizedString("Ungroup Room", comment: "room menu")) { actions.ungroupRoom(r.id) }
+            Divider()
+            Button(NSLocalizedString("Delete Room…", comment: "room menu"), role: .destructive) { actions.deleteRoom(r.id) }
+        }
+        if !folded {
+            ForEach(Self.nested(members), id: \.session.id) { row($0.session, depth: $0.depth + 1) }
+        }
     }
 
     private var emptyHint: some View {

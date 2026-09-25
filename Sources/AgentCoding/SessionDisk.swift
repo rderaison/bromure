@@ -395,7 +395,6 @@ public final class SessionDisk {
     /// old node, so host writes silently land where the guest can't
     /// see them — wedging the post-reboot kitty on a black screen.
     /// See `clearContents`.
-    @MainActor
     /// The guest's cooperative HTTP proxy (bromure-agentd's vm-bridge
     /// listener). 65534: out of the way of anything people run (8080 was
     /// forever colliding with dev servers and containers) and above the
@@ -423,6 +422,7 @@ public final class SessionDisk {
         return Self.legacyGuestProxyPort
     }
 
+    @MainActor
     public func prepareMetadataShare(forRestore: Bool = false) throws -> URL {
         let tmp = store.profileDirectory(for: profile)
             .appendingPathComponent("meta-share", isDirectory: true)

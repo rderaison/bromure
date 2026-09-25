@@ -212,6 +212,78 @@ struct SessionStageActions {
     var showMachine: (UUID) -> Void = { _ in }
     /// Put the Switchboard on stage — starting it first when there's none.
     var openSwitchboard: () -> Void = {}
+
+    // Rooms
+    /// Put a room on stage: its sessions' grid + its Switchboard.
+    var openRoom: (UUID) -> Void = { _ in }
+    /// Create a room (named), optionally moving a session into it.
+    var newRoom: (String, UUID?) -> Void = { _, _ in }
+    /// Move a session into a room, or out of any (nil).
+    var moveToRoom: (UUID, UUID?) -> Void = { _, _ in }
+    var renameRoom: (UUID, String) -> Void = { _, _ in }
+    var setRoomColor: (UUID, String) -> Void = { _, _ in }
+    /// Delete the room and every session in it (after a word).
+    var deleteRoom: (UUID) -> Void = { _ in }
+    /// Archive the room with all its sessions; bring it back.
+    var archiveRoom: (UUID) -> Void = { _ in }
+    var unarchiveRoom: (UUID) -> Void = { _ in }
+    /// Dissolve the room: its sessions go back to the list.
+    var ungroupRoom: (UUID) -> Void = { _ in }
+    var newSessionInRoom: (UUID) -> Void = { _ in }
+    /// One session dropped on another: into the other's room, or a new
+    /// room holding both. (dragged, onto)
+    var groupSessions: (UUID, UUID) -> Void = { _, _ in }
+}
+
+/// Name a new room, or rename one.
+struct RoomNameSheet: View {
+    let title: String
+    let action: String
+    let onSet: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @FocusState private var focused: Bool
+
+    init(title: String, action: String, initial: String = "", onSet: @escaping (String) -> Void) {
+        self.title = title
+        self.action = action
+        self.onSet = onSet
+        _name = State(initialValue: initial)
+    }
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 15, weight: .semibold))
+                Text(NSLocalizedString("A room groups sessions that work on the same thing. Its own Switchboard keeps track of them — and only them.", comment: "room sheet"))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            TextField(NSLocalizedString("e.g. Payments v2", comment: "room sheet"), text: $name)
+                .textFieldStyle(.roundedBorder)
+                .focused($focused)
+                .onSubmit { save() }
+            HStack {
+                Spacer()
+                Button(NSLocalizedString("Cancel", comment: "")) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(action) { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmed.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+        .onAppear { focused = true }
+    }
+
+    private func save() {
+        guard !trimmed.isEmpty else { return }
+        onSet(trimmed)
+        dismiss()
+    }
 }
 
 // MARK: - Small chrome

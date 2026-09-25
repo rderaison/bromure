@@ -34,6 +34,10 @@ struct HostMirrorScreen: View {
     /// session pushes its stage; "+" presents the new-session composer and
     /// the session it started opens once the sheet is down.
     @State private var openSessionID: UUID?
+    /// A room pushed (its tabs of sessions + Switchboard).
+    @State private var openRoomID: UUID?
+    /// The room a new session is being started in (nil = none).
+    @State private var newSessionRoom: UUID?
     @State private var newSession = false
     @State private var pendingSessionID: UUID?
     #if DEBUG
@@ -64,7 +68,8 @@ struct HostMirrorScreen: View {
     #if DEBUG
     /// Headless screenshot runs (no taps on a simulator without Simulator.app):
     /// `BROMURE_DEBUG_OPEN_SESSION=<id>` pushes that session once the mirror
-    /// reports it; `BROMURE_DEBUG_NEW_SESSION=1` presents the composer.
+    /// reports it; `BROMURE_DEBUG_OPEN_ROOM=<id>` a room;
+    /// `BROMURE_DEBUG_NEW_SESSION=1` presents the composer.
     private func debugRoute() {
         guard !didDebugRoute, controller.supportsSessions else { return }
         let env = ProcessInfo.processInfo.environment
@@ -72,6 +77,10 @@ struct HostMirrorScreen: View {
            controller.sessionStore.session(id) != nil {
             didDebugRoute = true
             openSessionID = id
+        } else if let id = env["BROMURE_DEBUG_OPEN_ROOM"].flatMap(UUID.init(uuidString:)),
+                  controller.roomStore.room(id) != nil {
+            didDebugRoute = true
+            openRoomID = id
         } else if env["BROMURE_DEBUG_NEW_SESSION"] == "1" {
             didDebugRoute = true
             newSession = true
@@ -87,7 +96,9 @@ struct HostMirrorScreen: View {
                 if controller.supportsSessions {
                     MobileSessionsSection(controller: controller,
                                           onSelect: { openSessionID = $0 },
-                                          onNew: { newSession = true })
+                                          onNew: { newSessionRoom = nil; newSession = true },
+                                          onSelectRoom: { openRoomID = $0 },
+                                          onNewInRoom: { newSessionRoom = $0; newSession = true })
                 }
 
                 boardsRow
@@ -134,13 +145,25 @@ struct HostMirrorScreen: View {
                                 onForget: { openSessionID = nil },
                                 onOpen: { openSessionID = $0 })
         }
+        .navigationDestination(item: $openRoomID) { id in
+            MobileRoomScreen(controller: controller, roomID: id,
+                             onOpenSession: { openSessionID = $0 },
+                             onNewSession: { newSessionRoom = $0; newSession = true },
+                             onGone: { openRoomID = nil })
+        }
         .sheet(isPresented: $newSession, onDismiss: {
-            if let id = pendingSessionID { pendingSessionID = nil; openSessionID = id }
+            // A session started from a room shows up in the room already.
+            if let id = pendingSessionID {
+                pendingSessionID = nil
+                if newSessionRoom == nil { openSessionID = id }
+            }
+            newSessionRoom = nil
         }) {
             NavigationStack {
                 MobileNewSessionScreen(controller: controller,
                                        onStarted: { id in pendingSessionID = id; newSession = false },
-                                       onCancel: { newSession = false })
+                                       onCancel: { newSession = false },
+                                       room: newSessionRoom)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
                             Button("Cancel") { newSession = false }

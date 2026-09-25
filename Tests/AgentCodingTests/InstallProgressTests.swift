@@ -146,7 +146,7 @@ struct BrowserInstallProgressTests {
         m.noteBrowserHostProgress("Downloading initrd (9 MB)…")
         #expect(abs(m.progress - 0.73) < 0.005)
 
-        m.noteBrowserHostProgress("Downloading Alpine netboot installer…")
+        m.noteBrowserHostProgress("Customizing the image: downloading tools…")
         #expect(abs(m.progress - 0.78) < 0.005)
 
         // Anchors the guest-narrated tail at 0.78 (span 0.21).
@@ -184,7 +184,7 @@ struct BrowserInstallProgressTests {
         let m = InitProgressModel()
         m.reset()
         m.narrateBrowserGuestLog = true
-        m.noteBrowserHostProgress("Downloading Alpine netboot installer…")
+        m.noteBrowserHostProgress("Customizing the image: downloading tools…")
         m.noteBrowserHostProgress("Personalizing image (fonts, keyboard, locale)…")
         m.appendLog("[browser-postinstall] copied 88 macOS font files\n")
         #expect(m.progress > 0.78)
@@ -199,7 +199,7 @@ struct BrowserInstallProgressTests {
         let m = InitProgressModel()
         m.reset()
         m.narrateBrowserGuestLog = true
-        m.noteBrowserHostProgress("Downloading Alpine netboot installer…")
+        m.noteBrowserHostProgress("Customizing the image: downloading tools…")
         let before = m.progress
         let status = m.status
         m.appendLog("random apk output line\nfetch https://dl-cdn.alpinelinux.org/x.apk\n")

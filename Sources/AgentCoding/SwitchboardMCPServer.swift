@@ -191,7 +191,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
         }
         let iso = ISO8601DateFormatter()
         func session(_ key: String = "session") -> AgentSession? {
-            (args[key] as? String).flatMap(engine.resolve)
+            (args[key] as? String).flatMap { engine.resolve($0, for: me) }
         }
         func unknown() -> [String: Any] {
             errorResult("No such session “\(args["session"] as? String ?? "")” — see list_sessions.")
@@ -232,7 +232,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
                 let all = (args["include_ended"] as? Bool) ?? false
                 let handles = engine.handles()
                 let list = engine.sessions.sessions
-                    .filter { !$0.isSwitchboard && !$0.isDeleted }
+                    .filter { !$0.isSwitchboard && !$0.isDeleted && engine.inScope($0, of: me) }
                     .filter { s in
                         all || (!s.isArchived && ["needs_you", "working", "ready"].contains(state(s)))
                     }
@@ -258,9 +258,18 @@ final class SwitchboardMCPServer: MCPLineHandler {
                     out.append(o)
                 }
                 let hidden = all ? 0 : engine.sessions.sessions
-                    .filter { !$0.isSwitchboard && !$0.isDeleted }.count - list.count
-                engine.markAllSeen()
+                    .filter { !$0.isSwitchboard && !$0.isDeleted && engine.inScope($0, of: me) }.count - list.count
+                engine.markAllSeen(for: me)
                 var res: [String: Any] = ["sessions": out]
+                if let room = me.roomID {
+                    res["room"] = engine.roomName(room) ?? ""
+                    let outside = engine.sessions.sessions.filter {
+                        !$0.isSwitchboard && !$0.isDeleted && !$0.isArchived && !engine.inScope($0, of: me)
+                    }.count
+                    if outside > 0 {
+                        res["outside_room"] = "\(outside) other session(s) outside this room — reach one only when the user names it"
+                    }
+                }
                 if hidden > 0 { res["not_shown"] = "\(hidden) asleep, ended or archived — include_ended: true lists them" }
                 return textResult(jsonString(res))
 
@@ -288,7 +297,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
 
             case "next_events":
                 let t = TimeInterval((args["timeout_seconds"] as? Int) ?? 0)
-                let got = await engine.nextEvents(after: args["cursor"] as? Int, timeout: t)
+                let got = await engine.nextEvents(for: me, after: args["cursor"] as? Int, timeout: t)
                 guard !got.isEmpty else { return textResult("Nothing new.") }
                 let handles = engine.handles()
                 return textResult(jsonString(["events": got.map { e -> [String: Any] in
@@ -302,7 +311,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
                 guard let s = session() else { return unknown() }
                 guard let text = args["text"] as? String else { return errorResult("text is required") }
                 if engine.bucket(s) == .needsYou,
-                   let why = await engine.verifyProvenance(args["on_behalf_of"] as? String) {
+                   let why = await engine.verifyProvenance(args["on_behalf_of"] as? String, for: me) {
                     return errorResult("\(engine.label(s)) is waiting on the user, so this is answering it. " + why)
                 }
                 try await engine.send(s, text)
@@ -310,7 +319,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
 
             case "answer_question":
                 guard let s = session() else { return unknown() }
-                if let why = await engine.verifyProvenance(args["on_behalf_of"] as? String) { return errorResult(why) }
+                if let why = await engine.verifyProvenance(args["on_behalf_of"] as? String, for: me) { return errorResult(why) }
                 if let n = args["option"] as? Int {
                     guard (1...9).contains(n) else { return errorResult("option must be 1–9") }
                     try await engine.press(s, [String(n)])
@@ -323,7 +332,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
 
             case "press_keys":
                 guard let s = session() else { return unknown() }
-                if let why = await engine.verifyProvenance(args["on_behalf_of"] as? String) { return errorResult(why) }
+                if let why = await engine.verifyProvenance(args["on_behalf_of"] as? String, for: me) { return errorResult(why) }
                 try await engine.press(s, (args["keys"] as? [String]) ?? [])
                 return textResult(jsonString(await screenAfter(s)))
 
@@ -340,7 +349,8 @@ final class SwitchboardMCPServer: MCPLineHandler {
                     cwd: (args["folder"] as? String) ?? "~",
                     openingMessage: message,
                     title: (args["title"] as? String).map { $0.trimmingCharacters(in: .whitespaces) }
-                        .flatMap { $0.isEmpty ? nil : $0 }))
+                        .flatMap { $0.isEmpty ? nil : $0 },
+                    roomID: me.roomID))   // a room's Switchboard starts sessions in its room
                 engine.markTouched(id)
                 return textResult(jsonString([
                     "started": true, "handle": engine.handles()[id] ?? "",
@@ -355,7 +365,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
 
             case "archive_session":
                 guard let s = session() else { return unknown() }
-                if let why = await engine.verifyProvenance(args["on_behalf_of"] as? String) { return errorResult(why) }
+                if let why = await engine.verifyProvenance(args["on_behalf_of"] as? String, for: me) { return errorResult(why) }
                 engine.sessionEngine.archive(s.id)
                 return textResult("Archived \(engine.label(s)).")
 

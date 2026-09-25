@@ -164,8 +164,9 @@ struct TranscriptHistoryTests {
         #expect(try pinned(path + "\n%5 \n") == path)
         // Written from the tab that held index 3 before: not this tab's.
         #expect(try pinned(path + "\n%4 \n") == "")
-        // An older reporter's one-line record: taken as before.
-        #expect(try pinned(path) == path)
+        // An unstamped one-line record predates the stamp — an earlier
+        // life of the index, left on /home: ignored.
+        #expect(try pinned(path) == "")
         #expect(try pinned(nil) == "")
     }
 }

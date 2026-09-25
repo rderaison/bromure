@@ -105,35 +105,7 @@ extension BeautifiedTranscriptProvider {
     func fetchTranscript(known: TranscriptCursor?, mode: TranscriptFetchMode,
                          agent: String?) async -> TranscriptFetch? {
         guard let idx = activeTabIndex() else { return nil }
-        let meta = await execGuest(
-            "i=\(idx); "
-            + "cwd=$(tmux display-message -p -t bromure:$i '#{pane_current_path}' 2>/dev/null); "
-            + "tty=$(tmux display-message -p -t bromure:$i '#{pane_tty}' 2>/dev/null); "
-            // The foreground process — but never the tab's SHELL: an agent
-            // launched by the managed .bashrc shares bash's foreground group,
-            // so bash reads as "+" too (and first, by pid). Its start time is
-            // the tab's, not the agent's, and its args carry no resume flag —
-            // a `--continue` relaunched in a fresh tab was floored out. Take
-            // the first "+" process that isn't a shell; a shell only if
-            // nothing else is in the foreground. Still the FIRST such process
-            // (pid order), so a short-lived tool child of the agent doesn't
-            // win either.
-            + "pid=$(ps -t \"${tty#/dev/}\" -o pid=,stat=,args= 2>/dev/null | awk '"
-            + "$2 ~ /\\+/ { if (first == \"\") first = $1; "
-            + "if (!found && $3 !~ /(^|\\/)-?(bash|sh|zsh|dash|fish|login)$/) { print $1; found = 1 } } "
-            + "END { if (!found) print first }'); "
-            + "et=$(ps -o etimes= -p \"$pid\" 2>/dev/null | tr -d ' '); "
-            + "if [ -n \"$et\" ]; then s=$(( $(date +%s) - et )); else s=0; fi; "
-            // Resuming reattaches an older transcript → don't floor it out. Match
-            // only the long flags: the args string also contains the (free-text)
-            // prompt, so short flags / bare words like `-c` or `resume` there
-            // would false-positive and resurrect a stale session on a FRESH run.
-            + "a=$(ps -ww -o args= -p \"$pid\" 2>/dev/null); "
-            + "case \"$a\" in "
-            + "*--resume*|*--continue*|*--restore*) s=0;; "
-            + "esac; "
-            + "printf '%s\\n%s\\n' \"$cwd\" \"$s\"",
-            timeout: 8)
+        let meta = await execGuest(AgentSessionLocator.floorProbeCommand(window: idx), timeout: 8)
         let lines = (meta ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard lines.count >= 2 else { return nil }
         let cwd = lines[0].trimmingCharacters(in: .whitespaces)
@@ -1424,6 +1396,12 @@ final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
 /// `SessionPane.updateNativeTerminalMount()` when the view mode is `.beautified`.
 struct BeautifiedSessionView: View {
     @ObservedObject var model: BeautifiedSessionModel
+    /// Which parts to draw. A room's grid shows transcripts only and one
+    /// composer below, addressed to the Switchboard or the focused cell.
+    enum Parts { case all, transcript, composer }
+    var parts: Parts = .all
+    /// Overrides "Message <agent>…" (a room's composer names its target).
+    var placeholder: String? = nil
     @State private var dropTargeted = false
     /// Keyboard highlight in the "/" palette.
     @State private var paletteIndex = 0
@@ -1519,6 +1497,38 @@ struct BeautifiedSessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if parts != .composer { transcriptParts }
+            if parts != .transcript { composerParts }
+        }
+        .animation(.easeOut(duration: 0.15), value: paletteVisible)
+        .onChange(of: paletteQuery) { _, _ in paletteIndex = 0 }
+        // A chat surface, not a terminal: opaque so it never picks up the
+        // window's terminal-translucency (which reads as a gray scrim here).
+        // The canvas tone — the composer card is the white thing on it.
+        .background(Color.platformWindowBackground)
+        // Drop images or text-based files anywhere in the window → staged in
+        // the guest and handed to the agent (the same thing the TUI does).
+        .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
+            parts == .transcript ? false : handleDrop(providers)
+        }
+        .overlay {
+            if dropTargeted {
+                ZStack {
+                    Color.accentColor.opacity(0.08)
+                    VStack(spacing: 8) {
+                        Image(systemName: "arrow.down.doc").font(.system(size: 30))
+                        Text(NSLocalizedString("Drop to attach", comment: "drop hint"))
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                }
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var transcriptParts: some View {
             transcript
             // omp keeps its TODO pinned at the bottom at all times; the inline
             // card otherwise scrolls up out of view (the transcript auto-sticks
@@ -1534,6 +1544,10 @@ struct BeautifiedSessionView: View {
                                 open: { model.openSession?($0) },
                                 answer: model.answerDelegation)
             }
+    }
+
+    @ViewBuilder
+    private var composerParts: some View {
             if paletteVisible {
                 SlashCommandPalette(
                     commands: paletteCommands,
@@ -1561,10 +1575,10 @@ struct BeautifiedSessionView: View {
                     .padding(.top, 8)
             }
             ChatComposer(
-                placeholder: model.agentDisplayName.isEmpty
+                placeholder: placeholder ?? (model.agentDisplayName.isEmpty
                     ? NSLocalizedString("Message the agent…  (or drop files)", comment: "beautified composer")
                     : String(format: NSLocalizedString("Message %@…  (or drop files)", comment: "beautified composer"),
-                             model.agentDisplayName),
+                             model.agentDisplayName)),
                 text: $model.composerText,
                 autofocus: true,
                 busy: model.sending,
@@ -1576,32 +1590,6 @@ struct BeautifiedSessionView: View {
                 onSend: { model.send() })
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-        }
-        .animation(.easeOut(duration: 0.15), value: paletteVisible)
-        .onChange(of: paletteQuery) { _, _ in paletteIndex = 0 }
-        // A chat surface, not a terminal: opaque so it never picks up the
-        // window's terminal-translucency (which reads as a gray scrim here).
-        // The canvas tone — the composer card is the white thing on it.
-        .background(Color.platformWindowBackground)
-        // Drop images or text-based files anywhere in the window → staged in
-        // the guest and handed to the agent (the same thing the TUI does).
-        .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
-            handleDrop(providers)
-        }
-        .overlay {
-            if dropTargeted {
-                ZStack {
-                    Color.accentColor.opacity(0.08)
-                    VStack(spacing: 8) {
-                        Image(systemName: "arrow.down.doc").font(.system(size: 30))
-                        Text(NSLocalizedString("Drop to attach", comment: "drop hint"))
-                            .font(.system(size: 13, weight: .medium))
-                    }
-                    .foregroundStyle(Color.accentColor)
-                }
-                .allowsHitTesting(false)
-            }
-        }
     }
 
     @ViewBuilder
