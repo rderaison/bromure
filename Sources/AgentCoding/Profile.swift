@@ -3747,6 +3747,15 @@ public final class ProfileStore {
     /// captured at app startup — passed in so we use a stable value across
     /// the session (Terminal.app prefs may change while AC is running).
     ///
+    /// The npm packages of the coding-agent CLIs baked into the image —
+    /// the ones whose install scripts the guest's npm may run.
+    static let agentCLIPackages = [
+        "@anthropic-ai/claude-code",
+        "@openai/codex",
+        "@moonshot-ai/kimi-code",
+        "@oh-my-pi/pi-coding-agent",
+    ]
+
     /// **Managed files** (.bashrc, .bash_profile, .profile, .npmrc,
     /// .config/kitty/kitty.conf) are **always overwritten** so changes to
     /// the agent-launch logic ship without any per-profile migration.
@@ -3803,6 +3812,13 @@ public final class ProfileStore {
         // the guest's PATH expects), but anything else the user configured —
         // scopes, registries, strict-ssl — is appended below it.
         var npmrc = "prefix=/home/ubuntu/.npm-global\n"
+        // npm 11.19+ runs install scripts only for packages on
+        // `allow-scripts`. The coding agents update themselves with a
+        // plain `npm install -g` into the prefix above; without their
+        // postinstall, Claude Code lands as a stub with no native binary
+        // ("claude native binary not installed") that shadows the working
+        // baked copy on PATH. Allow exactly the agent CLIs Bromure ships.
+        npmrc += Self.agentCLIPackages.map { "allow-scripts[]=\($0)\n" }.joined()
         if let f = profile.importedConfigFiles.first(where: { $0.path == ".npmrc" }),
            !f.contents.isEmpty {
             npmrc += "\n# --- imported from your Mac ---\n" + f.contents

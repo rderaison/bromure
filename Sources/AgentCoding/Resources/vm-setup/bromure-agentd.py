@@ -4604,6 +4604,29 @@ WantedBy=multi-user.target
 """
 
 
+def task_heal_agent_stubs():
+    """Drop a per-user Claude Code install that is only a stub.
+
+    npm 11.19+ skips install scripts not on `allow-scripts`, and Claude
+    Code's self-updater installs into ~/.npm-global with a plain
+    `npm install -g`: without its postinstall the package keeps a
+    ~500-byte placeholder instead of the native binary ("claude native
+    binary not installed"), and that copy shadows the working one baked
+    into /usr on PATH. The managed .npmrc now allows the agents' scripts;
+    this sweeps a stub left from before, so `claude` falls back to the
+    baked copy until the next (now working) update.
+    """
+    base = os.path.join(HOME, ".npm-global/lib/node_modules/@anthropic-ai/claude-code")
+    exe = os.path.join(base, "bin", "claude.exe")
+    if not os.path.isfile(exe) or os.path.getsize(exe) >= 1000000:
+        return
+    shutil.rmtree(base, ignore_errors=True)
+    link = os.path.join(HOME, ".npm-global/bin/claude")
+    if os.path.islink(link) or os.path.isfile(link):
+        os.unlink(link)
+    log("agent-stubs", "removed a stub Claude Code install from ~/.npm-global")
+
+
 def task_apply_hostname():
     """The workspace's hostname, from the meta share (hostname.txt). The
     host-written tty1 .bash_profile used to do this before the agent ran;
@@ -5105,6 +5128,7 @@ def main():
     # the tmux session): on ext4/migrate boots this mounts the real home.
     _run_once("home", task_home_setup)
     _run_once("folder-shares", task_folder_shares)
+    _run_once("agent-stubs", task_heal_agent_stubs)
     _run_once("session", create_session)
 
     # One-shot background jobs (fire-and-forget, not supervised).
