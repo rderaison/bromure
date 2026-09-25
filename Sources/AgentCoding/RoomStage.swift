@@ -295,6 +295,14 @@ struct RoomStageView: View {
 
     private var accent: Color { Color(hex: controller.room?.colorHex ?? "#6366F1") }
 
+    /// A change with every animation off (layout, page): the cells hold
+    /// live chats, far too heavy to animate.
+    static func instantly(_ change: () -> Void) {
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t, change)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -325,9 +333,9 @@ struct RoomStageView: View {
     /// ⌃Tab / ⌃⇧Tab walk the tabs.
     private var pageKeys: some View {
         ZStack {
-            Button("") { withAnimation(.snappy) { controller.show(page: controller.page + 1) } }
+            Button("") { RoomStageView.instantly { controller.show(page: controller.page + 1) } }
                 .keyboardShortcut(.tab, modifiers: .control)
-            Button("") { withAnimation(.snappy) { controller.show(page: controller.page - 1) } }
+            Button("") { RoomStageView.instantly { controller.show(page: controller.page - 1) } }
                 .keyboardShortcut(.tab, modifiers: [.control, .shift])
         }
         .opacity(0)
@@ -410,7 +418,9 @@ struct RoomStageView: View {
             ForEach(RoomLayout.all, id: \.self) { l in
                 let on = l == current
                 Button {
-                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { controller.setLayout(l) }
+                    // No animation: a spring re-laid every chat out on every
+                    // frame (both layouts at once) — seconds in a fat client.
+                    RoomStageView.instantly { controller.setLayout(l) }
                 } label: {
                     GridGlyph(cols: l.cols, rows: l.rows, on: on, accent: accent)
                         .frame(width: 26, height: 20)
@@ -440,7 +450,7 @@ struct RoomStageView: View {
                     ForEach(Array(pages.enumerated()), id: \.offset) { i, page in
                         RoomTab(page: page, index: i, single: single, selected: i == controller.page,
                                 model: controller.listModel, accent: accent) {
-                            withAnimation(.snappy(duration: 0.3)) { controller.show(page: i) }
+                            RoomStageView.instantly { controller.show(page: i) }
                         }
                         .id(i)
                     }
@@ -476,9 +486,6 @@ struct RoomStageView: View {
                 }
                 .padding(spacing)
                 .id(controller.page)
-                .transition(.asymmetric(
-                    insertion: .move(edge: controller.pageDirection > 0 ? .trailing : .leading).combined(with: .opacity),
-                    removal: .move(edge: controller.pageDirection > 0 ? .leading : .trailing).combined(with: .opacity)))
             }
         }
         .clipped()
