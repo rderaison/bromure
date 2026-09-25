@@ -1845,6 +1845,12 @@ struct SessionSectionsView: View {
                     Button(NSLocalizedString("New worktree…", comment: "session menu")) { worktreeFor = s }
                 }
                 if !s.isArchived { roomMenu(s) }
+                Divider()
+                Button(String(format: NSLocalizedString("“%@” Settings…", comment: "session menu: machine settings"),
+                              workspaceName(s.profileID))) { actions.editMachine(s.profileID) }
+                if s.windowIndex != nil, !s.hasEnded {
+                    Button(NSLocalizedString("Open in Linux Terminal", comment: "session menu")) { actions.openLinux(s.id) }
+                }
             } else if s.isArchived {
                 Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
             }

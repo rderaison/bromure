@@ -2572,3 +2572,7 @@
 "Couldn't upload the attachments" = "添付ファイルをアップロードできませんでした";
 "That's too much to attach at once" = "一度に添付するには多すぎます";
 "All machines" = "すべてのマシン";
+"“%@” Settings…" = "「%@」の設定…";
+"Open in Linux Terminal" = "Linux ターミナルで開く";
+"Machine Details" = "マシンの詳細";
+"The machine this session runs on — click for its details, right-click for its settings" = "このセッションが動作しているマシン — クリックで詳細、右クリックで設定";

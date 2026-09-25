@@ -1960,8 +1960,13 @@ struct RemoteToolbarBar: View {
     /// index): decides whether a terminal on stage offers the way back.
     var sessionForTab: (Profile.ID, Int) -> UUID? = { _, _ in nil }
 
+    /// The machine the bar acts on: with a session on stage, that
+    /// session's own machine (the gear then edits it, asleep or not) —
+    /// not whichever machine was selected last.
     private var entry: SessionListModel.VMEntry? {
-        model.entries.first { $0.id == model.selectedID }
+        let id = (model.sessionsFirst && model.selectedSessionID != nil)
+            ? (model.selectedSessionProfileID ?? model.selectedID) : model.selectedID
+        return model.entries.first { $0.id == id }
     }
     /// A session is on stage: the machine-level controls belong to the
     /// machine's own tabs.
@@ -3684,6 +3689,8 @@ final class RemoteHostWindow: NSWindow {
                     else { self.pendingSelectSessionID = id }
                 }
             },
+            editMachine: { [weak self] pid in self?.openWorkspaceSettings(pid) },
+            openLinux: { [weak self] sid in self?.showLinux(for: sid) },
             openRoom: { [weak self] id in self?.showRoom(id) },
             newRoom: { [weak self] name, sid in
                 self?.roomCommandThenShow(nil, "create",

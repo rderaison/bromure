@@ -2572,3 +2572,7 @@
 "Couldn't upload the attachments" = "无法上传附件";
 "That's too much to attach at once" = "一次附加的内容太多";
 "All machines" = "所有机器";
+"“%@” Settings…" = "“%@”设置…";
+"Open in Linux Terminal" = "在 Linux 终端中打开";
+"Machine Details" = "机器详情";
+"The machine this session runs on — click for its details, right-click for its settings" = "这个会话运行所在的机器——点按查看详情，右键点按打开设置";

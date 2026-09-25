@@ -2575,3 +2575,7 @@
 "Couldn't upload the attachments" = "無法上傳附件";
 "That's too much to attach at once" = "一次附加的內容太多";
 "All machines" = "所有機器";
+"“%@” Settings…" = "「%@」設定…";
+"Open in Linux Terminal" = "在 Linux 終端機中開啟";
+"Machine Details" = "機器詳細資訊";
+"The machine this session runs on — click for its details, right-click for its settings" = "這個工作階段執行所在的機器——點按查看詳細資訊，按右鍵開啟設定";

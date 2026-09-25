@@ -2607,3 +2607,7 @@
 "Couldn't upload the attachments" = "Couldn't upload the attachments";
 "That's too much to attach at once" = "That's too much to attach at once";
 "All machines" = "All machines";
+"“%@” Settings…" = "“%@” Settings…";
+"Open in Linux Terminal" = "Open in Linux Terminal";
+"Machine Details" = "Machine Details";
+"The machine this session runs on — click for its details, right-click for its settings" = "The machine this session runs on — click for its details, right-click for its settings";

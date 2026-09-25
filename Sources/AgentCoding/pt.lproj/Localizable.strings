@@ -2572,3 +2572,7 @@
 "Couldn't upload the attachments" = "Não foi possível enviar os anexos";
 "That's too much to attach at once" = "É demais para anexar de uma vez";
 "All machines" = "Todas as máquinas";
+"“%@” Settings…" = "Ajustes de “%@”…";
+"Open in Linux Terminal" = "Abrir no terminal Linux";
+"Machine Details" = "Detalhes da máquina";
+"The machine this session runs on — click for its details, right-click for its settings" = "A máquina em que esta sessão roda — clique para ver os detalhes, clique com o botão direito para os ajustes";

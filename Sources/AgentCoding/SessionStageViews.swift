@@ -213,6 +213,12 @@ struct SessionStageActions {
     /// Put the Switchboard on stage — starting it first when there's none.
     var openSwitchboard: () -> Void = {}
 
+    /// The machine's settings (the workspace editor), by profile id — from
+    /// a session's right-click, its ⋯ menu, its sidebar row.
+    var editMachine: (UUID) -> Void = { _ in }
+    /// The session's Linux terminal (its tmux tab), by session id.
+    var openLinux: (UUID) -> Void = { _ in }
+
     // Rooms
     /// Put a room on stage: its sessions' grid + its Switchboard.
     var openRoom: (UUID) -> Void = { _ in }
@@ -364,6 +370,32 @@ struct SessionHeaderView: View {
         model.profileRows.first { $0.id == id }?.accentHex ?? "#888888"
     }
 
+    /// The machine behind the session: its settings, its terminal, its
+    /// dashboard — a right-click on the session's name away.
+    @ViewBuilder
+    private func machineItems(_ s: AgentSession, gone: Bool) -> some View {
+        if !workspaceName(s.profileID).isEmpty {
+            Button {
+                actions.editMachine(s.profileID)
+            } label: {
+                Label(String(format: NSLocalizedString("“%@” Settings…", comment: "session menu: machine settings"),
+                             workspaceName(s.profileID)), systemImage: "gearshape")
+            }
+            if !gone, s.windowIndex != nil, !s.hasEnded {
+                Button {
+                    actions.openLinux(s.id)
+                } label: {
+                    Label(NSLocalizedString("Open in Linux Terminal", comment: "session menu"), systemImage: "terminal")
+                }
+            }
+            Button {
+                actions.showMachine(s.profileID)
+            } label: {
+                Label(NSLocalizedString("Machine Details", comment: "session menu"), systemImage: "cpu")
+            }
+        }
+    }
+
     var body: some View {
         if let s = session {
             let bucket = SessionHome.bucket(for: s, in: model)
@@ -389,6 +421,7 @@ struct SessionHeaderView: View {
                                     draftTitle = s.title; renaming = true
                                 }
                                 .help(gone ? "" : NSLocalizedString("Double-click to rename", comment: "session header"))
+                                .contextMenu { machineItems(s, gone: gone) }
                         }
                         // One quiet line: @nick · status · agent · machine · folder.
                         HStack(spacing: 7) {
@@ -426,7 +459,8 @@ struct SessionHeaderView: View {
                                 .fixedSize()
                                 .contentShape(Rectangle())
                                 .onTapGesture { actions.showMachine(s.profileID) }
-                                .help(NSLocalizedString("The machine this session runs on — click for its details", comment: "session header"))
+                                .contextMenu { machineItems(s, gone: gone) }
+                                .help(NSLocalizedString("The machine this session runs on — click for its details, right-click for its settings", comment: "session header"))
                             }
                             metaDot
                             HStack(spacing: 4) {
@@ -503,6 +537,8 @@ struct SessionHeaderView: View {
                         } else if s.isArchived {
                             Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
                         }
+                        Divider()
+                        machineItems(s, gone: gone)
                         Divider()
                         Button(NSLocalizedString("Delete session", comment: "session menu"), role: .destructive) {
                             actions.delete(s.id)

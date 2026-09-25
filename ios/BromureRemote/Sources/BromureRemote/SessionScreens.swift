@@ -86,6 +86,8 @@ struct MobileSessionScreen: View {
     @State private var confirmEnd = false
     @State private var confirmDelete = false
     @State private var worktreeSheet = false
+    /// The session's machine settings (the workspace editor).
+    @State private var machineSettings = false
 
     private var model: SessionListModel { controller.listModel }
     private var session: AgentSession? { controller.sessionStore.session(sessionID) }
@@ -132,6 +134,11 @@ struct MobileSessionScreen: View {
                     }
                 }
                 .presentationDetents([.medium, .large])
+            }
+        }
+        .sheet(isPresented: $machineSettings) {
+            if let s = session {
+                WorkspaceEditorSheet(controller: controller, editing: s.profileID) { machineSettings = false }
             }
         }
         .alert("Rename session", isPresented: $renaming) {
@@ -225,6 +232,12 @@ struct MobileSessionScreen: View {
                 if SessionHome.hasFolder(s) {
                     Button { worktreeSheet = true } label: {
                         Label("New worktree…", systemImage: "arrow.triangle.branch")
+                    }
+                }
+                if !MobileSessions.workspaceName(model, s).isEmpty {
+                    Button { machineSettings = true } label: {
+                        Label(String(format: NSLocalizedString("“%@” Settings…", comment: "session menu: machine settings"),
+                                     MobileSessions.workspaceName(model, s)), systemImage: "gearshape")
                     }
                 }
                 if s.isArchived {
