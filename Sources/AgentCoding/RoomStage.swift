@@ -286,6 +286,12 @@ struct RoomStageView: View {
     @State private var renaming = false
     @State private var draftName = ""
     @State private var pickingTarget = false
+    /// The cell a zoom is moving (in or out), until the spring settles: it
+    /// draws a placeholder meanwhile, and the Switchboard strip folding
+    /// under it stays empty — laying a whole transcript out on every
+    /// animation frame is what made zooming crawl (worst over a fat
+    /// client's tunnel). The live chat mounts once, at the end.
+    @State private var zoomMoving: UUID?
 
     private var accent: Color { Color(hex: controller.room?.colorHex ?? "#6366F1") }
 
@@ -334,7 +340,7 @@ struct RoomStageView: View {
         HStack(spacing: 10) {
             if controller.zoomedID != nil {
                 Button {
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) { controller.zoomedID = nil }
+                    setZoom(nil)
                 } label: {
                     Label(NSLocalizedString("Room", comment: "room stage back"), systemImage: "chevron.left")
                         .font(.system(size: 12.5, weight: .semibold))
@@ -500,15 +506,26 @@ struct RoomStageView: View {
             .padding(10)
     }
 
+    /// Zoom a cell in (or back out with nil), keeping its chat out of the
+    /// animation (see `zoomMoving`).
+    private func setZoom(_ id: UUID?) {
+        guard id != controller.zoomedID else { return }
+        let moving = id ?? controller.zoomedID
+        zoomMoving = moving
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.86), completionCriteria: .logicallyComplete) {
+            controller.zoomedID = id
+        } completion: {
+            if zoomMoving == moving { zoomMoving = nil }
+        }
+    }
+
     private func toggleZoom(_ s: AgentSession, at point: CGPoint) {
         controller.focus(s.id)
         controller.target = .focused
         let zoomingIn = controller.zoomedID != s.id
         controller.zoomOrigin = point
         wave = 0
-        withAnimation(.spring(response: 0.46, dampingFraction: 0.84)) {
-            controller.zoomedID = zoomingIn ? s.id : nil
-        }
+        setZoom(zoomingIn ? s.id : nil)
         if zoomingIn {
             withAnimation(.easeOut(duration: 0.9)) { wave = 1 }
         } else {
@@ -525,7 +542,9 @@ struct RoomStageView: View {
             cellTitle(s, zoomed: zoomed)
             Divider()
             Group {
-                if let m = controller.models[s.id] {
+                if zoomMoving == s.id {
+                    movingPlaceholder(s)
+                } else if let m = controller.models[s.id] {
                     BeautifiedSessionView(model: m, parts: .transcript)
                 } else {
                     restingCell(s)
@@ -579,6 +598,14 @@ struct RoomStageView: View {
         }
         .help(zoomed ? NSLocalizedString("Back to the whole room", comment: "room cell")
                      : NSLocalizedString("Zoom in", comment: "room cell"))
+    }
+
+    /// What a cell shows while a zoom moves it: nothing to lay out.
+    private func movingPlaceholder(_ s: AgentSession) -> some View {
+        ZStack {
+            Color(nsColor: .textBackgroundColor)
+            AgentAvatar(tool: s.tool, size: 30).opacity(0.25)
+        }
     }
 
     private func restingCell(_ s: AgentSession) -> some View {
@@ -635,7 +662,9 @@ struct RoomStageView: View {
             }
             if dockShown {
                 Group {
-                    if let sb, let m = controller.models[sb.id] {
+                    if zoomMoving != nil {
+                        Color.clear   // folding / unfolding with a zoom: nothing to lay out
+                    } else if let sb, let m = controller.models[sb.id] {
                         BeautifiedSessionView(model: m, parts: .transcript)
                             .simultaneousGesture(TapGesture().onEnded { controller.target = .switchboard })
                     } else if let sb, sb.isLaunching {

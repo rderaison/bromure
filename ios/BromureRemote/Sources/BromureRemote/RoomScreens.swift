@@ -287,6 +287,10 @@ struct MobileRoomScreen: View {
     @State private var focusedID: UUID?
     @State private var toSwitchboard = true
     @State private var zoomedID: UUID?
+    /// The cell a zoom is moving, until the spring settles: it draws a
+    /// placeholder meanwhile instead of laying its transcript out on
+    /// every frame.
+    @State private var zoomMoving: UUID?
     @State private var dockOpen = true
     @State private var draft = ""
     @State private var sending = false
@@ -348,6 +352,17 @@ struct MobileRoomScreen: View {
             // Swiping to a page brings the focus (and the composer) along.
             if let f = focusedID, pages.indices.contains(p), pages[p].contains(where: { $0.id == f }) { return }
             if pages.indices.contains(p) { focus(pages[p].first?.id) }
+        }
+    }
+
+    private func setZoom(_ id: UUID?) {
+        guard id != zoomedID else { return }
+        let moving = id ?? zoomedID
+        zoomMoving = moving
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.86), completionCriteria: .logicallyComplete) {
+            zoomedID = id
+        } completion: {
+            if zoomMoving == moving { zoomMoving = nil }
         }
     }
 
@@ -493,12 +508,11 @@ struct MobileRoomScreen: View {
         let isFocused = focusedID == s.id
         let addressed = isFocused && !toSwitchboard
         return RoomCellView(controller: controller, session: s, zoomed: zoomed,
+                            moving: zoomMoving == s.id,
                             onZoom: {
                                 focus(s.id)
                                 toSwitchboard = false
-                                withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
-                                    zoomedID = zoomedID == s.id ? nil : s.id
-                                }
+                                setZoom(zoomedID == s.id ? nil : s.id)
                             },
                             onOpen: { onOpenSession(s.id) },
                             onRemove: { MobileRooms.move(controller, s.id, to: nil) })
@@ -868,9 +882,7 @@ struct MobileRoomScreen: View {
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         if zoomedID != nil {
             ToolbarItem(placement: .topBarLeading) {
-                Button {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) { zoomedID = nil }
-                } label: { Label("Room", systemImage: "chevron.left") }
+                Button { setZoom(nil) } label: { Label("Room", systemImage: "chevron.left") }
             }
         }
         if !compact, !members.isEmpty, zoomedID == nil {
@@ -925,6 +937,8 @@ struct RoomCellView: View {
     let controller: RemoteHostController
     let session: AgentSession
     let zoomed: Bool
+    /// A zoom is moving this cell: skip the transcript until it settles.
+    var moving = false
     let onZoom: () -> Void
     let onOpen: () -> Void
     let onRemove: () -> Void
@@ -963,7 +977,10 @@ struct RoomCellView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             Divider()
-            if MobileRooms.isLive(s, controller) {
+            if moving {
+                AgentAvatar(tool: s.tool, size: 30).opacity(0.25)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if MobileRooms.isLive(s, controller) {
                 RoomTranscriptView(controller: controller, session: s)
             } else {
                 resting(s)
@@ -990,6 +1007,13 @@ struct RoomCellView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
+
+/// The last conversation read per session: a cell remounted by a zoom (or
+/// a tab switch) shows it at once while its first poll runs.
+@MainActor
+enum RoomTranscriptCache {
+    static var items: [UUID: [TranscriptItem]] = [:]
 }
 
 /// A live session's conversation, tailed from its own tmux window's
@@ -1027,6 +1051,12 @@ struct RoomTranscriptView: View {
                 }
             }
         }
+        .onAppear {
+            if items.isEmpty, let cached = RoomTranscriptCache.items[session.id] {
+                items = cached
+                loaded = true
+            }
+        }
         .task(id: "\(session.profileID)#\(window)") { await poll() }
     }
 
@@ -1047,6 +1077,7 @@ struct RoomTranscriptView: View {
             }
             if let cmd, let raw = try? await controller.guestExec(session.profileID, command: cmd, timeout: 15) {
                 items = AgentTranscript.parse(Data(raw.utf8), agent: agent)
+                RoomTranscriptCache.items[session.id] = items
             }
             loaded = true
             tick += 1
