@@ -3861,8 +3861,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "compose":
                     // Type into the selected session's chat composer (palette shots).
                     guard let text = params["text"] as? String,
-                          let id = self.unifiedWindow?.selectedID,
-                          let pane = self.pane(for: id), pane.debugSetComposer(text)
+                          let id = self.unifiedWindow?.listModel.selectedSessionProfileID
+                              ?? self.unifiedWindow?.selectedID,
+                          let pane = self.unifiedWindow?.pane(id) ?? self.pane(for: id), pane.debugSetComposer(text)
                     else { return ["error": "no beautified composer on stage"] }
                     return ["ok": true]
                 case "type":
@@ -3872,7 +3873,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     else { return ["error": "no session on stage"] }
                     return pane.debugTypeComposer(text)
                 case "composer-geometry":
-                    guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                    guard let id = self.unifiedWindow?.listModel.selectedSessionProfileID
+                              ?? self.unifiedWindow?.selectedID,
+                          let pane = self.unifiedWindow?.pane(id) ?? self.pane(for: id)
                     else { return ["error": "no session on stage"] }
                     return pane.debugComposerGeometry()
                 case "key":
@@ -3884,9 +3887,38 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "drop":
                     // Attach a host file to the composer, as a drop would.
                     guard let path = params["path"] as? String,
-                          let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
+                          let id = self.unifiedWindow?.listModel.selectedSessionProfileID
+                              ?? self.unifiedWindow?.selectedID,
+                          let pane = self.unifiedWindow?.pane(id) ?? self.pane(for: id)
                     else { return ["error": "no session on stage"] }
                     return pane.debugDropFile(path)
+                case "drop-stage", "drop-staged":
+                    // Stage the composer's attachments without sending / read the result.
+                    guard let id = self.unifiedWindow?.listModel.selectedSessionProfileID
+                              ?? self.unifiedWindow?.selectedID,
+                          let pane = self.unifiedWindow?.pane(id) ?? self.pane(for: id)
+                    else { return ["error": "no session on stage"] }
+                    return pane.debugStageAttachments(report: action == "drop-staged")
+                case "files-drop":
+                    // Drop a host file or folder on the Files pane (into the folder on show).
+                    guard let path = params["path"] as? String, let m = self.unifiedWindow?.fileExplorerModel
+                    else { return ["error": "path?"] }
+                    m.receive([URL(fileURLWithPath: (path as NSString).expandingTildeInPath)])
+                    return ["ok": true, "root": m.root ?? "", "canTransfer": m.canTransfer]
+                case "switchboard-room-events":
+                    guard let r = (params["room"] as? String).flatMap(UUID.init(uuidString:))
+                    else { return ["error": "room?"] }
+                    return ["events": self.switchboardEngine.debugRoomEvents(r)]
+                case "roster-state":
+                    // What session reconcile sees per workspace.
+                    return ["entries": (self.unifiedWindow?.listModel.entries ?? []).map {
+                        ["name": $0.name, "rosterLive": $0.model.rosterLive,
+                         "tabs": $0.model.tabs.map { "\($0.index):\($0.display ?? "")" }]
+                    }]
+                case "files-state":
+                    guard let m = self.unifiedWindow?.fileExplorerModel else { return ["error": "no window"] }
+                    return ["root": m.root ?? "", "transfer": m.transferText ?? "", "error": m.loadError ?? "",
+                            "entries": m.rootNodes.map(\.name)]
                 case "drop-images":
                     guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)
                     else { return ["error": "no session on stage"] }
@@ -3912,7 +3944,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard let s = params["id"] as? String, let id = UUID(uuidString: s),
                           self.agentSessionStore.session(id) != nil
                     else { return ["error": "unknown session"] }
-                    if let why = self.agentSessionStore.setNickname(id, params["nickname"] as? String) {
+                    if let why = self.agentSessionStore.setNickname(id, params["nickname"] as? String,
+                                                                    reclaim: params["reclaim"] as? Bool ?? false) {
                         return ["error": why]
                     }
                     return ["ok": true, "nickname": self.agentSessionStore.session(id)?.nickname ?? ""]
@@ -4555,7 +4588,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     return ["ok": true]
                 case (let sid?, "nickname"):
                     guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
-                    if let why = self.agentSessionStore.setNickname(sid, body["nickname"] as? String) {
+                    if let why = self.agentSessionStore.setNickname(sid, body["nickname"] as? String,
+                                                                    reclaim: body["reclaim"] as? Bool ?? false) {
                         return ["error": why]
                     }
                     return ["ok": true]

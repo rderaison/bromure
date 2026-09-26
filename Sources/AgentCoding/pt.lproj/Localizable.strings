@@ -3119,3 +3119,10 @@
 "Force Reboot" = "Forçar reinício";
 "Force reboot “%@”?" = "Forçar o reinício de “%@”?";
 "Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)" = "Desliga a máquina de forma limpa e a inicia de novo. Tudo o que roda nela para. (Segure ⌥ ao escolher Reiniciar para forçar.)";
+"Packing %@…" = "Compactando %@…";
+"Unpacking %@…" = "Descompactando %@…";
+"%d items in “%@” weren't copied: they point outside the folder or aren't regular files." = "%d itens em “%@” não foram copiados: apontam para fora da pasta ou não são arquivos comuns.";
+"Nickname: @%@…" = "Apelido: @%@…";
+"Reuse" = "Reutilizar";
+"%@ stopped as it started: %@" = "%@ parou ao iniciar: %@";
+"@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ era usado pela sessão arquivada “%@”, pela última vez em %@. Reutilizar nesta sessão?";

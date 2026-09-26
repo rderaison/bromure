@@ -1175,7 +1175,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     // MARK: Hosting
 
-    private func pane(_ id: Profile.ID) -> SessionPane? {
+    func pane(_ id: Profile.ID) -> SessionPane? {
         hostedPanes.first { $0.profile.id == id }
     }
 
@@ -1473,8 +1473,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             rename: { [weak self] id, title in
                 self?.acDelegate?.agentSessionEngine.rename(id, to: title)
             },
-            setNickname: { [weak self] id, nick in
-                self?.acDelegate?.agentSessionStore.setNickname(id, nick)
+            setNickname: { [weak self] id, nick, reclaim in
+                self?.acDelegate?.agentSessionStore.setNickname(id, nick, reclaim: reclaim)
+            },
+            checkNickname: { [weak self] id, nick in
+                self?.acDelegate?.agentSessionStore.checkNickname(id, nick) ?? .ok
             },
             resumeWith: { [weak self] id, text in
                 self?.acDelegate?.agentSessionEngine.resume(id, message: text)

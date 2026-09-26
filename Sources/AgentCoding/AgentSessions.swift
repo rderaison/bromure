@@ -506,7 +506,9 @@ final class AgentSessionStore {
     /// ("@nick"); nil or nothing usable clears it. Refuses a name another
     /// session holds — the reason, else nil.
     @discardableResult
-    func setNickname(_ id: UUID, _ raw: String?) -> String? {
+    /// `reclaim`: take the name from the archived session holding it
+    /// (the user said yes to `checkNickname`'s question).
+    func setNickname(_ id: UUID, _ raw: String?, reclaim: Bool = false) -> String? {
         guard let i = sessions.firstIndex(where: { $0.id == id }) else {
             return NSLocalizedString("Unknown session.", comment: "nickname")
         }
@@ -515,14 +517,47 @@ final class AgentSessionStore {
             save()
             return nil
         }
-        if let other = sessions.first(where: {
-            $0.id != id && !$0.isDeleted && $0.nickname?.lowercased() == nick.lowercased()
-        }) {
-            return String(format: NSLocalizedString("@%@ is already “%@”.", comment: "nickname"), nick, other.title)
+        if let j = holder(of: nick, besides: id) {
+            guard reclaim, sessions[j].isArchived else {
+                switch checkNickname(id, raw) {
+                case .refused(let why), .reclaim(let why): return why
+                case .ok: return nil
+                }
+            }
+            sessions[j].nickname = nil
         }
         sessions[i].nickname = nick
         save()
         return nil
+    }
+
+    enum NicknameVerdict: Equatable {
+        case ok
+        /// Another live session has it.
+        case refused(String)
+        /// An archived session has it: the question to put to the user.
+        case reclaim(String)
+    }
+
+    /// Whether `id` may take `raw`, without taking it — the sheet asks
+    /// before it sets (a fat client asks its mirror, so a refusal shows at
+    /// once instead of the name silently not taking).
+    func checkNickname(_ id: UUID, _ raw: String) -> NicknameVerdict {
+        guard let nick = DelegationNotice.normalizeNickname(raw), let j = holder(of: nick, besides: id)
+        else { return .ok }
+        let other = sessions[j]
+        guard other.isArchived else {
+            return .refused(String(format: NSLocalizedString("@%@ is already “%@”.", comment: "nickname"), nick, other.title))
+        }
+        let when = DateFormatter.localizedString(from: other.lastSeenAt ?? other.createdAt,
+                                                 dateStyle: .medium, timeStyle: .none)
+        return .reclaim(String(format: NSLocalizedString(
+            "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?",
+            comment: "nickname: taking it from an archived session"), nick, other.title, when))
+    }
+
+    private func holder(of nick: String, besides id: UUID) -> Int? {
+        sessions.firstIndex { $0.id != id && !$0.isDeleted && $0.nickname?.lowercased() == nick.lowercased() }
     }
 
     /// The conversation id the agent's hook reported for this session.
@@ -1170,7 +1205,9 @@ enum SessionHome {
     @MainActor
     static func bucket(for s: AgentSession, in model: SessionListModel) -> SessionBucket {
         if isGone(s, in: model) { return .ended }
+        #if os(macOS)
         if let demo = DemoMode.bucket(for: s.id) { return demo }   // manual screenshots
+        #endif
         if s.isLaunching { return .working }
         if s.needsSignIn == true, !s.hasEnded, liveTab(for: s, in: model) != nil { return .needsYou }
         if s.hasEnded { return .ended }
@@ -1179,12 +1216,16 @@ enum SessionHome {
         // Up, but tmux hasn't reported yet (a boot, a resume): still asleep
         // as far as the session can tell — not "Ended" for a few seconds.
         guard rosterLive(for: s.profileID, in: model) else { return .asleep }
+        // The agent died starting (see `watchEarlyExit`): the user has to
+        // look, not wait on a "working" that will never come.
+        let failedStart = !(s.lastError ?? "").isEmpty
         guard let tab = liveTab(for: s, in: model) else {
             // Running workspace, tab not in the roster.
-            return .ended
+            return failedStart ? .needsYou : .ended
         }
         if !agentRunning(s, in: tab) {
             // A shell: the agent exited (resume) — or hasn't started yet.
+            if failedStart { return .needsYou }
             return agentExited(s, in: model) ? .ended : .working
         }
         switch tab.agentStatus {
@@ -2212,7 +2253,7 @@ struct SessionSectionsView: View {
         .onAppear { revealSelectedArchived(model.selectedSessionID) }
         .onChange(of: model.selectedSessionID) { _, id in revealSelectedArchived(id) }
         .sheet(item: $nicknameFor) { s in
-            NicknameSheet(session: s) { actions.setNickname(s.id, $0) }
+            NicknameSheet(session: s, check: { actions.checkNickname(s.id, $0) }) { actions.setNickname(s.id, $0, $1) }
         }
         .sheet(item: $roomSheet) { sheet in
             if let r = sheet.renaming {

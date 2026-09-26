@@ -66,6 +66,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import termios
 import threading
@@ -538,6 +539,19 @@ def _file_op(spec):
         if op == "mkdir":
             os.makedirs(path, exist_ok=True)
             return {"exit_code": 0}
+        if op == "untar":
+            # A folder dropped on the file browser, as one archive (the
+            # host tars it): unpack into `path`, then drop the archive.
+            archive = spec.get("archive", "")
+            if not archive.startswith("/"):
+                return {"error": "archive must be absolute", "exit_code": 1}
+            try:
+                return _untar_confined(archive, path)
+            finally:
+                try:
+                    os.unlink(archive)
+                except OSError:
+                    pass
         if op == "remove":
             if os.path.isdir(path) and not os.path.islink(path):
                 shutil.rmtree(path)
@@ -547,6 +561,51 @@ def _file_op(spec):
         return {"error": "unknown file op %r" % op, "exit_code": 1}
     except Exception as e:
         return {"error": str(e), "exit_code": 1}
+
+
+def _untar_confined(archive, dest):
+    """Extract `archive` under `dest` and nowhere else. Each entry is checked
+    before it's written: no absolute names, no `..`, nothing that resolves
+    outside `dest` (through a link already there or one unpacked earlier
+    from the same archive), links only to targets inside `dest`, and only
+    files, folders and links — no devices or FIFOs. An entry that fails is
+    skipped and reported; the rest land. Python's "data" filter (3.12+)
+    runs on top: it also strips set-uid bits and the archive's ownership."""
+    os.makedirs(dest, exist_ok=True)
+    root = os.path.realpath(dest)
+
+    def inside(p):
+        return p == root or p.startswith(root + os.sep)
+
+    skipped = []
+    extracted = 0
+    with tarfile.open(archive, "r:*") as tf:
+        for m in tf:
+            name = m.name
+            parts = name.replace("\\", "/").split("/")
+            unsafe = (name.startswith("/") or ".." in parts
+                      or not (m.isreg() or m.isdir() or m.issym() or m.islnk()))
+            if not unsafe:
+                unsafe = not inside(os.path.realpath(os.path.join(root, name)))
+            if not unsafe and (m.issym() or m.islnk()):
+                link = m.linkname
+                base = os.path.dirname(os.path.join(root, name)) if m.issym() else root
+                unsafe = (link.startswith("/")
+                          or not inside(os.path.realpath(os.path.join(base, link))))
+            if unsafe:
+                skipped.append(name)
+                continue
+            m.mode &= 0o777   # no set-uid/set-gid/sticky, whatever the Python
+            try:
+                if hasattr(tarfile, "data_filter"):
+                    tf.extract(m, root, filter="data")
+                else:
+                    tf.extract(m, root)
+                extracted += 1
+            except (tarfile.TarError, OSError):
+                skipped.append(name)
+    return {"exit_code": 0, "extracted": extracted,
+            "skipped": skipped[:20], "skippedCount": len(skipped)}
 
 
 def _shell_handle_connection(vsock_sock, replenish_fn):

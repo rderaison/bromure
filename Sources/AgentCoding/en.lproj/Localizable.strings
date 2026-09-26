@@ -3154,3 +3154,10 @@
 "Force Reboot" = "Force Reboot";
 "Force reboot “%@”?" = "Force reboot “%@”?";
 "Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)" = "Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)";
+"Packing %@…" = "Packing %@…";
+"Unpacking %@…" = "Unpacking %@…";
+"%d items in “%@” weren't copied: they point outside the folder or aren't regular files." = "%d items in “%@” weren't copied: they point outside the folder or aren't regular files.";
+"Nickname: @%@…" = "Nickname: @%@…";
+"Reuse" = "Reuse";
+"%@ stopped as it started: %@" = "%@ stopped as it started: %@";
+"@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?";

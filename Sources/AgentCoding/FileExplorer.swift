@@ -606,18 +606,36 @@ final class FileExplorerModel {
         guard let root, canTransfer else { return }
         let base = dir.map { (root as NSString).appendingPathComponent($0) } ?? root
         Task { @MainActor in
+            var note: String?
             for src in urls {
                 var isDir: ObjCBool = false
                 FileManager.default.fileExists(atPath: src.path, isDirectory: &isDir)
                 do {
+                    // A folder travels as one archive (`FolderUpload`).
+#if os(macOS)
+                    if isDir.boolValue {
+                        let skipped = try await FolderUpload.upload(
+                            src, into: (base as NSString).appendingPathComponent(src.lastPathComponent),
+                            op: { try await self.fileOp($0) }, progress: { self.transferText = $0 })
+                        if skipped > 0 {
+                            note = String(format: NSLocalizedString(
+                                "%d items in “%@” weren't copied: they point outside the folder or aren't regular files.",
+                                comment: "files pane: unsafe entries skipped when unpacking a dropped folder"),
+                                skipped, src.lastPathComponent)
+                        }
+                        continue
+                    }
+#endif
                     try await uploadItem(at: src, to: (base as NSString).appendingPathComponent(src.lastPathComponent),
                                          isDirectory: isDir.boolValue)
                 } catch {
-                    loadError = error.localizedDescription
+                    note = error.localizedDescription
                 }
             }
             transferText = nil
             await refresh()
+            // After the refresh, which clears the error line.
+            if let note { loadError = note }
         }
     }
 
@@ -633,6 +651,10 @@ final class FileExplorerModel {
             }
             return
         }
+        try await uploadFile(at: src, to: guestPath, label: src.lastPathComponent)
+    }
+
+    private func uploadFile(at src: URL, to guestPath: String, label: String) async throws {
         guard let handle = try? FileHandle(forReadingFrom: src) else { return }
         defer { try? handle.close() }
         var first = true
@@ -644,7 +666,7 @@ final class FileExplorerModel {
                                   "data": data.base64EncodedString(), "append": !first])
             sent += Int64(data.count)
             transferText = String(format: NSLocalizedString("Copying %@ in… %@", comment: ""),
-                                  src.lastPathComponent,
+                                  label,
                                   ByteCountFormatter.string(fromByteCount: sent, countStyle: .file))
             first = false
             if data.count < Self.chunkBytes { break }

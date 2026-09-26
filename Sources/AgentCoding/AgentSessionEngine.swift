@@ -105,6 +105,18 @@ final class AgentSessionEngine {
         var paths: [String] = []
         for (i, f) in files.enumerated() {
             let path = GuestDrop.path(index: i, name: "\(stamp)_\(f.name)")
+            // A folder: its contents at `path` (see `FolderUpload`).
+            if f.folder != nil || f.packedFolder {
+                let fileOp: FolderUpload.FileOp = { try await delegate.guestFileOp(profileID: profileID, op: $0, timeout: 600) }
+                do {
+                    if let folder = f.folder { try await FolderUpload.upload(folder, into: path, op: fileOp) }
+                    else { try await FolderUpload.unpack(f.data, into: path, op: fileOp) }
+                    paths.append(path)
+                } catch {
+                    BACDebug.log("sessions", "folder attachment \(f.name) failed: \(error)")
+                }
+                continue
+            }
             var ok = true
             for w in GuestDrop.writeOps(guestPath: path, data: f.data) where !(await op(w)) { ok = false; break }
             guard ok else { continue }
@@ -492,6 +504,7 @@ final class AgentSessionEngine {
                     return
                 }
                 BACDebug.log("sessions", "“\(s.title)”: worktree-create sent (baseline \(baseline))")
+                self.watchEarlyExit(id, display: display)
                 return
             }
             if let url = s.cloneURL, !url.isEmpty {
@@ -539,7 +552,67 @@ final class AgentSessionEngine {
                 return
             }
             BACDebug.log("sessions", "“\(s.title)”: agent-tab sent (baseline \(baseline))")
+            self.watchEarlyExit(id, display: display)
         }
+    }
+
+    /// The agent dying as it starts (a bad flag, a resume with nothing to
+    /// resume, a config error): the launcher says so in the tab and drops
+    /// to a shell, and the session sat on "Starting…". Watch the new tab —
+    /// found by its name, straight from tmux — until the agent is seen
+    /// running, and end the launch with the agent's own words if it dies.
+    private func watchEarlyExit(_ id: UUID, display: String) {
+        let q = "'" + display.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let screen = "for w in $(tmux list-windows -t bromure -F '#{window_index}' 2>/dev/null); do "
+            + "[ \"$(tmux show-options -wqv -t bromure:$w @display)\" = \(q) ] && tmux capture-pane -p -J -t bromure:$w; "
+            + "done; true"
+        Task { [weak self] in
+            let deadline = Date().addingTimeInterval(AgentSessionStore.launchTimeout)
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self, let s = self.store.session(id), let delegate = self.delegate else { return }
+                // Up and running: the chat watches it from here. Ended or
+                // failed some other way: nothing left to watch.
+                if s.agentAlive == true { return }
+                guard s.isLaunching || s.windowIndex != nil else { return }
+                guard let out = try? await delegate.guestExec(profileID: s.profileID, command: screen, timeout: 8),
+                      let reason = Self.earlyExitReason(out, tool: s.tool.rawValue) else { continue }
+                BACDebug.log("sessions", "“\(s.title)”: \(s.tool.rawValue) died starting — \(reason)")
+                self.store.mutate(id) {
+                    $0.launchingSince = nil
+                    $0.lastError = String(format: NSLocalizedString("%@ stopped as it started: %@", comment: "session launch"),
+                                          s.tool.displayName, reason)
+                }
+                return
+            }
+        }
+    }
+
+    /// What a launcher's tab says when its agent died: the line the agent
+    /// printed before the launcher's "<tool> exited with status N" (or that
+    /// line itself when the agent said nothing). nil while it hasn't died.
+    /// `tool` nil: whichever agent the tab ran.
+    nonisolated static func earlyExitReason(_ screen: String, tool: String? = nil) -> String? {
+        // The launcher colors its line; a captured screen can keep the
+        // codes, or what's left of them ("33[31m").
+        let lines = screen.components(separatedBy: "\n").map {
+            $0.replacingOccurrences(of: #"(\x{1b}|\\?0?33)?\[[0-9;]*m"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+        }
+        let marker = tool.map { "[bromure-ac] \($0) exited with status" }
+        guard let i = lines.lastIndex(where: { l in
+            if let marker { return l.contains(marker) }
+            return l.range(of: #"\[bromure-ac\] \S+ exited with status"#, options: .regularExpression) != nil
+        }) else { return nil }
+        // What the agent printed since the launcher started it; an error
+        // line wins over what follows it ("See log: …").
+        let start = lines[..<i].lastIndex(where: { $0.contains("[bromure-ac] starting") }).map { $0 + 1 } ?? 0
+        let printed = lines[start..<i].filter { !$0.isEmpty && !$0.contains("[bromure-ac]") }
+        let errorish = #"(?i)\b(error|failed|fatal|not found|no such|cannot|can't|invalid|no conversation|no model)\b"#
+        let said = printed.last(where: { $0.range(of: errorish, options: .regularExpression) != nil }) ?? printed.last
+        let exitLine = lines[i]
+        let reason = said ?? exitLine.replacingOccurrences(of: "[bromure-ac] ", with: "")
+        return reason.count > 200 ? String(reason.prefix(200)) + "…" : reason
     }
 
     /// A delegate's tab opens behind the current one: another agent

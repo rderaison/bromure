@@ -66,6 +66,9 @@ protocol RoomStageBackend: AnyObject {
     /// behind it (the target is asleep) — the same list its chat offers.
     func peerMentions(for s: AgentSession) -> [PeerMention]
     func assignNickname(_ id: UUID, _ nick: String)
+    /// The nickname sheet's pair: is the name free, and take it.
+    func checkNickname(_ id: UUID, _ nick: String) -> AgentSessionStore.NicknameVerdict
+    func setNickname(_ id: UUID, _ nick: String, reclaim: Bool) -> String?
 }
 
 /// This Mac's rooms: the delegate's stores, chats pinned to the local panes.
@@ -85,6 +88,9 @@ final class LocalRoomBackend: RoomStageBackend {
 
     func makeChat(for s: AgentSession) -> BeautifiedSessionModel? {
         guard let w = s.windowIndex, let pane = delegate?.pane(for: s.profileID) else { return nil }
+        // The session's own agent names the chat ("Kimi is ready"), not the
+        // workspace's default one — the tab's label may not say it yet.
+        pane.agentHints[w] = s.tool.rawValue
         return pane.makeBeautifiedModel(windowIndex: w, provider: PinnedTranscriptProvider(pane: pane, window: w))
     }
 
@@ -114,6 +120,22 @@ final class LocalRoomBackend: RoomStageBackend {
 
     func assignNickname(_ id: UUID, _ nick: String) {
         delegate?.agentSessionStore.setNickname(id, nick)
+    }
+
+    func checkNickname(_ id: UUID, _ nick: String) -> AgentSessionStore.NicknameVerdict {
+        delegate?.agentSessionStore.checkNickname(id, nick) ?? .ok
+    }
+
+    func setNickname(_ id: UUID, _ nick: String, reclaim: Bool) -> String? {
+        delegate?.agentSessionStore.setNickname(id, nick, reclaim: reclaim)
+    }
+}
+
+extension RoomStageBackend {
+    func checkNickname(_ id: UUID, _ nick: String) -> AgentSessionStore.NicknameVerdict { .ok }
+    func setNickname(_ id: UUID, _ nick: String, reclaim: Bool) -> String? {
+        assignNickname(id, nick)
+        return nil
     }
 }
 
@@ -375,6 +397,8 @@ struct RoomStageView: View {
     /// At 1×1 the Switchboard is a tab of its own (no dock under a lone
     /// cell): whether that tab is the one on show.
     @State private var switchboardTab = false
+    /// The member whose nickname sheet is up (from its cell's ⋯ menu).
+    @State private var nicknameFor: AgentSession?
     private var singleLayout: Bool { controller.layout.size == 1 && controller.zoomedID == nil }
     @State private var dockOpen = true
     /// While one session is zoomed the Switchboard folds away; the chevron
@@ -430,6 +454,12 @@ struct RoomStageView: View {
             dock
         }
         .background(pageKeys)
+        .sheet(item: $nicknameFor) { s in
+            let backend = controller.backend
+            NicknameSheet(session: s, check: { backend.checkNickname(s.id, $0) }) {
+                backend.setNickname(s.id, $0, reclaim: $1)
+            }
+        }
         // At 1×1 the tab on show and the composer's target agree: the
         // Switchboard's tab when the composer talks to it, else the session's.
         .onAppear { syncSingleTab() }
@@ -827,6 +857,10 @@ struct RoomStageView: View {
             Spacer(minLength: 4)
             Menu {
                 Button(NSLocalizedString("Open as Session", comment: "room cell")) { controller.onOpenSession(s.id) }
+                Button(s.nickname == nil ? NSLocalizedString("Nickname…", comment: "room cell")
+                                         : String(format: NSLocalizedString("Nickname: @%@…", comment: "room cell"), s.nickname!)) {
+                    nicknameFor = s
+                }
                 Button(NSLocalizedString("Remove from Room", comment: "room cell")) { controller.onRemoveFromRoom(s.id) }
             } label: {
                 Image(systemName: "ellipsis")

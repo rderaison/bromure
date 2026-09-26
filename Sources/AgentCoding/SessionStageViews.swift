@@ -13,6 +13,11 @@ struct DroppedFile {
     let name: String
     let data: Data
     let isImage: Bool
+    /// A dropped folder: no bytes, it's packed and copied when staged.
+    var folder: URL? = nil
+    /// `data` is a folder already packed (`FolderUpload.packed`) — how a
+    /// folder reaches a server with a remote new session.
+    var packedFolder = false
 
     /// Largest file a drop attaches. Anything bigger is refused with a beep
     /// rather than vanishing silently. Files are memory-mapped, so a pending
@@ -28,8 +33,14 @@ struct DroppedFile {
             let url: URL? = await withCheckedContinuation { cont in
                 _ = p.loadObject(ofClass: URL.self) { u, _ in cont.resume(returning: u) }
             }
-            guard let url, url.isFileURL,
-                  let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= maxBytes else { return nil }
+            guard let url, url.isFileURL else { return nil }
+            #if os(macOS)
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                return DroppedFile(name: url.lastPathComponent, data: Data(), isImage: false, folder: url)
+            }
+            #endif
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= maxBytes else { return nil }
             let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
             return DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg)
         }
@@ -98,20 +109,25 @@ struct DroppedFile {
         return (cleaned, files)
     }
 
-    /// Wire form for the remote session API: {name, data (base64), isImage}.
+    /// Wire form for the remote session API: {name, data (base64), isImage},
+    /// plus folder: true when `data` is a packed folder.
     var wireDictionary: [String: Any] {
-        ["name": name, "data": data.base64EncodedString(), "isImage": isImage]
+        var d: [String: Any] = ["name": name, "data": data.base64EncodedString(), "isImage": isImage]
+        if packedFolder { d["folder"] = true }
+        return d
     }
 
-    init(name: String, data: Data, isImage: Bool) {
+    init(name: String, data: Data, isImage: Bool, folder: URL? = nil, packedFolder: Bool = false) {
         self.name = name; self.data = data; self.isImage = isImage
+        self.folder = folder; self.packedFolder = packedFolder
     }
 
     init?(wire: [String: Any]) {
         guard let name = wire["name"] as? String,
               let b64 = wire["data"] as? String, let data = Data(base64Encoded: b64),
               data.count <= Self.maxBytes else { return nil }
-        self.init(name: name, data: data, isImage: wire["isImage"] as? Bool ?? false)
+        self.init(name: name, data: data, isImage: wire["isImage"] as? Bool ?? false,
+                  packedFolder: wire["folder"] as? Bool ?? false)
     }
 }
 
@@ -146,7 +162,7 @@ struct PendingAttachmentChips: View {
 
     private func placeholder(_ f: DroppedFile) -> some View {
         VStack(spacing: 4) {
-            Image(systemName: "doc.text").font(.system(size: 18))
+            Image(systemName: f.folder != nil || f.packedFolder ? "folder" : "doc.text").font(.system(size: 18))
                 .foregroundStyle(.secondary)
             Text(f.name).font(.system(size: 9.5)).lineLimit(1)
                 .truncationMode(.middle).foregroundStyle(.secondary)
@@ -197,8 +213,11 @@ struct SessionStageActions {
     var close: (UUID) -> Void = { _ in }
     var rename: (UUID, String) -> Void = { _, _ in }
     /// Give the session the name agents reach it by ("@nick"; empty
-    /// clears). Returns why not, or nil.
-    var setNickname: (UUID, String) -> String? = { _, _ in nil }
+    /// clears; the flag takes it from an archived session). Returns why
+    /// not, or nil.
+    var setNickname: (UUID, String, Bool) -> String? = { _, _, _ in nil }
+    /// Whether the name is free, before setting it.
+    var checkNickname: (UUID, String) -> AgentSessionStore.NicknameVerdict = { _, _ in .ok }
     /// Resume and say this — wakes the machine and the agent if need be.
     var resumeWith: (UUID, String) -> Void = { _, _ in }
     var forget: (UUID) -> Void = { _ in }
@@ -640,7 +659,7 @@ struct SessionHeaderView: View {
             .onChange(of: live) { _, _ in actions.represent(s.id) }
             .onChange(of: bucket) { _, _ in actions.represent(s.id) }
             .sheet(isPresented: $nicknameSheet) {
-                NicknameSheet(session: s) { actions.setNickname(s.id, $0) }
+                NicknameSheet(session: s, check: { actions.checkNickname(s.id, $0) }) { actions.setNickname(s.id, $0, $1) }
             }
             .sheet(isPresented: $worktreeSheet) {
                 NewWorktreeSheet(parent: s, gitState: actions.gitState) { req in
@@ -1939,15 +1958,22 @@ struct NewSessionView: View {
 /// this host. Empty clears it.
 struct NicknameSheet: View {
     let session: AgentSession
-    /// Returns why the name was refused, or nil once it's set.
-    let onSet: (String) -> String?
+    /// Whether the name is free — asked before setting it.
+    let check: (String) -> AgentSessionStore.NicknameVerdict
+    /// Returns why the name was refused, or nil once it's set. The flag:
+    /// take it from the archived session holding it.
+    let onSet: (String, Bool) -> String?
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var error: String?
+    /// An archived session holds the name: the question, until answered.
+    @State private var reclaimQuestion: String?
     @FocusState private var focused: Bool
 
-    init(session: AgentSession, onSet: @escaping (String) -> String?) {
+    init(session: AgentSession, check: @escaping (String) -> AgentSessionStore.NicknameVerdict = { _ in .ok },
+         onSet: @escaping (String, Bool) -> String?) {
         self.session = session
+        self.check = check
         self.onSet = onSet
         _name = State(initialValue: session.nickname ?? "")
     }
@@ -1973,8 +1999,13 @@ struct NicknameSheet: View {
                     .font(.system(size: 13, design: .monospaced))
                     .focused($focused)
                     .onSubmit { save() }
+                    .onChange(of: name) { _, _ in reclaimQuestion = nil; error = nil }
             }
-            if let error {
+            if let reclaimQuestion {
+                Label(reclaimQuestion, systemImage: "archivebox")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 11.5)).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1985,13 +2016,14 @@ struct NicknameSheet: View {
             HStack {
                 if session.nickname != nil {
                     Button(NSLocalizedString("Clear", comment: "nickname sheet")) {
-                        _ = onSet(""); dismiss()
+                        _ = onSet("", false); dismiss()
                     }
                 }
                 Spacer()
                 Button(NSLocalizedString("Cancel", comment: "")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(NSLocalizedString("Set", comment: "nickname sheet")) { save() }
+                Button(reclaimQuestion == nil ? NSLocalizedString("Set", comment: "nickname sheet")
+                                              : NSLocalizedString("Reuse", comment: "nickname sheet: take it from the archived session")) { save() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(normalized == nil)
             }
@@ -2003,7 +2035,15 @@ struct NicknameSheet: View {
 
     private func save() {
         guard normalized != nil else { return }
-        if let why = onSet(name) { error = why } else { dismiss() }
+        let reclaim = reclaimQuestion != nil
+        if !reclaim {
+            switch check(name) {
+            case .refused(let why): error = why; return
+            case .reclaim(let question): reclaimQuestion = question; return
+            case .ok: break
+            }
+        }
+        if let why = onSet(name, reclaim) { reclaimQuestion = nil; error = why } else { dismiss() }
     }
 }
 

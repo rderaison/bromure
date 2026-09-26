@@ -429,10 +429,21 @@ final class SessionPane {
             "textLength": (editor.string as NSString).length,
         ]
     }
+    /// Debug: stage what's attached as a send would (no send), or report it.
+    func debugStageAttachments(report: Bool) -> [String: Any] {
+        guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
+        if !report { m.debugStagePending() }
+        return ["ok": true, "staged": m.debugStaged ?? NSNull(), "pending": m.pendingAttachments.count]
+    }
     /// Debug: attach a host file to the composer, as a drop on the window would.
     func debugDropFile(_ hostPath: String) -> [String: Any] {
         guard let m = beautifiedModel else { return ["error": "no beautified view on stage"] }
         let url = URL(fileURLWithPath: (hostPath as NSString).expandingTildeInPath)
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+            m.drop([DroppedFile(name: url.lastPathComponent, data: Data(), isImage: false, folder: url)])
+            return ["ok": true, "pending": m.pendingAttachments.count, "folder": true]
+        }
         guard let data = try? Data(contentsOf: url) else { return ["error": "unreadable: \(hostPath)"] }
         let isImage = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
         m.drop([DroppedFile(name: url.lastPathComponent, data: data, isImage: isImage)])
@@ -575,6 +586,7 @@ final class SessionPane {
     /// provider pinned to that session's window.
     func makeBeautifiedModel(windowIndex: Int, provider: BeautifiedTranscriptProvider) -> BeautifiedSessionModel {
         let m = BeautifiedSessionModel(provider: provider)
+        m.draftKey = "local:\(profile.id.uuidString):\(windowIndex)"
         if let seed = beautifiedSeeds.removeValue(forKey: windowIndex) { m.seedOpening(seed) }
         m.transcriptSink = transcriptSinks[windowIndex]
         // The tab's own terminal surface, for an interactive slash command

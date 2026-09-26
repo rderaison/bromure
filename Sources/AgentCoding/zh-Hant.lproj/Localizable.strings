@@ -3122,3 +3122,10 @@
 "Force Reboot" = "強制重新開機";
 "Force reboot “%@”?" = "要強制重新開機「%@」嗎？";
 "Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)" = "正常關閉機器並重新開機。其中執行的一切都會停止。（選擇「重新開機」時按住 ⌥ 可強制重新開機。）";
+"Packing %@…" = "正在打包 %@…";
+"Unpacking %@…" = "正在解開 %@…";
+"%d items in “%@” weren't copied: they point outside the folder or aren't regular files." = "「%2$@」中有 %1$d 個項目未拷貝：它們指向檔案夾之外，或不是一般檔案。";
+"Nickname: @%@…" = "暱稱：@%@…";
+"Reuse" = "重新使用";
+"%@ stopped as it started: %@" = "%1$@ 啟動時停止：%2$@";
+"@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ 曾由已封存的工作階段「%2$@」使用，最後一次在 %3$@。要在此工作階段中重新使用嗎？";

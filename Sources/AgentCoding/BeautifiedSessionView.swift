@@ -200,6 +200,17 @@ extension BeautifiedTranscriptProvider {
         else { return paths }
         for (n, f) in files.enumerated() {
             let path = GuestDrop.path(index: n, name: f.name)
+            #if os(macOS)
+            if let folder = f.folder {
+                // The folder's contents at `path` (see `FolderUpload`).
+                let op: FolderUpload.FileOp = { [self] op in
+                    guard let r = await self.guestFileOp(op) else { throw CocoaError(.fileWriteUnknown) }
+                    return r
+                }
+                if (try? await FolderUpload.upload(folder, into: path, op: op)) != nil { paths.append(path) }
+                continue
+            }
+            #endif
             var ok = true
             for op in GuestDrop.writeOps(guestPath: path, data: f.data) {
                 if await guestFileOp(op) == nil { ok = false; break }
@@ -350,10 +361,38 @@ struct WorkingGate {
 /// Drives one beautified view: polls its provider for the live transcript and
 /// relays composer input. `@MainActor` — it only touches provider calls (main-
 /// actor) and SwiftUI state.
+/// What's typed (and attached) in a chat's composer but not sent, kept
+/// apart from the chat's model: a session switch builds a fresh model, and
+/// the draft used to go with the old one.
+@MainActor
+enum ComposerDrafts {
+    struct Draft { var text = ""; var attachments: [DroppedFile] = [] }
+    private static var drafts: [String: Draft] = [:]
+    static subscript(key: String) -> Draft {
+        get { drafts[key] ?? Draft() }
+        set {
+            if newValue.text.isEmpty && newValue.attachments.isEmpty { drafts[key] = nil }
+            else { drafts[key] = newValue }
+        }
+    }
+}
+
 @MainActor
 final class BeautifiedSessionModel: ObservableObject {
     @Published var items: [TranscriptItem] = []
-    @Published var composerText = ""
+    @Published var composerText = "" {
+        didSet { if let draftKey { ComposerDrafts[draftKey].text = composerText } }
+    }
+    /// Where this chat's unsent draft is kept (`ComposerDrafts`): the machine
+    /// and tab it's for. Setting it brings the draft back.
+    var draftKey: String? {
+        didSet {
+            guard let draftKey, draftKey != oldValue else { return }
+            let d = ComposerDrafts[draftKey]
+            composerText = d.text
+            pendingAttachments = d.attachments
+        }
+    }
     @Published var sending = false
     /// True until the first transcript fetch resolves — drives the placeholder.
     @Published var loading = true
@@ -855,6 +894,16 @@ final class BeautifiedSessionModel: ObservableObject {
         transcriptSink?(d)
     }
 
+    /// Debug: stage the pending attachments as a send would, without
+    /// sending — the guest paths land in `debugStaged`.
+    func debugStagePending() {
+        let files = pendingAttachments
+        pendingAttachments = []
+        debugStaged = nil
+        Task { debugStaged = await provider.stage(files) }
+    }
+    var debugStaged: [String]?
+
     /// Debug: the history on show, for the E2E hook.
     func debugHistoryState() -> [String: Any] {
         let buf = currentPath.flatMap { buffers[$0] }
@@ -1063,7 +1112,9 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Files dropped on the window, pending as composer attachments (thumbnail
     /// chips) until the user hits Send — TUI parity: the drop attaches, Send
     /// transmits your text plus the staged paths as ONE message.
-    @Published var pendingAttachments: [DroppedFile] = []
+    @Published var pendingAttachments: [DroppedFile] = [] {
+        didSet { if let draftKey { ComposerDrafts[draftKey].attachments = pendingAttachments } }
+    }
 
     /// The images user turns reference by their drop path that this view
     /// doesn't hold yet, from this Mac's record of what it uploaded. A turn
@@ -1120,7 +1171,7 @@ final class BeautifiedSessionModel: ObservableObject {
         // stamped so no later send reuses them.
         let stamp = GuestDrop.stamp()
         let prefixed = atts.map {
-            DroppedFile(name: "\(stamp)_\($0.name)", data: $0.data, isImage: $0.isImage)
+            DroppedFile(name: "\(stamp)_\($0.name)", data: $0.data, isImage: $0.isImage, folder: $0.folder)
         }
         let attPaths = prefixed.enumerated().map { GuestDrop.path(index: $0.offset, name: $0.element.name) }
         for (i, f) in prefixed.enumerated() where f.isImage {
@@ -2383,6 +2434,11 @@ struct SessionFailure: Equatable {
         }
         if let d = match(quotaNeedles) { return SessionFailure(kind: .quota, detail: d) }
         if let d = match(authNeedles)  { return SessionFailure(kind: .auth,  detail: d) }
+        // The launcher's "<tool> exited with status N": what the agent said
+        // before it went is the useful part.
+        if let d = AgentSessionEngine.earlyExitReason(tail.joined(separator: "\n")) {
+            return SessionFailure(kind: .generic, detail: clean(d))
+        }
         if let d = match(genericNeedles) { return SessionFailure(kind: .generic, detail: d) }
         return nil
     }

@@ -3119,3 +3119,10 @@
 "Force Reboot" = "Neustart erzwingen";
 "Force reboot “%@”?" = "Neustart von „%@“ erzwingen?";
 "Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)" = "Fährt die Maschine sauber herunter und startet sie neu. Alles, was darin läuft, wird beendet. (Halten Sie ⌥ gedrückt, während Sie „Neu starten“ wählen, um ihn zu erzwingen.)";
+"Packing %@…" = "%@ wird gepackt…";
+"Unpacking %@…" = "%@ wird entpackt…";
+"%d items in “%@” weren't copied: they point outside the folder or aren't regular files." = "%d Einträge in „%@“ wurden nicht kopiert: Sie verweisen aus dem Ordner hinaus oder sind keine normalen Dateien.";
+"Nickname: @%@…" = "Spitzname: @%@…";
+"Reuse" = "Wiederverwenden";
+"%@ stopped as it started: %@" = "%@ ist beim Start abgebrochen: %@";
+"@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ gehörte der archivierten Sitzung „%@“, zuletzt am %@. Für diese Sitzung wiederverwenden?";

@@ -290,3 +290,76 @@ struct AgentSessionStoreTests {
         }
     }
 }
+
+@Suite("Agent dying as it starts")
+struct EarlyExitReasonTests {
+    @Test("The agent's own words before the launcher's exit line")
+    func agentSaid() {
+        let screen = """
+        [bromure-ac] starting claude in worktree…
+        No conversation found to continue
+        \u{1b}[31m[bromure-ac] claude exited with status 1\u{1b}[0m
+        ubuntu@claudedev:~/claude-260926-1717$
+        """
+        #expect(AgentSessionEngine.earlyExitReason(screen, tool: "claude") == "No conversation found to continue")
+    }
+
+    @Test("Nothing said: the exit line itself")
+    func silent() {
+        let screen = "[bromure-ac] starting codex in worktree…\n[bromure-ac] codex exited with status 2\n$ "
+        #expect(AgentSessionEngine.earlyExitReason(screen, tool: "codex") == "codex exited with status 2")
+    }
+
+    @Test("Any agent when none is named; color remnants stripped")
+    func anyTool() {
+        let screen = "No model configured\n33[31m[bromure-ac] kimi exited with status 1[0m\n$ "
+        #expect(AgentSessionEngine.earlyExitReason(screen) == "No model configured")
+        #expect(AgentSessionEngine.earlyExitReason("33[31m[bromure-ac] grok exited with status 3[0m") == "grok exited with status 3")
+    }
+
+    @Test("Still running, or another tool's line: no verdict")
+    func running() {
+        #expect(AgentSessionEngine.earlyExitReason("[bromure-ac] starting claude in worktree…\n╭─ Claude Code", tool: "claude") == nil)
+        #expect(AgentSessionEngine.earlyExitReason("[bromure-ac] kimi exited with status 1", tool: "claude") == nil)
+    }
+}
+
+@Suite("Nicknames: taken, and taken back from an archived session")
+@MainActor
+struct NicknameReclaimTests {
+    private func store() -> AgentSessionStore {
+        AgentSessionStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("sessions-\(UUID().uuidString).json"))
+    }
+
+    @Test("A live session's name is refused, with who holds it")
+    func liveRefused() {
+        let st = store(); let ws = UUID()
+        let a = AgentSession(profileID: ws, tool: .claude, title: "Vision", cwd: "~/a")
+        let b = AgentSession(profileID: ws, tool: .claude, title: "Other", cwd: "~/b")
+        st.upsert(a); st.upsert(b)
+        #expect(st.setNickname(a.id, "vis") == nil)
+        guard case .refused(let why) = st.checkNickname(b.id, "@vis") else { Issue.record("expected refused"); return }
+        #expect(why.contains("Vision"))
+        #expect(st.setNickname(b.id, "vis", reclaim: true) != nil)   // no taking from a live one
+        #expect(st.session(a.id)?.nickname == "vis")
+    }
+
+    @Test("An archived session's name is offered back, and moves only on yes")
+    func archivedReclaimed() {
+        let st = store(); let ws = UUID()
+        let a = AgentSession(profileID: ws, tool: .claude, title: "Old vision", cwd: "~/a")
+        let b = AgentSession(profileID: ws, tool: .claude, title: "New", cwd: "~/b")
+        st.upsert(a); st.upsert(b)
+        #expect(st.setNickname(a.id, "vis") == nil)
+        st.setArchived(a.id, true)
+        guard case .reclaim(let q) = st.checkNickname(b.id, "vis") else { Issue.record("expected reclaim"); return }
+        #expect(q.contains("Old vision") && q.contains("@vis"))
+        #expect(st.setNickname(b.id, "vis") != nil)                    // not without the yes
+        #expect(st.session(a.id)?.nickname == "vis")
+        #expect(st.setNickname(b.id, "vis", reclaim: true) == nil)
+        #expect(st.session(b.id)?.nickname == "vis")
+        #expect(st.session(a.id)?.nickname == nil)
+        #expect(st.checkNickname(a.id, "other") == .ok)
+    }
+}

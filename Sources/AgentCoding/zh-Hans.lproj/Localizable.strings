@@ -3119,3 +3119,10 @@
 "Force Reboot" = "强制重启";
 "Force reboot “%@”?" = "要强制重启“%@”吗？";
 "Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)" = "正常关闭机器并重新启动。其中运行的一切都会停止。（选择“重启”时按住 ⌥ 可强制重启。）";
+"Packing %@…" = "正在打包 %@…";
+"Unpacking %@…" = "正在解包 %@…";
+"%d items in “%@” weren't copied: they point outside the folder or aren't regular files." = "“%2$@”中有 %1$d 项未复制：它们指向文件夹之外，或不是普通文件。";
+"Nickname: @%@…" = "昵称：@%@…";
+"Reuse" = "重新使用";
+"%@ stopped as it started: %@" = "%1$@ 启动时停止：%2$@";
+"@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ 曾由已归档的会话“%2$@”使用，最后一次在 %3$@。要在此会话中重新使用吗？";

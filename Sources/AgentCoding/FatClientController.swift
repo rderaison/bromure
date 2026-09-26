@@ -1106,7 +1106,19 @@ final class RemoteHostController {
         if let message, !message.isEmpty { body["message"] = message }
         // Dropped files travel with the request; the server stages them in
         // the machine once it's up, exactly like a local drop.
-        if !attachments.isEmpty { body["attachments"] = attachments.map(\.wireDictionary) }
+        // A folder is packed here and unpacked on the server.
+        var wire: [[String: Any]] = []
+        for a in attachments {
+            #if os(macOS)
+            if let folder = a.folder {
+                guard let data = try? await FolderUpload.packed(folder) else { continue }
+                wire.append(DroppedFile(name: a.name, data: data, isImage: false, packedFolder: true).wireDictionary)
+                continue
+            }
+            #endif
+            wire.append(a.wireDictionary)
+        }
+        if !wire.isEmpty { body["attachments"] = wire }
         let resp = try? await Task.detached(priority: .userInitiated) {
             try RemoteTransport.client(for: host).request("POST", "/agent-sessions/start", body: body)
         }.value
@@ -1769,7 +1781,8 @@ final class RemoteHostController {
         let path = "/vms/\(seg(id))/file"
         let resp = try await Task.detached(priority: .userInitiated) {
             try RemoteTransport.client(for: host)
-                .request("POST", path, body: ["op": op, "timeout": timeout])
+                .request("POST", path, body: ["op": op, "timeout": timeout],
+                         recvTimeoutSeconds: timeout + 5)
         }.value
         if let err = resp.json["error"] as? String {
             throw ACAppDelegate.GuestExecError.commandFailed(exitCode: 1, stderr: err)
@@ -1981,7 +1994,9 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     }
 
     func guestFileOp(_ op: [String: Any]) async -> [String: Any]? {
-        try? await controller.guestFileOp(workspaceID, op: op, timeout: 30)
+        // Unpacking a dropped folder can take a while on a big one.
+        let timeout = (op["op"] as? String) == "untar" ? 600 : 30
+        return try? await controller.guestFileOp(workspaceID, op: op, timeout: timeout)
     }
 
     func isWorking() -> Bool { boundTab?.agentStatus == .working }
@@ -2164,6 +2179,8 @@ final class RemoteRoomBackend: RoomStageBackend {
 
     func makeChat(for s: AgentSession) -> BeautifiedSessionModel? {
         guard let w = s.windowIndex else { return nil }
+        // The session's own agent, not the workspace's default.
+        window?.hintSessionTool(s.tool, profileID: s.profileID, window: w)
         return window?.makeRemoteChatModel(id: s.profileID, window: w)
     }
 
@@ -2188,6 +2205,15 @@ final class RemoteRoomBackend: RoomStageBackend {
 
     func assignNickname(_ id: UUID, _ nick: String) {
         window?.controller.sessionCommand(id, "nickname", body: ["nickname": nick])
+    }
+
+    func checkNickname(_ id: UUID, _ nick: String) -> AgentSessionStore.NicknameVerdict {
+        window?.controller.sessionStore.checkNickname(id, nick) ?? .ok
+    }
+
+    func setNickname(_ id: UUID, _ nick: String, reclaim: Bool) -> String? {
+        window?.controller.sessionCommand(id, "nickname", body: ["nickname": nick, "reclaim": reclaim])
+        return nil
     }
 
     func setLayout(_ room: UUID, _ layout: String) {
@@ -2302,6 +2328,10 @@ final class RemoteHostWindow: NSWindow {
     /// roster label reads "bash" (agents under an interpreter).
     private var sessionAgentWindows: Set<String> = []
     private var sessionToolHints: [String: String] = [:]
+    /// A room cell's chat: name it after the session's agent.
+    func hintSessionTool(_ tool: Profile.Tool, profileID: Profile.ID, window w: Int) {
+        sessionToolHints["\(profileID.uuidString):\(w)"] = tool.rawValue
+    }
     /// A session's opening message, echoed into its chat the moment it
     /// mounts (once per session) — no blank wait for the first transcript.
     private var sessionSeeds: [String: String] = [:]
@@ -2659,7 +2689,9 @@ final class RemoteHostWindow: NSWindow {
         // remote file browser window.
         fileExplorerModel.fileOpProvider = { [weak self] id, op in
             guard let self else { throw ACAppDelegate.GuestExecError.vmNotRunning }
-            return try await self.controller.guestFileOp(id, op: op, timeout: 30)
+            // Unpacking a dropped folder can take a while on a big one.
+            let timeout = (op["op"] as? String) == "untar" ? 600 : 30
+            return try await self.controller.guestFileOp(id, op: op, timeout: timeout)
         }
         let filePane = FileExplorerPane(
             model: fileExplorerModel, listModel: controller.listModel,
@@ -3986,11 +4018,14 @@ final class RemoteHostWindow: NSWindow {
             rename: { [weak self] id, title in
                 self?.controller.sessionCommand(id, "rename", body: ["title": title])
             },
-            setNickname: { [weak self] id, nick in
-                // The server checks uniqueness; a refusal shows on the next poll
-                // (the name simply doesn't take).
-                self?.controller.sessionCommand(id, "nickname", body: ["nickname": nick])
+            setNickname: { [weak self] id, nick, reclaim in
+                // Checked against the mirror first (`checkNickname`); the
+                // server checks again.
+                self?.controller.sessionCommand(id, "nickname", body: ["nickname": nick, "reclaim": reclaim])
                 return nil
+            },
+            checkNickname: { [weak self] id, nick in
+                self?.controller.sessionStore.checkNickname(id, nick) ?? .ok
             },
             resumeWith: { [weak self] id, text in
                 self?.controller.sessionCommand(id, "resume", body: ["message": text])
@@ -4749,6 +4784,7 @@ final class RemoteHostWindow: NSWindow {
             }
             return ["ok": true, "members": rc.members.count, "hits": hits,
                     "layout": rc.layout.string, "page": rc.page, "pages": rc.pages.count,
+                    "composerText": rc.targetModel?.composerText ?? "",
                     "switchboard": rc.switchboard?.id.uuidString ?? "",
                     "models": rc.models.map { id, m -> [String: Any] in
                         var st = m.debugHistoryState()
@@ -6050,6 +6086,7 @@ final class RemoteHostWindow: NSWindow {
         let provider = RemoteTranscriptProvider(controller: controller, workspaceID: id,
                                                 windowIndex: idx, accent: accent)
         let m = BeautifiedSessionModel(provider: provider)
+        m.draftKey = "\(controller.host.id.uuidString):\(id.uuidString):\(idx)"
         // Delegations this session is part of (read-only here: answering
         // for the agent is done on the server's own window), and the jump
         // to the other end's session.

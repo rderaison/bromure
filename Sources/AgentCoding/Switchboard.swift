@@ -24,6 +24,8 @@ struct SwitchboardEvent {
         case sessionDone = "session_done"
         case sessionEnded = "session_ended"
         case apiRefused = "api_refused"
+        case sessionJoinedRoom = "session_joined_room"
+        case sessionLeftRoom = "session_left_room"
     }
     let seq: Int
     let at: Date
@@ -33,6 +35,8 @@ struct SwitchboardEvent {
     let text: String
     /// Worth waking the Switchboard for.
     let notable: Bool
+    /// A room's comings and goings: news for that room's Switchboard only.
+    var roomID: UUID? = nil
 }
 
 @MainActor
@@ -79,6 +83,8 @@ final class SwitchboardEngine {
     /// Room names, for room Switchboards' briefs and scope notes.
     var roomName: (UUID) -> String? = { _ in nil }
     private var lastBuckets: [UUID: SessionBucket] = [:]
+    /// Each session's room as last seen (nil: none) — to tell joins and leaves.
+    private var lastRooms: [UUID: UUID?] = [:]
     private var primed = false
     /// Sessions the Switchboard acted on or started — their completion is
     /// worth a notice.
@@ -218,6 +224,20 @@ final class SwitchboardEngine {
                 needsYouSince.removeValue(forKey: s.id)
                 append(.sessionNeedsYou, s, "\(label(s)) needs you", notable: true)
             }
+            // Into a room, or out of one (a drop on the room, Add to Room, a
+            // session started there): the room's Switchboard hears of it —
+            // it only knew the members it had listed.
+            let firstSeen = lastRooms.index(forKey: s.id) == nil
+            let prevRoom = lastRooms[s.id] ?? nil
+            lastRooms[s.id] = s.roomID
+            if primed, prevRoom != s.roomID, !(firstSeen && s.roomID == nil) {
+                if let old = prevRoom {
+                    append(.sessionLeftRoom, s, "\(label(s)) left the room", notable: true, room: old)
+                }
+                if let new = s.roomID, !(firstSeen && (b == .ended || b == .asleep)) {
+                    append(.sessionJoinedRoom, s, "\(label(s)) joined the room", notable: true, room: new)
+                }
+            }
             guard primed else { continue }
             guard let prev else {
                 if b != .ended && b != .asleep {
@@ -238,16 +258,23 @@ final class SwitchboardEngine {
             }
         }
         for id in lastBuckets.keys where !seen.contains(id) { lastBuckets.removeValue(forKey: id) }
+        for id in lastRooms.keys where !seen.contains(id) { lastRooms.removeValue(forKey: id) }
         primed = true
         deliverNotice()
     }
 
-    private func append(_ kind: SwitchboardEvent.Kind, _ s: AgentSession?, _ text: String, notable: Bool) {
+    private func append(_ kind: SwitchboardEvent.Kind, _ s: AgentSession?, _ text: String, notable: Bool,
+                        room: UUID? = nil) {
         events.append(SwitchboardEvent(seq: nextSeq, at: Date(), kind: kind, sessionID: s?.id,
-                                     text: text, notable: notable))
+                                     text: text, notable: notable, roomID: room))
         nextSeq += 1
         if events.count > Self.eventCap { events.removeFirst(events.count - Self.eventCap) }
         BACDebug.log("switchboard", "event: \(text)")
+    }
+
+    /// Debug: a room's comings and goings as its Switchboard hears them.
+    func debugRoomEvents(_ room: UUID) -> [String] {
+        events.filter { $0.roomID == room }.map { "\($0.kind.rawValue) \($0.notable ? "!" : "") \($0.text)" }
     }
 
     /// The Switchboard just looked at everything (list_sessions): what was
@@ -260,6 +287,7 @@ final class SwitchboardEngine {
     /// An event `me` should hear about: any for the global Switchboard;
     /// for a room's, those about its sessions.
     private func concerns(_ e: SwitchboardEvent, _ me: AgentSession) -> Bool {
+        if let room = e.roomID { return me.roomID == room }
         guard me.roomID != nil else { return true }
         guard let sid = e.sessionID, let s = sessions.session(sid) else { return false }
         return inScope(s, of: me)

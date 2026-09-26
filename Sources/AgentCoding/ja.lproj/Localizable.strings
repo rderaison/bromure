@@ -3119,3 +3119,10 @@
 "Force Reboot" = "強制再起動";
 "Force reboot “%@”?" = "「%@」を強制再起動しますか？";
 "Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)" = "マシンを正常にシャットダウンしてから再起動します。中で動いているものはすべて停止します。（強制するには ⌥ を押しながら「再起動」を選びます。）";
+"Packing %@…" = "%@ をまとめています…";
+"Unpacking %@…" = "%@ を展開しています…";
+"%d items in “%@” weren't copied: they point outside the folder or aren't regular files." = "「%2$@」の %1$d 項目はコピーされませんでした：フォルダの外を指しているか、通常のファイルではありません。";
+"Nickname: @%@…" = "ニックネーム：@%@…";
+"Reuse" = "再利用";
+"%@ stopped as it started: %@" = "%1$@ は起動時に停止しました：%2$@";
+"@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ はアーカイブ済みのセッション「%2$@」が使っていました（最終使用 %3$@）。このセッションで再利用しますか？";

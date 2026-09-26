@@ -5134,6 +5134,15 @@ public final class ProfileStore {
             _bromure_install_tool "$_wt_tool" || true
             hash -r 2>/dev/null || true
         fi
+        # Resuming a Claude session that never got a conversation in this
+        # folder: `--continue` would die on "No conversation found to
+        # continue" — start it fresh instead. (Claude keeps a folder's
+        # conversations under its path with every non-alphanumeric as "-".)
+        case " $_wt_flags " in *" --continue "*)
+            if [ "$_wt_tool" = "claude" ] && ! ls "$HOME/.claude/projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')"/*.jsonl >/dev/null 2>&1; then
+                _wt_flags=$(printf '%s' " $_wt_flags " | sed 's/ --continue / /')
+            fi ;;
+        esac
         if command -v "$_wt_tool" >/dev/null 2>&1; then
             printf '\\033[2m[bromure-ac] starting %s in worktree…\\033[0m\\n' "$_wt_tool"
             if [ -n "${BROMURE_AC_WT_PROMPT:-}" ]; then
