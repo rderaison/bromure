@@ -264,7 +264,16 @@ final class RoomStageController {
 
     /// Read a stopped member's conversation once (cached copy first).
     func loadResting(_ s: AgentSession) {
-        guard resting[s.id] == nil, restingLoading.insert(s.id).inserted else { return }
+        guard resting[s.id] == nil else { return }
+        // Kept across visits (a room's controller is rebuilt each time it's
+        // shown): a stopped conversation only changes when the session moves,
+        // and over a fat client each read is the whole transcript.
+        let stamp = Self.restingStamp(s)
+        if let hit = Self.restingCache[s.id], hit.stamp == stamp {
+            resting[s.id] = hit.items
+            return
+        }
+        guard restingLoading.insert(s.id).inserted else { return }
         let ended = SessionHome.bucket(for: s, in: listModel) == .ended
         let agent = s.tool.rawValue
         Task { @MainActor in
@@ -272,9 +281,18 @@ final class RoomStageController {
             let items = await Task.detached(priority: .userInitiated) {
                 data.map { AgentTranscript.parse($0, agent: agent) } ?? []
             }.value
-            resting[s.id] = Array(items.suffix(40))
+            let tail = Array(items.suffix(40))
+            resting[s.id] = tail
+            if data != nil { Self.restingCache[s.id] = (stamp, tail) }
             restingLoading.remove(s.id)
         }
+    }
+
+    /// Stopped sessions' tails by session, with what they were read at.
+    private static var restingCache: [UUID: (stamp: String, items: [TranscriptItem])] = [:]
+    private static func restingStamp(_ s: AgentSession) -> String {
+        [s.lastSeenAt, s.agentSeenAt, s.endedAt, s.resumedAt]
+            .map { $0.map { String($0.timeIntervalSince1970) } ?? "-" }.joined(separator: "|")
     }
 
     /// The chat the composer sends to right now (nil: nothing live there).
@@ -354,6 +372,10 @@ struct RoomStageView: View {
     @Namespace private var zoom
     @State private var wave: Double = 1
     @State private var dockHeight: CGFloat = 220
+    /// At 1×1 the Switchboard is a tab of its own (no dock under a lone
+    /// cell): whether that tab is the one on show.
+    @State private var switchboardTab = false
+    private var singleLayout: Bool { controller.layout.size == 1 && controller.zoomedID == nil }
     @State private var dockOpen = true
     /// While one session is zoomed the Switchboard folds away; the chevron
     /// peeks at it without changing the grid's preference.
@@ -393,6 +415,8 @@ struct RoomStageView: View {
                 if let z = controller.zoomedID, let s = controller.members.first(where: { $0.id == z }) {
                     zoomed(s)
                         .transition(.opacity)
+                } else if singleLayout, switchboardTab {
+                    switchboardPane
                 } else {
                     grid
                         .transition(.opacity)
@@ -406,8 +430,21 @@ struct RoomStageView: View {
             dock
         }
         .background(pageKeys)
+        // At 1×1 the tab on show and the composer's target agree: the
+        // Switchboard's tab when the composer talks to it, else the session's.
+        .onAppear { syncSingleTab() }
+        .onChange(of: singleLayout) { _, _ in syncSingleTab() }
         // Opaque: the fat client's stage underneath is black.
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func syncSingleTab() {
+        guard singleLayout else { return }
+        switchboardTab = controller.target == .switchboard
+        let pages = controller.pages
+        if !switchboardTab, pages.indices.contains(controller.page), let first = pages[controller.page].first {
+            controller.focus(first.id)
+        }
     }
 
     /// ⌃Tab / ⌃⇧Tab walk the tabs.
@@ -452,13 +489,17 @@ struct RoomStageView: View {
             } else {
                 Text(controller.room?.name ?? "")
                     .font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+                    .layoutPriority(1)   // the name outlasts the count and the pickers
                     .onTapGesture(count: 2) {
                         draftName = controller.room?.name ?? ""
                         renaming = true
                     }
                     .help(NSLocalizedString("Double-click to rename", comment: "room stage"))
             }
+            // A narrow stage gives the count up first (truncated, never wrapped).
             Text(tally).font(.system(size: 12)).foregroundStyle(.secondary)
+                .lineLimit(1).layoutPriority(-1)
             if controller.room?.isArchived == true {
                 // Put away: say so, and one click brings it all back.
                 Label(NSLocalizedString("Archived", comment: "sidebar section"), systemImage: "archivebox")
@@ -473,13 +514,20 @@ struct RoomStageView: View {
             if controller.zoomedID == nil, !controller.members.isEmpty { layoutPicker }
             roomMenu
             Button(action: controller.onNewSession) {
-                Label(NSLocalizedString("Add to Room", comment: "room stage"), systemImage: "plus")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(accent.gradient))
-                    .shadow(color: accent.opacity(0.3), radius: 5, y: 2)
+                // The label when it fits, else just the "+" — never wrapped.
+                ViewThatFits(in: .horizontal) {
+                    Label(NSLocalizedString("Add to Room", comment: "room stage"), systemImage: "plus")
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 12)
+                    Image(systemName: "plus")
+                        .padding(.horizontal, 8)
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(accent.gradient))
+                .shadow(color: accent.opacity(0.3), radius: 5, y: 2)
             }
             .buttonStyle(.plain)
             .help(NSLocalizedString("Start a session in this room", comment: "room stage"))
@@ -603,10 +651,28 @@ struct RoomStageView: View {
         return ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
+                    if single {
+                        SwitchboardTab(selected: switchboardTab,
+                                       dot: controller.switchboard.flatMap { SessionHome.dot(for: $0, in: controller.listModel) },
+                                       accent: accent) {
+                            RoomStageView.instantly {
+                                switchboardTab = true
+                                controller.target = .switchboard
+                            }
+                        }
+                    }
                     ForEach(Array(pages.enumerated()), id: \.offset) { i, page in
-                        RoomTab(page: page, index: i, single: single, selected: i == controller.page,
+                        RoomTab(page: page, index: i, single: single,
+                                selected: i == controller.page && !(single && switchboardTab),
                                 model: controller.listModel, accent: accent) {
-                            RoomStageView.instantly { controller.show(page: i) }
+                            RoomStageView.instantly {
+                                controller.show(page: i)
+                                if single {
+                                    switchboardTab = false
+                                    controller.focus(page.first?.id)
+                                    controller.target = .focused
+                                }
+                            }
                         }
                         .id(i)
                     }
@@ -871,7 +937,14 @@ struct RoomStageView: View {
 
     // MARK: Switchboard dock + the one composer
 
+    /// Under the grid: the Switchboard dock and the composer — at 1×1 only the
+    /// composer (the Switchboard is a tab there).
+    @ViewBuilder
     private var dock: some View {
+        if singleLayout { composerBar } else { dockStack }
+    }
+
+    private var dockStack: some View {
         let sb = controller.switchboard
         let paused = sb.map { controller.models[$0.id] == nil && !$0.isLaunching } ?? false
         return VStack(spacing: 0) {
@@ -922,7 +995,61 @@ struct RoomStageView: View {
                 Group {
                     if zoomMoving != nil {
                         Color.clear   // folding / unfolding with a zoom: nothing to lay out
-                    } else if let sb, let m = controller.models[sb.id] {
+                    } else {
+                        switchboardBody
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: dockHeight)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            composerBar
+        }
+        .onChange(of: controller.zoomedID) { _, _ in dockPeek = false }
+    }
+
+    /// At 1×1: the Switchboard full-size, as its own tab.
+    private var switchboardPane: some View {
+        let sb = controller.switchboard
+        let paused = sb.map { controller.models[$0.id] == nil && !$0.isLaunching } ?? false
+        return VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "wand.and.rays").foregroundStyle(accent)
+                Text(NSLocalizedString("Switchboard", comment: "room dock"))
+                    .font(.system(size: 12.5, weight: .semibold))
+                Text(NSLocalizedString("keeps track of this room's sessions", comment: "room dock"))
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            Divider()
+            Group {
+                if paused, let sb {
+                    VStack(spacing: 8) {
+                        Image(systemName: "pause.circle").font(.system(size: 22, weight: .light))
+                            .foregroundStyle(.tertiary)
+                        Text(NSLocalizedString("Paused — your next message picks it up", comment: "room dock"))
+                            .foregroundStyle(.secondary)
+                        Button(NSLocalizedString("Resume", comment: "room cell")) { controller.onResume(sb.id) }
+                    }
+                } else {
+                    switchboardBody
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(nsColor: .textBackgroundColor)))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(accent.opacity(0.4), lineWidth: 1.5))
+        .padding(12)
+    }
+
+    /// The Switchboard's chat, or what stands in for it (starting, asleep, none yet).
+    @ViewBuilder
+    private var switchboardBody: some View {
+        let sb = controller.switchboard
+                    if let sb, let m = controller.models[sb.id] {
                         BeautifiedSessionView(model: m, parts: .transcript)
                             .simultaneousGesture(TapGesture().onEnded { controller.target = .switchboard })
                     } else if let sb, sb.isLaunching {
@@ -949,14 +1076,6 @@ struct RoomStageView: View {
                                 .buttonStyle(.borderedProminent)
                         }
                     }
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: dockHeight)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-            composerBar
-        }
-        .onChange(of: controller.zoomedID) { _, _ in dockPeek = false }
     }
 
     /// The room's one composer, full width, with a "To" token above it:
@@ -1150,6 +1269,51 @@ private struct RoomTab: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(page.map(\.title).joined(separator: "\n"))
+    }
+}
+
+/// The Switchboard's tab at 1×1, in front of the sessions' own.
+private struct SwitchboardTab: View {
+    let selected: Bool
+    let dot: AgentStatus?
+    let accent: Color
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: "wand.and.rays")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(accent)
+                        .frame(width: 16, height: 16)
+                    if let dot { AgentStatusDot(status: dot).scaleEffect(0.8).offset(x: 2, y: 2) }
+                }
+                Text(NSLocalizedString("Switchboard", comment: "room dock"))
+                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(selected ? Color(nsColor: .controlBackgroundColor)
+                                   : (hovering ? Color.primary.opacity(0.05) : .clear))
+                    .shadow(color: .black.opacity(selected ? 0.10 : 0), radius: 2, y: 1)
+            }
+            .overlay(alignment: .bottom) {
+                if selected {
+                    Capsule().fill(accent).frame(height: 2).padding(.horizontal, 10).offset(y: 4)
+                }
+            }
+            .foregroundStyle(selected ? Color.primary : Color.secondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(NSLocalizedString("The room's Switchboard", comment: "room tab"))
     }
 }
 

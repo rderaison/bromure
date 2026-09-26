@@ -113,6 +113,10 @@ enum Fusion {
         /// built-in on-host engine (loopback, admin key).
         var localEngineBase: String? = nil
         var localEngineKey: String? = nil
+        /// The provider the Oh My Pi leg/judge speaks to (omp has no native
+        /// provider — it's switchable). Only Anthropic, OpenAI and xAI can be
+        /// fused; see `Profile.fusionOmpProviders`.
+        var ompProvider: Profile.OmpProvider = .default
     }
 
     /// A resolved credential for one upstream leg/judge call.
@@ -180,7 +184,8 @@ enum Fusion {
     /// no credential is available — the caller drops that leg.
     static func resolveCred(tool: Profile.Tool, authMode: Profile.AuthMode,
                             swapper: TokenSwapper, profileID: UUID,
-                            localBase: String? = nil, localKey: String? = nil) async -> Cred? {
+                            localBase: String? = nil, localKey: String? = nil,
+                            ompProvider: Profile.OmpProvider = .default) async -> Cred? {
         switch (tool, authMode) {
         case (.claude, .subscription):
             guard let (_, r) = HTTPMitmConnection.claudeSubscriptionProvider?(),
@@ -208,6 +213,16 @@ enum Fusion {
             guard let (_, r) = HTTPMitmConnection.kimiSubscriptionProvider?(),
                   let tok = try? await r.accessToken(for: profileID) else { return nil }
             return .kimiSubscription(tok)
+        case (.omp, .token):
+            // omp is API-key only and speaks whichever provider it's switched
+            // to; its key is swapped on that provider's host, so read it there.
+            // z.ai / custom endpoints aren't wire shapes Fusion speaks.
+            switch ompProvider {
+            case .anthropic: return realFor(["anthropic.com"], swapper, profileID).map(Cred.anthropicKey)
+            case .openai:    return realFor(["openai.com"], swapper, profileID).map(Cred.openAIKey)
+            case .xai:       return realFor(["x.ai"], swapper, profileID).map(Cred.grokKey)
+            case .zai, .custom: return nil
+            }
         case (_, .local):
             // Any tool in local mode → the engine serving this profile's local
             // models: the user's external server when configured, otherwise
@@ -712,11 +727,12 @@ enum Fusion {
                   let cred = await resolveCred(tool: leg, authMode: mode,
                                                swapper: swapper, profileID: profileID,
                                                localBase: config.localEngineBase,
-                                               localKey: config.localEngineKey) else {
+                                               localKey: config.localEngineKey,
+                                               ompProvider: config.ompProvider) else {
                 log("leg \(leg.rawValue): no usable credential — dropping")
                 continue
             }
-            let model = config.legModels[leg] ?? defaultLegModel(leg, mode)
+            let model = config.legModels[leg] ?? defaultLegModel(leg, mode, ompProvider: config.ompProvider)
             if let txt = await askModel(cred: cred, model: model,
                                         system: guestSystem.isEmpty ? legSystem : guestSystem,
                                         question: transcript.isEmpty ? question : transcript,
@@ -765,7 +781,8 @@ enum Fusion {
             judgeCred = await resolveCred(tool: config.judgeProvider, authMode: judgeMode,
                                           swapper: swapper, profileID: profileID,
                                           localBase: config.localEngineBase,
-                                          localKey: config.localEngineKey)
+                                          localKey: config.localEngineKey,
+                                          ompProvider: config.ompProvider)
         } else {
             judgeCred = nil
         }
@@ -1019,13 +1036,21 @@ enum Fusion {
     /// Default leg model per provider + auth mode when the panel hasn't pinned
     /// one. ChatGPT-account Codex only accepts its own models (e.g. gpt-5-codex),
     /// not the public API model ids.
-    private static func defaultLegModel(_ tool: Profile.Tool, _ authMode: Profile.AuthMode) -> String {
+    static func defaultLegModel(_ tool: Profile.Tool, _ authMode: Profile.AuthMode,
+                                ompProvider: Profile.OmpProvider = .default) -> String {
         switch tool {
         case .claude: return "claude-opus-4-8"
         case .codex:  return authMode == .subscription ? "gpt-5.5" : "gpt-5.5-2026-04-23"
         case .grok:   return "grok-build"
         case .kimi:   return "kimi-k2.5"
-        case .omp:    return "claude-opus-4-8"
+        case .omp:
+            // The default of the provider omp speaks to (same as that
+            // provider's own agent leg, in API-key mode).
+            switch ompProvider {
+            case .openai: return defaultLegModel(.codex, .token)
+            case .xai:    return defaultLegModel(.grok, .token)
+            case .anthropic, .zai, .custom: return defaultLegModel(.claude, .token)
+            }
         }
     }
 

@@ -403,7 +403,7 @@ struct VMDashboardView: View {
                                           comment: "Cloudflare tunnel consent alert title")
         a.informativeText = String(
             format: NSLocalizedString(
-                "Bromure will download cloudflared %@ (~18 MB) from GitHub, verify it against a pinned checksum and Cloudflare's Developer ID signature, and run one tunnel process per exposed service (recorded in the Supply Chain Log).\n\nTraffic transits Cloudflare's network under their Terms of Service (cloudflare.com/terms).\n\nEach service gets a random public https://….trycloudflare.com URL — anyone who has it can reach the service, so make sure the service itself expects that. The URL changes if the tunnel restarts.",
+                "Bromure will download cloudflared %@ (~18 MB) from GitHub, verify it against a pinned checksum and Cloudflare's Developer ID signature, and run one tunnel process per exposed service (recorded in the Security Timeline).\n\nTraffic transits Cloudflare's network under their Terms of Service (cloudflare.com/terms).\n\nEach service gets a random public https://….trycloudflare.com URL — anyone who has it can reach the service, so make sure the service itself expects that. The URL changes if the tunnel restarts.",
                 comment: "Cloudflare tunnel consent alert body; %@ = cloudflared version"),
             CloudflaredPin.version)
         a.addButton(withTitle: NSLocalizedString("Agree & Expose", comment: "Cloudflare tunnel consent confirm button"))

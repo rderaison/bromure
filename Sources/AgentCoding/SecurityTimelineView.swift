@@ -32,6 +32,8 @@ struct SecurityTimelineView: View {
 
     @State private var query = ""
     @State private var engineFilter: String?
+    /// The Overview's Blocked / Allowed tiles narrow by outcome.
+    @State private var outcomeFilter: SecurityTimeline.Decision?
     /// "" = this Mac; a host's name = that mirrored host; nil = all.
     @State private var machineFilter: String?
 
@@ -45,6 +47,7 @@ struct SecurityTimelineView: View {
         var e = timeline.allEvents
         if let machineFilter { e = e.filter { ($0.machine ?? "") == machineFilter } }
         if let engineFilter { e = e.filter { $0.engine == engineFilter } }
+        if let outcomeFilter { e = e.filter { $0.kind == outcomeFilter } }
         if !query.isEmpty {
             let q = query.lowercased()
             e = e.filter {
@@ -64,8 +67,9 @@ struct SecurityTimelineView: View {
             Divider()
             if tab == .overview {
                 SecurityOverview(timeline: timeline, postures: postures(),
-                                 showTimeline: { engine in
+                                 showTimeline: { engine, outcome in
                                      engineFilter = engine
+                                     outcomeFilter = outcome
                                      tab = .timeline
                                  })
             } else if rows.isEmpty {
@@ -146,6 +150,14 @@ struct SecurityTimelineView: View {
             Picker("", selection: $engineFilter) {
                 Text(NSLocalizedString("All engines", comment: "")).tag(String?.none)
                 ForEach(engines, id: \.self) { Text($0).tag(String?.some($0)) }
+            }
+            .labelsHidden()
+            .fixedSize()
+
+            Picker("", selection: $outcomeFilter) {
+                Text(NSLocalizedString("All outcomes", comment: "security timeline")).tag(SecurityTimeline.Decision?.none)
+                Text(NSLocalizedString("Blocked", comment: "security overview")).tag(SecurityTimeline.Decision?.some(.blocked))
+                Text(NSLocalizedString("Allowed", comment: "security overview")).tag(SecurityTimeline.Decision?.some(.allowed))
             }
             .labelsHidden()
             .fixedSize()
@@ -242,7 +254,8 @@ struct SecurityTimelineView: View {
 private struct SecurityOverview: View {
     var timeline: SecurityTimeline
     let postures: [SecurityPosture]
-    let showTimeline: (String?) -> Void
+    /// Open the Timeline filtered by engine and/or outcome.
+    let showTimeline: (_ engine: String?, _ outcome: SecurityTimeline.Decision?) -> Void
 
     private var recent: [SecurityTimeline.Event] {
         let since = Date().addingTimeInterval(-86400)
@@ -261,9 +274,9 @@ private struct SecurityOverview: View {
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
                     tile(NSLocalizedString("Blocked", comment: "security overview"), recent.filter { $0.kind == .blocked }.count,
-                         "hand.raised.fill", .red, engine: nil)
+                         "hand.raised.fill", .red, engine: nil, outcome: .blocked)
                     tile(NSLocalizedString("Allowed", comment: "security overview"), recent.filter { $0.kind == .allowed }.count,
-                         "checkmark.seal.fill", .green, engine: nil)
+                         "checkmark.seal.fill", .green, engine: nil, outcome: .allowed)
                     tile(NSLocalizedString("Credentials brokered", comment: "security overview"),
                          recent.filter { $0.engine == NSLocalizedString("Credential brokering", comment: "Security Timeline engine") }.count,
                          "arrow.left.arrow.right", .blue,
@@ -329,8 +342,9 @@ private struct SecurityOverview: View {
         }
     }
 
-    private func tile(_ title: String, _ n: Int, _ icon: String, _ tint: Color, engine: String?) -> some View {
-        Button { showTimeline(engine) } label: {
+    private func tile(_ title: String, _ n: Int, _ icon: String, _ tint: Color, engine: String?,
+                      outcome: SecurityTimeline.Decision? = nil) -> some View {
+        Button { showTimeline(engine, outcome) } label: {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Image(systemName: icon)

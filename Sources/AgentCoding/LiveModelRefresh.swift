@@ -93,6 +93,15 @@ extension ACAppDelegate {
             let pid = session.profileID
             let stored = profiles.first(where: { $0.id == pid }) ?? session.profile
             let fresh = stagedProfile(for: stored)
+            // Fusion's legs and credentials follow the same settings: re-judge
+            // the ⚡ toggle and push the fresh config (swap map updates below).
+            let fusionOK = fusionConfigurable(stored)
+            pane(for: pid)?.model.fusionConfigurable = fusionOK
+            mitmEngine?.setFusionConfig(makeFusionConfig(for: stored), for: pid)
+            if !fusionOK {
+                pane(for: pid)?.model.fusionEngaged = false
+                mitmEngine?.setFusionEngaged(false, for: pid)
+            }
             guard let prior = lastStagedProfiles[pid] else {
                 lastStagedProfiles[pid] = fresh
                 continue

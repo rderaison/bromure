@@ -5,7 +5,7 @@ import SwiftUI
 
 // MARK: - Messaging connector window
 //
-// File › Infrastructure › Messaging Connector… (and the sidebar's Messaging
+// Workspaces › Infrastructure › Messaging Connector… (and the sidebar's Messaging
 // row). One window, marked Beta: the connector machine's state (on/off, like
 // a registry), then a card per channel — Connect… opens its setup flow:
 //   Signal:   its own number (code by SMS or by voice call — Signal only
@@ -503,7 +503,7 @@ struct SignalSetupView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label(NSLocalizedString("Signal is connected.", comment: "signal setup"), systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
-            Button(NSLocalizedString("Send a Test Message", comment: "signal setup")) {
+            Button(NSLocalizedString("Send Test Message", comment: "signal setup")) {
                 Task {
                     let ok = await engine.sendToUser("Hi, I'm your Bromure Switchboard. Ask me what's going on.", via: .signal)
                     note = ok ? NSLocalizedString("Sent — check your phone.", comment: "")
@@ -709,7 +709,7 @@ struct WhatsAppSetupView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label(NSLocalizedString("WhatsApp is connected.", comment: "whatsapp setup"), systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
-            Button(NSLocalizedString("Send a Test Message", comment: "whatsapp setup")) {
+            Button(NSLocalizedString("Send Test Message", comment: "whatsapp setup")) {
                 Task {
                     let ok = await engine.sendToUser("Hi, I'm your Bromure Switchboard. Ask me what's going on.", via: .whatsapp)
                     note = ok ? NSLocalizedString("Sent — check your phone.", comment: "")

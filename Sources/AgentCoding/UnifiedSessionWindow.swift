@@ -234,6 +234,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// What the stage currently shows for the selected session — re-presenting
     /// only when this changes keeps the surface's state alive.
     private var sessionPresentationKey: String?
+    /// Manual screenshots: the fixture chat on stage (DemoMode).
+    private var demoChat: BeautifiedSessionModel?
     /// Set once the home selection ran, so reopening the window doesn't
     /// yank the user off a machine they picked on purpose.
     private(set) var didShowHome = false
@@ -1186,6 +1188,24 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     func hostsPane(for id: Profile.ID) -> Bool { pane(id) != nil }
 
+    /// The machine the stage is about: a session's machine while a session
+    /// is shown, the machine whose dashboard is up, else the selected
+    /// machine. nil while the stage shows something that isn't one machine
+    /// (a room, a board, the new-session screen, a cluster or registry, the
+    /// automation editor) — `selectedID` may be a stale pick then.
+    var machineOnStage: Profile.ID? {
+        if let sid = selectedSessionID {
+            return acDelegate?.agentSessionStore.session(sid)?.profileID
+        }
+        if let id = vmDashboardSelectedID ?? dockerSelectedID { return id }
+        if listModel.selectedRoomID != nil || listModel.newSessionSelected
+            || listModel.automationBoardSelected || listModel.taskBoardSelected
+            || kubeSelectedID != nil || registrySelectedID != nil || automationEditorVisible {
+            return nil
+        }
+        return selectedID
+    }
+
     /// Select a VM: show its framebuffer in the stage and focus it.
     func select(profileID id: Profile.ID) {
         guard let pane = pane(id) else { return }
@@ -1521,8 +1541,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             })
     }
 
-    /// Delete a room: its sessions stay (back in the list), its Switchboard
-    /// is archived.
+    /// Delete a room and every session in it (after a word): their agents
+    /// stop and they leave the list; to keep them, ungroup the room instead.
     private func confirmDeleteRoom(_ id: UUID) {
         guard let delegate = acDelegate, let room = delegate.agentRoomStore.room(id) else { return }
         let alert = NSAlert()
@@ -1849,7 +1869,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // session's shell is reachable as a terminal from the Machines list.
         let liveChat = livePosition != nil && pane(s.profileID) != nil && bucket != .ended
         let key: String
-        if liveChat, let livePosition {
+        if DemoMode.isLive(s.id) {
+            key = "demo:\(s.id.uuidString)"
+        } else if liveChat, let livePosition {
             key = "live:\(s.profileID.uuidString):\(livePosition)"
         } else if s.isLaunching {
             key = "launch"
@@ -1863,6 +1885,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard key != sessionPresentationKey else { return }
         sessionPresentationKey = key
         setSessionHeader(visible: true)
+        demoChat?.stop()
+        demoChat = nil
+        if DemoMode.isLive(s.id) {
+            // Manual screenshots: the real chat view over the fixture.
+            let m = DemoMode.chatModel(for: s, delegate: delegate)
+            demoChat = m
+            showSessionOverlay(BeautifiedSessionView(model: m))
+            return
+        }
 
         if liveChat, let livePosition, let pane = pane(s.profileID) {
             hideSessionOverlay()
@@ -2040,6 +2071,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     // MARK: Command palette (⌘K)
 
     private let palette = CommandPaletteHost()
+    /// Doc/E2E hook: ⌘K open (never toggled closed).
+    func debugShowCommandPalette() { if !palette.isShown { showCommandPalette() } }
 
     /// ⌘K: jump anywhere, run anything.
     func showCommandPalette() {
@@ -2159,7 +2192,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         clearVMDashboard()
         clearSessionStage()   // also drops a previous room
         listModel.selectedRoomID = id
-        let controller = RoomStageController(roomID: id, backend: LocalRoomBackend(delegate), listModel: listModel)
+        let backend: RoomStageBackend = DemoMode.isOn ? DemoRoomBackend(delegate) : LocalRoomBackend(delegate)
+        let controller = RoomStageController(roomID: id, backend: backend, listModel: listModel)
         controller.onNewSession = { [weak self] in self?.showNewSession(room: id) }
         controller.onOpenSession = { [weak self] sid in self?.selectSession(sid) }
         controller.onRemoveFromRoom = { [weak self] sid in
@@ -3124,8 +3158,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         alert.beginSheetModal(for: self) { [weak self] resp in
             guard resp == .alertFirstButtonReturn, let self else { return }
-            delegate.agentSessionEngine.close(id)
-            self.sessionStageDidChange()
+            // Same path as the row menu's End: ends it and offers Undo.
+            self.sessionStageActions.close(id)
         }
     }
 
@@ -3353,10 +3387,15 @@ struct SessionSidebar: View {
                         .font(.system(size: 12, weight: .bold))
                     Text(NSLocalizedString("New session", comment: "sidebar"))
                         .font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    Text("⌘N")
-                        .font(.system(size: 11))
-                        .opacity(0.7)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    // The shortcut goes first when the sidebar is narrow.
+                    ViewThatFits {
+                        Text("⌘N")
+                            .font(.system(size: 11))
+                            .opacity(0.7)
+                        Color.clear.frame(width: 0)
+                    }
                 }
                 .foregroundStyle(.white)
                 .padding(.horizontal, 12)

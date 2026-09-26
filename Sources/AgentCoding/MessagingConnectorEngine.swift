@@ -4,7 +4,7 @@ import SandboxEngine
 
 // MARK: - Messaging connector (engine side)
 //
-// One small managed VM (File › Infrastructure › Messaging Connector…) that
+// One small managed VM (Workspaces › Infrastructure › Messaging Connector…) that
 // links the Switchboard to the user's phone and chat. It boots through the
 // same path as a registry or a cluster node (`bootMachine` — suspended with
 // the app, resumed on relaunch, fsck'd when its disks need it) and runs

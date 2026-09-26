@@ -373,6 +373,52 @@ struct ProfileModelOverlayTests {
         #expect(LiveModelRefresh.agentsNeedingRestart(from: bare, to: pinned).contains(.claude))
     }
 
+    @Test("z.ai: Claude direct via its Anthropic-compatible endpoint")
+    func zaiClaudeGateway() {
+        var s = ModelSettings()
+        s.providers = [ProviderCredential(provider: .zai, apiKey: "zai-real")]
+        s.agentTiers[.claude] = [.medium: ModelRef(source: .provider(.zai), modelID: "glm-5.3")]
+        let p = Profile(name: "t", tool: .claude, authMode: .token, apiKey: nil)
+        let out = p.overlaidWithGlobalModels(s)
+        #expect(out.authMode == .token)
+        #expect(out.apiKey == "zai-real")
+        #expect(out.claudeGatewayBaseURL == "https://api.z.ai/api/anthropic")
+        #expect(out.claudeGatewayModels == ["medium": "glm-5.3"])
+        let plan = out.makeTokenPlan(salt: Data(repeating: 4, count: 32))
+        #expect(plan.fakeForCloud(host: "api.z.ai") != nil)
+        #expect(p.agentsReadyToStart(s).contains(.claude))
+    }
+
+    @Test("The menu's routability matches what the overlay can route")
+    func routability() {
+        // Claude: its own provider, Bedrock, Anthropic-compatible gateways.
+        for prov in [ModelProvider.anthropic, .bedrock, .openrouter, .zai] {
+            #expect(prov.canRoute(.claude, native: .anthropic))
+        }
+        for prov in [ModelProvider.openai, .xai, .moonshot] {
+            #expect(!prov.canRoute(.claude, native: .anthropic))
+        }
+        // Codex: its own provider, Bedrock, OpenAI-compatible bases only.
+        for prov in [ModelProvider.openai, .bedrock, .openrouter, .xai, .moonshot] {
+            #expect(prov.canRoute(.codex, native: .openai))
+        }
+        for prov in [ModelProvider.anthropic, .zai] {
+            #expect(!prov.canRoute(.codex, native: .openai))
+        }
+        // omp switched to z.ai reaches it natively.
+        #expect(ModelProvider.zai.canRoute(.omp, native: .zai))
+
+        // An unroutable pick (Claude + xAI) falls back to Claude's own
+        // provider, and doesn't count as a gateway.
+        var s = ModelSettings()
+        s.providers = [ProviderCredential(provider: .xai, apiKey: "xai"),
+                       ProviderCredential(provider: .anthropic, apiKey: "sk-ant")]
+        s.agentTiers[.claude] = [.medium: ModelRef(source: .provider(.xai), modelID: "grok-5")]
+        let out = Profile(name: "t", tool: .claude, authMode: .token).overlaidWithGlobalModels(s)
+        #expect(out.apiKey == "sk-ant")
+        #expect(out.claudeGatewayBaseURL == nil)
+    }
+
     @Test("Stale native pre-fills are dropped; other routes are kept")
     func dropNativePrefills() {
         var s = ModelSettings()
@@ -387,5 +433,61 @@ struct ProfileModelOverlayTests {
                                                            modelID: "anthropic/claude-opus-4.8")])
         #expect(s.agentTiers[.codex] == nil)
         #expect(s.agentTiers[.kimi]?[.medium]?.modelID == "qwen")
+    }
+}
+
+@Suite("Fusion legs follow the effective model settings")
+struct FusionEffectiveSettingsTests {
+
+    @Test("Keys in Preferences › Models make the legs usable") func globalKeysMakeLegsUsable() {
+        var s = ModelSettings()
+        s.providers = [ProviderCredential(provider: .anthropic, apiKey: "global-ant"),
+                       ProviderCredential(provider: .openai, apiKey: "global-oai")]
+        // A 5.0 workspace: no per-workspace credential at all.
+        let raw = Profile(name: "t", tool: .claude, authMode: .token)
+        #expect(!raw.fusionConfigurable)
+        let eff = raw.overlaidWithGlobalModels(s)
+        #expect(eff.hasUsableCredential(for: .claude))
+        #expect(eff.hasUsableCredential(for: .codex))
+        #expect(!eff.hasUsableCredential(for: .grok))
+        #expect(eff.fusionConfigurable)
+    }
+
+    @Test("A legacy per-workspace key still counts when its provider isn't registered")
+    func legacyFallback() {
+        var s = ModelSettings()
+        s.providers = [ProviderCredential(provider: .anthropic, apiKey: "global-ant")]
+        var raw = Profile(name: "t", tool: .claude, authMode: .token)
+        raw.additionalTools = [Profile.ToolSpec(tool: .grok, authMode: .token, apiKey: "own-xai")]
+        let eff = raw.overlaidWithGlobalModels(s)
+        #expect(eff.fusionUsableProviders.contains(.grok))
+        #expect(eff.fusionUsableProviders.contains(.claude))
+    }
+
+    @Test("An omp leg needs a provider Fusion speaks, with an API key") func ompLeg() {
+        var s = ModelSettings()
+        s.providers = [ProviderCredential(provider: .openai, apiKey: "oai"),
+                       ProviderCredential(provider: .zai, apiKey: "z")]
+        var onOpenAI = Profile(name: "t", tool: .claude, authMode: .token)
+        onOpenAI.additionalTools = [Profile.ToolSpec(tool: .omp, authMode: .token, ompProvider: .openai)]
+        #expect(onOpenAI.overlaidWithGlobalModels(s).hasUsableCredential(for: .omp))
+
+        var onZai = Profile(name: "t", tool: .claude, authMode: .token)
+        onZai.additionalTools = [Profile.ToolSpec(tool: .omp, authMode: .token, ompProvider: .zai)]
+        #expect(!onZai.overlaidWithGlobalModels(s).hasUsableCredential(for: .omp))
+
+        // omp has no subscription to borrow.
+        var sub = Profile(name: "t", tool: .claude, authMode: .token)
+        sub.additionalTools = [Profile.ToolSpec(tool: .omp, authMode: .subscription)]
+        #expect(!sub.hasUsableCredential(for: .omp))
+    }
+
+    @Test("omp's default leg model follows its provider") func ompDefaultModel() {
+        #expect(Fusion.defaultLegModel(.omp, .token, ompProvider: .openai)
+                == Fusion.defaultLegModel(.codex, .token))
+        #expect(Fusion.defaultLegModel(.omp, .token, ompProvider: .xai)
+                == Fusion.defaultLegModel(.grok, .token))
+        #expect(Fusion.defaultLegModel(.omp, .token, ompProvider: .anthropic)
+                == Fusion.defaultLegModel(.claude, .token))
     }
 }

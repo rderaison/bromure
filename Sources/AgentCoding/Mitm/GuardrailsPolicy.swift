@@ -127,6 +127,9 @@ public struct GuardrailsPolicy: Codable, Equatable, Sendable {
         )
     }
 
+    /// Any mode on OR the (default-on) insecure-bypass escape hatch — i.e.
+    /// "this block holds non-default state", not "guardrails restrict
+    /// something" (see `BromureAC.guardrailsRestrict` for that).
     public var isActive: Bool {
         allowInsecureBypass
             || [kubernetes, aws, digitalOcean, docker, github, gitlab, bitbucket]
@@ -214,6 +217,11 @@ public struct GuardrailsConfig: Sendable {
     /// The guest may opt a request out of upstream cert validation with the
     /// `X-bromure-insecure` header. See `GuardrailsPolicy.allowInsecureBypass`.
     public let allowInsecureBypass: Bool
+
+    /// The workspace turned off the credential-exfiltration alert
+    /// (`Profile.disableExfiltrationAlerts`): a leak is still blocked, but the
+    /// VM isn't paused — the Security Timeline row must say so.
+    public var exfiltrationAlertsDisabled: Bool = false
 
     public init(kubernetes: GuardrailsPolicy.Mode, kubeHosts: Set<String>,
                 aws: GuardrailsPolicy.Mode = .off,

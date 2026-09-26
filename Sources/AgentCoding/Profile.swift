@@ -2380,19 +2380,33 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
 
     // MARK: - Fusion eligibility
 
+    /// The providers an Oh My Pi leg can be fused on: the ones whose wire
+    /// Fusion already speaks (Anthropic Messages, OpenAI / xAI chat). omp on
+    /// z.ai or a custom endpoint isn't offered as a leg.
+    public static let fusionOmpProviders: Set<OmpProvider> = [.anthropic, .openai, .xai]
+
     /// True when `tool` is enabled in this profile AND has a credential Fusion
     /// can drive as a leg: an API key (token mode), Bedrock (Claude only), or a
     /// subscription (host-side — assumed registered; the leg call fails
     /// gracefully if not). Used for the panel's leg checkboxes + judge picker.
+    ///
+    /// Reads the profile's own tool specs — call it on the workspace's
+    /// EFFECTIVE profile (`overlaidWithGlobalModels`, i.e. Preferences › Models
+    /// + the workspace override projected on), not the stored one: since the
+    /// global Models store, the stored specs only hold legacy per-workspace
+    /// credentials (which the overlay keeps for unregistered providers).
     public func hasUsableCredential(for tool: Tool) -> Bool {
         guard let s = allToolSpecs.first(where: { $0.tool == tool }) else { return false }
         switch s.authMode {
         case .token:
+            // omp: only on a provider Fusion can call (see fusionOmpProviders).
+            if tool == .omp, !Self.fusionOmpProviders.contains(s.effectiveOmpProvider) { return false }
             return !(s.apiKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .bedrock:
             return tool == .claude && awsCredentials.isUsable
         case .subscription:
-            return true
+            // omp is API-key only — it has no subscription to borrow.
+            return tool != .omp
         case .local:
             // A tool in local mode has no *cloud* identity, so it isn't a
             // cloud Fusion leg. The local Fusion leg/judge is a standalone

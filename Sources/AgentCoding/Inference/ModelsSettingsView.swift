@@ -468,6 +468,7 @@ struct ModelsSettingsView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
                 Text(agentName(agent)).fontWeight(agent == nil ? .semibold : .regular)
+                    .lineLimit(1).fixedSize()   // the chip gives way, not the agent's name
                 Spacer()
                 tierChip(agent, .medium)
             }
@@ -557,6 +558,13 @@ struct ModelsSettingsView: View {
                     // subscription can't power this agent" (EULA).
                     if usableProviders.isEmpty {
                         Text("Configure a provider first").foregroundStyle(.secondary)
+                    } else if let agent, usableProviders.contains(where: {
+                        resolved.credential($0)?.useSubscription != true
+                    }) {
+                        Text(String(format: NSLocalizedString("No configured provider can power %@",
+                                                              comment: "model menu: no routable provider for this agent"),
+                                    agent.displayName))
+                            .foregroundStyle(.secondary)
                     } else {
                         Text("A subscription can only power its own agent").foregroundStyle(.secondary)
                     }
@@ -567,7 +575,8 @@ struct ModelsSettingsView: View {
                 }
             } label: {
                 modelChip(effective, inherited: inherited,
-                          placeholder: nativeDefaultLabel(agent, tier))
+                          placeholder: nativeDefaultLabel(agent, tier),
+                          unroutable: unroutableProvider(agent, effective))
             }
             .menuStyle(.borderlessButton).fixedSize()
             if explicit != nil {
@@ -581,20 +590,42 @@ struct ModelsSettingsView: View {
     }
 
     @ViewBuilder private func modelChip(_ ref: ModelRef?, inherited: Bool,
-                                        placeholder: String? = nil) -> some View {
-        let color = ref.map { sourceColor($0.source) } ?? (placeholder != nil ? .green : .secondary)
+                                        placeholder: String? = nil,
+                                        unroutable: String? = nil) -> some View {
+        let color = unroutable != nil ? .orange
+            : (ref.map { sourceColor($0.source) } ?? (placeholder != nil ? .green : .secondary))
         HStack(spacing: 5) {
             Circle().fill(color).frame(width: 7, height: 7)
-            Text(ref?.modelID ?? placeholder ?? "Choose…")
+            Text(ref?.modelID ?? placeholder ?? NSLocalizedString("Choose…", comment: "model chip"))
                 .font(.callout)
-                .foregroundStyle(ref == nil ? Color.secondary : Color.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(ref == nil || unroutable != nil ? Color.secondary : Color.primary)
+                .strikethrough(unroutable != nil)
                 .lineLimit(1).truncationMode(.middle)
-            if inherited { Text("· inherited").font(.caption2).foregroundStyle(.tertiary) }
+            if unroutable != nil {
+                Text(NSLocalizedString("· unavailable", comment: "model chip: the stored model can't be routed for this agent"))
+                    .font(.caption2).foregroundStyle(.orange)
+            } else if inherited {
+                Text("· inherited").font(.caption2).foregroundStyle(.tertiary)
+            }
             Image(systemName: "chevron.up.chevron.down").font(.caption2).foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(color.opacity(0.25)))
+        .help(unroutable ?? "")
+    }
+
+    /// Why a stored (or inherited) model can't run for `agent` — the launch
+    /// can't route that provider for it and falls back to the agent's own
+    /// provider — or nil when it routes fine.
+    private func unroutableProvider(_ agent: ModelAgent?, _ ref: ModelRef?) -> String? {
+        guard let agent, let ref, case .provider(let p) = ref.source,
+              !p.canRoute(agent, native: agent.defaultNativeProvider) else { return nil }
+        return String(format: NSLocalizedString("%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model.",
+                                                comment: "model chip tooltip: agent, provider"),
+                      agent.displayName, p.displayName)
     }
 
     // MARK: Derived
@@ -638,6 +669,8 @@ struct ModelsSettingsView: View {
     /// agents). API-key providers are unrestricted (pay-per-use).
     private func providerAllowed(_ provider: ModelProvider, for agent: ModelAgent?) -> Bool {
         guard let cred = resolved.credential(provider), cred.isUsable else { return false }
+        // Only pairings the launch overlay can actually route (same check).
+        if let agent, !provider.canRoute(agent, native: agent.defaultNativeProvider) { return false }
         if cred.useSubscription {
             return agent != nil && agent == provider.nativeAgent
         }

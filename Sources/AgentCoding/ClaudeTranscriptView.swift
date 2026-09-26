@@ -2910,32 +2910,114 @@ private extension MarkdownUI.Theme {
         }
         // Tables: a card, not a spreadsheet — rows parted by hairlines, the
         // header set off by a tint, cells with room around the words, one
-        // rounded border around the whole.
+        // rounded border around the whole. In a narrow column (a room cell)
+        // it scrolls sideways rather than squeeze (`ReadableTableWidth`).
         t = t.table { c in
-            c.label
-                .fixedSize(horizontal: false, vertical: true)
-                .markdownTableBorderStyle(.init(.insideHorizontalBorders,
-                                                color: Color.primary.opacity(0.10)))
-                .markdownTableBackgroundStyle(.alternatingRows(
-                    Color.clear, Color.primary.opacity(0.025),
-                    header: Color.primary.opacity(0.06)))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.14)))
-                .markdownMargin(top: .em(0.5), bottom: .em(0.9))
+            ReadableTableWidth {
+                c.label
+                    .fixedSize(horizontal: false, vertical: true)
+                    .markdownTableBorderStyle(.init(.insideHorizontalBorders,
+                                                    color: Color.primary.opacity(0.10)))
+                    .markdownTableBackgroundStyle(.alternatingRows(
+                        Color.clear, Color.primary.opacity(0.025),
+                        header: Color.primary.opacity(0.06)))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.14)))
+            }
+            .markdownMargin(top: .em(0.5), bottom: .em(0.9))
         }
         t = t.tableCell { c in
-            c.label
-                .markdownTextStyle {
-                    FontSize(bodySize * 0.95)
-                    if c.row == 0 { FontWeight(.semibold) }
-                }
-                .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.2))
-                .padding(.vertical, 7)
-                .padding(.horizontal, 12)
+            TableCellWidthCap {
+                c.label
+                    .markdownTextStyle {
+                        FontSize(bodySize * 0.95)
+                        if c.row == 0 { FontWeight(.semibold) }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                    .relativeLineSpacing(.em(0.2))
+            }
+            .padding(.vertical, 7)
+            .padding(.horizontal, 12)
         }
         return t
+    }
+}
+
+/// A markdown table in a column too narrow for it (a room cell) keeps its
+/// natural width — each cell at most `TableCellWidthCap.cap` wide — and
+/// scrolls sideways, instead of being squeezed until its cells wrap a few
+/// letters to a line. Squeezed, a table grew many screens tall, and the
+/// chat's lazy list draws a row that tall as nothing: the whole room cell
+/// went blank. In a column at least `narrow` wide it wraps to the column
+/// as before.
+private struct ReadableTableWidth<Content: View>: View {
+    static var narrow: CGFloat { 480 }
+    @ViewBuilder let content: Content
+    /// The column's width (not the table's).
+    @State private var column: CGFloat?
+
+    var body: some View {
+        Group {
+            // Until the column is measured, the natural width: a first pass
+            // squeezed into a narrow column is the tall row itself.
+            if column.map({ $0 < Self.narrow }) ?? true {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    content.environment(\.transcriptTableSqueezed, true)
+                }
+            } else {
+                content
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
+            if column != w { column = w }
+        }
+    }
+}
+
+private struct TranscriptTableSqueezedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Inside a table laid out at its natural width in a narrow column.
+    fileprivate var transcriptTableSqueezed: Bool {
+        get { self[TranscriptTableSqueezedKey.self] }
+        set { self[TranscriptTableSqueezedKey.self] = newValue }
+    }
+}
+
+/// A table cell no wider than a readable line when its table isn't wrapped
+/// to the column (`ReadableTableWidth`).
+private struct TableCellWidthCap<Content: View>: View {
+    static var cap: CGFloat { 240 }
+    @ViewBuilder let content: Content
+    @Environment(\.transcriptTableSqueezed) private var squeezed
+
+    var body: some View {
+        if squeezed {
+            CappedWidthLayout(cap: Self.cap) { content }
+        } else {
+            content
+        }
+    }
+}
+
+/// Its one subview at its natural width up to `cap`, as tall as it wraps
+/// to there (a `frame(maxWidth:)` keeps the one-line height of the natural
+/// size, so the wrapped lines overlap the next row).
+private struct CappedWidthLayout: Layout {
+    let cap: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let s = subviews.first else { return .zero }
+        let w = min(s.sizeThatFits(.unspecified).width, cap, proposal.width ?? .infinity)
+        return s.sizeThatFits(ProposedViewSize(width: w, height: nil))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: nil))
     }
 }
 

@@ -1628,6 +1628,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// running/booting; otherwise a saved snapshot on disk means suspended,
     /// else it's off.
     private func runState(for profile: Profile) -> SessionListModel.RunState {
+        if DemoMode.isRunning(profile.id) { return .running }   // manual screenshots
         if let session = runningSessions[profile.id] {
             switch session.sandbox.state {
             case .running:            return .running
@@ -2352,7 +2353,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    func makeFusionConfig(for profile: Profile) -> Fusion.Config? {
+    /// The workspace as Fusion sees it: its effective model settings
+    /// (Preferences › Models + the workspace's override) projected on, exactly
+    /// as the agents are staged — so leg usability, auth modes and the swap-map
+    /// credentials Fusion reads all agree. Legacy per-workspace credentials
+    /// survive for providers the settings don't register (the overlay leaves
+    /// those agents alone). Idempotent on an already-projected launch copy.
+    func fusionEffectiveProfile(_ profile: Profile) -> Profile {
+        profile.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: profile),
+                                         subscribed: subscribedProviders(for: profile))
+    }
+
+    /// Whether Fusion can be engaged for this workspace (≥ 2 usable legs),
+    /// judged on its effective model settings — gates the ⚡ toolbar toggle.
+    func fusionConfigurable(_ profile: Profile) -> Bool {
+        fusionEffectiveProfile(profile).fusionConfigurable
+    }
+
+    func makeFusionConfig(for rawProfile: Profile) -> Fusion.Config? {
+        let profile = fusionEffectiveProfile(rawProfile)
         guard profile.fusionConfigurable else { return nil }
         let usable = profile.fusionUsableProviders   // cloud providers with creds
         var legs = Profile.Tool.allCases.filter {
@@ -2370,6 +2389,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var authModes: [Profile.Tool: Profile.AuthMode] = [:]
         for spec in profile.allToolSpecs { authModes[spec.tool] = spec.authMode }
 
+        // Oh My Pi: fused on the provider it's switched to, with the model the
+        // Models settings pick for it there (else that provider's default).
+        let ompProvider = profile.allToolSpecs.first { $0.tool == .omp }?.effectiveOmpProvider ?? .default
+        var legModels: [Profile.Tool: String] = [:]
+        if let ref = ModelSettingsStore.shared.effective(for: rawProfile).ref(for: .omp, tier: .medium),
+           case .provider(let prov) = ref.source,
+           prov == ModelProvider.from(omp: ompProvider), !ref.modelID.isEmpty {
+            legModels[.omp] = ref.modelID
+        }
+
         // Judge: the local engine, or a chosen cloud provider.
         let judgeLocal = profile.fusionJudgeLocal
         let judgeProvider = (profile.fusionJudgeProvider.flatMap { usable.contains($0) ? $0 : nil })
@@ -2378,15 +2407,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if judgeLocal {
             let id = profile.fusionJudgeModel ?? profile.fusionLocalLeg ?? ""
             judgeModel = CatalogStore.shared.resolve(id)?.repo ?? id
+        } else if judgeProvider == .omp {
+            // An omp judge speaks omp's provider — default to its leg model,
+            // not the Claude-only engine default.
+            judgeModel = profile.fusionJudgeModel ?? legModels[.omp]
+                ?? Fusion.defaultLegModel(.omp, .token, ompProvider: ompProvider)
         } else {
             judgeModel = profile.fusionJudgeModel ?? Fusion.defaultJudgeModel
         }
 
         return Fusion.Config(legs: legs, judgeProvider: judgeProvider,
                              judgeModel: judgeModel, authModes: authModes,
-                             legModels: [:], localLegModel: localLegModel, judgeLocal: judgeLocal,
+                             legModels: legModels, localLegModel: localLegModel, judgeLocal: judgeLocal,
                              localEngineBase: profile.localEngineBaseURL?.absoluteString,
-                             localEngineKey: profile.localEngineAPIKey)
+                             localEngineKey: profile.localEngineAPIKey,
+                             ompProvider: ompProvider)
+    }
+
+    /// Whether a workspace's guardrails actually restrict something — for the
+    /// Security Timeline's Overview. `GuardrailsPolicy.isActive` also counts
+    /// the (default-on) `X-bromure-insecure` escape hatch, which relaxes rather
+    /// than restricts, so it isn't used here: a write policy / egress rule the
+    /// proxy enforces, or any credential set to "ask before use".
+    static func guardrailsRestrict(_ p: Profile) -> Bool {
+        if makeGuardrailsConfig(for: p).isActive { return true }
+        return p.apiKeyRequiresApproval
+            || p.additionalTools.contains { $0.requireApproval }
+            || p.gitHTTPSCredentials.contains { $0.requireApproval }
+            || p.manualTokens.contains { $0.requireApproval }
+            || p.dockerRegistries.contains { $0.requireApproval }
+            || p.httpDatabases.contains { $0.requireApproval }
+            || p.kubeconfigs.contains { $0.requireApproval }
+            || p.importedSSHKeys.contains { $0.requireApproval }
+            || p.awsCredentials.requireApproval
+            || p.digitalOceanTokenRequiresApproval
+            || p.linearTokenRequiresApproval
+            || p.twilioCredential.requireApproval
+            || p.sshKeyRequiresApproval
     }
 
     static func makeGuardrailsConfig(for profile: Profile) -> GuardrailsConfig {
@@ -2413,14 +2470,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return GuardrailsConfig.DBGuardrail(engine: db.engine, host: host, mode: db.guardrail)
         }
         let g = profile.guardrails
-        return GuardrailsConfig(kubernetes: g.kubernetes, kubeHosts: kubeHosts,
-                                aws: g.aws,
-                                digitalOcean: g.digitalOcean,
-                                docker: g.docker, dockerHosts: dockerHosts,
-                                github: g.github, gitlab: g.gitlab, bitbucket: g.bitbucket,
-                                databases: databases,
-                                egressPolicy: profile.resolvedEgressPolicy,
-                                allowInsecureBypass: g.allowInsecureBypass)
+        var config = GuardrailsConfig(kubernetes: g.kubernetes, kubeHosts: kubeHosts,
+                                      aws: g.aws,
+                                      digitalOcean: g.digitalOcean,
+                                      docker: g.docker, dockerHosts: dockerHosts,
+                                      github: g.github, gitlab: g.gitlab, bitbucket: g.bitbucket,
+                                      databases: databases,
+                                      egressPolicy: profile.resolvedEgressPolicy,
+                                      allowInsecureBypass: g.allowInsecureBypass)
+        config.exfiltrationAlertsDisabled = profile.disableExfiltrationAlerts
+        return config
     }
 
     static func loopbackCallbackPort(from url: URL) -> UInt16? {
@@ -3548,6 +3607,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     else { return ["error": "unknown session"] }
                     self.ensureUnifiedWindow().selectSession(sid)
                     window = self.unifiedWindow
+                case "palette":
+                    // ⌘K over the main window (doc-shot hook).
+                    let w = self.ensureUnifiedWindow()
+                    w.debugShowCommandPalette()
+                    window = w
                 case "timeline":
                     // Security Timeline window (E2E / doc-shot hook).
                     self.openSecurityTimelineAction(nil)
@@ -3584,6 +3648,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard let profile = self.profileByNameOrID(String(w.dropFirst(7)))
                     else { return ["error": "unknown workspace"] }
                     let win = self.ensureUnifiedWindow()
+                    win.dismissInfrastructureSheet()
                     win.showRewindHome(profile.id)
                     window = win.attachedSheet ?? win
                 default:       window = self.unifiedWindow
@@ -4013,6 +4078,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     }
                     return ["ok": true]
 
+                case "seed-demo":
+                    // Manual screenshots: a fixture of workspaces, sessions,
+                    // rooms and transcripts from a JSON spec (see DemoMode).
+                    guard let spec = params["spec"] as? String else { return ["error": "spec path required"] }
+                    do {
+                        return ["ok": true, "sessions": try DemoMode.seed(specPath: spec, delegate: self)]
+                    } catch { return ["error": "seed failed: \(error)"] }
                 case "ensure-profile":
                     let name = (params["name"] as? String) ?? "Screenshot"
                     if let existing = self.profiles.first(where: { $0.name.lowercased() == name.lowercased() }) {
@@ -4531,6 +4603,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if action == "create" {
                 let c = engine.ensureConnector()
                 return ["ok": true, "id": c.id.uuidString]
+            }
+            if action == "window", self.kubeClusterStore.connector == nil {
+                // Test hook: the window as a first-time user sees it.
+                ConnectorWindowController.show()
+                return ["ok": true]
             }
             guard let c = self.kubeClusterStore.connector else { return ["ok": false, "error": "no connector"] }
             switch action {
@@ -5055,7 +5132,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
             return ["ok": false, "error": "VM not found: \(idOrName)"]
         }
-        guard session.profile.fusionConfigurable else {
+        guard fusionConfigurable(session.profile) else {
             return ["ok": false, "error": "Fusion needs at least two usable model credentials on this workspace."]
         }
         setFusionEngaged(engaged, for: session.profile)
@@ -5229,7 +5306,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "diskPath": diskURL.path,
                 "diskAllocatedBytes": diskAllocated,
                 "baseImageVersion": s.profile.baseImageVersionAtClone ?? "unknown",
-                "fusionConfigurable": s.profile.fusionConfigurable,
+                "fusionConfigurable": fusionConfigurable(s.profile),
                 "fusionEngaged": mitmEngine?.fusionEngaged(for: s.profileID) ?? false,
                 // Mirrored from the session (not the pane) so detached VMs report
                 // them too. The TUI/dashboard filter loopback at display time.
@@ -6797,7 +6874,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     SecurityPosture(id: p.id, name: p.name, colorHex: p.color.hexInUI,
                                     firewall: p.resolvedEgressPolicy.isActive,
                                     supplyChain: p.supplyChain.isActive,
-                                    guardrails: p.guardrails.isActive,
+                                    guardrails: Self.guardrailsRestrict(p),
                                     promptInjection: p.promptInjection.isActive,
                                     pii: p.pii.isActive)
                 }
@@ -7334,8 +7411,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         unifiedWindow?.toggleLinux(nil)
     }
 
+    /// Deletes the machine on stage (the session's machine while a session
+    /// is shown) — not a stale machine pick behind a session. After a word.
     @objc func deleteWorkspaceAction(_ sender: Any?) {
-        if let id = unifiedWindow?.selectedID, let p = profiles.first(where: { $0.id == id }) {
+        if let id = unifiedWindow?.machineOnStage, let p = profiles.first(where: { $0.id == id }) {
             deleteProfile(p)
         }
     }
@@ -7365,8 +7444,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Only affects items targeting this delegate; everything else stays enabled.
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
-        case #selector(newTabAction(_:)), #selector(deleteWorkspaceAction(_:)):
+        case #selector(newTabAction(_:)):
             return unifiedWindow?.selectedID != nil
+        case #selector(deleteWorkspaceAction(_:)):
+            return unifiedWindow?.machineOnStage.map { id in profiles.contains { $0.id == id } } ?? false
         case #selector(addTerminalToGridAction(_:)):
             guard let ctx = currentWorkspaceContext(),
                   ctx.pane.model.tabs.indices.contains(ctx.index) else { return false }
@@ -9216,7 +9297,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // title-bar toggle — we don't auto-engage; we only force-off when the
         // profile is no longer configurable.
         _ = old
-        let nowConfigurable = new.fusionConfigurable
+        let nowConfigurable = fusionConfigurable(new)
         win?.model.fusionConfigurable = nowConfigurable
         mitmEngine?.setFusionConfig(makeFusionConfig(for: new), for: new.id)
         if !nowConfigurable {
@@ -10163,7 +10244,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // Fusion: show the title-bar toggle when configured, but
                 // start disengaged — the user clicks the lightning bolt to
                 // turn it on for the session.
-                win.model.fusionConfigurable = profile.fusionConfigurable
+                win.model.fusionConfigurable = self.fusionConfigurable(profile)
                 win.model.fusionEngaged = false
                 engine.setFusionEngaged(false, for: profile.id)
                 engine.setFusionConfig(self.makeFusionConfig(for: profile), for: profile.id)
@@ -13055,7 +13136,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         // Restore display state from the registry.
         pane.model.ipAddress = session.lastIP
-        pane.model.fusionConfigurable = profile.fusionConfigurable
+        pane.model.fusionConfigurable = fusionConfigurable(profile)
         pane.model.fusionEngaged = session.fusionEngaged
         let unified = ensureUnifiedWindow()
         unified.addPane(pane, select: !quiet)
@@ -13291,6 +13372,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
             var profile = profile
             self.populateMCPBearerTokens(in: &profile)
+            // Global model settings drive the reboot too (see launch()). The
+            // pane's profile is the raw one after any live edit, so a reboot
+            // without this lost the keys and models set in Preferences › Models.
+            profile = profile.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: profile),
+                                                       subscribed: self.subscribedProviders(for: profile))
+            self.lastStagedProfiles[profile.id] = profile
             // The reboot restages the home seed: give a Kimi record its
             // managed config first if registration never captured one.
             if self.kimiNeedsProvisioning(profile) {
@@ -13377,7 +13464,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if profile.pii.isActive { PromptInjectionModels.ensureInstalledInBackground(.piiRampart) }
                 // Fusion: keep the toggle visible when configured, but reset
                 // to disengaged on reboot (user re-engages on demand).
-                win.model.fusionConfigurable = profile.fusionConfigurable
+                win.model.fusionConfigurable = self.fusionConfigurable(profile)
                 win.model.fusionEngaged = false
                 engine.setFusionEngaged(false, for: profile.id)
                 engine.setFusionConfig(self.makeFusionConfig(for: profile), for: profile.id)

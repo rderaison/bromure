@@ -431,7 +431,7 @@ final class SwitchboardEngine {
     /// Reply on the phone (the channel the user last wrote from).
     func messageUser(_ text: String) async -> String? {
         guard phoneLinked() else {
-            return "No phone or Slack is connected (File › Infrastructure › Messaging Connector). Answer in this conversation instead."
+            return "No phone or Slack is connected (Workspaces › Infrastructure › Messaging Connector…). Answer in this conversation instead."
         }
         guard let send = sendToPhone, await send(text, lastPhoneChannel) else {
             return "The message didn't go out — the connector may be stopped or the account disconnected."

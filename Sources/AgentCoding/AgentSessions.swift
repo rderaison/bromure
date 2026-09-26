@@ -719,7 +719,7 @@ final class AgentSessionStore {
                               now.timeIntervalSince(since) > Self.launchTimeout {
                         s.launchingSince = nil
                         s.lastError = NSLocalizedString(
-                            "The agent never showed up. The workspace may run an older in-VM agent — restart it (Virtual Machines › ⋯ › Restart) and try again.",
+                            "The agent never showed up. The workspace may run an older in-VM agent — reboot it (Virtual Machines › ⋯ › Reboot) and try again.",
                             comment: "session launch")
                     }
                 }
@@ -1170,6 +1170,7 @@ enum SessionHome {
     @MainActor
     static func bucket(for s: AgentSession, in model: SessionListModel) -> SessionBucket {
         if isGone(s, in: model) { return .ended }
+        if let demo = DemoMode.bucket(for: s.id) { return demo }   // manual screenshots
         if s.isLaunching { return .working }
         if s.needsSignIn == true, !s.hasEnded, liveTab(for: s, in: model) != nil { return .needsYou }
         if s.hasEnded { return .ended }
@@ -2245,7 +2246,7 @@ struct SessionSectionsView: View {
         withAnimation(.easeInOut(duration: 0.15)) { archivedRevealed = true }
     }
 
-    /// Sessions whose machine is gone: nothing to reopen them on. One line
+    /// Sessions whose machine or folder is gone: nothing to reopen them on. One line
     /// offers to clear them instead of a column of ghosts.
     private func orphanCleanup(_ orphans: [AgentSession]) -> some View {
         HStack(spacing: 8) {
@@ -2253,8 +2254,8 @@ struct SessionSectionsView: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.tertiary)
             Text(orphans.count == 1
-                 ? NSLocalizedString("1 session from a removed machine", comment: "sidebar cleanup")
-                 : String(format: NSLocalizedString("%d sessions from removed machines", comment: "sidebar cleanup"), orphans.count))
+                 ? NSLocalizedString("1 session whose machine or folder is gone", comment: "sidebar cleanup")
+                 : String(format: NSLocalizedString("%d sessions whose machine or folder is gone", comment: "sidebar cleanup"), orphans.count))
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

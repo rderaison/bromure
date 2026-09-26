@@ -61,6 +61,9 @@ struct CommandPaletteView: View {
     var search: (String) -> [PaletteItem] = { _ in [] }
     @State private var query = ""
     @State private var selected = 0
+    /// The row under the pointer: hovering selects it, but must not scroll to
+    /// it — that pulled the list back under the wheel as it scrolled.
+    @State private var hovered: Int?
     @FocusState private var focused: Bool
 
     private var results: [PaletteItem] {
@@ -129,14 +132,15 @@ struct CommandPaletteView: View {
                                 row(item, on: i == selected)
                                     .id(item.id)
                                     .onTapGesture { item.run(); onClose() }
-                                    .onHover { if $0 { selected = i } }
+                                    .onHover { if $0 { hovered = i; selected = i } }
                             }
                         }
                         .padding(6)
                     }
                     .frame(maxHeight: 400)
                     .onChange(of: selected) { _, i in
-                        if results.indices.contains(i) { proxy.scrollTo(results[i].id, anchor: .center) }
+                        // Keyboard moves bring the row into view; a hovered one already is.
+                        if i != hovered, results.indices.contains(i) { proxy.scrollTo(results[i].id, anchor: .center) }
                     }
                 }
             }

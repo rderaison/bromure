@@ -262,6 +262,8 @@ struct SlashCommandPalette: View {
     /// The header, when it isn't "Commands".
     var title: String? = nil
 
+    /// The row under the pointer (see the scroll below).
+    @State private var hovered: Int?
     private static let rowHeight: CGFloat = 36
     private static let visibleRows = 7
 
@@ -293,7 +295,7 @@ struct SlashCommandPalette: View {
                             row(c, selected: i == highlighted)
                                 .id(c.id)
                                 .onTapGesture { onPick(c) }
-                                .onHover { if $0 { onHover(i) } }
+                                .onHover { if $0 { hovered = i; onHover(i) } }
                         }
                     }
                     .padding(.horizontal, 6)
@@ -304,7 +306,9 @@ struct SlashCommandPalette: View {
                 // its header.
                 .frame(height: Self.rowHeight * CGFloat(min(Self.visibleRows, max(1, commands.count))) + 12)
                 .onChange(of: highlighted) { _, i in
-                    if commands.indices.contains(i) {
+                    // Keyboard moves bring the row into view; a hovered one
+                    // already is (scrolling to it fought the wheel).
+                    if i != hovered, commands.indices.contains(i) {
                         withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(commands[i].id, anchor: .center) }
                     }
                 }

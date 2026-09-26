@@ -455,6 +455,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let compromise = swapper.detectCompromise(
             rawRequest: request, host: host, profileID: profileID)
         if !compromise.isEmpty {
+            // With the workspace's exfiltration alert off, the host neither
+            // alerts nor pauses the VM — the row must not claim it did.
+            let alertsOff = guardrailsProvider()?.exfiltrationAlertsDisabled ?? false
             for c in compromise {
                 FileHandle.standardError.write(Data(
                     "[mitm] COMPROMISE \(c.fakeTokenPreview) (declared \(c.declaredHost)) → \(c.observedHost)\n".utf8))
@@ -469,6 +472,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         "fake_preview": .string(c.fakeTokenPreview),
                         "declared_host": .string(c.declaredHost),
                         "observed_host": .string(c.observedHost),
+                        "vm_paused": .bool(!alertsOff),
                     ])
             }
             // Reply to the in-VM client with a plain 451; the agent
@@ -1494,7 +1498,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 if outcome.body != body { toForward = head + outcome.body }
                 if !vault.isEmpty { piiVault = vault }
                 let ms = Date().timeIntervalSince(t) * 1000
-                if outcome.total > 0 {
+                // A partial scan is recorded even with nothing swapped: the
+                // Timeline must show that part of the text got pattern rules only.
+                if outcome.total > 0 || outcome.partial {
                     Self.recordPIISwaps(outcome, host: host, profileID: profileID, ms: ms)
                 }
                 if outcome.total > 0 || ms > 250 || outcome.partial {
@@ -2225,6 +2231,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         var data: [String: AnyJSON] = ["host": .string(host), "count": .int(o.total),
                                        "latency_ms": .int(Int(ms.rounded()))]
         for (kind, n) in o.newSwaps { data[kind.rawValue] = .int(n) }
+        if o.partial { data["partial"] = .bool(true) }
         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "privacy.pii_swap", eventData: data)
     }
 

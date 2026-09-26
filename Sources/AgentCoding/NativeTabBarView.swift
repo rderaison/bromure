@@ -717,7 +717,7 @@ private struct SiteInfoPopover: View {
                 if let from = info.notBefore, let to = info.notAfter {
                     certificateRow("Valid", "\(formatDate(from)) – \(formatDate(to))")
                 }
-                Button("View Full Certificate\u{2026}") {
+                Button("View Full Certificate…") {
                     openCertificatePanel()
                 }
                 .controlSize(.small)

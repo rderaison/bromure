@@ -287,9 +287,15 @@ public final class SecurityTimeline {
             let cred = str(d, "credential") ?? "session token"
             let declared = str(d, "declared_host") ?? "?"
             let observed = str(d, "observed_host") ?? "?"
+            // Older events carry no flag: they predate the opt-out, so paused.
+            var paused = true
+            if case .bool(let v)? = d["vm_paused"] { paused = v }
             return row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
                        "\(fake) (\(cred), scoped to \(declared)) → \(observed)",
-                       NSLocalizedString("blocked — exfiltration attempt, VM paused", comment: "Security Timeline decision"), .blocked)
+                       paused
+                           ? NSLocalizedString("blocked — exfiltration attempt, VM paused", comment: "Security Timeline decision")
+                           : NSLocalizedString("blocked — exfiltration attempt (alerts off, VM not paused)", comment: "Security Timeline decision"),
+                       .blocked)
 
         case "credential.exfiltration_allowed":
             let observed = str(d, "observed_host") ?? "?"
@@ -412,9 +418,16 @@ public final class SecurityTimeline {
             let what = parts.compactMap { k, one, many in
                 int(d, k).flatMap { $0 == 1 ? one : $0 > 1 ? String(format: many, $0) : nil }
             }.joined(separator: " · ")
+            // The per-request model budget ran out: part of the new text was
+            // scanned by the pattern recognizers alone.
+            var partial = false
+            if case .bool(let v)? = d["partial"] { partial = v }
             var e = row(NSLocalizedString("PII protection", comment: "Security Timeline engine"),
-                        "\(what.isEmpty ? String(n) : what) → \(host)",
-                        NSLocalizedString("swapped for stand-ins", comment: "Security Timeline decision"), .info)
+                        n == 0 && what.isEmpty ? host : "\(what.isEmpty ? String(n) : what) → \(host)",
+                        partial
+                            ? NSLocalizedString("partial — model budget reached; pattern rules only", comment: "Security Timeline decision")
+                            : NSLocalizedString("swapped for stand-ins", comment: "Security Timeline decision"),
+                        .info)
             e.count = n
             return e
 

@@ -109,7 +109,34 @@ struct SecurityTimelineMirrorTests {
         #expect(e?.condition.contains("api.github.com") == true)
         #expect(e?.condition.contains("evil.example") == true)
         #expect(e?.decision.contains("exfiltration") == true)
+        #expect(e?.decision.contains("VM paused") == true)   // no flag = legacy = paused
         #expect(e?.profileID == pid)
+
+        // Alerts off: still blocked, but the row must not claim a pause.
+        let quiet = SecurityTimeline.map(
+            profileID: pid, eventType: "credential.exfiltration",
+            eventData: ["observed_host": .string("evil.example"), "vm_paused": .bool(false)],
+            now: Date())
+        #expect(quiet?.kind == .blocked)
+        #expect(quiet?.decision.contains("VM paused") == false)
+        #expect(quiet?.decision.contains("not paused") == true)
+    }
+
+    @Test("A PII scan that ran out of model budget says so")
+    func piiPartialMapping() {
+        let pid = UUID()
+        let partial = SecurityTimeline.map(
+            profileID: pid, eventType: "privacy.pii_swap",
+            eventData: ["host": .string("api.anthropic.com"), "count": .int(0), "partial": .bool(true)],
+            now: Date())
+        #expect(partial?.decision.hasPrefix("partial") == true)
+        #expect(partial?.condition == "api.anthropic.com")
+        #expect(partial?.count == 0)
+        let full = SecurityTimeline.map(
+            profileID: pid, eventType: "privacy.pii_swap",
+            eventData: ["host": .string("api.anthropic.com"), "count": .int(2), "name": .int(2)],
+            now: Date())
+        #expect(full?.decision == "swapped for stand-ins")
     }
 
     @Test("A mirrored host never overwrites this Mac's events, nor another host's")

@@ -41,10 +41,10 @@ struct VMRun: ParsableCommand {
     @Option(name: .long, help: "Name for an on-the-fly workspace (default: cli-XXXX).")
     var name: String?
 
-    @Option(name: .long, help: "Tool for an on-the-fly workspace: claude | codex | grok.")
+    @Option(name: .long, help: "Tool for an on-the-fly workspace: claude | codex | grok | kimi | omp.")
     var tool: String?
 
-    @Option(name: .long, help: "Auth mode for an on-the-fly workspace: token | subscription | bedrock.")
+    @Option(name: .long, help: "Auth mode for an on-the-fly workspace: token | subscription | bedrock | local.")
     var auth: String?
 
     @Option(name: .long, help: "API key (for --auth token).")
@@ -70,8 +70,12 @@ struct VMRun: ParsableCommand {
             spec["profile"] = workspace                        // start an existing workspace
         } else if name != nil || tool != nil || auth != nil {  // create a throwaway on-the-fly
             if let name { spec["name"] = name }
-            if let tool { spec["tool"] = tool }
-            if let auth { spec["auth"] = auth }
+            if let tool = try validatedCLIChoice(tool, Profile.Tool.self, option: "--tool") {
+                spec["tool"] = tool
+            }
+            if let auth = try validatedCLIChoice(auth, Profile.AuthMode.self, option: "--auth") {
+                spec["auth"] = auth
+            }
             if let apiKey { spec["apiKey"] = apiKey }
         } else {
             throw ValidationError(
@@ -773,7 +777,7 @@ struct WorkspacesCreate: ParsableCommand {
 
     @Option(name: .long, help: "Workspace name (required unless --from-json supplies one).")
     var name: String?
-    @Option(name: .long, help: "Primary tool: claude | codex | grok.")
+    @Option(name: .long, help: "Primary tool: claude | codex | grok | kimi | omp.")
     var tool: String?
     @Option(name: .long, help: "Auth mode: token | subscription | bedrock | local.")
     var auth: String?
@@ -797,8 +801,12 @@ struct WorkspacesCreate: ParsableCommand {
         var body: [String: Any] = [:]
         if let fromJson { body = try loadJSONDocument(fromJson) }
         if let name { body["name"] = name }
-        if let tool { body["tool"] = tool }
-        if let auth { body["authMode"] = auth }
+        if let tool = try validatedCLIChoice(tool, Profile.Tool.self, option: "--tool") {
+            body["tool"] = tool
+        }
+        if let auth = try validatedCLIChoice(auth, Profile.AuthMode.self, option: "--auth") {
+            body["authMode"] = auth
+        }
         if let apiKey { body["apiKey"] = apiKey }
         if let memory { body["memoryGB"] = memory }
         if let color { body["color"] = color }
@@ -977,6 +985,19 @@ struct WorkspacePorts: ParsableCommand {
 /// path (`./`, `src`) resolved against the CLI's cwd. Resolution must happen
 /// here — the app receives the path over the control socket and its own cwd
 /// is `/`, so `-v ./` sent verbatim would come back as the root directory.
+/// Reject an unknown --tool / --auth up front: the server would otherwise fall
+/// back to the template's value without a word.
+func validatedCLIChoice<E: RawRepresentable & CaseIterable>(
+    _ raw: String?, _ type: E.Type, option: String
+) throws -> String? where E.RawValue == String {
+    guard let raw else { return nil }
+    guard E(rawValue: raw) != nil else {
+        let valid = E.allCases.map(\.rawValue).joined(separator: " | ")
+        throw ValidationError("Invalid \(option) “\(raw)” — expected one of: \(valid).")
+    }
+    return raw
+}
+
 func absoluteHostPath(_ raw: String) -> String {
     let expanded = (raw as NSString).expandingTildeInPath
     let absolute = expanded.hasPrefix("/")

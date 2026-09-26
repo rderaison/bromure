@@ -403,6 +403,9 @@ struct ProfileEditorView: View {
     @State private var bgColor: Color
     @State private var fgColor: Color
     @State private var selectedCategory: EditorCategory = .general
+    /// The pane a freshly opened Preferences editor starts on (set just before
+    /// a workspace editor opens Preferences), consumed on init.
+    static var pendingPreferencesCategory: EditorCategory?
     /// The sidebar's search.
     @State private var categorySearch = ""
     #if os(iOS) || os(visionOS)
@@ -601,6 +604,11 @@ struct ProfileEditorView: View {
            let cat = EditorCategory(rawValue: raw) {
             _selectedCategory = State(initialValue: cat)
         }
+        if storageContext == nil, localModelsRemoteAny == nil, modelsPane == nil,
+           let pending = Self.pendingPreferencesCategory {
+            Self.pendingPreferencesCategory = nil
+            _selectedCategory = State(initialValue: pending)
+        }
         if case .remoteGlobal(let initial)? = modelsPane {
             _remoteGlobalDraft = State(initialValue: initial)
         }
@@ -652,10 +660,26 @@ struct ProfileEditorView: View {
         }
     }
 
+    /// The editor targets a REMOTE server (fat-client workspace editors and
+    /// remote Preferences): they pass no storage context either, but this Mac's
+    /// app-wide settings (Automation, subnet, relay transport) aren't theirs.
+    private var targetsRemote: Bool {
+        #if os(macOS)
+        if localModelsRemoteAny != nil || remoteCredentialRefs != nil { return true }
+        if case .remoteGlobal? = modelsPane { return true }
+        return false
+        #else
+        return true
+        #endif
+    }
+
+    /// Bromure → Preferences on THIS Mac (no workspace, not a remote).
+    private var isLocalPreferences: Bool { storageContext == nil && !targetsRemote }
+
     private var visibleCategories: [EditorCategory] {
         EditorCategory.allCases.filter { c in
             #if os(macOS)
-            return c != .automation || storageContext == nil
+            return c != .automation || isLocalPreferences
             #else
             // iOS editor is always remote: this-machine Automation + Models panes
             // (MLX catalog / global store) don't apply.
@@ -739,9 +763,14 @@ struct ProfileEditorView: View {
             // ignore spaces so a single-word key like "supplychain"
             // resolves to "Supply Chain" — the screenshot script uses
             // space-less keys to keep them out of output filenames.
-            if let raw = (note.object as? String)?
+            // A "preferences:" prefix targets only this Mac's Preferences editor.
+            var raw = (note.object as? String)?
                 .lowercased()
-                .replacingOccurrences(of: " ", with: ""),
+                .replacingOccurrences(of: " ", with: "")
+            if let r = raw, r.hasPrefix("preferences:") {
+                raw = isLocalPreferences ? String(r.dropFirst("preferences:".count)) : nil
+            }
+            if let raw,
                let cat = EditorCategory.allCases.first(where: {
                    $0.rawValue.lowercased().replacingOccurrences(of: " ", with: "") == raw
                }) {
@@ -1208,6 +1237,11 @@ struct ProfileEditorView: View {
                           text: $draft.comments, axis: .vertical)
                     .lineLimit(2...6)
             }
+
+            // Delegation / @nickname reach: one machine's own policy.
+            if draft.id != ProfileStore.templateID {
+                Section { agentReachSection }
+            }
         }
         .formStyle(.grouped)
         #else
@@ -1235,6 +1269,8 @@ struct ProfileEditorView: View {
                         .lineLimit(2...6)
                         .textFieldStyle(.roundedBorder)
                 }
+                Divider()
+                agentReachSection
             }
         }
         #endif
@@ -1313,9 +1349,6 @@ struct ProfileEditorView: View {
                     onForgetSubscription: sub.onForget
                 )
             }
-
-            Divider().padding(.vertical, 4)
-            agentReachSection
         }
         // Re-read registration status when a register/forget completes (it runs
         // in a separate window), so the inline controls flip without reopening.
@@ -1390,9 +1423,33 @@ struct ProfileEditorView: View {
 
     // MARK: - Fusion pane
 
+    /// The draft as Fusion sees it: the workspace's effective model settings
+    /// (Preferences › Models, or the remote's, with this workspace's override
+    /// resolved over them) projected on — the same projection the launch
+    /// staging and `makeFusionConfig` use. Legacy per-workspace credentials
+    /// remain for providers the settings don't register. Read-only: Fusion
+    /// choices are still written to `draft`.
+    private var fusionEffectiveDraft: Profile {
+        #if os(macOS)
+        let settings: ModelSettings
+        switch resolvedModelsPane {
+        case .globalStore:           settings = ModelSettingsStore.shared.effective(for: draft)
+        case .remoteGlobal:          settings = draft.modelOverride?.resolved(over: remoteGlobalDraft) ?? remoteGlobalDraft
+        case .workspace(let global): settings = draft.modelOverride?.resolved(over: global) ?? global
+        }
+        let hooks = modelsSubscriptionHooks
+        let subscribed = Set([ModelProvider.anthropic, .openai, .xai, .moonshot]
+            .filter { hooks.savedAt($0) != nil })
+        return draft.overlaidWithGlobalModels(settings, subscribed: subscribed)
+        #else
+        return draft
+        #endif
+    }
+
     @ViewBuilder
     private var fusionSection: some View {
-        let usable = draft.fusionUsableProviders
+        let effective = fusionEffectiveDraft
+        let usable = effective.fusionUsableProviders
         // Installed local models, available as a fuse leg / judge backend.
         let localModels = installedLocalModels
         VStack(alignment: .leading, spacing: 12) {
@@ -1405,7 +1462,7 @@ struct ProfileEditorView: View {
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(.orange, in: Capsule())
                 }
-                Text("When engaged, Fusion answers each prompt with **multiple** models at once, has a judge model map where they agree, conflict, and each shine, then synthesizes a single best reply — delivered to Claude Code as if one model wrote it. Engage it per session from the ⚡ in the title bar.")
+                Text("When engaged, Fusion answers each prompt with **multiple** models at once, has a judge model map where they agree, conflict, and each shine, then synthesizes a single best reply — delivered to Claude Code as if one model wrote it. Engage it per session from the ⚡ in the toolbar, shown while a machine's terminal tab is on screen.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Fusion runs on the **Claude Code** session (it intercepts Claude's API). It needs at least two configured agents below.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -1418,7 +1475,7 @@ struct ProfileEditorView: View {
             Text("Your Claude Code session is always one of the fused models; pick the others.")
                 .font(.caption).foregroundStyle(.secondary)
             ForEach(Profile.Tool.allCases, id: \.self) { t in
-                let ok = draft.hasUsableCredential(for: t)
+                let ok = usable.contains(t)
                 Toggle(isOn: Binding(
                     get: { draft.fusionLegs.contains(t) && ok },
                     set: { on in
@@ -1428,8 +1485,14 @@ struct ProfileEditorView: View {
                         Image(systemName: t.sfSymbol).foregroundStyle(ok ? .primary : .secondary)
                         Text(fusionBackendLabel(t))
                         if !ok {
-                            Text("— no cloud credential (configure it in Agents)")
-                                .font(.caption).foregroundStyle(.secondary)
+                            Group {
+                                if t == .omp {
+                                    Text("— needs an Anthropic, OpenAI or xAI API key for Oh My Pi (set it in Preferences › Models)")
+                                } else {
+                                    Text("— no cloud credential (set one up in Preferences › Models)")
+                                }
+                            }
+                            .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -1439,7 +1502,7 @@ struct ProfileEditorView: View {
             // Local model leg.
             fusionLocalLegRow(localModels: localModels)
 
-            if !draft.fusionConfigurable {
+            if !effective.fusionConfigurable {
                 Text("Pick at least two models to fuse — your Claude Code session counts as one, so add one more (a cloud agent or a local model).")
                     .font(.caption).foregroundStyle(.orange)
             }
@@ -1481,7 +1544,7 @@ struct ProfileEditorView: View {
             HStack(spacing: 6) {
                 Image(systemName: "cpu").foregroundStyle(.secondary)
                 Text("Local model").foregroundStyle(.secondary)
-                Text("— download one in Local Models")
+                Text("— download one in Preferences › Models")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .opacity(0.6)
@@ -1573,10 +1636,11 @@ struct ProfileEditorView: View {
     /// Fetch the cloud model list for the current judge provider via the host.
     /// (A local judge picks from the installed catalog, no fetch needed.)
     private func loadFusionJudgeModels() {
+        let effective = fusionEffectiveDraft
         guard !draft.fusionJudgeLocal,
-              let provider = draft.fusionJudgeProvider ?? draft.fusionUsableProviders.first,
+              let provider = draft.fusionJudgeProvider ?? effective.fusionUsableProviders.first,
               let fetch = onFetchFusionModels else { return }
-        let spec = draft.allToolSpecs.first { $0.tool == provider }
+        let spec = effective.allToolSpecs.first { $0.tool == provider }
         fusionJudgeModelsLoading = true
         fetch(provider, spec?.authMode ?? .token, spec?.apiKey) { models in
             fusionJudgeModels = models
@@ -1857,7 +1921,7 @@ struct ProfileEditorView: View {
     }
 
     /// One configured-credential summary row: icon, title, host(s), and an
-    /// edit/remove menu. Tapping opens the type's editor (or the Agents pane
+    /// edit/remove menu. Tapping opens the type's editor (or Preferences › Models
     /// for agent API keys, which are configured there).
     @ViewBuilder
     private func configuredCredentialRow(_ ref: CredentialRef) -> some View {
@@ -1872,7 +1936,9 @@ struct ProfileEditorView: View {
             }
             Spacer(minLength: 8)
             Menu {
-                Button(ref.editorType == .agents ? "Edit in Agents…" : "Edit…") {
+                Button(ref.editorType == .agents
+                       ? NSLocalizedString("Edit in Models…", comment: "Credentials pane: agent API key row menu item; opens Preferences › Models")
+                       : NSLocalizedString("Edit…", comment: "")) {
                     openCredentialEditor(ref)
                 }
                 if ref.editorType != .agents {
@@ -1892,7 +1958,23 @@ struct ProfileEditorView: View {
 
     private func openCredentialEditor(_ ref: CredentialRef) {
         if ref.editorType == .agents {
-            NotificationCenter.default.post(name: .bromureACSelectEditorCategory, object: "agents")
+            // Agent API keys live in the global model settings (Preferences ›
+            // Models). Preferences and remote editors switch their own pane; a
+            // local workspace editor opens Preferences on that pane.
+            #if os(macOS)
+            if isLocalPreferences || targetsRemote {
+                selectedCategory = .localModels
+                return
+            }
+            Self.pendingPreferencesCategory = .localModels
+            (NSApp.delegate as? ACAppDelegate)?.openPreferencesAction(nil)
+            // Preferences was already open: its editor doesn't re-init. The
+            // "preferences:" prefix keeps this workspace editor where it is.
+            NotificationCenter.default.post(name: .bromureACSelectEditorCategory,
+                                            object: "preferences:" + EditorCategory.localModels.rawValue)
+            #else
+            selectedCategory = .localModels
+            #endif
         } else {
             credSheet = .editor(ref.editorType)
         }
@@ -1911,7 +1993,7 @@ struct ProfileEditorView: View {
         case .linear:              draft.linearToken = ""
         case .twilio:              draft.twilioCredential = TwilioCredential()
         case .managedSSHKey:       draft.sshPublicKey = nil; generateSSH = false
-        case .primaryToolKey, .additionalTool: break   // configured in the Agents pane
+        case .primaryToolKey, .additionalTool: break   // configured in Preferences › Models
         }
     }
 
@@ -1941,7 +2023,7 @@ struct ProfileEditorView: View {
             Divider()
             ScrollView {
                 VStack(spacing: 0) {
-                    // Agent API keys are configured in the Agents pane, so the
+                    // Agent API keys are configured in Preferences › Models, so the
                     // picker offers everything else.
                     ForEach(CredentialEditorType.allCases.filter { $0 != .agents }) { type in
                         Button { credSheet = .editor(type) } label: {
@@ -1962,7 +2044,7 @@ struct ProfileEditorView: View {
                     }
                 }
             }
-            Text("Agent API keys (Anthropic, OpenAI, xAI) are configured in the Agents pane.")
+            Text(NSLocalizedString("Agent API keys (Anthropic, OpenAI, xAI, …) are configured in Preferences › Models.", comment: "add credential footer"))
                 .font(.caption).foregroundStyle(.secondary).padding(10)
         }
         .frame(width: 460, height: 520)
@@ -2101,8 +2183,12 @@ struct ProfileEditorView: View {
     private func isSlotConfigured(_ slot: EnvFileImport.Slot) -> Bool {
         switch slot {
         case .toolKey(let t):
+            #if os(macOS)
+            return agentKeyImportSettings.credential(ModelProvider.native(for: t))?.isUsable ?? false
+            #else
             if draft.tool == t { return !(draft.apiKey ?? "").isEmpty }
             return draft.additionalTools.contains { $0.tool == t && !($0.apiKey ?? "").isEmpty }
+            #endif
         case .gitToken(let host):
             return draft.gitHTTPSCredentials.contains { $0.host == host && $0.isUsable }
         case .digitalOcean: return !draft.digitalOceanToken.isEmpty
@@ -2133,6 +2219,11 @@ struct ProfileEditorView: View {
             }
             switch row.slot {
             case .toolKey(let t):
+                #if os(macOS)
+                // Agent keys live in the model settings (Preferences › Models),
+                // not the legacy per-workspace fields launch no longer reads.
+                importAgentKey(row.value, for: t)
+                #else
                 if draft.tool == t {
                     draft.apiKey = row.value; draft.authMode = .token
                 } else if let i = draft.additionalTools.firstIndex(where: { $0.tool == t }) {
@@ -2141,6 +2232,7 @@ struct ProfileEditorView: View {
                 } else {
                     draft.additionalTools.append(.init(tool: t, authMode: .token, apiKey: row.value))
                 }
+                #endif
             case .gitToken(let host):
                 let user = row.gitUsername.trimmingCharacters(in: .whitespaces)
                 if let i = draft.gitHTTPSCredentials.firstIndex(where: { $0.host == host }) {
@@ -2181,6 +2273,42 @@ struct ProfileEditorView: View {
         }
         showEnvImport = false
     }
+
+    #if os(macOS)
+    /// The model settings an imported agent API key lands in: this Mac's global
+    /// store (Preferences or a local workspace — like onboarding's import), the
+    /// remote's global draft (remote Preferences), or a remote workspace's own
+    /// override layer (its global store lives on the server).
+    private var agentKeyImportSettings: ModelSettings {
+        switch resolvedModelsPane {
+        case .remoteGlobal: return remoteGlobalDraft
+        case .workspace(let global) where targetsRemote:
+            return draft.modelOverride?.resolved(over: global) ?? global
+        default: return ModelSettingsStore.shared.settings
+        }
+    }
+
+    /// Put an imported agent API key on the agent's native provider, keeping
+    /// the rest of that provider's credential.
+    private func importAgentKey(_ key: String, for tool: Profile.Tool) {
+        let provider = ModelProvider.native(for: tool)
+        func put(_ s: inout ModelSettings) {
+            if let i = s.providers.firstIndex(where: { $0.provider == provider }) {
+                s.providers[i].apiKey = key
+            } else {
+                s.providers.append(ProviderCredential(provider: provider, apiKey: key))
+            }
+        }
+        switch resolvedModelsPane {
+        case .remoteGlobal: put(&remoteGlobalDraft)
+        case .workspace where targetsRemote:
+            var o = draft.modelOverride ?? ModelOverride()
+            put(&o.settings)
+            draft.modelOverride = o
+        default: ModelSettingsStore.shared.update { put(&$0) }
+        }
+    }
+    #endif
 
     // MARK: - Disclosure helper
 
@@ -3268,7 +3396,7 @@ struct ProfileEditorView: View {
                     .pickerStyle(.menu)
                     .frame(width: 200)
                 }
-                Text("Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as workspace secrets. View at App → Trace Inspector (⇧⌘I).")
+                Text("Off → nothing recorded. Activity → metadata only (host, status, latency, swap report, leak warnings). AI request details → also captures bodies for known LLM hosts (Anthropic, OpenAI, Google, Cohere, Mistral, Perplexity, x.ai, Groq, Replicate, HuggingFace). Everything → bodies for every host. Bodies are AES-GCM encrypted with the same keychain key as workspace secrets. View it in Window › Trace Inspector… (⇧⌘I).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -3445,11 +3573,11 @@ struct ProfileEditorView: View {
             }
 
             // Workspace subnet is app-wide, not per-workspace — show it only in
-            // Preferences (storageContext == nil), like the Automation pane.
-            // (Never on iOS: these panels drive THIS machine's VM subnet / relay
+            // this Mac's Preferences, like the Automation pane. (Never for a
+            // remote: these panels drive THIS machine's VM subnet / relay
             // transport defaults, which a remote client doesn't have.)
             #if os(macOS)
-            if storageContext == nil {
+            if isLocalPreferences {
                 Divider()
                 SubnetSettingsView()
                 Divider()
@@ -3620,7 +3748,7 @@ struct ProfileEditorView: View {
 
     private var mcpSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("MCP servers give your agent access to external tools and context. Configs are translated into the right format for the active agent (Claude Code or Codex) and injected into the VM at boot.")
+            Text("MCP servers give your agent access to external tools and context. Configs are translated into the right format for each agent (Claude Code, Codex, Grok, Kimi and omp) and injected into the VM at boot.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -3963,7 +4091,7 @@ struct ProfileEditorView: View {
                     .platformRadioGroupPickerStyle()
                     .labelsHidden()
                     .disabled(!draft.promptInjection.isActive)
-                    Text(NSLocalizedString("“Log but continue” records detections to the Security Log window. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright.", comment: ""))
+                    Text(NSLocalizedString("“Log but continue” records detections to the Security Timeline. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright.", comment: ""))
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

@@ -106,7 +106,7 @@ final class KubeMCPServer: MCPLineHandler {
                 "storage": ["type": "boolean", "description": "Longhorn replicated block storage on a data disk per node, as the default storage class (default true). Off = node-local local-path only."],
                 "storageDiskGB": ["type": "integer", "description": "Data disk per node in GB when storage is on (default 40)."],
                 "loadBalancer": ["type": "string", "enum": ["bromure", "metallb", "none"],
-                                 "description": "How LoadBalancer Services get an address (default bromure: published on this Mac's LAN)."],
+                                 "description": "How LoadBalancer Services get an address (default metallb: an address on the VM network, reachable from the workspaces and this Mac only; bromure: published on this Mac's LAN)."],
                 "lanPool": ["type": "string", "description": "bromure load balancer: spare LAN addresses to give Services, e.g. \"10.0.0.20-10.0.0.29\". Empty = share the Mac's own address by port."],
                 "ingress": ["type": "boolean", "description": "Keep k3s's Traefik ingress controller (default true)."],
                 "awsEmulator": ["type": "boolean", "description": "Install floci, a local AWS emulator (S3, DynamoDB, SQS, SNS, Lambda, API Gateway, …) reachable from every workspace (default false)."],

@@ -364,7 +364,7 @@ struct OnboardingWizardView: View {
                            NSLocalizedString("AWS, Kubernetes, DigitalOcean",
                                              comment: "wizard: what the scan reads"))
                 sourceLine("sparkles",
-                           NSLocalizedString("Claude, ChatGPT, Grok & Kimi logins and API keys",
+                           NSLocalizedString("Claude, ChatGPT, Grok & Kimi API keys and settings",
                                              comment: "wizard: what the scan reads"))
                 sourceLine("key.horizontal.fill",
                            NSLocalizedString("SSH keys, .env files",

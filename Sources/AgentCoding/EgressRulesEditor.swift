@@ -24,7 +24,7 @@ struct EgressRulesEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Outbound connections").font(.headline)
-            Text("Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Log, and enforcement is host-side so a compromised agent can't bypass it.")
+            Text("Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Timeline, and enforcement is host-side so a compromised agent can't bypass it.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
             Picker("Unmatched traffic", selection: $defaultAllow) {

@@ -334,7 +334,7 @@ final class RemoteMenuApp {
     // Same panes, same names, same order as the GUI editor's `EditorCategory`
     // (Automation is Preferences-only, so it's not a per-workspace pane).
     private static let configPaneNames = [
-        "General", "Agents", "Local Models", "Fusion", "Folders", "Credentials",
+        "General", "Models", "Fusion", "Folders", "Credentials",
         "Environment", "MCP", "Tracing", "Guardrails", "Supply Chain",
         "Prompt Injection", "Appearance", "Resources",
     ]
@@ -344,8 +344,7 @@ final class RemoteMenuApp {
                                     workspace: String) -> Bool {
         switch pane {
         case "General":          return editGeneral(&doc)
-        case "Agents":           return editAgents(&doc)
-        case "Local Models":     return editLocalModels(&doc)
+        case "Models":           return editModels(&doc)
         case "Fusion":           return editFusion(&doc)
         case "Folders":          return editFolders(&doc)
         case "Credentials":      return editCredentials(&doc)
@@ -644,25 +643,31 @@ final class RemoteMenuApp {
         ])
     }
 
-    private func editAgents(_ doc: inout [String: Any]) -> Bool {
-        editFields(title: "Agents", doc: &doc, fields: [
-            ("tool", "Primary tool", .pickLabeled([
-                ("Claude Code", "claude"), ("Codex", "codex"), ("Grok Build", "grok")])),
-            ("authMode", "Auth mode", .pickLabeled([
-                ("API token", "token"), ("Subscription (interactive login)", "subscription"),
-                ("Bedrock (AWS)", "bedrock"), ("Local model", "local")])),
-            ("apiKey", "API key", .text(secret: true)),
-            ("apiKeyRequiresApproval", "Require approval to use", .bool),
-            ("bedrockModelID", "Default Model ID", .text(secret: false)),
-        ])
-    }
-
-    private func editLocalModels(_ doc: inout [String: Any]) -> Bool {
-        editFields(title: "Local Models", doc: &doc, fields: [
-            ("modelRouting", "Routing", .pickLabeled([
-                ("Cloud", "cloud"), ("Local — always on-device", "local")])),
-            ("activeModelID", "Active local model", .modelPick),
-        ])
+    /// Models: providers, keys and per-agent tiers are app-wide (Preferences ›
+    /// Models), with an optional per-workspace override — both edited in the
+    /// app. Read-only here: shows what this server's agents run against.
+    private func editModels(_ doc: inout [String: Any]) -> Bool {
+        var lines = [
+            "Providers, API keys and per-agent models are set in the app:",
+            "Preferences › Models for every workspace, or a workspace's own",
+            "Models pane to override them.", "",
+        ]
+        if let resp = try? client.request("GET", "/models/settings"), resp.status == 200,
+           let providers = resp.json["providers"] as? [[String: Any]] {
+            lines.append("Providers:")
+            if providers.isEmpty { lines.append("  (none)") }
+            for p in providers {
+                let raw = p["provider"] as? String ?? "?"
+                let name = ModelProvider(rawValue: raw)?.displayName ?? raw
+                let auth = (p["useSubscription"] as? Bool ?? false) ? "subscription" : "API key"
+                lines.append("  • \(name) — \(auth)")
+            }
+        }
+        if doc["modelOverride"] != nil {
+            lines += ["", "This workspace overrides the global settings."]
+        }
+        tui.pager(title: "Models", body: lines.joined(separator: "\n"))
+        return false
     }
 
     private func editResources(_ doc: inout [String: Any]) -> Bool {

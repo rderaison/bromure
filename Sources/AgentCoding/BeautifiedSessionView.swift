@@ -40,6 +40,18 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     /// cap — which a single filled base64 chunk would blow past. nil on failure.
     /// Used to stage dropped files (local: vsock; fat client: the tunnel).
     func guestFileOp(_ op: [String: Any]) async -> [String: Any]?
+    /// Identifies this chat's transcript across chat models (a fat client's
+    /// host + machine + window), so a chat shown again starts from what was
+    /// already downloaded and reads only what's new. nil: no reuse.
+    var historyCacheKey: String? { get }
+    /// How much history a first read takes, when less than the default suits
+    /// (a slow link); "load earlier" fetches the rest. nil: the default.
+    var historyBytesHint: Int? { get }
+}
+
+extension BeautifiedTranscriptProvider {
+    var historyCacheKey: String? { nil }
+    var historyBytesHint: Int? { nil }
 }
 
 /// Where the host's copy of a transcript file ends: the file path and the
@@ -122,8 +134,8 @@ extension BeautifiedTranscriptProvider {
               let cmd = CodingTaskEngine.transcriptChunkCommand(
                   guestCwd: cwd, since: since, agent: agent, pinnedWindow: idx,
                   knownPath: known?.path, knownOffset: known?.offset ?? -1,
-                  bytes: mode == .earlier ? BeautifiedSessionModel.earlierHistoryBytes
-                                          : BeautifiedSessionModel.initialHistoryBytes,
+                  bytes: mode == .earlier ? (historyBytesHint ?? BeautifiedSessionModel.earlierHistoryBytes)
+                                          : (historyBytesHint ?? BeautifiedSessionModel.initialHistoryBytes),
                   earlier: mode == .earlier),
               let out = await execGuest(cmd, timeout: 30)
         else { return nil }
@@ -655,6 +667,14 @@ final class BeautifiedSessionModel: ObservableObject {
     /// what the user notices), relaxed once it's idle.
     func start() {
         guard pollTask == nil else { return }
+        // Shown again (a room, a click back): start from what was downloaded
+        // last time; the first read then only asks for what's new.
+        if buffers.isEmpty, let key = provider.historyCacheKey, let hit = Self.historyCache[key] {
+            buffers[hit.path] = hit.buffer
+            bufferOrder = [hit.path]
+            currentPath = hit.path
+            parseDirty = true
+        }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.poll()
@@ -668,6 +688,25 @@ final class BeautifiedSessionModel: ObservableObject {
         pollTask?.cancel()
         pollTask = nil
         flushSink(force: true)
+        if let key = provider.historyCacheKey, let path = currentPath, let buf = buffers[path] {
+            Self.remember(key, path: path, buffer: buf)
+        }
+    }
+
+    /// Downloaded history kept across chat models, by `historyCacheKey`,
+    /// most recent last, within `historyCacheLimit` bytes.
+    private static var historyCache: [String: (path: String, buffer: TranscriptBuffer)] = [:]
+    private static var historyCacheOrder: [String] = []
+    private static let historyCacheLimit = 96_000_000
+    private static func remember(_ key: String, path: String, buffer: TranscriptBuffer) {
+        historyCache[key] = (path, buffer)
+        historyCacheOrder.removeAll { $0 == key }
+        historyCacheOrder.append(key)
+        var total = historyCache.values.reduce(0) { $0 + $1.buffer.data.count }
+        while total > historyCacheLimit, historyCacheOrder.count > 1 {
+            let old = historyCacheOrder.removeFirst()
+            total -= historyCache.removeValue(forKey: old)?.buffer.data.count ?? 0
+        }
     }
 
     /// Set `working`, tracking when a working spell begins (for the elapsed
@@ -1964,6 +2003,9 @@ struct BeautifiedSessionView: View {
                 .onChange(of: model.failure) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.prompt) { _, _ in scrollToTail(proxy) }
                 .onAppear { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+                // Shown (a click, a switch back): the latest, once the whole
+                // history is laid out — the first jump lands on the tail only.
+                .onChange(of: settled) { _, done in if done { scrollToTail(proxy) } }
                 // Opened from a search: to the first message with the words.
                 .onReceive(NotificationCenter.default.publisher(for: .bromureFindInChat)) { note in
                     pendingFind = note.object as? String
@@ -3039,7 +3081,7 @@ struct DelegationPanel: View {
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
-                        .help(NSLocalizedString("The peer is on this Mac, reached through its mirror", comment: "delegation panel"))
+                        .help(NSLocalizedString("The peer lives on this remote host, reached through its mirror", comment: "delegation panel"))
                 } else if let pid = child?.profileID, pid != session.profileID,
                           let ws = workspaceName?(pid), !ws.isEmpty {
                     Text(ws)

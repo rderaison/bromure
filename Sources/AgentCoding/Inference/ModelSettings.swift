@@ -38,7 +38,8 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
     /// on xAI…): the guest talks to the host's repair proxy, which translates
     /// the agent's wire and holds the key. nil: no such route (Anthropic and
     /// OpenAI are only reached natively; z.ai's compatible API isn't under
-    /// `/v1`; Bedrock has its own `Bedrock` helper).
+    /// `/v1` — Claude Code reaches it via `anthropicGatewayBase`; Bedrock has
+    /// its own `Bedrock` helper).
     public var openAICompatibleBase: String? {
         switch self {
         case .openrouter: return "https://openrouter.ai/api"
@@ -49,10 +50,31 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
     }
 
     /// Claude Code's direct gateway route: OpenRouter serves the Anthropic
-    /// Messages API at `/api/v1/messages`, so Claude points ANTHROPIC_BASE_URL
-    /// there and sends its (stand-in) key as a bearer — no proxy translation.
+    /// Messages API at `/api/v1/messages` and z.ai at
+    /// `/api/anthropic/v1/messages`, so Claude points ANTHROPIC_BASE_URL there
+    /// and sends its (stand-in) key as a bearer — no proxy translation.
+    /// (z.ai's OpenAI-compatible API is `/api/paas/v4`, not under `/v1`, so it
+    /// has no `openAICompatibleBase`: besides Claude Code, only omp switched
+    /// to z.ai natively reaches it.)
     public var anthropicGatewayBase: String? {
-        self == .openrouter ? "https://openrouter.ai/api" : nil
+        switch self {
+        case .openrouter: return "https://openrouter.ai/api"
+        case .zai:        return "https://api.z.ai/api/anthropic"
+        default:          return nil
+        }
+    }
+
+    /// Whether the launch overlay can route `agent` to this provider — the
+    /// single source of truth shared by the Models pane's menus and
+    /// `Profile.overlaidWithGlobalModels`. `native` is the provider the agent
+    /// reaches on its own (omp: the one it's switched to). Besides its own
+    /// provider, an agent reaches Bedrock (Claude natively, the others via
+    /// its OpenAI-compatible surface), and then Claude Code only an
+    /// Anthropic-compatible gateway, every other agent only a provider with an
+    /// OpenAI-compatible base (the external-engine route).
+    public func canRoute(_ agent: ModelAgent, native: ModelProvider) -> Bool {
+        if self == native || self == .bedrock { return true }
+        return agent == .claude ? anthropicGatewayBase != nil : openAICompatibleBase != nil
     }
 
     /// The upstream API host the MITM scopes a fake→real key swap to (empty for

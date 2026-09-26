@@ -113,8 +113,9 @@ public extension Profile {
             // through the external-engine route — the host's repair proxy
             // translates the wire and holds the key (Codex on OpenRouter,
             // Kimi on xAI…).
-            if let ref, case .provider(let prov) = ref.source,
-               prov != Self.nativeProvider(tool: tool, ompProvider: ompProvider),
+            let native = Self.nativeProvider(tool: tool, ompProvider: ompProvider)
+            if let ref, case .provider(let prov) = ref.source, prov != native,
+               prov.canRoute(agent, native: native),
                let cred = settings.credential(prov), cred.isUsable {
                 let key = (cred.apiKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if tool == .claude, let base = prov.anthropicGatewayBase, !key.isEmpty {
@@ -233,8 +234,8 @@ public extension Profile {
                     ready.insert(tool)
                 }
             } else if let ref, case .provider(let prov) = ref.source,
-                      prov != Self.nativeProvider(tool: tool, ompProvider: ompProvider),
-                      (tool == .claude ? prov.anthropicGatewayBase : prov.openAICompatibleBase) != nil {
+                      case let native = Self.nativeProvider(tool: tool, ompProvider: ompProvider),
+                      prov != native, prov.canRoute(agent, native: native) {
                 // A gateway / non-native provider: its key is all it takes.
                 if let cred = settings.credential(prov), cred.isUsable,
                    !(cred.apiKey ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
@@ -304,6 +305,12 @@ public extension ModelAgent {
         case .kimi:   return .kimi
         case .omp:    return .omp
         }
+    }
+
+    /// The provider this agent reaches on its own when no workspace says
+    /// otherwise — omp: its default provider (it's switchable per workspace).
+    var defaultNativeProvider: ModelProvider {
+        nativeCloudProvider ?? ModelProvider.from(omp: .default)
     }
 }
 

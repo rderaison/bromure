@@ -1953,6 +1953,13 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
         self.accent = accent
     }
 
+    /// Over the tunnel every byte counts: reuse what was downloaded, and take
+    /// a smaller first window (scrolling up loads the rest).
+    var historyCacheKey: String? {
+        windowIndex.map { "\(controller.host.id.uuidString):\(workspaceID.uuidString):\($0)" }
+    }
+    var historyBytesHint: Int? { 1_500_000 }
+
     /// The bound window while the roster still lists it (gone = nothing to
     /// read, not somebody else's tab), else the workspace's active tab.
     func activeTabIndex() -> Int? {
