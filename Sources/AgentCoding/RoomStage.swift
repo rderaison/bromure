@@ -89,7 +89,8 @@ final class LocalRoomBackend: RoomStageBackend {
     }
 
     func setLayout(_ room: UUID, _ layout: String) {
-        delegate?.agentRoomStore.setLayout(room, layout)
+        // "" (or junk) = Auto: sized to fit the room.
+        delegate?.agentRoomStore.setLayout(room, RoomLayout(layout)?.string)
     }
 
     func wake(_ s: AgentSession, with text: String) {
@@ -190,6 +191,14 @@ final class RoomStageController {
         } else {
             page = 0
         }
+    }
+
+    /// Auto: the grid sized to fit the room's sessions.
+    var isAutoLayout: Bool { room?.layout.flatMap(RoomLayout.init) == nil }
+
+    func setAutoLayout() {
+        backend.setLayout(roomID, "")
+        page = 0
     }
 
     func show(page p: Int) {
@@ -507,27 +516,64 @@ struct RoomStageView: View {
                       : String(format: NSLocalizedString("%d sessions", comment: "room row"), n)
     }
 
-    /// Six little grids in a pill; the room's layout lit.
+    /// Auto and the two grids used most, one click each; the rest in a menu.
     private var layoutPicker: some View {
         let current = controller.layout
-        return HStack(spacing: 2) {
-            ForEach(RoomLayout.all, id: \.self) { l in
-                let on = l == current
-                Button {
-                    // No animation: a spring re-laid every chat out on every
-                    // frame (both layouts at once) — seconds in a fat client.
-                    RoomStageView.instantly { controller.setLayout(l) }
-                } label: {
-                    GridGlyph(cols: l.cols, rows: l.rows, on: on, accent: accent)
-                        .frame(width: 26, height: 20)
-                        .background(RoundedRectangle(cornerRadius: 6)
-                            .fill(on ? Color(nsColor: .controlBackgroundColor) : .clear)
-                            .shadow(color: .black.opacity(on ? 0.12 : 0), radius: 1.5, y: 0.5))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(String(format: NSLocalizedString("%d × %d grid", comment: "room layout"), l.cols, l.rows))
+        let auto = controller.isAutoLayout
+        let quick = [RoomLayout(cols: 2, rows: 2), RoomLayout(cols: 3, rows: 3)]
+        let others = RoomLayout.all.filter { !quick.contains($0) }
+        func chip<L: View>(_ on: Bool, _ help: String, _ action: @escaping () -> Void, @ViewBuilder _ label: () -> L) -> some View {
+            Button {
+                // No animation: a spring re-laid every chat out on every
+                // frame (both layouts at once) — seconds in a fat client.
+                RoomStageView.instantly(action)
+            } label: {
+                label()
+                    .frame(height: 20)
+                    .padding(.horizontal, 6)
+                    .background(RoundedRectangle(cornerRadius: 6)
+                        .fill(on ? Color(nsColor: .controlBackgroundColor) : .clear)
+                        .shadow(color: .black.opacity(on ? 0.12 : 0), radius: 1.5, y: 0.5))
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .help(help)
+        }
+        return HStack(spacing: 2) {
+            chip(auto, NSLocalizedString("Sized to fit the room", comment: "room layout"), { controller.setAutoLayout() }) {
+                Text(NSLocalizedString("Auto", comment: "room layout"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(auto ? accent : .secondary)
+            }
+            ForEach(quick, id: \.self) { l in
+                chip(!auto && l == current,
+                     String(format: NSLocalizedString("%d × %d grid", comment: "room layout"), l.cols, l.rows),
+                     { controller.setLayout(l) }) {
+                    GridGlyph(cols: l.cols, rows: l.rows, on: !auto && l == current, accent: accent)
+                        .frame(width: 16, height: 14)
+                }
+            }
+            Menu {
+                ForEach(others, id: \.self) { l in
+                    Button {
+                        RoomStageView.instantly { controller.setLayout(l) }
+                    } label: {
+                        Text(String(format: NSLocalizedString("%d × %d grid", comment: "room layout"), l.cols, l.rows))
+                    }
+                }
+            } label: {
+                let custom = !auto && others.contains(current)
+                Text(custom ? "\(current.cols)×\(current.rows)" : "⋯")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(custom ? accent : .secondary)
+                    .frame(minWidth: 20, minHeight: 20)
+                    .background(RoundedRectangle(cornerRadius: 6)
+                        .fill(custom ? Color(nsColor: .controlBackgroundColor) : .clear))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(NSLocalizedString("Other layouts", comment: "room layout"))
         }
         .padding(2)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))

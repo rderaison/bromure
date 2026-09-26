@@ -401,6 +401,11 @@ final class SessionListModel {
     var selectedRoomID: UUID?
     var roomFocusProfileID: Profile.ID?
     var roomFocusCwd: String?
+    /// ⌘ is held down in the window: the sidebar shows each session's
+    /// ⌘1–9 number.
+    var commandHeld = false
+    /// The sidebar's search text.
+    var sidebarFilter = ""
 }
 
 /// Right-click actions on a tab row. Handled by the window, which reads the

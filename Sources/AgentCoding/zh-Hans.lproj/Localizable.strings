@@ -2685,3 +2685,20 @@
 "Thinking…" = "正在思考…";
 "Thought" = "已思考";
 "Using %@" = "正在使用 %@";
+
+/* Added 2026-09-25: undo, search, changes, shortcuts */
+"%@ on %@, in %@" = "%@，在 %@ 上，位于 %@";
+"%@ tokens" = "%@ 个令牌";
+"Archived %@" = "已归档 %@";
+"Auto" = "自动";
+"Changed %d files" = "更改了 %d 个文件";
+"Changed 1 file" = "更改了 1 个文件";
+"Deleted %@" = "已删除 %@";
+"Edit and send again" = "编辑并重新发送";
+"Ended %@" = "已结束 %@";
+"In conversations" = "对话中";
+"Input %@ · cached %@ · output %@" = "输入 %@ · 缓存 %@ · 输出 %@";
+"Jump to latest" = "跳到最新";
+"Other layouts" = "其他布局";
+"Removed from %@" = "已从 %@ 移出";
+"Sized to fit the room" = "按房间自动调整";

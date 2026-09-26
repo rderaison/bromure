@@ -2685,3 +2685,20 @@
 "Thinking…" = "Denkt nach…";
 "Thought" = "Nachgedacht";
 "Using %@" = "Nutzt %@";
+
+/* Added 2026-09-25: undo, search, changes, shortcuts */
+"%@ on %@, in %@" = "%@ auf %@, in %@";
+"%@ tokens" = "%@ Tokens";
+"Archived %@" = "%@ archiviert";
+"Auto" = "Auto";
+"Changed %d files" = "%d Dateien geändert";
+"Changed 1 file" = "1 Datei geändert";
+"Deleted %@" = "%@ gelöscht";
+"Edit and send again" = "Bearbeiten und erneut senden";
+"Ended %@" = "%@ beendet";
+"In conversations" = "In Gesprächen";
+"Input %@ · cached %@ · output %@" = "Eingabe %@ · Cache %@ · Ausgabe %@";
+"Jump to latest" = "Zum Neuesten";
+"Other layouts" = "Weitere Layouts";
+"Removed from %@" = "Aus %@ entfernt";
+"Sized to fit the room" = "Passend zum Raum";

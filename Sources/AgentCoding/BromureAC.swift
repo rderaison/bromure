@@ -117,6 +117,10 @@ struct BromureAC: ParsableCommand {
         // Hidden verification hook: run the PII detector over files and print
         // what it finds and how long it took. Standalone, no servers or VMs.
         //   bromure-ac __pii-scan <file>… [--min 0.6] [--quiet] [--plan]
+        if filtered.first == "__bench-scroll" {
+            ScrollBench.run(Array(filtered.dropFirst()))
+            return
+        }
         if filtered.first == "__pii-scan" {
             PIIScanCLI.run(Array(filtered.dropFirst()))
             return
@@ -4049,7 +4053,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onFatClientDebug = { [weak self] params in
             MainActor.assumeIsolated {
                 guard let self else { return ["error": "no app"] }
-                if let action = params["action"] as? String, action.hasPrefix("room-") {
+                if let action = params["action"] as? String,
+                   action.hasPrefix("room-") || ["sidebar-search", "select-session", "undo-toast",
+                                                 "activity-open", "command-held", "appearance"].contains(action) {
                     return self.roomDebug(action, params)
                 }
                 let key = (params["host"] as? String) ?? ""
@@ -5489,9 +5495,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // then check Command is the only one set.
         let userMods: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
         let mods = event.modifierFlags.intersection(userMods)
+        // ⌥⌘↑ / ⌥⌘↓: the previous / next session in the sidebar's order.
+        if mods == [.command, .option], event.keyCode == 126 || event.keyCode == 125,
+           let w = NSApp.keyWindow as? UnifiedSessionWindow,
+           w.stepSession(event.keyCode == 125 ? 1 : -1) {
+            return nil
+        }
         guard mods == [.command] else { return event }
 
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        // ⌘⏎: pick the paused / finished session on stage back up.
+        if chars == "\r", let w = NSApp.keyWindow as? UnifiedSessionWindow, w.resumeOnStage() {
+            return nil
+        }
 
         // ⌘H = standard macOS "hide app". Handle here defensively in
         // case responder-chain routing is interfered with elsewhere.
@@ -7050,6 +7066,40 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let id = uuid("room") else { return ["error": "room?"] }
             if w.listModel.selectedRoomID == id { w.clearRoom() }
             roomUngroup(id)   // test cleanup: the sessions stay
+            return ["ok": true]
+        case "sidebar-search":
+            // Type into the sidebar's search (content matches included).
+            w.listModel.sidebarFilter = p["text"] as? String ?? ""
+            let q = w.listModel.sidebarFilter
+            let hits = TranscriptSearchIndex.shared.matches(q)
+            return ["ok": true, "indexed": TranscriptSearchIndex.shared.entries.count,
+                    "contentHits": hits.map { ["id": $0.key.uuidString, "snippet": $0.value] }]
+        case "select-session":
+            guard let id = uuid("session") else { return ["error": "session?"] }
+            w.selectSession(id)
+            if let q = p["find"] as? String {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    NotificationCenter.default.post(name: .bromureFindInChat, object: q)
+                }
+            }
+            return ["ok": true]
+        case "activity-open":
+            ActivityGroupView.startOpen = p["open"] as? Bool ?? true
+            return ["ok": true]
+        case "appearance":
+            // Screenshot hook: "dark", "light", or anything else = follow the system.
+            switch p["mode"] as? String {
+            case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
+            case "light": NSApp.appearance = NSAppearance(named: .aqua)
+            default:      NSApp.appearance = nil
+            }
+            return ["ok": true]
+        case "command-held":
+            w.listModel.commandHeld = p["held"] as? Bool ?? true
+            return ["ok": true]
+        case "undo-toast":
+            // Show the toast as an archive would (without archiving).
+            w.debugToast(p["text"] as? String ?? "Archived “Example”")
             return ["ok": true]
         case "room-list":
             return ["rooms": agentRoomStore.rooms.map { r in

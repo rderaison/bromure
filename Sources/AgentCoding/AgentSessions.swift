@@ -822,6 +822,24 @@ enum SessionHome {
         return SessionBucket.allCases.flatMap { groups[$0] ?? [] } + gone
     }
 
+    /// The sessions in the order the sidebar shows them — each room's
+    /// members first, then the loose ones by state with delegates under
+    /// their delegator (finished ones, folded away, left out): what ⌘1–9
+    /// number and ⌥⌘↑/↓ walk.
+    @MainActor
+    static func sidebarOrder(_ sessions: [AgentSession], rooms: [AgentRoom], in model: SessionListModel) -> [AgentSession] {
+        let list = orderedAll(sessions, in: model)
+        let live = rooms.filter { !$0.isArchived }
+        let roomIDs = Set(live.map(\.id))
+        var out: [AgentSession] = []
+        for r in live { out += SessionSectionsView.nested(list.filter { $0.roomID == r.id }).map(\.session) }
+        let loose = list.filter { $0.roomID.map { !roomIDs.contains($0) } ?? true }
+        for b in SessionBucket.allCases where b != .ended {
+            out += SessionSectionsView.nested(loose.filter { bucket(for: $0, in: model) == b }).map(\.session)
+        }
+        return out
+    }
+
     /// The put-away sessions, most recently archived first.
     static func archived(_ sessions: [AgentSession]) -> [AgentSession] {
         sessions.filter { $0.isArchived && !$0.isDeleted && !$0.isSwitchboard }
@@ -1476,6 +1494,12 @@ struct SessionRowView: View {
     /// The title to show when it differs from the session's own (another
     /// session has the same one).
     var title: String? = nil
+    /// ⌘ held: its ⌘1–9 number, in place of the time.
+    var shortcut: Int? = nil
+    /// Found by what was said: the words around the match, instead of the status.
+    var snippet: String? = nil
+    /// The last reply, shown on hover.
+    var preview: String? = nil
     @State private var hovering = false
 
     var body: some View {
@@ -1498,7 +1522,13 @@ struct SessionRowView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Spacer(minLength: 0)
-                    if let when {
+                    if let shortcut {
+                        Text("⌘\(shortcut)")
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(0.12)))
+                    } else if let when {
                         Text(when)
                             .font(.system(size: 10.5, weight: .medium).monospacedDigit())
                             .foregroundStyle(.tertiary)
@@ -1512,13 +1542,21 @@ struct SessionRowView: View {
                             .lineLimit(1)
                             .layoutPriority(1)
                     }
-                    Text(statusLine)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    if let snippet {
+                        Text(snippet)
+                            .italic()
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    } else {
+                        Text(statusLine)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
             }
+            .help(preview ?? "")
         }
         .padding(.leading, 8 + CGFloat(min(depth, 3)) * 16)
         .padding(.trailing, 10)
@@ -1738,6 +1776,10 @@ struct SessionSectionsView: View {
     var actions = SessionStageActions()
     /// The rooms, shown above the loose sessions (host window only).
     var rooms: [AgentRoom] = []
+    /// Sessions whose conversation mentions the search, with the words around it.
+    var contentSearch: (String) -> [UUID: String] = { _ in [:] }
+    /// A session's last reply, for its row's tooltip.
+    var lastReply: (UUID) -> String? = { _ in nil }
     @AppStorage("sessions.listExpanded") private var expanded = true
     /// Rooms folded in the sidebar (their members hidden).
     @State private var foldedRooms: Set<UUID> = []
@@ -1764,16 +1806,31 @@ struct SessionSectionsView: View {
     /// The session a "Nickname…" sheet is open for.
     @State private var nicknameFor: AgentSession?
 
+    /// ⌘1–9, by session (what the shortcuts jump to).
+    private var shortcutNumbers: [UUID: Int] {
+        var out: [UUID: Int] = [:]
+        for (i, s) in SessionHome.sidebarOrder(store.sessions, rooms: rooms, in: model).prefix(9).enumerated() { out[s.id] = i + 1 }
+        return out
+    }
+
+    /// Sessions found by what was said in them (not their name), with the words.
+    private var contentHits: [UUID: String] {
+        let q = filter.trimmingCharacters(in: .whitespaces)
+        return q.count >= 3 ? contentSearch(q) : [:]
+    }
+
     private var matching: [AgentSession] {
         var sessions = store.sessions
         let q = filter.trimmingCharacters(in: .whitespaces)
         if !q.isEmpty {
             let bare = q.hasPrefix("@") ? String(q.dropFirst()) : q
+            let hits = contentHits
             sessions = sessions.filter {
                 $0.title.localizedCaseInsensitiveContains(q)
                     || ($0.openingMessage ?? "").localizedCaseInsensitiveContains(q)
                     || $0.cwd.localizedCaseInsensitiveContains(q)
                     || (!bare.isEmpty && ($0.nickname ?? "").localizedCaseInsensitiveContains(bare))
+                    || hits[$0.id] != nil
             }
         }
         return sessions
@@ -1953,8 +2010,20 @@ struct SessionSectionsView: View {
             gone: gone,
             depth: depth,
             selected: model.selectedSessionID == s.id,
-            onSelect: { onSelect(s.id) },
-            title: SessionHome.distinctTitle(s, among: store.sessions, in: model))
+            onSelect: {
+                onSelect(s.id)
+                // Found by its words: the chat scrolls to them.
+                if contentHits[s.id] != nil, !s.title.localizedCaseInsensitiveContains(filter) {
+                    let q = filter
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        NotificationCenter.default.post(name: .bromureFindInChat, object: q)
+                    }
+                }
+            },
+            title: SessionHome.distinctTitle(s, among: store.sessions, in: model),
+            shortcut: model.commandHeld ? shortcutNumbers[s.id] : nil,
+            snippet: filter.isEmpty || s.title.localizedCaseInsensitiveContains(filter) ? nil : contentHits[s.id],
+            preview: lastReply(s.id))
         .overlay {
             if dropSession == s.id {
                 RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.accentColor, lineWidth: 2)

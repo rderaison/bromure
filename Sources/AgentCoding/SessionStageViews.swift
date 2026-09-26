@@ -489,6 +489,21 @@ struct SessionHeaderView: View {
                                 }
                                 .help(url)
                             }
+                            #if os(macOS)
+                            if let t = TranscriptSearchIndex.shared.tokens(s.id) {
+                                metaDot
+                                HStack(spacing: 4) {
+                                    Image(systemName: "gauge.with.dots.needle.33percent").font(.system(size: 10.5))
+                                    Text(String(format: NSLocalizedString("%@ tokens", comment: "session header"),
+                                                TranscriptSearchIndex.compact(t.total)))
+                                        .monospacedDigit()
+                                }
+                                .help(String(format: NSLocalizedString("Input %@ · cached %@ · output %@", comment: "session header"),
+                                             TranscriptSearchIndex.compact(t.input),
+                                             TranscriptSearchIndex.compact(t.cached),
+                                             TranscriptSearchIndex.compact(t.output)))
+                            }
+                            #endif
                         }
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -680,6 +695,24 @@ struct SessionRestView: View {
 
     private enum Load { case idle, loading, loaded([TranscriptItem]), unavailable }
     @State private var load: Load = .idle
+    /// Words to scroll to once the conversation is in.
+    @State private var pendingFind: String?
+    private var loadedCount: Int { if case .loaded(let items) = load { return items.count } else { return 0 } }
+
+    private func applyFind(_ proxy: ScrollViewProxy) {
+        guard let q = pendingFind, !q.isEmpty, case .loaded(let items) = load else { return }
+        pendingFind = nil
+        guard let hit = items.first(where: { item in
+            switch item.kind {
+            case .userText(let t), .assistantText(let t):
+                return t.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            default: return false
+            }
+        }) else { return }
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(hit.id, anchor: .center) }
+        }
+    }
     @State private var draft = ""
     @State private var sending = false
 
@@ -690,6 +723,7 @@ struct SessionRestView: View {
             let bucket = SessionHome.bucket(for: s, in: model)
             let live = SessionHome.liveTabPosition(for: s, in: model)
             VStack(spacing: 0) {
+                ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         if let err = s.lastError, !err.isEmpty { errorCard(err) }
@@ -699,6 +733,14 @@ struct SessionRestView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 20)
+                }
+                // Opened from a search: to the first message with the words
+                // (once the conversation has loaded).
+                .onReceive(NotificationCenter.default.publisher(for: .bromureFindInChat)) { note in
+                    pendingFind = note.object as? String
+                    applyFind(proxy)
+                }
+                .onChange(of: loadedCount) { _, _ in applyFind(proxy) }
                 }
                 Divider().opacity(0.5)
                 if let why = SessionHome.goneReason(s, in: model) {
@@ -838,6 +880,28 @@ struct NewSessionView: View {
     /// no nickname yet. nil: no palette.
     let peerMentions: ((UUID) -> [PeerMention])?
     let assignNickname: ((UUID, String) -> Void)?
+    /// The last few agent + machine + folder combinations, one click each.
+    let recentStarts: [RecentStart]
+
+    struct RecentStart: Hashable {
+        let profileID: UUID
+        let tool: Profile.Tool
+        /// The folder ("" = a fresh one).
+        let folder: String
+
+        /// The newest distinct combinations among `sessions`.
+        static func from(_ sessions: [AgentSession], profiles: [Profile], limit: Int = 3) -> [RecentStart] {
+            var out: [RecentStart] = []
+            for s in sessions.sorted(by: { $0.createdAt > $1.createdAt })
+            where !s.isDeleted && !s.isSwitchboard && profiles.contains(where: { $0.id == s.profileID }) {
+                let home = s.cwd.isEmpty || s.cwd == "~" || s.cwd == "/home/ubuntu"
+                let r = RecentStart(profileID: s.profileID, tool: s.tool, folder: home ? "" : s.cwd)
+                if !out.contains(r) { out.append(r) }
+                if out.count == limit { break }
+            }
+            return out
+        }
+    }
 
     private enum Where: String, CaseIterable, Identifiable {
         case home, folder, repository
@@ -943,7 +1007,9 @@ struct NewSessionView: View {
          listFolders: ((UUID, String) async -> [String]?)? = nil,
          readyTools: ((Profile) -> Set<Profile.Tool>)? = nil,
          peerMentions: ((UUID) -> [PeerMention])? = nil,
-         assignNickname: ((UUID, String) -> Void)? = nil) {
+         assignNickname: ((UUID, String) -> Void)? = nil,
+         recentStarts: [RecentStart] = []) {
+        self.recentStarts = recentStarts
         self.profiles = profiles
         self.runningIDs = runningIDs
         self.recentFolders = recentFolders
@@ -1091,6 +1157,7 @@ struct NewSessionView: View {
                                         .allowsHitTesting(false)
                                 }
                             }
+                        if recentStarts.count > 1 { recentStartsRow }
                         recentRow
                         Text(Self.footnote)
                             .font(.system(size: 11.5))
@@ -1305,6 +1372,46 @@ struct NewSessionView: View {
 
     /// Folders earlier sessions on this machine ran in — one click to work
     /// there again.
+    /// "Pick up where you were": agent, machine and folder in one click.
+    private var recentStartsRow: some View {
+        HStack(spacing: 8) {
+            ForEach(recentStarts, id: \.self) { r in
+                let name = profiles.first { $0.id == r.profileID }?.name ?? ""
+                let picked = profileID == r.profileID && tool == r.tool
+                    && (r.folder.isEmpty ? place == .home : (place == .folder && folder == r.folder))
+                Button {
+                    profileID = r.profileID
+                    tool = r.tool
+                    if r.folder.isEmpty { place = .home; folder = "" } else { place = .folder; folder = r.folder }
+                } label: {
+                    HStack(spacing: 7) {
+                        AgentAvatar(tool: r.tool, size: 18)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(name).font(.system(size: 11.5, weight: .semibold)).lineLimit(1)
+                            Text(r.folder.isEmpty ? NSLocalizedString("Fresh folder", comment: "new session where: a new empty folder made for the session")
+                                                  : (r.folder as NSString).lastPathComponent)
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: 190, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(picked ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.045)))
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(picked ? Color.accentColor.opacity(0.4) : Color.primary.opacity(0.06), lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: 11))
+                }
+                .buttonStyle(.plain)
+                .help(String(format: NSLocalizedString("%@ on %@, in %@", comment: "new session recent start"),
+                             r.tool.displayName, name,
+                             r.folder.isEmpty ? NSLocalizedString("Fresh folder", comment: "new session where: a new empty folder made for the session") : r.folder))
+            }
+        }
+    }
+
     @ViewBuilder
     private var recentRow: some View {
         let recent = Array(recentFolders(profileID).prefix(4))

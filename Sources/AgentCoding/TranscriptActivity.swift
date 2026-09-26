@@ -8,16 +8,19 @@ import SwiftUI
 // files read · 1 edit" — that opens to the full detail on a click. Errors
 // stay visible on the line; the run in progress shows what it's doing now.
 
-/// A row of the chat: a message on its own, or a run of activity.
+/// A row of the chat: a message on its own, a run of activity, or what a
+/// turn changed in the files.
 enum TranscriptRow: Identifiable {
     case item(TranscriptItem)
     case activity([TranscriptItem])
+    case changes(TurnChanges, after: Int)
 
     /// The first item's id, so scroll anchors keep working.
     var id: Int {
         switch self {
         case .item(let i): return i.id
         case .activity(let a): return a.first?.id ?? 0
+        case .changes(_, let after): return -(after + 1)
         }
     }
 
@@ -28,19 +31,181 @@ enum TranscriptRow: Identifiable {
         }
     }
 
-    static func rows(_ items: [TranscriptItem]) -> [TranscriptRow] {
+    /// A long reply cut into rows of about this many characters, so no row
+    /// is several screens tall (a lazy list can't draw one of those).
+    static let chunkChars = 2000
+
+    /// `text` split at paragraph breaks outside code fences into pieces of
+    /// about `limit` characters (a fence is never cut).
+    static func chunks(_ text: String, limit: Int = chunkChars) -> [String] {
+        guard text.count > limit * 3 / 2 else { return [text] }
+        var out: [String] = []
+        var current = ""
+        var inFence = false
+        for line in text.components(separatedBy: "\n") {
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") { inFence.toggle() }
+            // A break is a blank line outside a fence, once the piece is big enough.
+            if !inFence, line.trimmingCharacters(in: .whitespaces).isEmpty, current.count >= limit {
+                out.append(current)
+                current = ""
+                continue
+            }
+            current += current.isEmpty ? line : "\n" + line
+        }
+        if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append(current) }
+        return out.isEmpty ? [text] : out
+    }
+
+    /// The rows of a long reply: the first keeps the item's id (search and
+    /// scroll anchors find it), the rest get ids derived from it.
+    static func split(_ item: TranscriptItem) -> [TranscriptItem] {
+        guard case .assistantText(let text) = item.kind else { return [item] }
+        let pieces = chunks(text)
+        guard pieces.count > 1 else { return [item] }
+        return pieces.enumerated().map { k, piece in
+            TranscriptItem(id: k == 0 ? item.id : item.id &* 131 &+ k, kind: .assistantText(piece),
+                           timestamp: item.timestamp)
+        }
+    }
+
+    static func rows(_ items: [TranscriptItem], chunked: Bool = true) -> [TranscriptRow] {
         var out: [TranscriptRow] = []
         var run: [TranscriptItem] = []
+        var turn: [TranscriptItem] = []
+        func closeTurn() {
+            if let c = TurnChanges.of(turn), let last = turn.last { out.append(.changes(c, after: last.id)) }
+            turn = []
+        }
         for item in items {
             if isActivity(item) {
                 run.append(item)
             } else {
                 if !run.isEmpty { out.append(.activity(run)); run = [] }
-                out.append(.item(item))
+                // Your next message closes the agent's turn: its changes go
+                // at the end of it.
+                if case .userText = item.kind { closeTurn() }
+                if chunked { out += split(item).map { .item($0) } } else { out.append(.item(item)) }
             }
+            turn.append(item)
         }
         if !run.isEmpty { out.append(.activity(run)) }
+        closeTurn()
         return out
+    }
+}
+
+/// What one turn changed: the files the agent's edits touched and the lines
+/// they added and removed — counted from its own edit calls.
+struct TurnChanges: Equatable {
+    var files: [String] = []
+    var added = 0
+    var removed = 0
+
+    static func of(_ items: [TranscriptItem]) -> TurnChanges? {
+        var c = TurnChanges()
+        for item in items {
+            guard case .toolUse(let name, _, let detail) = item.kind,
+                  ActivitySummary.category(name) == .edit else { continue }
+            c.add(detail)
+        }
+        return c.files.isEmpty && c.added == 0 && c.removed == 0 ? nil : c
+    }
+
+    private static func lines(_ s: String) -> Int {
+        let t = s.hasSuffix("\n") ? String(s.dropLast()) : s
+        return t.isEmpty ? 0 : t.split(separator: "\n", omittingEmptySubsequences: false).count
+    }
+
+    private mutating func touch(_ path: String?) {
+        guard let p = path?.trimmingCharacters(in: .whitespaces), !p.isEmpty, !files.contains(p) else { return }
+        files.append(p)
+    }
+
+    /// One edit call's input: Claude/omp edits (old → new), whole-file
+    /// writes, multi-edits, and patches (Codex apply_patch, unified diffs).
+    private mutating func add(_ detail: String) {
+        let json = (try? JSONSerialization.jsonObject(with: Data(detail.utf8))) as? [String: Any]
+        guard let input = json else { patch(detail); return }
+        let path = ["file_path", "path", "notebook_path", "filePath"].lazy
+            .compactMap { input[$0] as? String }.first
+        if let old = input["old_string"] as? String, let new = input["new_string"] as? String {
+            touch(path); removed += Self.lines(old); added += Self.lines(new)
+        } else if let edits = input["edits"] as? [[String: Any]] {
+            touch(path)
+            for e in edits {
+                removed += Self.lines(e["old_string"] as? String ?? e["oldText"] as? String ?? "")
+                added += Self.lines(e["new_string"] as? String ?? e["newText"] as? String ?? "")
+            }
+        } else if let content = input["content"] as? String {
+            touch(path); added += Self.lines(content)
+        } else if let p = ["patch", "input", "diff"].lazy.compactMap({ input[$0] as? String }).first {
+            patch(p, path: path)
+        } else {
+            touch(path)
+        }
+    }
+
+    private mutating func patch(_ text: String, path: String? = nil) {
+        touch(path)
+        for line in text.components(separatedBy: "\n") {
+            for header in ["*** Update File: ", "*** Add File: ", "*** Delete File: ", "+++ b/"]
+            where line.hasPrefix(header) {
+                touch(String(line.dropFirst(header.count)))
+            }
+            if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("***") { continue }
+            if line.hasPrefix("+") { added += 1 } else if line.hasPrefix("-") { removed += 1 }
+        }
+    }
+}
+
+extension Notification.Name {
+    /// "Show me the changes": the key window opens its Files pane.
+    static let bromureShowChanges = Notification.Name("io.bromure.showChanges")
+    /// Scroll the chat on stage to the first message with these words.
+    static let bromureFindInChat = Notification.Name("io.bromure.findInChat")
+}
+
+/// The end of a turn that edited files: "Changed 3 files  +120 −35" — a
+/// click opens the Files pane (its git changes); hover lists the files.
+struct TurnChangesView: View {
+    let changes: TurnChanges
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            NotificationCenter.default.post(name: .bromureShowChanges, object: nil)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "doc.badge.gearshape")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text(changes.files.count == 1
+                     ? NSLocalizedString("Changed 1 file", comment: "turn changes")
+                     : String(format: NSLocalizedString("Changed %d files", comment: "turn changes"), changes.files.count))
+                    .font(.system(size: 12, weight: .medium))
+                if changes.added > 0 {
+                    Text("+\(changes.added)").font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.green)
+                }
+                if changes.removed > 0 {
+                    Text("−\(changes.removed)").font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.red)
+                }
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.accentColor.opacity(hovering ? 0.12 : 0.07)))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.18), lineWidth: 0.5))
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(changes.files.map { ($0 as NSString).lastPathComponent }.joined(separator: "\n"))
     }
 }
 
@@ -188,7 +353,9 @@ struct ActivityGroupView: View {
     let items: [TranscriptItem]
     /// The run the agent is in right now.
     var live = false
-    @State private var open = false
+    /// Debug/screenshot hook: new lines start open.
+    nonisolated(unsafe) static var startOpen = false
+    @State private var open = ActivityGroupView.startOpen
     @State private var hovering = false
 
     var body: some View {
@@ -258,8 +425,9 @@ struct TranscriptRowsView: View {
     var body: some View {
         ForEach(TranscriptRow.rows(items)) { row in
             switch row {
-            case .item(let item): TranscriptItemView(item: item)
-            case .activity(let run): ActivityGroupView(items: run)
+            case .item(let item): TranscriptItemView(item: item).id(row.id)
+            case .activity(let run): ActivityGroupView(items: run).id(row.id)
+            case .changes(let c, _): TurnChangesView(changes: c).id(row.id)
             }
         }
     }

@@ -1478,6 +1478,8 @@ struct BeautifiedSessionView: View {
     /// it there. Scrolled up to read, it stays put — only the user's own
     /// turn (`localRevision`) or a card needing them pulls it back down.
     @State private var pinnedToBottom = true
+    /// Words to scroll to once they have loaded (opened from a search).
+    @State private var pendingFind: String?
     /// The window is being live-resized: render the tail only.
     @State private var liveResizing = false
     /// Just mounted (a layout switch, a zoom, a tab): the first frame shows
@@ -1744,7 +1746,13 @@ struct BeautifiedSessionView: View {
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
+                    // Lazy: only the rows on screen exist, so a scroll frame
+                    // lays out and tracks a screenful, not the whole history
+                    // (eager was ~17 ms a frame on a long chat, lazy ~3 ms —
+                    // `__bench-scroll`). It once went blank on a reply several
+                    // screens tall; long replies are now cut into ~2000-char
+                    // rows (`TranscriptRow.split`), so no row is that tall.
+                    LazyVStack(alignment: .leading, spacing: 14) {
                         // While the window is being resized, only the last
                         // couple of screens re-flow live; the rest comes back
                         // when the drag ends.
@@ -1807,13 +1815,23 @@ struct BeautifiedSessionView: View {
                         let liveRun = model.working ? rows.last.flatMap { r -> Int? in
                             if case .activity = r { return r.id } else { return nil }
                         } : nil
+                        let lastUserID = visible.last(where: {
+                            if case .userText = $0.kind { return true } else { return false }
+                        })?.id
+                        // A reply cut into rows: its first row carries the
+                        // tools, and Copy takes the whole reply.
+                        let replies: [Int: String] = Dictionary(visible.compactMap { item -> (Int, String)? in
+                            if case .assistantText(let t) = item.kind { return (item.id, t) } else { return nil }
+                        }, uniquingKeysWith: { a, _ in a })
                         ForEach(rows) { row in
                             switch row {
                             case .item(let item):
-                                itemRow(item)
+                                itemRow(item, lastUserID: lastUserID, replies: replies)
                             case .activity(let run):
                                 ActivityGroupView(items: run, live: row.id == liveRun)
                                     .id(row.id)
+                            case .changes(let c, _):
+                                TurnChangesView(changes: c).id(row.id)
                             }
                         }
                         if !live.isEmpty {
@@ -1925,6 +1943,32 @@ struct BeautifiedSessionView: View {
                 .onChange(of: model.failure) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.prompt) { _, _ in scrollToTail(proxy) }
                 .onAppear { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+                // Opened from a search: to the first message with the words.
+                .onReceive(NotificationCenter.default.publisher(for: .bromureFindInChat)) { note in
+                    pendingFind = note.object as? String
+                    applyFind(proxy)
+                }
+                .onChange(of: model.items.count) { _, _ in applyFind(proxy) }
+                // Scrolled up while it keeps going: one click back down.
+                .overlay(alignment: .bottom) {
+                    if !pinnedToBottom {
+                        Button {
+                            scrollToTail(proxy)
+                        } label: {
+                            Label(NSLocalizedString("Jump to latest", comment: "beautified"), systemImage: "arrow.down")
+                                .font(.system(size: 12, weight: .semibold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(.regularMaterial, in: Capsule())
+                                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
+                                .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.bottom, 12)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+                }
+                .animation(.easeOut(duration: 0.18), value: pinnedToBottom)
             }
         }
     }
@@ -1938,6 +1982,29 @@ struct BeautifiedSessionView: View {
             StreamingCaret()
         } else {
             ThinkingRow(since: model.workingSince)
+        }
+    }
+
+    /// Scroll to the first message with the pending search words, once
+    /// they've loaded.
+    private func applyFind(_ proxy: ScrollViewProxy) {
+        guard let q = pendingFind, !q.isEmpty,
+              let i = model.items.firstIndex(where: { Self.says($0, q) }) else { return }
+        pendingFind = nil
+        let needed = model.items.count - i
+        if needed > model.renderLimit { model.renderLimit = needed }
+        let id = model.items[i].id
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
+        }
+    }
+
+    /// A message (yours or the agent's) that contains `q`.
+    static func says(_ item: TranscriptItem, _ q: String) -> Bool {
+        switch item.kind {
+        case .userText(let t), .assistantText(let t):
+            return t.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        default: return false
         }
     }
 
@@ -1988,13 +2055,23 @@ struct BeautifiedSessionView: View {
     /// (persists after the poll, since the real user turn carries the same
     /// guest paths the drop echoed).
     @ViewBuilder
-    private func itemRow(_ item: TranscriptItem) -> some View {
+    private func itemRow(_ item: TranscriptItem, lastUserID: Int?, replies: [Int: String]) -> some View {
         if case .userText(let text) = item.kind {
             let paths = GuestDrop.imagePaths(in: text).filter { model.imagesByPath[$0] != nil }
-            TranscriptItemView(item: item,
-                               attachments: paths.compactMap { model.imagesByPath[$0] },
-                               hiddenPaths: paths)
-                .id(item.id)
+            // Your last message can be taken back into the composer to redo.
+            MessageChrome(item: item, onEdit: item.id == lastUserID ? { model.composerText = text } : nil) {
+                TranscriptItemView(item: item,
+                                   attachments: paths.compactMap { model.imagesByPath[$0] },
+                                   hiddenPaths: paths)
+            }
+            .id(item.id)
+        } else if case .assistantText = item.kind {
+            if let whole = replies[item.id] {
+                MessageChrome(item: item, copyText: whole) { TranscriptItemView(item: item) }
+                    .id(item.id)
+            } else {
+                TranscriptItemView(item: item).id(item.id)   // a later piece of a long reply
+            }
         } else {
             TranscriptItemView(item: item)
                 .id(item.id)
@@ -3063,5 +3140,66 @@ struct DelegationPanel: View {
         case .note, .brief: verb = NSLocalizedString("noted", comment: "delegation panel")
         }
         return "\(who) \(verb): " + DelegationNotice.oneLine(m.text, max: 200)
+    }
+}
+
+
+/// A message's hover tools: when it was said, Copy, and (your last message)
+/// Edit — back into the composer to change and send again.
+private struct MessageChrome<Content: View>: View {
+    let item: TranscriptItem
+    /// What Copy takes (the whole reply when this row is its first piece).
+    var copyText: String? = nil
+    var onEdit: (() -> Void)? = nil
+    @ViewBuilder let content: Content
+    @State private var hovering = false
+    @State private var copied = false
+
+    private var text: String {
+        if let copyText { return copyText }
+        switch item.kind {
+        case .userText(let t), .assistantText(let t): return t
+        default: return ""
+        }
+    }
+
+    var body: some View {
+        content
+            .overlay(alignment: .topTrailing) {
+                if hovering {
+                    HStack(spacing: 8) {
+                        if let t = item.timestamp {
+                            Text(t.formatted(date: .omitted, time: .shortened))
+                                .font(.system(size: 10.5).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .help(t.formatted(date: .complete, time: .standard))
+                        }
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(text, forType: .string)
+                            copied = true
+                            Task { try? await Task.sleep(nanoseconds: 1_200_000_000); copied = false }
+                        } label: {
+                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        }
+                        .help(NSLocalizedString("Copy", comment: "message tools"))
+                        if let onEdit {
+                            Button(action: onEdit) { Image(systemName: "pencil") }
+                                .help(NSLocalizedString("Edit and send again", comment: "message tools"))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(.regularMaterial, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.08), radius: 4, y: 1)
+                    .offset(y: -10)
+                    .transition(.opacity)
+                }
+            }
+            .onHover { inside in withAnimation(.easeOut(duration: 0.12)) { hovering = inside } }
     }
 }

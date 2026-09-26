@@ -2720,3 +2720,20 @@
 "Thinking…" = "Thinking…";
 "Thought" = "Thought";
 "Using %@" = "Using %@";
+
+/* Added 2026-09-25: undo, search, changes, shortcuts */
+"%@ on %@, in %@" = "%@ on %@, in %@";
+"%@ tokens" = "%@ tokens";
+"Archived %@" = "Archived %@";
+"Auto" = "Auto";
+"Changed %d files" = "Changed %d files";
+"Changed 1 file" = "Changed 1 file";
+"Deleted %@" = "Deleted %@";
+"Edit and send again" = "Edit and send again";
+"Ended %@" = "Ended %@";
+"In conversations" = "In conversations";
+"Input %@ · cached %@ · output %@" = "Input %@ · cached %@ · output %@";
+"Jump to latest" = "Jump to latest";
+"Other layouts" = "Other layouts";
+"Removed from %@" = "Removed from %@";
+"Sized to fit the room" = "Sized to fit the room";

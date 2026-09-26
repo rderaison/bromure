@@ -2685,3 +2685,20 @@
 "Thinking…" = "考え中…";
 "Thought" = "思考";
 "Using %@" = "%@ を使用中";
+
+/* Added 2026-09-25: undo, search, changes, shortcuts */
+"%@ on %@, in %@" = "%@ (%@、%@)";
+"%@ tokens" = "%@ トークン";
+"Archived %@" = "%@ をアーカイブしました";
+"Auto" = "自動";
+"Changed %d files" = "%d 個のファイルを変更";
+"Changed 1 file" = "1 個のファイルを変更";
+"Deleted %@" = "%@ を削除しました";
+"Edit and send again" = "編集して再送信";
+"Ended %@" = "%@ を終了しました";
+"In conversations" = "会話の中";
+"Input %@ · cached %@ · output %@" = "入力 %@ · キャッシュ %@ · 出力 %@";
+"Jump to latest" = "最新へ移動";
+"Other layouts" = "その他のレイアウト";
+"Removed from %@" = "%@ から外しました";
+"Sized to fit the room" = "ルームに合わせる";

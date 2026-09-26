@@ -151,6 +151,28 @@ private final class WindowColorBackingView: NSView {
 /// default home for sessions (popped-out VMs leave it for a `TabbedSessionWindow`).
 @MainActor
 final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
+    /// Views painted the canvas colour, repainted when the appearance
+    /// changes (a CGColor resolved once stays light in a dark window).
+    private var canvasViews: [WeakView] = []
+    private var appearanceObservation: NSKeyValueObservation?
+    private struct WeakView { weak var view: NSView? }
+
+    private func paintCanvas(_ v: NSView) {
+        canvasViews.append(WeakView(view: v))
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            v.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        }
+        guard appearanceObservation == nil else { return }
+        appearanceObservation = observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    for w in self.canvasViews { w.view?.layer?.backgroundColor = NSColor.acCanvas.cgColor }
+                }
+            }
+        }
+    }
+
     weak var acDelegate: ACAppDelegate?
     let listModel = SessionListModel()
 
@@ -393,6 +415,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onNewSession: { [weak self] in self?.showNewSession() },
             onSelectSession: { [weak self] id in self?.selectSession(id) },
             sessionActions: sessionStageActions,
+            contentSearch: { TranscriptSearchIndex.shared.matches($0) },
+            lastReply: { TranscriptSearchIndex.shared.lastReply($0) },
             kubeStore: acDelegate.kubeClusterStore,
             onSelectKube: { [weak self] id in self?.showKubeDashboard(id) },
             onNewKube: { [weak self] in self?.showNewKubeCluster() },
@@ -434,7 +458,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // backing), and any slack between the header's content and its slot
         // must read as window, never as a black bar.
         headerHost.wantsLayer = true
-        headerHost.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(headerHost)
         headerHost.isHidden = true
         self.sessionHeaderHost = headerHost
         stage.addSubview(headerHost)
@@ -498,48 +522,48 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // and empty-state. Opaque background so it fully covers the VM behind it.
         dockerSlot.translatesAutoresizingMaskIntoConstraints = false
         dockerSlot.wantsLayer = true
-        dockerSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(dockerSlot)
         dockerSlot.isHidden = true
         stage.addSubview(dockerSlot)
         // Kubernetes cluster dashboard overlay — same treatment.
         kubeSlot.translatesAutoresizingMaskIntoConstraints = false
         kubeSlot.wantsLayer = true
-        kubeSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(kubeSlot)
         kubeSlot.isHidden = true
         stage.addSubview(kubeSlot)
         registrySlot.translatesAutoresizingMaskIntoConstraints = false
         registrySlot.wantsLayer = true
-        registrySlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(registrySlot)
         registrySlot.isHidden = true
         stage.addSubview(registrySlot)
         // Automation editor overlay — same full-bleed pattern as Docker.
         automationSlot.translatesAutoresizingMaskIntoConstraints = false
         automationSlot.wantsLayer = true
-        automationSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(automationSlot)
         automationSlot.isHidden = true
         stage.addSubview(automationSlot)
         // Automation kanban board overlay — same treatment.
         kanbanSlot.translatesAutoresizingMaskIntoConstraints = false
         kanbanSlot.wantsLayer = true
-        kanbanSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(kanbanSlot)
         kanbanSlot.isHidden = true
         stage.addSubview(kanbanSlot)
         // Coding-task kanban board overlay — same treatment.
         taskBoardSlot.translatesAutoresizingMaskIntoConstraints = false
         taskBoardSlot.wantsLayer = true
-        taskBoardSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(taskBoardSlot)
         taskBoardSlot.isHidden = true
         stage.addSubview(taskBoardSlot)
         // Tasks-first stage overlay (task detail / inline review / composer).
         sessionSlot.translatesAutoresizingMaskIntoConstraints = false
         sessionSlot.wantsLayer = true
-        sessionSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(sessionSlot)
         sessionSlot.isHidden = true
         stage.addSubview(sessionSlot)
         // VM dashboard overlay — same treatment as the Docker overlay.
         vmDashboardSlot.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.wantsLayer = true
-        vmDashboardSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(vmDashboardSlot)
         vmDashboardSlot.isHidden = true
         stage.addSubview(vmDashboardSlot)
         // Grid overlay — topmost stage surface.
@@ -705,7 +729,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // this 1pt column would otherwise composite straight onto the desktop
         // — a see-through slit between the sidebar and the terminal.
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(divider)
         divider.translatesAutoresizingMaskIntoConstraints = false
         let resizeHandle = SidebarResizeHandle()
         resizeHandle.translatesAutoresizingMaskIntoConstraints = false
@@ -824,6 +848,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
         updateEmptyState()
         startSessionReconcile()
+        TranscriptSearchIndex.shared.start()
+        // Holding ⌘ shows each session's ⌘1–9 number in the sidebar.
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            guard let self else { return event }
+            let held = event.window === self
+                && event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command]
+            if held != self.listModel.commandHeld { self.listModel.commandHeld = held }
+            return event
+        }
+        // A chat's "Changed N files" line: open the Files pane (git changes).
+        NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isKeyWindow else { return }
+                self.setFilePaneOpen(true, animated: true)
+            }
+        }
     }
 
     // MARK: File-explorer pane
@@ -1350,8 +1390,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self?.sessionStageDidChange()
             },
             close: { [weak self] id in
-                self?.acDelegate?.agentSessionEngine.close(id)
-                self?.sessionStageDidChange()
+                guard let self, let delegate = self.acDelegate else { return }
+                let title = delegate.agentSessionStore.session(id)?.title ?? ""
+                delegate.agentSessionEngine.close(id)
+                self.sessionStageDidChange()
+                self.toasts.show(String(format: NSLocalizedString("Ended %@", comment: "undo toast"),
+                                        UndoToastHost.quoted(title))) { [weak self] in
+                    self?.acDelegate?.agentSessionEngine.resume(id)
+                    self?.sessionStageDidChange()
+                }
             },
             rename: { [weak self] id, title in
                 self?.acDelegate?.agentSessionEngine.rename(id, to: title)
@@ -1373,8 +1420,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 }
             },
             archive: { [weak self] id in
-                self?.acDelegate?.agentSessionEngine.archive(id)
-                self?.sessionStageDidChange()
+                guard let self, let delegate = self.acDelegate else { return }
+                let title = delegate.agentSessionStore.session(id)?.title ?? ""
+                delegate.agentSessionEngine.archive(id)
+                self.sessionStageDidChange()
+                self.toasts.show(String(format: NSLocalizedString("Archived %@", comment: "undo toast"),
+                                        UndoToastHost.quoted(title))) { [weak self] in
+                    self?.acDelegate?.agentSessionEngine.unarchive(id)
+                    self?.sessionStageDidChange()
+                }
             },
             unarchive: { [weak self] id in
                 self?.acDelegate?.agentSessionEngine.unarchive(id)
@@ -1406,8 +1460,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self.showRoom(delegate.roomCreate(name: name, sessions: sid.map { [$0] } ?? []).id)
             },
             moveToRoom: { [weak self] sid, rid in
-                self?.acDelegate?.roomMove(sid, to: rid)
-                self?.roomController?.refresh()
+                guard let self else { return }
+                let from = self.acDelegate?.agentSessionStore.session(sid)?.roomID
+                self.acDelegate?.roomMove(sid, to: rid)
+                self.roomController?.refresh()
+                if rid == nil, let from { self.offerRoomUndo(sid, back: from) }
             },
             renameRoom: { [weak self] id, name in self?.acDelegate?.agentRoomStore.rename(id, to: name) },
             setRoomColor: { [weak self] id, hex in self?.acDelegate?.agentRoomStore.setColor(id, hex) },
@@ -1454,8 +1511,38 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     /// Delete a session — after a word when its agent is running; at once
     /// otherwise. The stage moves on when it was the one on show.
+    /// Undo for a session taken out of a room: back in.
+    private func offerRoomUndo(_ sid: UUID, back room: UUID) {
+        let name = acDelegate?.agentRoomStore.room(room)?.name ?? ""
+        toasts.show(String(format: NSLocalizedString("Removed from %@", comment: "undo toast"),
+                           UndoToastHost.quoted(name))) { [weak self] in
+            self?.acDelegate?.roomMove(sid, to: room)
+            self?.roomController?.refresh()
+        }
+    }
+
+    /// The toast that offers Undo after a quick action.
+    private lazy var toasts = UndoToastHost(window: self)
+    func debugToast(_ text: String) { toasts.show(text) {} }
+    private var flagsMonitor: Any?
+
     private func confirmDeleteSession(_ id: UUID) {
         guard let delegate = acDelegate, let s = delegate.agentSessionStore.session(id) else { return }
+        // Nothing running: gone at once, and a few seconds to take it back
+        // (the record and its saved conversation are kept until then).
+        if !SessionHome.isAgentLive(s, in: listModel) {
+            let saved = delegate.agentSessionEngine.transcripts.load(id)
+            delegate.agentSessionEngine.delete(id)
+            if selectedSessionID == id { clearSessionStage(); selectInitialSession() } else { sessionStageDidChange() }
+            toasts.show(String(format: NSLocalizedString("Deleted %@", comment: "undo toast"),
+                               UndoToastHost.quoted(s.title))) { [weak self] in
+                guard let self, let delegate = self.acDelegate else { return }
+                delegate.agentSessionStore.upsert(s)
+                if let saved { delegate.agentSessionEngine.transcripts.save(id, saved) }
+                self.sessionStageDidChange()
+            }
+            return
+        }
         let perform = { [weak self] in
             guard let self else { return }
             delegate.agentSessionEngine.delete(id)
@@ -1604,7 +1691,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             assignNickname: { [weak delegate] id, nick in
                 delegate?.agentSessionStore.setNickname(id, nick)
-            })
+            },
+            recentStarts: NewSessionView.RecentStart.from(delegate.agentSessionStore.sessions,
+                                                          profiles: delegate.profiles))
         showSessionOverlay(view)
         if let room, let name = delegate.agentRoomStore.room(room)?.name {
             showRoomBanner(name)
@@ -1924,7 +2013,20 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 delegate.sidebarEditProfile(p.id)
             })
         }
-        palette.toggle(in: self, items: items)
+        palette.toggle(in: self, items: items) { [weak self] q in
+            guard let self, let delegate = self.acDelegate else { return [] }
+            return TranscriptSearchIndex.shared.matches(q).compactMap { id, snippet -> PaletteItem? in
+                guard let s = delegate.agentSessionStore.session(id), !s.isDeleted else { return nil }
+                return PaletteItem(section: .messages, title: s.title, subtitle: snippet,
+                                   icon: "text.bubble", tint: AgentAvatar.tint(for: s.tool)) { [weak self] in
+                    self?.selectSession(id)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        NotificationCenter.default.post(name: .bromureFindInChat, object: q)
+                    }
+                }
+            }
+            .sorted { $0.title < $1.title }
+        }
     }
 
     // MARK: Rooms
@@ -1949,6 +2051,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         controller.onRemoveFromRoom = { [weak self] sid in
             self?.acDelegate?.roomMove(sid, to: nil)
             self?.roomController?.refresh()
+            self?.offerRoomUndo(sid, back: id)
         }
         controller.onResume = { [weak self] sid in self?.acDelegate?.agentSessionEngine.resume(sid) }
         controller.onRename = { [weak self] name in self?.acDelegate?.agentRoomStore.rename(id, to: name) }
@@ -2862,7 +2965,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
               selectedSessionID != nil || listModel.newSessionSelected
         else { return false }
         if let n = Int(chars), (1...9).contains(n) {
-            let ordered = SessionHome.ordered(delegate.agentSessionStore.sessions, in: listModel)
+            let ordered = SessionHome.sidebarOrder(delegate.agentSessionStore.sessions,
+                                                   rooms: delegate.agentRoomStore.rooms, in: listModel)
             if !isRepeat, ordered.indices.contains(n - 1) { selectSession(ordered[n - 1].id) }
             return true
         }
@@ -2871,6 +2975,29 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             return true   // never the tab underneath
         }
         return false
+    }
+
+    /// ⌥⌘↑/↓: the previous / next session in the sidebar's order.
+    func stepSession(_ delta: Int) -> Bool {
+        guard listModel.sessionsFirst, let delegate = acDelegate else { return false }
+        let ordered = SessionHome.sidebarOrder(delegate.agentSessionStore.sessions,
+                                               rooms: delegate.agentRoomStore.rooms, in: listModel)
+        guard !ordered.isEmpty else { return false }
+        let i = selectedSessionID.flatMap { id in ordered.firstIndex { $0.id == id } }
+        let next = i.map { ($0 + delta + ordered.count) % ordered.count } ?? (delta > 0 ? 0 : ordered.count - 1)
+        selectSession(ordered[next].id)
+        return true
+    }
+
+    /// ⌘⏎: resume the paused or finished session on stage.
+    func resumeOnStage() -> Bool {
+        guard let id = selectedSessionID, let delegate = acDelegate,
+              let s = delegate.agentSessionStore.session(id) else { return false }
+        let bucket = SessionHome.bucket(for: s, in: listModel)
+        guard bucket == .asleep || bucket == .ended, !SessionHome.isGone(s, in: listModel) else { return false }
+        delegate.agentSessionEngine.resume(id)
+        sessionStageDidChange()
+        return true
     }
 
     private func confirmEndSession(_ id: UUID) {
@@ -2984,6 +3111,11 @@ struct SessionSidebar: View {
     var onSelectSession: (UUID) -> Void = { _ in }
     /// The rows' context menu (archive, end, delete).
     var sessionActions = SessionStageActions()
+    /// Sessions whose conversation mentions the search, with the words
+    /// around it (this Mac's transcript copies; empty on a fat client).
+    var contentSearch: (String) -> [UUID: String] = { _ in [:] }
+    /// A session's last reply, for its row's tooltip.
+    var lastReply: (UUID) -> String? = { _ in nil }
     /// Kubernetes clusters — their own category under Machines.
     var kubeStore: KubeClusterStore? = nil
     var onSelectKube: (UUID) -> Void = { _ in }
@@ -2998,7 +3130,11 @@ struct SessionSidebar: View {
     var onConnectorAction: (UUID, KubeRowAction) -> Void = { _, _ in }
     /// A machine's "Rewind home…": the window puts up the sheet.
     var onRewindHome: (Profile.ID) -> Void = { _ in }
-    @State private var sessionFilter = ""
+    /// The search text lives on the model (the debug hooks set it too).
+    private var sessionFilter: String {
+        get { model.sidebarFilter }
+        nonmutating set { model.sidebarFilter = newValue }
+    }
 
     var body: some View {
         if model.sidebarCollapsed {
@@ -3074,7 +3210,7 @@ struct SessionSidebar: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
-            TextField(NSLocalizedString("Search sessions", comment: "sidebar"), text: $sessionFilter)
+            TextField(NSLocalizedString("Search sessions", comment: "sidebar"), text: $model.sidebarFilter)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
             if !sessionFilter.isEmpty {
@@ -3124,7 +3260,9 @@ struct SessionSidebar: View {
                 SessionSectionsView(store: sessionStore, model: model,
                                     filter: sessionFilter, onSelect: onSelectSession,
                                     actions: sessionActions,
-                                    rooms: roomStore?.rooms ?? [])
+                                    rooms: roomStore?.rooms ?? [],
+                                    contentSearch: contentSearch,
+                                    lastReply: lastReply)
                 CodingTasksSection(
                     store: taskStore,
                     model: model,

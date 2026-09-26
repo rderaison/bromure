@@ -11,9 +11,10 @@ import SwiftUI
 
 struct PaletteItem: Identifiable {
     enum Section: Int, CaseIterable {
-        case actions, sessions, rooms, machines
+        case actions, sessions, rooms, machines, messages
         var title: String {
             switch self {
+            case .messages: return NSLocalizedString("In conversations", comment: "command palette section")
             case .actions:  return NSLocalizedString("Actions", comment: "command palette section")
             case .sessions: return NSLocalizedString("Sessions", comment: "command palette section")
             case .rooms:    return NSLocalizedString("Rooms", comment: "command palette section")
@@ -56,6 +57,8 @@ struct PaletteItem: Identifiable {
 struct CommandPaletteView: View {
     let items: [PaletteItem]
     let onClose: () -> Void
+    /// Sessions found by what was said in them, for a query.
+    var search: (String) -> [PaletteItem] = { _ in [] }
     @State private var query = ""
     @State private var selected = 0
     @FocusState private var focused: Bool
@@ -73,7 +76,9 @@ struct CommandPaletteView: View {
         let sorted = scored.sorted { a, b in
             a.score != b.score ? a.score > b.score : a.item.section.rawValue < b.item.section.rawValue
         }
-        return Array(sorted.prefix(40).map(\.item))
+        var out = Array(sorted.prefix(40).map(\.item))
+        if q.count >= 3 { out += search(q).prefix(12) }
+        return out
     }
 
     var body: some View {
@@ -192,10 +197,11 @@ final class CommandPaletteHost {
 
     var isShown: Bool { host != nil }
 
-    func toggle(in window: NSWindow, items: [PaletteItem]) {
+    func toggle(in window: NSWindow, items: [PaletteItem], search: @escaping (String) -> [PaletteItem] = { _ in [] }) {
         if isShown { close(); return }
         guard let content = window.contentView else { return }
-        let view = NSHostingView(rootView: CommandPaletteView(items: items, onClose: { [weak self] in self?.close() }))
+        let view = NSHostingView(rootView: CommandPaletteView(items: items, onClose: { [weak self] in self?.close() },
+                                                              search: search))
         view.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(view)
         NSLayoutConstraint.activate([

@@ -2149,6 +2149,28 @@ final class RemoteRoomBackend: RoomStageBackend {
 /// the SSH tunnel via `__attach-window --remote`.
 @MainActor
 final class RemoteHostWindow: NSWindow {
+    /// Views painted the canvas colour, repainted when the appearance
+    /// changes (a CGColor resolved once stays light in a dark window).
+    private var canvasViews: [WeakView] = []
+    private var appearanceObservation: NSKeyValueObservation?
+    private struct WeakView { weak var view: NSView? }
+
+    private func paintCanvas(_ v: NSView) {
+        canvasViews.append(WeakView(view: v))
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            v.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        }
+        guard appearanceObservation == nil else { return }
+        appearanceObservation = observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    for w in self.canvasViews { w.view?.layer?.backgroundColor = NSColor.acCanvas.cgColor }
+                }
+            }
+        }
+    }
+
     let controller: RemoteHostController
 
     private let stage = NSView()
@@ -2367,6 +2389,21 @@ final class RemoteHostWindow: NSWindow {
         }
         RunLoop.main.add(t, forMode: .common)
         refreshTimer = t
+        // Holding ⌘ shows each session's ⌘1–9 number in the sidebar.
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            guard let self else { return event }
+            let held = event.window === self
+                && event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command]
+            if held != self.controller.listModel.commandHeld { self.controller.listModel.commandHeld = held }
+            return event
+        }
+        // A chat's "Changed N files" line: this window's Files pane, if it's the one in front.
+        NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isKeyWindow else { return }
+                self.setFilePaneOpen(true)
+            }
+        }
     }
 
     override func close() {
@@ -2403,9 +2440,28 @@ final class RemoteHostWindow: NSWindow {
     /// did nothing (the guest ignores them). Requires EXACTLY ⌘ so ⇧⌘T / ⌃⌘B
     /// stay with the handlers below.
     private func handleACShortcut(_ event: NSEvent) -> Bool {
-        guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command]
-        else { return false }
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        // ⌥⌘↑ / ⌥⌘↓: the previous / next session, as in the local window.
+        if sessionsFirst, mods == [.command, .option], event.keyCode == 126 || event.keyCode == 125 {
+            let ordered = SessionHome.sidebarOrder(controller.sessionStore.sessions,
+                                                   rooms: controller.roomStore.rooms, in: controller.listModel)
+            guard !ordered.isEmpty else { return false }
+            let delta = event.keyCode == 125 ? 1 : -1
+            let i = selectedSessionID.flatMap { id in ordered.firstIndex { $0.id == id } }
+            let next = i.map { ($0 + delta + ordered.count) % ordered.count } ?? (delta > 0 ? 0 : ordered.count - 1)
+            selectSession(ordered[next].id)
+            return true
+        }
+        guard mods == [.command] else { return false }
         let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        // ⌘⏎: pick the paused / finished session on stage back up.
+        if chars == "\r", let id = selectedSessionID, let s = controller.sessionStore.session(id) {
+            let bucket = SessionHome.bucket(for: s, in: controller.listModel)
+            if bucket == .asleep || bucket == .ended {
+                controller.sessionCommand(id, "resume")
+                return true
+            }
+        }
         let fire = !event.isARepeat   // don't spawn/close on autorepeat
         // Sessions-first chords, as in the local window: ⌘N a new session;
         // ⌘1–9 the sidebar's sessions and ⌘W the session on stage (asked
@@ -2418,7 +2474,8 @@ final class RemoteHostWindow: NSWindow {
             }
             if selectedSessionID != nil || controller.listModel.newSessionSelected {
                 if let n = Int(chars), (1...9).contains(n) {
-                    let ordered = SessionHome.ordered(controller.sessionStore.sessions, in: controller.listModel)
+                    let ordered = SessionHome.sidebarOrder(controller.sessionStore.sessions,
+                                                           rooms: controller.roomStore.rooms, in: controller.listModel)
                     if fire, ordered.indices.contains(n - 1) { selectSession(ordered[n - 1].id) }
                     return true
                 }
@@ -2528,7 +2585,7 @@ final class RemoteHostWindow: NSWindow {
         // session is on stage), spanning the stage's width.
         sessionHeaderSlot.translatesAutoresizingMaskIntoConstraints = false
         sessionHeaderSlot.wantsLayer = true
-        sessionHeaderSlot.layer?.backgroundColor = NSColor.acCanvas.cgColor
+        paintCanvas(sessionHeaderSlot)
         sessionHeaderSlot.isHidden = true
         content.addSubview(sessionHeaderSlot)
         content.addSubview(stage)
@@ -3627,6 +3684,10 @@ final class RemoteHostWindow: NSWindow {
 
     /// Delete a session on the server — after a word when its agent is
     /// running; at once otherwise. The stage moves on when it was on show.
+    /// The toast that offers Undo after a quick action.
+    private lazy var toasts = UndoToastHost(window: self)
+    private var flagsMonitor: Any?
+
     private func confirmDeleteSession(_ id: UUID) {
         guard let s = controller.sessionStore.session(id) else { return }
         let perform = { [weak self] in
@@ -3687,7 +3748,15 @@ final class RemoteHostWindow: NSWindow {
                 self.controller.sessionCommand(id, "forget")
                 if self.selectedSessionID == id { self.clearSessionStage(); self.showNewSession() }
             },
-            archive: { [weak self] id in self?.controller.sessionCommand(id, "archive") },
+            archive: { [weak self] id in
+                guard let self else { return }
+                let title = self.controller.sessionStore.session(id)?.title ?? ""
+                self.controller.sessionCommand(id, "archive")
+                self.toasts.show(String(format: NSLocalizedString("Archived %@", comment: "undo toast"),
+                                        UndoToastHost.quoted(title))) { [weak self] in
+                    self?.controller.sessionCommand(id, "unarchive")
+                }
+            },
             unarchive: { [weak self] id in self?.controller.sessionCommand(id, "unarchive") },
             delete: { [weak self] id in self?.confirmDeleteSession(id) },
             newWorktree: { [weak self] id, name, tool, message in
@@ -3825,7 +3894,8 @@ final class RemoteHostWindow: NSWindow {
                 return PeerMention.candidates(c.sessionStore.sessions, excluding: nil,
                                               workspace: { c.profile(for: $0)?.name ?? "" })
             },
-            assignNickname: { [weak c] sid, nick in c?.sessionCommand(sid, "nickname", body: ["nickname": nick]) })
+            assignNickname: { [weak c] sid, nick in c?.sessionCommand(sid, "nickname", body: ["nickname": nick]) },
+            recentStarts: NewSessionView.RecentStart.from(c.sessionStore.sessions, profiles: c.profiles))
         showSessionOverlay(view)
     }
 
@@ -4058,8 +4128,15 @@ final class RemoteHostWindow: NSWindow {
         let rc = RoomStageController(roomID: id, backend: RemoteRoomBackend(self), listModel: model)
         rc.onNewSession = { [weak self] in self?.showNewSession(room: id) }
         rc.onOpenSession = { [weak self] sid in self?.selectSession(sid) }
-        rc.onRemoveFromRoom = { sid in
+        rc.onRemoveFromRoom = { [weak self] sid in
             Task { @MainActor in await c.roomCommand(nil, "move", body: ["session": sid.uuidString]) }
+            let name = c.roomStore.room(id)?.name ?? ""
+            self?.toasts.show(String(format: NSLocalizedString("Removed from %@", comment: "undo toast"),
+                                     UndoToastHost.quoted(name))) {
+                Task { @MainActor in
+                    await c.roomCommand(nil, "move", body: ["session": sid.uuidString, "room": id.uuidString])
+                }
+            }
         }
         rc.onResume = { sid in c.sessionCommand(sid, "resume") }
         rc.onRename = { name in Task { @MainActor in await c.roomCommand(id, "rename", body: ["name": name]) } }
