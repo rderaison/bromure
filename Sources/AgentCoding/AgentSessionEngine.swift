@@ -733,7 +733,7 @@ final class AgentSessionEngine {
     /// Flags a session's role adds to every launch of its agent (the
     /// Switchboard's MCP config), on top of any resume flags.
     static func roleFlags(for s: AgentSession) -> String {
-        s.isSwitchboard ? SwitchboardEngine.launchFlags : ""
+        s.isSwitchboard ? SwitchboardEngine.launchFlags(for: s.tool) : ""
     }
 
     static func resumeFlags(for s: AgentSession) -> String {

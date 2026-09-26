@@ -143,6 +143,12 @@ struct SwitchboardTests {
     @Test("The launch flags point at the staged MCP config")
     func flags() {
         #expect(SwitchboardEngine.launchFlags.contains(SessionDisk.switchboardMCPConfigGuestPath))
+        #expect(SwitchboardEngine.launchFlags(for: .claude) == SwitchboardEngine.launchFlags)
+        // Codex: `-c` overrides, no spaces inside a flag (the launcher word-splits).
+        let codex = SwitchboardEngine.launchFlags(for: .codex).split(separator: " ")
+        #expect(codex.count == 4 && codex[1].hasPrefix("mcp_servers.switchboard.command="))
+        #expect(codex[3].contains(SessionDisk.switchboardMCPShimGuestPath))
+        #expect(SwitchboardEngine.launchFlags(for: .kimi).isEmpty)   // project file, written in the guest
         #expect(SessionDisk.switchboardMCPShimScript.contains("PORT = \(SessionDisk.switchboardMCPVsockPort)"))
         #expect(SessionDisk.switchboardMCPConfigJSON.contains("bromure-switchboard-mcp.py"))
     }

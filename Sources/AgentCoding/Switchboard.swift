@@ -61,6 +61,38 @@ final class SwitchboardEngine {
     /// The guest-side MCP config (staged in the meta share by SessionDisk)
     /// and the allow rule that lets its tools run without a prompt each.
     static let launchFlags = "--mcp-config \(SessionDisk.switchboardMCPConfigGuestPath) --allowedTools mcp__switchboard"
+    /// What gives `tool` the switchboard MCP at launch: Claude its config
+    /// file, Codex `-c` overrides (it has no project-scope config). Grok,
+    /// Kimi and omp read it from the folder's project file, which the guest
+    /// writes (agentd `_switchboard_mcp_setup`). No spaces inside a flag:
+    /// the launcher word-splits them.
+    static func launchFlags(for tool: Profile.Tool) -> String {
+        switch tool {
+        case .claude: return launchFlags
+        case .codex:
+            return "-c mcp_servers.switchboard.command=\"python3\" "
+                + "-c mcp_servers.switchboard.args=[\"\(SessionDisk.switchboardMCPShimGuestPath)\"]"
+        default: return ""
+        }
+    }
+
+    /// The agent a new Switchboard runs: a room's, its first member's; the
+    /// global one's, that of the first session that's up — else the last
+    /// one used, else Claude.
+    func agent(room: UUID?) -> Profile.Tool {
+        let all = sessions.sessions.filter { !$0.isSwitchboard && !$0.isDeleted }
+        if let room, let first = all.filter({ $0.roomID == room }).min(by: { $0.createdAt < $1.createdAt }) {
+            return first.tool
+        }
+        if let model = listModel(),
+           let up = all.filter({ s in
+               let b = SessionHome.bucket(for: s, in: model)
+               return b != .asleep && b != .ended
+           }).min(by: { $0.createdAt < $1.createdAt }) {
+            return up.tool
+        }
+        return all.max { SessionHome.lastActivity($0) < SessionHome.lastActivity($1) }?.tool ?? .claude
+    }
     /// Notices start with this, so the provenance check can tell them from
     /// what the user typed.
     static let noticePrefix = "[Switchboard]"
@@ -157,7 +189,7 @@ final class SwitchboardEngine {
                 .max { SessionHome.lastActivity($0) < SessionHome.lastActivity($1) }
             guard let pid = home ?? recent?.profileID ?? profiles().first?.id else { return nil }
             let id = sessionEngine.start(.init(
-                profileID: pid, tool: .claude, cwd: Self.folder(room: room),
+                profileID: pid, tool: agent(room: room.id), cwd: Self.folder(room: room),
                 openingMessage: Self.kickoff(room: room.name),
                 title: room.name, role: AgentSession.switchboardRole, roomID: room.id), remotely: remotely)
             sessions.mutate(id) { $0.userTitled = true }
@@ -175,7 +207,7 @@ final class SwitchboardEngine {
         guard let pid = preferred.flatMap({ id in all.first { $0.id == id }?.id })
                 ?? recent?.profileID ?? all.first?.id else { return nil }
         let id = sessionEngine.start(.init(
-            profileID: pid, tool: .claude, cwd: Self.folder,
+            profileID: pid, tool: agent(room: nil), cwd: Self.folder,
             openingMessage: Self.kickoff,
             title: NSLocalizedString("Switchboard", comment: "switchboard session title"),
             role: AgentSession.switchboardRole), remotely: remotely)
@@ -201,7 +233,9 @@ final class SwitchboardEngine {
         let q = "'" + guestFolder.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let text = roomName.map { SwitchboardBrief.text + SwitchboardBrief.roomSection($0) } ?? SwitchboardBrief.text
         let b64 = Data(text.utf8).base64EncodedString()
-        return "mkdir -p \(q) && echo \(b64) | base64 -d > \(q)/CLAUDE.md"
+        // CLAUDE.md for Claude, AGENTS.md for the others (Codex, Kimi, omp):
+        // whichever agent runs finds it again after a resume.
+        return "mkdir -p \(q) && echo \(b64) | base64 -d > \(q)/CLAUDE.md && cp \(q)/CLAUDE.md \(q)/AGENTS.md"
     }
 
     // MARK: Events

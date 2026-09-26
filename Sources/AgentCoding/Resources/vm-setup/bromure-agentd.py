@@ -2514,7 +2514,29 @@ def _delegation_mcp_setup(tool, workdir):
     those get the entry MERGED into the same files the board MCP uses
     (after it, so a task tab keeps both), git-excluded. Nothing to
     announce: the shim reads its own tmux window."""
-    if tool not in ("grok", "kimi", "omp") or not os.path.exists(_DELEGATION_MCP_SHIM):
+    _project_mcp_add(tool, workdir, "bromure-delegation", _DELEGATION_MCP_SHIM)
+
+
+_SWITCHBOARD_MCP_SHIM = "/mnt/bromure-meta/bromure-switchboard-mcp.py"
+
+
+def _switchboard_mcp_setup(tool, workdir):
+    """A Switchboard's tab (its folder is ~/.bromure/switchboard, or a
+    room's under ~/.bromure/rooms/) gets the switchboard MCP too. Claude and
+    Codex take it on the command line (the host's launch flags); grok, kimi
+    and omp read it from the folder's project file, like delegation."""
+    home = os.path.join(HOME, ".bromure")
+    real = os.path.abspath(workdir)
+    if real != os.path.join(home, "switchboard") and \
+            not real.startswith(os.path.join(home, "rooms") + os.sep):
+        return
+    _project_mcp_add(tool, workdir, "switchboard", _SWITCHBOARD_MCP_SHIM)
+
+
+def _project_mcp_add(tool, workdir, name, shim):
+    """Merge one stdio MCP server into the project-scope file grok, kimi or
+    omp reads in `workdir` (git-excluded). No-op for other agents."""
+    if tool not in ("grok", "kimi", "omp") or not os.path.exists(shim):
         return
     if tool == "omp":
         path, exclude = os.path.join(workdir, ".mcp.json"), ".mcp.json"
@@ -2532,14 +2554,13 @@ def _delegation_mcp_setup(tool, workdir):
             except (OSError, ValueError):
                 existing = {}
         servers = existing.get("mcpServers", {}) or {}
-        servers["bromure-delegation"] = {
-            "command": "python3", "args": [_DELEGATION_MCP_SHIM]}
+        servers[name] = {"command": "python3", "args": [shim]}
         existing["mcpServers"] = servers
         with open(path, "w") as f:
             json.dump(existing, f, indent=2)
         _git_exclude(workdir, exclude)
     except OSError as e:
-        log("worktree", "%s delegation-mcp setup failed: %s" % (tool, e))
+        log("worktree", "%s %s mcp setup failed: %s" % (tool, name, e))
 
 
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
@@ -2714,6 +2735,7 @@ def _agent_tab(cwd, display, tool, prompt_b64, flags="", background=False):
     _pretrust(tool, cwd)
     _preonboard(tool, cwd)
     _delegation_mcp_setup(tool, cwd)
+    _switchboard_mcp_setup(tool, cwd)
     win = _new_window(command="bash -l", cwd=cwd, env=env, background=background)
     if not win:
         worktree_err("session: could not open a tab at %s" % cwd)
