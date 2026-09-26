@@ -15,6 +15,7 @@ struct SecurityPosture: Identifiable {
     let supplyChain: Bool
     let guardrails: Bool
     let promptInjection: Bool
+    var pii: Bool = false
 }
 
 struct SecurityTimelineView: View {
@@ -22,6 +23,9 @@ struct SecurityTimelineView: View {
     let onClose: () -> Void
     /// This Mac's workspaces and which protections each has on.
     var postures: () -> [SecurityPosture] = { [] }
+
+    /// Open on the Timeline tab instead of the Overview (screenshots).
+    var startOnTimeline = false
 
     private enum Tab: String { case overview, timeline }
     @State private var tab: Tab = .overview
@@ -79,6 +83,8 @@ struct SecurityTimelineView: View {
             }
         }
         .frame(minWidth: 760, minHeight: 400)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear { if startOnTimeline { tab = .timeline } }
         .onDisappear(perform: onClose)
     }
 
@@ -219,6 +225,7 @@ struct SecurityTimelineView: View {
 
     private static func icon(_ engine: String) -> String {
         switch engine {
+        case "PII protection":       return "person.crop.circle.badge.checkmark"
         case "Credential brokering": return "arrow.left.arrow.right"
         case "Credential used":      return "key.fill"
         case "Guardrails":           return "hand.raised.fill"
@@ -252,7 +259,7 @@ private struct SecurityOverview: View {
                     Text(NSLocalizedString("What Bromure's security engines decided for your agents.", comment: "security overview"))
                         .foregroundStyle(.secondary)
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
                     tile(NSLocalizedString("Blocked", comment: "security overview"), recent.filter { $0.kind == .blocked }.count,
                          "hand.raised.fill", .red, engine: nil)
                     tile(NSLocalizedString("Allowed", comment: "security overview"), recent.filter { $0.kind == .allowed }.count,
@@ -265,6 +272,12 @@ private struct SecurityOverview: View {
                          recent.filter { $0.engine == NSLocalizedString("Supply chain", comment: "Security Timeline engine") }.count,
                          "shippingbox.fill", .orange,
                          engine: NSLocalizedString("Supply chain", comment: "Security Timeline engine"))
+                    // Values swapped, not requests: each row carries its count.
+                    tile(NSLocalizedString("PII swapped", comment: "security overview"),
+                         recent.filter { $0.engine == NSLocalizedString("PII protection", comment: "Security Timeline engine") }
+                             .reduce(0) { $0 + ($1.count ?? 1) },
+                         "person.crop.circle.badge.checkmark", .purple,
+                         engine: NSLocalizedString("PII protection", comment: "Security Timeline engine"))
                 }
 
                 if !postures.isEmpty {
@@ -304,7 +317,7 @@ private struct SecurityOverview: View {
                                 }
                                 .padding(10)
                                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(Color.red.opacity(0.06)))
+                                    .fill(Color.red.opacity(0.09)))
                             }
                         }
                     }
@@ -350,6 +363,7 @@ private struct SecurityOverview: View {
                                   NSLocalizedString("Supply chain", comment: "Security Timeline engine"),
                                   NSLocalizedString("Guardrails", comment: "Security Timeline engine"),
                                   NSLocalizedString("Prompt injection", comment: "Security Timeline engine"),
+                                  NSLocalizedString("PII protection", comment: "Security Timeline engine"),
                                   NSLocalizedString("Credential brokering", comment: "Security Timeline engine")]
 
     private var postureHeader: some View {
@@ -357,7 +371,7 @@ private struct SecurityOverview: View {
             Text(NSLocalizedString("Workspace", comment: "security timeline"))
                 .frame(maxWidth: .infinity, alignment: .leading)
             ForEach(Self.columns, id: \.self) { c in
-                Text(c).frame(width: 110)
+                Text(c).multilineTextAlignment(.center).frame(width: 96)
             }
         }
         .font(.system(size: 11, weight: .semibold))
@@ -373,10 +387,10 @@ private struct SecurityOverview: View {
                 Text(p.name).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            ForEach(Array([p.firewall, p.supplyChain, p.guardrails, p.promptInjection, true].enumerated()), id: \.offset) { _, on in
+            ForEach(Array([p.firewall, p.supplyChain, p.guardrails, p.promptInjection, p.pii, true].enumerated()), id: \.offset) { _, on in
                 Image(systemName: on ? "checkmark.circle.fill" : "minus.circle")
                     .foregroundStyle(on ? AnyShapeStyle(Color.green) : AnyShapeStyle(.tertiary))
-                    .frame(width: 110)
+                    .frame(width: 96)
                     .help(on ? NSLocalizedString("On", comment: "security overview") : NSLocalizedString("Off", comment: "security overview"))
             }
         }

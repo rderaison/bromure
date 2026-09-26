@@ -59,6 +59,9 @@ public final class SecurityTimeline {
         public var workspace: String? = nil
         /// Where it happened: nil = this Mac, else a mirrored host's name.
         public var machine: String? = nil
+        /// How many things it covers when it's more than one (PII values
+        /// swapped in one request); nil = one.
+        public var count: Int? = nil
     }
 
     /// This Mac's events, oldest first (the most recent `cap` in memory; the
@@ -150,6 +153,7 @@ public final class SecurityTimeline {
         var d: [String: Any] = ["t": e.time.timeIntervalSince1970, "e": e.engine, "c": e.condition,
                                 "d": e.decision, "k": e.kind.wire, "p": e.profileID.uuidString]
         if let w = e.workspace { d["w"] = w }
+        if let n = e.count { d["n"] = n }
         guard var data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
         data.append(0x0A)
         return data
@@ -162,7 +166,7 @@ public final class SecurityTimeline {
         return Event(time: Date(timeIntervalSince1970: t), engine: engine, condition: condition,
                      decision: decision, kind: Decision(wire: d["k"] as? String ?? ""),
                      profileID: (d["p"] as? String).flatMap(UUID.init) ?? UUID(),
-                     workspace: d["w"] as? String)
+                     workspace: d["w"] as? String, count: d["n"] as? Int)
     }
 
     private func persist(_ e: Event) {
@@ -226,6 +230,7 @@ public final class SecurityTimeline {
                 "profileID": e.profileID.uuidString,
             ]
             if let w = e.workspace { r["workspace"] = w }
+            if let n = e.count { r["count"] = n }
             return r
         }
     }
@@ -242,7 +247,8 @@ public final class SecurityTimeline {
             let pid = (r["profileID"] as? String).flatMap(UUID.init) ?? UUID()
             return Event(time: t, engine: engine, condition: condition,
                          decision: decision, kind: Decision(wire: r["kind"] as? String ?? ""),
-                         profileID: pid, workspace: r["workspace"] as? String, machine: host)
+                         profileID: pid, workspace: r["workspace"] as? String, machine: host,
+                         count: r["count"] as? Int)
         }
     }
 
@@ -382,6 +388,35 @@ public final class SecurityTimeline {
             return row(NSLocalizedString("Upstream TLS", comment: "Security Timeline engine"), host,
                        NSLocalizedString("allowed — certificate validation skipped (X-bromure-insecure); no credentials injected",
                                          comment: "Security Timeline decision"), .allowed)
+
+        case "privacy.pii_swap":
+            // Counts only — the values themselves never leave the proxy.
+            let host = str(d, "host") ?? "?"
+            let n = int(d, "count") ?? 0
+            let parts: [(String, String, String)] = [
+                ("name", NSLocalizedString("1 name", comment: "PII swap count"),
+                 NSLocalizedString("%d names", comment: "PII swap count")),
+                ("email", NSLocalizedString("1 email", comment: "PII swap count"),
+                 NSLocalizedString("%d emails", comment: "PII swap count")),
+                ("phone", NSLocalizedString("1 phone number", comment: "PII swap count"),
+                 NSLocalizedString("%d phone numbers", comment: "PII swap count")),
+                ("address", NSLocalizedString("1 address", comment: "PII swap count"),
+                 NSLocalizedString("%d addresses", comment: "PII swap count")),
+                ("card", NSLocalizedString("1 card number", comment: "PII swap count"),
+                 NSLocalizedString("%d card numbers", comment: "PII swap count")),
+                ("ssn", NSLocalizedString("1 SSN", comment: "PII swap count"),
+                 NSLocalizedString("%d SSNs", comment: "PII swap count")),
+                ("identifier", NSLocalizedString("1 ID number", comment: "PII swap count"),
+                 NSLocalizedString("%d ID numbers", comment: "PII swap count")),
+            ]
+            let what = parts.compactMap { k, one, many in
+                int(d, k).flatMap { $0 == 1 ? one : $0 > 1 ? String(format: many, $0) : nil }
+            }.joined(separator: " · ")
+            var e = row(NSLocalizedString("PII protection", comment: "Security Timeline engine"),
+                        "\(what.isEmpty ? String(n) : what) → \(host)",
+                        NSLocalizedString("swapped for stand-ins", comment: "Security Timeline decision"), .info)
+            e.count = n
+            return e
 
         case "prompt_injection.detection":
             let action = (str(d, "action") ?? "detected").lowercased()

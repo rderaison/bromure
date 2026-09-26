@@ -1517,6 +1517,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// PromptGuard scan of tool_result content + ModernBERT/heuristic scan
     /// of CLAUDE.md authority context. Enforced host-side in the MITM.
     public var promptInjection: PromptInjectionPolicy
+    /// PII protection — personal data swapped for stand-ins before it reaches
+    /// the model provider, restored in the replies. Enforced in the MITM.
+    public var pii: PIIPolicy
 
     /// DigitalOcean Personal Access Token. Injected as
     /// DIGITALOCEAN_ACCESS_TOKEN env + ~/.config/doctl/config.yaml in
@@ -1825,6 +1828,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         guardrails: GuardrailsPolicy = GuardrailsPolicy(),
         supplyChain: SupplyChainPolicy = SupplyChainPolicy(),
         promptInjection: PromptInjectionPolicy = PromptInjectionPolicy(),
+        pii: PIIPolicy = PIIPolicy(),
         digitalOceanToken: String = "",
         linearToken: String = "",
         twilioCredential: TwilioCredential = TwilioCredential(),
@@ -1909,6 +1913,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.guardrails = guardrails
         self.supplyChain = supplyChain
         self.promptInjection = promptInjection
+        self.pii = pii
         self.digitalOceanToken = digitalOceanToken
         self.linearToken = linearToken
         self.twilioCredential = twilioCredential
@@ -2002,6 +2007,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case disableExfiltrationAlerts
         case supplyChain
         case promptInjection
+        case pii
         case digitalOceanToken
         case linearToken
         case twilioCredential
@@ -2124,6 +2130,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         disableExfiltrationAlerts = try c.decodeIfPresent(Bool.self, forKey: .disableExfiltrationAlerts) ?? false
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
         promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
+        pii = try c.decodeIfPresent(PIIPolicy.self, forKey: .pii) ?? PIIPolicy()
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         linearToken = try c.decodeIfPresent(String.self, forKey: .linearToken) ?? ""
         twilioCredential = try c.decodeIfPresent(TwilioCredential.self, forKey: .twilioCredential) ?? TwilioCredential()
@@ -2284,6 +2291,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // toggle gets persisted automatically.
         try c.encode(supplyChain, forKey: .supplyChain)
         try c.encode(promptInjection, forKey: .promptInjection)
+        if pii != PIIPolicy() { try c.encode(pii, forKey: .pii) }
         if !digitalOceanToken.isEmpty {
             try c.encode(digitalOceanToken, forKey: .digitalOceanToken)
         }

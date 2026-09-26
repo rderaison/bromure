@@ -61,7 +61,8 @@ final class PromptInjectionModelDownloader: NSObject {
             comment: "model download size warning"), kind.approxSizeString)
         alert.addButton(withTitle: NSLocalizedString("Download", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        guard alert.runModal() == .alertFirstButtonReturn else {
+        // The PII model is ~15 MB: not worth a question, just fetch it.
+        guard kind == .piiRampart || alert.runModal() == .alertFirstButtonReturn else {
             finish(success: false); return
         }
         // Preflight disk space before committing, so the user is warned up front

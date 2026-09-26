@@ -2612,3 +2612,34 @@
 "checked — versions newer than the cooldown hidden" = "téléchargé";
 "downloaded" = "vérifié — versions plus récentes que le délai de carence masquées";
 "install scripts stripped" = "scripts d’installation retirés";
+
+/* Added 2026-09-25: PII protection */
+"%@ doesn't match its expected checksum" = "%@ ne correspond pas à la somme de contrôle attendue";
+"%d ID numbers" = "%d numéros d’identité";
+"%d SSNs" = "%d numéros de sécurité sociale";
+"%d addresses" = "%d adresses";
+"%d card numbers" = "%d numéros de carte";
+"%d emails" = "%d e-mails";
+"%d names" = "%d noms";
+"%d phone numbers" = "%d numéros de téléphone";
+"Before the agent's conversation leaves the Mac, Bromure swaps the personal data in it — names, emails, phone numbers, card and ID numbers, street addresses — for realistic stand-ins, and puts the real values back in the replies. The model provider never sees them; the agent and your files keep the real thing. Detection runs on-device with the built-in Rampart model." = "Avant que la conversation de l’agent ne quitte le Mac, Bromure remplace les données personnelles qu’elle contient — noms, e-mails, numéros de téléphone, de carte et d’identité, adresses — par des substituts réalistes, et remet les vraies valeurs dans les réponses. Le fournisseur du modèle ne les voit jamais ; l’agent et vos fichiers gardent les vraies. La détection tourne sur le Mac avec le modèle Rampart intégré.";
+"Card, bank account and tax numbers" = "Numéros de carte, de compte bancaire et fiscaux";
+"Email addresses and phone numbers" = "Adresses e-mail et numéros de téléphone";
+"PII protection" = "Protection des données personnelles";
+"PII swapped" = "Données personnelles remplacées";
+"People's names" = "Noms de personnes";
+"Personal data (Rampart)" = "Données personnelles (Rampart)";
+"Protection" = "Protection";
+"SSNs, passports, driver's licenses and other IDs" = "Numéros de sécurité sociale, passeports, permis de conduire et autres pièces d’identité";
+"Source code is left to the pattern rules (emails, cards, SSNs) — names in code are almost always identifiers. Each swap is counted in the Security Timeline; the values themselves are never logged." = "Le code source est laissé aux règles de motifs (e-mails, cartes, numéros de sécurité sociale) — dans le code, les noms sont presque toujours des identifiants. Chaque remplacement est compté dans la chronologie de sécurité ; les valeurs elles-mêmes ne sont jamais journalisées.";
+"Street addresses (city, state and postal code are kept)" = "Adresses postales (la ville, la région et le code postal sont conservés)";
+"Swap personal data for stand-ins before it reaches the model" = "Remplacer les données personnelles par des substituts avant qu’elles n’atteignent le modèle";
+"swapped for stand-ins" = "remplacées par des substituts";
+"PII Protection" = "Données personnelles";
+"1 ID number" = "1 numéro d’identité";
+"1 SSN" = "1 numéro de sécurité sociale";
+"1 address" = "1 adresse";
+"1 card number" = "1 numéro de carte";
+"1 email" = "1 e-mail";
+"1 name" = "1 nom";
+"1 phone number" = "1 numéro de téléphone";

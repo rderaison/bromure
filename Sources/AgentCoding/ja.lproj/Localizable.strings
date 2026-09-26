@@ -2612,3 +2612,34 @@
 "checked — versions newer than the cooldown hidden" = "ダウンロード済み";
 "downloaded" = "確認済み — 待機期間より新しいバージョンは非表示";
 "install scripts stripped" = "インストールスクリプトを除去";
+
+/* Added 2026-09-25: PII protection */
+"%@ doesn't match its expected checksum" = "%@ が想定したチェックサムと一致しません";
+"%d ID numbers" = "ID 番号 %d 件";
+"%d SSNs" = "社会保障番号 %d 件";
+"%d addresses" = "住所 %d 件";
+"%d card numbers" = "カード番号 %d 件";
+"%d emails" = "メール %d 件";
+"%d names" = "氏名 %d 件";
+"%d phone numbers" = "電話番号 %d 件";
+"Before the agent's conversation leaves the Mac, Bromure swaps the personal data in it — names, emails, phone numbers, card and ID numbers, street addresses — for realistic stand-ins, and puts the real values back in the replies. The model provider never sees them; the agent and your files keep the real thing. Detection runs on-device with the built-in Rampart model." = "エージェントの会話が Mac から送信される前に、Bromure はそこに含まれる個人データ (氏名、メール、電話番号、カード番号や ID 番号、住所) をそれらしい代替値に置き換え、返答では本来の値に戻します。モデルの提供元がそれを目にすることはなく、エージェントとファイルは本来の値のまま動作します。検出は内蔵の Rampart モデルを使って Mac 上で行われます。";
+"Card, bank account and tax numbers" = "カード番号、銀行口座番号、税番号";
+"Email addresses and phone numbers" = "メールアドレスと電話番号";
+"PII protection" = "個人データ保護";
+"PII swapped" = "置き換えた個人データ";
+"People's names" = "人名";
+"Personal data (Rampart)" = "個人データ (Rampart)";
+"Protection" = "保護";
+"SSNs, passports, driver's licenses and other IDs" = "社会保障番号、パスポート、運転免許証などの ID";
+"Source code is left to the pattern rules (emails, cards, SSNs) — names in code are almost always identifiers. Each swap is counted in the Security Timeline; the values themselves are never logged." = "ソースコードはパターンルール (メール、カード、社会保障番号) のみで確認します。コード中の名前はほとんどが識別子だからです。置き換えの件数はセキュリティタイムラインに記録されますが、値そのものは記録されません。";
+"Street addresses (city, state and postal code are kept)" = "番地までの住所 (市区町村、州、郵便番号はそのまま)";
+"Swap personal data for stand-ins before it reaches the model" = "個人データをモデルに届く前に代替値に置き換える";
+"swapped for stand-ins" = "代替値に置き換え済み";
+"PII Protection" = "個人データ";
+"1 ID number" = "ID 番号 1 件";
+"1 SSN" = "社会保障番号 1 件";
+"1 address" = "住所 1 件";
+"1 card number" = "カード番号 1 件";
+"1 email" = "メール 1 件";
+"1 name" = "氏名 1 件";
+"1 phone number" = "電話番号 1 件";

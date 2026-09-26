@@ -2647,3 +2647,34 @@
 "checked — versions newer than the cooldown hidden" = "checked — versions newer than the cooldown hidden";
 "downloaded" = "downloaded";
 "install scripts stripped" = "install scripts stripped";
+
+/* Added 2026-09-25: PII protection */
+"%@ doesn't match its expected checksum" = "%@ doesn't match its expected checksum";
+"%d ID numbers" = "%d ID numbers";
+"%d SSNs" = "%d SSNs";
+"%d addresses" = "%d addresses";
+"%d card numbers" = "%d card numbers";
+"%d emails" = "%d emails";
+"%d names" = "%d names";
+"%d phone numbers" = "%d phone numbers";
+"Before the agent's conversation leaves the Mac, Bromure swaps the personal data in it — names, emails, phone numbers, card and ID numbers, street addresses — for realistic stand-ins, and puts the real values back in the replies. The model provider never sees them; the agent and your files keep the real thing. Detection runs on-device with the built-in Rampart model." = "Before the agent's conversation leaves the Mac, Bromure swaps the personal data in it — names, emails, phone numbers, card and ID numbers, street addresses — for realistic stand-ins, and puts the real values back in the replies. The model provider never sees them; the agent and your files keep the real thing. Detection runs on-device with the built-in Rampart model.";
+"Card, bank account and tax numbers" = "Card, bank account and tax numbers";
+"Email addresses and phone numbers" = "Email addresses and phone numbers";
+"PII protection" = "PII protection";
+"PII swapped" = "PII swapped";
+"People's names" = "People's names";
+"Personal data (Rampart)" = "Personal data (Rampart)";
+"Protection" = "Protection";
+"SSNs, passports, driver's licenses and other IDs" = "SSNs, passports, driver's licenses and other IDs";
+"Source code is left to the pattern rules (emails, cards, SSNs) — names in code are almost always identifiers. Each swap is counted in the Security Timeline; the values themselves are never logged." = "Source code is left to the pattern rules (emails, cards, SSNs) — names in code are almost always identifiers. Each swap is counted in the Security Timeline; the values themselves are never logged.";
+"Street addresses (city, state and postal code are kept)" = "Street addresses (city, state and postal code are kept)";
+"Swap personal data for stand-ins before it reaches the model" = "Swap personal data for stand-ins before it reaches the model";
+"swapped for stand-ins" = "swapped for stand-ins";
+"PII Protection" = "PII Protection";
+"1 ID number" = "1 ID number";
+"1 SSN" = "1 SSN";
+"1 address" = "1 address";
+"1 card number" = "1 card number";
+"1 email" = "1 email";
+"1 name" = "1 name";
+"1 phone number" = "1 phone number";

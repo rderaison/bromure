@@ -2612,3 +2612,34 @@
 "checked — versions newer than the cooldown hidden" = "已下载";
 "downloaded" = "已检查 — 已隐藏比冷却期更新的版本";
 "install scripts stripped" = "已移除安装脚本";
+
+/* Added 2026-09-25: PII protection */
+"%@ doesn't match its expected checksum" = "%@ 与预期的校验和不符";
+"%d ID numbers" = "%d 个证件号码";
+"%d SSNs" = "%d 个社会安全号码";
+"%d addresses" = "%d 个地址";
+"%d card numbers" = "%d 个卡号";
+"%d emails" = "%d 个邮箱";
+"%d names" = "%d 个姓名";
+"%d phone numbers" = "%d 个电话号码";
+"Before the agent's conversation leaves the Mac, Bromure swaps the personal data in it — names, emails, phone numbers, card and ID numbers, street addresses — for realistic stand-ins, and puts the real values back in the replies. The model provider never sees them; the agent and your files keep the real thing. Detection runs on-device with the built-in Rampart model." = "在代理的对话离开 Mac 之前，Bromure 会把其中的个人数据（姓名、邮箱、电话号码、卡号和证件号码、街道地址）换成逼真的替身，并在回复中换回真实值。模型提供方永远看不到它们；代理和你的文件保留真实值。检测在本机使用内置的 Rampart 模型运行。";
+"Card, bank account and tax numbers" = "卡号、银行账号和税号";
+"Email addresses and phone numbers" = "邮箱地址和电话号码";
+"PII protection" = "个人数据保护";
+"PII swapped" = "已替换的个人数据";
+"People's names" = "人名";
+"Personal data (Rampart)" = "个人数据（Rampart）";
+"Protection" = "保护";
+"SSNs, passports, driver's licenses and other IDs" = "社会安全号码、护照、驾照及其他证件";
+"Source code is left to the pattern rules (emails, cards, SSNs) — names in code are almost always identifiers. Each swap is counted in the Security Timeline; the values themselves are never logged." = "源代码只由模式规则检查（邮箱、卡号、社会安全号码）——代码中的名字几乎都是标识符。每次替换都会计入安全时间线；值本身从不记录。";
+"Street addresses (city, state and postal code are kept)" = "街道地址（保留城市、州和邮政编码）";
+"Swap personal data for stand-ins before it reaches the model" = "在个人数据到达模型之前将其换成替身";
+"swapped for stand-ins" = "已换成替身";
+"PII Protection" = "个人数据";
+"1 ID number" = "1 个证件号码";
+"1 SSN" = "1 个社会安全号码";
+"1 address" = "1 个地址";
+"1 card number" = "1 个卡号";
+"1 email" = "1 个邮箱";
+"1 name" = "1 个姓名";
+"1 phone number" = "1 个电话号码";
