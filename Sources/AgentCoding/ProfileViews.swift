@@ -106,6 +106,42 @@ enum EditorCategory: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// The sidebar's sections.
+    enum Group: String, CaseIterable {
+        case workspace = "Workspace", models = "Models", machine = "Machine", security = "Security", app = "App"
+    }
+
+    var group: Group {
+        switch self {
+        case .general, .appearance: return .workspace
+        case .localModels, .fusion: return .models
+        case .folders, .environment, .resources, .browser, .mcp: return .machine
+        case .credentials, .guardrails, .supplyChain, .promptInjection, .tracing: return .security
+        case .automation: return .app
+        }
+    }
+
+    /// What else the sidebar search finds it by.
+    var keywords: String {
+        switch self {
+        case .general:         return "name color close login notes defaults"
+        case .localModels:     return "llm provider api key anthropic openai bedrock openrouter ollama vllm local subscription"
+        case .fusion:          return "mount mac folders fusion"
+        case .folders:         return "shared folder mount directory"
+        case .credentials:     return "keys tokens secrets ssh aws github password vault 1password"
+        case .environment:     return "env variables dotenv shell"
+        case .mcp:             return "tools servers mcp"
+        case .tracing:         return "trace http log requests"
+        case .guardrails:      return "firewall egress network block allow kubernetes aws docker github destructive"
+        case .supplyChain:     return "npm pypi packages age socket osv install scripts depi"
+        case .promptInjection: return "injection detector scan classifier"
+        case .appearance:      return "theme terminal font opacity dark"
+        case .browser:         return "chrome chromium web browser"
+        case .resources:       return "cpu memory ram disk"
+        case .automation:      return "automation api control remote"
+        }
+    }
+
     var symbol: String {
         switch self {
         case .general:     "person.text.rectangle.fill"
@@ -363,6 +399,8 @@ struct ProfileEditorView: View {
     @State private var bgColor: Color
     @State private var fgColor: Color
     @State private var selectedCategory: EditorCategory = .general
+    /// The sidebar's search.
+    @State private var categorySearch = ""
     #if os(iOS) || os(visionOS)
     /// iPhone navigation stack: empty = the category list, one element = the
     /// pushed pane. (iPad keeps the two-pane split and never touches this.)
@@ -599,6 +637,17 @@ struct ProfileEditorView: View {
     /// Models appears in BOTH Preferences (edits the global settings) and a
     /// workspace editor (edits that workspace's OVERRIDE of the global settings).
     /// Automation is app-wide UserDefaults, so it stays Preferences-only.
+    /// The categories the sidebar search keeps (all when empty).
+    private var searchedCategories: [EditorCategory] {
+        let q = categorySearch.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return visibleCategories }
+        return visibleCategories.filter { c in
+            let hay = (NSLocalizedString(c.rawValue, comment: "") + " " + c.rawValue + " " + c.keywords
+                       + " " + NSLocalizedString(c.group.rawValue, comment: "")).lowercased()
+            return q.split(separator: " ").allSatisfy { hay.contains($0) }
+        }
+    }
+
     private var visibleCategories: [EditorCategory] {
         EditorCategory.allCases.filter { c in
             #if os(macOS)
@@ -759,18 +808,46 @@ struct ProfileEditorView: View {
         HStack(spacing: 0) {
             // Sidebar. iOS has no non-optional List-selection initializer,
             // so it binds through an optional that ignores deselection.
-            List(visibleCategories, selection: selectedCategoryOptional) { category in
-                Label {
-                    Text(LocalizedStringKey(category.rawValue))
-                } icon: {
-                    categoryIcon(category)
-                        .frame(width: 22, height: 22)
-                        .background(category.color.gradient,
-                                    in: RoundedRectangle(cornerRadius: 5))
+            VStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.secondary)
+                    TextField(NSLocalizedString("Search settings", comment: "preferences search"), text: $categorySearch)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12.5))
                 }
-                .tag(category)
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.06)))
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
+                List(selection: selectedCategoryOptional) {
+                    ForEach(EditorCategory.Group.allCases, id: \.self) { group in
+                        let cats = searchedCategories.filter { $0.group == group }
+                        if !cats.isEmpty {
+                            Section(LocalizedStringKey(group.rawValue)) {
+                                ForEach(cats) { category in
+                                    Label {
+                                        Text(LocalizedStringKey(category.rawValue))
+                                    } icon: {
+                                        categoryIcon(category)
+                                            .frame(width: 22, height: 22)
+                                            .background(category.color.gradient,
+                                                        in: RoundedRectangle(cornerRadius: 5))
+                                    }
+                                    .tag(category)
+                                }
+                            }
+                        }
+                    }
+                }
+                .listStyle(.sidebar)
+                // The search lands on its first match.
+                .onChange(of: categorySearch) { _, _ in
+                    if let first = searchedCategories.first, !searchedCategories.contains(selectedCategory) {
+                        selectedCategory = first
+                    }
+                }
             }
-            .listStyle(.sidebar)
             // iOS renders sidebar rows in a larger type — 170pt wraps
             // "Credentials" / "Environment" into two lines there.
             #if os(macOS)
@@ -800,15 +877,24 @@ struct ProfileEditorView: View {
     /// the stack, visible on every screen.
     private var phoneNavigator: some View {
         NavigationStack(path: $phonePath) {
-            List(visibleCategories) { category in
-                NavigationLink(value: category) {
-                    Label {
-                        Text(LocalizedStringKey(category.rawValue))
-                    } icon: {
-                        categoryIcon(category)
-                            .frame(width: 22, height: 22)
-                            .background(category.color.gradient,
-                                        in: RoundedRectangle(cornerRadius: 5))
+            List {
+                ForEach(EditorCategory.Group.allCases, id: \.self) { group in
+                    let cats = visibleCategories.filter { $0.group == group }
+                    if !cats.isEmpty {
+                        Section(LocalizedStringKey(group.rawValue)) {
+                            ForEach(cats) { category in
+                                NavigationLink(value: category) {
+                                    Label {
+                                        Text(LocalizedStringKey(category.rawValue))
+                                    } icon: {
+                                        categoryIcon(category)
+                                            .frame(width: 22, height: 22)
+                                            .background(category.color.gradient,
+                                                        in: RoundedRectangle(cornerRadius: 5))
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1108,12 +1194,15 @@ struct ProfileEditorView: View {
 
             closeActionPicker
 
-            Toggle(NSLocalizedString("Start this VM at login", comment: ""),
-                   isOn: $draft.bootAtStartup)
+            // One machine's own: not a default for new ones.
+            if draft.id != ProfileStore.templateID {
+                Toggle(NSLocalizedString("Start this VM at login", comment: ""),
+                       isOn: $draft.bootAtStartup)
 
-            TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
-                      text: $draft.comments, axis: .vertical)
-                .lineLimit(2...6)
+                TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
+                          text: $draft.comments, axis: .vertical)
+                    .lineLimit(2...6)
+            }
         }
         .formStyle(.grouped)
         #else
@@ -1131,14 +1220,16 @@ struct ProfileEditorView: View {
             LabeledContent(NSLocalizedString("When closing the window", comment: "")) {
                 closeActionPicker.labelsHidden()
             }
-            Toggle(NSLocalizedString("Start this VM at login", comment: ""),
-                   isOn: $draft.bootAtStartup)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"))
-                    .font(.caption).foregroundStyle(.secondary)
-                TextField("", text: $draft.comments, axis: .vertical)
-                    .lineLimit(2...6)
-                    .textFieldStyle(.roundedBorder)
+            if draft.id != ProfileStore.templateID {
+                Toggle(NSLocalizedString("Start this VM at login", comment: ""),
+                       isOn: $draft.bootAtStartup)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"))
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextField("", text: $draft.comments, axis: .vertical)
+                        .lineLimit(2...6)
+                        .textFieldStyle(.roundedBorder)
+                }
             }
         }
         #endif

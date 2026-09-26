@@ -841,7 +841,7 @@ struct NewSessionView: View {
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .home:       return NSLocalizedString("New folder", comment: "new session where")
+            case .home:       return NSLocalizedString("Fresh folder", comment: "new session where: a new empty folder made for the session")
             case .folder:     return NSLocalizedString("A folder", comment: "new session where")
             case .repository: return NSLocalizedString("A repository", comment: "new session where")
             }
@@ -911,6 +911,11 @@ struct NewSessionView: View {
     static let lastProfileKey = "sessions.lastProfileID"
     static let lastToolKey = "sessions.lastTool"
 
+    /// The agent last started on a machine (nil: never).
+    static func rememberedTool(for machine: UUID) -> Profile.Tool? {
+        UserDefaults.standard.string(forKey: lastToolKey + "." + machine.uuidString).flatMap(Profile.Tool.init(rawValue:))
+    }
+
     /// A wide stage gets a wide margin; a phone keeps every point.
     private static var sidePadding: CGFloat {
         #if os(macOS)
@@ -953,11 +958,15 @@ struct NewSessionView: View {
             ?? profiles.first?.id
             ?? UUID()
         let profile = profiles.first { $0.id == pid }
-        let rememberedTool = UserDefaults.standard.string(forKey: Self.lastToolKey).flatMap(Profile.Tool.init(rawValue:))
+        // The agent last used on THIS machine, else the machine's own agent,
+        // else the last one used anywhere.
+        let rememberedTool = Self.rememberedTool(for: pid)
         _profileID = State(initialValue: pid)
         // Any agent can be picked on any machine (see `configuredTools`), so
         // the last choice stands whatever the machine has set up.
-        _tool = State(initialValue: rememberedTool ?? profile?.tool ?? .claude)
+        _tool = State(initialValue: rememberedTool ?? profile?.tool
+                      ?? UserDefaults.standard.string(forKey: Self.lastToolKey).flatMap(Profile.Tool.init(rawValue:))
+                      ?? .claude)
         _place = State(initialValue: .home)
         _folder = State(initialValue: "")
     }
@@ -998,7 +1007,7 @@ struct NewSessionView: View {
     private var whereLabel: String {
         switch place {
         case .home:
-            return NSLocalizedString("New folder", comment: "new session where")
+            return NSLocalizedString("Fresh folder", comment: "new session where: a new empty folder made for the session")
         case .folder:
             let f = folder.trimmingCharacters(in: .whitespaces)
             return f.isEmpty ? NSLocalizedString("A folder", comment: "new session where") : f
@@ -1017,6 +1026,7 @@ struct NewSessionView: View {
         guard canStart else { return }
         UserDefaults.standard.set(profileID.uuidString, forKey: Self.lastProfileKey)
         UserDefaults.standard.set(tool.rawValue, forKey: Self.lastToolKey)
+        UserDefaults.standard.set(tool.rawValue, forKey: Self.lastToolKey + "." + profileID.uuidString)
         onStart(AgentSessionRequest(
             profileID: profileID, tool: tool, cwd: effectiveFolder,
             cloneURL: place == .repository ? repoURL.trimmingCharacters(in: .whitespaces) : nil,
@@ -1035,6 +1045,15 @@ struct NewSessionView: View {
     /// session is named after the first words typed and renamed by the agent
     /// once it has understood the task.
     var body: some View {
+        content
+            // Another machine: its own agent (the one last used there, else
+            // the one it's set up for).
+            .onChange(of: profileID) { _, pid in
+                if let t = Self.rememberedTool(for: pid) ?? profiles.first(where: { $0.id == pid })?.tool { tool = t }
+            }
+    }
+
+    private var content: some View {
         GeometryReader { geo in
             ScrollView {
                 VStack(spacing: 22) {

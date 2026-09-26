@@ -695,8 +695,24 @@ final class AgentSessionEngine {
     /// foreground group of its tty (one shell round-trip per workspace,
     /// every few seconds). tmux's own `pane_current_command` can't tell:
     /// an agent under an interpreter (omp under bun) reads as "bash".
+    /// Sessions that ended more than `autoArchiveAfter` ago are put away
+    /// (Archived: still readable, back with one message) so the list stays
+    /// about what's alive. At most once a minute; never a room's member
+    /// or a Switchboard.
+    static let autoArchiveAfter: TimeInterval = 3 * 86400
+    private var lastSweep = Date.distantPast
+    private func sweepEnded(now: Date = Date()) {
+        guard now.timeIntervalSince(lastSweep) > 60 else { return }
+        lastSweep = now
+        for s in store.sessions where !s.isArchived && !s.isDeleted && !s.isSwitchboard && s.roomID == nil
+            && s.hasEnded && now.timeIntervalSince(s.endedAt ?? now) > Self.autoArchiveAfter {
+            store.setArchived(s.id, true)
+        }
+    }
+
     func probeLiveness(entries: [SessionListModel.VMEntry]) {
         guard let delegate else { return }
+        sweepEnded()
         probeFolders(entries: entries)
         probeChanges(entries: entries)
         // An archived or deleted session whose tab is back (its workspace

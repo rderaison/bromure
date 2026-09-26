@@ -768,13 +768,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             model: listModel,
             onReboot:    { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.requestReboot(for: p) } },
             onTrace:     { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.openTraceInspector(for: p.profile) } },
-            onSettings:  { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.openEditorWindow(editing: p.profile) } },
+            // Works for a machine that's off too (no pane): by profile id.
+            onSettings:  { [weak self] id in self?.acDelegate?.sidebarEditProfile(id) },
             onDetach:    { [weak self] id in self?.acDelegate?.popOutVM(id) },
             onToggleFusion: { [weak self] id, on in if let p = self?.pane(id) { self?.acDelegate?.setFusionEngaged(on, for: p.profile) } },
             onToggleFilePane: { [weak self] in self?.toggleFilePane(nil) },
             onToggleBrowser: { [weak self] in self?.toggleBrowserPane(nil) },
             onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
             onToggleLinux: { [weak self] in self?.toggleLinux() },
+            onDetails: { [weak self] id in self?.showVMDashboard(id) },
             sessionForTab: { [weak self] id, window in
                 self?.acDelegate?.agentSessionStore.session(profileID: id, windowIndex: window)?.id
             })
@@ -1845,6 +1847,71 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         setSessionHeader(visible: false)
     }
 
+    // MARK: Command palette (⌘K)
+
+    private let palette = CommandPaletteHost()
+
+    /// ⌘K: jump anywhere, run anything.
+    func showCommandPalette() {
+        guard let delegate = acDelegate else { return }
+        var items: [PaletteItem] = [
+            PaletteItem(section: .actions, title: NSLocalizedString("New Session", comment: "room stage"),
+                        icon: "plus", keywords: "start agent", shortcut: "⌘N") { [weak self] in self?.showNewSession() },
+            PaletteItem(section: .actions, title: NSLocalizedString("New Room…", comment: "session menu"),
+                        icon: "square.grid.2x2", tint: .indigo, keywords: "group") { [weak self] in self?.promptNewRoom() },
+            PaletteItem(section: .actions, title: NSLocalizedString("Security Timeline", comment: ""),
+                        icon: "shield.lefthalf.filled", tint: .green, keywords: "security events firewall audit log overview") {
+                delegate.openSecurityTimelineAction(nil)
+            },
+            PaletteItem(section: .actions, title: NSLocalizedString("Coding Tasks", comment: "command palette"),
+                        icon: "checklist", tint: .blue, keywords: "board kanban") { [weak self] in self?.showTaskBoard() },
+            PaletteItem(section: .actions, title: NSLocalizedString("Automations", comment: "command palette"),
+                        icon: "bolt.badge.clock.fill", tint: .orange, keywords: "board schedule") { [weak self] in self?.showAutomationBoard() },
+            PaletteItem(section: .actions, title: NSLocalizedString("Preferences", comment: "command palette"),
+                        icon: "gearshape", tint: .gray, keywords: "settings defaults", shortcut: "⌘,") {
+                delegate.openPreferencesAction(nil)
+            },
+            PaletteItem(section: .actions, title: NSLocalizedString("New Machine…", comment: "command palette"),
+                        icon: "cpu", tint: .teal, keywords: "workspace vm create") {
+                delegate.beginNewWorkspace(withWizard: false)
+            },
+        ]
+        let sessions = delegate.agentSessionStore.sessions.filter { !$0.isDeleted && !$0.isSwitchboard }
+        let ordered = SessionHome.orderedAll(sessions, in: listModel) + SessionHome.archived(sessions)
+        for s in ordered {
+            let bucket = SessionHome.bucket(for: s, in: listModel)
+            let ws = listModel.profileRows.first { $0.id == s.profileID }?.name ?? ""
+            items.append(PaletteItem(section: .sessions,
+                                     title: SessionHome.distinctTitle(s, among: sessions, in: listModel),
+                                     subtitle: [ws, s.isArchived ? NSLocalizedString("Archived", comment: "sidebar section") : bucket.title]
+                                        .filter { !$0.isEmpty }.joined(separator: " · "),
+                                     icon: "text.bubble.fill", tint: bucket.tint,
+                                     keywords: (s.nickname.map { "@" + $0 } ?? "") + " " + s.cwd) { [weak self] in
+                self?.selectSession(s.id)
+            })
+        }
+        for r in delegate.agentRoomStore.rooms {
+            items.append(PaletteItem(section: .rooms, title: r.name,
+                                     subtitle: RoomTally.summary(r, delegate.agentSessionStore.sessions, in: listModel),
+                                     icon: "square.grid.2x2.fill", tint: Color(hex: r.colorHex), keywords: "room") { [weak self] in
+                self?.showRoom(r.id)
+            })
+        }
+        for p in delegate.profiles {
+            items.append(PaletteItem(section: .machines, title: p.name,
+                                     subtitle: NSLocalizedString("Machine Details", comment: "session menu"),
+                                     icon: "cpu", tint: Color(hex: p.color.hexInUI), keywords: "machine workspace vm") { [weak self] in
+                self?.showVMDashboard(p.id)
+            })
+            items.append(PaletteItem(section: .machines,
+                                     title: String(format: NSLocalizedString("“%@” Settings…", comment: "session menu: machine settings"), p.name),
+                                     icon: "gearshape.fill", tint: Color(hex: p.color.hexInUI), keywords: "settings configure edit") {
+                delegate.sidebarEditProfile(p.id)
+            })
+        }
+        palette.toggle(in: self, items: items)
+    }
+
     // MARK: Rooms
 
     /// A room on stage: its sessions as a grid of live chats, its
@@ -1870,6 +1937,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         }
         controller.onResume = { [weak self] sid in self?.acDelegate?.agentSessionEngine.resume(sid) }
         controller.onRename = { [weak self] name in self?.acDelegate?.agentRoomStore.rename(id, to: name) }
+        controller.onResumeAll = { [weak self] ids in
+            for sid in ids { self?.acDelegate?.agentSessionEngine.resume(sid) }
+        }
+        controller.onEndAll = { [weak self] ids in
+            for sid in ids { self?.acDelegate?.agentSessionEngine.close(sid) }
+        }
         controller.onUnarchive = { [weak self] in
             self?.acDelegate?.roomUnarchive(id)
             self?.roomController?.refresh()
@@ -4385,6 +4458,8 @@ struct UnifiedToolbarBar: View {
     /// Sessions-first: the Linux pill — a session's terminal tab, and from
     /// that tab the session again.
     var onToggleLinux: () -> Void = {}
+    /// The machine's dashboard (the machine menu's "Machine Details").
+    var onDetails: ((Profile.ID) -> Void)? = nil
     /// The session hosted by a machine's tmux window, if any (profile, window
     /// index): decides whether a terminal on stage offers the way back.
     var sessionForTab: (Profile.ID, Int) -> UUID? = { _, _ in nil }
@@ -4434,14 +4509,14 @@ struct UnifiedToolbarBar: View {
                 } else if terminalHostsSession {
                     LinuxPill(back: true, action: onToggleLinux)
                 }
-                if showMachineControls {
-                    HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
-                    HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
-                }
-                HeaderIcon(system: "gearshape", help: "Edit workspace") { onSettings(entry.id) }
-                if showMachineControls {
-                    HeaderIcon(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") { onDetach(entry.id) }
-                }
+                // Everything about the machine, in one labeled menu named for
+                // it (which machine a session runs on is right there too).
+                MachineMenu(name: entry.name, accentHex: entry.accentHex,
+                            onSettings: { onSettings(entry.id) },
+                            onReboot: { onReboot(entry.id) },
+                            onTrace: { onTrace(entry.id) },
+                            onDetach: { onDetach(entry.id) },
+                            onDetails: onDetails.map { f in { f(entry.id) } })
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
                 // The one Files view: the folder's files, git changes, drag
@@ -4452,6 +4527,106 @@ struct UnifiedToolbarBar: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
     }
+}
+
+/// The toolbar's machine menu: one labeled capsule — the machine's colour
+/// and name — holding what used to be four unlabeled glyphs (settings,
+/// reboot, trace, pop-out) plus its details.
+struct MachineMenu: View {
+    let name: String
+    let accentHex: String
+    let onSettings: () -> Void
+    let onReboot: () -> Void
+    let onTrace: () -> Void
+    let onDetach: () -> Void
+    var onDetails: (() -> Void)? = nil
+    @State private var hovering = false
+
+    @State private var anchor = MenuAnchor()
+
+    var body: some View {
+        Button(action: popUp) {
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                    .fill(Color(hex: accentHex).gradient)
+                    .frame(width: 9, height: 9)
+                Text(name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .frame(maxWidth: 160)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Color.primary.opacity(hovering ? 0.11 : 0.06)))
+            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+            .contentShape(Capsule())
+            .background(MenuAnchorView(anchor: anchor))
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .onHover { hovering = $0 }
+        .help(NSLocalizedString("The machine: its settings, trace, reboot…", comment: "machine menu"))
+    }
+
+    /// A SwiftUI `Menu` flattens a custom label to text + icon in the
+    /// toolbar, so the capsule is a plain button popping a real NSMenu
+    /// under itself.
+    private func popUp() {
+        let menu = NSMenu()
+        func add(_ title: String, _ symbol: String, _ run: @escaping () -> Void) {
+            let item = ClosureMenuItem(title: title, run: run)
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            menu.addItem(item)
+        }
+        add(NSLocalizedString("Settings…", comment: "machine menu"), "gearshape", onSettings)
+        if let onDetails {
+            add(NSLocalizedString("Machine Details", comment: "session menu"), "cpu", onDetails)
+        }
+        menu.addItem(.separator())
+        add(NSLocalizedString("Inspect Trace", comment: "machine menu"), "doc.text.magnifyingglass", onTrace)
+        add(NSLocalizedString("Pop Out to Its Own Window", comment: "machine menu"),
+            "rectangle.portrait.and.arrow.right", onDetach)
+        menu.addItem(.separator())
+        add(NSLocalizedString("Reboot", comment: "machine menu"), "arrow.clockwise.circle", onReboot)
+        guard let view = anchor.view else {
+            if let e = NSApp.currentEvent, let v = e.window?.contentView {
+                menu.popUp(positioning: nil, at: v.convert(e.locationInWindow, from: nil), in: v)
+            }
+            return
+        }
+        let y = view.isFlipped ? view.bounds.maxY + 4 : view.bounds.minY - 4
+        menu.popUp(positioning: nil, at: NSPoint(x: view.bounds.minX, y: y), in: view)
+    }
+}
+
+/// Holds the AppKit view behind a SwiftUI control, to anchor a menu.
+final class MenuAnchor {
+    weak var view: NSView?
+}
+
+struct MenuAnchorView: NSViewRepresentable {
+    let anchor: MenuAnchor
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        anchor.view = v
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) { anchor.view = nsView }
+}
+
+/// An NSMenuItem that runs a closure.
+final class ClosureMenuItem: NSMenuItem {
+    private let run: () -> Void
+    init(title: String, run: @escaping () -> Void) {
+        self.run = run
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+    required init(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    @objc private func fire() { run() }
 }
 
 /// Toolbar pill: from a session, the Linux machine behind it (its terminal

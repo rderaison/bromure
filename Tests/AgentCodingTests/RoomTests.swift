@@ -122,3 +122,30 @@ struct RoomLayoutTests {
         #expect(RoomLayout("banana") == nil)
     }
 }
+
+@Suite("Session titles")
+@MainActor
+struct SessionTitleTests {
+    @Test("Titles: first sentence, no preamble, capitalized, short")
+    func titles() {
+        #expect(AgentSession.title(fromMessage: "please fix the login redirect loop on staging") == "Fix the login redirect loop on staging")
+        #expect(AgentSession.title(fromMessage: "You are a test parent. Reply with exactly the word ready, then stop.") == "You are a test parent")
+        #expect(AgentSession.title(fromMessage: "Can you add a dark mode toggle to the settings page? It should persist.") == "Add a dark mode toggle to the settings page")
+        #expect(AgentSession.title(fromMessage: "# Plan\nstuff") == "Plan")
+        let long = AgentSession.title(fromMessage: "Refactor the entire authentication module so that every provider shares the same token cache and refresh logic")
+        #expect(long.count <= 57 && long.hasSuffix("…"))
+    }
+
+    @Test("Duplicate titles get what tells them apart")
+    func distinct() {
+        let model = SessionListModel()
+        let ws = UUID()
+        var a = AgentSession(profileID: ws, tool: .claude, title: "Delegation MCP tool request", cwd: "~/dtest-peer")
+        var b = AgentSession(profileID: ws, tool: .claude, title: "Delegation MCP tool request", cwd: "~/dtest-parent")
+        b.nickname = "parent"
+        a.nickname = nil
+        #expect(SessionHome.distinctTitle(a, among: [a, b], in: model) == "Delegation MCP tool request · dtest-peer")
+        #expect(SessionHome.distinctTitle(b, among: [a, b], in: model) == "Delegation MCP tool request · @parent")
+        #expect(SessionHome.distinctTitle(a, among: [a], in: model) == "Delegation MCP tool request")
+    }
+}

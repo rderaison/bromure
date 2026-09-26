@@ -451,12 +451,37 @@ struct MobileSessionsSection: View {
     @State private var deletingRoom: AgentRoom?
     @AppStorage("sessions.listExpanded") private var expanded = true
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
+    @AppStorage("sessions.endedExpanded") private var endedExpanded = false
     /// A long-press Delete on a session whose agent is running asks first.
     @State private var pendingDelete: AgentSession?
     /// A long-press "New worktree…": the session to branch off.
     @State private var pendingWorktree: AgentSession?
 
     private var model: SessionListModel { controller.listModel }
+
+    /// A state's label over its cards ("NEEDS YOU · 2"); Ended folds.
+    private func bucketLabel(_ bucket: SessionBucket, count: Int, folded: Bool?) -> some View {
+        Button {
+            if folded != nil { withAnimation(.easeOut(duration: 0.18)) { endedExpanded.toggle() } }
+        } label: {
+            HStack(spacing: 6) {
+                Circle().fill(bucket.tint).frame(width: 7, height: 7)
+                Text(bucket.title.uppercased())
+                    .font(.caption2.weight(.semibold)).kerning(0.5)
+                    .foregroundStyle(.secondary)
+                Text("\(count)").font(.caption2.weight(.semibold)).monospacedDigit().foregroundStyle(.tertiary)
+                Spacer()
+                if let folded {
+                    Image(systemName: "chevron.right").font(.caption2.weight(.bold)).foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(folded ? 0 : 90))
+                }
+            }
+            .padding(.top, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(folded == nil)
+    }
 
     var body: some View {
         let all = SessionHome.orderedAll(controller.sessionStore.sessions, in: model)
@@ -515,7 +540,15 @@ struct MobileSessionsSection: View {
                 if list.isEmpty && rooms.isEmpty {
                     emptyCard
                 } else {
-                    ForEach(list) { card($0) }
+                    // Grouped by state, Ended folded away.
+                    ForEach(SessionBucket.allCases) { bucket in
+                        let group = list.filter { SessionHome.bucket(for: $0, in: model) == bucket }
+                        if !group.isEmpty {
+                            let folded = bucket == .ended && !endedExpanded
+                            bucketLabel(bucket, count: group.count, folded: bucket == .ended ? folded : nil)
+                            if !folded { ForEach(group) { card($0) } }
+                        }
+                    }
                 }
             }
             let put = MobileRooms.looseArchived(controller)

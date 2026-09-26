@@ -295,11 +295,12 @@ struct CodingKanbanView: View {
                     .padding(14)
                 }
             } else {
-                #if os(iOS) || os(visionOS)
-                // iPad: five columns rarely fit the detail column (portrait
-                // leaves ~700pt), so the board pans horizontally. Columns fill
-                // the width when there's room, and never shrink below a
-                // readable 300pt — beyond that the strip scrolls.
+                // Five columns rarely fit (an iPad in portrait, a Mac window
+                // with the sidebar and Files pane open), so the board pans
+                // horizontally. Columns fill the width when there's room and
+                // never shrink below a readable minimum — beyond that the
+                // strip scrolls. (On the Mac the board used to overflow its
+                // stage and spill over the sidebar.)
                 GeometryReader { geo in
                     let w = Self.columnWidth(count: 5, available: geo.size.width)
                     ScrollView(.horizontal, showsIndicators: true) {
@@ -313,16 +314,6 @@ struct CodingKanbanView: View {
                         .padding(14)
                     }
                 }
-                #else
-                HStack(alignment: .top, spacing: 14) {
-                    backlogColumn
-                    planColumn
-                    inProgressColumn
-                    testingColumn
-                    doneColumn
-                }
-                .padding(14)
-                #endif
             }
         }
         .background(Color.platformWindowBackground)
@@ -404,12 +395,16 @@ struct CodingKanbanView: View {
     /// Kanban column width for the horizontally-panning iPad board: split the
     /// viewport when it's wide enough, floor at 300pt (then the strip scrolls),
     /// cap at the column's own 400pt max so wide boards don't balloon.
+    #endif
     static func columnWidth(count: Int, available: CGFloat) -> CGFloat {
         let spacing: CGFloat = 14, inset: CGFloat = 28
         let split = (available - inset - spacing * CGFloat(count - 1)) / CGFloat(count)
+        #if os(macOS)
+        return min(400, max(220, split))
+        #else
         return min(400, max(300, split))
+        #endif
     }
-    #endif
 
     private func accentHex(for profileID: UUID) -> String {
         model.profileRows.first { $0.id == profileID }?.accentHex ?? "#888888"

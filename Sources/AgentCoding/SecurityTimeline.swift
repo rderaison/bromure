@@ -314,10 +314,31 @@ public final class SecurityTimeline {
             let pkg = str(d, "package") ?? "?"
             let ver = str(d, "version").map { "@\($0)" } ?? ""
             let outcome = (str(d, "outcome") ?? "allowed").lowercased()
-            let cond = (eco.isEmpty ? "" : eco + " ") + pkg + ver
-            let decision = str(d, "reason").map { "\(outcome) — \($0)" } ?? outcome
-            let kind: Decision = (outcome == "allowed" || outcome == "passed")
-                ? .allowed : .blocked
+            let fetch = (str(d, "kind") ?? "artifact").lowercased()
+            let cond = (eco.isEmpty ? "" : eco + " · ") + pkg + ver
+            let reason = str(d, "reason")
+            // Only a real block is red. A version list run through the age
+            // filter ("rewritten" — every one, filtered or not) and a stripped
+            // install script are the engine doing its normal job: blue.
+            let decision: String
+            let kind: Decision
+            switch outcome {
+            case "allowed", "passed":
+                decision = fetch == "metadata"
+                    ? NSLocalizedString("checked", comment: "Security Timeline decision: package index looked up")
+                    : NSLocalizedString("downloaded", comment: "Security Timeline decision: package fetched")
+                kind = .allowed
+            case "rewritten":
+                decision = NSLocalizedString("checked — versions newer than the cooldown hidden",
+                                             comment: "Security Timeline decision: age-gated package index")
+                kind = .info
+            case "stripped":
+                decision = NSLocalizedString("install scripts stripped", comment: "Security Timeline decision")
+                kind = .info
+            default:
+                decision = reason.map { "\(outcome) — \($0)" } ?? outcome
+                kind = .blocked
+            }
             return row(NSLocalizedString("Supply chain", comment: "Security Timeline engine"), cond, decision, kind)
 
         case "egress.firewall":

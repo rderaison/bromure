@@ -56,6 +56,8 @@ protocol RoomStageBackend: AnyObject {
     func makeChat(for s: AgentSession) -> BeautifiedSessionModel?
     func startSwitchboard(_ room: AgentRoom)
     func setLayout(_ room: UUID, _ layout: String)
+    /// A session that isn't running: resume it with this message.
+    func wake(_ s: AgentSession, with text: String)
 }
 
 /// This Mac's rooms: the delegate's stores, chats pinned to the local panes.
@@ -84,6 +86,10 @@ final class LocalRoomBackend: RoomStageBackend {
 
     func setLayout(_ room: UUID, _ layout: String) {
         delegate?.agentRoomStore.setLayout(room, layout)
+    }
+
+    func wake(_ s: AgentSession, with text: String) {
+        delegate?.agentSessionEngine.resume(s.id, message: text)
     }
 }
 
@@ -119,10 +125,21 @@ final class RoomStageController {
     @ObservationIgnored var onResume: (UUID) -> Void = { _ in }
     @ObservationIgnored var onRename: (String) -> Void = { _ in }
     @ObservationIgnored var onUnarchive: () -> Void = {}
+    /// Room-wide: resume every member that isn't running / end every one
+    /// that is.
+    @ObservationIgnored var onResumeAll: ([UUID]) -> Void = { _ in }
+    @ObservationIgnored var onEndAll: ([UUID]) -> Void = { _ in }
+
+    /// Ended sessions leave the grid and the tabs (per room, remembered).
+    var hideEnded: Bool {
+        didSet { UserDefaults.standard.set(hideEnded, forKey: Self.hideEndedKey(roomID)) }
+    }
+    private static func hideEndedKey(_ id: UUID) -> String { "room.hideEnded.\(id.uuidString)" }
 
     init(roomID: UUID, backend: RoomStageBackend, listModel: SessionListModel) {
         self.roomID = roomID
         self.backend = backend
+        self.hideEnded = UserDefaults.standard.bool(forKey: Self.hideEndedKey(roomID))
         self.listModel = listModel
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -134,8 +151,15 @@ final class RoomStageController {
 
     var members: [AgentSession] {
         guard let room else { return [] }
+        let all = RoomTally.members(room, in: backend.roomSessions).sorted { $0.createdAt < $1.createdAt }
+        guard hideEnded else { return all }
+        return all.filter { SessionHome.bucket(for: $0, in: listModel) != .ended }
+    }
+
+    /// Every member, ended ones included (the room-wide actions).
+    var allMembers: [AgentSession] {
+        guard let room else { return [] }
         return RoomTally.members(room, in: backend.roomSessions)
-            .sorted { $0.createdAt < $1.createdAt }
     }
 
     var layout: RoomLayout {
@@ -292,6 +316,8 @@ struct RoomStageView: View {
     /// animation frame is what made zooming crawl (worst over a fat
     /// client's tunnel). The live chat mounts once, at the end.
     @State private var zoomMoving: UUID?
+    /// What's typed for a session that isn't running (sending wakes it).
+    @State private var wakeDraft = ""
 
     private var accent: Color { Color(hex: controller.room?.colorHex ?? "#6366F1") }
 
@@ -391,6 +417,7 @@ struct RoomStageView: View {
             }
             Spacer()
             if controller.zoomedID == nil, !controller.members.isEmpty { layoutPicker }
+            roomMenu
             Button(action: controller.onNewSession) {
                 Label(NSLocalizedString("New Session", comment: "room stage"), systemImage: "plus")
                     .font(.system(size: 12, weight: .medium))
@@ -403,6 +430,42 @@ struct RoomStageView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
+    }
+
+    /// Room-wide actions.
+    private var roomMenu: some View {
+        let all = controller.allMembers
+        let asleep = all.filter { controller.models[$0.id] == nil && !$0.isLaunching }
+        let live = all.filter { controller.models[$0.id] != nil }
+        return Menu {
+            Button {
+                controller.onResumeAll(asleep.map(\.id))
+            } label: {
+                Label(NSLocalizedString("Resume All", comment: "room menu"), systemImage: "play.fill")
+            }
+            .disabled(asleep.isEmpty)
+            Button {
+                controller.onEndAll(live.map(\.id))
+            } label: {
+                Label(NSLocalizedString("End All", comment: "room menu"), systemImage: "stop.fill")
+            }
+            .disabled(live.isEmpty)
+            Divider()
+            Toggle(isOn: Binding(get: { controller.hideEnded }, set: { v in
+                RoomStageView.instantly { controller.hideEnded = v }
+            })) {
+                Label(NSLocalizedString("Hide Ended Sessions", comment: "room menu"), systemImage: "eye.slash")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 28, height: 26)
+                .background(Capsule().fill(Color.primary.opacity(0.06)))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(NSLocalizedString("Room actions", comment: "room menu"))
     }
 
     private var tally: String {
@@ -575,7 +638,8 @@ struct RoomStageView: View {
         let model = controller.listModel
         return HStack(spacing: 8) {
             AgentAvatar(tool: s.tool, size: 18, status: SessionHome.dot(for: s, in: model))
-            Text(s.title).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+            Text(SessionHome.distinctTitle(s, among: controller.members, in: model))
+                .font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
             if let nick = s.nickname {
                 Text("@" + nick).font(.system(size: 11, design: .monospaced)).foregroundStyle(accent)
             }
@@ -667,7 +731,20 @@ struct RoomStageView: View {
                         if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
                     }
             }
-            if dockShown {
+            if dockShown, let sb, controller.models[sb.id] == nil, !sb.isLaunching {
+                // Asleep: one quiet line, not a big empty panel — the
+                // composer below wakes it.
+                HStack(spacing: 8) {
+                    Image(systemName: "moon.zzz").foregroundStyle(.tertiary)
+                    Text(NSLocalizedString("Asleep — your next message wakes it", comment: "room dock"))
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button(NSLocalizedString("Resume", comment: "room cell")) { controller.onResume(sb.id) }
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+            } else if dockShown {
                 Group {
                     if zoomMoving != nil {
                         Color.clear   // folding / unfolding with a zoom: nothing to lay out
@@ -757,10 +834,24 @@ struct RoomStageView: View {
                         format: NSLocalizedString("Message %@…  (or drop files)", comment: "beautified composer"),
                         toSwitchboard ? NSLocalizedString("the Switchboard", comment: "room composer target") : name))
                         .id(ObjectIdentifier(m))   // a fresh composer per target
+                } else if let asleep = toSwitchboard ? controller.switchboard : focused {
+                    // Not running: the message wakes it and it carries on.
+                    ChatComposer(
+                        placeholder: String(format: NSLocalizedString("Message %@ — it wakes up and carries on…",
+                                                                      comment: "room composer: asleep target"),
+                                            toSwitchboard ? NSLocalizedString("the Switchboard", comment: "room composer target") : name),
+                        text: $wakeDraft,
+                        accent: accent,
+                        onSend: {
+                            let text = wakeDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !text.isEmpty else { return }
+                            controller.backend.wake(asleep, with: text)
+                            wakeDraft = ""
+                        })
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
                 } else {
-                    Text(toSwitchboard && controller.switchboard == nil
-                         ? NSLocalizedString("Start the room's Switchboard to ask it about everything here.", comment: "room composer")
-                         : NSLocalizedString("This session isn't running — resume it to talk to it.", comment: "room composer"))
+                    Text(NSLocalizedString("Start the room's Switchboard to ask it about everything here.", comment: "room composer"))
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)

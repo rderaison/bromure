@@ -155,14 +155,32 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
         launchDisplay == nil && openingMessage == nil && cloneURL == nil && userTitled != true
     }
 
-    /// "Fix the login redirect loop" from a multi-line opening message.
+    /// "Fix the login redirect loop" from a multi-line opening message: the
+    /// first line, its first sentence when that's a real one, polite
+    /// preambles dropped ("Please", "Can you", "I want you to"), cut on a
+    /// word at ~56 characters — a sidebar row, not the whole ask.
     static func title(fromMessage text: String) -> String {
         let first = text.split(whereSeparator: \.isNewline).first
             .map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
-        let clean = first.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces)
-        if clean.count <= 72 { return clean }
-        var cut = String(clean.prefix(72))
-        if let sp = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: sp) > 30 {
+        var clean = first.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces)
+        // Its first sentence, when the line runs on past one.
+        if let end = clean.firstIndex(where: { ".?!".contains($0) }),
+           clean.index(after: end) < clean.endIndex, clean[clean.index(after: end)] == " " {
+            let sentence = String(clean[...end]).trimmingCharacters(in: .whitespaces)
+            if sentence.count >= 12 { clean = sentence }
+        }
+        for preamble in ["please ", "can you ", "could you ", "would you ", "i want you to ",
+                         "i'd like you to ", "i would like you to ", "hey, ", "hi, ", "ok, ", "okay, "] {
+            if clean.lowercased().hasPrefix(preamble), clean.count > preamble.count + 8 {
+                clean = String(clean.dropFirst(preamble.count))
+            }
+        }
+        clean = clean.trimmingCharacters(in: CharacterSet(charactersIn: " .?!"))
+        if let f = clean.first { clean = f.uppercased() + clean.dropFirst() }
+        let limit = 56
+        if clean.count <= limit { return clean }
+        var cut = String(clean.prefix(limit))
+        if let sp = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: sp) > 24 {
             cut = String(cut[..<sp])
         }
         return cut.trimmingCharacters(in: .punctuationCharacters) + "…"
@@ -885,6 +903,19 @@ enum SessionHome {
         }
     }
 
+    /// The session's title — plus, when another of `among` has the very
+    /// same one, what tells them apart: its @nickname, else its folder, else
+    /// its machine ("Delegation MCP tool request · dtest-peer").
+    @MainActor
+    static func distinctTitle(_ s: AgentSession, among: [AgentSession], in model: SessionListModel) -> String {
+        guard among.contains(where: { $0.id != s.id && $0.title == s.title && !$0.isDeleted }) else { return s.title }
+        if let nick = s.nickname, !nick.isEmpty { return s.title + " · @" + nick }
+        let folder = (s.cwd as NSString).lastPathComponent
+        if !folder.isEmpty, folder != "~", folder != "ubuntu" { return s.title + " · " + folder }
+        if let ws = model.profileRows.first(where: { $0.id == s.profileID })?.name { return s.title + " · " + ws }
+        return s.title
+    }
+
     /// One line under the title.
     @MainActor
     static func statusLine(for s: AgentSession, in model: SessionListModel, now: Date = Date()) -> String {
@@ -1399,6 +1430,9 @@ struct SessionRowView: View {
     var depth = 0
     let selected: Bool
     let onSelect: () -> Void
+    /// The title to show when it differs from the session's own (another
+    /// session has the same one).
+    var title: String? = nil
     @State private var hovering = false
 
     var body: some View {
@@ -1412,7 +1446,7 @@ struct SessionRowView: View {
                 .opacity(session.hasEnded ? 0.55 : 1)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(session.title)
+                    Text(title ?? session.title)
                         .font(.system(size: 13, weight: selected ? .semibold : .medium))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -1629,6 +1663,41 @@ struct RoomRowView: View {
     }
 }
 
+/// A state group's label in the session list ("NEEDS YOU · 2"), tinted
+/// by the state; the Ended one folds.
+struct SessionGroupHeader: View {
+    let bucket: SessionBucket
+    let count: Int
+    let foldable: Bool
+    let folded: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(bucket.tint).frame(width: 6, height: 6)
+            Text(bucket.title.uppercased())
+                .font(.system(size: 10, weight: .semibold))
+                .kerning(0.6)
+                .foregroundStyle(.secondary)
+            Text("\(count)")
+                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.tertiary)
+            Spacer(minLength: 0)
+            if foldable {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(folded ? 0 : 90))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 3)
+        .contentShape(Rectangle())
+        .onTapGesture { if foldable { onToggle() } }
+    }
+}
+
 /// The session list: one "Sessions" section holding every session — what
 /// needs you first, then working, ready, asleep, ended, and last the ones
 /// whose machine or folder is gone — and, under it, an "Archived" fold for
@@ -1659,6 +1728,8 @@ struct SessionSectionsView: View {
         var withSession: UUID?
     }
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
+    /// The Ended group, folded unless opened (or searched).
+    @AppStorage("sessions.endedExpanded") private var endedExpanded = false
     /// The session a "New worktree…" sheet is open for.
     @State private var worktreeFor: AgentSession?
     /// The session a "Nickname…" sheet is open for.
@@ -1721,7 +1792,21 @@ struct SessionSectionsView: View {
                 }
                 if list.isEmpty && activeRooms.isEmpty { emptyHint }
                 ForEach(activeRooms) { roomBlock($0, list) }
-                ForEach(Self.nested(loose(list)), id: \.session.id) { row($0.session, depth: $0.depth) }
+                // Grouped by state: what needs you first, ended folded away.
+                let loose = loose(list)
+                ForEach(SessionBucket.allCases) { bucket in
+                    let group = loose.filter { SessionHome.bucket(for: $0, in: model) == bucket }
+                    if !group.isEmpty {
+                        let folded = bucket == .ended && !endedExpanded && filter.isEmpty
+                        SessionGroupHeader(bucket: bucket, count: group.count,
+                                           foldable: bucket == .ended, folded: folded) {
+                            withAnimation(.easeInOut(duration: 0.15)) { endedExpanded.toggle() }
+                        }
+                        if !folded {
+                            ForEach(Self.nested(group), id: \.session.id) { row($0.session, depth: $0.depth) }
+                        }
+                    }
+                }
             }
 
             let put = archived
@@ -1805,7 +1890,8 @@ struct SessionSectionsView: View {
             gone: gone,
             depth: depth,
             selected: model.selectedSessionID == s.id,
-            onSelect: { onSelect(s.id) })
+            onSelect: { onSelect(s.id) },
+            title: SessionHome.distinctTitle(s, among: store.sessions, in: model))
         .overlay {
             if dropSession == s.id {
                 RoundedRectangle(cornerRadius: 7).strokeBorder(Color.accentColor, lineWidth: 2)

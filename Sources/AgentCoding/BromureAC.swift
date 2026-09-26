@@ -116,6 +116,17 @@ struct BromureAC: ParsableCommand {
         }
         // Hidden docs/screenshot hook: render the reworked "Log in to bromure.io"
         // sheet to a PNG and exit — no servers, no VMs. Sibling of /debug/ui-shot.
+        // Hidden verification hook for the UX surfaces (command palette,
+        // Security Overview, machine menu, grouped session list), rendered
+        // with sample data — standalone, no servers or VMs.
+        //   bromure-ac __shot-ui <palette|overview|machinemenu|groups> [out.png] [--dark]
+        if filtered.first == "__shot-ui" {
+            let args = Array(filtered.dropFirst())
+            let which = args.first ?? "palette"
+            let out = args.dropFirst().first { !$0.hasPrefix("--") } ?? "/tmp/bromure-\(which).png"
+            renderUIShot(which, dark: args.contains("--dark"), to: out)
+            return
+        }
         if filtered.first == "__shot-enrollment" {
             renderEnrollmentSheet(to: filtered.count > 1 ? filtered[1] : "/tmp/bromure-enrollment.png")
             return
@@ -143,6 +154,98 @@ struct BromureAC: ParsableCommand {
             MermaidFence<EmptyView>.renderTranscriptSnapshot(markdown: md, to: out)
         }
         Self.main(filtered)
+    }
+
+    static func renderUIShot(_ which: String, dark: Bool, to path: String) {
+        MainActor.assumeIsolated {
+            let app = NSApplication.shared
+            app.setActivationPolicy(.accessory)
+            if dark { app.appearance = NSAppearance(named: .darkAqua) }
+            let pid = UUID()
+            let view: AnyView
+            var size = NSSize(width: 900, height: 620)
+            switch which {
+            case "palette":
+                let items: [PaletteItem] = [
+                    PaletteItem(section: .actions, title: "New Session", icon: "plus", shortcut: "⌘N") {},
+                    PaletteItem(section: .actions, title: "New Room…", icon: "square.grid.2x2", tint: .indigo) {},
+                    PaletteItem(section: .actions, title: "Security Timeline", icon: "shield.lefthalf.filled", tint: .green) {},
+                    PaletteItem(section: .actions, title: "Preferences", icon: "gearshape", tint: .gray, shortcut: "⌘,") {},
+                    PaletteItem(section: .sessions, title: "Fix the login redirect loop", subtitle: "Claude Dev · Working",
+                                icon: "text.bubble.fill", tint: SessionBucket.working.tint) {},
+                    PaletteItem(section: .sessions, title: "Add dark mode to settings", subtitle: "Daily · Needs you",
+                                icon: "text.bubble.fill", tint: SessionBucket.needsYou.tint) {},
+                    PaletteItem(section: .rooms, title: "HVAC", subtitle: "4 ready", icon: "square.grid.2x2.fill", tint: .indigo) {},
+                ]
+                view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
+                    CommandPaletteView(items: items, onClose: {}) })
+            case "overview":
+                let tl = SecurityTimeline(directory: nil)
+                let now = Date()
+                let rows: [(String, String, String, SecurityTimeline.Decision)] = [
+                    ("Firewall", "github.com:443 tcp", "allow", .allowed),
+                    ("Supply chain", "npm · axios@1.7.9", "downloaded", .allowed),
+                    ("Credential brokering", "brm_a1…c3 → api.anthropic.com", "swapped in sk-ant…9f", .info),
+                    ("Firewall", "evil.example:443 tcp", "deny", .blocked),
+                    ("Supply chain", "npm · event-stream@3.3.6", "blocked — known malware", .blocked),
+                    ("Prompt injection", "tool result: \"ignore previous instructions…\"", "blocked", .blocked),
+                ]
+                for (i, r) in rows.enumerated() {
+                    tl.append(.init(time: now.addingTimeInterval(Double(-600 + i * 60)), engine: r.0, condition: r.1,
+                                    decision: r.2, kind: r.3, profileID: pid, workspace: "Claude Dev"))
+                }
+                let postures = [
+                    SecurityPosture(id: pid, name: "Claude Dev", colorHex: "#3B82F6", firewall: true, supplyChain: true,
+                                    guardrails: true, promptInjection: true),
+                    SecurityPosture(id: UUID(), name: "Daily", colorHex: "#10B981", firewall: false, supplyChain: true,
+                                    guardrails: false, promptInjection: true),
+                ]
+                view = AnyView(SecurityTimelineView(timeline: tl, onClose: {}, postures: { postures }))
+                size = NSSize(width: 980, height: 720)
+            case "machinemenu":
+                view = AnyView(HStack(spacing: 8) {
+                    Spacer()
+                    MachineMenu(name: "Claude Dev", accentHex: "#3B82F6", onSettings: {}, onReboot: {}, onTrace: {},
+                                onDetach: {}, onDetails: {})
+                    Image(systemName: "globe").foregroundStyle(.secondary)
+                    Image(systemName: "sidebar.right").foregroundStyle(.secondary)
+                }.padding(14).background(Color(nsColor: .windowBackgroundColor)))
+                size = NSSize(width: 420, height: 60)
+            default:   // groups
+                view = AnyView(VStack(alignment: .leading, spacing: 0) {
+                    SessionGroupHeader(bucket: .needsYou, count: 1, foldable: false, folded: false) {}
+                    SessionGroupHeader(bucket: .working, count: 2, foldable: false, folded: false) {}
+                    SessionGroupHeader(bucket: .idle, count: 3, foldable: false, folded: false) {}
+                    SessionGroupHeader(bucket: .ended, count: 14, foldable: true, folded: true) {}
+                    Spacer()
+                }.frame(width: 260).padding(.vertical, 8).background(Color(nsColor: .windowBackgroundColor)))
+                size = NSSize(width: 260, height: 160)
+            }
+            let host = NSHostingView(rootView: view.frame(width: size.width, height: size.height))
+            host.frame = NSRect(origin: .zero, size: size)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.titled, .fullSizeContentView],
+                                  backing: .buffered, defer: false)
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+            let end = Date().addingTimeInterval(1.5)
+            while Date() < end { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
+            let bounds = host.bounds
+            if let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(bounds.width * 2),
+                                          pixelsHigh: Int(bounds.height * 2), bitsPerSample: 8, samplesPerPixel: 4,
+                                          hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                          bytesPerRow: 0, bitsPerPixel: 0) {
+                rep.size = bounds.size
+                host.cacheDisplay(in: bounds, to: rep)
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    try? data.write(to: URL(fileURLWithPath: path))
+                    FileHandle.standardError.write(Data("[shot] wrote \(data.count) bytes → \(path)\n".utf8))
+                }
+            }
+            Darwin.exit(0)
+        }
     }
 
     /// Render `BACEnrollmentSheet` offscreen to a PNG using the same
@@ -628,6 +731,11 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                  keyEquivalent: "")
     newRoomItem.target = delegate
     wsMenu.addItem(newRoomItem)
+    let paletteItem = NSMenuItem(title: L("Go to…"),
+                                 action: #selector(ACAppDelegate.commandPaletteAction(_:)),
+                                 keyEquivalent: "k")
+    paletteItem.target = delegate
+    wsMenu.addItem(paletteItem)
     let nextRoomItem = NSMenuItem(title: L("Next Room"),
                                   action: #selector(ACAppDelegate.nextRoomAction(_:)),
                                   keyEquivalent: "r")
@@ -6477,7 +6585,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false)
         win.title = NSLocalizedString("Security Timeline", comment: "")
@@ -6485,7 +6593,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.delegate = self
         win.isReleasedWhenClosed = false
         win.contentView = NSHostingView(rootView: SecurityTimelineView(
-            onClose: { [weak self] in self?.securityTimelineWindow = nil }))
+            onClose: { [weak self] in self?.securityTimelineWindow = nil },
+            postures: { [weak self] in
+                (self?.profiles ?? []).map { p in
+                    SecurityPosture(id: p.id, name: p.name, colorHex: p.color.hexInUI,
+                                    firewall: p.resolvedEgressPolicy.isActive,
+                                    supplyChain: p.supplyChain.isActive,
+                                    guardrails: p.guardrails.isActive,
+                                    promptInjection: p.promptInjection.isActive)
+                }
+            }))
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         securityTimelineWindow = win
@@ -6730,6 +6847,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSApp.setActivationPolicy(.regular)
         w.makeKeyAndOrderFront(nil)
         w.showNewSession()
+    }
+
+    /// ⌘K — the command palette, over whichever window has the focus.
+    @objc func commandPaletteAction(_ sender: Any?) {
+        if let rw = keyRemoteWindow { rw.showCommandPalette(); return }
+        let w = ensureUnifiedWindow()
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        w.showCommandPalette()
     }
 
     @objc func newRoomAction(_ sender: Any?) {

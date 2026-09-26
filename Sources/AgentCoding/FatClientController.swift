@@ -1956,6 +1956,8 @@ struct RemoteToolbarBar: View {
     /// Sessions-first (a server with the home): the Linux pill — a session's
     /// terminal tab, and from that tab the session again.
     var onToggleLinux: () -> Void = {}
+    /// The machine's dashboard (the machine menu's "Machine Details").
+    var onDetails: ((Profile.ID) -> Void)? = nil
     /// The session hosted by a machine's tmux window, if any (profile, window
     /// index): decides whether a terminal on stage offers the way back.
     var sessionForTab: (Profile.ID, Int) -> UUID? = { _, _ in nil }
@@ -2017,14 +2019,14 @@ struct RemoteToolbarBar: View {
                 } else if terminalHostsSession {
                     LinuxPill(back: true, action: onToggleLinux)
                 }
-                if showMachineControls {
-                    HeaderIcon(system: "arrow.clockwise.circle", help: "Reboot the VM") { onReboot(entry.id) }
-                    HeaderIcon(system: "doc.text.magnifyingglass", help: "Inspect trace (⇧⌘I)") { onTrace(entry.id) }
-                }
-                HeaderIcon(system: "gearshape", help: "Edit workspace") { onSettings(entry.id) }
-                if showMachineControls {
-                    HeaderIcon(system: "rectangle.portrait.and.arrow.right", help: "Pop out to its own window") { onDetach(entry.id) }
-                }
+                // Everything about the machine, in one labeled menu named for
+                // it (which machine a session runs on is right there too).
+                MachineMenu(name: entry.name, accentHex: entry.accentHex,
+                            onSettings: { onSettings(entry.id) },
+                            onReboot: { onReboot(entry.id) },
+                            onTrace: { onTrace(entry.id) },
+                            onDetach: { onDetach(entry.id) },
+                            onDetails: onDetails.map { f in { f(entry.id) } })
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserOpenWorkspaces.contains(entry.id)) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
@@ -2102,6 +2104,10 @@ final class RemoteRoomBackend: RoomStageBackend {
     func startSwitchboard(_ room: AgentRoom) {
         guard let c = window?.controller else { return }
         Task { @MainActor in await c.roomCommand(room.id, "switchboard") }
+    }
+
+    func wake(_ s: AgentSession, with text: String) {
+        window?.controller.sessionCommand(s.id, "resume", body: ["message": text])
     }
 
     func setLayout(_ room: UUID, _ layout: String) {
@@ -2729,6 +2735,7 @@ final class RemoteHostWindow: NSWindow {
             },
             onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
             onToggleLinux: { [weak self] in self?.toggleLinux() },
+            onDetails: { [weak self] id in self?.showMachineDashboard(id) },
             sessionForTab: { [weak self] id, window in
                 self?.controller.sessionStore.session(profileID: id, windowIndex: window)?.id
             })
@@ -3951,6 +3958,59 @@ final class RemoteHostWindow: NSWindow {
         setSessionHeader(visible: false)
     }
 
+    // MARK: Command palette (⌘K)
+
+    private let palette = CommandPaletteHost()
+
+    /// ⌘K over the mirror: the server's sessions, rooms and machines.
+    func showCommandPalette() {
+        let c = controller
+        let model = c.listModel
+        var items: [PaletteItem] = [
+            PaletteItem(section: .actions, title: NSLocalizedString("New Session", comment: "room stage"),
+                        icon: "plus", keywords: "start agent", shortcut: "⌘N") { [weak self] in self?.showNewSession() },
+            PaletteItem(section: .actions, title: NSLocalizedString("New Room…", comment: "session menu"),
+                        icon: "square.grid.2x2", tint: .indigo, keywords: "group") { [weak self] in self?.promptNewRoom() },
+            PaletteItem(section: .actions, title: NSLocalizedString("Coding Tasks", comment: "command palette"),
+                        icon: "checklist", tint: .blue, keywords: "board kanban") { [weak self] in self?.showTaskBoard() },
+            PaletteItem(section: .actions, title: NSLocalizedString("Automations", comment: "command palette"),
+                        icon: "bolt.badge.clock.fill", tint: .orange, keywords: "board schedule") { [weak self] in self?.showAutomationBoard() },
+        ]
+        let sessions = c.sessionStore.sessions.filter { !$0.isDeleted && !$0.isSwitchboard }
+        for s in SessionHome.orderedAll(sessions, in: model) + SessionHome.archived(sessions) {
+            let bucket = SessionHome.bucket(for: s, in: model)
+            let ws = model.profileRows.first { $0.id == s.profileID }?.name ?? ""
+            items.append(PaletteItem(section: .sessions,
+                                     title: SessionHome.distinctTitle(s, among: sessions, in: model),
+                                     subtitle: [ws, s.isArchived ? NSLocalizedString("Archived", comment: "sidebar section") : bucket.title]
+                                        .filter { !$0.isEmpty }.joined(separator: " · "),
+                                     icon: "text.bubble.fill", tint: bucket.tint,
+                                     keywords: (s.nickname.map { "@" + $0 } ?? "") + " " + s.cwd) { [weak self] in
+                self?.selectSession(s.id)
+            })
+        }
+        for r in c.roomStore.rooms {
+            items.append(PaletteItem(section: .rooms, title: r.name,
+                                     subtitle: RoomTally.summary(r, c.sessionStore.sessions, in: model),
+                                     icon: "square.grid.2x2.fill", tint: Color(hex: r.colorHex), keywords: "room") { [weak self] in
+                self?.showRoom(r.id)
+            })
+        }
+        for p in c.profiles {
+            items.append(PaletteItem(section: .machines, title: p.name,
+                                     subtitle: NSLocalizedString("Machine Details", comment: "session menu"),
+                                     icon: "cpu", tint: Color(hex: p.color.hexInUI), keywords: "machine workspace vm") { [weak self] in
+                self?.showMachineDashboard(p.id)
+            })
+            items.append(PaletteItem(section: .machines,
+                                     title: String(format: NSLocalizedString("“%@” Settings…", comment: "session menu: machine settings"), p.name),
+                                     icon: "gearshape.fill", tint: Color(hex: p.color.hexInUI), keywords: "settings configure edit") { [weak self] in
+                self?.openWorkspaceSettings(p.id)
+            })
+        }
+        palette.toggle(in: self, items: items)
+    }
+
     // MARK: Rooms (the server's)
 
     /// A room on stage: the server's sessions in it as a grid of live chats,
@@ -3980,6 +4040,8 @@ final class RemoteHostWindow: NSWindow {
         rc.onResume = { sid in c.sessionCommand(sid, "resume") }
         rc.onRename = { name in Task { @MainActor in await c.roomCommand(id, "rename", body: ["name": name]) } }
         rc.onUnarchive = { Task { @MainActor in await c.roomCommand(id, "unarchive") } }
+        rc.onResumeAll = { ids in for sid in ids { c.sessionCommand(sid, "resume") } }
+        rc.onEndAll = { ids in for sid in ids { c.sessionCommand(sid, "close") } }
         roomController = rc
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: rc))
