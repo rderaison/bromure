@@ -146,7 +146,7 @@ A few things behave specially over the mirror:
 
 - **Settings…** opens the same settings editor as local, backed by a secrets-blanked read and a secret-preserving save (see [Secrets stay on the host](#secrets-stay-on-the-host)). Its **Models** pane edits that remote machine's override of the *remote* Mac's model settings. **Generate new SSH key** works and shows you the new public key.
 - **The Files pane** (⌃⌘E) browses the machine's files over the tunnel. It replaces the separate file-browser window of earlier releases. See [Machines](06f-machines.mdx).
-- **Reboot** asks **Soft** vs **Hard** locally, then sends the verb.
+- **Reboot** works as on the server's own window: a clean reboot after **Reboot “…”?**, or a forced one when you hold ⌥ while choosing it (see [Rebooting a machine](06f-machines.mdx#rebooting-a-machine)); the verb is then sent to the server.
 - **Pop Out to Its Own Window** opens an extra live terminal window that closes itself if the machine stops.
 
 If the remote runs an older Bromure without the sessions API, the mirror falls back to the older machine-first layout.

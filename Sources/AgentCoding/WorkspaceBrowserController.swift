@@ -80,12 +80,6 @@ final class WorkspaceBrowserController {
     /// The workspace this browser belongs to — keys its persistent profile disk.
     private let workspaceID: UUID
 
-    /// ⌘T while the browser pane is focused (Openbox grabs it in the guest and
-    /// bounces "t" back): open a new terminal SHELL, not a browser tab — ⌘T is
-    /// the shell shortcut everywhere. The browser's own new-tab moves to ⇧⌘T,
-    /// handled host-side in each window's `performKeyEquivalent`. Set by the
-    /// window that owns this browser; nil falls back to a browser tab.
-    var onNewShell: (() -> Void)?
     /// When true, Chromium's user-data-dir lives on an encrypted per-workspace
     /// disk so logins/cookies survive teardown (set from Profile.browserPersistent).
     let persistent: Bool
@@ -444,9 +438,9 @@ final class WorkspaceBrowserController {
         bridge.onShortcut = { [weak self] key in
             switch key {
             case "t":
-                // ⌘T → new shell (the browser's new-tab is ⇧⌘T now). Falls back
-                // to a browser tab only if no shell hook is wired.
-                if let onNewShell = self?.onNewShell { onNewShell() } else { bar.onNewTab?() }
+                // ⌘T with the browser focused (Openbox grabs it in the guest and
+                // bounces it back): a browser tab. Anywhere else ⌘T is a shell.
+                bar.onNewTab?()
             case "w": if let id = bar.activeTab?.id { bar.onClose?(id) }
             case "r": if let id = bar.activeTab?.id { bar.onReload?(id) }
             case "l": bar.pendingFocusOnActiveChange = true   // ⌘L → focus the address bar

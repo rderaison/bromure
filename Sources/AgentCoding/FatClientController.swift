@@ -2608,13 +2608,6 @@ final class RemoteHostWindow: NSWindow {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        // ⇧⌘T opens a new browser tab (⌘T is the shell shortcut). Caught here,
-        // before the keystroke reaches the guest, when a browser pane is shown.
-        if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "t",
-           let id = shownBrowser, let ctl = browserControllers[id] {
-            ctl.newTab("")
-            return true
-        }
         // ⇧⌘I opens the Trace Inspector, scoped to the workspace in view (else all)
         // — the local window's shortcut, applied to the remote's traces.
         if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "i" {
@@ -2914,26 +2907,14 @@ final class RemoteHostWindow: NSWindow {
     /// guest-backed (the workspace's shared folders are host dirs on the
     /// REMOTE Mac), so browsing and drag-in/drag-out transfer ride the
     /// `/vms/{id}/file` op channel over the tunnel.
-    /// Local soft/hard reboot chooser (the decision belongs to the interacting
-    /// client), then the verb rides the tunnel.
+    /// The same Reboot as on the server's own window: clean, or forced with ⌥
+    /// held (the decision belongs to the interacting client); the verb rides
+    /// the tunnel.
     private func confirmReboot(_ id: Profile.ID) {
         let name = controller.profile(for: id)?.name ?? "workspace"
-        let alert = NSAlert()
-        alert.messageText = String(format: NSLocalizedString("Reboot “%@”?", comment: ""), name)
-        alert.informativeText = NSLocalizedString(
-            "Soft reboot asks the guest to shut down cleanly. Hard reboot tears the VM down immediately.",
-            comment: "")
-        alert.addButton(withTitle: NSLocalizedString("Soft Reboot", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Hard Reboot", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            controller.restartWorkspace(id)
-        case .alertSecondButtonReturn:
-            controller.hardRebootWorkspace(id)
-        default:
-            break
-        }
+        let force = NSEvent.modifierFlags.contains(.option)
+        guard ACAppDelegate.confirmReboot(name, force: force) else { return }
+        if force { controller.hardRebootWorkspace(id) } else { controller.restartWorkspace(id) }
     }
 
     // MARK: Workspace settings (the pill's gearshape, mirroring local)
@@ -5097,8 +5078,6 @@ final class RemoteHostWindow: NSWindow {
                 webcam: profile?.browserWebcam ?? false,
                 microphone: profile?.browserMicrophone ?? false),
             remoteProxy: .init(subnetCIDR: subnet, socksPort: port))
-        // ⌘T inside the browser opens a new terminal SHELL (its new-tab is ⇧⌘T).
-        c.onNewShell = { [weak self] in self?.controller.newTab(id) }
         browserControllers[id] = c
         return c
     }
@@ -5345,7 +5324,7 @@ final class RemoteHostWindow: NSWindow {
             onStart: { [weak self] id in self?.controller.startWorkspace(id) },
             onShutdown: { [weak self] id in self?.controller.shutdownWorkspace(id) },
             onSuspend: { [weak self] id in self?.controller.suspendWorkspace(id) },
-            onRestart: { [weak self] id in self?.controller.restartWorkspace(id) },
+            onRestart: { [weak self] id in self?.confirmReboot(id) },
             onEdit: { [weak self] id in self?.openWorkspaceSettings(id) },
             onDuplicate: { _ in },
             onReset: { _ in },
@@ -5495,7 +5474,7 @@ final class RemoteHostWindow: NSWindow {
             startedAt: c.bootTimes[id],
             onNewTerminal: { c.newTab(id) },
             onSuspend:     { c.suspendWorkspace(id) },
-            onReboot:      { c.restartWorkspace(id) },
+            onReboot:      { [weak self] in self?.confirmReboot(id) },
             onShutdown:    { c.shutdownWorkspace(id) },
             onResume:      { c.startWorkspace(id) })
         let host = NSHostingView(rootView: view)

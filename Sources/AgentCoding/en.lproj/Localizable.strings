@@ -3150,3 +3150,7 @@
 "“Log but continue” records detections to the Security Timeline. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“Log but continue” records detections to the Security Timeline. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright.";
 "⌘N" = "⌘N";
 "Agent API keys (Anthropic, OpenAI, xAI, …) are configured in Preferences › Models." = "Agent API keys (Anthropic, OpenAI, xAI, …) are configured in Preferences › Models.";
+"Cuts the machine's power at once and boots it fresh, like pulling the plug: anything unsaved inside it is lost. For a machine that doesn't respond." = "Cuts the machine's power at once and boots it fresh, like pulling the plug: anything unsaved inside it is lost. For a machine that doesn't respond.";
+"Force Reboot" = "Force Reboot";
+"Force reboot “%@”?" = "Force reboot “%@”?";
+"Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)" = "Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)";

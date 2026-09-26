@@ -807,7 +807,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // ---- Window toolbar: per-selected-VM controls + IP ----
         let toolbarBar = UnifiedToolbarBar(
             model: listModel,
-            onReboot:    { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.requestReboot(for: p) } },
+            onReboot:    { [weak self] id in self?.acDelegate?.restartProfile(id) },
             onTrace:     { [weak self] id in if let p = self?.pane(id) { self?.acDelegate?.openTraceInspector(for: p.profile) } },
             // Works for a machine that's off too (no pane): by profile id.
             onSettings:  { [weak self] id in self?.acDelegate?.sidebarEditProfile(id) },
@@ -943,8 +943,6 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 allowDownloads: profile?.browserAllowDownloads ?? true,
                 webcam: profile?.browserWebcam ?? false,
                 microphone: profile?.browserMicrophone ?? false))
-        // ⌘T inside the browser opens a new terminal SHELL (its new-tab is ⇧⌘T).
-        c.onNewShell = { [weak self] in self?.newTab(profileID: id) }
         browserControllers[id] = c
         return c
     }
@@ -3188,14 +3186,6 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        // ⇧⌘T → new browser tab (⌘T is the shell shortcut). Caught here, before
-        // the keystroke reaches the guest, when a browser pane is shown.
-        if event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command, .shift],
-           event.charactersIgnoringModifiers?.lowercased() == "t",
-           let id = shownBrowser, let ctl = browserControllers[id] {
-            ctl.newTab("")
-            return true
-        }
         if handleACShortcut(event) { return true }
         return super.performKeyEquivalent(with: event)
     }
@@ -4986,6 +4976,13 @@ struct MachineMenu: View {
             "rectangle.portrait.and.arrow.right", onDetach)
         menu.addItem(.separator())
         add(NSLocalizedString("Reboot", comment: "machine menu"), "arrow.clockwise.circle", onReboot)
+        // ⌥ swaps it for a forced reboot (the handler reads ⌥ too).
+        let force = ClosureMenuItem(title: NSLocalizedString("Force Reboot", comment: "reboot"), run: onReboot)
+        force.image = NSImage(systemSymbolName: "bolt.circle", accessibilityDescription: nil)
+        force.keyEquivalentModifierMask = .option
+        force.isAlternate = true
+        menu.items.last?.keyEquivalentModifierMask = []
+        menu.addItem(force)
         popUpMenu(menu)
     }
 

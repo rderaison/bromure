@@ -3115,3 +3115,7 @@
 "“Log but continue” records detections to the Security Timeline. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“Registrar e continuar” registra as detecções na Linha do tempo de segurança. “Perguntar o que fazer” pausa a solicitação e mostra o texto sinalizado. “Bloquear” faz a solicitação falhar de imediato.";
 "⌘N" = "⌘N";
 "Agent API keys (Anthropic, OpenAI, xAI, …) are configured in Preferences › Models." = "As chaves de API dos agentes (Anthropic, OpenAI, xAI, …) são configuradas em Preferências › Modelos.";
+"Cuts the machine's power at once and boots it fresh, like pulling the plug: anything unsaved inside it is lost. For a machine that doesn't respond." = "Corta a energia da máquina na hora e a inicia de novo, como puxar o plugue: o que não estiver salvo nela se perde. Para uma máquina que não responde.";
+"Force Reboot" = "Forçar reinício";
+"Force reboot “%@”?" = "Forçar o reinício de “%@”?";
+"Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)" = "Desliga a máquina de forma limpa e a inicia de novo. Tudo o que roda nela para. (Segure ⌥ ao escolher Reiniciar para forçar.)";

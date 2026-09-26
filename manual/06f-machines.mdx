@@ -103,7 +103,7 @@ When a session or a machine tab is on the stage, the toolbar shows a capsule wit
 | **Copy IP Address (…)** | Copies the machine's IP address. Only while it runs. |
 | **Inspect Trace** | Opens the [Trace Inspector](11-tracing.mdx) for this machine (also ⇧⌘I). |
 | **Pop Out to Its Own Window** | Moves the machine into a window of its own (see [Pop out and re-dock](#pop-out-and-re-dock)). |
-| **Reboot** | Asks **Reboot “…”?** with **Soft reboot** (a graceful halt, then a fresh boot) or **Hard reboot** (the VM is torn down at once, then booted fresh). |
+| **Reboot** | Shuts the machine down cleanly and boots it fresh, after a **Reboot “…”?** confirmation. Hold ⌥ while choosing it — the item turns into **Force Reboot** — to cut the power at once instead. See [Rebooting a machine](#rebooting-a-machine). |
 
 When the session's machine isn't running, the menu starts with "Not running — starts with your next message" and offers only **Settings…** and **Machine Details**.
 
@@ -161,9 +161,21 @@ From the machine's **⋯** menu or its dashboard:
 
 - **Suspend** saves the VM's RAM to disk and stops it. **Resume** picks up exactly where it was. No confirmation, since nothing is lost.
 - **Shutdown** powers the VM off after a confirmation ("Powers off the VM and stops everything running inside it. The system disk is kept; in-progress work in running processes is lost."). The next start is a full boot.
-- **Reboot** (in the **⋯** menu) asks for confirmation, powers the VM off and boots it fresh.
+- **Reboot** — see [Rebooting a machine](#rebooting-a-machine).
 
 Running `reboot` inside the guest also works: the app notices and boots the machine again in place.
+
+### Rebooting a machine
+
+**Reboot** is the same everywhere it's offered — the machine row's **⋯** menu, the machine dashboard and the toolbar's machine menu — and on a fat client as on this Mac:
+
+1. **Reboot “…”?** asks for confirmation: "Shuts the machine down cleanly and boots it fresh. Everything running inside it stops."
+2. The machine is asked to power off, like pressing its power button, so its filesystems flush and its services stop. If it hasn't powered off after 15 seconds (60 seconds for a Kubernetes node or registry), its power is cut.
+3. It boots fresh — never from a saved state — exactly as a start does, with the current settings (Preferences › Models included).
+
+**Force reboot.** Hold **⌥** (Option) while you choose **Reboot**: in the toolbar's machine menu the item reads **Force Reboot** while ⌥ is down. The confirmation becomes **Force reboot “…”?**, and the machine's power is cut at once — like pulling the plug — before the fresh boot. Anything unsaved inside it is lost, so keep it for a machine that doesn't respond to a normal reboot.
+
+From the command line, `bromure-cli vm reboot <machine>` does the clean reboot and `--hard` the forced one (see [CLI, API & MCP](16-automation-cli.mdx)).
 
 A stopped or suspended machine's sessions aren't lost. They show as paused and continue with your next message, which starts the machine again. For what happens when you *close* a machine instead, see [Closing a machine](#closing-a-machine).
 

@@ -3115,3 +3115,7 @@
 "“Log but continue” records detections to the Security Timeline. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "「記録して続行」は検出内容をセキュリティ タイムラインに記録します。「どうするか確認する」はリクエストを一時停止し、検出されたテキストを表示します。「ブロック」はリクエストをその場で失敗させます。";
 "⌘N" = "⌘N";
 "Agent API keys (Anthropic, OpenAI, xAI, …) are configured in Preferences › Models." = "エージェントの API キー（Anthropic、OpenAI、xAI など）は 環境設定 › モデル で設定します。";
+"Cuts the machine's power at once and boots it fresh, like pulling the plug: anything unsaved inside it is lost. For a machine that doesn't respond." = "マシンの電源を即座に切って再起動します（電源プラグを抜くのと同じ）。保存されていない内容は失われます。応答しないマシン向けです。";
+"Force Reboot" = "強制再起動";
+"Force reboot “%@”?" = "「%@」を強制再起動しますか？";
+"Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)" = "マシンを正常にシャットダウンしてから再起動します。中で動いているものはすべて停止します。（強制するには ⌥ を押しながら「再起動」を選びます。）";

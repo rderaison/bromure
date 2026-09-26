@@ -3115,3 +3115,7 @@
 "“Log but continue” records detections to the Security Timeline. “Ask me what to do” pauses the request and shows the flagged text. “Block” fails the request outright." = "“记录但继续”会将检测结果记录到安全时间线中。“询问我该怎么做”会暂停请求并显示被标记的文本。“阻止”会直接让请求失败。";
 "⌘N" = "⌘N";
 "Agent API keys (Anthropic, OpenAI, xAI, …) are configured in Preferences › Models." = "代理的 API 密钥（Anthropic、OpenAI、xAI 等）在 偏好设置 › 模型 中配置。";
+"Cuts the machine's power at once and boots it fresh, like pulling the plug: anything unsaved inside it is lost. For a machine that doesn't respond." = "立即切断机器电源并重新启动，就像拔掉插头：其中未保存的内容会丢失。适用于没有响应的机器。";
+"Force Reboot" = "强制重启";
+"Force reboot “%@”?" = "要强制重启“%@”吗？";
+"Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)" = "正常关闭机器并重新启动。其中运行的一切都会停止。（选择“重启”时按住 ⌥ 可强制重启。）";

@@ -1549,18 +1549,38 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         requestStopSession(id, action: .suspend)
     }
 
-    /// Menu "Reboot": power off (clearing saved state) then boot fresh. Confirmed.
-    func restartProfile(_ id: Profile.ID) {
-        guard let profile = profiles.first(where: { $0.id == id }),
-              confirmDisruptiveLifecycle(verb: "Reboot", profile: profile,
-                body: "Powers the VM off and boots it fresh. Everything running inside it is stopped.")
-        else { return }
-        Task { @MainActor in
-            if runningSessions[id] != nil {
-                await stopSession(id, action: .shutdown)
-            }
-            launch(profile)
+    /// "Reboot", everywhere it's offered: shut the machine down cleanly (forced
+    /// after a grace period) and boot it fresh through the normal launch.
+    /// Holding ⌥ while choosing it forces it — the power is cut at once, for a
+    /// machine that doesn't respond. `force` nil reads ⌥ from the click.
+    /// An off machine just starts.
+    func restartProfile(_ id: Profile.ID, force: Bool? = nil, confirm: Bool = true) {
+        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        let force = force ?? NSEvent.modifierFlags.contains(.option)
+        guard runningSessions[id] != nil else { launch(profile); return }
+        if confirm, !Self.confirmReboot(profile.name, force: force) { return }
+        Task { @MainActor in _ = await self.rebootMachine(id, force: force, remoteInitiated: false) }
+    }
+
+    /// The reboot question, the same on this Mac and in a fat client.
+    static func confirmReboot(_ name: String, force: Bool) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        if force {
+            alert.messageText = String(format: NSLocalizedString("Force reboot “%@”?", comment: "reboot"), name)
+            alert.informativeText = NSLocalizedString(
+                "Cuts the machine's power at once and boots it fresh, like pulling the plug: anything unsaved inside it is lost. For a machine that doesn't respond.",
+                comment: "reboot")
+            alert.addButton(withTitle: NSLocalizedString("Force Reboot", comment: "reboot"))
+        } else {
+            alert.messageText = String(format: NSLocalizedString("Reboot “%@”?", comment: ""), name)
+            alert.informativeText = NSLocalizedString(
+                "Shuts the machine down cleanly and boots it fresh. Everything running inside it stops. (Hold ⌥ while choosing Reboot to force it.)",
+                comment: "reboot")
+            alert.addButton(withTitle: NSLocalizedString("Reboot", comment: "machine menu"))
         }
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Modal confirmation for a disruptive lifecycle action (Shut Down / Reboot)
@@ -5467,15 +5487,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// cold-boot a fresh VM for the same profile, re-attaching a window only if
     /// one was attached before.
     @MainActor private func automationRebootVM(idOrName: String, mode: String) async -> [String: Any] {
-        guard let id = resolveRunningSessionID(idOrName), let session = runningSessions[id] else {
+        guard let id = resolveRunningSessionID(idOrName), runningSessions[id] != nil else {
             return ["ok": false, "error": "VM not running: \(idOrName)"]
         }
+        return await rebootMachine(id, force: mode == "hard", remoteInitiated: true)
+    }
+
+    /// Stop a running machine — cleanly (`stopSession(.shutdown)`: a power-off
+    /// request, forced after its grace period) or at once — then boot it fresh
+    /// through `launch`, the path a start takes, and reboot its browser pane
+    /// against the new network. Every Reboot goes through here.
+    @MainActor func rebootMachine(_ id: Profile.ID, force: Bool, remoteInitiated: Bool) async -> [String: Any] {
+        guard let session = runningSessions[id] else { return ["ok": false, "error": "VM not running"] }
         let profile = session.profile
         let wasAttached = isAttached(id)
         session.sandbox.sessionDisk?.clearSavedState()   // cold-boot fresh, never resume
 
-        if mode == "hard", let vm = session.sandbox.vm {
+        if force, let vm = session.sandbox.vm {
             await Self.forceStop(vm)
+            handleSessionStopped(profileID: id)   // a forced stop fires no onStopped
         } else {
             await stopSession(id, action: .shutdown)
         }
@@ -5486,7 +5516,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if runningSessions[id] == nil { break }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        launch(profile, detached: !wasAttached, remoteInitiated: true)
+        launch(profile, detached: !wasAttached, remoteInitiated: remoteInitiated)
         var up = false
         for _ in 0..<600 {   // first boots can take a while
             if runningSessions[id] != nil { up = true; break }
@@ -5497,7 +5527,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // triggers; that client also reboots its own mirrored browser off the
         // /state uptime reset — this covers a browser open on the host itself.
         if up { unifiedWindow?.rebootBrowser(for: id) }
-        return ["ok": up, "workspace": profile.name, "mode": mode == "hard" ? "hard" : "soft"]
+        return ["ok": up, "workspace": profile.name, "mode": force ? "hard" : "soft"]
     }
 
     /// Docker-style 12-char short id for a profile: the UUID's hex with dashes
@@ -9512,13 +9542,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
         guard let host = window.host?.paneHostWindow else {
             // No window to anchor a sheet (headless) — fall back to a modal.
-            if alert.runModal() == .alertFirstButtonReturn { requestReboot(for: window) }
+            if alert.runModal() == .alertFirstButtonReturn { restartProfile(window.profile.id, force: false, confirm: false) }
             return
         }
         alert.beginSheetModal(for: host) { [weak self, weak window] response in
             guard response == .alertFirstButtonReturn,
                   let self, let window else { return }
-            self.requestReboot(for: window)
+            self.restartProfile(window.profile.id, force: false, confirm: false)
         }
     }
 
@@ -12421,59 +12451,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     enum CompromiseAction { case allow, block, shutdown, saveForInvestigation }
 
-    /// Reboot dialog: soft (graceful guest halt via `poweroff` — NOT
-    /// `reboot`, which restarts the VM in place without VZ ever firing
-    /// guestDidStop, leaving the relaunch path dead) or hard (host-side
-    /// `vm.stop()`). Both clear the saved RAM snapshot first so the
-    /// post-stop relaunch is a clean fresh boot, not a restore that
-    /// would put us right back where we were.
-    @MainActor
-    func requestReboot(for window: SessionPane) {
-        let alert = NSAlert()
-        alert.messageText = String(
-            format: NSLocalizedString("Reboot “%@”?", comment: ""),
-            window.profile.name)
-        alert.informativeText = NSLocalizedString(
-            "Soft reboot gracefully halts the VM (filesystems flush, services stop) and boots a fresh one in this window. Hard reboot tears down the VM immediately and starts a fresh one.",
-            comment: "")
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: NSLocalizedString("Soft reboot", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Hard reboot", comment: ""))
-        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            window.sandbox?.sessionDisk?.clearSavedState()
-            window.rebootRequested = true
-            sendCommand("soft-reboot", in: window)
-        case .alertSecondButtonReturn:
-            window.sandbox?.sessionDisk?.clearSavedState()
-            window.rebootRequested = true
-            // Host-initiated stop. VZ doesn't fire `guestDidStop` for
-            // this path (that callback is reserved for guest-driven
-            // halts like `sudo reboot`), so the `onStopped` →
-            // `relaunchVM` chain that soft reboot rides on never
-            // triggers. Drive the relaunch from the completion
-            // handler instead. The `rebootRequested` flag still
-            // gates: if VZ does fire `didStopWithError` for some
-            // edge case, the delegate path will consume the flag
-            // first and we'll no-op here (or vice versa).
-            window.sandbox?.vm?.stop(completionHandler: { [weak self, weak window] error in
-                if let error {
-                    FileHandle.standardError.write(Data(
-                        "[ac] hard reboot: stop failed: \(error)\n".utf8))
-                }
-                Task { @MainActor in
-                    guard let self, let window, window.rebootRequested else {
-                        return
-                    }
-                    window.rebootRequested = false
-                    self.relaunchVM(in: window)
-                }
-            })
-        default:
-            return
-        }
-    }
 
     /// Wire the standard set of sandbox callbacks for `win`. Used by
     /// both the initial launch and the post-reboot relaunch — the

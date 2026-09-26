@@ -114,7 +114,7 @@ final class TabbedSessionWindow: NSWindow, SessionPaneHost {
             },
             onReboot: { [weak self] in
                 guard let self else { return }
-                self.acDelegate?.requestReboot(for: self.pane)
+                self.acDelegate?.restartProfile(self.pane.profile.id)
             },
             onEditProfile: { [weak self] in
                 guard let self else { return }
