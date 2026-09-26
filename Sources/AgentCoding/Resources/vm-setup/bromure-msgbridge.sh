@@ -2,7 +2,10 @@
 # Bromure AC — Signal / WhatsApp connector, run INSIDE the connector VM.
 #
 # Same driver as bromure-registry.sh (detached steps, polled logs):
-#   bromure-msgbridge.sh start setup        data disk + the two services + relay
+#   bromure-msgbridge.sh start setup [signal] [whatsapp]
+#                                           data disk + the named services + relay
+#   bromure-msgbridge.sh service <signal|whatsapp> on|off
+#                                           start one (a link sheet opened) / stop it
 #   bromure-msgbridge.sh poll  setup <offset>
 #   bromure-msgbridge.sh probe              JSON: services, accounts, inbox
 #   bromure-msgbridge.sh ip
@@ -65,6 +68,7 @@ ensure_container() {  # name image run-args…
     local name="$1" image="$2"; shift 2
     if docker inspect "$name" >/dev/null 2>&1; then
         log "$name exists — making sure it runs"
+        docker update --restart=always "$name" >/dev/null 2>&1 || true
         docker start "$name" >/dev/null 2>&1 || true
         return 0
     fi
@@ -74,8 +78,58 @@ ensure_container() {  # name image run-args…
         || { log "starting $name failed"; return 1; }
 }
 
-do_setup() {
-    log "setup: signal=$SIGNAL_IMAGE whatsapp=$WHATSAPP_IMAGE"
+# A service nobody set up doesn't run: stopped, and kept from coming back
+# with the machine (its account data stays on the disk).
+stop_container() {
+    local name="$1"
+    docker inspect "$name" >/dev/null 2>&1 || return 0
+    docker update --restart=no "$name" >/dev/null 2>&1 || true
+    docker stop "$name" >/dev/null 2>&1 || true
+    log "$name stopped (not set up)"
+}
+
+run_signal() {
+    # Native build (no JVM — the machine is 512 MB). 18080: the base
+    # image's own guest service already holds 8080.
+    ensure_container bromure-signal "$SIGNAL_IMAGE" \
+        -e MODE=json-rpc-native -e PORT=18080 \
+        -v "$DATA/signal:/home/.local/share/signal-cli"
+}
+
+run_whatsapp() {
+    ensure_container bromure-whatsapp "$WHATSAPP_IMAGE" \
+        -e APP_PORT=3000 -e APP_HOST=127.0.0.1 -e APP_BASIC_AUTH= \
+        -e APP_UI_ENABLED=false -e MCP_ENABLED=false -e APP_OS=Bromure \
+        -e WHATSAPP_WEBHOOK=http://127.0.0.1:9000/wa \
+        -v "$DATA/whatsapp:/app/storages"
+}
+
+signal_up() { curl -sf http://127.0.0.1:18080/v1/about >/dev/null 2>&1; }
+# WhatsApp answers its status with an error code until a device is
+# linked — any HTTP answer means it's up.
+wa_up() { [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/app/status 2>/dev/null)" != "000" ]; }
+
+# service <signal|whatsapp> on|off — on waits until it answers.
+cmd_service() {
+    local svc="${1:-}" state="${2:-on}"
+    case "$svc:$state" in
+        signal:on)    run_signal || return 1
+                      for _ in $(seq 1 90); do signal_up && { echo "up"; return 0; }; sleep 2; done ;;
+        whatsapp:on)  run_whatsapp || return 1
+                      for _ in $(seq 1 90); do wa_up && { echo "up"; return 0; }; sleep 2; done ;;
+        signal:off)   stop_container bromure-signal; echo "off"; return 0 ;;
+        whatsapp:off) stop_container bromure-whatsapp; echo "off"; return 0 ;;
+        *) echo "usage: service signal|whatsapp on|off" >&2; return 2 ;;
+    esac
+    echo "not answering"; return 1
+}
+
+do_setup() {  # the services to run: signal, whatsapp (none = relay only)
+    local want_signal=0 want_wa=0 a
+    for a in "$@"; do
+        case "$a" in signal) want_signal=1 ;; whatsapp) want_wa=1 ;; esac
+    done
+    log "setup: signal=$want_signal whatsapp=$want_wa"
     if [ -b /dev/vdb ]; then
         if [ -z "$(sudo blkid -s TYPE -o value /dev/vdb 2>/dev/null)" ]; then
             log "formatting /dev/vdb (ext4, label bromure-msg)"
@@ -100,16 +154,10 @@ do_setup() {
     done
     docker info >/dev/null 2>&1 || { log "docker isn't running"; return 1; }
 
-    # Native build (no JVM — the machine is 512 MB). 18080: the base
-    # image's own guest service already holds 8080.
-    ensure_container bromure-signal "$SIGNAL_IMAGE" \
-        -e MODE=json-rpc-native -e PORT=18080 \
-        -v "$DATA/signal:/home/.local/share/signal-cli" || return 1
-    ensure_container bromure-whatsapp "$WHATSAPP_IMAGE" \
-        -e APP_PORT=3000 -e APP_HOST=127.0.0.1 -e APP_BASIC_AUTH= \
-        -e APP_UI_ENABLED=false -e MCP_ENABLED=false -e APP_OS=Bromure \
-        -e WHATSAPP_WEBHOOK=http://127.0.0.1:9000/wa \
-        -v "$DATA/whatsapp:/app/storages" || return 1
+    if [ "$want_signal" = 1 ]; then run_signal || return 1
+    else stop_container bromure-signal; fi
+    if [ "$want_wa" = 1 ]; then run_whatsapp || return 1
+    else stop_container bromure-whatsapp; fi
 
     # The relay: a systemd unit, so it outlives this shell and comes back
     # with the machine (a resumed snapshot keeps it running as it was).
@@ -131,19 +179,16 @@ EOF
     sudo systemctl enable --now bromure-msgbridge.service >/dev/null 2>&1
     sudo systemctl restart bromure-msgbridge.service
 
-    # WhatsApp answers its status with an error code until a device is
-    # linked — any HTTP answer means it's up.
-    wa_up() { [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/app/status 2>/dev/null)" != "000" ]; }
     for _ in $(seq 1 90); do
-        if curl -sf http://127.0.0.1:18080/v1/about >/dev/null 2>&1 && wa_up; then
-            log "Signal and WhatsApp services answering"
+        if { [ "$want_signal" = 0 ] || signal_up; } && { [ "$want_wa" = 0 ] || wa_up; }; then
+            log "messaging services answering"
             log "setup: done"
             return 0
         fi
         sleep 2
     done
-    curl -sf http://127.0.0.1:18080/v1/about >/dev/null 2>&1 || log "the Signal service never answered"
-    wa_up || log "the WhatsApp service never answered"
+    [ "$want_signal" = 0 ] || signal_up || log "the Signal service never answered"
+    [ "$want_wa" = 0 ] || wa_up || log "the WhatsApp service never answered"
     return 1
 }
 
@@ -158,8 +203,9 @@ case "${1:-}" in
     start)     shift; cmd_start "$@" ;;
     poll)      shift; cmd_poll "$@" ;;
     do-setup)  shift; do_setup "$@" ;;
+    service)   shift; cmd_service "$@" ;;
     probe)     python3 "$RELAY" probe ;;
     relay)     shift; python3 "$RELAY" "$@" ;;
     ip)        cmd_ip ;;
-    *) echo "usage: $0 start|poll|probe|relay|ip" >&2; exit 2 ;;
+    *) echo "usage: $0 start|poll|service|probe|relay|ip" >&2; exit 2 ;;
 esac

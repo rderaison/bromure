@@ -4710,6 +4710,14 @@ final class RemoteHostWindow: NSWindow {
             contentView?.layoutSubtreeIfNeeded()
             writeSnapshot(to: shot)
             return ["ok": true, "connected": controller.connected, "frame": ["w": Double(frame.width), "h": Double(frame.height)]]
+        case "sidebar":
+            // {collapsed: Bool} — the icon rail, or the full sidebar back.
+            setSidebarCollapsed(p["collapsed"] as? Bool ?? !sidebarCollapsed, animated: false)
+            if let shot = p["shot"] as? String {
+                contentView?.layoutSubtreeIfNeeded()
+                writeSnapshot(to: shot)
+            }
+            return ["ok": true, "collapsed": sidebarCollapsed]
         case "remote-room":
             // Show a server room ({room: id or name}, optional) and report each
             // live chat's history: what it holds vs. what it renders.

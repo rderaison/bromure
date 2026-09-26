@@ -3257,7 +3257,8 @@ struct SessionSidebar: View {
                         onSelectTab: onSelectTab,
                         sessionStore: model.sessionsFirst ? sessionStore : nil,
                         onSelectSession: onSelectSession,
-                        onNewSession: onNewSession)
+                        onNewSession: onNewSession,
+                        onOpenSwitchboard: sessionActions.openSwitchboard)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .background(Color.acSidebar)
         } else {
@@ -3496,6 +3497,7 @@ private struct CompactRail: View {
     var sessionStore: AgentSessionStore? = nil
     var onSelectSession: (UUID) -> Void = { _ in }
     var onNewSession: () -> Void = {}
+    var onOpenSwitchboard: () -> Void = {}
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -3512,6 +3514,17 @@ private struct CompactRail: View {
                     }
                     .buttonStyle(.plain)
                     .help(NSLocalizedString("New session (⌘N)", comment: "rail"))
+                    // The Switchboard, first — as the full sidebar pins it.
+                    if SwitchboardGate.isVisible(sessionStore.sessions, in: model) {
+                        RailSwitchboardButton(
+                            dot: SwitchboardGate.switchboard(in: sessionStore.sessions)
+                                .flatMap { SessionHome.dot(for: $0, in: model) },
+                            summary: SwitchboardGate.summary(sessionStore.sessions, in: model),
+                            isActive: SwitchboardGate.switchboard(in: sessionStore.sessions)
+                                .map { model.selectedSessionID == $0.id
+                                        && !model.gridSelected && !model.newSessionSelected } ?? false,
+                            onSelect: onOpenSwitchboard)
+                    }
                     ForEach(SessionHome.orderedAll(sessionStore.sessions, in: model)) { s in
                         RailSessionButton(
                             session: s,
@@ -3562,6 +3575,38 @@ private struct CompactRail: View {
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
         }
+    }
+}
+
+/// The Switchboard on the rail: its glyph with its conversation's dot; the
+/// summary as the tooltip.
+private struct RailSwitchboardButton: View {
+    let dot: AgentStatus?
+    let summary: String
+    let isActive: Bool
+    let onSelect: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: "wand.and.rays")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color.accentColor.opacity(0.14)))
+                if let dot { AgentStatusDot(status: dot).offset(x: 2, y: 2) }
+            }
+            .frame(width: 30, height: 26)
+            .background(RoundedRectangle(cornerRadius: 6)
+                .fill(isActive ? Color.accentColor.opacity(0.16)
+                               : (hovering ? Color.primary.opacity(0.05) : .clear)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(NSLocalizedString("Switchboard", comment: "switchboard row")
+              + (summary.isEmpty ? "" : " — " + summary))
     }
 }
 

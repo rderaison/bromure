@@ -117,8 +117,15 @@ extension KubeClusterEngine {
             store.upsert(c)
             store.setStatus(id) { $0.nodesUp = 1; $0.address = ip }
 
-            step(id, fresh ? "Installing Signal and WhatsApp" : "Starting Signal and WhatsApp")
-            try await runStep(id, node: c.node, step: "setup", args: [], scriptPath: Self.connectorScriptPath)
+            // Only the services the user set up run: an unused WhatsApp
+            // (whatsmeow) still dials Meta all day. A link sheet starts its
+            // service on demand (ensureService).
+            let wanted = Self.wantedServices(c)
+            step(id, wanted.isEmpty ? "Starting the connector"
+                     : String(format: fresh ? "Installing %@" : "Starting %@",
+                              wanted.map { $0.displayName }.joined(separator: " and ")))
+            try await runStep(id, node: c.node, step: "setup", args: wanted.map(\.rawValue),
+                              scriptPath: Self.connectorScriptPath)
             c.provisioned = true
             store.upsert(c)
             try? await pushConnectorConfig(c)
@@ -136,6 +143,27 @@ extension KubeClusterEngine {
         } catch {
             fail(id, "\(fresh ? "Creating" : "Starting") the connector failed: \(error.localizedDescription)")
         }
+    }
+
+    /// The container-backed services this connector runs: the ones with a
+    /// channel set up (Slack is the relay's own, no service).
+    static func wantedServices(_ c: MessagingConnector) -> [ConnectorChannel.Kind] {
+        [c.signal.map { _ in .signal }, c.whatsapp.map { _ in .whatsapp }].compactMap { $0 }
+    }
+
+    /// Start `kind`'s service before a link flow talks to it (the first
+    /// time pulls its image). False when it doesn't come up.
+    private func ensureService(_ c: MessagingConnector, _ kind: ConnectorChannel.Kind) async -> Bool {
+        let info = store.status(c.id).connector
+        if (kind == .signal ? info?.signalUp : info?.whatsappUp) == true { return true }
+        log(c.id, "Starting \(kind.displayName)")
+        guard let out = try? await exec(c.node.id, "bash \(Self.connectorScriptPath) service \(kind.rawValue) on",
+                                        timeout: 900) else { return false }
+        return out.split(separator: "\n").last == "up"
+    }
+
+    private func stopService(_ c: MessagingConnector, _ kind: ConnectorChannel.Kind) async {
+        _ = try? await exec(c.node.id, "bash \(Self.connectorScriptPath) service \(kind.rawValue) off", timeout: 60)
     }
 
     /// Tell the relay which Signal account to listen on.
@@ -174,7 +202,7 @@ extension KubeClusterEngine {
         store.setStatus(id) {
             $0.connector = info
             if $0.phase == .running {
-                if !(info.signalUp && info.whatsappUp) {
+                if (c.signal != nil && !info.signalUp) || (c.whatsapp != nil && !info.whatsappUp) {
                     $0.message = "A messaging service isn't answering"
                 } else if c.slack?.connected == true, info.slackConnected == false {
                     $0.message = "Slack isn't connected" + (info.slackError.map { " (\($0))" } ?? "")
@@ -384,6 +412,7 @@ extension KubeClusterEngine {
     /// call (Signal only calls after an SMS was tried for that number).
     func signalRegister(number: String, voice: Bool, captcha: String?) async -> ConnectorReply {
         guard let c = store.connector else { return .init(ok: false, message: "No connector") }
+        guard await ensureService(c, .signal) else { return .init(ok: false, message: "Signal didn't start on the connector") }
         var args = ["signal-register", number, voice ? "1" : "0"]
         if let captcha, !captcha.isEmpty { args.append(Self.b64(captcha)) }
         guard let r = try? await relay(c, args) else { return .init(ok: false, message: "The connector didn't answer") }
@@ -412,8 +441,9 @@ extension KubeClusterEngine {
     /// A `sgnl://linkdevice?…` URI to show as a QR code; the link completes
     /// when the phone scans it (see `signalFinishLink`).
     func signalLinkURI() async -> ConnectorReply {
-        guard let c = store.connector,
-              let r = try? await relay(c, ["signal-link"], timeout: 90) else {
+        guard let c = store.connector else { return .init(ok: false, message: "No connector") }
+        guard await ensureService(c, .signal) else { return .init(ok: false, message: "Signal didn't start on the connector") }
+        guard let r = try? await relay(c, ["signal-link"], timeout: 90) else {
             return .init(ok: false, message: "The connector didn't answer")
         }
         if let res = r["result"] as? [String: Any], let uri = res["device_link_uri"] as? String {
@@ -535,8 +565,9 @@ extension KubeClusterEngine {
 
     /// The QR code (PNG) to scan in WhatsApp › Linked devices.
     func whatsappQR() async -> ConnectorReply {
-        guard let c = store.connector,
-              let r = try? await relay(c, ["wa-login-qr"]) else {
+        guard let c = store.connector else { return .init(ok: false, message: "No connector") }
+        guard await ensureService(c, .whatsapp) else { return .init(ok: false, message: "WhatsApp didn't start on the connector") }
+        guard let r = try? await relay(c, ["wa-login-qr"]) else {
             return .init(ok: false, message: "The connector didn't answer")
         }
         if let b64 = r["png"] as? String, let png = Data(base64Encoded: b64), !png.isEmpty {
@@ -548,8 +579,9 @@ extension KubeClusterEngine {
     /// An 8-character code to type in WhatsApp › Linked devices › Link with
     /// phone number instead — for when scanning isn't practical.
     func whatsappPairingCode(phone: String) async -> ConnectorReply {
-        guard let c = store.connector,
-              let r = try? await relay(c, ["wa-pair", Self.digits(phone)]) else {
+        guard let c = store.connector else { return .init(ok: false, message: "No connector") }
+        guard await ensureService(c, .whatsapp) else { return .init(ok: false, message: "WhatsApp didn't start on the connector") }
+        guard let r = try? await relay(c, ["wa-pair", Self.digits(phone)]) else {
             return .init(ok: false, message: "The connector didn't answer")
         }
         if let res = r["result"] as? [String: Any], let results = res["results"] as? [String: Any],
@@ -598,9 +630,11 @@ extension KubeClusterEngine {
                 _ = try? await relay(c, ["signal-unregister", n])
             }
             c.signal = nil
+            await stopService(c, .signal)
         case .whatsapp:
             _ = try? await relay(c, ["wa-logout"])
             c.whatsapp = nil
+            await stopService(c, .whatsapp)
         case .slack:
             // The tokens go from the connector; the app itself stays in the
             // user's Slack workspace until they remove it there.

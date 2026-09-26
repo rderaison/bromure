@@ -4547,6 +4547,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let kind = (doc["channel"] as? String).flatMap(ConnectorChannel.Kind.init(rawValue:))
                 else { return ["ok": false, "error": "channel required"] }
                 Task { await engine.disconnect(kind) }
+            case "wa-qr":
+                // Test hook: what the WhatsApp link sheet asks first (starts
+                // the service on demand); poll status for whatsappUp.
+                Task { _ = await engine.whatsappQR() }
             case "slack-pair":
                 return ["ok": true, "code": engine.slackStartPairing()]
             case "window":
