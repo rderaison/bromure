@@ -57,6 +57,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// detection off. Static to avoid threading a closure through every
     /// listener/delegate layer.
     nonisolated(unsafe) static var promptInjectionPolicyProvider: (@Sendable (UUID) -> PromptInjectionPolicy?)?
+    /// Per-profile PII protection (swap personal data for stand-ins on the
+    /// way to the model, restore it on the way back). Same static rationale.
+    nonisolated(unsafe) static var piiPolicyProvider: (@Sendable (UUID) -> PIIPolicy?)?
     /// Reads whether Fusion is currently engaged for a profile's session.
     /// Set once by `MitmEngine.register`; nil → treat as disengaged.
     /// Static, same rationale as `promptInjectionPolicyProvider`.
@@ -1471,6 +1474,41 @@ final class HTTPMitmConnection: @unchecked Sendable {
             servedByMarker = target.servedBy
         }
 
+        // PII protection: swap personal data in the conversation for
+        // stand-ins before it leaves the Mac; the relay below puts the real
+        // values back in the reply. Not for a turn served by the on-host
+        // engine — nothing leaves the Mac there. Runs before Fusion so its
+        // fan-out never carries the real values either.
+        var piiVault: PIIVault? = nil
+        if routedBackend == .cloud, bodyFile == nil,
+           let pii = Self.piiPolicyProvider?(profileID), pii.isActive,
+           let split = toForward.range(of: Data("\r\n\r\n".utf8)) {
+            let head = toForward.subdata(in: 0..<split.upperBound)
+            let body = toForward.subdata(in: split.upperBound..<toForward.count)
+            let encoded = Self.headerValue("Content-Encoding",
+                                           inHeaderSection: String(decoding: head, as: UTF8.self)) != nil
+            if !encoded, PIIRewriter.isEligible(host: host, method: reqMethod, body: body) {
+                let vault = PIIVault.forProfile(profileID)
+                let t = Date()
+                let outcome = await PIIRewriter.rewriteRequest(body, policy: pii, vault: vault)
+                if outcome.body != body { toForward = head + outcome.body }
+                if !vault.isEmpty { piiVault = vault }
+                let ms = Date().timeIntervalSince(t) * 1000
+                if outcome.total > 0 {
+                    Self.recordPIISwaps(outcome, host: host, profileID: profileID, ms: ms)
+                }
+                if outcome.total > 0 || ms > 250 || outcome.partial {
+                    FileHandle.standardError.write(Data(String(
+                        format: "[pii] %@ %@: %d new value(s) swapped, %d → %d bytes, %.0f ms%@\n",
+                        host, reqPath, outcome.total, body.count, outcome.body.count, ms,
+                        outcome.partial ? " (model budget spent: rest by pattern rules)" : "").utf8))
+                }
+            } else if encoded, TraceLevel.aiHosts.contains(where: { host.lowercased().contains($0) }) {
+                FileHandle.standardError.write(Data(
+                    "[pii] \(host) \(reqPath): compressed request body — not scanned\n".utf8))
+            }
+        }
+
         // Fusion is a cloud, identity-side feature — skip it when this
         // turn is routed local.
         let fusionOn = routedBackend == .cloud && (Self.fusionEngagedProvider?(profileID) ?? false)
@@ -1550,7 +1588,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                             tls: tls,
                                             upstreamScheme: (cleartext || routedBackend == .local) ? "http" : "https",
                                             insecureBypassAllowed: insecureBypassAllowed,
-                                            profileID: profileID)
+                                            profileID: profileID,
+                                            responseRestorer: piiVault.map { vault in
+                                                { PIIResponseRestorer(vault: vault, contentType: $0) }
+                                            })
         }
 
         // Claude subscription 401 self-heal. The streaming relay has already
@@ -2178,6 +2219,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// 451 response the guest sees when a prompt-injection detection blocks the
     /// request (block mode, or ask → denied). The agent gets a hard HTTP error
     /// instead of the model reply; no byte reaches the AI host.
+    /// One Security Timeline row per request that swapped personal data the
+    /// provider hadn't seen yet (history resent every turn isn't recounted).
+    private static func recordPIISwaps(_ o: PIIRewriter.Outcome, host: String, profileID: UUID, ms: Double) {
+        var data: [String: AnyJSON] = ["host": .string(host), "count": .int(o.total),
+                                       "latency_ms": .int(Int(ms.rounded()))]
+        for (kind, n) in o.newSwaps { data[kind.rawValue] = .int(n) }
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "privacy.pii_swap", eventData: data)
+    }
+
     private static func injectionBlockResponse(detector: String, source: String) -> Data {
         let body = "Bromure blocked this request: possible \(detector) detected in \(source).\n"
         var r = "HTTP/1.1 451 Unavailable For Legal Reasons\r\n"
@@ -3276,7 +3326,8 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
                            upstreamScheme: String = "https",
                            bodyFile: URL? = nil,
                            insecureBypassAllowed: Bool = false,
-                           profileID: UUID) async throws -> RelayResponse {
+                           profileID: UUID,
+                           responseRestorer: ((String) -> PIIResponseRestorer)? = nil) async throws -> RelayResponse {
     guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)) else {
         throw MitmError.malformedHTTPRequest
     }
@@ -3428,6 +3479,21 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
     var useChunked = false
     let isHeadRequest = method.uppercased() == "HEAD"
     var responseStarted = false     // any response byte written to the client yet?
+    var restorer: PIIResponseRestorer? = nil
+    // Write one body piece to the client in the chosen framing.
+    func send(_ piece: Data) throws {
+        guard !piece.isEmpty else { return }
+        if useChunked {
+            var frame = Data(String(format: "%x\r\n", piece.count).utf8)
+            frame.append(piece)
+            frame.append(Data("\r\n".utf8))
+            try tls.write(frame)
+            totalWireBytes += frame.count
+        } else {
+            try tls.write(piece)
+            totalWireBytes += piece.count
+        }
+    }
     do {
     for try await event in events {
         switch event {
@@ -3456,26 +3522,21 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
             if useChunked { head += "Transfer-Encoding: chunked\r\n" }
             head += "Connection: close\r\n"
             head += "\r\n"
+            if let make = responseRestorer, !isHeadRequest {
+                restorer = make(http.value(forHTTPHeaderField: "Content-Type") ?? "")
+            }
             let headData = Data(head.utf8)
             try tls.write(headData)
             totalWireBytes += headData.count
             // The head always fits — bound above by RFC's practical
             // header limits, well under any sensible cap.
             responseBuffer.append(headData)
-        case .chunk(let chunk):
+        case .chunk(let upstreamChunk):
             if ttft == nil { ttft = Date().timeIntervalSince(reqStart) }
-            if useChunked {
-                if !chunk.isEmpty {
-                    var frame = Data(String(format: "%x\r\n", chunk.count).utf8)
-                    frame.append(chunk)
-                    frame.append(Data("\r\n".utf8))
-                    try tls.write(frame)
-                    totalWireBytes += frame.count
-                }
-            } else {
-                try tls.write(chunk)
-                totalWireBytes += chunk.count
-            }
+            // PII protection: stand-ins back to the real values (what the
+            // guest sees, and what the trace keeps).
+            let chunk = restorer?.feed(upstreamChunk) ?? upstreamChunk
+            try send(chunk)
             if responseBuffer.count + chunk.count <= bodyBufferCap {
                 responseBuffer.append(chunk)
             } else if responseBuffer.count < bodyBufferCap {
@@ -3523,6 +3584,13 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         }
         return RelayResponse(buffer: respData, wireBytes: respData.count,
                              truncatedForTrace: false, ttftSeconds: ttft)
+    }
+    // Release whatever the restorer held back (the tail of a stream, or a
+    // whole JSON body).
+    if let tail = restorer?.finish(), !tail.isEmpty {
+        try? send(tail)
+        if responseBuffer.count + tail.count <= bodyBufferCap { responseBuffer.append(tail) }
+        else { truncatedForTrace = true }
     }
     // Terminating zero-length chunk — the end-of-body marker the client
     // dechunks on. Only when we actually framed the body as chunked.

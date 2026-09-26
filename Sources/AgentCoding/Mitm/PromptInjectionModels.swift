@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 
 /// Locates + downloads the local detector models for prompt-injection /
@@ -10,11 +11,13 @@ public enum PromptInjectionModels {
     public enum Kind: Sendable, CaseIterable {
         case promptGuard      // source-code / tool_result injection (PromptGuard)
         case claudeMdGuard    // rogue CLAUDE.md / instruction files (ModernBERT)
+        case piiRampart       // personal-data detector for PII protection (Rampart)
 
         var dirName: String {
             switch self {
             case .promptGuard:   return "prompt-injection"
             case .claudeMdGuard: return "claudemd-guard"
+            case .piiRampart:    return PIIDetector.dirName
             }
         }
         /// (filename, min bytes). The size floor rejects truncated downloads
@@ -28,6 +31,8 @@ public enum PromptInjectionModels {
             case .claudeMdGuard:
                 return [("model.onnx", 100_000_000), ("tokenizer.json", 500_000),
                         ("tokenizer_config.json", 100), ("config.json", 100)]
+            case .piiRampart:
+                return [("model.onnx", 14_000_000), ("vocab.txt", 100_000), ("config.json", 1_000)]
             }
         }
 
@@ -38,6 +43,8 @@ public enum PromptInjectionModels {
                 return NSLocalizedString("Source-code prompt-injection", comment: "detector name")
             case .claudeMdGuard:
                 return NSLocalizedString("Rogue-instruction (CLAUDE.md)", comment: "detector name")
+            case .piiRampart:
+                return NSLocalizedString("Personal data (Rampart)", comment: "detector name")
             }
         }
 
@@ -48,6 +55,7 @@ public enum PromptInjectionModels {
             switch self {
             case .promptGuard:   return 298_000_000   // ~284 MiB
             case .claudeMdGuard: return 603_000_000   // ~575 MiB
+            case .piiRampart:    return 14_830_000    // ~14 MiB
             }
         }
 
@@ -59,6 +67,26 @@ public enum PromptInjectionModels {
 
     private static let baseURL = URL(string: "https://dl.bromure.io/llms")!
 
+    /// Rampart (nationaldesignstudio/rampart, CC BY 4.0) comes straight from
+    /// Hugging Face at a pinned revision, each file checked by SHA-256.
+    private static let rampartRevision = "b1993e4e68b082835b80ffc65acc03325ea2e501"
+    private static let rampartFiles: [String: (remote: String, sha256: String)] = [
+        "model.onnx": ("onnx/model_q4.onnx", "9f27d24949b0581701071ea5ef522d77ccd3f50c525cc91eac4d265b0fc2afe5"),
+        "vocab.txt": ("vocab.txt", "0fbe6b50061feabb9be68af471e9aa6df07a4bc428bdca4b0eff1fcd3612dee5"),
+        "config.json": ("config.json", "003b84bbcd489f5e782fe5cad8f3249c3653ec880089abb1ccc398a0d895e3e6"),
+    ]
+
+    private static func sourceURL(_ kind: Kind, _ file: String) -> URL {
+        if kind == .piiRampart, let f = rampartFiles[file] {
+            return URL(string: "https://huggingface.co/nationaldesignstudio/rampart/resolve/\(rampartRevision)/\(f.remote)")!
+        }
+        return baseURL.appendingPathComponent("\(kind.dirName)/\(file)")
+    }
+
+    private static func expectedSHA256(_ kind: Kind, _ file: String) -> String? {
+        kind == .piiRampart ? rampartFiles[file]?.sha256 : nil
+    }
+
     public static var modelsRoot: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BromureAC/Models", isDirectory: true)
@@ -68,6 +96,8 @@ public enum PromptInjectionModels {
     }
 
     public static func isInstalled(_ kind: Kind) -> Bool {
+        // The PII model ships inside the app; nothing to download.
+        if kind == .piiRampart, PIIDetector.bundledDirectory != nil { return true }
         let dir = directory(for: kind)
         let fm = FileManager.default
         return kind.files.allSatisfy { f in
@@ -115,7 +145,7 @@ public enum PromptInjectionModels {
                 completedBytes += Int64(sz)
                 progress(min(0.999, Double(completedBytes) / total)); continue
             }
-            let url = baseURL.appendingPathComponent("\(kind.dirName)/\(f.name)")
+            let url = sourceURL(kind, f.name)
             let base = completedBytes
             let downloader = ProgressDownloader { written in
                 progress(min(0.999, Double(base + written) / total))
@@ -126,6 +156,10 @@ public enum PromptInjectionModels {
             }
             let sz = ((try? FileManager.default.attributesOfItem(atPath: tmp.path)[.size]) as? Int) ?? 0
             guard sz >= f.minBytes else { throw Err.truncated(f.name, sz, f.minBytes) }
+            if let want = expectedSHA256(kind, f.name) {
+                let got = SHA256.hash(data: try Data(contentsOf: tmp)).map { String(format: "%02x", $0) }.joined()
+                guard got == want else { throw Err.checksum(f.name) }
+            }
             if FileManager.default.fileExists(atPath: dest.path) {
                 try FileManager.default.removeItem(at: dest)
             }
@@ -241,10 +275,11 @@ public enum PromptInjectionModels {
         Task.detached(priority: .utility) {
             defer { releaseInFlight(kind) }
             guard !isInstalled(kind) else { return }
-            SupplyChainLog.shared.record("[prompt-injection] downloading \(kind.dirName) model from bromure.io…")
+            SupplyChainLog.shared.record("[prompt-injection] downloading \(kind.dirName) model…")
             do {
                 try await download(kind)
                 SupplyChainLog.shared.record("[prompt-injection] \(kind.dirName) model installed.")
+                if kind == .piiRampart { await PIIDetector.shared.reload() }
             } catch {
                 SupplyChainLog.shared.record("[prompt-injection] \(kind.dirName) download failed: \(error.localizedDescription)")
                 // A silent log isn't enough for the disk-full case: the user
@@ -276,8 +311,12 @@ public enum PromptInjectionModels {
         case http(Int, String)
         case truncated(String, Int, Int)
         case diskFull(availableMB: UInt64, requiredMB: UInt64)
+        case checksum(String)
         var errorDescription: String? {
             switch self {
+            case .checksum(let f):
+                return String(format: NSLocalizedString("%@ doesn't match its expected checksum",
+                    comment: "A downloaded model file failed its SHA-256 check"), f)
             case .http(let s, let f):
                 return String(format: NSLocalizedString("HTTP %d downloading %@",
                     comment: "Model download failed with an HTTP status"), s, f)

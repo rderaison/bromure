@@ -114,6 +114,13 @@ struct BromureAC: ParsableCommand {
         if filtered.isEmpty, invokedName == "bromure-cli" {
             filtered = ["help"]
         }
+        // Hidden verification hook: run the PII detector over files and print
+        // what it finds and how long it took. Standalone, no servers or VMs.
+        //   bromure-ac __pii-scan <file>… [--min 0.6] [--quiet] [--plan]
+        if filtered.first == "__pii-scan" {
+            PIIScanCLI.run(Array(filtered.dropFirst()))
+            return
+        }
         // Hidden docs/screenshot hook: render the reworked "Log in to bromure.io"
         // sheet to a PNG and exit — no servers, no VMs. Sibling of /debug/ui-shot.
         // Hidden verification hook for the UX surfaces (command palette,
@@ -179,7 +186,7 @@ struct BromureAC: ParsableCommand {
                 ]
                 view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
                     CommandPaletteView(items: items, onClose: {}) })
-            case "overview":
+            case "overview", "timeline":
                 let tl = SecurityTimeline(directory: nil)
                 let now = Date()
                 let rows: [(String, String, String, SecurityTimeline.Decision)] = [
@@ -194,14 +201,35 @@ struct BromureAC: ParsableCommand {
                     tl.append(.init(time: now.addingTimeInterval(Double(-600 + i * 60)), engine: r.0, condition: r.1,
                                     decision: r.2, kind: r.3, profileID: pid, workspace: "Claude Dev"))
                 }
+                // PII swaps go through the real mapping.
+                for (i, d) in [["name": 2, "email": 1], ["name": 3, "phone": 1, "address": 1]].enumerated() {
+                    var data: [String: AnyJSON] = ["host": .string("api.anthropic.com"),
+                                                   "count": .int(d.values.reduce(0, +))]
+                    for (k, v) in d { data[k] = .int(v) }
+                    if var e = SecurityTimeline.map(profileID: pid, eventType: "privacy.pii_swap", eventData: data,
+                                                    now: now.addingTimeInterval(Double(-200 + i * 90))) {
+                        e.workspace = "Claude Dev"
+                        tl.append(e)
+                    }
+                }
                 let postures = [
                     SecurityPosture(id: pid, name: "Claude Dev", colorHex: "#3B82F6", firewall: true, supplyChain: true,
-                                    guardrails: true, promptInjection: true),
+                                    guardrails: true, promptInjection: true, pii: true),
                     SecurityPosture(id: UUID(), name: "Daily", colorHex: "#10B981", firewall: false, supplyChain: true,
                                     guardrails: false, promptInjection: true),
                 ]
-                view = AnyView(SecurityTimelineView(timeline: tl, onClose: {}, postures: { postures }))
+                view = AnyView(SecurityTimelineView(timeline: tl, onClose: {}, postures: { postures },
+                                                    startOnTimeline: which == "timeline"))
                 size = NSSize(width: 980, height: 720)
+            case "pii-settings", "pii-off":
+                // The real workspace editor, opened on PII Protection.
+                setenv("BROMURE_EDITOR_CATEGORY", EditorCategory.pii.rawValue, 1)
+                let p = Profile(name: "Claude Dev", tool: .claude, authMode: .subscription,
+                                pii: PIIPolicy(enabled: which == "pii-settings", addresses: false))
+                view = AnyView(ProfileEditorView(profile: p, isNew: false, terminalDefaults: .fallback,
+                                                 storageContext: nil, onSave: { _, _ in }, onCancel: {})
+                                  .frame(width: 900, height: 1080))
+                size = NSSize(width: 900, height: 1080)
             case "machinemenu":
                 view = AnyView(HStack(spacing: 8) {
                     Spacer()
@@ -221,7 +249,10 @@ struct BromureAC: ParsableCommand {
                 }.frame(width: 260).padding(.vertical, 8).background(Color(nsColor: .windowBackgroundColor)))
                 size = NSSize(width: 260, height: 160)
             }
-            let host = NSHostingView(rootView: view.frame(width: size.width, height: size.height))
+            // cacheDisplay captures the view alone, not the window behind it:
+            // paint the window color so transparent areas aren't white in dark.
+            let host = NSHostingView(rootView: view.frame(width: size.width, height: size.height)
+                .background(Color(nsColor: .windowBackgroundColor)))
             host.frame = NSRect(origin: .zero, size: size)
             let window = NSWindow(contentRect: host.frame, styleMask: [.titled, .fullSizeContentView],
                                   backing: .buffered, defer: false)
@@ -6600,7 +6631,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                     firewall: p.resolvedEgressPolicy.isActive,
                                     supplyChain: p.supplyChain.isActive,
                                     guardrails: p.guardrails.isActive,
-                                    promptInjection: p.promptInjection.isActive)
+                                    promptInjection: p.promptInjection.isActive,
+                                    pii: p.pii.isActive)
                 }
             }))
         win.makeKeyAndOrderFront(nil)
@@ -8833,6 +8865,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             || old.egressRules != new.egressRules
             || old.supplyChain != new.supplyChain
             || old.promptInjection != new.promptInjection
+            || old.pii != new.pii
             || old.httpDatabases != new.httpDatabases
             || old.tool != new.tool
             || old.authMode != new.authMode
@@ -9005,6 +9038,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         mitmEngine?.setPromptInjectionPolicy(new.promptInjection, for: new.id)
         if new.promptInjection.detectSourceInjection { PromptInjectionModels.ensureInstalledInBackground(.promptGuard) }
         if new.promptInjection.detectRulesInjection { PromptInjectionModels.ensureInstalledInBackground(.claudeMdGuard) }
+        mitmEngine?.setPIIPolicy(new.pii, for: new.id)
+        if new.pii.isActive { PromptInjectionModels.ensureInstalledInBackground(.piiRampart) }
 
         var profile = new
         populateMCPBearerTokens(in: &profile)
@@ -9849,6 +9884,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 engine.setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
                 if profile.promptInjection.detectSourceInjection { PromptInjectionModels.ensureInstalledInBackground(.promptGuard) }
                 if profile.promptInjection.detectRulesInjection { PromptInjectionModels.ensureInstalledInBackground(.claudeMdGuard) }
+                engine.setPIIPolicy(profile.pii, for: profile.id)
+                if profile.pii.isActive { PromptInjectionModels.ensureInstalledInBackground(.piiRampart) }
                 // Fusion: show the title-bar toggle when configured, but
                 // start disengaged — the user clicks the lightning bolt to
                 // turn it on for the session.
@@ -13006,6 +13043,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 engine.setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
                 if profile.promptInjection.detectSourceInjection { PromptInjectionModels.ensureInstalledInBackground(.promptGuard) }
                 if profile.promptInjection.detectRulesInjection { PromptInjectionModels.ensureInstalledInBackground(.claudeMdGuard) }
+                engine.setPIIPolicy(profile.pii, for: profile.id)
+                if profile.pii.isActive { PromptInjectionModels.ensureInstalledInBackground(.piiRampart) }
                 // Fusion: keep the toggle visible when configured, but reset
                 // to disengaged on reboot (user re-engages on demand).
                 win.model.fusionConfigurable = profile.fusionConfigurable

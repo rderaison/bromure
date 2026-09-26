@@ -254,6 +254,12 @@ if [ "$TARGET" = "bromure-ac" ]; then
 PLIST
     echo "Bundled mlx.metallib (in-process MLX engine; no Python/uv)."
 
+    # Rampart PII detector model (~15 MB, CC BY 4.0), pinned + SHA-256 checked.
+    # PIIDetector loads Resources/pii-rampart first, so PII protection works
+    # offline from the first launch with no download.
+    "$SCRIPT_DIR/scripts/fetch-pii-model.sh" "$RESOURCES_DIR/pii-rampart" >/dev/null
+    echo "Bundled the Rampart PII model."
+
     # The Rooms stage's SwiftUI shaders (shaders/RoomEffects.metal), compiled
     # here rather than by SwiftPM. The Metal toolchain is a build-time
     # requirement only (the .metallib ships in the bundle): fail loudly

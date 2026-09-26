@@ -39,6 +39,7 @@ SHARED = [
     # Policy / token / routing types Profile.swift and the mirror reference.
     "Mitm/TraceRecord.swift",
     "Mitm/PromptInjectionPolicy.swift",
+    "Mitm/PIIPolicy.swift",
     "Mitm/SupplyChainPolicy.swift",
     "Mitm/GuardrailsPolicy.swift",
     "Mitm/SecretsVault.swift",

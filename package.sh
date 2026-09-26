@@ -233,6 +233,12 @@ if [ "$TARGET" = "bromure-ac" ]; then
 PLIST
     echo "Bundled mlx.metallib (in-process MLX engine; no Python/uv)."
 
+    # Rampart PII detector model (~15 MB, CC BY 4.0), pinned + SHA-256 checked.
+    # PIIDetector loads Resources/pii-rampart first, so PII protection works
+    # offline from the first launch with no download.
+    "$SCRIPT_DIR/scripts/fetch-pii-model.sh" "$RESOURCES_DIR/pii-rampart" >/dev/null
+    echo "Bundled the Rampart PII model."
+
     # Ghostty runtime resources for the native terminal surfaces (mirrors
     # build.sh; GhosttyRuntime sets GHOSTTY_RESOURCES_DIR to Resources/ghostty).
     if [ -d "$SCRIPT_DIR/vendor/ghostty-resources" ]; then

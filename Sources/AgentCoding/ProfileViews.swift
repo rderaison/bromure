@@ -96,6 +96,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case guardrails       = "Guardrails"
     case supplyChain      = "Supply Chain"
     case promptInjection  = "Prompt Injection"
+    case pii              = "PII Protection"
     case appearance  = "Appearance"
     case browser     = "Browser"
     case resources   = "Resources"
@@ -116,7 +117,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .general, .appearance: return .workspace
         case .localModels, .fusion: return .models
         case .folders, .environment, .resources, .browser, .mcp: return .machine
-        case .credentials, .guardrails, .supplyChain, .promptInjection, .tracing: return .security
+        case .credentials, .guardrails, .supplyChain, .promptInjection, .pii, .tracing: return .security
         case .automation: return .app
         }
     }
@@ -135,6 +136,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .guardrails:      return "firewall egress network block allow kubernetes aws docker github destructive"
         case .supplyChain:     return "npm pypi packages age socket osv install scripts depi"
         case .promptInjection: return "injection detector scan classifier"
+        case .pii:             return "privacy personal data names email phone gdpr redact anonymize pseudonymize"
         case .appearance:      return "theme terminal font opacity dark"
         case .browser:         return "chrome chromium web browser"
         case .resources:       return "cpu memory ram disk"
@@ -155,6 +157,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .guardrails:       "exclamationmark.shield.fill"
         case .supplyChain:      "shippingbox.fill"
         case .promptInjection:  "exclamationmark.triangle.fill"
+        case .pii:              "person.crop.circle.badge.checkmark"
         case .appearance:  "paintpalette.fill"
         case .browser:     "globe"
         case .resources:   "memorychip.fill"
@@ -175,6 +178,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .guardrails:       .orange
         case .supplyChain:      .yellow
         case .promptInjection:  .red
+        case .pii:              .purple
         case .appearance:  .pink
         case .browser:     .blue
         case .resources:   .gray
@@ -961,6 +965,7 @@ struct ProfileEditorView: View {
         case .guardrails:       guardrailsSection
         case .supplyChain:      supplyChainSection
         case .promptInjection:  promptInjectionSection
+        case .pii:              piiSection
         case .appearance:  appearanceSection
         case .browser:     browserSection
         case .resources:   resourcesSection
@@ -3851,6 +3856,52 @@ struct ProfileEditorView: View {
 
 
     // MARK: - Supply Chain section
+
+    @ViewBuilder
+    private var piiSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(NSLocalizedString("Before the agent's conversation leaves the Mac, Bromure swaps the personal data in it — names, emails, phone numbers, card and ID numbers, street addresses — for realistic stand-ins, and puts the real values back in the replies. The model provider never sees them; the agent and your files keep the real thing. Detection runs on-device with the built-in Rampart model.", comment: "PII protection explanation"))
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            GroupBox(label: Label(NSLocalizedString("Protection", comment: "PII protection"),
+                                  systemImage: "person.crop.circle.badge.checkmark")) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle(NSLocalizedString("Swap personal data for stand-ins before it reaches the model", comment: "PII protection toggle"),
+                           isOn: $draft.pii.enabled)
+                        .onChange(of: draft.pii.enabled) { _, isOn in
+                            guard isOn else { return }
+                            // The model lives where the proxy runs; a remote
+                            // client just saves the flag.
+                            #if os(macOS)
+                            PromptInjectionModelDownloader.start(.piiRampart) { ok in
+                                if !ok { draft.pii.enabled = false }
+                            }
+                            #endif
+                        }
+                    Divider()
+                    Group {
+                        Toggle(NSLocalizedString("People's names", comment: "PII category"), isOn: $draft.pii.names)
+                        Toggle(NSLocalizedString("Email addresses and phone numbers", comment: "PII category"), isOn: $draft.pii.contact)
+                        Toggle(NSLocalizedString("Card, bank account and tax numbers", comment: "PII category"), isOn: $draft.pii.financial)
+                        Toggle(NSLocalizedString("SSNs, passports, driver's licenses and other IDs", comment: "PII category"), isOn: $draft.pii.governmentIDs)
+                        Toggle(NSLocalizedString("Street addresses (city, state and postal code are kept)", comment: "PII category"), isOn: $draft.pii.addresses)
+                    }
+                    .disabled(!draft.pii.enabled)
+                }
+                .padding(8)
+            }
+
+            Text(NSLocalizedString("Source code is left to the pattern rules (emails, cards, SSNs) — names in code are almost always identifiers. Each swap is counted in the Security Timeline; the values themselves are never logged.", comment: "PII protection footnote"))
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            // CC BY 4.0 attribution for the detector model.
+            Link(destination: URL(string: "https://huggingface.co/nationaldesignstudio/rampart")!) {
+                Text(verbatim: "Rampart — National Design Studio, CC BY 4.0")
+            }
+            .font(.caption)
+        }
+    }
 
     @ViewBuilder
     private var promptInjectionSection: some View {

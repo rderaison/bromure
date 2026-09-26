@@ -194,6 +194,24 @@ public final class MitmEngine {
         promptInjectionPolicies.removeValue(forKey: profileID)
     }
 
+    private let piiLock = NSLock()
+    nonisolated(unsafe) private var piiPolicies: [UUID: PIIPolicy] = [:]
+
+    public nonisolated func setPIIPolicy(_ policy: PIIPolicy, for profileID: UUID) {
+        piiLock.lock()
+        let prior = piiPolicies[profileID]
+        piiPolicies[profileID] = policy
+        piiLock.unlock()
+        if prior != policy {
+            SupplyChainLog.shared.record(
+                "[pii] protection \(policy.isActive ? "on" : "off") for \(profileID.uuidString.prefix(8))")
+        }
+    }
+    public nonisolated func piiPolicy(for profileID: UUID) -> PIIPolicy? {
+        piiLock.lock(); defer { piiLock.unlock() }
+        return piiPolicies[profileID]
+    }
+
     // MARK: - Fusion engaged state
     //
     // Per-profile runtime flag for whether Fusion is currently engaged.
@@ -374,6 +392,9 @@ public final class MitmEngine {
         // proxy passes, so one closure serves all connections.
         HTTPMitmConnection.promptInjectionPolicyProvider = { [weak self] pid in
             self?.promptInjectionPolicy(for: pid)
+        }
+        HTTPMitmConnection.piiPolicyProvider = { [weak self] pid in
+            self?.piiPolicy(for: pid)
         }
         // Same idea for Fusion: one closure routes by profile id and lets
         // the proxy ask "is Fusion engaged for this session right now?".

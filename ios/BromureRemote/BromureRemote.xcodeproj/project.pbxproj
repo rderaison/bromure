@@ -64,6 +64,7 @@
 		B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */; };
 		61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */; };
 		A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */; };
+		4C4053D0D9DCB88EC29BDD19 /* Mitm__PIIPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98E5CAA937E7F279BDA1098C /* Mitm__PIIPolicy.swift */; };
 		FED3004C83536B84CF8C0C61 /* Mitm__PromptInjectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */; };
 		5C0722E5CF0BF28BADBEA327 /* Mitm__SecretsVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */; };
 		B854291378C379CF05ECFEE3 /* Mitm__SessionTokenPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */; };
@@ -202,6 +203,7 @@
 		D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__ConsentCredentialID.swift"; path = "Sources/BromureRemote/_shared/Mitm__ConsentCredentialID.swift"; sourceTree = "<group>"; };
 		6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__GuardrailsPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__GuardrailsPolicy.swift"; sourceTree = "<group>"; };
 		323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__OnePasswordCLI.swift"; path = "Sources/BromureRemote/_shared/Mitm__OnePasswordCLI.swift"; sourceTree = "<group>"; };
+		98E5CAA937E7F279BDA1098C /* Mitm__PIIPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__PIIPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__PIIPolicy.swift"; sourceTree = "<group>"; };
 		973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__PromptInjectionPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__PromptInjectionPolicy.swift"; sourceTree = "<group>"; };
 		0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SecretsVault.swift"; path = "Sources/BromureRemote/_shared/Mitm__SecretsVault.swift"; sourceTree = "<group>"; };
 		7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SessionTokenPlan.swift"; path = "Sources/BromureRemote/_shared/Mitm__SessionTokenPlan.swift"; sourceTree = "<group>"; };
@@ -364,6 +366,7 @@
 				D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */,
 				6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */,
 				323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */,
+				98E5CAA937E7F279BDA1098C /* Mitm__PIIPolicy.swift */,
 				973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */,
 				0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */,
 				7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */,
@@ -579,6 +582,7 @@
 				B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */,
 				61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */,
 				A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */,
+				4C4053D0D9DCB88EC29BDD19 /* Mitm__PIIPolicy.swift in Sources */,
 				FED3004C83536B84CF8C0C61 /* Mitm__PromptInjectionPolicy.swift in Sources */,
 				5C0722E5CF0BF28BADBEA327 /* Mitm__SecretsVault.swift in Sources */,
 				B854291378C379CF05ECFEE3 /* Mitm__SessionTokenPlan.swift in Sources */,
