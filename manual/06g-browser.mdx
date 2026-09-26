@@ -120,7 +120,7 @@ The browser VM is managed for you and kept cheap when idle:
 
 - It is created lazily on first open (or first agent tool call) and boots from the shared 500 MB image as a copy-on-write clone.
 - A hidden browser **suspends after about 10 seconds** and is **torn down entirely after 5 minutes** collapsed, freeing its memory and disk.
-- The pane's open/closed state is remembered per machine while the app runs, but deliberately not across app restarts — a disposable browser would not survive a restart anyway.
+- The pane's open/closed state belongs to what's on stage: each session remembers its own (open the browser in one session and it doesn't follow you to another session on the same machine — the Switchboard, say — even though they share the machine's browser), and a machine's own terminal view remembers the machine's. A session that is asleep, and the new-session screen, never show the pane — there's no globe there to close it with. The state lasts while the app runs, deliberately not across restarts — a disposable browser would not survive a restart anyway.
 
 Unlike machines, the sidecar browser VM *is* served from a pre-warmed pool, which is why opening the pane usually feels instant after the first time.
 

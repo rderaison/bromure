@@ -2064,7 +2064,7 @@ struct RemoteToolbarBar: View {
             // A room spans machines: nothing machine-specific in its bar.
             if model.selectedRoomID != nil, let entry {
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
-                           active: model.browserOpenWorkspaces.contains(entry.id)) { onToggleBrowser() }
+                           active: model.browserPaneOpen) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
                            active: model.filePaneOpen) { onToggleFilePane() }
             }
@@ -2094,7 +2094,7 @@ struct RemoteToolbarBar: View {
                             onDetails: onDetails.map { f in { f(entry.id) } },
                             ip: entry.model.ipAddress)
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
-                           active: model.browserOpenWorkspaces.contains(entry.id)) { onToggleBrowser() }
+                           active: model.browserPaneOpen) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
                            active: model.filePaneOpen) { onToggleFilePane() }
             }
@@ -2366,6 +2366,9 @@ final class RemoteHostWindow: NSWindow {
     /// Relays the remote agent's browser MCP to the local pane's browser.
     private var browserRelays: [Profile.ID: BrowserMCPRelayClient] = [:]
     private var browserOpen: Set<Profile.ID> = []
+    /// Sessions whose browser pane is open, with their machine: a session on
+    /// stage has its own open/closed state (see the local window).
+    private var browserOpenSessions: [UUID: Profile.ID] = [:]
     private var shownBrowser: Profile.ID?
     /// Test hook: auto-open the browser pane once a workspace is selected.
     private let autoBrowser = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_BROWSER"] != nil
@@ -4124,6 +4127,7 @@ final class RemoteHostWindow: NSWindow {
         model.newSessionSelected = true
         sessionPresentationKey = nil
         setSessionHeader(visible: false)
+        hideShownBrowser()   // no machine here: no browser (and no globe)
         let c = controller
         let running = Set(model.profileRows.filter { $0.state == .running || $0.state == .booting }.map(\.id))
         let view = NewSessionView(
@@ -4245,9 +4249,13 @@ final class RemoteHostWindow: NSWindow {
             controller.selectTab(s.profileID, index: w)
             showWorkspace(s.profileID, window: w)
             model.beautifiedActive = sessionViewMode == .beautified
+            // Another session on the same machine doesn't remount it: apply
+            // this session's own browser state here too.
+            followBrowserPane(for: s.profileID)
             return
         }
         unmountTerminal()
+        hideShownBrowser()   // asleep or launching: no browser, no globe
         let accent = Color(hex: controller.profile(for: s.profileID)?.color.hexInUI ?? "#3B82F6")
         let c = controller
         if s.isLaunching {
@@ -4633,9 +4641,9 @@ final class RemoteHostWindow: NSWindow {
                 "members": roomController?.members.count ?? 0,
                 "models": roomController?.models.count ?? 0,
             ]
-        case "sessions", "select-session", "new-session", "linux":
+        case "sessions", "select-session", "open-session", "new-session", "linux":
             switch action {
-            case "select-session":
+            case "select-session", "open-session":   // open-session: never routed to the local window
                 guard let s = p["id"] as? String, let id = UUID(uuidString: s),
                       controller.sessionStore.session(id) != nil else { return ["error": "unknown session"] }
                 selectSession(id)
@@ -4870,6 +4878,12 @@ final class RemoteHostWindow: NSWindow {
             }
             controller.deleteAutomation(aid)
             return ["ok": true]
+        case "globe":
+            // The toolbar globe / ⌃⌘B, exactly as a click (what's on stage decides).
+            toggleBrowser(for: nil)
+            return ["ok": true, "paneOpen": controller.listModel.browserPaneOpen,
+                    "shownBrowser": shownBrowser?.uuidString ?? "",
+                    "browserWidth": Double(browserWidthConstraint.constant)]
         case "toggle-browser":
             guard let id = resolveID() else { return ["error": "workspace not found"] }
             let open = p["open"] as? Bool ?? !browserOpen.contains(id)
@@ -5086,6 +5100,19 @@ final class RemoteHostWindow: NSWindow {
     /// specific workspace. Needs the tunnel up (subnet + SOCKS), so it no-ops
     /// until the first `/state` arrives.
     func toggleBrowser(for id: Profile.ID?) {
+        // A session on stage: its own browser state — only a live one has one.
+        if id == nil, selectedSessionID != nil || controller.listModel.newSessionSelected {
+            guard let s = liveSessionOnStage else { return }
+            if browserOpenSessions[s.id] != nil {
+                browserOpenSessions[s.id] = nil
+                if browserOpenSessions.values.contains(s.profileID) { hideShownBrowser() }
+                else { setBrowserOpen(s.profileID, false) }
+            } else {
+                browserOpenSessions[s.id] = s.profileID
+                setBrowserOpen(s.profileID, true)
+            }
+            return
+        }
         // Fall back to the selected workspace, not just the mounted terminal:
         // a name-row click shows the dashboard (no terminal mounted, so
         // `shownWorkspace` is nil), but the globe must still target that
@@ -5122,6 +5149,7 @@ final class RemoteHostWindow: NSWindow {
                 ? expandedBrowserWidth : max(480, frame.width * 0.42)
             setBrowserWidth(clampBrowserWidth(initial))
             ctl.setVisible(true)
+            controller.listModel.browserPaneOpen = true
             // Relay the remote agent's browser MCP to this local browser.
             ensureBrowserRelay(id)
             // First browser opened this session: offer the VPN to the remote
@@ -5129,7 +5157,8 @@ final class RemoteHostWindow: NSWindow {
             offerBrowserVPNIfNeeded()
         } else {
             browserOpen.remove(id)
-            if shownBrowser == id { shownBrowser = nil }
+            browserOpenSessions = browserOpenSessions.filter { $0.value != id }
+            if shownBrowser == id { shownBrowser = nil; controller.listModel.browserPaneOpen = false }
             // Pane CLOSED (not just switched away) → arm the idle teardown, so a
             // hidden browser VM is suspended after 10s and torn down after
             // ~5min, exactly like the native window. (Workspace-switch hides go
@@ -5203,6 +5232,7 @@ final class RemoteHostWindow: NSWindow {
     /// create + remember it so switching to that workspace reveals it, without
     /// hijacking the current view.
     private func showBrowserForAgent(_ id: Profile.ID) {
+        if let s = liveSessionOnStage, s.profileID == id { browserOpenSessions[s.id] = id }
         if controller.listModel.selectedID == id {
             setBrowserOpen(id, true)   // idempotent — no-ops if already shown
         } else {
@@ -5251,6 +5281,20 @@ final class RemoteHostWindow: NSWindow {
         browserControllers[prev]?.setVisible(false, teardownWhenHidden: false)
         shownBrowser = nil
         setBrowserWidth(0)
+        controller.listModel.browserPaneOpen = false
+    }
+
+    /// The session on stage when it's live — the only kind that can show a
+    /// browser (an asleep one has no globe to close it with).
+    private var liveSessionOnStage: AgentSession? {
+        let model = controller.listModel
+        guard let sid = selectedSessionID, !model.newSessionSelected,
+              let s = controller.sessionStore.session(sid),
+              SessionHome.liveTabPosition(for: s, in: model) != nil else { return nil }
+        switch controller.runState(for: s.profileID) {
+        case .running, .booting: return s
+        default: return nil
+        }
     }
 
     /// Collapse the sidebar to the hierarchy-less icon rail, or expand it back
@@ -5446,6 +5490,16 @@ final class RemoteHostWindow: NSWindow {
         // Claude opens lands in this pane, even if the user never clicked the
         // globe first (otherwise the remote services it on its own app).
         ensureBrowserRelay(id)
+        if selectedSessionID != nil {
+            // A session's own state, not the machine's.
+            if let s = liveSessionOnStage, s.profileID == id, browserOpenSessions[s.id] != nil {
+                setBrowserOpen(id, true)
+            } else {
+                hideShownBrowser()
+            }
+            if autoBrowser { setBrowserOpen(id, true) }
+            return
+        }
         if browserOpen.contains(id) {
             setBrowserOpen(id, true)
         } else if let prev = shownBrowser, prev != id {

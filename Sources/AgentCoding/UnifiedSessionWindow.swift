@@ -316,8 +316,28 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// suspended) as long as its pane stays open; collapsing ITS pane is
     /// what arms teardown.
     private var browserPaneOpenWorkspaces: Set<Profile.ID> = []
-    /// Whether the SELECTED workspace's browser pane is open.
+    /// Sessions whose browser pane is open, with their machine. A session on
+    /// stage has its own open/closed state (the browser VM is still the
+    /// machine's): opened in one session, it doesn't follow you to the next
+    /// session on that machine — the Switchboard, say.
+    private var browserPaneOpenSessions: [UUID: Profile.ID] = [:]
+    /// The session on stage, when it's live — the only kind that can show a
+    /// browser (asleep, it has no toolbar globe to close one with).
+    private var liveSessionOnStage: AgentSession? {
+        guard let sid = selectedSessionID, !listModel.newSessionSelected,
+              let s = acDelegate?.agentSessionStore.session(sid),
+              pane(s.profileID) != nil,
+              SessionHome.liveTabPosition(for: s, in: listModel) != nil else { return nil }
+        return s
+    }
+    /// Whether the pane is open for what's on stage: the live session's own
+    /// state; nothing for an asleep session or the new-session screen; else
+    /// the SELECTED workspace's.
     var browserPaneOpen: Bool {
+        if selectedSessionID != nil || listModel.newSessionSelected {
+            guard let s = liveSessionOnStage else { return false }
+            return browserPaneOpenSessions[s.id] != nil
+        }
         guard let id = selectedID else { return false }
         return browserPaneOpenWorkspaces.contains(id)
     }
@@ -961,7 +981,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// fight the user's choice.
     func ensureBrowserForMCP(_ id: Profile.ID) {
         let controller = browserController(for: id)
-        if selectedID == id, !browserPaneOpen, controller.state == .idle {
+        if (liveSessionOnStage?.profileID ?? selectedID) == id, !browserPaneOpen, controller.state == .idle {
             // Opens the pane AND boots via showBrowser → setVisible(true).
             setBrowserPaneOpen(true, animated: true)
             return
@@ -972,6 +992,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Point the pane at `id`'s browser and mark it visible; hide the
     /// previously-shown one so its collapse timers arm.
     private func showBrowser(for id: Profile.ID) {
+        if shownBrowser == id { browserController(for: id).setVisible(true); return }
         if let prev = shownBrowser, prev != id {
             // Hidden by a workspace switch, not a collapse: suspend-only —
             // it must stay resumable until the sidebar itself closes.
@@ -995,6 +1016,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserControllers.removeAll()
         browserModels.removeAll()
         browserPaneOpenWorkspaces.removeAll()
+        browserPaneOpenSessions.removeAll()
         shownBrowser = nil
     }
 
@@ -1013,6 +1035,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserControllers.removeAll()
         browserModels.removeAll()
         browserPaneOpenWorkspaces.removeAll()
+        browserPaneOpenSessions.removeAll()
         shownBrowser = nil
         guard !controllers.isEmpty else { return }
         // Bounded, like stopSession's suspend/shutdown watchdogs: `vm.stop()`
@@ -1041,13 +1064,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     func rebootBrowser(for id: Profile.ID) {
         guard browserControllers[id] != nil else { return }   // never opened
         let wasOpen = browserPaneOpenWorkspaces.contains(id)
+        let openSessions = browserPaneOpenSessions.filter { $0.value == id }
         let wasShown = browserPaneOpen && shownBrowser == id
         teardownBrowser(for: id)
         // teardownBrowser clears the workspace's pane-open state; a reboot
         // is transient, so restore it (the browser lives as long as its
         // pane is open).
         if wasOpen { browserPaneOpenWorkspaces.insert(id) }
-        if wasShown, selectedID == id {
+        browserPaneOpenSessions.merge(openSessions) { a, _ in a }
+        if wasShown, (liveSessionOnStage?.profileID ?? selectedID) == id {
             showBrowser(for: id)
         }
     }
@@ -1058,6 +1083,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         browserControllers[id] = nil
         browserModels[id] = nil
         browserPaneOpenWorkspaces.remove(id)
+        browserPaneOpenSessions = browserPaneOpenSessions.filter { $0.value != id }
         if shownBrowser == id {
             shownBrowser = nil
             browserPaneHost.rootView = BrowserPaneView(model: browserPlaceholderModel)
@@ -1065,6 +1091,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     }
 
     func setBrowserPaneOpen(_ open: Bool, animated: Bool) {
+        if selectedSessionID != nil || listModel.newSessionSelected {
+            guard let s = liveSessionOnStage, open != (browserPaneOpenSessions[s.id] != nil) else { return }
+            if open {
+                browserPaneOpenSessions[s.id] = s.profileID
+                browserPaneOpenWorkspaces.insert(s.profileID)
+            } else {
+                browserPaneOpenSessions[s.id] = nil
+            }
+            // Closing arms the machine's browser for teardown only when no
+            // other session keeps it open.
+            let stillOpen = browserPaneOpenSessions.values.contains(s.profileID)
+            if !open, !stillOpen { browserPaneOpenWorkspaces.remove(s.profileID) }
+            applyBrowserPaneState(animated: animated,
+                                  collapsedWorkspace: open || stillOpen ? nil : s.profileID)
+            return
+        }
         guard let id = selectedID else { return }
         guard open != browserPaneOpenWorkspaces.contains(id) else { return }
         if open { browserPaneOpenWorkspaces.insert(id) }
@@ -1096,7 +1138,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         listModel.browserPaneOpen = open
         browserPaneResizeHandle?.isHidden = !open
 
-        if open, let id = selectedID {
+        if open, let id = liveSessionOnStage?.profileID ?? selectedID {
             browserPaneHost.isHidden = false
             // Boots/resumes id and suspends (never tears down) the
             // previously shown one — it stays alive on its own pane state.
@@ -1740,6 +1782,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         listModel.newSessionSelected = true
         sessionPresentationKey = nil
         setSessionHeader(visible: false)
+        browserPaneDidChangeWorkspace()   // no machine here: no browser (and no globe)
         let running = Set(listModel.profileRows
             .filter { $0.state == .running || $0.state == .booting }.map(\.id))
         let store = delegate.agentSessionStore
@@ -1883,6 +1926,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard key != sessionPresentationKey else { return }
         sessionPresentationKey = key
         setSessionHeader(visible: true)
+        // The browser pane follows the session: its own state when live,
+        // hidden while asleep. (A live chat's tab switch re-applies it too.)
+        defer { browserPaneDidChangeWorkspace() }
         demoChat?.stop()
         demoChat = nil
         if DemoMode.isLive(s.id) {
