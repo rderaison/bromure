@@ -1039,7 +1039,7 @@ struct RoomTranscriptView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(items) { TranscriptItemView(item: $0) }
+                            TranscriptRowsView(items: items)
                         }
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)

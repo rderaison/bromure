@@ -2678,3 +2678,45 @@
 "1 email" = "1 email";
 "1 name" = "1 name";
 "1 phone number" = "1 phone number";
+
+/* Added 2026-09-25: main window pass */
+"%d sessions from removed machines" = "%d sessions from removed machines";
+"1 session from a removed machine" = "1 session from a removed machine";
+"Add to Room" = "Add to Room";
+"Copy IP Address (%@)" = "Copy IP Address (%@)";
+"Finished" = "Finished";
+"Finished. Your next message picks it up from here." = "Finished. Your next message picks it up from here.";
+"Not running — starts with your next message" = "Not running — starts with your next message";
+"Paused — your next message picks it up" = "Paused — your next message picks it up";
+"Paused. Your next message picks it up from here." = "Paused. Your next message picks it up from here.";
+"Their machines are gone — delete these conversations" = "Their machines are gone — delete these conversations";
+"a message picks it up" = "a message picks it up";
+
+/* Added 2026-09-25: activity lines */
+"%d commands" = "%d commands";
+"%d edits" = "%d edits";
+"%d failed" = "%d failed";
+"%d files read" = "%d files read";
+"%d searches" = "%d searches";
+"%d subagents" = "%d subagents";
+"%d tool calls" = "%d tool calls";
+"%d web pages" = "%d web pages";
+"1 command" = "1 command";
+"1 edit" = "1 edit";
+"1 failed" = "1 failed";
+"1 file read" = "1 file read";
+"1 search" = "1 search";
+"1 subagent" = "1 subagent";
+"1 tool call" = "1 tool call";
+"1 web page" = "1 web page";
+"Delegating %@" = "Delegating %@";
+"Editing %@" = "Editing %@";
+"Fetching %@" = "Fetching %@";
+"Hide the details" = "Hide the details";
+"Reading %@" = "Reading %@";
+"Running %@" = "Running %@";
+"Searching %@" = "Searching %@";
+"Show what the agent did" = "Show what the agent did";
+"Thinking…" = "Thinking…";
+"Thought" = "Thought";
+"Using %@" = "Using %@";

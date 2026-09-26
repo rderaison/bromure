@@ -1976,6 +1976,12 @@ struct RemoteToolbarBar: View {
         model.sessionsFirst && (model.selectedSessionID != nil || model.newSessionSelected)
     }
     private var showMachineControls: Bool { !sessionOnStage }
+    /// A session whose machine isn't running: its name still leads to the settings.
+    private var restingMachine: SessionListModel.ProfileRow? {
+        guard entry == nil, model.sessionsFirst, model.selectedRoomID == nil,
+              model.selectedSessionID != nil, let pid = model.selectedSessionProfileID else { return nil }
+        return model.profileRows.first { $0.id == pid }
+    }
     /// The terminal on stage hosts a session: offer the way back to it.
     private var terminalHostsSession: Bool {
         guard model.sessionsFirst, !sessionOnStage, let entry, let tab = entry.model.activeTab else { return false }
@@ -2002,9 +2008,22 @@ struct RemoteToolbarBar: View {
                               : "point.3.connected.trianglepath.dotted"),
                        help: tunnelHelp,
                        active: controller.tunnelState == "active") { onToggleTunnel() }
-            if let entry, !(model.sessionsFirst && model.newSessionSelected) {
+            if let row = restingMachine {
+                MachineMenu(name: row.name, accentHex: row.accentHex,
+                            onSettings: { onSettings(row.id) },
+                            onReboot: {}, onTrace: {}, onDetach: {},
+                            onDetails: onDetails.map { f in { f(row.id) } },
+                            running: false)
+            }
+            // A room spans machines: nothing machine-specific in its bar.
+            if model.selectedRoomID != nil, let entry {
+                HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
+                           active: model.browserOpenWorkspaces.contains(entry.id)) { onToggleBrowser() }
+                HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
+                           active: model.filePaneOpen) { onToggleFilePane() }
+            }
+            if model.selectedRoomID == nil, let entry, !(model.sessionsFirst && model.newSessionSelected) {
                 if showMachineControls {
-                    if let ip = entry.model.ipAddress { ToolbarIP(ip: ip) }
                     FusionToggle(model: entry.model) { on in onToggleFusion(entry.id, on) }
                     // Sessions-first has no terminal/chat flip: a session is a
                     // chat (Linux for its terminal), a machine's tab a terminal.
@@ -2026,7 +2045,8 @@ struct RemoteToolbarBar: View {
                             onReboot: { onReboot(entry.id) },
                             onTrace: { onTrace(entry.id) },
                             onDetach: { onDetach(entry.id) },
-                            onDetails: onDetails.map { f in { f(entry.id) } })
+                            onDetails: onDetails.map { f in { f(entry.id) } },
+                            ip: entry.model.ipAddress)
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserOpenWorkspaces.contains(entry.id)) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
@@ -2108,6 +2128,10 @@ final class RemoteRoomBackend: RoomStageBackend {
 
     func wake(_ s: AgentSession, with text: String) {
         window?.controller.sessionCommand(s.id, "resume", body: ["message": text])
+    }
+
+    func restingTranscript(for s: AgentSession, ended: Bool) async -> Data? {
+        await window?.controller.fetchSessionTranscript(s.id)
     }
 
     func setLayout(_ room: UUID, _ layout: String) {
@@ -2218,7 +2242,7 @@ final class RemoteHostWindow: NSWindow {
     private var sidebarResizeHandle: SidebarResizeHandle?
     private static let sidebarMinWidth: CGFloat = 160
     private static let sidebarMaxWidth: CGFloat = 520
-    private static let sidebarDefaultWidth: CGFloat = 240
+    private static let sidebarDefaultWidth: CGFloat = 264
     private static let sidebarWidthKey = "ac.remote.sidebarWidth"
     // Collapse-to-rail (mirrors the local window): dragging the handle below
     // `sidebarMinWidth` snaps to a hierarchy-less icon rail; dragging back past

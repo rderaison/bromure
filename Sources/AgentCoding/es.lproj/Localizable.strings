@@ -2645,3 +2645,45 @@
 "1 email" = "1 correo";
 "1 name" = "1 nombre";
 "1 phone number" = "1 número de teléfono";
+
+/* Added 2026-09-25: main window pass */
+"%d sessions from removed machines" = "%d sesiones de máquinas eliminadas";
+"1 session from a removed machine" = "1 sesión de una máquina eliminada";
+"Add to Room" = "Añadir a la sala";
+"Copy IP Address (%@)" = "Copiar dirección IP (%@)";
+"Finished" = "Terminada";
+"Finished. Your next message picks it up from here." = "Terminada. Tu próximo mensaje la retoma desde aquí.";
+"Not running — starts with your next message" = "Apagada: arranca con tu próximo mensaje";
+"Paused — your next message picks it up" = "En pausa: tu próximo mensaje la retoma";
+"Paused. Your next message picks it up from here." = "En pausa. Tu próximo mensaje la retoma desde aquí.";
+"Their machines are gone — delete these conversations" = "Sus máquinas ya no existen: eliminar estas conversaciones";
+"a message picks it up" = "un mensaje la retoma";
+
+/* Added 2026-09-25: activity lines */
+"%d commands" = "%d comandos";
+"%d edits" = "%d ediciones";
+"%d failed" = "%d fallidos";
+"%d files read" = "%d archivos leídos";
+"%d searches" = "%d búsquedas";
+"%d subagents" = "%d subagentes";
+"%d tool calls" = "%d llamadas a herramientas";
+"%d web pages" = "%d páginas web";
+"1 command" = "1 comando";
+"1 edit" = "1 edición";
+"1 failed" = "1 fallido";
+"1 file read" = "1 archivo leído";
+"1 search" = "1 búsqueda";
+"1 subagent" = "1 subagente";
+"1 tool call" = "1 llamada a herramienta";
+"1 web page" = "1 página web";
+"Delegating %@" = "Delegando %@";
+"Editing %@" = "Editando %@";
+"Fetching %@" = "Obteniendo %@";
+"Hide the details" = "Ocultar los detalles";
+"Reading %@" = "Leyendo %@";
+"Running %@" = "Ejecutando %@";
+"Searching %@" = "Buscando %@";
+"Show what the agent did" = "Ver lo que hizo el agente";
+"Thinking…" = "Pensando…";
+"Thought" = "Pensó";
+"Using %@" = "Usando %@";

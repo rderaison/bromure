@@ -495,15 +495,18 @@ struct SessionHeaderView: View {
                         .lineLimit(1)
                     }
                     Spacer(minLength: 8)
-                    // Picking the conversation back up is one quiet glyph; the
-                    // composer below says the rest.
+                    // Picking the conversation back up, said in words.
                     if !gone, bucket == .ended || bucket == .asleep {
                         Button {
                             actions.resume(s.id)
                         } label: {
-                            Image(systemName: "play.circle.fill")
-                                .font(.system(size: 20))
-                                .foregroundStyle(Color.accentColor)
+                            Label(NSLocalizedString("Resume", comment: "session header"), systemImage: "play.fill")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .foregroundStyle(.white)
+                                .background(Capsule().fill(Color.accentColor.gradient))
+                                .shadow(color: Color.accentColor.opacity(0.35), radius: 6, y: 2)
                         }
                         .buttonStyle(.plain)
                         .help(bucket == .asleep
@@ -716,14 +719,14 @@ struct SessionRestView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 6) {
                             Image(systemName: s.isArchived ? "archivebox"
-                                  : bucket == .asleep ? "moon.zzz" : "flag.checkered")
+                                  : bucket == .asleep ? "pause.circle" : "checkmark.circle")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                             Text(s.isArchived
                                  ? NSLocalizedString("Archived. Your next message brings it back and carries on from here.", comment: "session rest")
                                  : bucket == .asleep
-                                 ? NSLocalizedString("Asleep. Your next message wakes it up and carries on from here.", comment: "session rest")
-                                 : NSLocalizedString("This session ended. Your next message carries on from here.", comment: "session rest"))
+                                 ? NSLocalizedString("Paused. Your next message picks it up from here.", comment: "session rest")
+                                 : NSLocalizedString("Finished. Your next message picks it up from here.", comment: "session rest"))
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                             Spacer(minLength: 0)
@@ -800,7 +803,7 @@ struct SessionRestView: View {
             }
         case .loaded(let items):
             LazyVStack(alignment: .leading, spacing: 14) {
-                ForEach(items) { TranscriptItemView(item: $0) }
+                TranscriptRowsView(items: items)
             }
         }
     }

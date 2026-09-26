@@ -148,4 +148,70 @@ struct SessionTitleTests {
         #expect(SessionHome.distinctTitle(b, among: [a, b], in: model) == "Delegation MCP tool request · @parent")
         #expect(SessionHome.distinctTitle(a, among: [a], in: model) == "Delegation MCP tool request")
     }
+
+    @Test("A folder named after the title doesn't tell twins apart")
+    func folderEcho() {
+        #expect(SessionHome.folderEchoesTitle("hello-260920-1412", "Hello"))
+        #expect(SessionHome.folderEchoesTitle("fix-login-redirect", "Fix login redirect loop on staging"))
+        #expect(!SessionHome.folderEchoesTitle("dtest-peer", "Delegation MCP tool request"))
+        let model = SessionListModel()
+        let ws = UUID()
+        let a = AgentSession(profileID: ws, tool: .claude, title: "Hello", cwd: "~/hello-260920-1412")
+        let b = AgentSession(profileID: ws, tool: .claude, title: "Hello", cwd: "~/hello-260921-0900")
+        let t = SessionHome.distinctTitle(a, among: [a, b], in: model)
+        #expect(t.hasPrefix("Hello · ") && !t.contains("260920"))
+    }
+
+    @Test("Titles cut from the first message are redone; renamed ones stay")
+    func retitle() {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("sessions-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = AgentSessionStore(fileURL: url)
+        let ws = UUID()
+        var cut = AgentSession(profileID: ws, tool: .claude, title: "You are a test parent. Reply with exactly the word r...")
+        cut.openingMessage = "You are a test parent. Reply with exactly the word ready, then stop."
+        var mine = AgentSession(profileID: ws, tool: .claude, title: "You are a test")
+        mine.openingMessage = "You are a test parent. Reply with exactly the word ready."
+        mine.userTitled = true
+        store.upsert(cut)
+        store.upsert(mine)
+        #expect(store.retitleFromOpeningMessages() == 1)
+        #expect(store.session(cut.id)?.title == "You are a test parent")
+        #expect(store.session(mine.id)?.title == "You are a test")
+    }
+}
+
+@Suite("Transcript activity lines")
+struct TranscriptActivityTests {
+    private func item(_ id: Int, _ k: TranscriptItem.Kind) -> TranscriptItem { TranscriptItem(id: id, kind: k, timestamp: nil) }
+
+    @Test("Runs of tool calls and thinking fold between messages")
+    func grouping() {
+        let rows = TranscriptRow.rows([
+            item(1, .userText("go")),
+            item(2, .thinking("hmm")),
+            item(3, .toolUse(name: "Bash", summary: "ls", detail: "")),
+            item(4, .toolResult(tool: "Bash", content: "a", isError: false)),
+            item(5, .assistantText("done")),
+            item(6, .toolUse(name: "Read", summary: "x.swift", detail: "")),
+        ])
+        #expect(rows.map(\.id) == [1, 2, 5, 6])
+        if case .activity(let run) = rows[1] { #expect(run.count == 3) } else { Issue.record("not folded") }
+    }
+
+    @Test("The line counts by kind; one step says what it was; failures show")
+    func summary() {
+        let many = ActivitySummary.line([
+            item(1, .toolUse(name: "Bash", summary: "npm test", detail: "")),
+            item(2, .toolResult(tool: "Bash", content: "", isError: true)),
+            item(3, .toolUse(name: "Read", summary: "a", detail: "")),
+            item(4, .toolUse(name: "Read", summary: "b", detail: "")),
+            item(5, .toolUse(name: "mcp__delegation__request", summary: "", detail: "")),
+        ])
+        #expect(many.text == "1 command · 2 files read · 1 subagent")
+        #expect(many.failures == 1)
+        let one = ActivitySummary.line([item(1, .thinking("…")), item(2, .toolUse(name: "Bash", summary: "npm test", detail: ""))])
+        #expect(one.text == "Thought · Bash npm test")
+        #expect(ActivitySummary.current([item(1, .toolUse(name: "Bash", summary: "npm test", detail: ""))]) == "Running npm test…")
+    }
 }

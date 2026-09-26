@@ -226,6 +226,32 @@ final class AgentSessionStore {
                 .appendingPathComponent("sessions.json")
         }
         load()
+        // Once: sessions named by cutting their first message (before the
+        // title rule) get a real title. Renamed ones are left alone.
+        let key = "sessions.retitled.v1"
+        if !UserDefaults.standard.bool(forKey: key) {
+            UserDefaults.standard.set(true, forKey: key)
+            if retitleFromOpeningMessages() > 0 { save() }
+        }
+    }
+
+    /// Re-title sessions whose title is just their opening message cut
+    /// short (never renamed by the user). Returns how many changed.
+    @discardableResult
+    func retitleFromOpeningMessages() -> Int {
+        var n = 0
+        for i in sessions.indices where sessions[i].userTitled != true {
+            guard let msg = sessions[i].openingMessage, !msg.isEmpty else { continue }
+            let title = sessions[i].title
+            let bare = title.trimmingCharacters(in: CharacterSet(charactersIn: "….").union(.whitespaces))
+            let first = msg.split(whereSeparator: \.isNewline).first.map(String.init) ?? msg
+            guard bare.count >= 3, first.lowercased().hasPrefix(bare.lowercased()) else { continue }
+            let better = AgentSession.title(fromMessage: msg)
+            guard !better.isEmpty, better != title else { continue }
+            sessions[i].title = better
+            n += 1
+        }
+        return n
     }
 
     init(mirror: Bool) {
@@ -725,8 +751,9 @@ enum SessionBucket: Int, CaseIterable, Identifiable {
         case .needsYou: return NSLocalizedString("Needs you", comment: "session bucket")
         case .working:  return NSLocalizedString("Working", comment: "session bucket")
         case .idle:     return NSLocalizedString("Ready", comment: "session bucket")
-        case .asleep:   return NSLocalizedString("Asleep", comment: "session bucket")
-        case .ended:    return NSLocalizedString("Ended", comment: "session bucket")
+        // Both pick up again with a message: the words say how they stopped.
+        case .asleep:   return NSLocalizedString("Paused", comment: "session bucket")
+        case .ended:    return NSLocalizedString("Finished", comment: "session bucket")
         }
     }
 
@@ -908,12 +935,28 @@ enum SessionHome {
     /// its machine ("Delegation MCP tool request · dtest-peer").
     @MainActor
     static func distinctTitle(_ s: AgentSession, among: [AgentSession], in model: SessionListModel) -> String {
-        guard among.contains(where: { $0.id != s.id && $0.title == s.title && !$0.isDeleted }) else { return s.title }
+        let twins = among.filter { $0.id != s.id && $0.title == s.title && !$0.isDeleted }
+        guard !twins.isEmpty else { return s.title }
         if let nick = s.nickname, !nick.isEmpty { return s.title + " · @" + nick }
         let folder = (s.cwd as NSString).lastPathComponent
-        if !folder.isEmpty, folder != "~", folder != "ubuntu" { return s.title + " · " + folder }
-        if let ws = model.profileRows.first(where: { $0.id == s.profileID })?.name { return s.title + " · " + ws }
-        return s.title
+        if !folder.isEmpty, folder != "~", folder != "ubuntu", !folderEchoesTitle(folder, s.title) {
+            return s.title + " · " + folder
+        }
+        // The machine, when that's what differs; else when it started.
+        if let ws = model.profileRows.first(where: { $0.id == s.profileID })?.name,
+           !twins.allSatisfy({ $0.profileID == s.profileID }) {
+            return s.title + " · " + ws
+        }
+        return s.title + " · " + s.createdAt.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+    }
+
+    /// A folder made from the title ("hello-260920-1412" for "Hello") says
+    /// nothing the title doesn't.
+    static func folderEchoesTitle(_ folder: String, _ title: String) -> Bool {
+        func squash(_ s: String) -> String { s.lowercased().filter { $0.isLetter } }
+        let f = squash(folder), t = squash(title)
+        guard !f.isEmpty, !t.isEmpty else { return false }
+        return f.hasPrefix(String(t.prefix(12))) || t.hasPrefix(f)
     }
 
     /// One line under the title.
@@ -949,11 +992,11 @@ enum SessionHome {
             if ws == .booting || (ws == .running && attached) {
                 return NSLocalizedString("Waking up…", comment: "session status")
             }
-            return NSLocalizedString("Asleep", comment: "session status")
+            return NSLocalizedString("Paused", comment: "session status")
         case .ended:
             return s.isArchived
                 ? NSLocalizedString("Archived", comment: "session status")
-                : NSLocalizedString("Ended", comment: "session status")
+                : NSLocalizedString("Finished", comment: "session status")
         }
     }
 
@@ -1436,70 +1479,62 @@ struct SessionRowView: View {
     @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 9) {
-            if depth > 0 {
-                Image(systemName: "arrow.turn.down.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-            }
-            AgentAvatar(tool: session.tool, size: 26, status: dot)
-                .opacity(session.hasEnded ? 0.55 : 1)
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 10) {
+            // The machine is the ring's colour (its name in the tooltip):
+            // the row's width goes to the title, not to a repeated name.
+            AgentAvatar(tool: session.tool, size: 28, status: dot)
+                .opacity(session.hasEnded ? 0.6 : 1)
+                .padding(2)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(workspaceName.isEmpty ? Color.clear : Color(hex: accentHex).opacity(0.85),
+                                      lineWidth: 1.5))
+                .help(workspaceName)
+            VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(title ?? session.title)
                         .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(session.hasEnded && !selected ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Spacer(minLength: 0)
                     if let when {
                         Text(when)
-                            .font(.system(size: 10.5).monospacedDigit())
+                            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
                             .foregroundStyle(.tertiary)
                     }
                 }
-                HStack(spacing: 4) {
+                HStack(spacing: 5) {
                     if let nick = session.nickname, !nick.isEmpty {
                         Text("@" + nick)
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .foregroundStyle(Color.accentColor)
                             .lineLimit(1)
-                        Text("·").foregroundStyle(.tertiary)
-                    }
-                    if !workspaceName.isEmpty {
-                        RoundedRectangle(cornerRadius: 1.5)
-                            .fill(Color(hex: accentHex))
-                            .frame(width: 6, height: 6)
-                        Text(workspaceName)
-                        Text("·").foregroundStyle(.tertiary)
+                            .layoutPriority(1)
                     }
                     Text(statusLine)
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                .font(.system(size: 11))
+                .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.leading, 10 + CGFloat(min(depth, 3)) * 14)
-        .padding(.trailing, 8)
-        .frame(height: 44)
-        .background(RoundedRectangle(cornerRadius: 7)
-            .fill(selected ? Color.acSelection
-                           : (hovering ? Color.primary.opacity(0.04) : .clear)))
-        .overlay(alignment: .leading) {
-            if selected {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.accentColor)
-                    .frame(width: 3)
-                    .padding(.vertical, 9)
             }
         }
-        .contentShape(Rectangle())
+        .padding(.leading, 8 + CGFloat(min(depth, 3)) * 16)
+        .padding(.trailing, 10)
+        .frame(height: 48)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(selected ? Color.accentColor.opacity(0.16)
+                               : (hovering ? Color.primary.opacity(0.05) : .clear)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(selected ? Color.accentColor.opacity(0.35) : .clear, lineWidth: 1))
+        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .opacity(gone ? 0.5 : 1)
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 
@@ -1597,12 +1632,13 @@ struct RoomRowView: View {
         let tint = Color(hex: room.colorHex)
         HStack(spacing: 9) {
             ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(tint.gradient)
-                    .frame(width: 26, height: 26)
+                    .frame(width: 30, height: 30)
                     .overlay(Image(systemName: "square.grid.2x2.fill")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(.white))
+                    .shadow(color: tint.opacity(0.35), radius: 3, y: 1)
                 if let dot {
                     Circle()
                         .fill(dot == .needsInput ? SessionBucket.needsYou.tint
@@ -1639,24 +1675,14 @@ struct RoomRowView: View {
         }
         .padding(.leading, 10)
         .padding(.trailing, 8)
-        .frame(height: 44)
-        .background(RoundedRectangle(cornerRadius: 7)
-            .fill(selected ? Color.acSelection
-                           : (hovering ? Color.primary.opacity(0.04) : .clear)))
-        .overlay {
-            if dropTargeted {
-                RoundedRectangle(cornerRadius: 7).strokeBorder(tint, lineWidth: 2)
-            }
-        }
-        .overlay(alignment: .leading) {
-            if selected {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(tint)
-                    .frame(width: 3)
-                    .padding(.vertical, 9)
-            }
-        }
-        .contentShape(Rectangle())
+        .frame(height: 48)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous)
+            .fill(selected ? tint.opacity(0.16)
+                           : (hovering ? Color.primary.opacity(0.05) : .clear)))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+            .strokeBorder(dropTargeted ? tint : (selected ? tint.opacity(0.35) : .clear),
+                          lineWidth: dropTargeted ? 2 : 1))
+        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }
         .help(NSLocalizedString("Open the room: all its sessions side by side, with its own Switchboard", comment: "room row"))
@@ -1728,6 +1754,9 @@ struct SessionSectionsView: View {
         var withSession: UUID?
     }
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
+    /// Opened for a moment because the selection went into it (not saved:
+    /// the fold stays closed next time).
+    @State private var archivedRevealed = false
     /// The Ended group, folded unless opened (or searched).
     @AppStorage("sessions.endedExpanded") private var endedExpanded = false
     /// The session a "New worktree…" sheet is open for.
@@ -1816,15 +1845,20 @@ struct SessionSectionsView: View {
                 // — and once, by itself, when the selection moves into it
                 // (see `revealSelectedArchived`), so the caret still folds
                 // it away with an archived session on stage.
-                let openArchived = archivedExpanded || !filter.isEmpty
+                let openArchived = archivedExpanded || archivedRevealed || !filter.isEmpty
                 SidebarSectionHeader(title: NSLocalizedString("Archived", comment: "sidebar section"),
                                      expanded: openArchived,
                                      count: put.count + putRooms.count,
                                      help: NSLocalizedString("Conversations you put away — still readable, back with one message", comment: "sidebar"),
-                                     onTitle: { withAnimation(.easeInOut(duration: 0.15)) { archivedExpanded.toggle() } })
+                                     onTitle: { withAnimation(.easeInOut(duration: 0.15)) {
+                                         if archivedRevealed { archivedRevealed = false; archivedExpanded = false }
+                                         else { archivedExpanded.toggle() }
+                                     } })
                 if openArchived {
                     ForEach(putRooms) { roomBlock($0, SessionHome.archived(matching)) }
-                    ForEach(put) { row($0) }
+                    let orphans = put.filter { SessionHome.isGone($0, in: model) }
+                    ForEach(put.filter { !SessionHome.isGone($0, in: model) }) { row($0) }
+                    if !orphans.isEmpty { orphanCleanup(orphans) }
                 }
             }
         }
@@ -1856,9 +1890,38 @@ struct SessionSectionsView: View {
     /// its row is on screen. One-shot — folding it back by hand sticks
     /// until the selection moves into the fold again.
     private func revealSelectedArchived(_ id: UUID?) {
-        guard let id, !archivedExpanded,
-              let s = store.session(id), s.isArchived, !s.isDeleted else { return }
-        withAnimation(.easeInOut(duration: 0.15)) { archivedExpanded = true }
+        guard let id, let s = store.session(id), s.isArchived, !s.isDeleted else {
+            // The selection left the fold: it closes again if it was only revealed.
+            if archivedRevealed { withAnimation(.easeInOut(duration: 0.15)) { archivedRevealed = false } }
+            return
+        }
+        guard !archivedExpanded else { return }
+        withAnimation(.easeInOut(duration: 0.15)) { archivedRevealed = true }
+    }
+
+    /// Sessions whose machine is gone: nothing to reopen them on. One line
+    /// offers to clear them instead of a column of ghosts.
+    private func orphanCleanup(_ orphans: [AgentSession]) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "trash")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.tertiary)
+            Text(orphans.count == 1
+                 ? NSLocalizedString("1 session from a removed machine", comment: "sidebar cleanup")
+                 : String(format: NSLocalizedString("%d sessions from removed machines", comment: "sidebar cleanup"), orphans.count))
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Button(NSLocalizedString("Delete", comment: "sidebar cleanup")) {
+                for o in orphans { actions.delete(o.id) }
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 11.5, weight: .medium))
+            .help(NSLocalizedString("Their machines are gone — delete these conversations", comment: "sidebar cleanup"))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     /// The list with each delegate placed right under its delegator (as
@@ -1894,7 +1957,7 @@ struct SessionSectionsView: View {
             title: SessionHome.distinctTitle(s, among: store.sessions, in: model))
         .overlay {
             if dropSession == s.id {
-                RoundedRectangle(cornerRadius: 7).strokeBorder(Color.accentColor, lineWidth: 2)
+                RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.accentColor, lineWidth: 2)
                     .allowsHitTesting(false)
             }
         }

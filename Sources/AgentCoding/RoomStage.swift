@@ -58,6 +58,10 @@ protocol RoomStageBackend: AnyObject {
     func setLayout(_ room: UUID, _ layout: String)
     /// A session that isn't running: resume it with this message.
     func wake(_ s: AgentSession, with text: String)
+    /// A stopped session's conversation as last saved (raw transcript), so
+    /// its cell still shows what happened. `ended`: the agent is gone for
+    /// good, so reading the live file can't wake anything.
+    func restingTranscript(for s: AgentSession, ended: Bool) async -> Data?
 }
 
 /// This Mac's rooms: the delegate's stores, chats pinned to the local panes.
@@ -91,6 +95,13 @@ final class LocalRoomBackend: RoomStageBackend {
     func wake(_ s: AgentSession, with text: String) {
         delegate?.agentSessionEngine.resume(s.id, message: text)
     }
+
+    func restingTranscript(for s: AgentSession, ended: Bool) async -> Data? {
+        guard let d = delegate else { return nil }
+        if let cached = d.agentSessionEngine.transcripts.load(s.id), !cached.isEmpty { return cached }
+        guard ended else { return nil }
+        return await d.fetchSessionTranscript(s).map { Data($0.utf8) }
+    }
 }
 
 /// What the room stage shows and does: one chat model per live member
@@ -115,6 +126,9 @@ final class RoomStageController {
     /// Where the last zoom started (stage coordinates), for the shockwave.
     var zoomOrigin: CGPoint = .zero
     private(set) var models: [UUID: BeautifiedSessionModel] = [:]
+    /// Stopped members' last messages (the tail), for their resting cells.
+    private(set) var resting: [UUID: [TranscriptItem]] = [:]
+    @ObservationIgnored private var restingLoading: Set<UUID> = []
     @ObservationIgnored private var modelKeys: [UUID: String] = [:]
     @ObservationIgnored private var timer: Timer?
 
@@ -223,6 +237,23 @@ final class RoomStageController {
         }
         if let z = zoomedID, !members.contains(where: { $0.id == z }) { zoomedID = nil }
         page = min(page, max(0, pages.count - 1))
+        // A member that went live will have more to show when it stops again.
+        for id in models.keys where resting[id] != nil { resting[id] = nil }
+    }
+
+    /// Read a stopped member's conversation once (cached copy first).
+    func loadResting(_ s: AgentSession) {
+        guard resting[s.id] == nil, restingLoading.insert(s.id).inserted else { return }
+        let ended = SessionHome.bucket(for: s, in: listModel) == .ended
+        let agent = s.tool.rawValue
+        Task { @MainActor in
+            let data = await backend.restingTranscript(for: s, ended: ended)
+            let items = await Task.detached(priority: .userInitiated) {
+                data.map { AgentTranscript.parse($0, agent: agent) } ?? []
+            }.value
+            resting[s.id] = Array(items.suffix(40))
+            restingLoading.remove(s.id)
+        }
     }
 
     /// The chat the composer sends to right now (nil: nothing live there).
@@ -419,13 +450,15 @@ struct RoomStageView: View {
             if controller.zoomedID == nil, !controller.members.isEmpty { layoutPicker }
             roomMenu
             Button(action: controller.onNewSession) {
-                Label(NSLocalizedString("New Session", comment: "room stage"), systemImage: "plus")
-                    .font(.system(size: 12, weight: .medium))
+                Label(NSLocalizedString("Add to Room", comment: "room stage"), systemImage: "plus")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(accent.gradient))
+                    .shadow(color: accent.opacity(0.3), radius: 5, y: 2)
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Capsule().fill(Color.primary.opacity(0.06)))
             .help(NSLocalizedString("Start a session in this room", comment: "room stage"))
         }
         .padding(.horizontal, 14)
@@ -537,14 +570,23 @@ struct RoomStageView: View {
                 emptyRoom.frame(width: geo.size.width, height: geo.size.height)
             } else {
                 let page = pages[min(controller.page, pages.count - 1)]
-                let spacing: CGFloat = 10
-                let h = (geo.size.height - spacing * CGFloat(layout.rows + 1)) / CGFloat(layout.rows)
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: spacing), count: layout.cols),
-                          spacing: spacing) {
-                    ForEach(page) { s in
-                        cell(s, zoomed: false)
-                            .frame(height: max(80, h))
-                            .matchedGeometryEffect(id: s.id, in: zoom)
+                let spacing: CGFloat = 12
+                // Rows as filled as the page needs, the last one stretched:
+                // three sessions in 2×2 is two over one, not a hole.
+                let cols = max(1, layout.cols)
+                let rows = stride(from: 0, to: page.count, by: cols).map { Array(page[$0..<min($0 + cols, page.count)]) }
+                let rowCount = max(1, rows.count)
+                let h = (geo.size.height - spacing * CGFloat(rowCount + 1)) / CGFloat(rowCount)
+                VStack(spacing: spacing) {
+                    ForEach(rows.indices, id: \.self) { r in
+                        HStack(spacing: spacing) {
+                            ForEach(rows[r]) { s in
+                                cell(s, zoomed: false)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: max(80, h))
+                                    .matchedGeometryEffect(id: s.id, in: zoom)
+                            }
+                        }
                     }
                 }
                 .padding(spacing)
@@ -622,12 +664,13 @@ struct RoomStageView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .textBackgroundColor)))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12)
-            .strokeBorder(focused ? accent.opacity(addressed ? 1 : 0.45) : Color.primary.opacity(0.08),
-                          lineWidth: focused ? 2 : 1))
-        .shadow(color: .black.opacity(addressed ? 0.16 : 0.05), radius: addressed ? 10 : 3, y: 2)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(nsColor: .textBackgroundColor)))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(focused ? accent.opacity(addressed ? 0.9 : 0.4) : Color.primary.opacity(0.07),
+                          lineWidth: focused ? 1.5 : 1))
+        .shadow(color: (addressed ? accent : .black).opacity(addressed ? 0.22 : 0.06),
+                radius: addressed ? 14 : 5, y: addressed ? 4 : 2)
         .simultaneousGesture(TapGesture().onEnded {
             controller.focus(s.id)
             controller.target = .focused
@@ -643,8 +686,16 @@ struct RoomStageView: View {
             if let nick = s.nickname {
                 Text("@" + nick).font(.system(size: 11, design: .monospaced)).foregroundStyle(accent)
             }
-            Text(SessionHome.statusLine(for: s, in: model))
-                .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+            // Live states as a tinted chip; a stopped cell says it in its bar.
+            let bucket = SessionHome.bucket(for: s, in: model)
+            if controller.models[s.id] != nil, bucket == .working || bucket == .needsYou {
+                Text(SessionHome.statusLine(for: s, in: model))
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(bucket.tint)
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(Capsule().fill(bucket.tint.opacity(0.14)))
+                    .lineLimit(1)
+            }
             Spacer(minLength: 4)
             Menu {
                 Button(NSLocalizedString("Open as Session", comment: "room cell")) { controller.onOpenSession(s.id) }
@@ -679,33 +730,107 @@ struct RoomStageView: View {
         }
     }
 
+    /// A stopped member: its conversation, faded, under a floating bar
+    /// that says so and picks it back up.
+    @ViewBuilder
     private func restingCell(_ s: AgentSession) -> some View {
         let bucket = SessionHome.bucket(for: s, in: controller.listModel)
-        return VStack(spacing: 10) {
-            if s.isLaunching {
+        if s.isLaunching {
+            VStack(spacing: 10) {
                 ProgressView()
                 Text(NSLocalizedString("Starting…", comment: "room cell")).foregroundStyle(.secondary)
-            } else {
-                Image(systemName: bucket == .ended ? "stop.circle" : "moon.zzz")
-                    .font(.system(size: 26, weight: .light)).foregroundStyle(.tertiary)
-                Text(bucket.title).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
-                Button(NSLocalizedString("Resume", comment: "room cell")) { controller.onResume(s.id) }
             }
+        } else {
+            ZStack(alignment: .bottom) {
+                Group {
+                    if let items = controller.resting[s.id], !items.isEmpty {
+                        // Eager (a tail of 40 at most): the bottom anchor
+                        // lands exactly, the last line clear of the bar.
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 12) {
+                                TranscriptRowsView(items: items)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.top, 12)
+                            .padding(.bottom, 76)
+                        }
+                        .defaultScrollAnchor(.bottom)
+                    } else if let msg = s.openingMessage, !msg.isEmpty {
+                        VStack(alignment: .leading) {
+                            TranscriptItemView(item: TranscriptItem(id: 0, kind: .userText(msg), timestamp: nil))
+                            Spacer(minLength: 0)
+                        }
+                        .padding(16)
+                    } else {
+                        AgentAvatar(tool: s.tool, size: 34).opacity(0.18)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+                .opacity(0.55)
+                .saturation(0.3)
+                LinearGradient(colors: [Color(nsColor: .textBackgroundColor).opacity(0),
+                                        Color(nsColor: .textBackgroundColor)],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(height: 70)
+                    .allowsHitTesting(false)
+                restingBar(s, bucket)
+            }
+            .onAppear { controller.loadResting(s) }
         }
+    }
+
+    private func restingBar(_ s: AgentSession, _ bucket: SessionBucket) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: bucket == .ended ? "checkmark.circle.fill" : "pause.circle.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+            Text(bucket.title)
+                .font(.system(size: 12, weight: .semibold))
+            Text(NSLocalizedString("a message picks it up", comment: "room cell"))
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            Button {
+                controller.onResume(s.id)
+            } label: {
+                Label(NSLocalizedString("Resume", comment: "room cell"), systemImage: "play.fill")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(Capsule().fill(accent.gradient))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.leading, 12).padding(.trailing, 5).padding(.vertical, 5)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+        .padding(12)
     }
 
     // MARK: Switchboard dock + the one composer
 
     private var dock: some View {
         let sb = controller.switchboard
+        let paused = sb.map { controller.models[$0.id] == nil && !$0.isLaunching } ?? false
         return VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "wand.and.rays").foregroundStyle(accent)
                 Text(NSLocalizedString("Switchboard", comment: "room dock"))
                     .font(.system(size: 12, weight: .semibold))
-                Text(NSLocalizedString("keeps track of this room's sessions", comment: "room dock"))
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                Spacer()
+                if paused, let sb {
+                    // Paused: said in this one line, no second strip.
+                    Text(NSLocalizedString("Paused — your next message picks it up", comment: "room dock"))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button(NSLocalizedString("Resume", comment: "room cell")) { controller.onResume(sb.id) }
+                        .controlSize(.small)
+                } else {
+                    Text(NSLocalizedString("keeps track of this room's sessions", comment: "room dock"))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                }
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         if controller.zoomedID == nil { dockOpen.toggle() } else { dockPeek.toggle() }
@@ -731,19 +856,8 @@ struct RoomStageView: View {
                         if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
                     }
             }
-            if dockShown, let sb, controller.models[sb.id] == nil, !sb.isLaunching {
-                // Asleep: one quiet line, not a big empty panel — the
-                // composer below wakes it.
-                HStack(spacing: 8) {
-                    Image(systemName: "moon.zzz").foregroundStyle(.tertiary)
-                    Text(NSLocalizedString("Asleep — your next message wakes it", comment: "room dock"))
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                    Spacer()
-                    Button(NSLocalizedString("Resume", comment: "room cell")) { controller.onResume(sb.id) }
-                        .controlSize(.small)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
+            if paused {
+                EmptyView()   // the header line says it all
             } else if dockShown {
                 Group {
                     if zoomMoving != nil {
@@ -760,7 +874,7 @@ struct RoomStageView: View {
                     } else if let sb {
                         // Asleep or ended (its machine went down): wake it.
                         VStack(spacing: 8) {
-                            Image(systemName: "moon.zzz").font(.system(size: 22, weight: .light))
+                            Image(systemName: "pause.circle").font(.system(size: 22, weight: .light))
                                 .foregroundStyle(.tertiary)
                             Button(NSLocalizedString("Resume", comment: "room cell")) { controller.onResume(sb.id) }
                         }

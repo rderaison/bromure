@@ -2643,3 +2643,45 @@
 "1 email" = "1 个邮箱";
 "1 name" = "1 个姓名";
 "1 phone number" = "1 个电话号码";
+
+/* Added 2026-09-25: main window pass */
+"%d sessions from removed machines" = "%d 个来自已移除机器的会话";
+"1 session from a removed machine" = "1 个来自已移除机器的会话";
+"Add to Room" = "添加到房间";
+"Copy IP Address (%@)" = "拷贝 IP 地址（%@）";
+"Finished" = "已完成";
+"Finished. Your next message picks it up from here." = "已完成。你的下一条消息会从这里继续。";
+"Not running — starts with your next message" = "未运行 — 下一条消息会启动它";
+"Paused — your next message picks it up" = "已暂停 — 下一条消息会继续";
+"Paused. Your next message picks it up from here." = "已暂停。你的下一条消息会从这里继续。";
+"Their machines are gone — delete these conversations" = "它们的机器已不存在 — 删除这些对话";
+"a message picks it up" = "发条消息即可继续";
+
+/* Added 2026-09-25: activity lines */
+"%d commands" = "%d 条命令";
+"%d edits" = "%d 处编辑";
+"%d failed" = "%d 个失败";
+"%d files read" = "读取 %d 个文件";
+"%d searches" = "%d 次搜索";
+"%d subagents" = "%d 个子代理";
+"%d tool calls" = "%d 次工具调用";
+"%d web pages" = "%d 个网页";
+"1 command" = "1 条命令";
+"1 edit" = "1 处编辑";
+"1 failed" = "1 个失败";
+"1 file read" = "读取 1 个文件";
+"1 search" = "1 次搜索";
+"1 subagent" = "1 个子代理";
+"1 tool call" = "1 次工具调用";
+"1 web page" = "1 个网页";
+"Delegating %@" = "正在委派 %@";
+"Editing %@" = "正在编辑 %@";
+"Fetching %@" = "正在获取 %@";
+"Hide the details" = "隐藏详情";
+"Reading %@" = "正在读取 %@";
+"Running %@" = "正在运行 %@";
+"Searching %@" = "正在搜索 %@";
+"Show what the agent did" = "查看代理做了什么";
+"Thinking…" = "正在思考…";
+"Thought" = "已思考";
+"Using %@" = "正在使用 %@";

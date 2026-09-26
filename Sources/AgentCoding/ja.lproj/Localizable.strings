@@ -2643,3 +2643,45 @@
 "1 email" = "メール 1 件";
 "1 name" = "氏名 1 件";
 "1 phone number" = "電話番号 1 件";
+
+/* Added 2026-09-25: main window pass */
+"%d sessions from removed machines" = "削除されたマシンのセッション %d 件";
+"1 session from a removed machine" = "削除されたマシンのセッション 1 件";
+"Add to Room" = "ルームに追加";
+"Copy IP Address (%@)" = "IP アドレスをコピー (%@)";
+"Finished" = "完了";
+"Finished. Your next message picks it up from here." = "完了しました。次のメッセージでここから再開します。";
+"Not running — starts with your next message" = "停止中 — 次のメッセージで起動します";
+"Paused — your next message picks it up" = "一時停止中 — 次のメッセージで再開します";
+"Paused. Your next message picks it up from here." = "一時停止中です。次のメッセージでここから再開します。";
+"Their machines are gone — delete these conversations" = "マシンはもう存在しません — これらの会話を削除";
+"a message picks it up" = "メッセージで再開";
+
+/* Added 2026-09-25: activity lines */
+"%d commands" = "コマンド %d 件";
+"%d edits" = "編集 %d 件";
+"%d failed" = "%d 件失敗";
+"%d files read" = "ファイル読み取り %d 件";
+"%d searches" = "検索 %d 件";
+"%d subagents" = "サブエージェント %d 件";
+"%d tool calls" = "ツール呼び出し %d 件";
+"%d web pages" = "Web ページ %d 件";
+"1 command" = "コマンド 1 件";
+"1 edit" = "編集 1 件";
+"1 failed" = "1 件失敗";
+"1 file read" = "ファイル読み取り 1 件";
+"1 search" = "検索 1 件";
+"1 subagent" = "サブエージェント 1 件";
+"1 tool call" = "ツール呼び出し 1 件";
+"1 web page" = "Web ページ 1 件";
+"Delegating %@" = "%@ を委任中";
+"Editing %@" = "%@ を編集中";
+"Fetching %@" = "%@ を取得中";
+"Hide the details" = "詳細を隠す";
+"Reading %@" = "%@ を読み取り中";
+"Running %@" = "%@ を実行中";
+"Searching %@" = "%@ を検索中";
+"Show what the agent did" = "エージェントの作業内容を表示";
+"Thinking…" = "考え中…";
+"Thought" = "思考";
+"Using %@" = "%@ を使用中";

@@ -962,7 +962,7 @@ private struct TranscriptReaderView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(answeredItems) { TranscriptItemView(item: $0) }
+                        TranscriptRowsView(items: answeredItems)
                         // The question the agent is asking RIGHT NOW gets the
                         // interactive card — pick the options here and Submit
                         // sends the picker's key sequence into the session, the

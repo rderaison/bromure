@@ -2646,3 +2646,45 @@
 "1 email" = "1 個電子郵件";
 "1 name" = "1 個姓名";
 "1 phone number" = "1 個電話號碼";
+
+/* Added 2026-09-25: main window pass */
+"%d sessions from removed machines" = "%d 個來自已移除機器的工作階段";
+"1 session from a removed machine" = "1 個來自已移除機器的工作階段";
+"Add to Room" = "加入房間";
+"Copy IP Address (%@)" = "拷貝 IP 位址（%@）";
+"Finished" = "已完成";
+"Finished. Your next message picks it up from here." = "已完成。你的下一則訊息會從這裡繼續。";
+"Not running — starts with your next message" = "未執行 — 下一則訊息會啟動它";
+"Paused — your next message picks it up" = "已暫停 — 下一則訊息會繼續";
+"Paused. Your next message picks it up from here." = "已暫停。你的下一則訊息會從這裡繼續。";
+"Their machines are gone — delete these conversations" = "它們的機器已不存在 — 刪除這些對話";
+"a message picks it up" = "傳個訊息即可繼續";
+
+/* Added 2026-09-25: activity lines */
+"%d commands" = "%d 個指令";
+"%d edits" = "%d 處編輯";
+"%d failed" = "%d 個失敗";
+"%d files read" = "讀取 %d 個檔案";
+"%d searches" = "%d 次搜尋";
+"%d subagents" = "%d 個子代理程式";
+"%d tool calls" = "%d 次工具呼叫";
+"%d web pages" = "%d 個網頁";
+"1 command" = "1 個指令";
+"1 edit" = "1 處編輯";
+"1 failed" = "1 個失敗";
+"1 file read" = "讀取 1 個檔案";
+"1 search" = "1 次搜尋";
+"1 subagent" = "1 個子代理程式";
+"1 tool call" = "1 次工具呼叫";
+"1 web page" = "1 個網頁";
+"Delegating %@" = "正在委派 %@";
+"Editing %@" = "正在編輯 %@";
+"Fetching %@" = "正在取得 %@";
+"Hide the details" = "隱藏詳細資訊";
+"Reading %@" = "正在讀取 %@";
+"Running %@" = "正在執行 %@";
+"Searching %@" = "正在搜尋 %@";
+"Show what the agent did" = "查看代理程式做了什麼";
+"Thinking…" = "正在思考…";
+"Thought" = "已思考";
+"Using %@" = "正在使用 %@";

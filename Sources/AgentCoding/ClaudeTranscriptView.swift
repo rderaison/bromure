@@ -1006,7 +1006,7 @@ struct ClaudeTranscriptPane: View {
     private func transcript(_ items: [TranscriptItem]) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
-                ForEach(items) { TranscriptItemView(item: $0) }
+                TranscriptRowsView(items: items)
             }
             .padding(18)
             .frame(maxWidth: 760, alignment: .leading)

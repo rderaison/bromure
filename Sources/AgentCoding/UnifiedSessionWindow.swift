@@ -245,7 +245,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Below this, a drag collapses to the rail; above it, expands back.
     private static let sidebarMinWidth: CGFloat = 100
     private static let sidebarMaxWidth: CGFloat = 600
-    private static let sidebarDefaultWidth: CGFloat = 220
+    private static let sidebarDefaultWidth: CGFloat = 264
     private static let sidebarRailWidth: CGFloat = 44
     private static let sidebarWidthKey = "ac.sidebarWidth"
 
@@ -713,7 +713,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         root.addSubview(divider)
         root.addSubview(stage)
         root.addSubview(resizeHandle)   // above the divider so it gets the drag
-        let stored = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
+        var stored = UserDefaults.standard.double(forKey: Self.sidebarWidthKey)
+        // Once: rows now give the title the room, so a sidebar sized for
+        // the old layout widens to the new default.
+        if !UserDefaults.standard.bool(forKey: "ac.sidebarWidth.v2") {
+            UserDefaults.standard.set(true, forKey: "ac.sidebarWidth.v2")
+            if stored >= Self.sidebarMinWidth, stored < Self.sidebarDefaultWidth {
+                stored = Self.sidebarDefaultWidth
+                UserDefaults.standard.set(stored, forKey: Self.sidebarWidthKey)
+            }
+        }
+        // Once: the Archived fold used to stay open after revealing one
+        // selection; start closed again.
+        if !UserDefaults.standard.bool(forKey: "sessions.archivedFold.v3") {
+            UserDefaults.standard.set(true, forKey: "sessions.archivedFold.v3")
+            UserDefaults.standard.set(false, forKey: "sessions.archivedExpanded")
+        }
         let initialWidth = stored >= Self.sidebarMinWidth ? stored : Self.sidebarDefaultWidth
         expandedSidebarWidth = initialWidth
         let sidebarWidth = sidebarHost.widthAnchor.constraint(equalToConstant: initialWidth)
@@ -4486,13 +4501,35 @@ struct UnifiedToolbarBar: View {
         return sessionForTab(entry.id, tab.index) != nil
     }
 
+    /// A session whose machine isn't running: its name and colour still
+    /// lead to the settings.
+    private var restingMachine: SessionListModel.ProfileRow? {
+        guard entry == nil, model.sessionsFirst, model.selectedRoomID == nil,
+              model.selectedSessionID != nil, let pid = model.selectedSessionProfileID else { return nil }
+        return model.profileRows.first { $0.id == pid }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
+            if let row = restingMachine {
+                MachineMenu(name: row.name, accentHex: row.accentHex,
+                            onSettings: { onSettings(row.id) },
+                            onReboot: {}, onTrace: {}, onDetach: {},
+                            onDetails: onDetails.map { f in { f(row.id) } },
+                            running: false)
+            }
+            // A room spans machines: nothing machine-specific in its bar —
+            // the browser and Files follow the focused cell.
+            if model.selectedRoomID != nil, entry != nil {
+                HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
+                           active: model.browserPaneOpen) { onToggleBrowser() }
+                HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
+                           active: model.filePaneOpen) { onToggleFilePane() }
+            }
             // The new-session screen belongs to no machine: no controls at all.
-            if let entry, !(model.sessionsFirst && model.newSessionSelected) {
+            if model.selectedRoomID == nil, let entry, !(model.sessionsFirst && model.newSessionSelected) {
                 if showMachineControls {
-                    if let ip = entry.model.ipAddress { ToolbarIP(ip: ip) }
                     if entry.model.streamingActive { StreamingDot() }
                     if let status = entry.model.engineStatus { EngineBadge(status: status) }
                     FusionToggle(model: entry.model) { on in onToggleFusion(entry.id, on) }
@@ -4516,7 +4553,8 @@ struct UnifiedToolbarBar: View {
                             onReboot: { onReboot(entry.id) },
                             onTrace: { onTrace(entry.id) },
                             onDetach: { onDetach(entry.id) },
-                            onDetails: onDetails.map { f in { f(entry.id) } })
+                            onDetails: onDetails.map { f in { f(entry.id) } },
+                            ip: entry.model.ipAddress)
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
                 // The one Files view: the folder's files, git changes, drag
@@ -4540,6 +4578,10 @@ struct MachineMenu: View {
     let onTrace: () -> Void
     let onDetach: () -> Void
     var onDetails: (() -> Void)? = nil
+    /// The machine's address, copied from the menu (no toolbar pill).
+    var ip: String? = nil
+    /// Off or suspended: only what works without it (settings, details).
+    var running = true
     @State private var hovering = false
 
     @State private var anchor = MenuAnchor()
@@ -4548,7 +4590,7 @@ struct MachineMenu: View {
         Button(action: popUp) {
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-                    .fill(Color(hex: accentHex).gradient)
+                    .fill(Color(hex: accentHex).gradient.opacity(running ? 1 : 0.4))
                     .frame(width: 9, height: 9)
                 Text(name)
                     .font(.system(size: 12, weight: .medium))
@@ -4581,9 +4623,26 @@ struct MachineMenu: View {
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
             menu.addItem(item)
         }
+        if !running {
+            let note = NSMenuItem(title: NSLocalizedString("Not running — starts with your next message", comment: "machine menu"),
+                                  action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            menu.addItem(note)
+            menu.addItem(.separator())
+        }
         add(NSLocalizedString("Settings…", comment: "machine menu"), "gearshape", onSettings)
         if let onDetails {
             add(NSLocalizedString("Machine Details", comment: "session menu"), "cpu", onDetails)
+        }
+        if let ip, running {
+            add(String(format: NSLocalizedString("Copy IP Address (%@)", comment: "machine menu"), ip), "network") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(ip, forType: .string)
+            }
+        }
+        guard running else {
+            popUpMenu(menu)
+            return
         }
         menu.addItem(.separator())
         add(NSLocalizedString("Inspect Trace", comment: "machine menu"), "doc.text.magnifyingglass", onTrace)
@@ -4591,6 +4650,10 @@ struct MachineMenu: View {
             "rectangle.portrait.and.arrow.right", onDetach)
         menu.addItem(.separator())
         add(NSLocalizedString("Reboot", comment: "machine menu"), "arrow.clockwise.circle", onReboot)
+        popUpMenu(menu)
+    }
+
+    private func popUpMenu(_ menu: NSMenu) {
         guard let view = anchor.view else {
             if let e = NSApp.currentEvent, let v = e.window?.contentView {
                 menu.popUp(positioning: nil, at: v.convert(e.locationInWindow, from: nil), in: v)

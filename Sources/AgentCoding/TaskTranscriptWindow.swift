@@ -129,7 +129,7 @@ struct TaskTranscriptView: View {
             case .loaded(let items):
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(items) { TranscriptItemView(item: $0) }
+                        TranscriptRowsView(items: items)
                     }
                     .padding(16)
                     .frame(maxWidth: 720, alignment: .leading)

@@ -1405,7 +1405,7 @@ private struct ResizePreview: View, Equatable {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Spacer(minLength: 0)
-            ForEach(items) { TranscriptItemView(item: $0) }
+            TranscriptRowsView(items: items)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
@@ -1800,10 +1800,21 @@ struct BeautifiedSessionView: View {
                         // (pick, then Submit) instead of its static questions.
                         let live = model.pendingQuestionItems
                         let liveIDs = Set(live.map(\.id))
-                        ForEach(visible) { item in
-                            // The consolidated todo is shown pinned above the
-                            // composer, not inline (where it scrolls away).
-                            if !Self.isTodo(item), !liveIDs.contains(item.id) { itemRow(item) }
+                        // The consolidated todo is shown pinned above the
+                        // composer, not inline (where it scrolls away). Tool
+                        // calls and thinking fold into one line per run.
+                        let rows = TranscriptRow.rows(visible.filter { !Self.isTodo($0) && !liveIDs.contains($0.id) })
+                        let liveRun = model.working ? rows.last.flatMap { r -> Int? in
+                            if case .activity = r { return r.id } else { return nil }
+                        } : nil
+                        ForEach(rows) { row in
+                            switch row {
+                            case .item(let item):
+                                itemRow(item)
+                            case .activity(let run):
+                                ActivityGroupView(items: run, live: row.id == liveRun)
+                                    .id(row.id)
+                            }
                         }
                         if !live.isEmpty {
                             let questions = live.compactMap {
@@ -1847,7 +1858,9 @@ struct BeautifiedSessionView: View {
                                             ? { model.startHostSignIn() } : nil)
                                 .id("beautified-failure")
                                 .transition(.opacity)
-                        } else if model.working, model.commandOutput == nil {
+                        } else if model.working, model.commandOutput == nil,
+                                  !(model.items.last.map(TranscriptRow.isActivity) ?? false) {
+                            // A run in progress shows its own step; otherwise the cue.
                             liveCue.id("beautified-thinking")
                         }
                         Color.clear.frame(height: 1).id(Self.tailID)
