@@ -5,26 +5,63 @@ import SwiftUI
 
 // MARK: - Review data
 
-/// What the review window shows for a task branch: the commits it added,
-/// the working-tree status, and the full diff against the parent branch.
+/// What a review window shows: the commits a branch added, the working-tree
+/// status, and the diff against the chosen base. The guest command is
+/// shared by the host (vsock guestExec) and the fat client (tunnel
+/// guestExec) so the two can't drift.
 struct TaskReviewData: Equatable, Sendable {
     var logLines: [String] = []
     var statusLines: [String] = []
     var files: [TaskDiffFile] = []
 
-    /// The guest shell command whose output `parse` reads — shared by the
-    /// host (vsock guestExec) and the fat client (tunnel guestExec) so the
-    /// two can't drift.
-    static func guestCommand(worktreeDir: String, parent: String) -> String {
+    /// What a session's review compares against.
+    enum Base: Hashable, Sendable {
+        /// The working tree against HEAD — edits not committed yet, new
+        /// files included.
+        case uncommitted
+        /// Everything since the branch left `parent` (its merge base),
+        /// committed or not.
+        case branch(String)
+        /// The last commit alone.
+        case lastCommit
+    }
+
+    /// The short commit the diff is against ("" when unknown).
+    var baseRef = ""
+
+    /// The review of a session's folder against `base`. New files the agent
+    /// hasn't added to git yet are shown too (up to 40, under 200 KB each).
+    static func sessionCommand(dir: String, base: Base) -> String {
         func q(_ s: String) -> String {
             "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
         }
-        return """
-        cd \(q(worktreeDir)) || exit 1; echo ===LOG===; \
-        git log --oneline \(q(parent))..HEAD 2>/dev/null | head -50; \
-        echo ===STATUS===; git status --porcelain 2>/dev/null | head -100; \
-        echo ===DIFF===; git diff \(q(parent)) 2>/dev/null | head -c 400000
-        """
+        let setBase: String
+        var withWorktree = true
+        switch base {
+        case .uncommitted: setBase = "b=HEAD"
+        case .branch(let p): setBase = "b=$(git merge-base \(q(p)) HEAD 2>/dev/null || echo \(q(p)))"
+        case .lastCommit: setBase = "b=HEAD~1"; withWorktree = false
+        }
+        let diff = withWorktree
+            ? "{ git diff \"$b\" -- 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null | head -n 40 "
+                + "| while IFS= read -r f; do [ \"$(stat -c%s \"$f\" 2>/dev/null || echo 0)\" -lt 204800 ] "
+                + "&& git diff --no-index -- /dev/null \"$f\"; done; }"
+            : "git diff \"$b\" HEAD -- 2>/dev/null"
+        return "cd \(q(dir)) || exit 1; \(setBase); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
+            + "echo ===LOG===; [ \"$b\" = HEAD ] || git log --oneline \"$b..HEAD\" 2>/dev/null | head -50; "
+            + "echo ===STATUS===; git status --porcelain 2>/dev/null | head -100; "
+            + "echo ===DIFF===; \(diff) | head -c 600000; true"
+    }
+
+    /// A stable fingerprint of a file's diff — "viewed" holds while it
+    /// matches.
+    static func fingerprint(_ file: TaskDiffFile) -> String {
+        var h: UInt64 = 0xcbf29ce484222325
+        for line in file.lines {
+            for b in line.text.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+            h = (h ^ 0x0a) &* 0x100000001b3
+        }
+        return String(h, radix: 16)
     }
 
     /// Split the guest command's marker-delimited output. Tolerant: missing
@@ -35,12 +72,15 @@ struct TaskReviewData: Equatable, Sendable {
         var diffLines: [String] = []
         for line in raw.split(separator: "\n", omittingEmptySubsequences: false) {
             switch line {
+            case "===BASE===":   section = "base"; continue
             case "===LOG===":    section = "log"; continue
             case "===STATUS===": section = "status"; continue
             case "===DIFF===":   section = "diff"; continue
             default: break
             }
             switch section {
+            case "base":
+                if !line.isEmpty, out.baseRef.isEmpty { out.baseRef = String(line) }
             case "log":
                 if !line.isEmpty { out.logLines.append(String(line)) }
             case "status":
@@ -58,15 +98,16 @@ struct TaskReviewData: Equatable, Sendable {
 #if os(macOS)
 // MARK: - Window manager
 
-/// Standalone review windows for Testing cards: the branch's diff against
-/// its parent, a comment thread, and the two ways out — back to In
-/// Progress with feedback, or merge into the parent.
+/// Review windows for Testing cards — the shared review UI (ReviewView) on
+/// the task's branch: its diff against the parent, the plan above it,
+/// comments that go back with "Send Back", and the ways out: merge (into
+/// the parent, squashed, or another branch) or a pull request.
 @MainActor
 final class TaskReviewWindowManager {
     struct Context {
         var store: () -> CodingTaskStore?
         /// Fetch log/status/diff from the guest. nil = workspace unreachable.
-        var fetchReview: (CodingTask) async -> TaskReviewData?
+        var fetchReview: (CodingTask, TaskReviewData.Base) async -> TaskReviewData?
         /// Jump to the task's worktree tab (main window locally, the mirror
         /// stage on a fat client).
         var openTerminal: (CodingTask) -> Void
@@ -88,210 +129,95 @@ final class TaskReviewWindowManager {
         /// (the mirror confirms on the next poll).
         var addComment: (_ taskID: UUID, _ text: String, _ file: String?,
                          _ line: Int?) -> Void
+        /// Take back a draft comment.
+        var removeComment: (_ taskID: UUID, _ commentID: UUID) -> Void
+        /// Mark a file viewed at this state of its diff (nil = not viewed).
+        var setViewed: (_ taskID: UUID, _ path: String, _ fingerprint: String?) -> Void
     }
 
     private let context: Context
-    private var windows: [UUID: NSWindow] = [:]
+    private let host = ReviewWindowHost()
 
     init(context: Context) {
         self.context = context
     }
 
     /// The open window for a task, if any — the E2E ui-shot hook renders it.
-    func window(for taskID: UUID) -> NSWindow? { windows[taskID] }
+    func window(for taskID: UUID) -> NSWindow? { host.window(for: taskID) }
 
-    func open(taskID: UUID) {
-        if let win = windows[taskID] { win.makeKeyAndOrderFront(nil); return }
-        guard let store = context.store(), let task = store.task(taskID) else { return }
-
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 700),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
-            backing: .buffered, defer: false)
-        win.title = String(
-            format: NSLocalizedString("Review — %@", comment: "review window title"),
-            task.title)
-        win.center()
-        win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 640, height: 420)
-
-        let view = TaskReviewView(
-            store: store,
-            taskID: taskID,
-            accentHex: context.accentHex(task.profileID),
-            workspaceName: context.workspaceName(task.profileID),
-            fetchReview: context.fetchReview,
-            onOpenTerminal: { [weak self] in
-                guard let t = self?.context.store()?.task(taskID) else { return }
-                self?.context.openTerminal(t)
-            },
-            onAddComment: { [weak self] text, file, line in
-                self?.context.addComment(taskID, text, file, line)
-            },
-            onSendBack: { [weak self] in
-                self?.context.sendBack(taskID)
-                self?.close(taskID)
-            },
-            fetchBranches: context.fetchBranches,
-            onMerge: { [weak self] target, squash, cleanup in
-                self?.context.merge(taskID, target, squash, cleanup)
-                self?.close(taskID)
-            },
-            onOpenPR: { [weak self] in
-                self?.context.openPR(taskID)
-                self?.close(taskID)
-            })
-        win.contentView = NSHostingView(rootView: view)
-
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification, object: win, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.windows[taskID] = nil }
+    func open(taskID id: UUID) {
+        guard let store = context.store(), let task = store.task(id) else { return }
+        let c = context
+        let t: () -> CodingTask? = { c.store()?.task(id) }
+        host.open(id, title: task.title) {
+            ReviewSource(
+                title: { t()?.title ?? "" },
+                place: { .branch(t()?.branch ?? "", parent: t()?.parentBranch) },
+                accentHex: { t().map { c.accentHex($0.profileID) } ?? "#888888" },
+                workspaceName: { t().map { c.workspaceName($0.profileID) } ?? "" },
+                bases: { ReviewSource.standardBases(parent: t()?.parentBranch) },
+                defaultBase: { t()?.parentBranch.map { .branch($0) } ?? .uncommitted },
+                comments: { t()?.comments ?? [] },
+                viewed: { t()?.reviewViewed ?? [:] },
+                plan: { t()?.plan },
+                fetch: { base in
+                    guard let task = t() else { return nil }
+                    return await c.fetchReview(task, base)
+                },
+                addComment: { text, file, line in c.addComment(id, text, file, line) },
+                removeComment: { c.removeComment(id, $0) },
+                setViewed: { c.setViewed(id, $0, $1) },
+                send: { [weak self] in
+                    c.sendBack(id)
+                    self?.host.close(id)
+                },
+                sendLabel: { n in
+                    n == 0 ? NSLocalizedString("Send Back to In Progress", comment: "review")
+                    : n == 1 ? NSLocalizedString("Send Back with 1 Comment", comment: "review")
+                    : String(format: NSLocalizedString("Send Back with %d Comments", comment: "review"), n)
+                },
+                sendHelp: NSLocalizedString("Sends the comments to the agent and moves the task back to In Progress (⇧⌘⏎)", comment: "review"),
+                composerHint: NSLocalizedString("⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back", comment: "review composer hint"),
+                openTerminal: { if let task = t() { c.openTerminal(task) } },
+                trailing: { [weak self] in
+                    AnyView(TaskMergeMenu(
+                        branch: t()?.branch, parent: t()?.parentBranch,
+                        fetchBranches: {
+                            guard let task = t() else { return [] }
+                            return await c.fetchBranches(task)
+                        },
+                        onMerge: { target, squash, cleanup in
+                            c.merge(id, target, squash, cleanup)
+                            self?.host.close(id)
+                        },
+                        onOpenPR: {
+                            c.openPR(id)
+                            self?.host.close(id)
+                        }))
+                })
         }
-        windows[taskID] = win
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private func close(_ taskID: UUID) {
-        windows[taskID]?.close()
-        windows[taskID] = nil
     }
 }
-#endif
 
-// MARK: - Review view
-
-struct TaskReviewView: View {
-    var store: CodingTaskStore
-    let taskID: UUID
-    let accentHex: String
-    let workspaceName: String
-    let fetchReview: (CodingTask) async -> TaskReviewData?
-    let onOpenTerminal: () -> Void
-    let onAddComment: (_ text: String, _ file: String?, _ line: Int?) -> Void
-    let onSendBack: () -> Void
-    let fetchBranches: (CodingTask) async -> [String]
+/// The ways out of a task's review: plain or squash merge into the parent,
+/// a pull request, or a merge into any other branch of the repo.
+struct TaskMergeMenu: View {
+    let branch: String?
+    let parent: String?
+    let fetchBranches: () async -> [String]
     let onMerge: (_ target: String?, _ squash: Bool, _ cleanup: Bool) -> Void
     let onOpenPR: () -> Void
-    /// "Keep working": reopen the agent's session on this branch and return
-    /// the task to In Progress — for a run that stopped before it was really
-    /// done. nil hides the button (the standalone window doesn't offer it).
-    var onResume: (() -> Void)? = nil
 
-    @State private var data: TaskReviewData?
-    @State private var loadFailed = false
     @State private var cleanupAfterMerge = true
-    @State private var draftComment = ""
-    /// File path the draft comment is scoped to (via a file header's
-    /// comment button); nil = about the whole change.
-    @State private var draftFile: String?
-    /// Repo branches for the "Merge into…" picker (loaded with the diff).
     @State private var branches: [String] = []
 
-    private var task: CodingTask? { store.task(taskID) }
-
-    private var unsentCount: Int {
-        task?.comments.filter { $0.sentAt == nil }.count ?? 0
-    }
-
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            content
-            Divider()
-            commentsBar
-        }
-        .background(Color.platformWindowBackground)
-        .task { await load() }
-    }
-
-    private func load() async {
-        guard let task else { return }
-        data = nil; loadFailed = false
-        if let fetched = await fetchReview(task) { data = fetched }
-        else { loadFailed = true }
-        branches = await fetchBranches(task)
-    }
-
-    // MARK: Header
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(Color(hex: accentHex))
-                .frame(width: 4, height: 34)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(task?.title ?? "")
-                    .font(.system(size: 14, weight: .bold))
-                    .lineLimit(1)
-                HStack(spacing: 6) {
-                    if let branch = task?.branch {
-                        Text(branch)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                    if let parent = task?.parentBranch {
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.tertiary)
-                        Text(parent)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                    if !workspaceName.isEmpty {
-                        Text("· " + workspaceName)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-            }
-            Spacer(minLength: 8)
-            Button {
-                Task { await load() }
-            } label: { Image(systemName: "arrow.clockwise") }
-                .help(NSLocalizedString("Refresh the diff", comment: ""))
-            Button(NSLocalizedString("Open Terminal", comment: "review"),
-                   action: onOpenTerminal)
-            if let onResume {
-                Button(NSLocalizedString("Keep working", comment: "review"), action: onResume)
-                    .help(NSLocalizedString(
-                        "Reopen the agent on this branch and continue the task — it goes back to In Progress. Add comments first to send them along.",
-                        comment: "review"))
-            }
-            Button(NSLocalizedString("Send Back to In Progress", comment: "review"),
-                   action: onSendBack)
-                .disabled(unsentCount == 0)
-                .help(unsentCount == 0
-                      ? NSLocalizedString("Add review comments first", comment: "")
-                      : String(format: NSLocalizedString(
-                          "Send %d comment(s) to the agent and continue the task",
-                          comment: ""), unsentCount))
-            mergeMenu
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(.bar)
-    }
-
-    /// The ways out of review: plain or squash merge into the parent, a
-    /// pull request, or a merge into any other branch of the repo.
-    private var mergeMenu: some View {
-        let parent = task?.parentBranch ?? "parent"
-        return Menu {
-            Button {
-                onMerge(nil, false, cleanupAfterMerge)
-            } label: {
-                Label(String(format: NSLocalizedString("Merge into %@", comment: "review"),
-                             parent),
-                      systemImage: "arrow.triangle.merge")
-            }
+        let parent = self.parent ?? "parent"
+        Menu {
             Button {
                 onMerge(nil, true, cleanupAfterMerge)
             } label: {
-                Label(String(format: NSLocalizedString("Squash & Merge into %@",
-                                                       comment: "review"), parent),
+                Label(String(format: NSLocalizedString("Squash & Merge into %@", comment: "review"), parent),
                       systemImage: "arrow.triangle.merge")
             }
             Divider()
@@ -307,203 +233,49 @@ struct TaskReviewView: View {
                 Label(NSLocalizedString("Create Pull Request…", comment: "review"),
                       systemImage: "arrow.up.forward.square")
             }
-            let others = branches.filter { $0 != task?.branch && $0 != parent }
+            let others = branches.filter { $0 != branch && $0 != parent }
             if !others.isEmpty {
                 Divider()
                 Menu(NSLocalizedString("Merge into…", comment: "review")) {
-                    ForEach(others.prefix(30), id: \.self) { branch in
-                        Button(branch) { onMerge(branch, false, cleanupAfterMerge) }
+                    ForEach(others.prefix(30), id: \.self) { b in
+                        Button(b) { onMerge(b, false, cleanupAfterMerge) }
                     }
                 }
             }
         } label: {
-            Label(String(format: NSLocalizedString("Merge into %@", comment: "review"),
-                         parent),
+            Label(String(format: NSLocalizedString("Merge into %@", comment: "review"), parent),
                   systemImage: "arrow.triangle.merge")
         } primaryAction: {
             onMerge(nil, false, cleanupAfterMerge)
         }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
         .fixedSize()
         .help(NSLocalizedString(
             "Click to merge into the parent; hold for squash, pull-request, and other-branch options.",
             comment: "review"))
-    }
-
-    // MARK: Diff content
-
-    @ViewBuilder
-    private var content: some View {
-        if let data {
-            if data.files.isEmpty && data.logLines.isEmpty && data.statusLines.isEmpty {
-                ContentUnavailableView(
-                    NSLocalizedString("No changes yet", comment: "review"),
-                    systemImage: "doc.badge.ellipsis",
-                    description: Text(NSLocalizedString(
-                        "The branch has no commits or edits against its parent.",
-                        comment: "review")))
-            } else {
-                diffScroll(data)
-            }
-        } else if loadFailed {
-            ContentUnavailableView(
-                NSLocalizedString("Can't reach the workspace", comment: "review"),
-                systemImage: "bolt.horizontal.circle",
-                description: Text(NSLocalizedString(
-                    "The diff is read live from the VM — start the workspace and refresh.",
-                    comment: "review")))
-        } else {
-            VStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text(NSLocalizedString("Reading the diff from the VM…", comment: ""))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    private func diffScroll(_ data: TaskReviewData) -> some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                if let plan = task?.plan, !plan.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label(NSLocalizedString("Plan", comment: "review"),
-                              systemImage: "list.bullet.clipboard")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.purple)
-                        MarkdownBlocks(text: plan, compact: true)
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 6)
-                                .fill(Color.purple.opacity(0.06)))
-                    }
-                }
-                if !data.logLines.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Label(String(format: NSLocalizedString("%d commit(s)", comment: ""),
-                                     data.logLines.count),
-                              systemImage: "point.topleft.down.curvedto.point.bottomright.up")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        ForEach(data.logLines, id: \.self) { line in
-                            Text(line)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                // Untracked/dirty files the diff can't show — surfaced so
-                // "the agent forgot to commit" is visible at review time.
-                let dirty = data.statusLines.filter { $0.hasPrefix("??") }
-                if !dirty.isEmpty {
-                    Label(String(format: NSLocalizedString(
-                        "%d untracked file(s) not in the diff — the agent may not have committed everything",
-                        comment: ""), dirty.count),
-                          systemImage: "exclamationmark.triangle")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.orange)
-                }
-                ForEach(data.files) { file in
-                    DiffFileView(
-                        file: file,
-                        lineComments: (task?.comments ?? []).filter {
-                            $0.file == file.path && $0.line != nil
-                        },
-                        onComment: { draftFile = file.path },
-                        onLineComment: { line, text in
-                            onAddComment(text, file.path, line)
-                        })
-                }
-            }
-            .padding(14)
-        }
-    }
-
-    // MARK: Comments
-
-    private var commentsBar: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let comments = task?.comments, !comments.isEmpty {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 5) {
-                        ForEach(comments) { c in
-                            HStack(alignment: .top, spacing: 6) {
-                                Image(systemName: c.sentAt == nil
-                                      ? "bubble.left.fill" : "checkmark.bubble")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(c.sentAt == nil ? .purple : .secondary)
-                                    .padding(.top, 2)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    if let file = c.file {
-                                        Text(c.line.map { "\(file):\($0)" } ?? file)
-                                            .font(.system(size: 10, design: .monospaced))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    Text(c.text)
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(c.sentAt == nil ? .primary : .secondary)
-                                        .textSelection(.enabled)
-                                }
-                                Spacer(minLength: 0)
-                                Text(c.sentAt == nil
-                                     ? NSLocalizedString("draft", comment: "review comment")
-                                     : NSLocalizedString("sent", comment: "review comment"))
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
-                    }
-                }
-                .frame(maxHeight: 110)
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                if let draftFile {
-                    HStack(spacing: 3) {
-                        Text(draftFile)
-                            .font(.system(size: 10, design: .monospaced))
-                            .lineLimit(1)
-                        Button {
-                            self.draftFile = nil
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 9))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.purple.opacity(0.15)))
-                }
-                ChatComposer(
-                    placeholder: NSLocalizedString(
-                        "Add a review comment — sent to the agent with “Send Back”",
-                        comment: ""),
-                    text: $draftComment,
-                    accent: .purple,
-                    onSend: addComment)
-            }
-        }
-        .padding(12)
-    }
-
-    private func addComment() {
-        let text = draftComment.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, task != nil else { return }
-        onAddComment(text, draftFile, nil)
-        draftComment = ""
-        draftFile = nil
+        .task { branches = await fetchBranches() }
     }
 }
+#endif
 
 // MARK: - Diff file view
 
-private struct DiffFileView: View {
+struct DiffFileView: View {
     let file: TaskDiffFile
     /// Pending comments anchored to lines of THIS file (drafts + sent).
     var lineComments: [ReviewComment] = []
     let onComment: () -> Void
     /// Margin annotation: (new-file line, text).
     var onLineComment: (Int, String) -> Void = { _, _ in }
+    /// Session review: whether the file is marked viewed (nil: no such
+    /// mark), and its toggle. A viewed file folds away.
+    var viewed: Bool? = nil
+    var onToggleViewed: () -> Void = {}
+    /// Take back a draft comment (nil: drafts can't be removed here).
+    var onRemoveComment: ((UUID) -> Void)? = nil
+    /// The inline editor's placeholder, for line %d.
+    var linePlaceholder = NSLocalizedString("Comment on line %d — sent with “Send Back”", comment: "review")
 
     @State private var expanded = true
     /// The line id whose inline comment editor is open.
@@ -538,6 +310,18 @@ private struct DiffFileView: View {
                     }
                     .buttonStyle(.plain)
                     .help(NSLocalizedString("Comment on this file", comment: "review"))
+                    if let viewed {
+                        Button(action: onToggleViewed) {
+                            HStack(spacing: 4) {
+                                Image(systemName: viewed ? "checkmark.square.fill" : "square")
+                                    .foregroundStyle(viewed ? Color.accentColor : .secondary)
+                                Text(NSLocalizedString("Viewed", comment: "review"))
+                            }
+                            .font(.system(size: 10.5))
+                        }
+                        .buttonStyle(.plain)
+                        .help(NSLocalizedString("Mark as looked at — it folds away until it changes again", comment: "review"))
+                    }
                 }
                 .contentShape(Rectangle())
             }
@@ -562,16 +346,14 @@ private struct DiffFileView: View {
                         ForEach(lineComments.filter { $0.line == line.newLine
                                                       && line.newLine != nil
                                                       && line.kind != .hunk }) { c in
-                            AnchoredCommentRow(comment: c)
+                            AnchoredCommentRow(comment: c, onRemove: onRemoveComment.map { f in { f(c.id) } })
                         }
                         if composing == line.id, let n = line.newLine {
                             HStack(spacing: 6) {
                                 Image(systemName: "text.bubble")
                                     .font(.system(size: 10))
                                     .foregroundStyle(.purple)
-                                TextField(String(format: NSLocalizedString(
-                                    "Comment on line %d — sent with “Send Back”",
-                                    comment: "review"), n), text: $draft)
+                                TextField(String(format: linePlaceholder, n), text: $draft)
                                     .textFieldStyle(.roundedBorder)
                                     .font(.system(size: 11))
                                     .onSubmit { submitLineComment(n) }
@@ -609,6 +391,10 @@ private struct DiffFileView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6)
             .strokeBorder(Color.primary.opacity(0.10)))
+        .onAppear { if viewed == true { expanded = false } }
+        .onChange(of: viewed) { _, v in
+            withAnimation(.easeInOut(duration: 0.15)) { expanded = v != true }
+        }
     }
 
     private func submitLineComment(_ line: Int) {
@@ -674,8 +460,9 @@ private struct DiffLineRow: View {
 }
 
 /// A pending/sent comment pinned under the diff line it annotates.
-private struct AnchoredCommentRow: View {
+struct AnchoredCommentRow: View {
     let comment: ReviewComment
+    var onRemove: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
@@ -689,6 +476,13 @@ private struct AnchoredCommentRow: View {
                 .foregroundStyle(comment.sentAt == nil ? .primary : .secondary)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
+            if comment.sentAt == nil, let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help(NSLocalizedString("Remove this comment", comment: "review"))
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 3)

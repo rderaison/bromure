@@ -857,11 +857,17 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             if held != self.listModel.commandHeld { self.listModel.commandHeld = held }
             return event
         }
-        // A chat's "Changed N files" line: open the Files pane (git changes).
-        NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] _ in
+        // A chat's "Changed N files" line: review that turn's files.
+        NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] note in
+            let files = note.object as? [String]
             MainActor.assumeIsolated {
                 guard let self, self.isKeyWindow else { return }
-                self.setFilePaneOpen(true, animated: true)
+                if let id = self.selectedSessionID, let delegate = self.acDelegate,
+                   let s = delegate.agentSessionStore.session(id), SessionHome.hasFolder(s) {
+                    delegate.sessionReviews.open(sessionID: id, files: files)
+                } else {
+                    self.setFilePaneOpen(true, animated: true)
+                }
             }
         }
     }
@@ -1383,6 +1389,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     // MARK: Sessions-first stage
 
     /// Wiring shared by the header, the launch surface and the rest page.
+    /// The session actions, for windows of their own (the review).
+    var stageActions: SessionStageActions { sessionStageActions }
+
     private var sessionStageActions: SessionStageActions {
         SessionStageActions(
             resume: { [weak self] id in
@@ -1421,6 +1430,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             archive: { [weak self] id in
                 guard let self, let delegate = self.acDelegate else { return }
+                // A branch with work on it: keep it or throw it away?
+                if let s = delegate.agentSessionStore.session(id), SessionHome.branchNeedsWord(s) {
+                    self.askBranchFate(s, deleting: false)
+                    return
+                }
                 let title = delegate.agentSessionStore.session(id)?.title ?? ""
                 delegate.agentSessionEngine.archive(id)
                 self.sessionStageDidChange()
@@ -1435,13 +1449,30 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self?.sessionStageDidChange()
             },
             delete: { [weak self] id in self?.confirmDeleteSession(id) },
-            newWorktree: { [weak self] id, name, tool, message in
+            newWorktree: { [weak self] id, req in
                 guard let self, let delegate = self.acDelegate,
                       let newID = delegate.agentSessionEngine.startWorktree(
-                          from: id, name: name, tool: tool, message: message)
+                          from: id, name: req.name, tool: req.tool, message: req.message,
+                          initGit: req.initGit, base: req.base)
                 else { return }
                 self.selectSession(newID)
             },
+            gitState: { [weak self] id in
+                guard let engine = self?.acDelegate?.agentSessionEngine,
+                      let s = engine.store.session(id) else { return nil }
+                return await engine.gitState(profileID: s.profileID, cwd: s.cwd)
+            },
+            mergeBranch: { [weak self] id, into, squash, removeAfter in
+                self?.acDelegate?.agentSessionEngine.mergeBranch(id, into: into, squash: squash, removeAfter: removeAfter)
+            },
+            branchPullRequest: { [weak self] id in
+                self?.acDelegate?.agentSessionEngine.branchPullRequest(id)
+                self?.sessionStageDidChange()
+            },
+            discardBranch: { [weak self] id in self?.confirmDiscardBranch(id) },
+            showBranches: { [weak self] pid in self?.acDelegate?.branchesWindows.open(profileID: pid) },
+            declineMerge: { [weak self] id in self?.acDelegate?.agentSessionEngine.declineMerge(id) },
+            reviewBranch: { [weak self] id in self?.acDelegate?.sessionReviews.open(sessionID: id) },
             represent: { [weak self] id in
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()
@@ -1524,10 +1555,60 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// The toast that offers Undo after a quick action.
     private lazy var toasts = UndoToastHost(window: self)
     func debugToast(_ text: String) { toasts.show(text) {} }
+    func debugBranchAction(_ action: String, _ id: UUID) {
+        let a = sessionStageActions
+        switch action {
+        case "branch-archive": a.archive(id)
+        case "branch-delete": a.delete(id)
+        default: a.discardBranch(id)
+        }
+    }
     private var flagsMonitor: Any?
+
+    /// "Discard branch": the checkout, the branch and the session go, after
+    /// a word — there's no taking it back.
+    private func confirmDiscardBranch(_ id: UUID) {
+        guard let s = acDelegate?.agentSessionStore.session(id) else { return }
+        BranchAlerts.confirmDiscard(s, on: self) { [weak self] in
+            guard let self else { return }
+            self.acDelegate?.agentSessionEngine.discardBranch(id)
+            if self.selectedSessionID == id { self.clearSessionStage(); self.selectInitialSession() }
+            else { self.sessionStageDidChange() }
+        }
+    }
+
+    /// Archiving or deleting a session whose branch holds work: keep the
+    /// branch or throw it away with the session.
+    private func askBranchFate(_ s: AgentSession, deleting: Bool) {
+        guard let delegate = acDelegate else { return }
+        let id = s.id
+        BranchAlerts.askFate(s, deleting: deleting, on: self) { [weak self] discard in
+            guard let self else { return }
+            let engine = delegate.agentSessionEngine
+            if discard {
+                engine.discardBranch(id)
+            } else {
+                engine.keepBranchQuietly(id)
+                deleting ? engine.delete(id) : engine.archive(id)
+            }
+            if (deleting || discard), self.selectedSessionID == id { self.clearSessionStage(); self.selectInitialSession() }
+            else { self.sessionStageDidChange() }
+            if discard {
+                self.toasts.show(String(format: NSLocalizedString("Discarded %@", comment: "undo toast"),
+                                        UndoToastHost.quoted(s.title)), undo: nil)
+            } else if !deleting {
+                self.toasts.show(String(format: NSLocalizedString("Archived %@ · branch kept", comment: "undo toast"),
+                                        UndoToastHost.quoted(s.title))) { [weak self] in
+                    self?.acDelegate?.agentSessionEngine.unarchive(id)
+                    self?.sessionStageDidChange()
+                }
+            }
+        }
+    }
 
     private func confirmDeleteSession(_ id: UUID) {
         guard let delegate = acDelegate, let s = delegate.agentSessionStore.session(id) else { return }
+        if SessionHome.branchNeedsWord(s) { askBranchFate(s, deleting: true); return }
         // Nothing running: gone at once, and a few seconds to take it back
         // (the record and its saved conversation are kept until then).
         if !SessionHome.isAgentLive(s, in: listModel) {
@@ -1775,6 +1856,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         } else {
             key = "rest:\(bucket.rawValue):\(s.lastError ?? "")"
         }
+        // The merge-request banner comes and goes without a new presentation.
+        if sessionHeaderHost?.isHidden == false {
+            sessionHeaderHeight?.constant = SessionHome.headerHeight(s, base: Self.sessionHeaderHeightValue)
+        }
         guard key != sessionPresentationKey else { return }
         sessionPresentationKey = key
         setSessionHeader(visible: true)
@@ -1929,7 +2014,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private func setSessionHeader(visible: Bool) {
         sessionHeaderHost.isHidden = !visible
         sessionHeaderHeight?.constant = visible
-            ? Self.sessionHeaderHeightValue
+            ? SessionHome.headerHeight(selectedSessionID.flatMap { acDelegate?.agentSessionStore.session($0) },
+                                       base: Self.sessionHeaderHeightValue)
             : 0
     }
 
@@ -1980,6 +2066,29 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 delegate.beginNewWorkspace(withWizard: false)
             },
         ]
+        // The session on stage: branch it, or merge its branch.
+        if let sid = selectedSessionID, let cur = delegate.agentSessionStore.session(sid), !cur.isArchived {
+            let actions = sessionStageActions
+            if SessionHome.hasFolder(cur) {
+                items.append(PaletteItem(section: .actions, title: NSLocalizedString("New Branch…", comment: "session menu"),
+                                         subtitle: cur.title, icon: "arrow.triangle.branch", tint: .purple,
+                                         keywords: "worktree git fork try") { [weak self] in
+                    self?.listModel.newBranchRequest = sid
+                })
+            }
+            if SessionHome.hasFolder(cur) {
+                items.append(PaletteItem(section: .actions, title: NSLocalizedString("Review Changes", comment: "branch menu"),
+                                         subtitle: cur.title, icon: "doc.text.magnifyingglass", tint: .purple,
+                                         keywords: "diff review comments git") { actions.reviewBranch(sid) })
+            }
+            if SessionHome.isBranch(cur), cur.branchMerge == nil || cur.branchMerge?.phase == .failed {
+                items.append(PaletteItem(section: .actions,
+                                         title: String(format: NSLocalizedString("Merge into %@", comment: "branch menu"),
+                                                       cur.branchParent ?? NSLocalizedString("parent", comment: "branch menu")),
+                                         subtitle: cur.title, icon: "arrow.triangle.merge", tint: .purple,
+                                         keywords: "worktree git branch") { actions.mergeBranch(sid, nil, false, true) })
+            }
+        }
         let sessions = delegate.agentSessionStore.sessions.filter { !$0.isDeleted && !$0.isSwitchboard }
         let ordered = SessionHome.orderedAll(sessions, in: listModel) + SessionHome.archived(sessions)
         for s in ordered {
@@ -2002,6 +2111,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             })
         }
         for p in delegate.profiles {
+            items.append(PaletteItem(section: .machines,
+                                     title: String(format: NSLocalizedString("Branches on %@", comment: "branches window title"), p.name),
+                                     icon: "arrow.triangle.branch", tint: .purple, keywords: "worktrees git stale") { [weak self] in
+                self?.acDelegate?.branchesWindows.open(profileID: p.id)
+            })
             items.append(PaletteItem(section: .machines, title: p.name,
                                      subtitle: NSLocalizedString("Machine Details", comment: "session menu"),
                                      icon: "cpu", tint: Color(hex: p.color.hexInUI), keywords: "machine workspace vm") { [weak self] in
@@ -3125,7 +3239,7 @@ struct SessionSidebar: View {
     var onSelectRegistry: (UUID) -> Void = { _ in }
     var onNewRegistry: () -> Void = {}
     var onRegistryAction: (UUID, KubeRowAction) -> Void = { _, _ in }
-    /// The Signal / WhatsApp connector — the third kind of managed machine.
+    /// The messaging connector — the third kind of managed machine.
     var onSelectConnector: (UUID) -> Void = { _ in }
     var onConnectorAction: (UUID, KubeRowAction) -> Void = { _, _ in }
     /// A machine's "Rewind home…": the window puts up the sheet.
@@ -3729,7 +3843,7 @@ private struct KubeRegistriesSection: View {
     }
 }
 
-/// "Messaging" — the Signal / WhatsApp connector, on or off like any
+/// "Messaging" — the messaging connector (Signal, WhatsApp, Slack), on or off like any
 /// managed machine, with which phone channels it carries.
 private struct ConnectorSection: View {
     let connector: MessagingConnector
@@ -3750,7 +3864,7 @@ private struct ConnectorSection: View {
     private var subline: String {
         switch status.phase {
         case .running:
-            let on = connector.channels.map { $0.kind == .signal ? "Signal" : "WhatsApp" }
+            let on = connector.channels.map(\.kind.displayName)
             return on.isEmpty ? NSLocalizedString("No phone connected", comment: "connector row")
                               : on.joined(separator: " · ")
         case .creating, .starting:

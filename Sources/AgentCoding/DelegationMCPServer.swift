@@ -79,7 +79,11 @@ final class DelegationMCPServer: MCPLineHandler {
     // MARK: Tools
 
     static let serverInstructions = """
-    Tools for working with OTHER agents through Bromure. Two ways: \
+    Tools for working with OTHER agents through Bromure, and with branches. \
+    `worktree_create` starts a session on a branch of your folder (a git \
+    worktree) to try something in parallel; `worktree_status` and \
+    `worktree_merge` follow and merge those branches — a merge always waits \
+    for your user's approval in Bromure. To hand off work with reporting: \
     `delegate` starts a fresh agent session for a piece of your work (a git \
     worktree of your folder, or a folder in another workspace), briefed with \
     your title, brief and what "done" means; `request` asks a session that \
@@ -107,6 +111,31 @@ final class DelegationMCPServer: MCPLineHandler {
     """
 
     static let toolDefinitions: [[String: Any]] = [
+        [
+            "name": "worktree_create",
+            "description": "Start a new agent session on a branch of your folder: a git worktree (its own checkout and branch, wt/<name>) off your current commit, so the work happens in parallel without touching your checkout. The user sees it nested under your session and can review and merge it from Bromure. Use it to try an idea or an alternative approach side by side; use `delegate` instead when you want the work reported back to you. Returns the session id, its branch and its checkout path (which you can read from your own shell).",
+            "inputSchema": ["type": "object", "properties": [
+                "title": ["type": "string", "description": "A short name (becomes the session's name and the branch's)."],
+                "prompt": ["type": "string", "description": "What the new session's agent should do, self-contained. Omit to open it idle for the user."],
+                "tool": ["type": "string", "enum": ["claude", "codex", "grok", "kimi", "omp"], "description": "Which agent runs it (default: the same as you)."],
+                "init_git": ["type": "boolean", "description": "If your folder isn't a git repository yet, make it one first (git init + a first commit of what's there). Only with your user's agreement."],
+                "base": ["type": "string", "description": "The branch to start from (default: your folder's current commit). The new branch merges back into it."],
+            ], "required": ["title"]],
+        ],
+        [
+            "name": "worktree_status",
+            "description": "Where your branches stand: your own branch if you run in a worktree, and every branch session started from yours — branch, checkout path, commits ahead of / behind the branch it came from, uncommitted files, whether its agent is running, and any merge under way.",
+            "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
+        ],
+        [
+            "name": "worktree_merge",
+            "description": "Ask the user to merge a branch: your own (when you run in a worktree) or one started from your session. Bromure shows the request on that session, and the user approves or declines it there. Once approved, a clean branch merges at once; uncommitted work or a conflict goes to that session's agent to finish. The checkout and branch are removed once it has landed. Commit your work before asking. Returns right away; worktree_status shows how it goes.",
+            "inputSchema": ["type": "object", "properties": [
+                "session_id": ["type": "string", "description": "The branch session to merge (from worktree_status). Omit for your own branch."],
+                "into": ["type": "string", "description": "The branch to merge into (default: the one it came from)."],
+                "squash": ["type": "boolean", "description": "Squash it into one commit (default false)."],
+            ]],
+        ],
         [
             "name": "delegate",
             "description": "Hand a scoped piece of work to a new agent session. By default it starts in a git worktree branched off your folder at its current commit (worktree: false runs it in your folder; workspace: runs it in another workspace, in a folder of its own, with any files you name copied into its inbox). It opens with your brief and reports back through these tools. Returns the delegation id. Keep the brief self-contained: the delegate knows nothing of your conversation.",
@@ -320,6 +349,99 @@ final class DelegationMCPServer: MCPLineHandler {
                     o["next"] = "steer(delegation_id) to follow up, close_delegation(delegation_id, verdict) when you're done with it."
                     return o
                 }
+
+            case "worktree_create":
+                guard let title = (args["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !title.isEmpty else { return errorResult("title is required") }
+                let se = engine.sessionEngine
+                guard SessionHome.hasFolder(me) else {
+                    return errorResult("Your session runs in the home folder, which can't be branched — only a project folder can.")
+                }
+                let initGit = args["init_git"] as? Bool ?? false
+                if !initGit, let st = await se.gitState(profileID: me.profileID, cwd: me.cwd), !st.isRepo {
+                    return errorResult("\(me.cwd) isn't a git repository. Pass init_git: true to make it one (git init + a first commit) — ask your user first.")
+                }
+                let tool = (args["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) ?? me.tool
+                let prompt = (args["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let sid = se.startWorktree(from: me.id, name: title, tool: tool,
+                                                 message: prompt?.isEmpty == false ? prompt : nil,
+                                                 initGit: initGit,
+                                                 base: (args["base"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+                else { return errorResult("Couldn't start it.") }
+                // The branch and checkout are known once its tab reports in.
+                let deadline = Date().addingTimeInterval(45)
+                while Date() < deadline {
+                    if let s = engine.sessions.session(sid), s.worktreeBranch != nil || s.lastError != nil { break }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+                let s = engine.sessions.session(sid)
+                if let err = s?.lastError, s?.worktreeBranch == nil { return errorResult(err) }
+                var out: [String: Any] = ["session_id": sid.uuidString, "title": s?.title ?? title,
+                                          "tool": tool.rawValue]
+                if let b = s?.worktreeBranch { out["branch"] = b; out["path"] = s?.cwd ?? "" }
+                else { out["note"] = "Still starting — worktree_status shows its branch and path in a moment." }
+                out["next"] = "It runs on its own; worktree_status shows its progress, worktree_merge asks the user to merge it."
+                return textResult(jsonString(out))
+
+            case "worktree_status":
+                let se = engine.sessionEngine
+                let all = engine.sessions.sessions.filter { !$0.isDeleted }
+                var mine = all.filter { $0.id != me.id && SessionHome.isBranch($0) && AgentSession.origin(of: $0) == me.id }
+                if SessionHome.isBranch(me) { mine.insert(me, at: 0) }
+                guard !mine.isEmpty else {
+                    return textResult("No branches: you aren't in a worktree and haven't started any. worktree_create starts one.")
+                }
+                await se.probeBranchesNow(profileID: me.profileID, sessions: mine.filter { $0.profileID == me.profileID })
+                let rows = mine.compactMap { engine.sessions.session($0.id) }.map { s -> [String: Any] in
+                    var o: [String: Any] = [
+                        "session_id": s.id.uuidString, "title": s.title,
+                        "you": s.id == me.id,
+                        "branch": s.worktreeBranch ?? "", "path": s.cwd,
+                        "agent": s.tool.rawValue,
+                        "running": s.windowIndex != nil && !s.hasEnded && s.agentAlive != false,
+                        "archived": s.isArchived,
+                    ]
+                    if let p = s.branchParent { o["from"] = p }
+                    if let i = s.branchInfo {
+                        o["commits_ahead"] = i.ahead; o["commits_behind"] = i.behind; o["uncommitted_files"] = i.changed
+                    }
+                    if let m = s.branchMerge {
+                        var mm: [String: Any] = ["into": m.target, "state": m.phase.rawValue, "squash": m.squash]
+                        if m.phase == .requested { mm["state"] = "awaiting the user's approval" }
+                        if let d = m.detail { mm["detail"] = d }
+                        o["merge"] = mm
+                    }
+                    return o
+                }
+                return textResult(jsonString(["branches": rows]))
+
+            case "worktree_merge":
+                let target: AgentSession
+                if let key = (args["session_id"] as? String)?.trimmingCharacters(in: .whitespaces), !key.isEmpty {
+                    guard let s = UUID(uuidString: key).flatMap({ engine.sessions.session($0) })
+                            ?? engine.sessions.sessions.first(where: { $0.id.uuidString.lowercased().hasPrefix(key.lowercased()) }),
+                          s.id == me.id || AgentSession.origin(of: s) == me.id
+                    else { return errorResult("No branch session “\(key)” of yours — worktree_status lists them.") }
+                    target = s
+                } else {
+                    target = me
+                }
+                guard SessionHome.isBranch(target) else {
+                    return errorResult(target.id == me.id
+                                       ? "You aren't running in a worktree. Pass the session_id of a branch session (worktree_status lists them)."
+                                       : "That session isn't on a branch of its own.")
+                }
+                let into = (args["into"] as? String)?.trimmingCharacters(in: .whitespaces)
+                if let why = await engine.sessionEngine.requestMerge(
+                    target.id, into: into?.isEmpty == false ? into : nil,
+                    squash: args["squash"] as? Bool ?? false, askedBy: me.id) {
+                    return errorResult(why)
+                }
+                let m = engine.sessions.session(target.id)?.branchMerge
+                return textResult(jsonString([
+                    "requested": true, "branch": target.worktreeBranch ?? "", "into": m?.target ?? "",
+                    "next": "The user has been asked in Bromure. Carry on; worktree_status shows whether it was approved and has landed\(target.id == me.id ? " (once it lands, this session is archived)" : "; you'll be told when it's in").",
+                ]))
 
             case "list_peers":
                 let peers = engine.reachableSessions(from: me).map { s -> [String: Any] in

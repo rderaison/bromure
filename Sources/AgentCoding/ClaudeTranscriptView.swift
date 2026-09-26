@@ -1047,6 +1047,14 @@ struct ChatComposer: View {
     /// macOS: keys the text area offers the host before acting on them
     /// itself — a "/" palette takes the arrows, Tab, Return and Escape.
     var onKey: ((ComposerKey) -> Bool)? = nil
+    /// The footer's key hint, when this composer does something else with ⏎.
+    var hint: String? = nil
+    /// The send button's symbol and tooltip.
+    var sendSymbol = "arrow.up"
+    var sendHelp: String? = nil
+    /// A control that belongs with the text — shown in the footer, before
+    /// the send button.
+    var accessory: AnyView? = nil
     let onSend: () -> Void
 
     #if os(macOS)
@@ -1085,12 +1093,13 @@ struct ChatComposer: View {
                 .frame(minHeight: 22)
             #endif
             HStack(spacing: 8) {
-                Text(working
+                Text(hint ?? (working
                      ? NSLocalizedString("⎋ stop   ⏎ send", comment: "composer hint")
-                     : NSLocalizedString("⏎ send   ⌥⏎ newline", comment: "composer hint"))
+                     : NSLocalizedString("⏎ send   ⌥⏎ newline", comment: "composer hint")))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.quaternary)
                 Spacer(minLength: 0)
+                if let accessory { accessory }
                 if working {
                     // Interrupt the running agent (sends Esc to its pane).
                     Button(action: onStop) {
@@ -1109,7 +1118,7 @@ struct ChatComposer: View {
                             if busy {
                                 ProgressView().controlSize(.small)
                             } else {
-                                Image(systemName: "arrow.up")
+                                Image(systemName: sendSymbol)
                                     .font(.system(size: 12, weight: .bold))
                                     .foregroundStyle(.white)
                             }
@@ -1121,7 +1130,7 @@ struct ChatComposer: View {
                     .buttonStyle(.plain)
                     .disabled(!sendable)
                     .keyboardShortcut(.return, modifiers: .command)
-                    .help(NSLocalizedString("Send (⏎)", comment: "composer"))
+                    .help(sendHelp ?? NSLocalizedString("Send (⏎)", comment: "composer"))
                 }
             }
         }

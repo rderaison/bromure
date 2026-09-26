@@ -24,7 +24,7 @@ struct DelegationRefusal: Error, CustomStringConvertible {
 final class DelegationEngine {
     let store: DelegationStore
     let sessions: AgentSessionStore
-    private let sessionEngine: AgentSessionEngine
+    let sessionEngine: AgentSessionEngine
     private weak var delegate: ACAppDelegate?
 
     /// Scans a text crossing between agents; a non-nil return is the snippet

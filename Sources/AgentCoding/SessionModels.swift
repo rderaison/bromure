@@ -404,6 +404,9 @@ final class SessionListModel {
     /// ⌘ is held down in the window: the sidebar shows each session's
     /// ⌘1–9 number.
     var commandHeld = false
+    /// ⌘K asked for the "New Branch" sheet of this session; its header
+    /// opens it and clears this.
+    var newBranchRequest: UUID?
     /// The sidebar's search text.
     var sidebarFilter = ""
 }

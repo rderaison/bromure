@@ -59,8 +59,8 @@ enum SwitchboardBrief {
       Don't report it as pending input.
 
     ## The phone
-    - A message starting with `[Signal]` or `[WhatsApp]` is the user
-      writing from their phone. Answer it with `message_user` — that's the
+    - A message starting with `[Signal]`, `[WhatsApp]` or `[Slack]` is the
+      user writing from their phone or Slack. Answer it with `message_user` — that's the
       only way they'll see it (you may also answer here). Keep it phone-short:
       1–6 lines, plain text, lead with what needs them. One message per
       batch of news.

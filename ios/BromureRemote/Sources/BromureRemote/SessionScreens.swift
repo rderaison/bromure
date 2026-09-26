@@ -28,6 +28,15 @@ enum MobileSessions {
             archive: { controller.sessionCommand($0, "archive") },
             unarchive: { controller.sessionCommand($0, "unarchive") },
             delete: { id in controller.sessionCommand(id, "delete"); onForget() },
+            gitState: { await controller.sessionGitState($0) },
+            mergeBranch: { id, into, squash, removeAfter in
+                var body: [String: Any] = ["squash": squash, "removeAfter": removeAfter]
+                if let into { body["into"] = into }
+                controller.sessionCommand(id, "branch-merge", body: body)
+            },
+            branchPullRequest: { controller.sessionCommand($0, "branch-pr") },
+            discardBranch: { id in controller.sessionCommand(id, "branch-discard"); onForget() },
+            declineMerge: { controller.sessionCommand($0, "branch-decline") },
             represent: { _ in },
             showMachine: { _ in onLinux() })
     }
@@ -125,10 +134,10 @@ struct MobileSessionScreen: View {
         }
         .sheet(isPresented: $worktreeSheet) {
             if let s = session {
-                NewWorktreeSheet(parent: s) { name, tool, message in
+                NewWorktreeSheet(parent: s, gitState: { await controller.sessionGitState($0) }) { req in
                     Task {
                         if let id = await controller.startWorktreeSession(
-                            from: s.id, name: name, tool: tool, message: message) {
+                            from: s.id, name: req.name, tool: req.tool, message: req.message, initGit: req.initGit, base: req.base) {
                             onOpen(id)
                         }
                     }
@@ -587,10 +596,10 @@ struct MobileSessionsSection: View {
             }
         }
         .sheet(item: $pendingWorktree) { s in
-            NewWorktreeSheet(parent: s) { name, tool, message in
+            NewWorktreeSheet(parent: s, gitState: { await controller.sessionGitState($0) }) { req in
                 Task {
                     if let id = await controller.startWorktreeSession(
-                        from: s.id, name: name, tool: tool, message: message) {
+                        from: s.id, name: req.name, tool: req.tool, message: req.message, initGit: req.initGit, base: req.base) {
                         onSelect(id)
                     }
                 }
@@ -795,10 +804,10 @@ struct PadSessionSections: View {
                 .tag(PadSelection.newSession)
                 // The rows' "New worktree…" presents its sheet here too.
                 .sheet(item: $pendingWorktree) { s in
-                    NewWorktreeSheet(parent: s) { name, tool, message in
+                    NewWorktreeSheet(parent: s, gitState: { await controller.sessionGitState($0) }) { req in
                         Task {
                             if let id = await controller.startWorktreeSession(
-                                from: s.id, name: name, tool: tool, message: message) {
+                                from: s.id, name: req.name, tool: req.tool, message: req.message, initGit: req.initGit, base: req.base) {
                                 onOpen(id)
                             }
                         }

@@ -74,4 +74,65 @@ struct WorktreeSessionTests {
         #expect(SessionHome.hasFolder(AgentSession(profileID: m, tool: .claude, title: "t", cwd: "~/proj")))
         #expect(SessionHome.hasFolder(AgentSession(profileID: m, tool: .claude, title: "t", cwd: "/tmp/x")))
     }
+
+    // MARK: Branch sessions
+
+    private func branch(_ info: BranchInfo?, merge: BranchMerge? = nil) -> AgentSession {
+        var s = AgentSession(profileID: UUID(), tool: .claude, title: "Cache", cwd: "~/.bromure/worktrees/p/cache")
+        s.worktreeBranch = "wt/cache"
+        s.branchParent = "main"
+        s.branchInfo = info
+        s.branchMerge = merge
+        return s
+    }
+
+    @Test("a branch says what it holds, in words")
+    func branchSummary() {
+        let d = Date()
+        #expect(SessionHome.branchSummary(branch(nil)) == nil)
+        #expect(SessionHome.branchSummary(branch(BranchInfo(ahead: 0, behind: 0, changed: 0, checkedAt: d))) == "no changes yet")
+        #expect(SessionHome.branchSummary(branch(BranchInfo(ahead: 1, behind: 0, changed: 0, checkedAt: d))) == "1 commit")
+        #expect(SessionHome.branchSummary(branch(BranchInfo(ahead: 3, behind: 2, changed: 5, checkedAt: d)))
+                == "3 commits · 5 uncommitted files · 2 behind")
+        // Behind only is still "nothing to lose".
+        #expect(BranchInfo(ahead: 0, behind: 4, changed: 0, checkedAt: d).isEmpty)
+    }
+
+    @Test("archiving or deleting a branch asks, until it's merged")
+    func branchNeedsWord() {
+        let merged = BranchMerge(target: "main", squash: false, removeAfter: true, startedAt: Date(), phase: .merged)
+        #expect(SessionHome.branchNeedsWord(branch(nil)))
+        #expect(!SessionHome.branchNeedsWord(branch(nil, merge: merged)))
+        var plain = branch(nil); plain.worktreeBranch = nil
+        #expect(!SessionHome.branchNeedsWord(plain))
+        #expect(SessionHome.mergeLine(branch(nil, merge: merged)) == "Merged into main")
+    }
+
+    @Test("a merge phase this build doesn't know decodes as stalled")
+    func unknownMergePhase() throws {
+        let json = #"{"target":"main","squash":false,"removeAfter":true,"startedAt":0,"phase":"rebasing"}"#
+        let m = try JSONDecoder().decode(BranchMerge.self, from: Data(json.utf8))
+        #expect(m.phase == .failed)
+        let req = #"{"target":"main","squash":true,"removeAfter":true,"startedAt":0,"phase":"requested"}"#
+        #expect(try JSONDecoder().decode(BranchMerge.self, from: Data(req.utf8)).phase == .requested)
+    }
+
+    @Test("a branch session nests under the session it came from")
+    func branchNests() {
+        let machine = UUID()
+        let parent = AgentSession(profileID: machine, tool: .claude, title: "Main", cwd: "~/p")
+        var child = AgentSession(profileID: machine, tool: .claude, title: "Try", cwd: "~/p")
+        child.worktreeOf = parent.id
+        let other = AgentSession(profileID: machine, tool: .claude, title: "Other", cwd: "~/q")
+        let order = SessionSectionsView.nested([child, other, parent])
+        #expect(order.map(\.session.id) == [other.id, parent.id, child.id])
+        #expect(order.last?.depth == 1)
+        #expect(AgentSession.origin(of: child) == parent.id)
+    }
+
+    @Test("the slug lives on the session, for the sheet's branch preview")
+    func slugOnSession() {
+        #expect(AgentSession.worktreeSlug("Try SQLite for the cache") == "try-sqlite-for-the-cache")
+        #expect(AgentSessionEngine.worktreeSlug("Try SQLite") == AgentSession.worktreeSlug("Try SQLite"))
+    }
 }

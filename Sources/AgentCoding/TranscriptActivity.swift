@@ -159,21 +159,23 @@ struct TurnChanges: Equatable {
 }
 
 extension Notification.Name {
-    /// "Show me the changes": the key window opens its Files pane.
+    /// "Show me the changes" ([String] of a turn's files, or nil): the key
+    /// window opens the session's review.
     static let bromureShowChanges = Notification.Name("io.bromure.showChanges")
     /// Scroll the chat on stage to the first message with these words.
     static let bromureFindInChat = Notification.Name("io.bromure.findInChat")
 }
 
 /// The end of a turn that edited files: "Changed 3 files  +120 −35" — a
-/// click opens the Files pane (its git changes); hover lists the files.
+/// click opens the review on those files; hover lists them.
 struct TurnChangesView: View {
     let changes: TurnChanges
     @State private var hovering = false
 
     var body: some View {
         Button {
-            NotificationCenter.default.post(name: .bromureShowChanges, object: nil)
+            // The turn's files: the key window opens the session's review on them.
+            NotificationCenter.default.post(name: .bromureShowChanges, object: changes.files)
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "doc.badge.gearshape")

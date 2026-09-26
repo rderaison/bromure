@@ -811,7 +811,7 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                      keyEquivalent: "")
     newRegistryItem.target = delegate
     infraMenu.addItem(newRegistryItem)
-    let connectorItem = NSMenuItem(title: L("Signal / WhatsApp Connector…"),
+    let connectorItem = NSMenuItem(title: L("Messaging Connector…"),
                                    action: #selector(ACAppDelegate.showConnectorAction(_:)),
                                    keyEquivalent: "")
     connectorItem.target = delegate
@@ -1899,7 +1899,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     let kubeClusterStore = KubeClusterStore()
     private(set) lazy var kubeClusterEngine: KubeClusterEngine = {
         let e = KubeClusterEngine(app: self, store: kubeClusterStore)
-        // The user's phone (Signal / WhatsApp connector) talks to the Switchboard.
+        // The user's phone and Slack (messaging connector) talk to the Switchboard.
         e.onConnectorMessage = { [weak self] kind, text in
             self?.switchboardEngine.phoneMessage(kind, text)
         }
@@ -3480,6 +3480,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     if self.preferencesWindow == nil { self.openPreferencesAction(nil) }
                     window = self.preferencesWindow
                 case "sheet":  window = self.editorWindow?.attachedSheet
+                case "unified-sheet": window = self.unifiedWindow?.attachedSheet
+                case "connector": window = ConnectorWindowController.current
+                case "connector-sheet": window = ConnectorWindowController.current?.attachedSheet
+                case let w where w.hasPrefix("branches:"):
+                    guard let pid = UUID(uuidString: String(w.dropFirst(9))) else { return ["error": "profile id?"] }
+                    self.branchesWindows.open(profileID: pid)
+                    window = self.branchesWindows.window(for: pid)
+                case let w where w.hasPrefix("session-review:"):
+                    window = UUID(uuidString: String(w.dropFirst(15))).flatMap { self.sessionReviews.window(for: $0) }
                 case "board":
                     // Kanban board as the stage surface, then the unified
                     // window — E2E/doc-screenshot hook for the board. The
@@ -4054,7 +4063,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             MainActor.assumeIsolated {
                 guard let self else { return ["error": "no app"] }
                 if let action = params["action"] as? String,
-                   action.hasPrefix("room-") || ["sidebar-search", "select-session", "undo-toast",
+                   action.hasPrefix("room-") || action.hasPrefix("branch-") || action.hasPrefix("review-") || ["sidebar-search", "select-session", "undo-toast",
                                                  "activity-open", "command-held", "appearance"].contains(action) {
                     return self.roomDebug(action, params)
                 }
@@ -4275,6 +4284,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.roomCommand(id, action, body) ?? ["error": "no app"]
             }
         }
+        server.onAgentSessionGitState = { [weak self] id in
+            guard let self, let s = self.agentSessionStore.session(id) else { return nil }
+            return await self.agentSessionEngine.gitState(profileID: s.profileID, cwd: s.cwd)
+        }
         server.onAgentSessionCommand = { [weak self] id, action, body in
             MainActor.assumeIsolated {
                 guard let self else { return ["error": "no app"] }
@@ -4344,14 +4357,81 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // {name, tool, message?} → a new session in a git worktree
                     // off this session's folder.
                     guard let parent = self.agentSessionStore.session(sid) else { return ["error": "unknown session"] }
-                    guard let name = (body["name"] as? String)?.trimmingCharacters(in: .whitespaces), !name.isEmpty
-                    else { return ["error": "name required"] }
+                    // No name = named after the message.
+                    let name = (body["name"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
                     let tool = (body["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) ?? parent.tool
                     guard let newID = self.agentSessionEngine.startWorktree(
                         from: sid, name: name, tool: tool, message: body["message"] as? String,
-                        remotely: true)
+                        initGit: body["initGit"] as? Bool ?? false,
+                        base: (body["base"] as? String).flatMap { $0.isEmpty ? nil : $0 }, remotely: true)
                     else { return ["error": "the session has no folder to branch"] }
                     return ["ok": true, "id": newID.uuidString]
+                case (let sid?, "branch-merge"):
+                    // {into?, squash?, removeAfter?}
+                    guard self.agentSessionStore.session(sid)?.worktreeBranch != nil else { return ["error": "not a branch session"] }
+                    self.agentSessionEngine.mergeBranch(sid, into: body["into"] as? String,
+                                                        squash: body["squash"] as? Bool ?? false,
+                                                        removeAfter: body["removeAfter"] as? Bool ?? true)
+                    return ["ok": true]
+                case (let sid?, "branch-pr"):
+                    guard self.agentSessionStore.session(sid)?.worktreeBranch != nil else { return ["error": "not a branch session"] }
+                    self.agentSessionEngine.branchPullRequest(sid, into: body["into"] as? String)
+                    return ["ok": true]
+                case (let sid?, "branch-discard"):
+                    guard self.agentSessionStore.session(sid)?.worktreeBranch != nil else { return ["error": "not a branch session"] }
+                    self.agentSessionEngine.discardBranch(sid)
+                    return ["ok": true]
+                case (let sid?, "review"):
+                    // The review window over a fat client: {op: add|remove|viewed|send, …}.
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    let engine = self.agentSessionEngine
+                    switch body["op"] as? String {
+                    case "add":
+                        guard let text = body["text"] as? String else { return ["error": "text required"] }
+                        engine.addReviewComment(sid, text: text, file: body["file"] as? String, line: body["line"] as? Int)
+                    case "remove":
+                        guard let cid = (body["comment"] as? String).flatMap(UUID.init(uuidString:))
+                        else { return ["error": "comment required"] }
+                        engine.removeReviewComment(sid, commentID: cid)
+                    case "viewed":
+                        guard let path = body["path"] as? String else { return ["error": "path required"] }
+                        engine.setReviewViewed(sid, path: path, fingerprint: body["fingerprint"] as? String)
+                    case "send":
+                        return ["ok": true, "sent": engine.sendReview(sid)]
+                    default:
+                        return ["error": "op must be add, remove, viewed or send"]
+                    }
+                    return ["ok": true]
+                case (nil, "worktree-open"):
+                    // A fat client's Branches window: {profile, entry fields, tool?}.
+                    guard let pid = (body["profile"] as? String).flatMap(UUID.init(uuidString:)),
+                          let dir = body["dir"] as? String, let branch = body["branch"] as? String
+                    else { return ["error": "profile, dir and branch required"] }
+                    let e = WorktreeEntry(dir: dir, root: body["root"] as? String ?? "", branch: branch,
+                                          parent: body["parent"] as? String ?? "", ahead: 0, changed: 0,
+                                          lastCommit: nil, display: body["display"] as? String ?? "")
+                    let tool = (body["tool"] as? String).flatMap(Profile.Tool.init(rawValue:))
+                        ?? self.profile(for: pid)?.tool ?? .claude
+                    let id = self.agentSessionEngine.openBranchSession(profileID: pid, entry: e, tool: tool, remotely: true)
+                    return ["ok": true, "id": id.uuidString]
+                case (nil, "worktree-discard"):
+                    guard let pid = (body["profile"] as? String).flatMap(UUID.init(uuidString:)),
+                          let root = body["root"] as? String, let branch = body["branch"] as? String
+                    else { return ["error": "profile, root and branch required"] }
+                    let e = WorktreeEntry(dir: "", root: root, branch: branch, parent: "", ahead: 0, changed: 0,
+                                          lastCommit: nil, display: "")
+                    self.agentSessionEngine.discardWorktree(
+                        profileID: pid, entry: e,
+                        session: (body["session"] as? String).flatMap(UUID.init(uuidString:)))
+                    return ["ok": true]
+                case (let sid?, "branch-decline"):
+                    guard self.agentSessionStore.session(sid) != nil else { return ["error": "unknown session"] }
+                    self.agentSessionEngine.declineMerge(sid)
+                    return ["ok": true]
+                case (let sid?, "branch-keep"):
+                    guard self.agentSessionStore.session(sid)?.worktreeBranch != nil else { return ["error": "not a branch session"] }
+                    self.agentSessionEngine.keepBranchQuietly(sid)
+                    return ["ok": true]
                 case (let sid?, "rename"):
                     guard self.agentSessionStore.session(sid) != nil,
                           let title = body["title"] as? String else { return ["error": "unknown session or no title"] }
@@ -4430,6 +4510,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             guard let c = self.kubeClusterStore.connector else { return ["ok": false, "error": "no connector"] }
             switch action {
+            case "slack-setup":
+                // Test hook: the Slack sheet's Connect, with these tokens —
+                // the outcome lands in the connector log (tokens never logged).
+                let bot = doc["bot"] as? String ?? "", app = doc["app"] as? String ?? ""
+                Task {
+                    let r = await engine.slackSetup(botToken: bot, appToken: app)
+                    engine.log(c.id, "slack-setup (test hook): " + (r.ok ? "ok, \(r.value ?? "")" : (r.message ?? "failed")))
+                }
+            case "disconnect":
+                // Test hook: a channel's Disconnect (no confirmation).
+                guard let kind = (doc["channel"] as? String).flatMap(ConnectorChannel.Kind.init(rawValue:))
+                else { return ["ok": false, "error": "channel required"] }
+                Task { await engine.disconnect(kind) }
+            case "slack-pair":
+                return ["ok": true, "code": engine.slackStartPairing()]
+            case "window":
+                // Test hook: the connector window, optionally with a channel's
+                // setup sheet open at a step (slack: create | tokens | pair).
+                ConnectorWindowController.show()
+                if let kind = (doc["setup"] as? String).flatMap(ConnectorChannel.Kind.init(rawValue:)) {
+                    let step = doc["step"] as? String
+                    SlackSetupView.testStartAt = step.flatMap(SlackSetupView.Step.init(rawValue:))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        NotificationCenter.default.post(name: .bromureConnectorSetup, object: kind.rawValue,
+                                                        userInfo: step.map { ["step": $0] })
+                    }
+                }
             case "start": engine.startConnector(c.id)
             case "stop": Task { await engine.stopConnector(c.id) }
             case "restart": engine.restartConnector(c.id)
@@ -4461,8 +4568,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 else { return ["ok": false, "error": "channel and mode required"] }
                 var cc = c
                 let ch = ConnectorChannel(kind: kind, mode: mode, account: doc["account"] as? String,
-                                          allowed: (doc["allowed"] as? [String]) ?? [], connected: true)
-                if kind == .signal { cc.signal = ch } else { cc.whatsapp = ch }
+                                          allowed: (doc["allowed"] as? [String]) ?? [],
+                                          connected: doc["connected"] as? Bool ?? true,
+                                          workspace: doc["workspace"] as? String)
+                var chh = ch
+                chh.workspaceID = doc["workspaceID"] as? String
+                cc.setChannel(kind, chh)
                 self.kubeClusterStore.upsert(cc)
             default:
                 return ["ok": false, "error": "unknown action \(action)"]
@@ -4597,6 +4708,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.startOver(id)
                 case "close-no-merge":
                     self.codingTaskEngine.closeWithoutMerge(id)
+                case "comment-remove":
+                    guard let cid = (body["comment"] as? String).flatMap(UUID.init(uuidString:))
+                    else { return ["error": "comment required"] }
+                    self.codingTaskStore.mutate(id) { t in t.comments.removeAll { $0.id == cid && $0.sentAt == nil } }
+                case "viewed":
+                    guard let path = body["path"] as? String else { return ["error": "path required"] }
+                    let fp = body["fingerprint"] as? String
+                    self.codingTaskStore.mutate(id) { t in
+                        var v = t.reviewViewed ?? [:]
+                        v[path] = fp
+                        t.reviewViewed = v.isEmpty ? nil : v
+                    }
                 case "comment":
                     guard let text = body["text"] as? String, !text.isEmpty else {
                         return ["error": "text required"]
@@ -7086,6 +7209,57 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case "activity-open":
             ActivityGroupView.startOpen = p["open"] as? Bool ?? true
             return ["ok": true]
+        // Branch sessions: the sheet, and the steps its buttons take.
+        case "branch-sheet":
+            guard let id = uuid("session") else { return ["error": "session?"] }
+            w.selectSession(id)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { w.listModel.newBranchRequest = id }
+            return ["ok": true]
+        case "branch-start":
+            guard let id = uuid("session") else { return ["error": "session?"] }
+            let tool = (p["tool"] as? String).flatMap(Profile.Tool.init(rawValue:))
+                ?? agentSessionStore.session(id)?.tool ?? .claude
+            guard let nid = agentSessionEngine.startWorktree(
+                from: id, name: p["name"] as? String ?? "", tool: tool,
+                message: p["message"] as? String, initGit: p["initGit"] as? Bool ?? false,
+                base: p["base"] as? String)
+            else { return ["error": "can't branch that session"] }
+            w.selectSession(nid)
+            return ["ok": true, "id": nid.uuidString]
+        case "branch-merge":
+            guard let id = uuid("session") else { return ["error": "session?"] }
+            agentSessionEngine.mergeBranch(id, into: p["into"] as? String, squash: p["squash"] as? Bool ?? false,
+                                           removeAfter: p["removeAfter"] as? Bool ?? true)
+            return ["ok": true]
+        case "branch-request":
+            // What worktree_merge does.
+            guard let id = uuid("session") else { return ["error": "session?"] }
+            let engine = agentSessionEngine
+            Task { _ = await engine.requestMerge(id, into: nil, squash: false, askedBy: id) }
+            return ["ok": true]
+        case "branch-archive", "branch-delete", "branch-discard":
+            // The window's own handlers — alerts included.
+            guard let id = uuid("session") else { return ["error": "session?"] }
+            w.debugBranchAction(action, id)
+            return ["ok": true]
+        case "review-open":
+            // {session, files?}: the review window, narrowed like a turn's line.
+            guard let id = uuid("session") else { return ["error": "session?"] }
+            sessionReviews.open(sessionID: id, files: p["files"] as? [String])
+            return ["ok": true]
+        case "review-comment":
+            guard let id = uuid("session") else { return ["error": "session?"] }
+            agentSessionEngine.addReviewComment(id, text: p["text"] as? String ?? "", file: p["file"] as? String,
+                                                line: p["line"] as? Int)
+            return ["ok": true, "comments": agentSessionStore.session(id)?.reviewComments?.count ?? 0]
+        case "branch-state":
+            guard let id = uuid("session"), let s = agentSessionStore.session(id) else { return ["error": "session?"] }
+            var o: [String: Any] = ["title": s.title, "cwd": s.cwd, "branch": s.worktreeBranch ?? "",
+                                    "parent": s.branchParent ?? "", "root": s.branchRoot ?? "",
+                                    "archived": s.isArchived, "deleted": s.isDeleted,
+                                    "summary": SessionHome.branchSummary(s) ?? "", "error": s.lastError ?? ""]
+            if let m = s.branchMerge { o["merge"] = ["phase": m.phase.rawValue, "target": m.target, "detail": m.detail ?? ""] }
+            return o
         case "appearance":
             // Screenshot hook: "dark", "light", or anything else = follow the system.
             switch p["mode"] as? String {
@@ -7689,6 +7863,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         do { try store.save(profile) } catch {
             FileHandle.standardError.write(Data(
                 "[onboarding] couldn't save the workspace: \(error)\n".utf8))
+        }
+        // First run: what was imported is how you work everywhere, not just
+        // in this one workspace — it becomes the settings every workspace
+        // starts from (git identity and config, registry, cloud and git
+        // credentials). SSH keys copy into a workspace's own folder, so they
+        // stay with this one.
+        if wizard.purpose != .newWorkspace {
+            var template = store.loadTemplate()
+            // Not subscriptions (global stores already, and reading one again
+            // would ask for keychain access twice) nor SSH keys.
+            let shared = findings.filter { f in
+                switch f.payload {
+                case .keychainSubscription, .subscription, .sshKey: return false
+                default: return true
+                }
+            }
+            _ = ConfigScan.apply(shared, to: &template)
+            do { try store.saveTemplate(template) } catch {
+                FileHandle.standardError.write(Data(
+                    "[onboarding] couldn't save the workspace template: \(error)\n".utf8))
+            }
         }
 
         // SSH keys copy into the profile directory, so they need it saved first.
@@ -10295,8 +10490,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let prompt = (args.count >= 5 && !args[4].isEmpty) ? b64(args[4]) : "-"
             // Optional 6th, raw: "background" — the tab opens behind the
             // current one (a delegate's; the user is looking at its delegator).
+            // Optional 7th: the branch to start from.
             encoded = [b64(args[0]), b64(args[1]), b64(args[2]), b64(args[3]), prompt]
-                + (args.count >= 6 && args[5] == "background" ? ["background"] : [])
+                + (args.count >= 6 && args[5] == "background" ? ["background"] : ["-"])
+                + (args.count >= 7 && !args[6].isEmpty ? [b64(args[6])] : [])
         case "run":
             // Automation fire: same layout as "create", but the guest falls
             // back to a plain agent tab when cwd isn't a git repo. Optional
@@ -10345,6 +10542,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case "terminal":
             guard args.count >= 2 else { return false }   // mainRoot, branch
             name = "worktree-terminal"; encoded = args.prefix(2).map(b64)
+        case "unregister":
+            // Keep the checkout, stop reopening it at boot (an archived
+            // branch session the user chose to keep).
+            guard args.count >= 2 else { return false }   // mainRoot, branch
+            name = "worktree-unregister"; encoded = args.prefix(2).map(b64)
         default:
             return false
         }
@@ -10884,12 +11086,50 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return try? await guestExec(profileID: task.profileID, command: cmd, timeout: 15)
     }
 
+    /// Every branch on a machine, and the ones nobody looks after.
+    private(set) lazy var branchesWindows = BranchesWindowManager(
+        context: BranchesWindowManager.Context(
+            machineName: { [weak self] id in self?.profile(for: id)?.name ?? "" },
+            list: { [weak self] id in await self?.agentSessionEngine.listWorktrees(profileID: id) },
+            sessions: { [weak self] in self?.agentSessionStore.sessions ?? [] },
+            openSession: { [weak self] pid, entry, tool in
+                guard let self else { return }
+                let id = self.agentSessionEngine.openBranchSession(profileID: pid, entry: entry, tool: tool)
+                self.ensureUnifiedWindow().selectSession(id)
+            },
+            selectSession: { [weak self] id in
+                guard let self else { return }
+                let w = self.ensureUnifiedWindow()
+                w.selectSession(id)
+                w.makeKeyAndOrderFront(nil)
+            },
+            review: { [weak self] id in self?.sessionReviews.open(sessionID: id) },
+            discard: { [weak self] pid, entry, s in
+                self?.agentSessionEngine.discardWorktree(profileID: pid, entry: entry, session: s?.id)
+            },
+            defaultTool: { [weak self] id in self?.profile(for: id)?.tool ?? .claude }))
+
+    /// Review windows for sessions: their changes, comments for the agent.
+    private(set) lazy var sessionReviews = SessionReviewWindowManager(
+        context: SessionReviewWindowManager.Context(
+            session: { [weak self] id in self?.agentSessionStore.session(id) },
+            fetch: { [weak self] id, base in await self?.agentSessionEngine.fetchReview(id, base: base) },
+            addComment: { [weak self] id, text, file, line in
+                self?.agentSessionEngine.addReviewComment(id, text: text, file: file, line: line)
+            },
+            removeComment: { [weak self] id, cid in self?.agentSessionEngine.removeReviewComment(id, commentID: cid) },
+            setViewed: { [weak self] id, path, fp in self?.agentSessionEngine.setReviewViewed(id, path: path, fingerprint: fp) },
+            send: { [weak self] id in self?.agentSessionEngine.sendReview(id) },
+            actions: { [weak self] in self?.unifiedWindow?.stageActions ?? SessionStageActions() },
+            accentHex: { [weak self] id in self?.profile(for: id)?.color.hexInUI ?? "#888888" },
+            workspaceName: { [weak self] id in self?.profile(for: id)?.name ?? "" }))
+
     /// Review windows for the coding board's Testing cards.
     private(set) lazy var taskReviewWindows = TaskReviewWindowManager(
         context: TaskReviewWindowManager.Context(
             store: { [weak self] in self?.codingTaskStore },
-            fetchReview: { [weak self] task in
-                await self?.fetchTaskReview(task)
+            fetchReview: { [weak self] task, base in
+                await self?.fetchTaskReview(task, base: base)
             },
             openTerminal: { [weak self] task in
                 guard let self, let slug = task.branchSlug else { return }
@@ -10920,6 +11160,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.codingTaskStore.mutate(taskID) {
                     $0.comments.append(ReviewComment(text: text, file: file, line: line))
                 }
+            },
+            removeComment: { [weak self] taskID, cid in
+                self?.codingTaskStore.mutate(taskID) { t in t.comments.removeAll { $0.id == cid && $0.sentAt == nil } }
+            },
+            setViewed: { [weak self] taskID, path, fp in
+                self?.codingTaskStore.mutate(taskID) { t in
+                    var v = t.reviewViewed ?? [:]
+                    v[path] = fp
+                    t.reviewViewed = v.isEmpty ? nil : v
+                }
             }))
 
     /// Repo branches for the review window's "Merge into…" picker.
@@ -10937,7 +11187,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// task's branch against its parent — read live from the guest so it
     /// always reflects the worktree as it is right now (including work the
     /// agent hasn't committed).
-    func fetchTaskReview(_ task: CodingTask) async -> TaskReviewData? {
+    func fetchTaskReview(_ task: CodingTask, base: TaskReviewData.Base? = nil) async -> TaskReviewData? {
         var wt = task.worktreeDir
         var parent = task.parentBranch
         // Self-heal: a task that finished while its session was detached
@@ -10958,7 +11208,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
         guard let wt, !wt.isEmpty, let parent, !parent.isEmpty else { return nil }
-        let cmd = TaskReviewData.guestCommand(worktreeDir: wt, parent: parent)
+        let cmd = TaskReviewData.sessionCommand(dir: wt, base: base ?? .branch(parent))
         guard let out = try? await guestExec(profileID: task.profileID,
                                              command: cmd, timeout: 30) else { return nil }
         return TaskReviewData.parse(out)

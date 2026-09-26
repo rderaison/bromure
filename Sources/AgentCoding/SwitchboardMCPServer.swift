@@ -151,7 +151,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
         ],
         [
             "name": "message_user",
-            "description": "Send a message to the user's phone (Signal or WhatsApp — the one they last wrote from). Use it to answer anything that came in as \"[Signal] …\" or \"[WhatsApp] …\", and to ping them when a session needs them while they're away. Short, plain text: no markdown, no tables.",
+            "description": "Send a message to the user on their phone or Slack (Signal, WhatsApp or Slack — the one they last wrote from). Use it to answer anything that came in as \"[Signal] …\", \"[WhatsApp] …\" or \"[Slack] …\", and to ping them when a session needs them while they're away. Short, plain text: no markdown, no tables.",
             "inputSchema": ["type": "object", "properties": [
                 "text": ["type": "string"],
             ], "required": ["text"]],

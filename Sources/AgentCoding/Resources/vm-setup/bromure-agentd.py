@@ -2464,7 +2464,7 @@ def _delegation_mcp_setup(tool, workdir):
 
 
 def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
-                     task=False, background=False):
+                     task=False, background=False, base=""):
     _ensure_seed_current()
     if prompt_b64 == "-":
         prompt_b64 = ""   # "-" sentinel = no prompt
@@ -2480,6 +2480,16 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
     if parent_branch == "HEAD":
         parent_branch = _capture(
             ["git", "-C", cwd, "rev-parse", "--short", "HEAD"]).strip()
+    start = "HEAD"
+    if base:
+        # Start from another branch: it's also where the work goes back to.
+        if subprocess.run(["git", "-C", cwd, "rev-parse", "--verify", "--quiet",
+                           base + "^{commit}"], stdout=_DEVNULL,
+                          stderr=_DEVNULL).returncode != 0:
+            worktree_err("worktree: no branch or commit named %s" % base)
+            return
+        start = base
+        parent_branch = base
 
     repo_name = os.path.basename(main_root)
     base = os.path.join(os.path.expanduser("~"), ".bromure", "worktrees",
@@ -2501,7 +2511,7 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
         n += 1
 
     add = subprocess.run(
-        ["git", "-C", cwd, "worktree", "add", "-b", branch, wt_dir, "HEAD"],
+        ["git", "-C", cwd, "worktree", "add", "-b", branch, wt_dir, start],
         capture_output=True, text=True)
     if add.returncode != 0:
         worktree_err("worktree add failed: " + (add.stderr or add.stdout))
@@ -3821,9 +3831,12 @@ def _dispatch_command(action, arg):
         # Fields 1-4 are base64; field 5 (tool) is passed RAW (matches "$5").
         # Optional 6th, raw: "background" opens the tab behind the current
         # one (a delegate's tab — the user is looking at the delegator).
-        f = _fields(arg, 6)
+        # Optional 7th, base64: the branch to start from (default: the
+        # folder's current commit). A placeholder "-" fills the 6th then.
+        f = _fields(arg, 7)
         _bg(_worktree_create, _b64d(f[0]), _b64d(f[1]), _b64d(f[2]),
-            _b64d(f[3]), f[4], False, False, f[5] == "background")
+            _b64d(f[3]), f[4], False, False, f[5] == "background",
+            _b64d(f[6]) if f[6] else "")
     elif action == "automation-run":
         # Same field layout as worktree-create; falls back to a plain agent
         # tab when the path isn't a git repo. Optional 6th field: run mode
@@ -3864,6 +3877,12 @@ def _dispatch_command(action, arg):
     elif action == "worktree-remove":
         f = _fields(arg, 2)
         _bg(_worktree_remove, _b64d(f[0]), _b64d(f[1]))
+    elif action == "worktree-unregister":
+        # Keep the checkout, but don't reopen it at boot any more.
+        f = _fields(arg, 2)
+        root = _b64d(f[0])
+        if root:
+            _wt_registry_del(os.path.basename(root), _b64d(f[1]))
     elif action == "worktree-resolve":
         f = _fields(arg, 2)
         _bg(_worktree_resolve, _b64d(f[0]), _b64d(f[1]))

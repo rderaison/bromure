@@ -652,6 +652,10 @@ public struct MessagingConnector: Codable, Identifiable, Equatable, Sendable {
     public var provisioned: Bool
     public var signal: ConnectorChannel?
     public var whatsapp: ConnectorChannel?
+    /// A Slack app of the user's (Socket Mode). Set once its tokens check
+    /// out; `connected` only after the user paired their Slack account with
+    /// a one-time code — until then nobody reaches the Switchboard on it.
+    public var slack: ConnectorChannel?
 
     public init(id: UUID = UUID(), name: String = "Signal / WhatsApp", createdAt: Date = Date(),
                 memoryGB: Int = 2, diskGB: Int = 4, node: KubeNodeRecord? = nil,
@@ -666,12 +670,37 @@ public struct MessagingConnector: Codable, Identifiable, Equatable, Sendable {
         self.provisioned = provisioned
     }
 
-    public var channels: [ConnectorChannel] { [signal, whatsapp].compactMap { $0 }.filter(\.connected) }
+    public var channels: [ConnectorChannel] { [signal, whatsapp, slack].compactMap { $0 }.filter(\.connected) }
+
+    public func channel(_ kind: ConnectorChannel.Kind) -> ConnectorChannel? {
+        switch kind {
+        case .signal: return signal
+        case .whatsapp: return whatsapp
+        case .slack: return slack
+        }
+    }
+
+    public mutating func setChannel(_ kind: ConnectorChannel.Kind, _ ch: ConnectorChannel?) {
+        switch kind {
+        case .signal: signal = ch
+        case .whatsapp: whatsapp = ch
+        case .slack: slack = ch
+        }
+    }
 }
 
 /// One messaging channel of the connector, as the user set it up.
 public struct ConnectorChannel: Codable, Equatable, Sendable {
-    public enum Kind: String, Codable, Sendable { case signal, whatsapp }
+    public enum Kind: String, Codable, Sendable, CaseIterable {
+        case signal, whatsapp, slack
+        public var displayName: String {
+            switch self {
+            case .signal: return "Signal"
+            case .whatsapp: return "WhatsApp"
+            case .slack: return "Slack"
+            }
+        }
+    }
     /// ownNumber: the Switchboard is its own contact (a number registered or
     /// linked for it); the user writes to it from `userAddress`.
     /// linked: the connector is a linked device of the user's own account;
@@ -686,13 +715,19 @@ public struct ConnectorChannel: Codable, Equatable, Sendable {
     /// JID. Linked mode: the account itself (Note to Self).
     public var allowed: [String]
     public var connected: Bool
+    /// Slack: the workspace's name (and id), as its token reported them.
+    public var workspace: String?
+    public var workspaceID: String?
 
-    public init(kind: Kind, mode: Mode, account: String? = nil, allowed: [String] = [], connected: Bool = false) {
+    public init(kind: Kind, mode: Mode, account: String? = nil, allowed: [String] = [], connected: Bool = false,
+                workspace: String? = nil, workspaceID: String? = nil) {
         self.kind = kind
         self.mode = mode
         self.account = account
         self.allowed = allowed
         self.connected = connected
+        self.workspace = workspace
+        self.workspaceID = workspaceID
     }
 
     /// Where replies go: the user (own number) or the account itself (linked).
@@ -710,6 +745,10 @@ public struct MessagingConnectorInfo: Codable, Equatable, Sendable {
     public var whatsappConnected: Bool
     public var inboxPending: Int
     public var at: String
+    /// Slack's Socket Mode link (nil from a relay that predates Slack).
+    public var slackConfigured: Bool?
+    public var slackConnected: Bool?
+    public var slackError: String?
 
     public static func decode(_ data: Data) -> MessagingConnectorInfo? {
         try? JSONDecoder().decode(MessagingConnectorInfo.self, from: data)

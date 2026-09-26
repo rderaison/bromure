@@ -10,7 +10,8 @@ import SwiftUI
 
 struct UndoToastView: View {
     let message: String
-    let onUndo: () -> Void
+    /// nil: nothing to take back — just the word that it's done.
+    let onUndo: (() -> Void)?
     let onClose: () -> Void
     @State private var shown = false
 
@@ -22,16 +23,18 @@ struct UndoToastView: View {
                 .font(.system(size: 12.5, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
-            Button {
-                onUndo()
-                onClose()
-            } label: {
-                Text(NSLocalizedString("Undo", comment: "undo toast"))
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+            if let onUndo {
+                Button {
+                    onUndo()
+                    onClose()
+                } label: {
+                    Text(NSLocalizedString("Undo", comment: "undo toast"))
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("z", modifiers: .command)
             }
-            .buttonStyle(.plain)
-            .keyboardShortcut("z", modifiers: .command)
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
@@ -59,7 +62,7 @@ final class UndoToastHost {
 
     init(window: NSWindow) { self.window = window }
 
-    func show(_ message: String, undo: @escaping () -> Void) {
+    func show(_ message: String, undo: (() -> Void)?) {
         close()
         guard let content = window?.contentView else { return }
         let view = NSHostingView(rootView: UndoToastView(message: message, onUndo: undo,

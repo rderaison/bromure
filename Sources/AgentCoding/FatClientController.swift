@@ -1123,9 +1123,10 @@ final class RemoteHostController {
     /// POST /agent-sessions/{id}/worktree — a new session in a git worktree
     /// off that session's folder. The new session's id, or nil.
     func startWorktreeSession(from id: UUID, name: String, tool: Profile.Tool,
-                              message: String?) async -> UUID? {
+                              message: String?, initGit: Bool = false, base: String? = nil) async -> UUID? {
         let host = self.host
-        var body: [String: Any] = ["name": name, "tool": tool.rawValue]
+        var body: [String: Any] = ["name": name, "tool": tool.rawValue, "initGit": initGit]
+        if let base { body["base"] = base }
         if let message, !message.isEmpty { body["message"] = message }
         let path = "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/worktree"
         let resp = try? await Task.detached(priority: .userInitiated) {
@@ -1134,6 +1135,39 @@ final class RemoteHostController {
         pollOnce()
         guard let resp, resp.status == 200, let idStr = resp.json["id"] as? String else { return nil }
         return UUID(uuidString: idStr)
+    }
+
+    /// POST /agent-sessions/worktree-open — a left-behind branch picked up
+    /// in a new session on the server. Its id, or nil.
+    func openWorktreeSession(profileID: UUID, entry e: WorktreeEntry, tool: Profile.Tool) async -> UUID? {
+        let host = self.host
+        let body: [String: Any] = ["profile": profileID.uuidString, "dir": e.dir, "branch": e.branch,
+                                   "parent": e.parent, "root": e.root, "display": e.display, "tool": tool.rawValue]
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", "/agent-sessions/worktree-open", body: body)
+        }.value
+        pollOnce()
+        guard let resp, resp.status == 200, let idStr = resp.json["id"] as? String else { return nil }
+        return UUID(uuidString: idStr)
+    }
+
+    /// POST /agent-sessions/worktree-discard — checkout + branch (+ session).
+    func discardWorktree(profileID: UUID, entry e: WorktreeEntry, session: UUID?) {
+        var body: [String: Any] = ["profile": profileID.uuidString, "root": e.root, "branch": e.branch]
+        if let session { body["session"] = session.uuidString }
+        send("POST", "/agent-sessions/worktree-discard", body: body)
+    }
+
+    /// POST /agent-sessions/git-state — what the session's folder is,
+    /// git-wise. nil when the machine can't be asked.
+    func sessionGitState(_ id: UUID) async -> GitFolderState? {
+        let host = self.host
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", "/agent-sessions/git-state",
+                                                          body: ["id": id.uuidString])
+        }.value
+        guard let resp, resp.status == 200 else { return nil }
+        return GitFolderState(json: resp.json)
     }
 
     /// POST /agent-sessions/switchboard — the server's Switchboard, started or
@@ -1241,10 +1275,15 @@ final class RemoteHostController {
         }
         foregroundKick()
     }
-    /// Worktree actions that are fully derivable from the mirrored tab
-    /// (remove / attach-terminal). Prompt-driven ones (new worktree, merge,
-    /// resolve, seed-automation) open a flow that isn't mirrored in v1 and are
-    /// left to the host's own GUI. The mirror still DISPLAYS all worktrees 1:1.
+    /// A guest worktree command on the server (the Machines list's tab menu:
+    /// create, merge, pr, resolve…) — same args as the host's own dialogs.
+    func worktreeCommand(_ id: Profile.ID, _ action: String, args: [String]) {
+        send("POST", "/sessions/\(seg(id))/worktree", body: ["action": action, "args": args])
+    }
+
+    /// Worktree actions fully derivable from the mirrored tab (remove /
+    /// attach-terminal); the window's own dialogs drive the others through
+    /// `worktreeCommand`.
     func worktree(_ id: Profile.ID, index: Int, action: TabAction) {
         guard let m = tabsModels[id], let tab = m.tabs.first(where: { $0.index == index }) else { return }
         let root = tab.rootRepo ?? tab.repoRoot ?? ""
@@ -2397,11 +2436,17 @@ final class RemoteHostWindow: NSWindow {
             if held != self.controller.listModel.commandHeld { self.controller.listModel.commandHeld = held }
             return event
         }
-        // A chat's "Changed N files" line: this window's Files pane, if it's the one in front.
-        NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] _ in
+        // A chat's "Changed N files" line: review that turn's files, if this
+        // is the window in front.
+        NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] note in
+            let files = note.object as? [String]
             MainActor.assumeIsolated {
                 guard let self, self.isKeyWindow else { return }
-                self.setFilePaneOpen(true)
+                if let id = self.selectedSessionID, let s = self.controller.sessionStore.session(id), SessionHome.hasFolder(s) {
+                    self.sessionReviews.open(sessionID: id, files: files)
+                } else {
+                    self.setFilePaneOpen(true)
+                }
             }
         }
     }
@@ -3205,11 +3250,11 @@ final class RemoteHostWindow: NSWindow {
     /// fat client keeps editors in windows, like workspace settings). Saves ride
     /// the tunnel: `onSave`/`onRunNow` upsert via `POST /automations`, delete via
     /// `DELETE /automations/{id}`. `nil` id opens a fresh draft (the "+" button).
-    private func showAutomationEditor(_ id: UUID?) {
+    private func showAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil) {
         controller.listModel.automationSelectedID = id
         if let win = automationWindow {
             // Rebuild for the newly-requested automation.
-            win.contentView = NSHostingView(rootView: makeAutomationEditor(id))
+            win.contentView = NSHostingView(rootView: makeAutomationEditor(id, prefill: prefill))
             win.makeKeyAndOrderFront(nil)
             return
         }
@@ -3222,16 +3267,17 @@ final class RemoteHostWindow: NSWindow {
             : NSLocalizedString("Edit automation", comment: "remote automation title")
         win.center()
         win.isReleasedWhenClosed = false
-        win.contentView = NSHostingView(rootView: makeAutomationEditor(id))
+        win.contentView = NSHostingView(rootView: makeAutomationEditor(id, prefill: prefill))
         win.makeKeyAndOrderFront(nil)
         automationWindow = win
     }
 
-    private func makeAutomationEditor(_ id: UUID?) -> AutomationEditorView {
+    private func makeAutomationEditor(_ id: UUID?, prefill: AutomationPrefill? = nil) -> AutomationEditorView {
         AutomationEditorView(
             store: controller.automationStore,
             profiles: controller.profiles,
             editing: id,
+            prefill: prefill,
             onSave: { [weak self] auto in
                 self?.controller.upsertAutomation(auto)
                 self?.closeAutomationWindow()
@@ -3357,10 +3403,10 @@ final class RemoteHostWindow: NSWindow {
     private lazy var taskReviewWindows = TaskReviewWindowManager(
         context: TaskReviewWindowManager.Context(
             store: { [weak self] in self?.controller.taskStore },
-            fetchReview: { [weak self] task in
+            fetchReview: { [weak self] task, base in
                 guard let self, let wt = task.worktreeDir, !wt.isEmpty,
                       let parent = task.parentBranch, !parent.isEmpty else { return nil }
-                let cmd = TaskReviewData.guestCommand(worktreeDir: wt, parent: parent)
+                let cmd = TaskReviewData.sessionCommand(dir: wt, base: base)
                 guard let out = try? await self.controller.guestExec(
                     task.profileID, command: cmd, timeout: 30) else { return nil }
                 return TaskReviewData.parse(out)
@@ -3393,6 +3439,14 @@ final class RemoteHostWindow: NSWindow {
                 if let file { body["file"] = file }
                 if let line { body["line"] = line }
                 self?.controller.taskCommand(id, "comment", body: body)
+            },
+            removeComment: { [weak self] id, cid in
+                self?.controller.taskCommand(id, "comment-remove", body: ["comment": cid.uuidString])
+            },
+            setViewed: { [weak self] id, path, fp in
+                var body: [String: Any] = ["path": path]
+                if let fp { body["fingerprint"] = fp }
+                self?.controller.taskCommand(id, "viewed", body: body)
             }))
 
     /// Native planning-conversation windows for the mirrored board — the
@@ -3690,6 +3744,7 @@ final class RemoteHostWindow: NSWindow {
 
     private func confirmDeleteSession(_ id: UUID) {
         guard let s = controller.sessionStore.session(id) else { return }
+        if SessionHome.branchNeedsWord(s) { askBranchFate(s, deleting: true); return }
         let perform = { [weak self] in
             guard let self else { return }
             self.controller.sessionCommand(id, "delete")
@@ -3704,6 +3759,135 @@ final class RemoteHostWindow: NSWindow {
         alert.beginSheetModal(for: self) { resp in
             guard resp == .alertFirstButtonReturn else { return }
             perform()
+        }
+    }
+
+    /// Archiving or deleting a branch session with unmerged work (on the
+    /// server): keep the branch or discard it.
+    private func askBranchFate(_ s: AgentSession, deleting: Bool) {
+        let id = s.id
+        BranchAlerts.askFate(s, deleting: deleting, on: self) { [weak self] discard in
+            guard let self else { return }
+            if discard {
+                self.controller.sessionCommand(id, "branch-discard")
+            } else {
+                self.controller.sessionCommand(id, "branch-keep")
+                self.controller.sessionCommand(id, deleting ? "delete" : "archive")
+            }
+            if (deleting || discard), self.selectedSessionID == id { self.clearSessionStage(); self.showNewSession() }
+        }
+    }
+
+    // MARK: Machine-tab worktree actions (the Machines list's tab menu)
+
+    /// The same actions the host's tab menu offers, as sheets on this window;
+    /// the guest work goes through the server's /sessions/{id}/worktree.
+    private func tabAction(_ id: Profile.ID, index: Int, action: TabAction) {
+        guard let m = controller.tabsModel(for: id), let tab = m.tabs.first(where: { $0.index == index }) else { return }
+        let tool = controller.profile(for: id)?.tool.rawValue ?? "claude"
+        switch action {
+        case .removeWorktree, .attachTerminal:
+            if action == .removeWorktree {
+                guard let branch = tab.worktreeBranch else { return }
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = String(format: NSLocalizedString("Discard worktree “%@”?", comment: ""), tab.shownLabel)
+                alert.informativeText = String(format: NSLocalizedString(
+                    "Removes the checkout and deletes branch “%@”. Any commits on this branch that haven't been merged will be lost.",
+                    comment: ""), branch)
+                alert.addButton(withTitle: NSLocalizedString("Discard", comment: ""))
+                alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+                alert.buttons.first?.hasDestructiveAction = true
+                alert.beginSheetModal(for: self) { [weak self] resp in
+                    guard resp == .alertFirstButtonReturn, let self else { return }
+                    self.controller.worktree(id, index: index, action: .removeWorktree)
+                    self.controller.closeTab(id, index: index)
+                }
+            } else {
+                controller.worktree(id, index: index, action: action)
+            }
+        case .newWorktree:
+            // A tab that is a session's: the session's own New Branch sheet.
+            if let s = controller.sessionStore.sessions.first(where: {
+                $0.profileID == id && $0.windowIndex == index && !$0.isDeleted && !$0.hasEnded }) {
+                selectSession(s.id)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                    self?.controller.listModel.newBranchRequest = s.id
+                }
+                return
+            }
+            guard let cwd = tab.cwd, !cwd.isEmpty else { return }
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("New worktree", comment: "")
+            alert.informativeText = NSLocalizedString(
+                "Creates a git worktree branched from this tab's current commit and opens a nested agent in it.", comment: "")
+            alert.addButton(withTitle: NSLocalizedString("Create", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+            let box = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 96))
+            let name = NSTextField(frame: NSRect(x: 0, y: 68, width: 320, height: 24))
+            name.placeholderString = NSLocalizedString("Task name (e.g. Website refactoring)", comment: "")
+            let tools = NSPopUpButton(frame: NSRect(x: 0, y: 36, width: 320, height: 24))
+            let names = Profile.Tool.allCases.map(\.rawValue)
+            tools.addItems(withTitles: names)
+            tools.selectItem(withTitle: names.contains(tool) ? tool : "claude")
+            let prompt = NSTextField(frame: NSRect(x: 0, y: 4, width: 320, height: 24))
+            prompt.placeholderString = NSLocalizedString("Initial prompt (optional)", comment: "")
+            [name, tools, prompt].forEach(box.addSubview)
+            alert.accessoryView = box
+            alert.window.initialFirstResponder = name
+            alert.beginSheetModal(for: self) { [weak self] resp in
+                let n = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard resp == .alertFirstButtonReturn, !n.isEmpty, let self else { return }
+                let t = tools.titleOfSelectedItem ?? tool
+                let p = prompt.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.controller.worktreeCommand(id, "create", args: [cwd, AgentSession.worktreeSlug(n), "\(n) (\(t))", t, p])
+            }
+        case .merge:
+            guard let branch = tab.worktreeBranch, let root = tab.rootRepo else { return }
+            // Destinations: the parent chain through the worktree tabs, then
+            // the repository's own branch.
+            var chain: [(branch: String, label: String)] = []
+            var pb = tab.parentBranch
+            var guardCount = 0
+            while let b = pb, !b.isEmpty, guardCount < 8 {
+                if let parent = m.tabs.first(where: { $0.worktreeBranch == b }) {
+                    chain.append((b, parent.shownLabel)); pb = parent.parentBranch
+                } else {
+                    chain.append((b, String(format: NSLocalizedString("%@ (repo root)", comment: ""), b))); break
+                }
+                guardCount += 1
+            }
+            guard !chain.isEmpty else { return }
+            let alert = NSAlert()
+            alert.messageText = String(format: NSLocalizedString("Merge “%@”", comment: ""), tab.shownLabel)
+            alert.informativeText = NSLocalizedString(
+                "Runs the merge in a new tab in the destination's checkout. Uncommitted work on the branch is committed first by the coding agent, so nothing is left behind; conflicts start the agent right there to resolve them. The worktree isn't discarded — use “Discard worktree” once you're happy.",
+                comment: "")
+            alert.addButton(withTitle: NSLocalizedString("Merge", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+            let canPR = controller.profile(for: id)?.hasGitHubCredential ?? false
+            if canPR { alert.addButton(withTitle: NSLocalizedString("Create Pull Request", comment: "")) }
+            let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 25))
+            for (i, d) in chain.enumerated() {
+                popup.addItem(withTitle: i == 0 ? d.label
+                    : String(format: NSLocalizedString("%@  ⚠︎ skips intermediates", comment: ""), d.label))
+            }
+            alert.accessoryView = popup
+            alert.beginSheetModal(for: self) { [weak self] resp in
+                guard let self else { return }
+                let target = chain[popup.indexOfSelectedItem].branch
+                let args = [branch, target, root, tab.shownLabel, tool]
+                switch resp {
+                case .alertFirstButtonReturn: self.controller.worktreeCommand(id, "merge", args: args)
+                case .alertThirdButtonReturn where canPR: self.controller.worktreeCommand(id, "pr", args: args)
+                default: break
+                }
+            }
+        case .resolveConflicts:
+            guard let dir = tab.cwd else { return }
+            controller.worktreeCommand(id, "resolve", args: [dir, tool])
+        case .createAutomation:
+            showAutomationEditor(nil, prefill: AutomationPrefill(profileID: id, repoPath: tab.cwd ?? "~"))
         }
     }
 
@@ -3726,6 +3910,71 @@ final class RemoteHostWindow: NSWindow {
             showNewSession()
         }
     }
+
+    /// The session actions, for windows of their own (the review).
+    var stageActions: SessionStageActions { sessionStageActions }
+
+    /// A remote machine's branches: listed over the tunnel; opening and
+    /// discarding go to the server.
+    private lazy var branchesWindows = BranchesWindowManager(
+        context: BranchesWindowManager.Context(
+            machineName: { [weak self] id in self?.controller.profile(for: id)?.name ?? "" },
+            list: { [weak self] id in
+                guard let self, let out = try? await self.controller.guestExec(id, command: WorktreeEntry.guestCommand, timeout: 30)
+                else { return nil }
+                return WorktreeEntry.parse(out)
+            },
+            sessions: { [weak self] in self?.controller.sessionStore.sessions ?? [] },
+            openSession: { [weak self] pid, e, tool in
+                guard let self else { return }
+                let c = self.controller
+                Task { @MainActor [weak self] in
+                    guard let self, let id = await c.openWorktreeSession(profileID: pid, entry: e, tool: tool) else { return }
+                    if c.sessionStore.session(id) != nil { self.selectSession(id) }
+                    else { self.pendingSelectSessionID = id }
+                }
+            },
+            selectSession: { [weak self] id in
+                self?.selectSession(id)
+                self?.makeKeyAndOrderFront(nil)
+            },
+            review: { [weak self] id in self?.sessionReviews.open(sessionID: id) },
+            discard: { [weak self] pid, e, s in
+                self?.controller.discardWorktree(profileID: pid, entry: e, session: s?.id)
+            },
+            defaultTool: { [weak self] id in self?.controller.profile(for: id)?.tool ?? .claude }))
+
+    /// Review windows over the mirror: the diff is read from the remote
+    /// machine over the tunnel; comments and viewed marks live on the
+    /// server's session record (the mirror shows them on the next poll).
+    private lazy var sessionReviews = SessionReviewWindowManager(
+        context: SessionReviewWindowManager.Context(
+            session: { [weak self] id in self?.controller.sessionStore.session(id) },
+            fetch: { [weak self] id, base in
+                guard let self, let s = self.controller.sessionStore.session(id) else { return nil }
+                let cmd = TaskReviewData.sessionCommand(dir: SessionHome.guestPath(s.cwd), base: base)
+                guard let out = try? await self.controller.guestExec(s.profileID, command: cmd, timeout: 30)
+                else { return nil }
+                return TaskReviewData.parse(out)
+            },
+            addComment: { [weak self] id, text, file, line in
+                var body: [String: Any] = ["op": "add", "text": text]
+                if let file { body["file"] = file }
+                if let line { body["line"] = line }
+                self?.controller.sessionCommand(id, "review", body: body)
+            },
+            removeComment: { [weak self] id, cid in
+                self?.controller.sessionCommand(id, "review", body: ["op": "remove", "comment": cid.uuidString])
+            },
+            setViewed: { [weak self] id, path, fp in
+                var body: [String: Any] = ["op": "viewed", "path": path]
+                if let fp { body["fingerprint"] = fp }
+                self?.controller.sessionCommand(id, "review", body: body)
+            },
+            send: { [weak self] id in self?.controller.sessionCommand(id, "review", body: ["op": "send"]) },
+            actions: { [weak self] in self?.sessionStageActions ?? SessionStageActions() },
+            accentHex: { [weak self] id in self?.controller.profile(for: id)?.color.hexInUI ?? "#888888" },
+            workspaceName: { [weak self] id in self?.controller.profile(for: id)?.name ?? "" }))
 
     private var sessionStageActions: SessionStageActions {
         SessionStageActions(
@@ -3750,6 +3999,10 @@ final class RemoteHostWindow: NSWindow {
             },
             archive: { [weak self] id in
                 guard let self else { return }
+                if let s = self.controller.sessionStore.session(id), SessionHome.branchNeedsWord(s) {
+                    self.askBranchFate(s, deleting: false)
+                    return
+                }
                 let title = self.controller.sessionStore.session(id)?.title ?? ""
                 self.controller.sessionCommand(id, "archive")
                 self.toasts.show(String(format: NSLocalizedString("Archived %@", comment: "undo toast"),
@@ -3759,17 +4012,36 @@ final class RemoteHostWindow: NSWindow {
             },
             unarchive: { [weak self] id in self?.controller.sessionCommand(id, "unarchive") },
             delete: { [weak self] id in self?.confirmDeleteSession(id) },
-            newWorktree: { [weak self] id, name, tool, message in
+            newWorktree: { [weak self] id, req in
                 guard let self else { return }
                 let c = self.controller
                 Task { @MainActor in
-                    guard let newID = await c.startWorktreeSession(from: id, name: name, tool: tool,
-                                                                   message: message) else { return }
+                    guard let newID = await c.startWorktreeSession(from: id, name: req.name, tool: req.tool,
+                                                                   message: req.message, initGit: req.initGit,
+                                                                   base: req.base) else { return }
                     // The mirror gets it with the next poll; select it then.
                     if c.sessionStore.session(newID) != nil { self.selectSession(newID) }
                     else { self.pendingSelectSessionID = newID }
                 }
             },
+            gitState: { [weak self] id in await self?.controller.sessionGitState(id) },
+            mergeBranch: { [weak self] id, into, squash, removeAfter in
+                var body: [String: Any] = ["squash": squash, "removeAfter": removeAfter]
+                if let into { body["into"] = into }
+                self?.controller.sessionCommand(id, "branch-merge", body: body)
+            },
+            branchPullRequest: { [weak self] id in self?.controller.sessionCommand(id, "branch-pr") },
+            discardBranch: { [weak self] id in
+                guard let self, let s = self.controller.sessionStore.session(id) else { return }
+                BranchAlerts.confirmDiscard(s, on: self) { [weak self] in
+                    guard let self else { return }
+                    self.controller.sessionCommand(id, "branch-discard")
+                    if self.selectedSessionID == id { self.clearSessionStage(); self.showNewSession() }
+                }
+            },
+            showBranches: { [weak self] pid in self?.branchesWindows.open(profileID: pid) },
+            declineMerge: { [weak self] id in self?.controller.sessionCommand(id, "branch-decline") },
+            reviewBranch: { [weak self] id in self?.sessionReviews.open(sessionID: id) },
             represent: { [weak self] id in
                 guard let self, self.selectedSessionID == id else { return }
                 self.sessionStageDidChange()
@@ -3952,6 +4224,10 @@ final class RemoteHostWindow: NSWindow {
         } else {
             key = "rest:\(bucket.rawValue):\(s.lastError ?? "")"
         }
+        // The merge-request banner comes and goes without a new presentation.
+        if !sessionHeaderSlot.isHidden {
+            sessionHeaderHeight.constant = SessionHome.headerHeight(s, base: Self.sessionHeaderHeightValue)
+        }
         guard key != sessionPresentationKey else { return }
         sessionPresentationKey = key
         setSessionHeader(visible: true)
@@ -4031,7 +4307,10 @@ final class RemoteHostWindow: NSWindow {
             sessionHeaderHost = host
         }
         sessionHeaderSlot.isHidden = !visible
-        sessionHeaderHeight.constant = visible ? Self.sessionHeaderHeightValue : 0
+        sessionHeaderHeight.constant = visible
+            ? SessionHome.headerHeight(selectedSessionID.flatMap { controller.sessionStore.session($0) },
+                                       base: Self.sessionHeaderHeightValue)
+            : 0
     }
 
     /// Leave the session surfaces — a machine row, a board or a dashboard
@@ -4070,6 +4349,29 @@ final class RemoteHostWindow: NSWindow {
             PaletteItem(section: .actions, title: NSLocalizedString("Automations", comment: "command palette"),
                         icon: "bolt.badge.clock.fill", tint: .orange, keywords: "board schedule") { [weak self] in self?.showAutomationBoard() },
         ]
+        // The session on stage: branch it, or merge its branch.
+        if let sid = selectedSessionID, let cur = c.sessionStore.session(sid), !cur.isArchived {
+            let actions = sessionStageActions
+            if SessionHome.hasFolder(cur) {
+                items.append(PaletteItem(section: .actions, title: NSLocalizedString("New Branch…", comment: "session menu"),
+                                         subtitle: cur.title, icon: "arrow.triangle.branch", tint: .purple,
+                                         keywords: "worktree git fork try") { [weak self] in
+                    self?.controller.listModel.newBranchRequest = sid
+                })
+            }
+            if SessionHome.hasFolder(cur) {
+                items.append(PaletteItem(section: .actions, title: NSLocalizedString("Review Changes", comment: "branch menu"),
+                                         subtitle: cur.title, icon: "doc.text.magnifyingglass", tint: .purple,
+                                         keywords: "diff review comments git") { actions.reviewBranch(sid) })
+            }
+            if SessionHome.isBranch(cur), cur.branchMerge == nil || cur.branchMerge?.phase == .failed {
+                items.append(PaletteItem(section: .actions,
+                                         title: String(format: NSLocalizedString("Merge into %@", comment: "branch menu"),
+                                                       cur.branchParent ?? NSLocalizedString("parent", comment: "branch menu")),
+                                         subtitle: cur.title, icon: "arrow.triangle.merge", tint: .purple,
+                                         keywords: "worktree git branch") { actions.mergeBranch(sid, nil, false, true) })
+            }
+        }
         let sessions = c.sessionStore.sessions.filter { !$0.isDeleted && !$0.isSwitchboard }
         for s in SessionHome.orderedAll(sessions, in: model) + SessionHome.archived(sessions) {
             let bucket = SessionHome.bucket(for: s, in: model)
@@ -4091,6 +4393,11 @@ final class RemoteHostWindow: NSWindow {
             })
         }
         for p in c.profiles {
+            items.append(PaletteItem(section: .machines,
+                                     title: String(format: NSLocalizedString("Branches on %@", comment: "branches window title"), p.name),
+                                     icon: "arrow.triangle.branch", tint: .purple, keywords: "worktrees git stale") { [weak self] in
+                self?.branchesWindows.open(profileID: p.id)
+            })
             items.append(PaletteItem(section: .machines, title: p.name,
                                      subtitle: NSLocalizedString("Machine Details", comment: "session menu"),
                                      icon: "cpu", tint: Color(hex: p.color.hexInUI), keywords: "machine workspace vm") { [weak self] in
@@ -4965,7 +5272,7 @@ final class RemoteHostWindow: NSWindow {
             },
             onTabAction: { [weak self] id, pos, action in
                 guard let self, let index = self.windowIndex(for: id, position: pos) else { return }
-                self.controller.worktree(id, index: index, action: action)
+                self.tabAction(id, index: index, action: action)
             },
             onSelectDocker: { [weak self] id in self?.showDockerDashboard(id) },
             onOpenContainer: { [weak self] id, cid in self?.showDockerDashboard(id, container: cid) },

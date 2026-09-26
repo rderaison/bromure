@@ -29,13 +29,21 @@ final class KubeClusterEngine {
     var watched: Set<UUID> = []
     private var startedAutoClusters = false
     /// Connector (MessagingConnectorEngine.swift): a message from the user
-    /// on Signal or WhatsApp, already checked to be theirs.
+    /// on Signal, WhatsApp or Slack, already checked to be theirs.
     var onConnectorMessage: ((ConnectorChannel.Kind, String) -> Void)?
     /// Recently sent replies, so their echo in a linked self-chat isn't
     /// read back as the user speaking.
     var connectorEchoes: Set<String> = [] {
         didSet { if connectorEchoes.count > 200 { connectorEchoes.removeAll() } }
     }
+    /// Slack pairing under way: the one-time code the user sends the app in
+    /// a direct message, and until when it's good. Never persisted.
+    var slackPairing: (code: String, until: Date)?
+    /// Direct messages with a wrong code while pairing: past a handful the
+    /// pairing is called off (someone may be guessing).
+    var slackPairingMisses = 0
+    /// Set when pairing was called off for too many wrong codes.
+    var slackPairingAborted = false
 
     init(app: ACAppDelegate, store: KubeClusterStore) {
         self.app = app
@@ -780,10 +788,15 @@ final class KubeClusterEngine {
                 // Same fallback as a workspace: a snapshot that won't restore
                 // (an app or base-image update since the quit, VZ refused)
                 // can't come back by any path — boot fresh from the disk.
-                let drift = sandbox.lastRestoreDrift.map { " (configuration changed: \($0))" } ?? ""
+                let drift = sandbox.lastRestoreDrift.map { " (configuration changed: \($0))" }
+                    ?? " (\(error.localizedDescription))"
                 log(id, "\(node.name): saved state didn't restore\(drift) — booting fresh")
                 sessionDisk.clearSavedState()
                 try sandbox.prepare()
+                // prepare() lays the meta share out again: the scripts staged
+                // above are gone with it (a connector booted without its
+                // bromure-msgbridge.sh can't start).
+                try stageScripts(m.scripts, into: nodes.profileDirectory(for: profile))
                 try await sandbox.start()
             }
         } else {

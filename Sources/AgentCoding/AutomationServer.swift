@@ -146,6 +146,9 @@ final class ACAutomationServer {
     /// The subfolders of a folder on a workspace (by id or name), for the
     /// new-session folder browser over the fat client. nil: unreadable now.
     var onAgentSessionFolders: ((_ profile: String, _ path: String) async -> [String]?)?
+    /// Is a session's folder a git repository (and on which branch)? nil:
+    /// the machine can't be asked.
+    var onAgentSessionGitState: (@MainActor (_ id: UUID) async -> GitFolderState?)?
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
@@ -998,6 +1001,27 @@ final class ACAutomationServer {
             _ = sem.wait(timeout: .now() + 240)
             sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
+        case ("POST", "/agent-sessions/git-state"):
+            // {id} → {repo, branch?}: is the session's folder a git
+            // repository (the new-worktree sheet offers `git init` if not).
+            // 404 when the machine can't be asked.
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            guard let sid = (bodyJSON["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+                sendResponse(fd: fd, status: 400, body: ["error": "id required"]); return
+            }
+            let sem = DispatchSemaphore(value: 0)
+            var st: GitFolderState?
+            Task { @MainActor [weak self] in
+                st = await self?.onAgentSessionGitState?(sid)
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 30)
+            if let st {
+                sendResponse(fd: fd, status: 200, body: st.json)
+            } else {
+                sendResponse(fd: fd, status: 404, body: ["error": "The machine can't be asked right now"])
+            }
+
         case ("POST", "/agent-sessions/folders"):
             // {profile, path} → {folders: [name…]}: what the new-session
             // browser walks; 404 when the machine can't be read right now.
@@ -1036,6 +1060,16 @@ final class ACAutomationServer {
             _ = sem.wait(timeout: .now() + 60)
             if let r { sendResponse(fd: fd, status: 200, body: r) }
             else { sendResponse(fd: fd, status: 404, body: ["error": "Unknown session"]) }
+
+        case ("POST", "/agent-sessions/worktree-open"), ("POST", "/agent-sessions/worktree-discard"):
+            // A machine's Branches window over a fat client: pick a
+            // left-behind branch up in a session, or throw it away.
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            let action = String(path.dropFirst("/agent-sessions/".count))
+            let r = DispatchQueue.main.sync {
+                self.onAgentSessionCommand?(nil, action, bodyJSON) ?? ["error": "no handler"]
+            }
+            sendResponse(fd: fd, status: r["error"] == nil ? 200 : 400, body: r)
 
         case ("POST", "/agent-sessions/switchboard"):
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }

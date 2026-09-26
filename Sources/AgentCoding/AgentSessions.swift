@@ -33,6 +33,170 @@ struct AgentSessionRequest {
     var roomID: UUID? = nil
 }
 
+/// A worktree session's branch, as the last check read it.
+struct BranchInfo: Codable, Equatable, Sendable {
+    /// Commits on the branch the parent doesn't have.
+    var ahead: Int
+    /// Commits on the parent since the branch was made.
+    var behind: Int
+    /// Files with uncommitted changes in the checkout.
+    var changed: Int
+    var checkedAt: Date
+
+    var isEmpty: Bool { ahead == 0 && changed == 0 }
+}
+
+/// What a folder is, git-wise, as the New Branch sheet needs to know:
+/// a repository (on which branch, with which others to start from), one
+/// without a commit yet, or none. `includes`: what the repository's
+/// .worktreeinclude copies into every new checkout.
+struct GitFolderState: Equatable, Sendable {
+    enum Kind: String, Sendable { case repo, noCommits, notRepo }
+    var kind: Kind
+    var branch: String?
+    var branches: [String] = []
+    var includes: [String] = []
+    var isRepo: Bool { kind == .repo }
+
+    /// The guest command's output (see AgentSessionEngine.gitState).
+    static func parse(_ out: String) -> GitFolderState? {
+        var state: GitFolderState?
+        var section = ""
+        for raw in out.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            switch line {
+            case "===BRANCHES===": section = "b"; continue
+            case "===INCLUDE===": section = "i"; continue
+            default: break
+            }
+            if state == nil {
+                if line == "none" { return GitFolderState(kind: .notRepo) }
+                if line == "empty" { state = GitFolderState(kind: .noCommits) }
+                else if line.hasPrefix("repo") {
+                    let b = String(line.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+                    state = GitFolderState(kind: .repo, branch: b.isEmpty || b == "HEAD" ? nil : b)
+                }
+                continue
+            }
+            if section == "b" { state?.branches.append(line) }
+            if section == "i" { state?.includes.append(line) }
+        }
+        return state
+    }
+
+    /// Over the fat-client wire.
+    var json: [String: Any] {
+        var o: [String: Any] = ["kind": kind.rawValue, "repo": isRepo, "branches": branches, "includes": includes]
+        if let branch { o["branch"] = branch }
+        return o
+    }
+
+    init(kind: Kind, branch: String? = nil, branches: [String] = [], includes: [String] = []) {
+        self.kind = kind; self.branch = branch; self.branches = branches; self.includes = includes
+    }
+
+    init?(json j: [String: Any]) {
+        if let k = (j["kind"] as? String).flatMap(Kind.init(rawValue:)) { kind = k }
+        else if let repo = j["repo"] as? Bool {
+            // An older server: repo, or "" for no commit yet.
+            kind = repo ? .repo : ((j["branch"] as? String) == "" ? .noCommits : .notRepo)
+        } else { return nil }
+        branch = (j["branch"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        branches = j["branches"] as? [String] ?? []
+        includes = j["includes"] as? [String] ?? []
+    }
+}
+
+/// One worktree on the machine.
+struct WorktreeEntry: Identifiable, Equatable, Sendable {
+    var id: String { dir }
+    var dir: String
+    var root: String
+    var branch: String
+    var parent: String
+    var ahead: Int
+    var changed: Int
+    var lastCommit: Date?
+    /// The name it was started under (the registry's display).
+    var display: String
+
+    var isEmpty: Bool { ahead == 0 && changed == 0 }
+
+    /// Lists every worktree under ~/.bromure/worktrees: one tab-separated
+    /// line each — dir, root, branch, parent, ahead, changed, last commit
+    /// (epoch), display.
+    static let guestCommand = """
+    for d in "$HOME"/.bromure/worktrees/*/*/; do d="${d%/}"; [ -e "$d/.git" ] || continue; \
+    cd "$d" 2>/dev/null || continue; \
+    r=$(git worktree list --porcelain 2>/dev/null | head -1 | cut -c10-); \
+    b=$(git rev-parse --abbrev-ref HEAD 2>/dev/null); \
+    reg="$(dirname "$d")/.registry"; p=""; disp=""; \
+    [ -f "$reg" ] && p=$(awk -F"$(printf '\\037')" -v b="$b" '$1==b{print $2}' "$reg" | tail -1) \
+    && disp=$(awk -F"$(printf '\\037')" -v b="$b" '$1==b{print $3}' "$reg" | tail -1); \
+    [ -n "$p" ] || p=$(git -C "$r" rev-parse --abbrev-ref HEAD 2>/dev/null); \
+    a=$(git rev-list --count "$p..HEAD" 2>/dev/null || echo 0); \
+    c=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' '); \
+    t=$(git log -1 --format=%ct 2>/dev/null || echo 0); \
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$d" "$r" "$b" "$p" "$a" "$c" "$t" "$disp"; \
+    done; true
+    """
+
+    static func parse(_ out: String) -> [WorktreeEntry] {
+        out.split(separator: "\n").compactMap { line in
+            let f = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            guard f.count >= 8, !f[0].isEmpty, !f[2].isEmpty else { return nil }
+            let t = TimeInterval(f[6]) ?? 0
+            return WorktreeEntry(dir: f[0], root: f[1], branch: f[2], parent: f[3],
+                                 ahead: Int(f[4]) ?? 0, changed: Int(f[5]) ?? 0,
+                                 lastCommit: t > 0 ? Date(timeIntervalSince1970: t) : nil,
+                                 display: f[7])
+        }
+    }
+
+    /// The session working on it, if any: same machine, same branch.
+    func session(in sessions: [AgentSession], profileID: UUID) -> AgentSession? {
+        sessions.filter { $0.profileID == profileID && $0.worktreeBranch == branch && !$0.isDeleted }
+            .max { ($0.lastSeenAt ?? .distantPast) < ($1.lastSeenAt ?? .distantPast) }
+    }
+}
+
+/// What the New Branch sheet asks for.
+struct NewBranchRequest: Sendable {
+    /// Empty = named after the message.
+    var name: String
+    var tool: Profile.Tool
+    var message: String?
+    /// Make the folder a repository first when it isn't one.
+    var initGit: Bool
+    /// The branch to start from (nil = the folder's current commit).
+    var base: String?
+}
+
+/// A merge of a worktree session's branch, from the click to its landing.
+struct BranchMerge: Codable, Equatable, Sendable {
+    enum Phase: String, Codable, Sendable {
+        /// An agent asked to merge (worktree_merge); the user says yes or no.
+        case requested
+        case merging, conflicts, merged, failed
+
+        /// A phase this build doesn't know reads as stalled, not as an
+        /// undecodable session.
+        init(from decoder: Decoder) throws {
+            self = Phase(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .failed
+        }
+    }
+    var target: String
+    var squash: Bool
+    /// Remove the checkout and the branch once it's in.
+    var removeAfter: Bool
+    var startedAt: Date
+    var phase: Phase
+    var detail: String?
+    /// The session whose agent asked for it (worktree_merge) — told how it
+    /// went.
+    var askedBy: UUID?
+}
+
 struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var id: UUID
     var profileID: UUID
@@ -96,6 +260,20 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var worktreeOf: UUID?
     /// The worktree's branch ("wt/<slug>"), once the tab reported it.
     var worktreeBranch: String?
+    /// The branch it was made from ("main") — where a merge goes by
+    /// default — and the repository it's a checkout of.
+    var branchParent: String?
+    var branchRoot: String?
+    /// What the branch holds, as the last check read it.
+    var branchInfo: BranchInfo?
+    /// A merge started from the session, followed until it lands.
+    var branchMerge: BranchMerge?
+    /// Review comments on the session's changes (the review window): kept
+    /// until sent to the agent, then shown as sent.
+    var reviewComments: [ReviewComment]?
+    /// Files marked viewed in the review window: path → fingerprint of the
+    /// diff that was seen (a later change to the file clears the mark).
+    var reviewViewed: [String: String]?
     /// Changes were noticed in the session's folder during this run of it:
     /// uncommitted work git reports when the folder is in a repository,
     /// else a file written since the session began. Set when first
@@ -153,6 +331,28 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// and dropped again without losing anything.
     var isPlainAdoptee: Bool {
         launchDisplay == nil && openingMessage == nil && cloneURL == nil && userTitled != true
+    }
+
+    /// The session this one came from: its delegator, else the session its
+    /// worktree branched off. The sidebar nests it there.
+    static func origin(of s: AgentSession) -> UUID? { s.parentSessionID ?? s.worktreeOf }
+
+    /// A filesystem/branch-safe slug from a free-form name — the same rule
+    /// the kanban's worktrees use ("Login fix" → "login-fix", branch
+    /// `wt/login-fix`).
+    static func worktreeSlug(_ name: String) -> String {
+        var out = ""
+        var lastDash = false
+        for ch in name.lowercased() {
+            if ch.isLetter || ch.isNumber {
+                out.append(ch); lastDash = false
+            } else if !lastDash {
+                out.append("-"); lastDash = true
+            }
+        }
+        let trimmed = String(out.trimmingCharacters(in: CharacterSet(charactersIn: "-")).prefix(40))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return trimmed.isEmpty ? "worktree" : trimmed
     }
 
     /// "Fix the login redirect loop" from a multi-line opening message: the
@@ -509,9 +709,11 @@ final class AgentSessionStore {
                         s.lastSeenAt = now
                         // A worktree session: the guest chose the folder
                         // and the branch — the tab knows both.
-                        if s.worktreeOf != nil {
+                        if s.worktreeOf != nil || tab.isWorktree {
                             if let c = tab.cwd, !c.isEmpty { s.cwd = c }
                             if let b = tab.worktreeBranch, !b.isEmpty { s.worktreeBranch = b }
+                            if let p = tab.parentBranch, !p.isEmpty { s.branchParent = p }
+                            if let r = tab.rootRepo, !r.isEmpty { s.branchRoot = r }
                         }
                     } else if let since = s.launchingSince,
                               now.timeIntervalSince(since) > Self.launchTimeout {
@@ -789,6 +991,57 @@ enum SessionHome {
         guestPath(s.cwd) != guestPath("~")
     }
 
+    // MARK: Branch sessions
+
+    /// A session on a branch of its own (a git worktree).
+    nonisolated static func isBranch(_ s: AgentSession) -> Bool {
+        !(s.worktreeBranch ?? "").isEmpty
+    }
+
+    /// Archiving or deleting it asks what becomes of the branch: it's a
+    /// branch session, and its work hasn't been merged.
+    nonisolated static func branchNeedsWord(_ s: AgentSession) -> Bool {
+        isBranch(s) && s.branchMerge?.phase != .merged
+    }
+
+    /// "3 commits · 5 uncommitted files · 2 behind", "no changes yet"; nil
+    /// before the machine was first asked.
+    nonisolated static func branchSummary(_ s: AgentSession) -> String? {
+        guard let i = s.branchInfo else { return nil }
+        if i.isEmpty { return NSLocalizedString("no changes yet", comment: "branch status") }
+        var parts: [String] = []
+        if i.ahead > 0 {
+            parts.append(i.ahead == 1 ? NSLocalizedString("1 commit", comment: "branch status")
+                         : String(format: NSLocalizedString("%d commits", comment: "branch status"), i.ahead))
+        }
+        if i.changed > 0 {
+            parts.append(i.changed == 1 ? NSLocalizedString("1 uncommitted file", comment: "branch status")
+                         : String(format: NSLocalizedString("%d uncommitted files", comment: "branch status"), i.changed))
+        }
+        if i.behind > 0 {
+            parts.append(String(format: NSLocalizedString("%d behind", comment: "branch status"), i.behind))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The session header's height: its strip, plus the merge-request
+    /// banner while an agent's request waits for an answer.
+    nonisolated static func headerHeight(_ s: AgentSession?, base: CGFloat) -> CGFloat {
+        base + (s?.branchMerge?.phase == .requested ? 51 : 0)
+    }
+
+    /// Where a merge stands, in words — nil when none is under way or done.
+    nonisolated static func mergeLine(_ s: AgentSession) -> String? {
+        guard let m = s.branchMerge else { return nil }
+        switch m.phase {
+        case .requested: return String(format: NSLocalizedString("Asks to merge into %@", comment: "branch status"), m.target)
+        case .merging:   return String(format: NSLocalizedString("Merging into %@…", comment: "branch status"), m.target)
+        case .conflicts: return String(format: NSLocalizedString("Merging into %@ — the agent is finishing it", comment: "branch status"), m.target)
+        case .merged:    return String(format: NSLocalizedString("Merged into %@", comment: "branch status"), m.target)
+        case .failed:    return NSLocalizedString("Merge stalled", comment: "branch status")
+        }
+    }
+
     /// The session's machine was deleted, or its folder is gone from the
     /// machine: it can be read and forgotten, nothing else.
     @MainActor
@@ -805,6 +1058,8 @@ enum SessionHome {
             return NSLocalizedString("Machine removed", comment: "session status")
         }
         if s.folderMissing == true {
+            // A merged branch's checkout was removed on purpose: say what happened.
+            if let m = s.branchMerge, m.phase == .merged { return mergeLine(s) }
             return NSLocalizedString("Folder removed", comment: "session status")
         }
         return nil
@@ -1502,6 +1757,17 @@ struct SessionRowView: View {
     var preview: String? = nil
     @State private var hovering = false
 
+    private var mergeTint: Color? {
+        switch session.branchMerge?.phase {
+        case .requested?: return .orange
+        case .merging?: return .accentColor
+        case .conflicts?: return .orange
+        case .merged?: return .green
+        case .failed?: return .red
+        case nil: return nil
+        }
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             // The machine is the ring's colour (its name in the tooltip):
@@ -1547,6 +1813,23 @@ struct SessionRowView: View {
                             .italic()
                             .lineLimit(1)
                             .truncationMode(.tail)
+                    } else if SessionHome.isBranch(session) {
+                        // A branch: its glyph, and where its work stands
+                        // (a merge under way says so, in its colour).
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(mergeTint ?? Color.secondary)
+                        if let merge = SessionHome.mergeLine(session) {
+                            Text(merge)
+                                .foregroundStyle(mergeTint ?? Color.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        } else {
+                            Text([statusLine, SessionHome.branchSummary(session)].compactMap { $0 }
+                                    .joined(separator: " · "))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                     } else {
                         Text(statusLine)
                             .lineLimit(1)
@@ -1937,8 +2220,8 @@ struct SessionSectionsView: View {
             }
         }
         .sheet(item: $worktreeFor) { parent in
-            NewWorktreeSheet(parent: parent) { name, tool, message in
-                actions.newWorktree(parent.id, name, tool, message)
+            NewWorktreeSheet(parent: parent, gitState: actions.gitState) { req in
+                actions.newWorktree(parent.id, req)
             }
         }
     }
@@ -1981,9 +2264,12 @@ struct SessionSectionsView: View {
         .padding(.vertical, 8)
     }
 
+    static func origin(of s: AgentSession) -> UUID? { AgentSession.origin(of: s) }
+
     /// The list with each delegate placed right under its delegator (as
     /// deep as the chain goes), when the delegator is listed; a delegate
     /// whose delegator isn't stands on its own.
+
     static func nested(_ list: [AgentSession]) -> [(session: AgentSession, depth: Int)] {
         let ids = Set(list.map(\.id))
         var out: [(session: AgentSession, depth: Int)] = []
@@ -1991,9 +2277,9 @@ struct SessionSectionsView: View {
         func walk(_ s: AgentSession, _ depth: Int) {
             guard seen.insert(s.id).inserted else { return }
             out.append((s, depth))
-            for c in list where c.parentSessionID == s.id { walk(c, depth + 1) }
+            for c in list where Self.origin(of: c) == s.id { walk(c, depth + 1) }
         }
-        for s in list where s.parentSessionID.map({ !ids.contains($0) }) ?? true { walk(s, 0) }
+        for s in list where Self.origin(of: s).map({ !ids.contains($0) }) ?? true { walk(s, 0) }
         for s in list where !seen.contains(s.id) { walk(s, 0) }   // a cycle, somehow
         return out
     }
@@ -2060,7 +2346,10 @@ struct SessionSectionsView: View {
                 Divider()
                 Button(NSLocalizedString("Nickname…", comment: "session menu")) { nicknameFor = s }
                 if SessionHome.hasFolder(s) {
-                    Button(NSLocalizedString("New worktree…", comment: "session menu")) { worktreeFor = s }
+                    Button(NSLocalizedString("New Branch…", comment: "session menu")) { worktreeFor = s }
+                }
+                if SessionHome.isBranch(s) {
+                    BranchMenuItems(session: s, actions: actions)
                 }
                 if !s.isArchived { roomMenu(s) }
                 Divider()

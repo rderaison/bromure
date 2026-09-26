@@ -3,21 +3,26 @@ import AppKit
 import CoreImage.CIFilterBuiltins
 import SwiftUI
 
-// MARK: - Signal / WhatsApp connector window
+// MARK: - Messaging connector window
 //
-// File › Infrastructure › Signal / WhatsApp Connector… (and the sidebar's
-// Messaging row). One window: the connector machine's state (on/off, like a
-// registry), then a card per channel — Connect… opens its setup flow:
+// File › Infrastructure › Messaging Connector… (and the sidebar's Messaging
+// row). One window, marked Beta: the connector machine's state (on/off, like
+// a registry), then a card per channel — Connect… opens its setup flow:
 //   Signal:   its own number (code by SMS or by voice call — Signal only
 //             calls a number it has texted first; a captcha when Signal asks
 //             for one) or a link to the user's own account (QR).
 //   WhatsApp: a link to the user's account ("Message yourself") or to a
 //             second account the Switchboard answers as — QR or pairing code.
+//   Slack:    an app the user creates in their workspace from Bromure's
+//             manifest (Socket Mode, DMs only), its two tokens pasted in,
+//             then a one-time code sent to it in a DM to pair their account.
 // The VM underneath is never the user's concern beyond on/off.
 
 @MainActor
 enum ConnectorWindowController {
     private static var window: NSWindow?
+    /// The open connector window (screenshot hook).
+    static var current: NSWindow? { window }
 
     static var app: ACAppDelegate? { NSApp.delegate as? ACAppDelegate }
 
@@ -32,7 +37,7 @@ enum ConnectorWindowController {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 640),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                          backing: .buffered, defer: false)
-        w.title = NSLocalizedString("Signal / WhatsApp Connector", comment: "connector window")
+        w.title = NSLocalizedString("Messaging Connector", comment: "connector window")
         w.contentView = NSHostingView(rootView: root)
         w.isReleasedWhenClosed = false
         w.center()
@@ -64,8 +69,8 @@ enum ConnectorWindowController {
     static func confirmDelete(_ id: UUID) {
         guard let app else { return }
         let alert = NSAlert()
-        alert.messageText = NSLocalizedString("Remove the Signal / WhatsApp connector?", comment: "connector delete")
-        alert.informativeText = NSLocalizedString("Its machine and everything on it goes — including the linked accounts. Bromure can no longer reach your phone until you set it up again. (A device linked to your own account also stays listed on your phone until you remove it there.)", comment: "connector delete")
+        alert.messageText = NSLocalizedString("Remove the messaging connector?", comment: "connector delete")
+        alert.informativeText = NSLocalizedString("Its machine and everything on it goes — including the linked accounts and the Slack tokens. Bromure can no longer reach you until you set it up again. (A device linked to your own account stays listed on your phone, and the Slack app stays in your workspace, until you remove them there.)", comment: "connector delete")
         alert.addButton(withTitle: NSLocalizedString("Remove", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         alert.buttons.first?.hasDestructiveAction = true
@@ -80,18 +85,22 @@ struct ConnectorView: View {
     let store: KubeClusterStore
     let engine: KubeClusterEngine
     @State private var setup: ConnectorChannel.Kind?
+    /// Test hook: the step the Slack sheet opens on.
+    @State private var setupStep: SlackSetupView.Step?
     @State private var testNote: String?
     @State private var showLog = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                betaBanner
                 header
                 if let c = store.connector {
                     machine(c)
                     let up = store.status(c.id).phase == .running
                     channelCard(.signal, c.signal, up: up)
                     channelCard(.whatsapp, c.whatsapp, up: up)
+                    channelCard(.slack, c.slack, up: up)
                     if let testNote {
                         Text(testNote).font(.callout).foregroundStyle(.secondary)
                     }
@@ -108,10 +117,37 @@ struct ConnectorView: View {
                 switch kind {
                 case .signal: SignalSetupView(engine: engine, onDone: { setup = nil })
                 case .whatsapp: WhatsAppSetupView(engine: engine, onDone: { setup = nil })
+                case .slack: SlackSetupView(store: store, engine: engine,
+                                            onDone: { setup = nil; setupStep = nil }, startAt: setupStep)
                 }
             }
             .frame(width: 520)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .bromureConnectorSetup)) { note in
+            let step = (note.userInfo?["step"] as? String).flatMap(SlackSetupView.Step.init(rawValue:))
+            let kind = (note.object as? String).flatMap(ConnectorChannel.Kind.init(rawValue:))
+            setupStep = step
+            setup = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { setup = kind }
+        }
+    }
+
+    /// The whole pane is new: say so, and what's at stake.
+    private var betaBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(NSLocalizedString("BETA", comment: "connector beta badge"))
+                .font(.system(size: 10, weight: .heavy))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Capsule().fill(Color.orange))
+            Text(NSLocalizedString("Connectors are new. Whoever you connect here can talk to the Switchboard, which can act on your sessions — Bromure only ever answers you, and STOP from any of them pauses it. Expect rough edges.", comment: "connector beta banner"))
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.09)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.orange.opacity(0.3), lineWidth: 0.5))
     }
 
     private var header: some View {
@@ -122,9 +158,9 @@ struct ConnectorView: View {
                 .frame(width: 40, height: 40)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.green.opacity(0.12)))
             VStack(alignment: .leading, spacing: 2) {
-                Text(NSLocalizedString("Signal / WhatsApp Connector", comment: "connector window"))
+                Text(NSLocalizedString("Messaging Connector", comment: "connector window"))
                     .font(.title2.weight(.semibold))
-                Text(NSLocalizedString("Chat with Bromure about your sessions from your phone.", comment: "connector window"))
+                Text(NSLocalizedString("Chat with Bromure about your sessions from Signal, WhatsApp or Slack.", comment: "connector window"))
                     .foregroundStyle(.secondary)
             }
         }
@@ -132,7 +168,7 @@ struct ConnectorView: View {
 
     private var intro: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(NSLocalizedString("Ask what's going on, answer a blocked session, or start new work — from Signal or WhatsApp. The connector is a small machine of its own on this Mac: your messaging keys live on it and nowhere else.", comment: "connector intro"))
+            Text(NSLocalizedString("Ask what's going on, answer a blocked session, or start new work — from Signal, WhatsApp or Slack. The connector is a small machine of its own on this Mac: your messaging keys and tokens live on it and nowhere else.", comment: "connector intro"))
                 .fixedSize(horizontal: false, vertical: true)
             Button(NSLocalizedString("Set Up the Connector", comment: "connector intro")) {
                 engine.ensureConnector()
@@ -191,33 +227,59 @@ struct ConnectorView: View {
     }
 
     private func channelCard(_ kind: ConnectorChannel.Kind, _ ch: ConnectorChannel?, up: Bool) -> some View {
-        let name = kind == .signal ? "Signal" : "WhatsApp"
+        let name = kind.displayName
+        let icon: String, tint: Color
+        switch kind {
+        case .signal: icon = "bubble.left.and.bubble.right.fill"; tint = .blue
+        case .whatsapp: icon = "phone.bubble.fill"; tint = .green
+        case .slack: icon = "number.square.fill"; tint = Color(red: 0.38, green: 0.11, blue: 0.40)
+        }
+        // Slack set up but not paired yet: nobody reaches Bromure on it.
+        let awaitingPairing = kind == .slack && ch != nil && ch?.connected != true
         return HStack(alignment: .top, spacing: 12) {
-            Image(systemName: kind == .signal ? "bubble.left.and.bubble.right.fill" : "phone.bubble.fill")
+            Image(systemName: icon)
                 .font(.system(size: 18))
-                .foregroundStyle(kind == .signal ? Color.blue : Color.green)
+                .foregroundStyle(tint)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 4) {
                 Text(name).font(.headline)
                 if let ch, ch.connected {
-                    Text(ch.mode == .ownNumber
-                         ? String(format: NSLocalizedString("Bromure is a contact%@", comment: "connector card"),
-                                  ch.account.map { " · " + Self.masked($0) } ?? "")
-                         : String(format: NSLocalizedString("You chat in “%@”", comment: "connector card"),
-                                  kind == .signal
-                                      ? NSLocalizedString("Note to Self", comment: "Signal's own self-chat, as Signal names it")
-                                      : NSLocalizedString("Message yourself", comment: "WhatsApp's own self-chat, as WhatsApp names it")))
-                        .font(.callout).foregroundStyle(.secondary)
-                    if ch.mode == .linked {
-                        Text(NSLocalizedString("Replies don't notify you — open that chat to see them.", comment: "connector card"))
+                    if kind == .slack {
+                        Text(String(format: NSLocalizedString("Direct messages with the Bromure app%@", comment: "connector card"),
+                                    ch.workspace.map { " · " + $0 } ?? ""))
+                            .font(.callout).foregroundStyle(.secondary)
+                        Text(NSLocalizedString("Answers your Slack account only — channels and everyone else are ignored.", comment: "connector card"))
                             .font(.caption).foregroundStyle(.tertiary)
+                    } else {
+                        Text(ch.mode == .ownNumber
+                             ? String(format: NSLocalizedString("Bromure is a contact%@", comment: "connector card"),
+                                      ch.account.map { " · " + Self.masked($0) } ?? "")
+                             : String(format: NSLocalizedString("You chat in “%@”", comment: "connector card"),
+                                      kind == .signal
+                                          ? NSLocalizedString("Note to Self", comment: "Signal's own self-chat, as Signal names it")
+                                          : NSLocalizedString("Message yourself", comment: "WhatsApp's own self-chat, as WhatsApp names it")))
+                            .font(.callout).foregroundStyle(.secondary)
+                        if ch.mode == .linked {
+                            Text(NSLocalizedString("Replies don't notify you — open that chat to see them.", comment: "connector card"))
+                                .font(.caption).foregroundStyle(.tertiary)
+                        }
                     }
+                } else if awaitingPairing {
+                    Text(ch?.workspace.map { String(format: NSLocalizedString("App set up in %@ — not paired with your account yet", comment: "connector card"), $0) }
+                         ?? NSLocalizedString("App set up — not paired with your account yet", comment: "connector card"))
+                        .font(.callout).foregroundStyle(.orange)
                 } else {
                     Text(NSLocalizedString("Not connected", comment: "connector card"))
                         .font(.callout).foregroundStyle(.secondary)
-                    if kind == .whatsapp {
+                    switch kind {
+                    case .whatsapp:
                         Text(NSLocalizedString("WhatsApp doesn't officially support this kind of link, and may disconnect it.", comment: "connector card"))
                             .font(.caption).foregroundStyle(.tertiary)
+                    case .slack:
+                        Text(NSLocalizedString("Uses a Slack app you create in your workspace — your admin may have to approve it.", comment: "connector card"))
+                            .font(.caption).foregroundStyle(.tertiary)
+                    case .signal:
+                        EmptyView()
                     }
                 }
             }
@@ -231,16 +293,11 @@ struct ConnectorView: View {
                                           : String(format: NSLocalizedString("The test message didn't go out on %@ — see the log.", comment: ""), name)
                         }
                     }
-                    Button(NSLocalizedString("Disconnect…", comment: "connector card"), role: .destructive) {
-                        let alert = NSAlert()
-                        alert.messageText = String(format: NSLocalizedString("Disconnect %@?", comment: "connector disconnect"), name)
-                        alert.informativeText = NSLocalizedString("Bromure won't hear from you on it until you connect again (a new QR scan or code).", comment: "connector disconnect")
-                        alert.addButton(withTitle: NSLocalizedString("Disconnect", comment: ""))
-                        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-                        alert.buttons.first?.hasDestructiveAction = true
-                        guard alert.runModal() == .alertFirstButtonReturn else { return }
-                        Task { await engine.disconnect(kind) }
-                    }
+                    disconnectButton(kind, name)
+                } else if awaitingPairing {
+                    Button(NSLocalizedString("Pair…", comment: "connector card")) { setup = .slack }
+                        .disabled(!up)
+                    disconnectButton(kind, name)
                 } else {
                     Button(NSLocalizedString("Connect…", comment: "connector card")) { setup = kind }
                         .disabled(!up)
@@ -250,6 +307,21 @@ struct ConnectorView: View {
         }
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.1)))
+    }
+
+    private func disconnectButton(_ kind: ConnectorChannel.Kind, _ name: String) -> some View {
+        Button(NSLocalizedString("Disconnect…", comment: "connector card"), role: .destructive) {
+            let alert = NSAlert()
+            alert.messageText = String(format: NSLocalizedString("Disconnect %@?", comment: "connector disconnect"), name)
+            alert.informativeText = kind == .slack
+                ? NSLocalizedString("The Slack tokens are deleted from the connector, and Bromure stops answering there. The app stays in your workspace until you remove it (Slack › Settings › Manage apps).", comment: "connector disconnect")
+                : NSLocalizedString("Bromure won't hear from you on it until you connect again (a new QR scan or code).", comment: "connector disconnect")
+            alert.addButton(withTitle: NSLocalizedString("Disconnect", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+            alert.buttons.first?.hasDestructiveAction = true
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            Task { await engine.disconnect(kind) }
+        }
     }
 
     private func logSection(_ c: MessagingConnector) -> some View {
@@ -276,6 +348,11 @@ struct ConnectorView: View {
 
 extension ConnectorChannel.Kind: Identifiable {
     public var id: String { rawValue }
+}
+
+extension Notification.Name {
+    /// Test hook: open a channel's setup sheet in the connector window.
+    static let bromureConnectorSetup = Notification.Name("io.bromure.connectorSetup")
 }
 
 // MARK: - QR
@@ -676,6 +753,224 @@ struct WhatsAppSetupView: View {
             let r = await engine.whatsappPairingCode(phone: n)
             busy = false
             if r.ok { pairCode = r.value } else { error = r.message }
+        }
+    }
+}
+
+// MARK: - Slack setup
+
+struct SlackSetupView: View {
+    let store: KubeClusterStore
+    let engine: KubeClusterEngine
+    let onDone: () -> Void
+    var startAt: Step? = nil
+
+    enum Step: String { case create, tokens, pair, done }
+    @State private var step: Step
+
+    init(store: KubeClusterStore, engine: KubeClusterEngine, onDone: @escaping () -> Void, startAt: Step? = nil) {
+        self.store = store
+        self.engine = engine
+        self.onDone = onDone
+        self.startAt = startAt
+        // Set up but not paired: pairing is what's left.
+        let unpaired = store.connector?.slack.map { !$0.connected } ?? false
+        let forced = Self.testStartAt
+        Self.testStartAt = nil
+        _step = State(initialValue: forced ?? startAt ?? (unpaired ? .pair : .create))
+    }
+
+    /// Test hook (control socket): the step the next sheet opens on.
+    static var testStartAt: Step?
+    @State private var botToken = ""
+    @State private var appToken = ""
+    @State private var busy = false
+    @State private var error: String?
+    @State private var note: String?
+    @State private var code: String?
+    @State private var codeUntil: Date?
+    @State private var pairTask: Task<Void, Never>?
+    @State private var showManifest = false
+
+    private var slack: ConnectorChannel? { store.connector?.slack }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(NSLocalizedString("Connect Slack", comment: "slack setup")).font(.title3.weight(.semibold))
+            switch step {
+            case .create: createStep
+            case .tokens: tokensStep
+            case .pair: pairStep
+            case .done: doneStep
+            }
+            if let error {
+                Text(error).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                if busy { ProgressView().controlSize(.small) }
+                Spacer()
+                Button(step == .done ? NSLocalizedString("Done", comment: "") : NSLocalizedString("Cancel", comment: "")) {
+                    pairTask?.cancel()
+                    onDone()
+                }
+                .keyboardShortcut(step == .done ? .defaultAction : .cancelAction)
+            }
+        }
+        .padding(24)
+        .onAppear {
+            if step == .pair { startPairing() }
+        }
+        .onDisappear { pairTask?.cancel() }
+    }
+
+    private var createStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(NSLocalizedString("Bromure talks to you on Slack through an app of your own, in your workspace. Slack opens with its settings filled in: direct messages only, no channels, no public URL.", comment: "slack setup"))
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 6) {
+                PrepStep(n: 1, text: NSLocalizedString("Open Slack's page below, pick your workspace and click Create.", comment: "slack setup"))
+                PrepStep(n: 2, text: NSLocalizedString("Install App › Install to Workspace, and allow. (If your workspace needs an admin's approval, it waits for them.)", comment: "slack setup"))
+                PrepStep(n: 3, text: NSLocalizedString("Come back here for its two tokens.", comment: "slack setup"))
+            }
+            HStack {
+                Button(NSLocalizedString("Create the App in Slack", comment: "slack setup")) {
+                    if let url = KubeClusterEngine.slackCreateAppURL { NSWorkspace.shared.open(url) }
+                }
+                .buttonStyle(.borderedProminent)
+                Button(NSLocalizedString("I've Installed It — Continue", comment: "slack setup")) { step = .tokens }
+            }
+            DisclosureGroup(isExpanded: $showManifest) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(NSLocalizedString("If the link doesn't open the form: Create New App › From an app manifest, and paste this.", comment: "slack setup"))
+                        .font(.caption).foregroundStyle(.secondary)
+                    ScrollView {
+                        Text(Self.manifestText)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(height: 120)
+                    Button(NSLocalizedString("Copy Manifest", comment: "slack setup")) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(Self.manifestText, forType: .string)
+                    }
+                    .controlSize(.small)
+                }
+            } label: {
+                Text(NSLocalizedString("The app's manifest", comment: "slack setup")).font(.caption)
+            }
+        }
+    }
+
+    static var manifestText: String {
+        guard let data = try? JSONSerialization.data(withJSONObject: KubeClusterEngine.slackManifest,
+                                                     options: [.prettyPrinted, .sortedKeys]) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private var tokensStep: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(NSLocalizedString("Bot User OAuth Token", comment: "slack setup")).font(.callout.weight(.medium))
+            Text(NSLocalizedString("In the app's settings: OAuth & Permissions — starts with xoxb-", comment: "slack setup"))
+                .font(.caption).foregroundStyle(.secondary)
+            SecureField("xoxb-…", text: $botToken).textFieldStyle(.roundedBorder)
+            Text(NSLocalizedString("App-level token", comment: "slack setup")).font(.callout.weight(.medium))
+            Text(NSLocalizedString("Basic Information › App-Level Tokens › Generate Token and Scopes: add connections:write, generate — starts with xapp-", comment: "slack setup"))
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            SecureField("xapp-…", text: $appToken).textFieldStyle(.roundedBorder)
+            Label(NSLocalizedString("Both are checked with Slack from the connector and kept there, on its own disk — not on this Mac.", comment: "slack setup"),
+                  systemImage: "lock.fill")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button(NSLocalizedString("Connect", comment: "slack setup")) { connect() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(busy || !botToken.trimmingCharacters(in: .whitespaces).hasPrefix("xoxb-")
+                              || !appToken.trimmingCharacters(in: .whitespaces).hasPrefix("xapp-"))
+                Button(NSLocalizedString("Back", comment: "")) { step = .create }
+            }
+        }
+    }
+
+    private var pairStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text((slack?.workspace.map { String(format: NSLocalizedString("The app is set up in %@.", comment: "slack setup"), $0) }
+                  ?? NSLocalizedString("The app is set up.", comment: "slack setup"))
+                 + " " + NSLocalizedString("Now pair your Slack account: in Slack, open Bromure (under Apps) and send it this code in a direct message.", comment: "slack setup"))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                if let code {
+                    Text(code.prefix(3) + " " + code.suffix(3))
+                        .font(.system(size: 34, weight: .semibold, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 18).padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.05)))
+                }
+                Spacer()
+            }
+            if let codeUntil {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(String(format: NSLocalizedString("Waiting for it… the code works until %@.", comment: "slack setup"),
+                                codeUntil.formatted(date: .omitted, time: .shortened)))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Label(NSLocalizedString("Whoever sends the code becomes the only person Bromure answers on Slack — send it yourself, and don't share it.", comment: "slack setup"),
+                  systemImage: "person.badge.shield.checkmark")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(NSLocalizedString("New Code", comment: "slack setup")) { startPairing() }
+                .buttonStyle(.link)
+        }
+    }
+
+    private var doneStep: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(NSLocalizedString("Slack is connected.", comment: "slack setup"), systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            Text(NSLocalizedString("Bromure sent you a message there. Anything you write to it in that conversation reaches the Switchboard.", comment: "slack setup"))
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let note { Text(note).font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+
+    private func connect() {
+        busy = true; error = nil
+        let bot = botToken, app = appToken
+        Task {
+            let r = await engine.slackSetup(botToken: bot, appToken: app)
+            busy = false
+            botToken = ""; appToken = ""   // not kept in the window either
+            if r.ok {
+                step = .pair
+                startPairing()
+            } else {
+                error = r.message
+            }
+        }
+    }
+
+    private func startPairing() {
+        error = nil
+        code = engine.slackStartPairing()
+        codeUntil = engine.slackPairing?.until
+        pairTask?.cancel()
+        pairTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if store.connector?.slack?.connected == true { step = .done; return }
+                if engine.slackPairingAborted {
+                    error = NSLocalizedString("Pairing was stopped: several wrong codes were sent to the app. If that wasn't you, someone else in your workspace is trying — get a new code when you're ready.", comment: "slack setup")
+                    codeUntil = nil
+                    return
+                }
+                if let until = codeUntil, Date() > until {
+                    error = NSLocalizedString("The code expired. Get a new one.", comment: "slack setup")
+                    codeUntil = nil
+                    return
+                }
+            }
         }
     }
 }

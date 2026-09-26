@@ -2,20 +2,23 @@
 import Foundation
 import SandboxEngine
 
-// MARK: - Signal / WhatsApp connector (engine side)
+// MARK: - Messaging connector (engine side)
 //
-// One small managed VM (File › Infrastructure › Signal / WhatsApp
-// Connector…) that links the Switchboard to the user's phone. It boots through
-// the same path as a registry or a cluster node (`bootMachine` — suspended
-// with the app, resumed on relaunch, fsck'd when its disks need it) and runs
-// Signal (signal-cli-rest-api) and WhatsApp (GOWA) under docker, with a
-// relay turning their messages into an inbox (vm-setup/bromure-msgbridge.*).
+// One small managed VM (File › Infrastructure › Messaging Connector…) that
+// links the Switchboard to the user's phone and chat. It boots through the
+// same path as a registry or a cluster node (`bootMachine` — suspended with
+// the app, resumed on relaunch, fsck'd when its disks need it) and runs
+// Signal (signal-cli-rest-api) and WhatsApp (GOWA) under docker, and Slack
+// over Socket Mode, with a relay turning their messages into an inbox
+// (vm-setup/bromure-msgbridge.*).
 //
 // The host drains that inbox every few seconds over the shell channel and
-// lets through only the user: their number (own-number mode) or their own
-// Note to Self / "Message yourself" chat (linked mode) — everything else is
-// dropped before the Switchboard could see it. Replies go back the same way.
-// The account keys never leave the VM's data disk.
+// lets through only the user: their number (own-number mode), their own
+// Note to Self / "Message yourself" chat (linked mode), or — on Slack — a
+// direct message from the one Slack account paired with a one-time code.
+// Everything else is dropped before the Switchboard could see it. Replies go
+// back the same way. The account keys and tokens never leave the VM's data
+// disk.
 
 extension KubeClusterEngine {
     static let connectorScriptPath = "/mnt/bromure-meta/bromure-msgbridge.sh"
@@ -92,7 +95,7 @@ extension KubeClusterEngine {
         guard var c = store.connector(id) else { return }
         let rt = runtime(id)
         let fresh = !c.provisioned
-        log(id, fresh ? "Creating the Signal / WhatsApp connector" : "Starting the Signal / WhatsApp connector…")
+        log(id, fresh ? "Creating the messaging connector" : "Starting the messaging connector…")
         do {
             step(id, "Booting the connector VM")
             try FileManager.default.createDirectory(at: clusterDirectory(id), withIntermediateDirectories: true)
@@ -104,7 +107,7 @@ extension KubeClusterEngine {
                     ownerID: id, record: c.node, cpus: 2, memoryGB: 1,
                     memoryMB: c.effectiveMemoryMB,
                     dataDiskGB: c.diskGB,
-                    comment: "Signal / WhatsApp connector — managed by Bromure.",
+                    comment: "Messaging connector (Signal, WhatsApp, Slack) — managed by Bromure.",
                     scripts: [("bromure-msgbridge.sh", app.connectorScriptURL),
                               ("bromure-msgbridge.py", app.connectorRelayURL)],
                     ipCommand: "bash \(Self.connectorScriptPath) ip",
@@ -171,7 +174,13 @@ extension KubeClusterEngine {
         store.setStatus(id) {
             $0.connector = info
             if $0.phase == .running {
-                $0.message = (info.signalUp && info.whatsappUp) ? nil : "A messaging service isn't answering"
+                if !(info.signalUp && info.whatsappUp) {
+                    $0.message = "A messaging service isn't answering"
+                } else if c.slack?.connected == true, info.slackConnected == false {
+                    $0.message = "Slack isn't connected" + (info.slackError.map { " (\($0))" } ?? "")
+                } else {
+                    $0.message = nil
+                }
             }
         }
     }
@@ -184,26 +193,67 @@ extension KubeClusterEngine {
             guard let text = (item["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !text.isEmpty else { continue }
             let kind = ConnectorChannel.Kind(rawValue: item["channel"] as? String ?? "")
-            guard let kind, let channel = kind == .signal ? c.signal : c.whatsapp, channel.connected else { continue }
+            if kind == .slack, await slackPairingMessage(item, text: text) { continue }
+            guard let kind, let channel = store.connector?.channel(kind), channel.connected else { continue }
             guard Self.isFromUser(item, channel: channel) else {
                 // Enough to tell a misrecognized self-chat from a stranger,
                 // no message content.
-                log(id, "Ignored a \(kind.rawValue) message not from you "
+                log(id, "Ignored a \(kind.displayName) message not from you "
                     + "(chat \(Self.redacted(item["chat"] as? String)), from \(Self.redacted(item["from"] as? String)), "
-                    + "fromMe \((item["fromMe"] as? Bool) ?? false))")
+                    + (kind == .slack
+                       ? "\(item["channelType"] as? String ?? "?")\((item["bot"] as? Bool) == true ? ", bot" : ""))"
+                       : "fromMe \((item["fromMe"] as? Bool) ?? false))"))
                 continue
             }
             if text.hasPrefix(Self.connectorReplyMark.trimmingCharacters(in: .whitespaces))
                 || connectorEchoes.contains(Self.echoKey(text)) { continue }
-            log(id, "Message from the user on \(kind == .signal ? "Signal" : "WhatsApp")")
+            log(id, "Message from the user on \(kind.displayName)")
             onConnectorMessage?(kind, text)
         }
+    }
+
+    /// A Slack DM carrying the pairing code, while pairing is under way:
+    /// its sender becomes the one Slack account Bromure answers. True when
+    /// the item was the pairing (it never reaches the Switchboard).
+    private func slackPairingMessage(_ item: [String: Any], text: String) async -> Bool {
+        guard let pairing = slackPairing, var c = store.connector, var ch = c.slack else { return false }
+        guard Date() < pairing.until else { slackPairing = nil; return false }
+        let words = text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).joined()
+        guard words == pairing.code.lowercased() else {
+            // A DM that isn't the code, while nobody is paired yet: count it —
+            // a stream of them is someone guessing, and pairing stops.
+            if c.slack?.connected != true, Self.isSlackDirectMessage(item, workspaceID: ch.workspaceID) {
+                slackPairingMisses += 1
+                if slackPairingMisses >= 10 {
+                    slackPairing = nil
+                    slackPairingAborted = true
+                    log(c.id, "Slack pairing called off: \(slackPairingMisses) direct messages with a wrong code")
+                }
+            }
+            return false
+        }
+        // The code proves who is on the other end — but only from a person's
+        // direct message, in the app's own workspace.
+        let from = item["from"] as? String ?? ""
+        guard Self.isSlackDirectMessage(item, workspaceID: ch.workspaceID), !from.isEmpty else {
+            log(c.id, "Ignored a Slack pairing code that wasn't a direct message from a person")
+            return true
+        }
+        slackPairing = nil
+        slackPairingMisses = 0
+        ch.allowed = [from]
+        ch.connected = true
+        c.slack = ch
+        store.upsert(c)
+        log(c.id, "Slack paired with \(Self.redacted(from))")
+        _ = await sendToUser("Paired. I'm your Bromure Switchboard — ask me what's going on.", via: .slack)
+        return true
     }
 
     /// Test hook (control socket): a fake inbound item through the same
     /// user filter and delivery as the real inbox.
     func injectConnectorMessage(_ kind: ConnectorChannel.Kind, _ item: [String: Any]) {
-        guard let c = store.connector, let channel = kind == .signal ? c.signal : c.whatsapp,
+        guard let c = store.connector, let channel = c.channel(kind),
               channel.connected, let text = item["text"] as? String else { return }
         guard Self.isFromUser(item, channel: channel) else {
             log(c.id, "Ignored an injected \(kind.rawValue) message from someone else")
@@ -211,16 +261,21 @@ extension KubeClusterEngine {
         }
         if text.hasPrefix(Self.connectorReplyMark.trimmingCharacters(in: .whitespaces))
             || connectorEchoes.contains(Self.echoKey(text)) { return }
-        log(c.id, "Message from the user on \(kind == .signal ? "Signal" : "WhatsApp") (injected)")
+        log(c.id, "Message from the user on \(kind.displayName) (injected)")
         onConnectorMessage?(kind, text)
     }
 
     /// Only the user reaches the Switchboard. Own number: a message whose
     /// sender is on the allow-list. Linked: the account writing to itself —
     /// Signal's Note to Self sync, WhatsApp's "Message yourself" chat.
+    /// Slack: a direct message from the paired member — never a channel, a
+    /// thread elsewhere, a bot, an edit or anyone else in the workspace.
     static func isFromUser(_ item: [String: Any], channel: ConnectorChannel) -> Bool {
         let from = item["from"] as? String ?? ""
         switch (channel.kind, channel.mode) {
+        case (.slack, _):
+            return isSlackDirectMessage(item, workspaceID: channel.workspaceID)
+                && !from.isEmpty && channel.allowed.contains(from)
         case (.signal, .linked):
             return (item["noteToSelf"] as? Bool) == true && from == channel.account
         case (.signal, .ownNumber):
@@ -242,6 +297,20 @@ extension KubeClusterEngine {
         case (.whatsapp, .ownNumber):
             return (item["fromMe"] as? Bool) != true && channel.allowed.contains { digits($0) == digits(from) }
         }
+    }
+
+    /// A person's plain direct message to the app, in its own workspace: a
+    /// DM (not a channel or group), no bot, no subtype (edits, joins, file
+    /// shares, "message_changed"… carry one), from the workspace the app
+    /// lives in (Slack Connect DMs come from other organizations).
+    static func isSlackDirectMessage(_ item: [String: Any], workspaceID: String?) -> Bool {
+        guard (item["channelType"] as? String) == "im",
+              (item["bot"] as? Bool) != true,
+              ((item["subtype"] as? String) ?? "").isEmpty else { return false }
+        if let ws = workspaceID, !ws.isEmpty, let team = item["team"] as? String, !team.isEmpty, team != ws {
+            return false
+        }
+        return true
     }
 
     /// The phone-number digits of a number or JID ("+1 555…", "1555…@s.whatsapp.net").
@@ -281,6 +350,7 @@ extension KubeClusterEngine {
         switch ch.kind {
         case .signal:   args = ["signal-send", account, to, Self.b64(body)]
         case .whatsapp: args = ["wa-send", Self.digits(to), Self.b64(body)]
+        case .slack:    args = ["slack-send", to, Self.b64(body)]
         }
         guard let r = try? await relay(c, args, timeout: 60), let status = r["status"] as? Int else { return false }
         if !(200..<300).contains(status) {
@@ -289,7 +359,7 @@ extension KubeClusterEngine {
         }
         // Logged on success too: in linked mode the reply lands silently in
         // the user's own self-chat, and "did it go out?" is the first question.
-        log(c.id, "Sent a message on \(ch.kind == .signal ? "Signal" : "WhatsApp")"
+        log(c.id, "Sent a message on \(ch.kind.displayName)"
             + (ch.mode == .linked ? " (to \(ch.kind == .signal ? "Note to Self" : "Message yourself") — no notification)" : ""))
         return true
     }
@@ -369,6 +439,98 @@ extension KubeClusterEngine {
         return .init(ok: true, value: account)
     }
 
+    // MARK: Slack setup
+
+    /// The app Bromure asks the user to create in their workspace: Socket
+    /// Mode (no public URL — the connector dials out), direct messages only,
+    /// the fewest scopes that work: read and answer DMs sent to the app.
+    static let slackManifest: [String: Any] = [
+        "_metadata": ["major_version": 1, "minor_version": 1],
+        "display_information": [
+            "name": "Bromure",
+            "description": "Your Bromure Switchboard: ask what your coding sessions are up to.",
+            "background_color": "#1f2330",
+        ],
+        "features": [
+            "app_home": ["home_tab_enabled": false, "messages_tab_enabled": true,
+                         "messages_tab_read_only_enabled": false],
+            "bot_user": ["display_name": "Bromure", "always_online": true],
+        ],
+        "oauth_config": ["scopes": ["bot": ["chat:write", "im:history", "im:read", "im:write"]]],
+        "settings": [
+            "event_subscriptions": ["bot_events": ["message.im"]],
+            "interactivity": ["is_enabled": false],
+            "org_deploy_enabled": false,
+            "socket_mode_enabled": true,
+            "token_rotation_enabled": false,
+        ],
+    ]
+
+    /// Slack's "create an app from this manifest" page, prefilled.
+    static var slackCreateAppURL: URL? {
+        guard let data = try? JSONSerialization.data(withJSONObject: slackManifest, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        var c = URLComponents(string: "https://api.slack.com/apps")
+        c?.queryItems = [URLQueryItem(name: "new_app", value: "1"), URLQueryItem(name: "manifest_json", value: json)]
+        return c?.url
+    }
+
+    /// Hand the two tokens to the connector, which checks them with Slack
+    /// and keeps them on its data disk. They travel as a file in a private
+    /// folder (never a command line) and aren't kept on the Mac. On success
+    /// the channel exists but answers nobody until pairing.
+    func slackSetup(botToken: String, appToken: String) async -> ConnectorReply {
+        guard var c = store.connector else { return .init(ok: false, message: "No connector") }
+        let bot = botToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let app = appToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard bot.hasPrefix("xoxb-") else {
+            return .init(ok: false, message: NSLocalizedString("The Bot User OAuth Token starts with xoxb-.", comment: "slack setup"))
+        }
+        guard app.hasPrefix("xapp-") else {
+            return .init(ok: false, message: NSLocalizedString("The app-level token starts with xapp-.", comment: "slack setup"))
+        }
+        let dir = "/var/lib/bromure-msgbridge/incoming"
+        let path = dir + "/slack-\(UUID().uuidString).json"
+        guard let data = try? JSONSerialization.data(withJSONObject: ["botToken": bot, "appToken": app]),
+              (try? await exec(c.node.id, "mkdir -p \(dir) && chmod 700 \(dir) && echo ok", timeout: 15))?
+                .contains("ok") == true,
+              (try? await app_writeFile(c.node.id, path: path, data: data)) == true,
+              let r = try? await relay(c, ["slack-setup", path], timeout: 60)
+        else {
+            _ = try? await exec(c.node.id, "rm -f \(Self.shellQuote(path))", timeout: 15)
+            return .init(ok: false, message: "The connector didn't answer")
+        }
+        guard r["ok"] as? Bool == true else {
+            return .init(ok: false, message: r["error"] as? String ?? "Slack refused the tokens")
+        }
+        let team = r["team"] as? String
+        c.slack = ConnectorChannel(kind: .slack, mode: .ownNumber, account: r["botUserID"] as? String,
+                                   allowed: [], connected: false,
+                                   workspace: team, workspaceID: r["teamID"] as? String)
+        store.upsert(c)
+        log(c.id, "Slack app set up in \(team ?? "a workspace") — waiting for pairing")
+        return .init(ok: true, value: team)
+    }
+
+    /// A fresh one-time pairing code (six digits, good for 10 minutes): the
+    /// first person to send it to the app in a direct message becomes the
+    /// only Slack account Bromure answers.
+    func slackStartPairing() -> String {
+        let code = String(format: "%06d", Int.random(in: 0...999_999))
+        slackPairing = (code, Date().addingTimeInterval(600))
+        slackPairingMisses = 0
+        slackPairingAborted = false
+        if let c = store.connector { log(c.id, "Slack pairing started") }
+        return code
+    }
+
+    private func app_writeFile(_ nodeID: UUID, path: String, data: Data) async throws -> Bool {
+        for op in GuestDrop.writeOps(guestPath: path, data: data) {
+            _ = try await app.guestFileOp(profileID: nodeID, op: op, timeout: 30)
+        }
+        return true
+    }
+
     // MARK: WhatsApp setup
 
     /// The QR code (PNG) to scan in WhatsApp › Linked devices.
@@ -439,10 +601,16 @@ extension KubeClusterEngine {
         case .whatsapp:
             _ = try? await relay(c, ["wa-logout"])
             c.whatsapp = nil
+        case .slack:
+            // The tokens go from the connector; the app itself stays in the
+            // user's Slack workspace until they remove it there.
+            _ = try? await relay(c, ["slack-logout"])
+            c.slack = nil
+            slackPairing = nil
         }
         store.upsert(c)
         try? await pushConnectorConfig(c)
-        log(c.id, "\(kind == .signal ? "Signal" : "WhatsApp") disconnected")
+        log(c.id, "\(kind.displayName) disconnected")
     }
 }
 #endif

@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""Bromure AC — Signal / WhatsApp relay, INSIDE the connector VM.
+"""Bromure AC — Signal / WhatsApp / Slack relay, INSIDE the connector VM.
 
 `daemon` (the bromure-msgbridge systemd unit) collects incoming messages:
 Signal's over signal-cli-rest-api's receive websocket (json-rpc mode), for
 the account named in config.json; WhatsApp's from GOWA's webhook, which
-posts to this process on 127.0.0.1:9000. Each becomes one normalized JSON
-line in the inbox the host drains (`drain`).
+posts to this process on 127.0.0.1:9000; Slack's over Socket Mode (a
+websocket the relay opens to Slack with the user's app tokens, kept in
+slack.json on the data disk, mode 0600 — they never leave this machine).
+Each becomes one normalized JSON line in the inbox the host drains
+(`drain`); the host decides who may reach the Switchboard.
 
 Every other verb is one call the host makes over the shell channel; each
 prints one JSON object. Standard library only — the base image's python3.
 """
-import base64, fcntl, http.server, json, os, socket, struct, sys, threading, time
+import base64, fcntl, http.server, json, os, socket, ssl, struct, sys, threading, time
 import urllib.error, urllib.parse, urllib.request
 
 DATA = "/var/lib/bromure-msgbridge"
 CONFIG = os.path.join(DATA, "config.json")
 INBOX = os.path.join(DATA, "inbox.jsonl")
+SLACK_CONFIG = os.path.join(DATA, "slack.json")
+SLACK_STATUS = os.path.join(DATA, "slack-status.json")
+SLACK_API = "https://slack.com/api/"
 SIGNAL = "http://127.0.0.1:18080"   # 8080 is the base image's own
 WHATSAPP = "http://127.0.0.1:3000"
 WEBHOOK_PORT = 9000
@@ -72,13 +78,17 @@ def append_inbox(item):
 
 def ws_connect(url, timeout=None):
     u = urllib.parse.urlparse(url)
-    sock = socket.create_connection((u.hostname, u.port or 80), timeout=10)
+    secure = u.scheme == "wss"
+    port = u.port or (443 if secure else 80)
+    sock = socket.create_connection((u.hostname, port), timeout=10)
+    if secure:
+        sock = ssl.create_default_context().wrap_socket(sock, server_hostname=u.hostname)
     sock.settimeout(timeout)
     key = base64.b64encode(os.urandom(16)).decode()
     path = u.path + ("?" + u.query if u.query else "")
     sock.sendall(("GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\n"
                   "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
-                  "Sec-WebSocket-Version: 13\r\n\r\n" % (path, u.hostname, u.port or 80, key)).encode())
+                  "Sec-WebSocket-Version: 13\r\n\r\n" % (path, u.hostname, port, key)).encode())
     head = b""
     while b"\r\n\r\n" not in head:
         chunk = sock.recv(1)
@@ -212,9 +222,116 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+# ------------------------------------------------------------------- slack
+
+def slack_config():
+    try:
+        with open(SLACK_CONFIG) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_private(path, obj):
+    """Write JSON readable by this user only (tokens)."""
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(obj, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def slack_status(**kw):
+    try:
+        write_private(SLACK_STATUS, dict(kw, at=time.time()))
+    except OSError:
+        pass
+
+
+def slack_api(method, token, body=None, timeout=30):
+    """A Slack Web API call: (ok, parsed). Form-encoded POST, bearer token."""
+    data = urllib.parse.urlencode(body or {}).encode()
+    req = urllib.request.Request(SLACK_API + method, data=data, method="POST",
+                                 headers={"Authorization": "Bearer " + token,
+                                          "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            res = json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            res = json.loads(e.read().decode() or "{}")
+        except ValueError:
+            res = {"ok": False, "error": "http_%d" % e.code}
+    except Exception as e:
+        res = {"ok": False, "error": str(e)}
+    return bool(res.get("ok")), res
+
+
+def slack_item(event, team):
+    """A Socket Mode message event → an inbox item, or None. Everything is
+    passed on with what the host needs to judge it (the DM-only, the user-
+    only and the no-bots rules live on the host, where they're tested)."""
+    if (event or {}).get("type") != "message":
+        return None
+    text = event.get("text") or ""
+    if not text:
+        return None
+    return {"channel": "slack", "from": event.get("user") or "", "chat": event.get("channel") or "",
+            "channelType": event.get("channel_type") or "", "team": event.get("team") or team or "",
+            "bot": bool(event.get("bot_id") or event.get("bot_profile")),
+            "subtype": event.get("subtype") or "", "text": text, "ts": event.get("ts")}
+
+
+def slack_loop():
+    """Keep one Socket Mode connection open while tokens are configured.
+    Every envelope is acknowledged at once (Slack retries otherwise); a
+    `disconnect` (refresh, warning, link disabled) or a dropped socket
+    opens a fresh URL."""
+    backoff = 3
+    while True:
+        cfg = slack_config()
+        app_token, team = cfg.get("appToken"), cfg.get("teamID") or ""
+        if not app_token:
+            slack_status(configured=False, connected=False)
+            time.sleep(3)
+            continue
+        ok, res = slack_api("apps.connections.open", app_token)
+        if not ok:
+            slack_status(configured=True, connected=False, error=res.get("error") or "connection refused")
+            time.sleep(min(backoff, 60))
+            backoff *= 2
+            continue
+        try:
+            sock = ws_connect(res["url"], timeout=None)
+            slack_status(configured=True, connected=True)
+            backoff = 3
+            for text in ws_messages(sock):
+                try:
+                    env = json.loads(text)
+                except ValueError:
+                    continue
+                if env.get("envelope_id"):
+                    _send_frame(sock, 0x1, json.dumps({"envelope_id": env["envelope_id"]}).encode())
+                if env.get("type") == "disconnect":
+                    break
+                if env.get("type") == "events_api":
+                    item = slack_item(((env.get("payload") or {}).get("event")), team)
+                    if item:
+                        append_inbox(item)
+                if slack_config().get("appToken") != app_token:
+                    break   # logged out or new tokens
+            sock.close()
+        except Exception as e:
+            sys.stderr.write("slack receive: %s\n" % e)
+            slack_status(configured=True, connected=False, error=str(e))
+        time.sleep(2)
+
+
 def daemon():
     os.makedirs(DATA, exist_ok=True)
     threading.Thread(target=signal_loop, daemon=True).start()
+    threading.Thread(target=slack_loop, daemon=True).start()
     http.server.ThreadingHTTPServer(("127.0.0.1", WEBHOOK_PORT), WebhookHandler).serve_forever()
 
 
@@ -257,7 +374,15 @@ def probe():
             pending = sum(1 for _ in f)
     except OSError:
         pass
-    out({"signalUp": s_status == 200,
+    try:
+        with open(SLACK_STATUS) as f:
+            sl = json.load(f)
+    except (OSError, ValueError):
+        sl = {}
+    out({"slackConfigured": bool(slack_config().get("appToken")),
+         "slackConnected": bool(sl.get("connected")),
+         "slackError": sl.get("error"),
+         "signalUp": s_status == 200,
          "signalAccounts": accounts if isinstance(accounts, list) else [],
          "whatsappUp": w_status != 0,
          "whatsappLoggedIn": bool(wr.get("is_logged_in")),
@@ -356,6 +481,60 @@ def wa_logout():
     out({"status": status, "result": res})
 
 
+def slack_setup(path):
+    """Check the two tokens with Slack, then keep them (0600) — only if both
+    are right. Prints the workspace and the app's bot user. The host hands
+    the tokens over as a file in a 0700 folder (never on a command line),
+    which is read and removed here whatever happens."""
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        cfg = {}
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    bot, app = (cfg.get("botToken") or "").strip(), (cfg.get("appToken") or "").strip()
+    if not bot.startswith("xoxb-"):
+        return out({"ok": False, "error": "The bot token should start with xoxb-"})
+    if not app.startswith("xapp-"):
+        return out({"ok": False, "error": "The app-level token should start with xapp-"})
+    ok, who = slack_api("auth.test", bot)
+    if not ok:
+        return out({"ok": False, "error": "Bot token: " + (who.get("error") or "refused")})
+    ok, conn = slack_api("apps.connections.open", app)
+    if not ok:
+        return out({"ok": False, "error": "App-level token: " + (conn.get("error") or "refused")})
+    write_private(SLACK_CONFIG, {"botToken": bot, "appToken": app, "teamID": who.get("team_id") or "",
+                                 "team": who.get("team") or "", "botUserID": who.get("user_id") or ""})
+    out({"ok": True, "team": who.get("team") or "", "teamID": who.get("team_id") or "",
+         "botUserID": who.get("user_id") or "", "url": who.get("url") or ""})
+
+
+def slack_send(user, b64):
+    """A direct message to `user` (their Slack member id) from the app."""
+    token = slack_config().get("botToken")
+    if not token:
+        return out({"status": 0, "result": "Slack isn't set up"})
+    ok, conv = slack_api("conversations.open", token, {"users": user})
+    if not ok:
+        return out({"status": 400, "result": conv.get("error")})
+    ok, res = slack_api("chat.postMessage", token, {"channel": conv["channel"]["id"],
+                                                     "text": base64.b64decode(b64).decode()})
+    out({"status": 200 if ok else 400, "result": res.get("error") if not ok else "sent"})
+
+
+def slack_logout():
+    for p in (SLACK_CONFIG, SLACK_STATUS):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    out({"ok": True})
+
+
 def signal_unregister(number):
     status, res = call("POST", SIGNAL + "/v1/unregister/" + urllib.parse.quote(number),
                        {"delete_account": False, "delete_local_data": True}, timeout=60)
@@ -369,6 +548,7 @@ VERBS = {
     "signal-send": signal_send, "signal-unregister": signal_unregister,
     "wa-login-qr": wa_login_qr, "wa-pair": wa_pair, "wa-status": wa_status,
     "wa-send": wa_send, "wa-logout": wa_logout,
+    "slack-setup": slack_setup, "slack-send": slack_send, "slack-logout": slack_logout,
 }
 
 if __name__ == "__main__":

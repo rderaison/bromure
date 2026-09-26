@@ -42,6 +42,9 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// Review feedback. Comments accumulate across review rounds;
     /// `sentAt` marks the round that carried them back to the agent.
     var comments: [ReviewComment]
+    /// Files marked viewed in the review window: path → fingerprint of the
+    /// diff that was seen.
+    var reviewViewed: [String: String]?
 
     var createdAt: Date
     var startedAt: Date?
@@ -2550,6 +2553,13 @@ struct TaskDiffFile: Identifiable, Equatable, Sendable {
 
 /// Tolerant unified-diff reader for `git diff` output.
 enum TaskDiffParser {
+    /// The b/ side of a "diff --git a/… b/…" line.
+    static func newPath(fromDiffLine line: String) -> String {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        if let r = t.range(of: " b/", options: .backwards) { return String(t[r.upperBound...]) }
+        return t.split(separator: " ").last.map(String.init) ?? t
+    }
+
     static func parse(_ raw: String) -> [TaskDiffFile] {
         var files: [TaskDiffFile] = []
         var current: TaskDiffFile?
@@ -2559,11 +2569,8 @@ enum TaskDiffParser {
             if line.hasPrefix("diff --git ") {
                 if let f = current { files.append(f) }
                 // "diff --git a/path b/path" — take the b/ side (handles
-                // renames and new files).
-                let parts = line.split(separator: " ")
-                let path = parts.last.map {
-                    $0.hasPrefix("b/") ? String($0.dropFirst(2)) : String($0)
-                } ?? String(line)
+                // renames and new files, and names with spaces).
+                let path = Self.newPath(fromDiffLine: String(line))
                 current = TaskDiffFile(path: path, lines: [])
                 continue
             }

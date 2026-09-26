@@ -40,7 +40,19 @@ final class AgentSessionEngine {
         self.delegate = delegate
         // A session that leaves the store takes its transcript copy along.
         store.onRemove = { [weak self] id in self?.transcripts.remove(id) }
+        // A merge that was being followed when the app quit.
+        DispatchQueue.main.async { [weak self] in self?.resumeMergeWatches() }
     }
+
+    // Worktree sessions (SessionBranches.swift).
+    var branchProbing: Set<UUID> = []
+    var branchProbeAt: [UUID: Date] = [:]
+    var mergeWatching: Set<UUID> = []
+    /// Sessions to `git init` their folder for before branching.
+    var initGitBeforeBranching: Set<UUID> = []
+    /// Branch sessions asked to start from another branch than the
+    /// folder's current one: session → base branch (read once at launch).
+    var worktreeBase: [UUID: String] = [:]
 
     /// The platform-neutral request lives with the model (AgentSessions.swift)
     /// so the shared new-session screen can build one on every platform.
@@ -110,17 +122,22 @@ final class AgentSessionEngine {
     /// from that tab. nil when the parent has no folder to branch.
     @discardableResult
     func startWorktree(from parentID: UUID, name: String, tool: Profile.Tool,
-                       message: String?, remotely: Bool = false) -> UUID? {
+                       message: String?, initGit: Bool = false, base: String? = nil,
+                       remotely: Bool = false) -> UUID? {
         guard let parent = store.session(parentID), SessionHome.hasFolder(parent) else { return nil }
-        let title = name.trimmingCharacters(in: .whitespaces).nonEmpty
-            ?? String(format: NSLocalizedString("Worktree of %@", comment: "session title"), parent.title)
         let message = message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+        // No name: the message says what it's for.
+        let title = name.trimmingCharacters(in: .whitespaces).nonEmpty
+            ?? message.map { AgentSession.title(fromMessage: $0) }?.nonEmpty
+            ?? String(format: NSLocalizedString("Worktree of %@", comment: "session title"), parent.title)
         var s = AgentSession(profileID: parent.profileID, tool: tool, title: title,
                              cwd: parent.cwd, openingMessage: message)
         s.worktreeOf = parentID
         s.userTitled = true          // the worktree's name is the session's name
         s.launchingSince = Date()
         store.upsert(s)
+        if initGit { initGitBeforeBranching.insert(s.id) }
+        if let base, !base.isEmpty { worktreeBase[s.id] = base }
         BACDebug.log("sessions", "start worktree “\(title)” off “\(parent.title)” (\(tool.rawValue))")
         launch(s.id, prompt: message ?? "", flags: "", worktreeSlug: Self.worktreeSlug(title),
                remotely: remotely)
@@ -129,20 +146,7 @@ final class AgentSessionEngine {
 
     /// A filesystem/branch-safe slug from a free-form name — the same rule
     /// the kanban's worktrees use.
-    static func worktreeSlug(_ name: String) -> String {
-        var out = ""
-        var lastDash = false
-        for ch in name.lowercased() {
-            if ch.isLetter || ch.isNumber {
-                out.append(ch); lastDash = false
-            } else if !lastDash {
-                out.append("-"); lastDash = true
-            }
-        }
-        let trimmed = String(out.trimmingCharacters(in: CharacterSet(charactersIn: "-")).prefix(40))
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return trimmed.isEmpty ? "worktree" : trimmed
-    }
+    static func worktreeSlug(_ name: String) -> String { AgentSession.worktreeSlug(name) }
 
     /// "hello-260915-1830": a few words of the message (or the agent's name)
     /// plus a timestamp, so folders never collide and still read at a glance.
@@ -437,7 +441,17 @@ final class AgentSessionEngine {
                 let top = (try? await delegate.guestExec(
                     profileID: s.profileID,
                     command: "git -C \(q) rev-parse --show-toplevel 2>/dev/null", timeout: 15)) ?? ""
-                guard !top.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                if top.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   self.initGitBeforeBranching.remove(id) != nil {
+                    // Asked for: make the folder a repository first.
+                    _ = await self.initGitRepository(profileID: s.profileID, cwd: s.cwd)
+                }
+                let topNow = top.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? ((try? await delegate.guestExec(
+                        profileID: s.profileID,
+                        command: "git -C \(q) rev-parse --show-toplevel 2>/dev/null", timeout: 15)) ?? "")
+                    : top
+                guard !topNow.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     fail(String(format: NSLocalizedString("%@ isn't a git repository — a worktree needs one.", comment: "session start"),
                                 prettyGuestPath(guestPath)))
                     return
@@ -472,7 +486,8 @@ final class AgentSessionEngine {
                 self.store.mutate(id) { $0.launchBaselineIndex = baseline; $0.launchDisplay = display }
                 guard delegate.automationWorktreeCommand(
                     profileNameOrID: s.profileID.uuidString, action: "create",
-                    args: [guestPath, worktreeSlug, display, s.tool.rawValue, prompt] + self.backgroundArg(id)) else {
+                    args: [guestPath, worktreeSlug, display, s.tool.rawValue, prompt,
+                           self.backgroundArg(id).first ?? "", self.worktreeBase.removeValue(forKey: id) ?? ""]) else {
                     fail(NSLocalizedString("Couldn't reach the workspace — is it running?", comment: "task start"))
                     return
                 }
@@ -715,6 +730,7 @@ final class AgentSessionEngine {
         sweepEnded()
         probeFolders(entries: entries)
         probeChanges(entries: entries)
+        probeBranches(entries: entries)
         // An archived or deleted session whose tab is back (its workspace
         // was asleep when it was put away, and just woke): both meant "end
         // it". A deleted one keeps its binding until the roster drops the

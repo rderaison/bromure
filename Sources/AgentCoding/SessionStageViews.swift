@@ -205,8 +205,28 @@ struct SessionStageActions {
     /// stays.
     var delete: (UUID) -> Void = { _ in }
     /// Start a new session in a git worktree branched off this session's
-    /// folder: (session, worktree name, agent, opening message).
-    var newWorktree: (UUID, String, Profile.Tool, String?) -> Void = { _, _, _, _ in }
+    /// folder: (session, worktree name — empty = from the message, agent,
+    /// opening message, `git init` the folder first).
+    var newWorktree: (UUID, NewBranchRequest) -> Void = { _, _ in }
+    /// What the session's folder is, git-wise. nil: the machine can't be
+    /// asked right now.
+    var gitState: (UUID) async -> GitFolderState? = { _ in nil }
+
+    // Branch sessions (worktrees)
+    /// Merge the session's branch: (session, into — nil = where it came
+    /// from, squash, remove the worktree once it has landed).
+    var mergeBranch: (UUID, String?, Bool, Bool) -> Void = { _, _, _, _ in }
+    /// Ask the session's agent to push the branch and open a pull request.
+    var branchPullRequest: (UUID) -> Void = { _ in }
+    /// Throw the branch away — checkout, branch and session (asks first).
+    var discardBranch: (UUID) -> Void = { _ in }
+    /// The machine's branches (worktrees), by profile id.
+    var showBranches: (UUID) -> Void = { _ in }
+    /// Say no to a merge an agent asked for.
+    var declineMerge: (UUID) -> Void = { _ in }
+    /// The session's changes in the review window (any session with a
+    /// folder, not only a branch).
+    var reviewBranch: (UUID) -> Void = { _ in }
     var represent: (UUID) -> Void = { _ in }
     /// The machine's dashboard (the header's machine name).
     var showMachine: (UUID) -> Void = { _ in }
@@ -393,6 +413,11 @@ struct SessionHeaderView: View {
             } label: {
                 Label(NSLocalizedString("Machine Details", comment: "session menu"), systemImage: "cpu")
             }
+            Button {
+                actions.showBranches(s.profileID)
+            } label: {
+                Label(NSLocalizedString("Branches on This Machine…", comment: "session menu"), systemImage: "arrow.triangle.branch")
+            }
         }
     }
 
@@ -476,8 +501,13 @@ struct SessionHeaderView: View {
                                     Text(branch)
                                         .font(.system(size: 11.5, design: .monospaced))
                                         .truncationMode(.middle)
+                                    if let sum = SessionHome.branchSummary(s), s.branchMerge == nil {
+                                        Text(sum).foregroundStyle(.tertiary)
+                                    }
                                 }
-                                .help(NSLocalizedString("A git worktree: its own branch, off the session it was started from", comment: "session header"))
+                                .help(s.branchParent.map {
+                                    String(format: NSLocalizedString("Its own git branch, off %@ — merge it back when it's ready", comment: "session header"), $0)
+                                } ?? NSLocalizedString("A git worktree: its own branch, off the session it was started from", comment: "session header"))
                             }
                             if let url = s.cloneURL, !url.isEmpty {
                                 metaDot
@@ -510,6 +540,9 @@ struct SessionHeaderView: View {
                         .lineLimit(1)
                     }
                     Spacer(minLength: 8)
+                    if !gone, SessionHome.isBranch(s) {
+                        BranchMergeControl(session: s, actions: actions)
+                    }
                     // Picking the conversation back up, said in words.
                     if !gone, bucket == .ended || bucket == .asleep {
                         Button {
@@ -550,7 +583,13 @@ struct SessionHeaderView: View {
                             }
                             if SessionHome.hasFolder(s) {
                                 Divider()
-                                Button(NSLocalizedString("New worktree…", comment: "session menu")) { worktreeSheet = true }
+                                if !SessionHome.isBranch(s) {
+                                    Button(NSLocalizedString("Review Changes", comment: "branch menu")) { actions.reviewBranch(s.id) }
+                                }
+                                Button(NSLocalizedString("New Branch…", comment: "session menu")) { worktreeSheet = true }
+                            }
+                            if SessionHome.isBranch(s) {
+                                BranchMenuItems(session: s, actions: actions)
                             }
                         } else if s.isArchived {
                             Button(NSLocalizedString("Unarchive", comment: "session menu")) { actions.unarchive(s.id) }
@@ -571,18 +610,35 @@ struct SessionHeaderView: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
                 .padding(.bottom, 12)
+                if !gone, s.branchMerge?.phase == .requested {
+                    Divider().opacity(0.6)
+                    BranchMergeRequestBanner(session: s,
+                                             asker: s.branchMerge?.askedBy.flatMap { store.session($0) },
+                                             actions: actions)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
+            .animation(.easeOut(duration: 0.2), value: s.branchMerge?.phase)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.platformWindowBackground)
             .overlay(alignment: .bottom) { Divider().opacity(0.6) }
+            .onChange(of: model.newBranchRequest) { _, req in
+                guard req == s.id else { return }
+                model.newBranchRequest = nil
+                worktreeSheet = true
+            }
+            .onAppear {
+                if model.newBranchRequest == s.id { model.newBranchRequest = nil; worktreeSheet = true }
+            }
+            .onChange(of: s.branchMerge?.phase) { _, _ in actions.represent(s.id) }
             .onChange(of: live) { _, _ in actions.represent(s.id) }
             .onChange(of: bucket) { _, _ in actions.represent(s.id) }
             .sheet(isPresented: $nicknameSheet) {
                 NicknameSheet(session: s) { actions.setNickname(s.id, $0) }
             }
             .sheet(isPresented: $worktreeSheet) {
-                NewWorktreeSheet(parent: s) { name, tool, message in
-                    actions.newWorktree(s.id, name, tool, message)
+                NewWorktreeSheet(parent: s, gitState: actions.gitState) { req in
+                    actions.newWorktree(s.id, req)
                 }
             }
         }
@@ -606,6 +662,169 @@ struct SessionHeaderView: View {
         let title = bucket == .ended && s.isArchived
             ? NSLocalizedString("Archived", comment: "session status") : bucket.title
         return detail.map { title + " · " + $0 } ?? title
+    }
+}
+
+// MARK: - Branch sessions
+
+/// What you do with a branch session's branch — the ⋯ menu's section and
+/// the merge button's menu.
+struct BranchMenuItems: View {
+    let session: AgentSession
+    let actions: SessionStageActions
+    /// The merge itself is the button next to the menu.
+    var includeMerge = true
+
+    private var parent: String { session.branchParent ?? NSLocalizedString("its parent", comment: "branch menu") }
+
+    var body: some View {
+        let s = session
+        let busy = s.branchMerge.map { $0.phase == .merging || $0.phase == .conflicts } ?? false
+        Section(NSLocalizedString("Branch", comment: "branch menu")) {
+            Button(NSLocalizedString("Review Changes", comment: "branch menu")) { actions.reviewBranch(s.id) }
+            if includeMerge {
+                Button(String(format: NSLocalizedString("Merge into %@", comment: "branch menu"), parent)) {
+                    actions.mergeBranch(s.id, nil, false, true)
+                }
+                .disabled(busy)
+            }
+            Button(String(format: NSLocalizedString("Squash and Merge into %@", comment: "branch menu"), parent)) {
+                actions.mergeBranch(s.id, nil, true, true)
+            }
+            .disabled(busy)
+            Button(NSLocalizedString("Merge, Keep Working on the Branch", comment: "branch menu")) {
+                actions.mergeBranch(s.id, nil, false, false)
+            }
+            .disabled(busy)
+            Button(NSLocalizedString("Open a Pull Request", comment: "branch menu")) { actions.branchPullRequest(s.id) }
+                .disabled(busy)
+            Button(NSLocalizedString("Open Terminal Here", comment: "branch menu")) { actions.openLinux(s.id) }
+            Divider()
+            #if os(macOS)
+            Button(NSLocalizedString("Discard Branch…", comment: "branch menu"), role: .destructive) {
+                actions.discardBranch(s.id)   // asks first
+            }
+            #else
+            // No alert from a closure here: the submenu is the second step.
+            Menu(NSLocalizedString("Discard Branch…", comment: "branch menu")) {
+                Button(NSLocalizedString("Discard — This Can't Be Undone", comment: "branch menu"), role: .destructive) {
+                    actions.discardBranch(s.id)
+                }
+            }
+            #endif
+        }
+    }
+}
+
+/// An agent asked to merge (worktree_merge): a full-width strip under the
+/// header says who asks for what, and the user answers there.
+struct BranchMergeRequestBanner: View {
+    let session: AgentSession
+    let asker: AgentSession?
+    let actions: SessionStageActions
+
+    var body: some View {
+        let s = session
+        let m = s.branchMerge
+        let who: String = {
+            if let a = asker, a.id != s.id {
+                return String(format: NSLocalizedString("%@ in “%@”", comment: "merge request: agent in session"),
+                              a.tool.displayName, a.title)
+            }
+            return s.tool.displayName
+        }()
+        HStack(spacing: 12) {
+            ZStack {
+                Circle().fill(Color.orange.opacity(0.16))
+                Image(systemName: "arrow.triangle.merge")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.orange)
+            }
+            .frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(String(format: NSLocalizedString("%@ asks to merge %@ into %@", comment: "merge request banner"),
+                            who, s.worktreeBranch ?? "", m?.target ?? ""))
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text([m?.squash == true ? NSLocalizedString("As one squashed commit", comment: "merge request banner") : nil,
+                      SessionHome.branchSummary(s),
+                      NSLocalizedString("The checkout is removed once it has landed.", comment: "merge request banner")]
+                        .compactMap { $0 }.joined(separator: " · "))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 12)
+            Button(NSLocalizedString("Review Changes", comment: "branch menu")) { actions.reviewBranch(s.id) }
+            Button(NSLocalizedString("Not Now", comment: "branch merge")) { actions.declineMerge(s.id) }
+            Button {
+                if let m { actions.mergeBranch(s.id, m.target, m.squash, m.removeAfter) }
+            } label: {
+                Text(m?.squash == true ? NSLocalizedString("Squash and Merge", comment: "branch merge")
+                                       : NSLocalizedString("Merge", comment: "branch merge"))
+                    .frame(minWidth: 56)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.orange)
+        }
+        .controlSize(.regular)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(Color.orange.opacity(0.07))
+        .overlay(alignment: .bottom) { Divider().opacity(0.6) }
+    }
+}
+
+/// The header's merge control for a branch session: "Merge into main" (its
+/// menu has the other ways), then the merge as it goes — merging, the agent
+/// finishing it, merged.
+struct BranchMergeControl: View {
+    let session: AgentSession
+    let actions: SessionStageActions
+
+    var body: some View {
+        let s = session
+        let parent = s.branchParent ?? NSLocalizedString("parent", comment: "branch menu")
+        if s.branchMerge?.phase == .requested {
+            EmptyView()   // the banner under the header asks
+        } else if let m = s.branchMerge, m.phase != .failed {
+            HStack(spacing: 6) {
+                switch m.phase {
+                case .merged:
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                default:
+                    ProgressView().controlSize(.small).scaleEffect(0.8).frame(width: 14, height: 14)
+                }
+                Text(SessionHome.mergeLine(s) ?? "")
+                    .lineLimit(1)
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(m.phase == .merged ? AnyShapeStyle(Color.green) : AnyShapeStyle(.secondary))
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(Color.primary.opacity(0.05)))
+            .help(m.phase == .conflicts
+                  ? NSLocalizedString("It couldn't merge on its own (uncommitted work or a conflict), so the agent is committing and merging it — follow along in the chat", comment: "branch merge")
+                  : "")
+        } else if s.branchInfo?.isEmpty != true {
+            Menu {
+                BranchMenuItems(session: s, actions: actions, includeMerge: false)
+            } label: {
+                Label(s.branchMerge?.phase == .failed
+                      ? NSLocalizedString("Retry Merge", comment: "branch merge")
+                      : String(format: NSLocalizedString("Merge into %@", comment: "branch menu"), parent),
+                      systemImage: "arrow.triangle.merge")
+            } primaryAction: {
+                actions.mergeBranch(s.id, nil, false, true)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+            .fixedSize()
+            .help(s.branchMerge?.detail
+                  ?? String(format: NSLocalizedString("Merge this branch into %@, then remove its checkout. Uncommitted work or a conflict is handed to the agent to finish.", comment: "branch merge"), parent))
+        }
     }
 }
 
@@ -1708,12 +1927,6 @@ struct NewSessionView: View {
     }
 }
 
-// MARK: - New worktree
-
-/// "New worktree…" on a session: a name for the worktree (its branch is
-/// wt/<slug>), the agent to run there, an optional opening message. The
-/// guest branches the session's folder at its current commit into
-/// ~/.bromure/worktrees/<repo>/<slug> and the new session starts there.
 /// "Nickname…": the name other agents (and the composer's @ palette) reach
 /// this session by. Letters, digits, dots, dashes, underscores; unique on
 /// this host. Empty clears it.
@@ -1787,66 +2000,264 @@ struct NicknameSheet: View {
     }
 }
 
+// MARK: - New branch (worktree)
+
+/// "New branch": a session of its own on a git worktree off this session's
+/// folder. The ask comes first (the name defaults to it); the folder is
+/// checked as the sheet opens, and one that isn't a repository yet gets an
+/// offer to become one. The guest branches the folder at its current commit
+/// into ~/.bromure/worktrees/<repo>/<slug> (branch wt/<slug>).
 struct NewWorktreeSheet: View {
     let parent: AgentSession
-    let onCreate: (String, Profile.Tool, String?) -> Void
+    let gitState: (UUID) async -> GitFolderState?
+    let onCreate: (NewBranchRequest) -> Void
     @Environment(\.dismiss) private var dismiss
+
+    private enum Repo: Equatable { case checking, repo(String?), notRepo, noCommits, unknown }
+    /// Branches it can start from (the current one first) and what the
+    /// repository's .worktreeinclude copies in.
+    @State private var branches: [String] = []
+    @State private var includes: [String] = []
+    /// nil = the folder's current commit.
+    @State private var base: String?
 
     @State private var name = ""
     @State private var tool: Profile.Tool
     @State private var message = ""
-    @FocusState private var nameFocused: Bool
+    @State private var repo: Repo = .checking
+    @State private var initGit = true
+    @FocusState private var messageFocused: Bool
 
-    init(parent: AgentSession, onCreate: @escaping (String, Profile.Tool, String?) -> Void) {
+    init(parent: AgentSession,
+         gitState: @escaping (UUID) async -> GitFolderState?,
+         onCreate: @escaping (NewBranchRequest) -> Void) {
         self.parent = parent
+        self.gitState = gitState
         self.onCreate = onCreate
         _tool = State(initialValue: parent.tool)
     }
 
     private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedMessage: String { message.trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// What the session (and its branch) will be called.
+    private var effectiveName: String {
+        if !trimmedName.isEmpty { return trimmedName }
+        if !trimmedMessage.isEmpty { return AgentSession.title(fromMessage: trimmedMessage) }
+        return ""
+    }
+    private var folder: String { prettyGuestPath(SessionHome.guestPath(parent.cwd)) }
+    private var canCreate: Bool {
+        guard !effectiveName.isEmpty else { return false }
+        switch repo {
+        case .notRepo: return initGit
+        default: return true
+        }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(NSLocalizedString("New worktree", comment: "new worktree"))
-                    .font(.system(size: 15, weight: .semibold))
-                Text(String(format: NSLocalizedString("Branches %@ at its current commit into a worktree of its own and starts an agent there.", comment: "new worktree"),
-                            prettyGuestPath(SessionHome.guestPath(parent.cwd))))
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(alignment: .leading, spacing: 10) {
-                TextField(NSLocalizedString("Worktree name (e.g. Login redirect fix)", comment: "new worktree"), text: $name)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($nameFocused)
-                Picker(NSLocalizedString("Agent", comment: "new worktree"), selection: $tool) {
-                    ForEach(Profile.Tool.allCases, id: \.self) { t in
-                        Text(t.displayName).tag(t)
-                    }
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.accentColor.gradient)
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
                 }
-                TextField(NSLocalizedString("Opening message (optional)", comment: "new worktree"),
+                .frame(width: 34, height: 34)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(NSLocalizedString("New branch", comment: "new worktree"))
+                        .font(.system(size: 15, weight: .semibold))
+                    Text(String(format: NSLocalizedString("A session of its own, on a copy of %@ with its own git branch. Your work in “%@” isn't touched; merge it back when it's ready.", comment: "new worktree"),
+                                folder, parent.title))
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(NSLocalizedString("What should it do?", comment: "new worktree"))
+                    .font(.system(size: 12, weight: .medium))
+                TextField(NSLocalizedString("e.g. Try moving the session cache to SQLite", comment: "new worktree"),
                           text: $message, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
-                    .lineLimit(2...4)
+                    .lineLimit(3...6)
+                    .focused($messageFocused)
             }
-            HStack {
+
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(NSLocalizedString("Name", comment: "new worktree"))
+                        .font(.system(size: 12, weight: .medium))
+                    TextField(trimmedMessage.isEmpty
+                              ? NSLocalizedString("e.g. Session cache in SQLite", comment: "new worktree")
+                              : AgentSession.title(fromMessage: trimmedMessage),
+                              text: $name)
+                        .textFieldStyle(.roundedBorder)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(NSLocalizedString("Agent", comment: "new worktree"))
+                        .font(.system(size: 12, weight: .medium))
+                    Picker("", selection: $tool) {
+                        ForEach(Profile.Tool.allCases, id: \.self) { t in
+                            Text(t.displayName).tag(t)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+
+            repoStatus
+
+            HStack(spacing: 10) {
+                if !effectiveName.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.branch").font(.system(size: 10))
+                        Text("wt/" + AgentSession.worktreeSlug(effectiveName))
+                            .font(.system(size: 11, design: .monospaced))
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    .foregroundStyle(.secondary)
+                    .help(NSLocalizedString("The git branch this session works on", comment: "new worktree"))
+                }
                 Spacer()
                 Button(NSLocalizedString("Cancel", comment: "")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(NSLocalizedString("Create", comment: "new worktree")) {
-                    let m = message.trimmingCharacters(in: .whitespacesAndNewlines)
-                    onCreate(trimmedName, tool, m.isEmpty ? nil : m)
+                Button(NSLocalizedString("Start", comment: "new worktree")) {
+                    onCreate(NewBranchRequest(
+                        name: trimmedName, tool: tool,
+                        message: trimmedMessage.isEmpty ? nil : trimmedMessage,
+                        initGit: repo == .notRepo || repo == .unknown ? initGit : false,
+                        base: base))
                     dismiss()
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(trimmedName.isEmpty)
+                .keyboardShortcut(.return, modifiers: .command)
+                .buttonStyle(.borderedProminent)
+                .disabled(!canCreate)
             }
         }
-        .padding(18)
+        .padding(20)
         #if os(macOS)
-        .frame(width: 440)
+        .frame(width: 480)
         #endif
-        .onAppear { nameFocused = true }
+        .onAppear { messageFocused = true }
+        .task {
+            // A machine that just woke can take a few seconds to answer.
+            for attempt in 0..<8 {
+                let st = await gitState(parent.id)
+                guard !Task.isCancelled else { return }
+                let next: Repo = st.map {
+                    switch $0.kind {
+                    case .repo: return .repo($0.branch)
+                    case .noCommits: return .noCommits
+                    case .notRepo: return .notRepo
+                    }
+                } ?? .unknown
+                if let st {
+                    branches = st.branches
+                    includes = st.includes
+                }
+                if next != repo { withAnimation(.easeOut(duration: 0.15)) { repo = next } }
+                if st != nil || attempt == 7 { return }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    /// One line on where it branches from — or what's missing.
+    @ViewBuilder private var repoStatus: some View {
+        switch repo {
+        case .checking:
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.small)
+                Text(String(format: NSLocalizedString("Checking %@…", comment: "new worktree"), folder))
+            }
+            .font(.system(size: 12)).foregroundStyle(.secondary)
+        case .repo(let branch):
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text(NSLocalizedString("Start from", comment: "new worktree"))
+                        .font(.system(size: 12, weight: .medium))
+                    Picker("", selection: $base) {
+                        Text(branch.map { String(format: NSLocalizedString("%@ (current)", comment: "new worktree base"), $0) }
+                             ?? NSLocalizedString("The current commit", comment: "new worktree base"))
+                            .tag(String?.none)
+                        let others = branches.filter { $0 != branch }
+                        if !others.isEmpty {
+                            Divider()
+                            ForEach(others, id: \.self) { b in Text(b).tag(String?.some(b)) }
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    Spacer(minLength: 0)
+                }
+                Label {
+                    Text(base == nil
+                         ? NSLocalizedString("At its latest commit — uncommitted changes stay behind. Merges back into it.", comment: "new worktree")
+                         : String(format: NSLocalizedString("At %@'s latest commit, and it merges back into %@.", comment: "new worktree"), base ?? "", base ?? ""))
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                }
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+                if !includes.isEmpty {
+                    Label {
+                        Text(String(format: NSLocalizedString("Also copies in, as .worktreeinclude says: %@", comment: "new worktree"),
+                                    includes.prefix(6).joined(separator: ", ") + (includes.count > 6 ? "…" : "")))
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "doc.on.doc").foregroundStyle(.secondary)
+                    }
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .help(includes.joined(separator: "\n"))
+                }
+            }
+        case .noCommits:
+            Label {
+                Text(NSLocalizedString("The repository has no commit yet, so the branch starts from an empty first commit. Files in the folder stay behind.", comment: "new worktree"))
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            }
+            .font(.system(size: 12)).foregroundStyle(.secondary)
+        case .notRepo:
+            VStack(alignment: .leading, spacing: 8) {
+                Label {
+                    Text(String(format: NSLocalizedString("%@ isn't a git repository yet, and a branch needs one.", comment: "new worktree"), folder))
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+                Toggle(isOn: $initGit) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(NSLocalizedString("Make it one (git init)", comment: "new worktree"))
+                        Text(NSLocalizedString("Everything in the folder goes into a first commit, which the branch starts from.", comment: "new worktree"))
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                #if os(macOS)
+                .toggleStyle(.checkbox)
+                #endif
+            }
+            .font(.system(size: 12))
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.orange.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.orange.opacity(0.25), lineWidth: 0.5))
+        case .unknown:
+            VStack(alignment: .leading, spacing: 6) {
+                Label(NSLocalizedString("The machine isn't running — the folder is checked once it starts.", comment: "new worktree"),
+                      systemImage: "moon.zzz")
+                Toggle(NSLocalizedString("If it isn't a git repository, make it one", comment: "new worktree"), isOn: $initGit)
+                    #if os(macOS)
+                    .toggleStyle(.checkbox)
+                    #endif
+            }
+            .font(.system(size: 12)).foregroundStyle(.secondary)
+        }
     }
 }
 

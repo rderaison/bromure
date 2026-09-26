@@ -92,7 +92,8 @@ struct DelegationTests {
         let list = parse(await f.server.handle(line: rpc("tools/list"), branch: "w3"))
         let names = ((list["result"] as? [String: Any])?["tools"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
         #expect(Set(names) == ["delegate", "request", "list_peers", "list_delegations", "read_inbox", "wait", "ask", "report",
-                               "deliver", "answer", "steer", "close_delegation", "cancel"])
+                               "deliver", "answer", "steer", "close_delegation", "cancel",
+                               "worktree_create", "worktree_status", "worktree_merge"])
     }
 
     @Test("the caller is the session bound to the announced window — or nobody")

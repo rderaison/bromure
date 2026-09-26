@@ -3887,8 +3887,14 @@ public final class ProfileStore {
         // creds (so we can install the credential helper). Skipping
         // entirely leaves the system git defaults intact.
         let gitconfig = home.appendingPathComponent(".gitconfig")
-        let name = profile.gitUserName.trimmingCharacters(in: .whitespaces)
-        let email = profile.gitUserEmail.trimmingCharacters(in: .whitespaces)
+        // A workspace with no identity of its own takes the one set for all
+        // workspaces (the template) — else agents can't commit, and stall
+        // asking whose name to use.
+        let own = (profile.gitUserName.trimmingCharacters(in: .whitespaces),
+                   profile.gitUserEmail.trimmingCharacters(in: .whitespaces))
+        let fallback = own.0.isEmpty && own.1.isEmpty ? loadTemplate() : nil
+        let name = own.0.isEmpty ? (fallback?.gitUserName.trimmingCharacters(in: .whitespaces) ?? "") : own.0
+        let email = own.1.isEmpty && own.0.isEmpty ? (fallback?.gitUserEmail.trimmingCharacters(in: .whitespaces) ?? "") : own.1
         let importedGit = profile.importedConfigFiles.first { $0.path == ".gitconfig" }
         if !name.isEmpty || !email.isEmpty || !usableCreds.isEmpty || importedGit != nil {
             var lines = [Self.managedSentinel]
