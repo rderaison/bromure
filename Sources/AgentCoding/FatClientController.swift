@@ -4729,6 +4729,8 @@ final class RemoteHostWindow: NSWindow {
                         "rooms": controller.roomStore.rooms.map { $0.name }]
             }
             if let text = p["composer"] as? String { rc.targetModel?.composerText = text }
+            if let l = (p["layout"] as? String).flatMap(RoomLayout.init) { rc.setLayout(l) }
+            if let n = p["page"] as? Int { rc.show(page: n) }
             if let shot = p["shot"] as? String {
                 contentView?.layoutSubtreeIfNeeded()
                 writeSnapshot(to: shot)
@@ -4746,6 +4748,7 @@ final class RemoteHostWindow: NSWindow {
                 }
             }
             return ["ok": true, "members": rc.members.count, "hits": hits,
+                    "layout": rc.layout.string, "page": rc.page, "pages": rc.pages.count,
                     "switchboard": rc.switchboard?.id.uuidString ?? "",
                     "models": rc.models.map { id, m -> [String: Any] in
                         var st = m.debugHistoryState()

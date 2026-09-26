@@ -1502,6 +1502,54 @@ private struct DelegationPanelHost: View {
 }
 
 /// The beautified pane: a live, auto-scrolling transcript of the agent + a
+/// A transcript sent to its tail stays there until the user scrolls it
+/// away. Where the tail is can't tell the two apart: the jump is made
+/// against estimated row heights, and as the lazy rows are measured the
+/// tail moves — short of the view (stuck mid-chat) or past it (blank) —
+/// for seconds in a grid of busy cells. So it's the user's own wheel or
+/// drag over this scroll view that decides (`probe` marks where it is).
+private final class TailFollow {
+    /// Follow the tail through layout drift.
+    var sticky = true
+    /// The user is scrolling this transcript: a wheel or drag over it
+    /// just now (a wheel notch scrolls on for a few frames after it).
+    var userScrolling: Bool {
+        guard let v = probe.view, let e = Self.lastEvent, e.window === v.window,
+              Date().timeIntervalSince(e.at) < 0.4 else { return false }
+        return v.bounds.contains(v.convert(e.location, from: nil))
+    }
+    let probe = TailFollowProbe.Box()
+
+    private struct UserEvent { let at: Date; weak var window: NSWindow?; let location: NSPoint }
+    private static var lastEvent: UserEvent?
+    private static var monitor: Any?
+    /// One monitor for all transcripts: it only notes the last wheel/drag.
+    static func watchUserScrolls() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .leftMouseDragged]) { e in
+            lastEvent = UserEvent(at: Date(), window: e.window, location: e.locationInWindow)
+            return e
+        }
+    }
+}
+
+/// An inert view behind a transcript's scroll view: where it sits is where
+/// the user's scrolling counts as theirs.
+private struct TailFollowProbe: NSViewRepresentable {
+    final class Box { weak var view: NSView? }
+    final class Inert: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+    let box: Box
+    func makeNSView(context: Context) -> NSView {
+        TailFollow.watchUserScrolls()
+        let v = Inert()
+        box.view = v
+        return v
+    }
+    func updateNSView(_ v: NSView, context: Context) { box.view = v }
+}
+
 /// Codex-desktop-style composer. Mounted into the pane's container by
 /// `SessionPane.updateNativeTerminalMount()` when the view mode is `.beautified`.
 struct BeautifiedSessionView: View {
@@ -1512,6 +1560,9 @@ struct BeautifiedSessionView: View {
     var parts: Parts = .all
     /// Overrides "Message <agent>…" (a room's composer names its target).
     var placeholder: String? = nil
+    /// The delegation panel under the transcript. Off in a room's grid:
+    /// a cell is a few lines tall and the panel took all of them.
+    var delegations: Bool = true
     @State private var dropTargeted = false
     /// Keyboard highlight in the "/" palette.
     @State private var paletteIndex = 0
@@ -1547,6 +1598,9 @@ struct BeautifiedSessionView: View {
     }
     @State private var viewportHeight: CGFloat = 0
     @State private var contentHeight: CGFloat = 0
+    /// Keeps the tail on show through layout drift until the user scrolls
+    /// (a reference: flipping it must not re-render the view).
+    @State private var tailFollow = TailFollow()
     private static let scrollSpace = "beautified-scroll"
 
     /// What's typed after a leading "/" — the palette shows for it until a
@@ -1717,7 +1771,7 @@ struct BeautifiedSessionView: View {
             // Its own view: it reads the session and delegation stores,
             // which change with every mirror push — only the panel should
             // re-render then, not the whole transcript above it.
-            DelegationPanelHost(model: model)
+            if delegations { DelegationPanelHost(model: model) }
     }
 
     @ViewBuilder
@@ -1820,6 +1874,7 @@ struct BeautifiedSessionView: View {
                                     // on show stays where it is after rows land
                                     // above it.
                                     let anchor = visible.first(where: { !Self.isTodo($0) })?.id
+                                    tailFollow.sticky = false
                                     if hidden > 0 {
                                         model.renderLimit += BeautifiedSessionModel.renderStep
                                         DispatchQueue.main.async {
@@ -1962,17 +2017,29 @@ struct BeautifiedSessionView: View {
                 // narrows, used to leave the offset past the end — a blank
                 // view until the user scrolled.
                 .defaultScrollAnchor(.bottom)
+                .background(TailFollowProbe(box: tailFollow.probe))
                 .coordinateSpace(name: Self.scrollSpace)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
                     viewportHeight = h
                     model.debugGeometry["viewport"] = h
                 }
                 .onPreferenceChange(TailOffsetKey.self) { marker in
+                    // Following the tail and the user didn't scroll: the
+                    // tail moved because rows were measured — go again.
+                    // (See `TailFollow`.)
+                    let byUser = tailFollow.userScrolling
+                    if !byUser, tailFollow.sticky, viewportHeight > 0,
+                       marker.map({ $0 > viewportHeight + 2 || $0 < viewportHeight - 40 }) ?? true {
+                        if !pinnedToBottom { pinnedToBottom = true }
+                        DispatchQueue.main.async { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+                        return
+                    }
                     // The marker unloaded by the lazy stack: scrolled far up.
                     // (Read as 0 it looked "past the end" and the overshoot
                     // snap below yanked a small pane — a room cell, the
                     // Switchboard dock — back down after a pixel.)
                     guard let tailY = marker else {
+                        if byUser { tailFollow.sticky = false }
                         if pinnedToBottom, viewportHeight > 0 { pinnedToBottom = false }
                         model.debugGeometry["tailY"] = -1
                         model.debugGeometry["pinned"] = 0
@@ -1983,6 +2050,7 @@ struct BeautifiedSessionView: View {
                     // write state.
                     let pinned = viewportHeight <= 0 || tailY <= viewportHeight + min(160, viewportHeight / 3)
                     if pinned != pinnedToBottom { pinnedToBottom = pinned }
+                    if byUser { tailFollow.sticky = pinned }
                     model.debugGeometry["tailY"] = tailY
                     model.debugGeometry["pinned"] = pinned ? 1 : 0
                     // Overshot: the content is taller than the view, yet its
@@ -2005,7 +2073,10 @@ struct BeautifiedSessionView: View {
                 .onChange(of: model.working) { _, _ in if pinnedToBottom { scrollToTail(proxy) } }
                 .onChange(of: model.failure) { _, _ in scrollToTail(proxy) }
                 .onChange(of: model.prompt) { _, _ in scrollToTail(proxy) }
-                .onAppear { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+                .onAppear {
+                    tailFollow.sticky = true
+                    proxy.scrollTo(Self.tailID, anchor: .bottom)
+                }
                 // Shown (a click, a switch back): the latest, once the whole
                 // history is laid out — the first jump lands on the tail only.
                 .onChange(of: settled) { _, done in if done { scrollToTail(proxy) } }
@@ -2060,6 +2131,7 @@ struct BeautifiedSessionView: View {
         let needed = model.items.count - i
         if needed > model.renderLimit { model.renderLimit = needed }
         let id = model.items[i].id
+        tailFollow.sticky = false
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
         }
@@ -2107,7 +2179,9 @@ struct BeautifiedSessionView: View {
     private func scrollToTail(_ proxy: ScrollViewProxy) {
         // Twice: once now, once after the lazy rows have been measured — a
         // single animated scroll against estimated row heights could stop
-        // short of, or past, the real tail.
+        // short of, or past, the real tail. Rows measured later still are
+        // caught by `tailFollow`.
+        tailFollow.sticky = true
         proxy.scrollTo(Self.tailID, anchor: .bottom)
         DispatchQueue.main.async {
             withAnimation(.easeOut(duration: 0.15)) {

@@ -783,7 +783,9 @@ struct RoomStageView: View {
                 if zoomMoving == s.id {
                     movingPlaceholder(s)
                 } else if let m = controller.models[s.id] {
-                    BeautifiedSessionView(model: m, parts: .transcript)
+                    // Delegations only where a cell has the room for them.
+                    BeautifiedSessionView(model: m, parts: .transcript,
+                                          delegations: zoomed || controller.layout.size == 1)
                 } else {
                     restingCell(s)
                 }
