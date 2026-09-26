@@ -882,9 +882,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // A chat's "Changed N files" line: review that turn's files.
         NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] note in
             let files = note.object as? [String]
+            let from = note.userInfo?["session"] as? UUID
             MainActor.assumeIsolated {
                 guard let self, self.isKeyWindow else { return }
-                if let id = self.selectedSessionID, let delegate = self.acDelegate,
+                if let id = from ?? self.selectedSessionID, let delegate = self.acDelegate,
                    let s = delegate.agentSessionStore.session(id), SessionHome.hasFolder(s) {
                     delegate.sessionReviews.open(sessionID: id, files: files)
                 } else {

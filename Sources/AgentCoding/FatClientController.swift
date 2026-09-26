@@ -2460,9 +2460,11 @@ final class RemoteHostWindow: NSWindow {
         // is the window in front.
         NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] note in
             let files = note.object as? [String]
+            let from = note.userInfo?["session"] as? UUID
             MainActor.assumeIsolated {
                 guard let self, self.isKeyWindow else { return }
-                if let id = self.selectedSessionID, let s = self.controller.sessionStore.session(id), SessionHome.hasFolder(s) {
+                if let id = from ?? self.selectedSessionID, let s = self.controller.sessionStore.session(id),
+                   SessionHome.hasFolder(s) {
                     self.sessionReviews.open(sessionID: id, files: files)
                 } else {
                     self.setFilePaneOpen(true)
@@ -4878,6 +4880,14 @@ final class RemoteHostWindow: NSWindow {
             }
             controller.deleteAutomation(aid)
             return ["ok": true]
+        case "show-changes":
+            // A chat's "Changed N files" chip, as a click from `session` would.
+            let sid = (p["session"] as? String).flatMap(UUID.init(uuidString:))
+            makeKeyAndOrderFront(nil)
+            NotificationCenter.default.post(name: .bromureShowChanges, object: p["files"] as? [String],
+                                            userInfo: sid.map { ["session": $0] })
+            return ["ok": true, "reviewOpen": sid.map { sessionReviews.window(for: $0) != nil } ?? false,
+                    "filePaneOpen": filePaneOpen]
         case "globe":
             // The toolbar globe / ⌃⌘B, exactly as a click (what's on stage decides).
             toggleBrowser(for: nil)

@@ -1633,7 +1633,10 @@ struct BeautifiedSessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if parts != .composer { transcriptParts }
+            if parts != .composer {
+                transcriptParts
+                    .environment(\.changesSessionID, model.currentSession?()?.id)
+            }
             if parts != .transcript { composerParts }
         }
         .animation(.easeOut(duration: 0.15), value: paletteVisible)

@@ -1072,6 +1072,7 @@ struct SessionRestView: View {
             LazyVStack(alignment: .leading, spacing: 14) {
                 TranscriptRowsView(items: items)
             }
+            .environment(\.changesSessionID, sessionID)
         }
     }
 }

@@ -876,6 +876,7 @@ struct RoomStageView: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 TranscriptRowsView(items: items)
                             }
+                            .environment(\.changesSessionID, s.id)
                             .padding(.horizontal, 16)
                             .padding(.top, 12)
                             .padding(.bottom, 76)

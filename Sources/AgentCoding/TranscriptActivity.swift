@@ -166,16 +166,32 @@ extension Notification.Name {
     static let bromureFindInChat = Notification.Name("io.bromure.findInChat")
 }
 
+/// The session a chat shows, for what its rows open (the review of a turn's
+/// changes): set by the chat and the resting views; nil = the one on stage.
+private struct ChangesSessionKey: EnvironmentKey {
+    static let defaultValue: UUID? = nil
+}
+extension EnvironmentValues {
+    var changesSessionID: UUID? {
+        get { self[ChangesSessionKey.self] }
+        set { self[ChangesSessionKey.self] = newValue }
+    }
+}
+
 /// The end of a turn that edited files: "Changed 3 files  +120 −35" — a
 /// click opens the review on those files; hover lists them.
 struct TurnChangesView: View {
     let changes: TurnChanges
+    @Environment(\.changesSessionID) private var sessionID
     @State private var hovering = false
 
     var body: some View {
         Button {
-            // The turn's files: the key window opens the session's review on them.
-            NotificationCenter.default.post(name: .bromureShowChanges, object: changes.files)
+            // The turn's files, and whose they are: the key window opens that
+            // session's review on them (in a room too, where no single session
+            // is selected).
+            NotificationCenter.default.post(name: .bromureShowChanges, object: changes.files,
+                                            userInfo: sessionID.map { ["session": $0] })
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "doc.badge.gearshape")
