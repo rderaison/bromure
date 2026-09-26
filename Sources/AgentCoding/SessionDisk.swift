@@ -38,6 +38,11 @@ public final class SessionDisk {
     /// agent (to start its OAuth login). Normal sessions leave this false and
     /// land at a plain shell.
     public var registrationMode = false
+
+    /// Worktree branches ("wt/<slug>") of the host's automation runs, staged
+    /// as retired-worktrees.txt: the guest drops them from its boot-restore
+    /// registry instead of reopening a tab (and a session) for each old run.
+    public var retiredWorktreeBranches: [String] = []
     /// Extra NO_PROXY entries for proxy.env — the VM subnet and the node
     /// addresses of the Kubernetes clusters this workspace may use. kubectl
     /// honours HTTPS_PROXY, and the host MITM can't dial into the VM LAN, so
@@ -980,6 +985,9 @@ public final class SessionDisk {
         // fallback for old guests/tools). Ships on unconditionally.
         try "".write(to: tmp.appendingPathComponent("plan-stream-enabled"),
                      atomically: true, encoding: .utf8)
+        try retiredWorktreeBranches.map { $0 + "\n" }.joined()
+            .write(to: tmp.appendingPathComponent("retired-worktrees.txt"),
+                   atomically: true, encoding: .utf8)
 
         // terminal-graphics-enabled — opt-in marker (defaults write
         // io.bromure.agentic-coding terminal.allowGraphics -bool YES): agentd

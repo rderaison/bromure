@@ -1820,6 +1820,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// ticks on the main run loop and fires due automations through the same
     /// outbox path the CLI/SSH surface uses.
     let scheduledAutomationStore = ScheduledAutomationStore()
+    /// Every automation run's worktree branch, for the guest to keep out of
+    /// its boot restore (see SessionDisk.retiredWorktreeBranches).
+    var automationWorktreeBranches: [String] {
+        scheduledAutomationStore.runs.compactMap { $0.branchSlug.map { "wt/" + $0 } }
+    }
     private(set) lazy var scheduledAutomationEngine =
         ScheduledAutomationEngine(store: scheduledAutomationStore, delegate: self)
 
@@ -10012,6 +10017,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 baseDiskURL: imageManager.baseDiskURL
             )
             sessionDisk.tokenPlan = plan
+            sessionDisk.retiredWorktreeBranches = automationWorktreeBranches
             sessionDisk.migrateHomeThisBoot = migrateHomeThisBoot
             sessionDisk.extraNoProxy = kubeClusterEngine.extraNoProxy(for: profile.id)
             sessionDisk.extraInsecureRegistries = kubeClusterEngine.registryAddresses(for: profile.id)
@@ -13276,6 +13282,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let salt = self.mitmEngine?.fakeTokenSalt ?? Data(repeating: 0, count: 32)
             let plan = self.sessionTokenPlan(for: profile, salt: salt)
             sessionDisk.tokenPlan = plan
+            sessionDisk.retiredWorktreeBranches = self.automationWorktreeBranches
             if profile.homeModel == .virtiofs {
                 self.seedCodexAuthFile(for: profile)
                 self.seedGrokAuthFile(for: profile)

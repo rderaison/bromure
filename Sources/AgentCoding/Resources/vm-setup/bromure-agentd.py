@@ -1851,6 +1851,10 @@ def _worktree_include(main_root, wt_dir):
             pass
 
 
+# One branch per line ("wt/<slug>"): the host's automation runs.
+_RETIRED_WORKTREES = "/mnt/bromure-meta/retired-worktrees.txt"
+
+
 def _restore_worktrees(repo_root, repo_name):
     """Reboot restore: re-open a tab for each registered worktree of this repo
     that still exists on disk and isn't already open. Once per boot per repo
@@ -1858,6 +1862,22 @@ def _restore_worktrees(repo_root, repo_name):
     rows = _read_registry(repo_name)
     if not rows:
         return
+    # Branches the host knows were automation runs (registered before runs
+    # stopped registering): drop them instead of reopening every day's run.
+    try:
+        with open(_RETIRED_WORKTREES) as f:
+            retired = set(l.strip() for l in f if l.strip())
+    except OSError:
+        retired = set()
+    def _is_retired(b):
+        # Exact, or with the -N suffix a taken branch name gets.
+        base, _, n = b.rpartition("-")
+        return b in retired or (n.isdigit() and base in retired)
+    if retired:
+        for r_branch, _p, _d, _t in rows:
+            if _is_retired(r_branch):
+                _wt_registry_del(repo_name, r_branch)
+        rows = [r for r in rows if not _is_retired(r[0])]
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", repo_name)
     marker = "/tmp/.bromure-wt-restored-" + safe
     if os.path.exists(marker):
@@ -2539,7 +2559,11 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
     _set_window_option(win, "@root_repo", main_root)
     _set_window_option(win, "@label", tool)
     _set_window_option(win, "@display", display)
-    _wt_registry_add(repo_name, branch, parent_branch, display, tool)
+    # Automation runs (yolo) don't come back at boot: they're unattended,
+    # a reopened tab has no prompt, and their result is the branch, not the
+    # tab. Only the user's own worktrees are restored.
+    if not yolo:
+        _wt_registry_add(repo_name, branch, parent_branch, display, tool)
 
 
 def _task_resume(main_root, branch, parent, display, tool, prompt_b64):
@@ -2933,6 +2957,12 @@ def _automation_finish(branch):
         _worktree_remove(root, branch)
         log("automation", "finished %s — empty run, worktree removed" % branch)
     else:
+        # Keep the checkout (the run's result) but not its boot restore:
+        # a finished run's tab is closed on purpose, like a tab the user
+        # closes. Left registered, every daily run came back as a tab —
+        # and a session — the next time anyone opened the repo.
+        if root:
+            _wt_registry_del(os.path.basename(root), branch)
         log("automation", "finished %s — transcript saved, tab closed" % branch)
 
 
