@@ -3128,3 +3128,4 @@
 "Reuse" = "Reutilizar";
 "%@ stopped as it started: %@" = "%@ se detuvo al arrancar: %@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ lo usaba la sesión archivada “%@”, por última vez el %@. ¿Reutilizarlo para esta sesión?";
+"Delegation" = "Delegación";

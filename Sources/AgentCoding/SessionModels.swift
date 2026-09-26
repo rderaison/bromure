@@ -345,7 +345,11 @@ final class SessionListModel {
     /// that VM's Docker node in the source list.
     var dockerSelectedID: Profile.ID?
     /// True when the Grid is the active stage surface.
-    var gridSelected = false
+    var gridSelected = false {
+        didSet { if gridSelected != oldValue { onGridSelectedChange?(gridSelected) } }
+    }
+    /// The Grid came or went — the window collapses its side panes for it.
+    @ObservationIgnored var onGridSelectedChange: ((Bool) -> Void)?
     /// Set when an automation's editor is the active stage surface —
     /// highlights its row in the Automations section.
     var automationSelectedID: UUID?

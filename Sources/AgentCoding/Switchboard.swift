@@ -95,7 +95,7 @@ final class SwitchboardEngine {
     }
     /// Notices start with this, so the provenance check can tell them from
     /// what the user typed.
-    static let noticePrefix = "[Switchboard]"
+    static let noticePrefix = DelegationNotice.switchboardPrefix
     static let kickoff = "You are the Switchboard — your brief is CLAUDE.md in this folder. Start by calling list_sessions and give me a short status (a few lines), then end your turn."
     /// A room's Switchboard opening line.
     static func kickoff(room: String) -> String {

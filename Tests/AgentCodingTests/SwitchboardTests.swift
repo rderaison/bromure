@@ -140,6 +140,16 @@ struct SwitchboardTests {
         #expect(!KubeClusterEngine.isFromUser(["fromMe": false, "from": "15557776666@s.whatsapp.net"], channel: waOwn))
     }
 
+    @Test("A typed Switchboard notice reads as the host's aside, without the agent's instruction")
+    func noticeAside() {
+        let typed = "[Switchboard] “wago” finished its turn — call next_events."
+        #expect(DelegationNotice.stripSwitchboard(typed) == "“wago” finished its turn")
+        #expect(DelegationNotice.isHostAside(typed))
+        #expect(DelegationNotice.isHostAside("[Delegation notice] @wago delivered"))
+        #expect(!DelegationNotice.isHostAside("change the thermostat 'last call' from 30mn to 6h"))
+        #expect(SwitchboardEngine.noticePrefix == DelegationNotice.switchboardPrefix)
+    }
+
     @Test("The launch flags point at the staged MCP config")
     func flags() {
         #expect(SwitchboardEngine.launchFlags.contains(SessionDisk.switchboardMCPConfigGuestPath))

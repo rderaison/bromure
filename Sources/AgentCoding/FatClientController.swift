@@ -2709,6 +2709,19 @@ final class RemoteHostWindow: NSWindow {
         filePaneHost = fpHost
         content.addSubview(fpHost)
         filePaneWidthConstraint = fpHost.widthAnchor.constraint(equalToConstant: 0)
+        // The Grid takes the whole stage: the file pane folds while it's up
+        // and comes back as it was (its open state is left alone).
+        controller.listModel.onGridSelectedChange = { [weak self] grid in
+            guard let self else { return }
+            let open = self.filePaneOpen && !grid
+            self.filePaneResizeHandle?.isHidden = !open
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.allowsImplicitAnimation = true
+                self.filePaneWidthConstraint.animator().constant = open ? self.expandedFilePaneWidth : 0
+                self.contentView?.layoutSubtreeIfNeeded()
+            }
+        }
         // Restore the persisted expanded width (used when the pane opens).
         let fpStored = UserDefaults.standard.double(forKey: Self.filePaneWidthKey)
         if fpStored >= Self.filePaneMinWidth { expandedFilePaneWidth = fpStored }
@@ -4751,6 +4764,17 @@ final class RemoteHostWindow: NSWindow {
                 writeSnapshot(to: shot)
             }
             return ["ok": true, "collapsed": sidebarCollapsed]
+        case "grid", "file-pane":
+            // The Grid on stage / the Files pane open or shut ({open}); both
+            // report the pane's actual width.
+            if action == "grid" { showGrid() }
+            if action == "file-pane" { setFilePaneOpen(p["open"] as? Bool ?? !filePaneOpen) }
+            if let shot = p["shot"] as? String {
+                contentView?.layoutSubtreeIfNeeded()
+                writeSnapshot(to: shot)
+            }
+            return ["ok": true, "grid": controller.listModel.gridSelected, "filePaneOpen": filePaneOpen,
+                    "filePaneWidth": Double(filePaneWidthConstraint.constant)]
         case "remote-room":
             // Show a server room ({room: id or name}, optional) and report each
             // live chat's history: what it holds vs. what it renders.

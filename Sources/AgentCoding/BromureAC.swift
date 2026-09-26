@@ -3592,6 +3592,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     window = self.branchesWindows.window(for: pid)
                 case let w where w.hasPrefix("session-review:"):
                     window = UUID(uuidString: String(w.dropFirst(15))).flatMap { self.sessionReviews.window(for: $0) }
+                case "grid":
+                    // The Grid as the stage surface (side panes fold for it).
+                    self.ensureUnifiedWindow().showGrid()
+                    window = self.unifiedWindow
                 case "board":
                     // Kanban board as the stage surface, then the unified
                     // window — E2E/doc-screenshot hook for the board. The

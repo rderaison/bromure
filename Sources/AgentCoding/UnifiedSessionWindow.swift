@@ -334,6 +334,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// state; nothing for an asleep session or the new-session screen; else
     /// the SELECTED workspace's.
     var browserPaneOpen: Bool {
+        if listModel.gridSelected { return false }   // the Grid has the whole stage
         if selectedSessionID != nil || listModel.newSessionSelected {
             guard let s = liveSessionOnStage else { return false }
             return browserPaneOpenSessions[s.id] != nil
@@ -1336,6 +1337,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // untouched so hideGrid restores it.
         filePaneHost.isHidden = true
         filePaneResizeHandle?.isHidden = true
+        filePaneWidthConstraint?.constant = 0
+        // The browser pane folds away too (suspended, not torn down); it
+        // comes back with the session or workspace it belongs to.
+        applyBrowserPaneState(animated: false)
         gridView?.reconcile()
     }
 
@@ -1349,6 +1354,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // open/closed state (grid hid it unconditionally above).
         filePaneHost.isHidden = !filePaneOpen
         filePaneResizeHandle?.isHidden = !filePaneOpen
+        filePaneWidthConstraint?.constant = filePaneOpen ? expandedFilePaneWidth : 0
+        applyBrowserPaneState(animated: false)
     }
 
     /// Grid cell "open in workspace": leave the grid on that terminal's tab.

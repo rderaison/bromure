@@ -3126,3 +3126,4 @@
 "Reuse" = "再利用";
 "%@ stopped as it started: %@" = "%1$@ は起動時に停止しました：%2$@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ はアーカイブ済みのセッション「%2$@」が使っていました（最終使用 %3$@）。このセッションで再利用しますか？";
+"Delegation" = "委任";

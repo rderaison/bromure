@@ -559,6 +559,25 @@ enum DelegationNotice {
         return String(t.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
     }
 
+    /// What the Switchboard engine types at its agent ("[Switchboard] “wago”
+    /// finished its turn — call next_events."): the host's aside as well.
+    static let switchboardPrefix = "[Switchboard]"
+
+    /// A typed Switchboard notice, as the reader should see it: the prefix
+    /// and the agent's instruction ("— call next_events.") left out.
+    static func stripSwitchboard(_ userText: String) -> String? {
+        let t = userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.hasPrefix(switchboardPrefix) else { return nil }
+        var rest = String(t.dropFirst(switchboardPrefix.count)).trimmingCharacters(in: .whitespaces)
+        if let r = rest.range(of: " — call next_events", options: .backwards) { rest = String(rest[..<r.lowerBound]) }
+        return rest
+    }
+
+    /// Typed by the host (a delegation or Switchboard notice), not by the user.
+    static func isHostAside(_ userText: String) -> Bool {
+        strip(userText) != nil || stripSwitchboard(userText) != nil
+    }
+
     /// Kinds that interrupt: typed at the recipient's prompt once it can
     /// take them. A report waits to be read; a cancel ends the child; a
     /// delegate's brief opens its session — but a request's brief is the
@@ -697,8 +716,13 @@ enum DelegationNotice {
 /// A typed notice in the transcript: the host's aside to the agent, drawn
 /// apart from the user's own turns. Several notices typed as one line
 /// (joined with `joiner`) read as one row with a line each.
+/// A line the host typed at the agent — a delegation or Switchboard
+/// notice. Drawn as a system line (glyph, small caps label, grey text, no
+/// card), so it never reads as something the user said.
 struct DelegationNoticeRow: View {
     let text: String
+    /// A Switchboard notice rather than a delegation one.
+    var switchboard = false
     static let joiner = " ‖ "
 
     private var lines: [String] {
@@ -708,12 +732,19 @@ struct DelegationNoticeRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            HStack(spacing: 4) {
+                Image(systemName: switchboard ? "point.3.connected.trianglepath.dotted" : "arrow.triangle.branch")
+                    .font(.system(size: 9.5, weight: .semibold))
+                Text(switchboard ? NSLocalizedString("Switchboard", comment: "system line label")
+                                 : NSLocalizedString("Delegation", comment: "system line label"))
+                    .font(.system(size: 9.5, weight: .bold))
+                    .textCase(.uppercase)
+                    .tracking(0.5)
+            }
+            .foregroundStyle(.tertiary)
+            .fixedSize()
+            VStack(alignment: .leading, spacing: 3) {
                 ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                     Text(line)
                         .font(.system(size: 11.5))
@@ -723,14 +754,9 @@ struct DelegationNoticeRow: View {
                 }
             }
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 12)
+        .padding(.vertical, 2)
+        .padding(.leading, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.secondary.opacity(0.06))
-        .overlay(alignment: .leading) {
-            Rectangle().fill(Color.secondary.opacity(0.35)).frame(width: 2)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 #endif

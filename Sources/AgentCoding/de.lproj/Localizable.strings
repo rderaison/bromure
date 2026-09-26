@@ -3126,3 +3126,4 @@
 "Reuse" = "Wiederverwenden";
 "%@ stopped as it started: %@" = "%@ ist beim Start abgebrochen: %@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ gehörte der archivierten Sitzung „%@“, zuletzt am %@. Für diese Sitzung wiederverwenden?";
+"Delegation" = "Delegation";

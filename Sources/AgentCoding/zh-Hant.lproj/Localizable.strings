@@ -3129,3 +3129,4 @@
 "Reuse" = "重新使用";
 "%@ stopped as it started: %@" = "%1$@ 啟動時停止：%2$@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ 曾由已封存的工作階段「%2$@」使用，最後一次在 %3$@。要在此工作階段中重新使用嗎？";
+"Delegation" = "委派";

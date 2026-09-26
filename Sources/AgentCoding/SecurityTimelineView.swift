@@ -92,36 +92,63 @@ struct SecurityTimelineView: View {
         .onDisappear(perform: onClose)
     }
 
+    /// One row when it fits; on a narrower window the filters take a row of
+    /// their own under the tabs and actions (the one row used to squeeze
+    /// the event count into a character-per-line column, and clip).
     private var toolbar: some View {
-        HStack(spacing: 10) {
-            Picker("", selection: $tab) {
-                Text(NSLocalizedString("Overview", comment: "security timeline tab")).tag(Tab.overview)
-                Text(NSLocalizedString("Timeline", comment: "security timeline tab")).tag(Tab.timeline)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                tabPicker
+                if tab == .timeline { filters }
+                Spacer(minLength: 0)
+                trailingActions
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            if tab == .timeline { filters }
-            Spacer(minLength: 0)
-            if tab == .timeline {
-                Text(String(format: NSLocalizedString("%d events", comment: ""), rows.count))
-                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-            }
-            Button {
-                exportCSV()
-            } label: {
-                Label(NSLocalizedString("Export…", comment: "security timeline"), systemImage: "square.and.arrow.up")
-            }
-            .controlSize(.small)
-            .disabled(timeline.allEvents.isEmpty)
-            .help(NSLocalizedString("Save the events (with any filter applied) as a CSV file", comment: "security timeline"))
-            if tab == .timeline {
-                Button(NSLocalizedString("Clear", comment: "")) { timeline.clear() }
-                    .controlSize(.small)
-                    .disabled(timeline.allEvents.isEmpty)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    tabPicker
+                    Spacer(minLength: 0)
+                    trailingActions
+                }
+                if tab == .timeline {
+                    HStack(spacing: 10) { filters; Spacer(minLength: 0) }
+                }
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    private var tabPicker: some View {
+        Picker("", selection: $tab) {
+            Text(NSLocalizedString("Overview", comment: "security timeline tab")).tag(Tab.overview)
+            Text(NSLocalizedString("Timeline", comment: "security timeline tab")).tag(Tab.timeline)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+    }
+
+    @ViewBuilder private var trailingActions: some View {
+        if tab == .timeline {
+            Text(String(format: NSLocalizedString("%d events", comment: ""), rows.count))
+                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                .lineLimit(1)
+                .fixedSize()
+        }
+        Button {
+            exportCSV()
+        } label: {
+            Label(NSLocalizedString("Export…", comment: "security timeline"), systemImage: "square.and.arrow.up")
+        }
+        .controlSize(.small)
+        .fixedSize()
+        .disabled(timeline.allEvents.isEmpty)
+        .help(NSLocalizedString("Save the events (with any filter applied) as a CSV file", comment: "security timeline"))
+        if tab == .timeline {
+            Button(NSLocalizedString("Clear", comment: "")) { timeline.clear() }
+                .controlSize(.small)
+                .fixedSize()
+                .disabled(timeline.allEvents.isEmpty)
+        }
     }
 
     /// The Timeline tab's search and filters.

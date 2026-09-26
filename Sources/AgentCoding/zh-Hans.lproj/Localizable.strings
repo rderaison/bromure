@@ -3126,3 +3126,4 @@
 "Reuse" = "重新使用";
 "%@ stopped as it started: %@" = "%1$@ 启动时停止：%2$@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ 曾由已归档的会话“%2$@”使用，最后一次在 %3$@。要在此会话中重新使用吗？";
+"Delegation" = "委派";

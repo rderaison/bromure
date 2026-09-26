@@ -3161,3 +3161,4 @@
 "Reuse" = "Reuse";
 "%@ stopped as it started: %@" = "%@ stopped as it started: %@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?";
+"Delegation" = "Delegation";

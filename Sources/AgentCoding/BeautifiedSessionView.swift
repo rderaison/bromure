@@ -1974,7 +1974,7 @@ struct BeautifiedSessionView: View {
                             if case .activity = r { return r.id } else { return nil }
                         } : nil
                         let lastUserID = visible.last(where: {
-                            if case .userText = $0.kind { return true } else { return false }
+                            if case .userText(let t) = $0.kind { return !DelegationNotice.isHostAside(t) } else { return false }
                         })?.id
                         // A reply cut into rows: its first row carries the
                         // tools, and Copy takes the whole reply.
@@ -2247,7 +2247,10 @@ struct BeautifiedSessionView: View {
     /// guest paths the drop echoed).
     @ViewBuilder
     private func itemRow(_ item: TranscriptItem, lastUserID: Int?, replies: [Int: String]) -> some View {
-        if case .userText(let text) = item.kind {
+        if case .userText(let text) = item.kind, DelegationNotice.isHostAside(text) {
+            // The host's aside: a system line, no timestamp/edit chrome.
+            TranscriptItemView(item: item).id(item.id)
+        } else if case .userText(let text) = item.kind {
             let paths = GuestDrop.imagePaths(in: text).filter { model.imagesByPath[$0] != nil }
             // Your last message can be taken back into the composer to redo.
             MessageChrome(item: item, onEdit: item.id == lastUserID ? { model.composerText = text } : nil) {

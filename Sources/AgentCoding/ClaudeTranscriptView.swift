@@ -1676,6 +1676,8 @@ struct TranscriptItemView: View {
             // delivered…) is the host's aside, not the user's words.
             if let notice = DelegationNotice.strip(text) {
                 DelegationNoticeRow(text: notice)
+            } else if let notice = DelegationNotice.stripSwitchboard(text) {
+                DelegationNoticeRow(text: notice, switchboard: true)
             } else {
                 let words = Self.withoutPaths(CodingTask.displayPrompt(text), hiddenPaths)
                 VStack(alignment: .leading, spacing: 8) {
