@@ -179,6 +179,30 @@ struct ClaudeTranscriptParserTests {
         } else { Issue.record("expected toolResult") }
     }
 
+    @Test("An AskUserQuestion is marked answered (with the pick) or dismissed by its result")
+    func questionAnswers() {
+        // Shapes as Claude Code writes them: the picks ride toolUseResult.answers
+        // keyed by question text; a dismissal is an error result.
+        let ask = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"Which layout?","header":"Layout","multiSelect":false,"options":[{"label":"Board","description":""},{"label":"List","description":""}]}]}}]}}
+        """
+        let answered = ask + "\n" + """
+        {"type":"user","toolUseResult":{"questions":[],"answers":{"Which layout?":"Board"}},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"Your questions have been answered: \\"Which layout?\\"=\\"Board\\"."}]}}
+        """
+        let dismissed = ask + "\n" + """
+        {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","is_error":true,"content":"The user doesn't want to proceed with this tool use."}]}}
+        """
+        func question(_ jsonl: String) -> TranscriptQuestion? {
+            for item in ClaudeTranscriptParser.parse(Data(jsonl.utf8)) {
+                if case .question(let q) = item.kind { return q }
+            }
+            return nil
+        }
+        #expect(question(ask)?.isResolved == false)
+        #expect(question(answered)?.answer == "Board")
+        #expect(question(dismissed)?.declined == true)
+    }
+
     @Test("Meta lines and empty blocks are skipped")
     func metaSkipped() {
         let jsonl = """

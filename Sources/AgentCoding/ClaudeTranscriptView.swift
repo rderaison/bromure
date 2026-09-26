@@ -43,6 +43,25 @@ extension TranscriptItem.Kind {
     }
 }
 
+extension Color {
+    /// The Bromure brand blue (the app icon's mark), lifted in dark mode.
+    static let bromureBrand: Color = {
+        let light = (r: 0.345, g: 0.400, b: 0.996)   // #5866FE
+        let dark = (r: 0.576, g: 0.682, b: 1.000)    // #93AEFF
+        #if os(macOS)
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            let c = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            return NSColor(srgbRed: c.r, green: c.g, blue: c.b, alpha: 1)
+        })
+        #else
+        return Color(uiColor: UIColor { traits in
+            let c = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(red: c.r, green: c.g, blue: c.b, alpha: 1)
+        })
+        #endif
+    }()
+}
+
 /// A parsed AskUserQuestion call: what the agent wants to know.
 struct TranscriptQuestion: Equatable {
     struct Option: Equatable {
@@ -53,6 +72,13 @@ struct TranscriptQuestion: Equatable {
     var header: String
     var multiSelect: Bool
     var options: [Option]
+    /// What the user picked, once the transcript records the answer (""
+    /// when answered but the pick isn't recorded); nil while unanswered.
+    var answer: String? = nil
+    /// The user dismissed the question instead of answering.
+    var declined = false
+
+    var isResolved: Bool { answer != nil || declined }
 
     /// All questions in the tool call, in order (the tool allows several;
     /// each carries its own options).
@@ -82,6 +108,9 @@ enum ClaudeTranscriptParser {
         var items: [TranscriptItem] = []
         /// tool_use id → tool name, so results can name their tool.
         var toolNames: [String: String] = [:]
+        /// AskUserQuestion tool_use id → its question items, so the
+        /// result can mark them answered.
+        var questionItems: [String: [Int]] = [:]
         /// Question texts of the last AskUserQuestion seen in the
         /// transcript proper — a pq hook dump matching that round is
         /// stale or already displayed, not pending.
@@ -156,15 +185,31 @@ enum ClaudeTranscriptParser {
                         ? TranscriptQuestion.parse(input) : []
                     if !questions.isEmpty {
                         lastAskedQuestions = questions.map(\.question)
+                        let first = items.count
                         questions.forEach { add(.question($0)) }
+                        if let id = block["id"] as? String {
+                            questionItems[id] = Array(first..<items.count)
+                        }
                     } else {
                         add(.toolUse(name: name,
                                      summary: toolSummary(name: name, input: input),
                                      detail: prettyJSON(input)))
                     }
                 case "tool_result":
-                    let tool = (block["tool_use_id"] as? String)
-                        .flatMap { toolNames[$0] } ?? "tool"
+                    let useID = block["tool_use_id"] as? String
+                    if let useID, let idxs = questionItems.removeValue(forKey: useID) {
+                        // The question's answer (Claude records the picks
+                        // by question text) or its dismissal.
+                        let declined = block["is_error"] as? Bool ?? false
+                        let answers = (obj["toolUseResult"] as? [String: Any])?["answers"]
+                            as? [String: String] ?? [:]
+                        for i in idxs where items.indices.contains(i) {
+                            guard case .question(var q) = items[i].kind else { continue }
+                            if declined { q.declined = true } else { q.answer = answers[q.question] ?? "" }
+                            items[i].kind = .question(q)
+                        }
+                    }
+                    let tool = useID.flatMap { toolNames[$0] } ?? "tool"
                     add(.toolResult(tool: tool,
                                     content: resultText(block["content"]),
                                     isError: block["is_error"] as? Bool ?? false))
@@ -1183,43 +1228,121 @@ struct DropPictureStrip: View {
 
 /// An AskUserQuestion rendered statically (archived transcripts, or a
 /// question that is no longer answerable): the question with its options.
+/// Once answered it folds to one quiet line — the question and the pick —
+/// that opens back up on a click.
 struct TranscriptQuestionCard: View {
     let question: TranscriptQuestion
+    @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        if question.isResolved && !expanded {
+            resolvedLine
+        } else {
+            card
+        }
+    }
+
+    private var resolvedLine: some View {
+        Button { withAnimation(.easeOut(duration: 0.15)) { expanded = true } } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: question.declined ? "xmark.circle" : "checkmark.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                Text(question.question)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let pick = pickText {
+                    Text("→ " + pick)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.primary.opacity(0.75))
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.035)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(NSLocalizedString("Show the question and its options", comment: "transcript question"))
+    }
+
+    /// The pick as shown on the folded line; nil when there's nothing to name.
+    private var pickText: String? {
+        if question.declined { return NSLocalizedString("dismissed", comment: "transcript question") }
+        guard let a = question.answer, !a.isEmpty else { return nil }
+        return a
+    }
+
+    /// The labels the user picked (a multi-select answer is comma-joined).
+    private var pickedLabels: Set<String> {
+        guard let a = question.answer, !a.isEmpty else { return [] }
+        let labels = Set(question.options.map(\.label))
+        if labels.contains(a) { return [a] }
+        return Set(a.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
+            .intersection(labels)
+    }
+
+    private var card: some View {
+        let resolved = question.isResolved
+        let tint: Color = resolved ? .secondary : Color.bromureBrand
+        let picked = pickedLabels
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "questionmark.bubble.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(.purple)
+                    .foregroundStyle(tint)
                 if !question.header.isEmpty {
                     Text(question.header)
                         .font(.system(size: 10, weight: .bold))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.purple.opacity(0.15)))
-                        .foregroundStyle(.purple)
+                        .background(Capsule().fill(tint.opacity(0.15)))
+                        .foregroundStyle(tint)
                 }
-                Text(NSLocalizedString("The agent asked", comment: "transcript question"))
+                Text(resolved
+                     ? NSLocalizedString("The agent asked — answered", comment: "transcript question")
+                     : NSLocalizedString("The agent asked", comment: "transcript question"))
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if resolved {
+                    Button { withAnimation(.easeOut(duration: 0.15)) { expanded = false } } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(NSLocalizedString("Fold", comment: "transcript question"))
+                }
             }
             Text(question.question)
                 .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(resolved ? .secondary : .primary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(Array(question.options.enumerated()), id: \.offset) { i, opt in
                 QuestionOptionRow(index: i, option: opt,
                                   multiSelect: question.multiSelect,
-                                  picked: false, interactive: false)
+                                  picked: picked.contains(opt.label), interactive: false,
+                                  tint: tint)
             }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8)
-            .fill(Color.purple.opacity(0.06)))
+            .fill(resolved ? Color.primary.opacity(0.035) : Color.bromureBrand.opacity(0.06)))
         .overlay(RoundedRectangle(cornerRadius: 8)
-            .strokeBorder(Color.purple.opacity(0.3)))
+            .strokeBorder(resolved ? Color.primary.opacity(0.1) : Color.bromureBrand.opacity(0.3)))
     }
 }
 
@@ -1229,6 +1352,7 @@ private struct QuestionOptionRow: View {
     let multiSelect: Bool
     let picked: Bool
     let interactive: Bool
+    var tint: Color = Color.bromureBrand
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -1236,7 +1360,7 @@ private struct QuestionOptionRow: View {
                   ? (picked ? "checkmark.square.fill" : "square")
                   : (picked ? "\(index + 1).circle.fill" : "\(index + 1).circle"))
                 .font(.system(size: 12))
-                .foregroundStyle(interactive ? Color.purple : .secondary)
+                .foregroundStyle(interactive || picked ? tint : .secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(option.label)
                     .font(.system(size: 12, weight: .medium))
@@ -1253,9 +1377,9 @@ private struct QuestionOptionRow: View {
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 6)
-            .fill(picked ? Color.purple.opacity(0.10) : Color.primary.opacity(0.04)))
+            .fill(picked ? tint.opacity(0.10) : Color.primary.opacity(0.04)))
         .overlay(RoundedRectangle(cornerRadius: 6)
-            .strokeBorder(picked ? Color.purple.opacity(0.6)
+            .strokeBorder(picked ? tint.opacity(0.6)
                                  : Color.primary.opacity(0.1)))
         .contentShape(Rectangle())
     }
@@ -1344,7 +1468,7 @@ struct TranscriptQuestionBatchCard: View {
             HStack(spacing: 6) {
                 Image(systemName: "questionmark.bubble.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(.purple)
+                    .foregroundStyle(Color.bromureBrand)
                 Text(questions.count > 1
                      ? String(format: NSLocalizedString(
                         "The agent is asking %d questions — answer them all, then Submit",
@@ -1374,9 +1498,9 @@ struct TranscriptQuestionBatchCard: View {
                             .padding(.horizontal, 9)
                             .padding(.vertical, 4)
                             .background(Capsule().fill(
-                                tab == i ? Color.purple.opacity(0.2)
+                                tab == i ? Color.bromureBrand.opacity(0.2)
                                          : Color.primary.opacity(0.05)))
-                            .foregroundStyle(tab == i ? Color.purple :
+                            .foregroundStyle(tab == i ? Color.bromureBrand :
                                              answered(i) ? Color.green : .secondary)
                             .contentShape(Capsule())
                         }
@@ -1438,7 +1562,7 @@ struct TranscriptQuestionBatchCard: View {
                 }
                 .controlSize(.small)
                 .buttonStyle(.borderedProminent)
-                .tint(.purple)
+                .tint(Color.bromureBrand)
                 .disabled(!allAnswered || sending || sent)
                 if sent {
                     Text(NSLocalizedString("Answers sent to the agent.",
@@ -1461,9 +1585,9 @@ struct TranscriptQuestionBatchCard: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8)
-            .fill(Color.purple.opacity(0.06)))
+            .fill(Color.bromureBrand.opacity(0.06)))
         .overlay(RoundedRectangle(cornerRadius: 8)
-            .strokeBorder(Color.purple.opacity(0.3)))
+            .strokeBorder(Color.bromureBrand.opacity(0.3)))
     }
 }
 

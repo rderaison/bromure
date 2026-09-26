@@ -190,6 +190,25 @@ struct BromureAC: ParsableCommand {
                 ]
                 view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
                     CommandPaletteView(items: items, onClose: {}) })
+            case "questions":
+                // The transcript's question cards: live, answered (folded),
+                // dismissed.
+                let opts = [TranscriptQuestion.Option(label: "Mapping board", description: "Providers on the left, agents on the right"),
+                            TranscriptQuestion.Option(label: "Plain list", description: "One row per agent")]
+                var pending = TranscriptQuestion(question: "How visual should the Providers → Agents mapping be?",
+                                                 header: "Layout", multiSelect: false, options: opts)
+                var answered = pending
+                answered.answer = "Mapping board"
+                var declined = pending
+                declined.declined = true
+                pending.answer = nil
+                view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
+                    VStack(alignment: .leading, spacing: 14) {
+                        TranscriptQuestionCard(question: pending)
+                        TranscriptQuestionCard(question: answered)
+                        TranscriptQuestionCard(question: declined)
+                    }.padding(24).frame(width: 640) })
+                size = NSSize(width: 640, height: 360)
             case "overview", "timeline":
                 let tl = SecurityTimeline(directory: nil)
                 let now = Date()

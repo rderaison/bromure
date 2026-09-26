@@ -991,7 +991,9 @@ final class BeautifiedSessionModel: ObservableObject {
         var out: [TranscriptItem] = []
         for item in items.reversed() {
             switch item.kind {
-            case .question: out.insert(item, at: 0)
+            case .question(let q):
+                if q.isResolved { return out }
+                out.insert(item, at: 0)
             case .todo: continue          // pinned above the composer, not part of the round
             default: return out
             }
