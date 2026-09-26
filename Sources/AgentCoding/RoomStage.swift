@@ -842,7 +842,11 @@ struct RoomStageView: View {
             Text(SessionHome.distinctTitle(s, among: controller.members, in: model))
                 .font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
             if let nick = s.nickname {
+                // Whole, on one line: the title truncates first (it wrapped
+                // to "@homebr / idge" in a narrow cell).
                 Text("@" + nick).font(.system(size: 11, design: .monospaced)).foregroundStyle(accent)
+                    .lineLimit(1)
+                    .fixedSize()
             }
             // Live states as a tinted chip; a stopped cell says it in its bar.
             let bucket = SessionHome.bucket(for: s, in: model)
@@ -853,6 +857,7 @@ struct RoomStageView: View {
                     .padding(.horizontal, 7).padding(.vertical, 2)
                     .background(Capsule().fill(bucket.tint.opacity(0.14)))
                     .lineLimit(1)
+                    .fixedSize()
             }
             Spacer(minLength: 4)
             Menu {
@@ -949,21 +954,32 @@ struct RoomStageView: View {
                 .foregroundStyle(.secondary)
             Text(bucket.title)
                 .font(.system(size: 12, weight: .semibold))
-            Text(NSLocalizedString("a message picks it up", comment: "room cell"))
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .fixedSize()
+            // The hint goes first when the cell is narrow — never the button
+            // (its label wrapped to "Resum/e").
+            ViewThatFits(in: .horizontal) {
+                Text(NSLocalizedString("a message picks it up", comment: "room cell"))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                Color.clear.frame(width: 0, height: 0)
+            }
             Spacer(minLength: 6)
             Button {
                 controller.onResume(s.id)
             } label: {
                 Label(NSLocalizedString("Resume", comment: "room cell"), systemImage: "play.fill")
                     .font(.system(size: 11.5, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize()
                     .foregroundStyle(.white)
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(Capsule().fill(accent.gradient))
             }
             .buttonStyle(.plain)
+            .layoutPriority(1)
         }
         .padding(.leading, 12).padding(.trailing, 5).padding(.vertical, 5)
         .background(.regularMaterial, in: Capsule())
