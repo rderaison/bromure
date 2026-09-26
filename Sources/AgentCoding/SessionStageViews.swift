@@ -14,7 +14,10 @@ struct DroppedFile {
     let data: Data
     let isImage: Bool
 
-    static let maxBytes = 25 * 1024 * 1024
+    /// Largest file a drop attaches. Anything bigger is refused with a beep
+    /// rather than vanishing silently. Files are memory-mapped, so a pending
+    /// attachment doesn't hold a copy in RAM; staging writes it in chunks.
+    static let maxBytes = 512 * 1024 * 1024
 
     /// Load one dragged item as bytes. Uses `loadObject(ofClass: URL.self)` —
     /// the same call the file browser's working drop uses — for Finder file
@@ -26,7 +29,7 @@ struct DroppedFile {
                 _ = p.loadObject(ofClass: URL.self) { u, _ in cont.resume(returning: u) }
             }
             guard let url, url.isFileURL,
-                  let data = try? Data(contentsOf: url), data.count <= maxBytes else { return nil }
+                  let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= maxBytes else { return nil }
             let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
             return DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg)
         }
@@ -48,6 +51,9 @@ struct DroppedFile {
         for p in providers {
             if let f = await load(p) { files.append(f) }
         }
+        #if canImport(AppKit)
+        if files.count < providers.count { NSSound.beep() }   // too big / unreadable
+        #endif
         return files
     }
 
@@ -78,7 +84,7 @@ struct DroppedFile {
         for tok in candidates where !tok.isEmpty && !seen.contains(tok) {
             seen.insert(tok)
             guard out.contains(tok), let url = hostFileURL(tok),
-                  let data = try? Data(contentsOf: url), data.count <= maxBytes else { continue }
+                  let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= maxBytes else { continue }
             let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
             files.append(DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg))
             out = out.replacingOccurrences(of: tok, with: "")

@@ -1333,7 +1333,7 @@ final class BeautifiedSessionModel: ObservableObject {
         let stamp = GuestDrop.stamp()
         for tok in tokens {
             guard let url = Self.hostFileURL(tok),
-                  let data = try? Data(contentsOf: url), data.count <= 25 * 1024 * 1024 else { continue }
+                  let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= DroppedFile.maxBytes else { continue }
             let isImg = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
             hits.append((tok, DroppedFile(name: "\(stamp)_\(url.lastPathComponent)", data: data, isImage: isImg)))
         }
@@ -1718,6 +1718,14 @@ struct BeautifiedSessionView: View {
                 onStop: { model.interrupt() },
                 onKey: { handlePaletteKey($0) },
                 onSend: { model.send() })
+            // A drop that lands ON the field pastes the file's host path
+            // (the field takes the drag first): turn it into a chip.
+            .onChange(of: model.composerText) { _, text in
+                let (rest, files) = DroppedFile.absorbHostPaths(in: text)
+                guard !files.isEmpty else { return }
+                model.drop(files)
+                model.composerText = rest
+            }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
     }

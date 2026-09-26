@@ -181,7 +181,8 @@ final class PasteThumbnailOverlay: NSView {
     }
 
     /// First decodable image among the paste sources (decode failures fall
-    /// through — a broken thumbnail must not block the chip for the rest).
+    /// through — a broken thumbnail must not block the chip for the rest);
+    /// failing that, the first file's Finder icon (a PDF, a zip…).
     static func firstImage(of sources: [TerminalImagePaste.Source]) -> NSImage? {
         for source in sources {
             switch source {
@@ -190,6 +191,11 @@ final class PasteThumbnailOverlay: NSView {
             case .file(let url, _):
                 if let image = NSImage(contentsOf: url) { return image }
             }
+        }
+        for case .file(let url, _) in sources {
+            let icon = NSWorkspace.shared.icon(forFile: url.path)
+            icon.size = NSSize(width: 64, height: 64)
+            return icon
         }
         return nil
     }

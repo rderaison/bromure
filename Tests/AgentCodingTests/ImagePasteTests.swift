@@ -102,17 +102,34 @@ struct ImagePasteTests {
         #expect(ext == "png")
     }
 
-    @Test("A non-image file among the URLs falls back to text paste")
+    @Test("Non-image files (zip, pdf) paste as files alongside images")
     func mixedFileURLs() throws {
         let img = try writeTempFile(tinyPNG(), ext: "png")
-        let txt = try writeTempFile(Data("hi".utf8), ext: "txt")
+        let zip = try writeTempFile(Data("PK\u{3}\u{4}".utf8), ext: "zip")
         defer {
             try? FileManager.default.removeItem(at: img)
-            try? FileManager.default.removeItem(at: txt)
+            try? FileManager.default.removeItem(at: zip)
         }
         let pb = makePasteboard()
         pb.clearContents()
-        pb.writeObjects([img as NSURL, txt as NSURL])
+        pb.writeObjects([img as NSURL, zip as NSURL])
+        let sources = TerminalImagePaste.sources(from: pb)
+        #expect(sources?.count == 2)
+        guard case .file(_, let ext)? = sources?.last else {
+            Issue.record("expected a file source"); return
+        }
+        #expect(ext == "zip")
+    }
+
+    @Test("A folder among the URLs falls back to text paste")
+    func folderURL() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("paste-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pb = makePasteboard()
+        pb.clearContents()
+        pb.writeObjects([dir as NSURL])
         #expect(TerminalImagePaste.sources(from: pb) == nil)
     }
 
@@ -125,6 +142,15 @@ struct ImagePasteTests {
             ext: "png", date: date, unique: "1a2b3c4d",
             timeZone: TimeZone(identifier: "UTC")!)
         #expect(name == "clipboard-20250709-145012-1a2b3c4d.png")
+    }
+
+    @Test("A pasted file keeps its own name, made shell-safe")
+    func originalFileName() {
+        let date = Date(timeIntervalSince1970: 1_752_072_612)
+        let name = TerminalImagePaste.fileName(
+            original: "Q3 report (final).pdf", date: date, unique: "1a2b3c4d",
+            timeZone: TimeZone(identifier: "UTC")!)
+        #expect(name == "20250709-145012-1a2b3c4d-Q3_report__final_.pdf")
     }
 
     // MARK: Upload

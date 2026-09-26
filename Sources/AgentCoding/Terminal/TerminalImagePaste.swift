@@ -7,18 +7,19 @@ import GhosttyKit
 import UIKit
 #endif
 
-/// Image paste for native terminal surfaces.
+/// Image and file paste for native terminal surfaces.
 ///
 /// The agent in the guest can't see the Mac clipboard, and a bitmap can't
-/// travel down the pty as bytes — so a ⌘V with an image on the clipboard
-/// becomes a file transfer: the image is written into the guest over the
-/// vsock file channel and the *guest path* is pasted in its place. Claude
-/// (or any guest tool) then reads the image from disk like any other file.
+/// travel down the pty as bytes — so a ⌘V (or a drop) of an image or file
+/// becomes a file transfer: it is written into the guest over the vsock
+/// file channel and the *guest path* is pasted in its place. Claude (or any
+/// guest tool) then reads it from disk like any other file.
 ///
-/// What counts as an image paste (`sources(from:)`):
-/// - copied image *files* (Finder ⌘C): file URLs where every URL is an
-///   image — the accompanying string flavor is just host file names,
-///   meaningless inside the guest;
+/// What counts as a file paste (`sources(from:)`):
+/// - copied or dragged *files* of any kind (Finder ⌘C, a drag — images,
+///   PDFs, zips…): file URLs where every URL is a regular file — the
+///   accompanying string flavor is just host file names, meaningless inside
+///   the guest; a folder in the selection keeps it a text paste;
 /// - copied *bitmaps* (screenshot-to-clipboard, a browser's "Copy Image")
 ///   with no plain-text flavor. Anything that also offers text (rich
 ///   text, spreadsheet cells that render an image flavor too) stays a
@@ -44,33 +45,34 @@ enum TerminalImagePaste {
     /// Refuse pastes beyond this (a mis-⌘C of a giant file in Finder must
     /// not silently pump gigabytes into the VM); the paste falls back to
     /// its text flavor instead.
-    static let maxTotalBytes = 96 * 1024 * 1024
+    static let maxTotalBytes = 512 * 1024 * 1024
 
     // MARK: Detection
 #if os(macOS)
 
-    /// The images `pasteboard` should paste as guest files, or nil when
-    /// this is not an image paste (text pastes return nil, always).
+    /// The images/files `pasteboard` should paste as guest files, or nil
+    /// when this is not a file paste (text pastes return nil, always).
     static func sources(from pasteboard: NSPasteboard) -> [Source]? {
         var total = 0
 
         // Copied files win over the string flavor (for a Finder copy the
-        // string is just the file name) — but only when *every* URL is an
-        // image; a mixed selection pastes as text like before.
+        // string is just the file name) — but only when *every* URL is a
+        // regular file; a selection with a folder pastes as text like before.
         if let urls = pasteboard.readObjects(
                 forClasses: [NSURL.self],
                 options: [.urlReadingFileURLsOnly: true]) as? [URL],
            !urls.isEmpty {
             var out: [Source] = []
             for url in urls {
-                guard let type = imageType(of: url),
-                      let size = try? url.resourceValues(
-                          forKeys: [.fileSizeKey]).fileSize
+                guard let values = try? url.resourceValues(
+                          forKeys: [.isRegularFileKey, .fileSizeKey, .contentTypeKey]),
+                      values.isRegularFile == true,
+                      let size = values.fileSize
                 else { return nil }
                 total += size
                 guard total <= maxTotalBytes else { return nil }
                 let ext = url.pathExtension.isEmpty
-                    ? (type.preferredFilenameExtension ?? "png")
+                    ? (values.contentType?.preferredFilenameExtension ?? "")
                     : url.pathExtension.lowercased()
                 out.append(.file(url, ext: ext))
             }
@@ -92,12 +94,6 @@ enum TerminalImagePaste {
         return nil
     }
 
-    private static func imageType(of url: URL) -> UTType? {
-        let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType
-            ?? UTType(filenameExtension: url.pathExtension)
-        guard let type, type.conforms(to: .image) else { return nil }
-        return type
-    }
 #endif
 
     // MARK: Naming
@@ -111,7 +107,24 @@ enum TerminalImagePaste {
         fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.timeZone = timeZone
         fmt.dateFormat = "yyyyMMdd-HHmmss"
-        return "clipboard-\(fmt.string(from: date))-\(unique).\(ext)"
+        return "clipboard-\(fmt.string(from: date))-\(unique)" + (ext.isEmpty ? "" : ".\(ext)")
+    }
+
+    /// "20260709-153012-1a2b3c4d-report.pdf" — a pasted/dropped file keeps
+    /// its own name (the agent reads "report.pdf", not an opaque blob), made
+    /// safe to type unquoted into a shell: anything outside [A-Za-z0-9._-]
+    /// becomes "_".
+    static func fileName(original: String, date: Date, unique: String,
+                         timeZone: TimeZone = .current) -> String {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = timeZone
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        let safe = String(original.unicodeScalars.map {
+            CharacterSet.alphanumerics.contains($0) && $0.isASCII
+                || "._-".unicodeScalars.contains($0) ? Character($0) : "_"
+        })
+        return "\(fmt.string(from: date))-\(unique)-\(safe.isEmpty ? "file" : safe)"
     }
 
     // MARK: Transfer
@@ -139,18 +152,19 @@ enum TerminalImagePaste {
         var paths: [String] = []
         for source in sources {
             let data: Data
-            let ext: String
+            let name: String
+            let unique = String(UUID().uuidString.prefix(8)).lowercased()
             switch source {
             case .bitmap(let d, let e):
-                data = d; ext = e
-            case .file(let url, let e):
+                data = d
+                name = fileName(ext: e, date: Date(), unique: unique)
+            case .file(let url, _):
                 // Mapped: the bytes page in per-chunk below instead of
                 // loading the whole file up front.
                 data = try Data(contentsOf: url, options: .mappedIfSafe)
-                ext = e
+                name = fileName(original: url.lastPathComponent, date: Date(), unique: unique)
             }
-            let unique = String(UUID().uuidString.prefix(8)).lowercased()
-            let path = pastesDir + "/" + fileName(ext: ext, date: Date(), unique: unique)
+            let path = pastesDir + "/" + name
             var offset = 0
             var first = true
             repeat {
