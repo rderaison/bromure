@@ -6,18 +6,20 @@ order: 11
 
 # Tracing & Audit
 
-Every request a workspace makes — the agent's calls to LLM providers, package downloads, `kubectl` and `aws` traffic, ordinary web fetches — passes through Bromure Agentic Coding's host-side [MITM proxy](04-concepts.mdx). Because the proxy already stands on that wire boundary, it can record what crossed it: which hosts the agent contacted, what it sent, what came back, whether any credential was swapped or leaked, and — for AI traffic — the full conversation, tool calls, and shell commands the model drove.
+Every request a machine makes — the agent's calls to LLM providers, package downloads, `kubectl` and `aws` traffic, ordinary web fetches — passes through Bromure Agentic Coding's host-side [MITM proxy](04-concepts.mdx). Because the proxy already stands on that wire boundary, it can record what crossed it: which hosts the agent contacted, what it sent, what came back, whether any credential was swapped or leaked, and — for AI traffic — the full conversation, tool calls, and shell commands the model drove.
 
-That record is the workspace's **session trace**. It exists for one reason: so you can answer, after the fact, "what did the agent actually do?" — down to the individual prompt, the individual `rm -rf`, the individual outbound request. Everything is recorded on your Mac, encrypted at rest, and (for individual users) never leaves it.
+That record is the machine's **session trace**. It exists for one reason: so you can answer, after the fact, "what did the agent actually do?" — down to the individual prompt, the individual `rm -rf`, the individual outbound request. Everything is recorded on your Mac, encrypted at rest, and (for individual users) never leaves it.
 
 This chapter covers the whole system: what a trace captures, how it is stored and aged out, the Trace Inspector window, the `bromure-cli trace` command line, how to get data back out, and the privacy boundary between local audit and the telemetry that enrolled Macs stream to an organization. The field-by-field settings reference for the pane lives in [Tracing settings](07-settings/tracing.mdx).
 
+Tracing records *traffic*. What Bromure's security engines *decided* about that traffic — swaps, blocks, package checks, detections — is recorded separately, and always, in the [Security Timeline](11a-security-timeline.mdx).
+
 ## What a trace records
 
-Tracing is per workspace, controlled by the **Session trace** picker in the **Tracing** pane of the **Edit workspace** window. It has four levels, each a superset of the one before it:
+Tracing is set per machine (a workspace, in the settings editor), with the **Session trace** picker in the **Tracing** pane under **Security** in the machine's settings. It has four levels, each a superset of the one before it:
 
 <p align="center">
-  <img src="images/editor-tracing.en.jpg" width="600" alt="The Tracing pane of the Edit workspace window, with the Session trace picker set to AI request details" />
+  <img src="images/editor-tracing.en.jpg" width="600" alt="The Tracing pane of the Web app workspace editor, with the Session trace picker and its explanation of the four levels" />
 </p>
 
 | Level | What is recorded |
@@ -27,9 +29,9 @@ Tracing is per workspace, controlled by the **Session trace** picker in the **Tr
 | **AI request details** (default) | Metadata for every request, plus full request and response bodies for known LLM hosts. |
 | **Everything** | Metadata for every request, plus bodies for *every* host. |
 
-New workspaces default to **AI request details**, so agent conversations are auditable out of the box without storing the bodies of unrelated traffic (package downloads, telemetry pings) on disk.
+New machines default to **AI request details**, so agent conversations are auditable out of the box without storing the bodies of unrelated traffic (package downloads, telemetry pings) on disk.
 
-> **Note:** The [trace level](18-glossary.mdx) enum defaults to **Off** in the profile format, so a workspace whose stored JSON predates this setting decodes as **Off**. The **AI request details** default applies only to workspaces created from the current template. Choose the level deliberately when auditing matters.
+> **Note:** The [trace level](18-glossary.mdx) enum defaults to **Off** in the profile format, so a machine whose stored settings predate this setting decodes as **Off**. The **AI request details** default applies only to machines created from the current template. Choose the level deliberately when auditing matters.
 
 ### The metadata record
 
@@ -40,13 +42,13 @@ At **Activity only** and above, the proxy writes one [trace record](18-glossary.
 - **Request bytes** (measured *before* any credential swap) and **response bytes**.
 - The **token-swap report** — which credentials the proxy substituted on the way out (see [Credential swaps and leaks](#credential-swaps-and-leaks)).
 - **Credential-leak warnings** — bearer-style tokens in the outbound request that Bromure did not mint.
-- Under local or hybrid model routing, **which backend served the turn** (see [Local Models](13-local-models.mdx)).
+- For AI requests, when the machine's model routing is set, **which backend served the turn** — `cloud` or the local model (see [Models & Providers](13-models.mdx)).
 
 This is enough to reconstruct the full picture of *who the agent talked to and when* without keeping a byte of prompt or response text on disk. When you want the audit trail — contacted domains, credential handling, latency — but not the content, **Activity only** is the level to pick.
 
 ### Captured bodies and parsed conversations
 
-At **AI request details**, the proxy additionally stores the complete request and response bodies for the known LLM hosts: **Anthropic**, **OpenAI** / **ChatGPT**, **Google**, **Cohere**, **Mistral**, **Perplexity**, **x.ai** / **Grok**, **Groq**, **Replicate**, and **HuggingFace**, plus the local-inference host when a workspace routes to a [local model](13-local-models.mdx). At **Everything**, bodies are kept for every host.
+At **AI request details**, the proxy additionally stores the complete request and response bodies for the known LLM hosts: **Anthropic**, **OpenAI** / **ChatGPT**, **Google**, **Cohere**, **Mistral**, **Perplexity**, **x.ai** / **Grok**, **Groq**, **Replicate**, and **HuggingFace**, plus the local-inference host when a machine routes to a [local model](13-models.mdx). At **Everything**, bodies are kept for every host.
 
 A captured AI body is not just stored — it is parsed. The Trace Inspector renders it as a [Conversation view](18-glossary.mdx): the system prompt, each user turn, the assistant's replies, and the structured blocks the model emitted. Those blocks are exactly what makes a coding-agent trace useful:
 
@@ -84,7 +86,7 @@ Retention is automatic and runs lazily (a cleanup pass every 200 appends):
 
 Separately, the app keeps the last **5,000** records in an in-memory ring for the live view; older records remain on disk within the caps above.
 
-> **Warning:** At **AI request details** and **Everything**, the full prompt and response text of AI exchanges is on disk — encrypted, but present. Because the bodies are sealed with the SecretsVault master key, rotating that key makes previously captured bodies undecryptable; the Trace Inspector then shows `(not captured / decryption failed)` where the body would have been.
+> **Warning:** At **AI request details** and **Everything**, the full prompt and response text of AI exchanges is on disk — encrypted, but present. With [PII Protection](10a-pii.mdx) on, the trace still holds the real values: it stores the request as the agent sent it and the reply after the real values were put back. Because the bodies are sealed with the SecretsVault master key, rotating that key makes previously captured bodies undecryptable; the Trace Inspector then shows `(not captured / decryption failed)` where the body would have been.
 
 ## The Trace Inspector window
 
@@ -92,7 +94,7 @@ The Trace Inspector is the live, filterable viewer for every recorded exchange a
 
 ### Opening the window
 
-Open it from **Window** → **Trace Inspector…** (⇧⌘I). It also opens **pre-filtered to one workspace** from a session window's toolbar, so you can jump straight from a running agent to its own traffic. On open, the in-memory ring is warmed from disk — reading **today's and yesterday's** day-directories only, so a cold launch is fast. Older records stay on disk and appear once you press the reload button while they are in range, or by reading them with the CLI.
+Open it from **Window** → **Trace Inspector…** (⇧⌘I). It also opens **pre-filtered to one machine** from **Inspect Trace** in the machine menu — the capsule named after the machine in the main window's toolbar — so you can jump straight from a running agent to its own traffic. **Inspect Trace** appears only while the machine is running. On open, the in-memory ring is warmed from disk — reading **today's and yesterday's** day-directories only, so a cold launch is fast. Older records stay on disk and appear once you press the reload button while they are in range, or by reading them with the CLI.
 
 ### The request list
 
@@ -143,27 +145,9 @@ On close, the proxy appends a chronological transcript after the upstream handsh
 
 Limits keep a chatty session bounded: 1 MB kept per message, 4,096 messages per session, a 64 MB maximum frame, and a 32 MB maximum inflated message; anything past a cap is marked `(truncated, total N bytes)`. Parse failures degrade only the transcript — the live tunnel pumps raw bytes and is never stalled or corrupted by tracing.
 
-## The Security Timeline window
+## The Security Timeline
 
-The Trace Inspector answers "what did the agent send?"; the **Security Timeline** (Window menu → **Security Timeline…**) answers "what did Bromure's security engines *decide*?". It is one chronological table — newest first — of every decision the engines made while your workspaces ran:
-
-<p align="center">
-  <img src="images/security-timeline.en.jpg" width="700" alt="The Security Timeline window: a chronological table of Firewall, Guardrails, Credential brokering, Prompt injection, Supply chain, and Credential used rows, each colour-coded green for allowed, red for blocked, or blue for informational" />
-</p>
-
-| Engine | Example rows |
-|---|---|
-| **Credential brokering** | `brm_a1b2… → api.openai.com — swapped in sk-oai_…` (blue); `blocked — exfiltration attempt, VM paused` (red) when a fake credential was caught leaving for a host it was never minted for. |
-| **Firewall** | `evil.example:443 tcp — blocked` — every egress-firewall verdict. |
-| **Supply chain** | `npm left-pad@1.3.0 — blocked — version is 2 days old` and allowed installs alike. |
-| **Guardrails** | `DELETE api.github.com/repos/… — blocked` write-policy enforcements. |
-| **Prompt injection** | Detector hits with the flagged snippet's preview and the action taken. |
-| **Credential used** | SSH signatures and AWS SigV4 signings performed by the host on the agent's behalf. |
-| **Upstream TLS** | Upstream certificates the host refused to trust. |
-
-Rows are colour-coded by outcome — green for allowed, red for blocked, blue for informational transformations — and the toolbar filters by engine or free text. The timeline is an in-memory "what just happened" view (capped at 5,000 rows), not an audit store: for durable evidence use the session traces, which outlive the app run and are encrypted at rest.
-
-The engines all run on the host, so when a [remote client](14-remote-access.mdx) mirrors this Mac the timeline mirrors too: the host ships its recent decisions inside the state stream and the client's Security Timeline window shows the same rows.
+The Trace Inspector answers "what did the agent send?"; the **Security Timeline** (**Window** → **Security Timeline…**) answers "what did Bromure's security engines *decide*?" — every credential swap, firewall verdict, package check, prompt-injection detection, PII swap and credential use, as one chronological table with a 24-hour **Overview**. Unlike tracing, it needs no setting: it is always recorded, kept for 90 days, and survives restarts. It has its own chapter: [Security Overview & Timeline](11a-security-timeline.mdx).
 
 ## The trace CLI
 
@@ -177,7 +161,7 @@ The `bromure-cli trace` command group gives you the same trace data in the termi
 | `bromure-cli trace leaks [workspace]` | Only requests with a potential credential leak — header, value preview, and suspicion class. Prints `No leaks detected. ✓` when clean. |
 | `bromure-cli trace clear [-f]` | Wipe **all** trace history — the in-memory ring and the on-disk files — after a `y/N` confirmation (skip it with `-f`). Reports how many records were cleared. |
 
-The optional `workspace` argument filters by id or name. If tracing is off for the workspace (or nothing has been recorded yet), `trace ls` prints `No trace records. (Tracing is per-workspace — enable it in the workspace's settings.)`; if the app is not running, every subcommand prints `No bromure-cli agent running.` The full CLI is documented in [Automation & CLI](16-automation-cli.mdx).
+The optional `workspace` argument filters by id or name. If tracing is off for the workspace (or nothing has been recorded yet), `trace ls` prints `No trace records. (Tracing is per-workspace — enable it in the workspace's settings.)`; if the app is not running, every subcommand prints `No bromure-cli agent running.` The full CLI is documented in [CLI, API & MCP](16-automation-cli.mdx).
 
 ## Exporting a trace
 
@@ -193,7 +177,7 @@ For an individual, unmanaged install, tracing is entirely local:
 
 - Traces are written to your Mac's Application Support directory and encrypted with a key held in your login Keychain.
 - No trace record, body, or summary is uploaded anywhere. The proxy has no analytics endpoint wired for individual users.
-- The prompt-injection classifiers that also feed the [Security Log](09-supply-chain.mdx) run on-device; see [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx). Nothing about your traffic is sent to a cloud service for scanning.
+- The prompt-injection classifiers that also feed the [Security Timeline](11a-security-timeline.mdx) run on-device; see [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx). Nothing about your traffic is sent to a cloud service for scanning.
 
 The redaction and preview rules above mean that even the data at rest never contains a usable secret. Tracing is a private audit log, not a phone-home.
 
@@ -210,9 +194,10 @@ On an enrolled Mac, sessions stream structured [cloud events](18-glossary.mdx) t
 - `file.read` / `file.write` — the extracted path and tool name.
 - `command.run` — the shell command, capped at 500 characters.
 - `credential.token_swap` — one per on-wire swap, previews only.
-- `prompt_injection.detection` — forwarded when a detector fires, carrying the whole flagged snippet (capped at 20 KB), unlike the local Security Log's 160-character preview.
+- `prompt_injection.detection` — forwarded when a detector fires, carrying the whole flagged snippet (capped at 20 KB), unlike the Security Timeline's short preview.
 - `egress.firewall` — one per firewall verdict: host, port, protocol, and the action taken.
-- `credential.exfiltration` — a fake credential was observed leaving the VM for a host outside its scope (previews and hosts only, never token bytes).
+- `credential.exfiltration` — a fake credential was observed leaving the VM for a host outside its scope (previews and hosts only, never token bytes); `credential.exfiltration_allowed` when you answered the compromise alert with **Allow**.
+- `privacy.pii_swap` — per request where [PII Protection](10a-pii.mdx) swapped values: the host and the counts by kind, never the values.
 - Detailed HTTP request logs — enrolled installs can additionally stream per-request HTTP metadata from the transparent interception layer, so an organization sees the workspace's outbound HTTP surface, not just its AI traffic.
 
 Only the newest assistant turn is walked, so resent history is never double-counted, and **raw prompts are never emitted** — the telemetry answers "what did the AI *do*", not "what did the user *ask*".
@@ -223,8 +208,8 @@ For long-lived WebSocket sessions, waiting until the socket closes to extract ev
 
 ### Private mode
 
-**Private mode** is a per-workspace switch on the Tracing pane, shown **only on enrolled Macs**. When enabled, that workspace stops streaming session metadata and the events above to the bromure.io workspace — neither the title-bar indicator nor the admin's session list sees anything from it. **Local tracing and the Trace Inspector are unaffected**: you still get the full encrypted trace on your own machine.
+**Private mode** is a per-workspace switch on the Tracing pane, shown **only on enrolled Macs**. When enabled, that machine stops streaming session metadata and the events above to the bromure.io workspace — neither the red streaming dot in the toolbar ("Session metadata is being sent to bromure.io") nor the admin's session list sees anything from it. **Local tracing and the Trace Inspector are unaffected**: you still get the full encrypted trace on your own machine.
 
-It exists for exactly the case where local audit and organizational telemetry should diverge — for example, a workspace where you use a personal API key and do not want that activity in your organization's dashboards. On an unenrolled Mac there is nothing being streamed, so the switch is hidden entirely.
+It exists for exactly the case where local audit and organizational telemetry should diverge — for example, a machine where you use a personal API key and do not want that activity in your organization's dashboards. On an unenrolled Mac there is nothing being streamed, so the switch is hidden entirely.
 
-> **Note:** Private mode suppresses `prompt_injection.detection` events too, so on a private workspace an injection is still recorded locally in the Security Log (and enforced according to your [detection action](10-prompt-injection.mdx)) but is not forwarded to your organization. See [Tracing settings](07-settings/tracing.mdx) for the switch itself and [Enterprise](15-enterprise.mdx) for what enrollment streams.
+> **Note:** Private mode suppresses `prompt_injection.detection` events too, so on a private machine an injection is still recorded locally in the Security Timeline (and enforced according to your [detection action](10-prompt-injection.mdx)) but is not forwarded to your organization. See [Tracing settings](07-settings/tracing.mdx) for the switch itself and [Enterprise](15-enterprise.mdx) for what enrollment streams.

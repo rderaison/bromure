@@ -1,43 +1,80 @@
 ---
 title: "Advanced"
-description: "Power-user surfaces: browse, extract from, and repair a workspace's ext4 disk images on your Mac without booting a VM, plus low-level configuration defaults."
+description: "Power-user surfaces: roll a machine's home back to an earlier boot, browse, extract from and repair a machine's ext4 disk images on your Mac without booting a VM, and a few low-level configuration defaults."
 order: 16.5
 ---
 
 # Advanced
 
-This chapter collects the app's power-user surfaces — the ones you reach for occasionally, not every session. Its centerpiece is the built-in **ext4 file browser**, which opens a workspace's disk images directly on your Mac without booting the VM: for recovering a file from a workspace you would rather not start, or repairing one that won't boot. A short section at the end documents two low-level configuration defaults.
+This chapter collects the power-user surfaces — the ones you reach for occasionally, not every day. It covers rolling a machine's home folder back to an earlier boot with **Rewind home…**, the built-in **ext4 file browser** that opens a machine's disk images directly on your Mac without booting the VM, the native filesystem check, and a few low-level configuration defaults.
 
-Everything here assumes you are comfortable with the storage model from [Workspaces](05-workspaces.mdx) and [Sessions](06-sessions.mdx).
+A machine (a workspace, in the settings editor) keeps its data in two Linux `ext4` disk images: the system disk and the home image. Everything here assumes you are comfortable with the storage model described in [Machines](06f-machines.mdx) and [Resources settings](07-settings/resources.mdx).
+
+## Rewinding a machine's home
+
+Each time a machine starts successfully, Bromure takes a copy-on-write checkpoint of its home image — the `/home/ubuntu` that holds your project checkouts, dotfiles, `.ssh`, shell history and agent state. Checkpoints are kept on a tiered ladder: the last few boots, then one a day for a week, then one a week for a month. They cost real disk space only as the live home drifts away from them.
+
+**Rewind home…** is the everyday way to use them:
+
+1. In the sidebar, open **Virtual Machines** and click the **⋯** button on the machine's row.
+2. Choose **Rewind home…**. A sheet titled **Rewind “‹machine›”’s home** opens: "Each point is the home folder as it was when that boot started. The next start boots from the one you pick; the home as it is now is kept as a new point, so this can be undone here."
+3. Pick a point in the list. Each row shows the date and time, how long ago that was, and the checkpoint's size on disk.
+4. Click **Rewind**.
+
+<p align="center">
+  <img src="images/rewind-home.en.jpg" width="600" alt="The Rewind “Web app”’s home sheet, explaining that each point is the home folder as it was when that boot started, with the message No rollback points yet — one is taken each time this machine starts, and Cancel and Rewind buttons" />
+</p>
+
+When it is done the sheet reads "Done — the next start of “‹machine›” boots from its home of ‹date›." Nothing else changes: the system disk, the machine's settings, and its credentials stay as they are.
+
+Things to know:
+
+- **The machine must be off.** The home image is swapped whole, so it can't be in use. While the machine is running, the sheet says "The machine is running — its home can't be swapped while it's in use. Shut it down first." and offers a **Shut down** button; **Rewind** stays disabled until the machine is off.
+- **A rewind can be undone.** Before swapping, the current home becomes a new rollback point at the top of the same list. To undo, open **Rewind home…** again and pick it.
+- **No points yet.** A machine that has never booted, or was just created, shows "No rollback points yet — one is taken each time this machine starts."
+- **Older machines.** A machine that still keeps its home in a folder on the Mac (the legacy shared-folder home) has no image to rewind; the sheet says "This machine keeps its home on the Mac, not in an image — nothing to rewind." Upgrade its storage from the **Resources** pane first.
+- **Remote machines.** In a rich-client mirror window, **Rewind home…** works the same way, against the server's checkpoints.
+
+### The other storage actions
+
+The machine's **Resources** pane (**⋯ › Edit… › Resources**) keeps the older, per-layer actions. They are disabled while the machine's window is open ("Close the session window first."):
+
+| Button | Layer | What it does |
+|---|---|---|
+| **Restore home…** | Home (ext4) | The same rollback as **Rewind home…**, as an alert with a pop-up list of points: **Restore** / **Cancel**. The current home is checkpointed first. |
+| **Erase home…** | Home | Wipes everything under `/home/ubuntu` — project clones, shell history, caches, the machine's SSH keypair. Bromure-managed files (`.bashrc`, `.gitconfig`, CLI configs) are rebuilt from the machine's settings on the next launch. |
+| **Reset to base…** | System disk | Re-clones the system disk from the base image. Anything installed with `apt` and changes under `/etc`, `/var`, `/usr`, `/opt` are lost; the home survives. |
+
+The machine's **⋯** menu also has **Reset disk**, the same system-disk reset. See [Resources settings](07-settings/resources.mdx) for the full pane.
 
 ## The ext4 file browser
 
-Each [workspace](18-glossary.mdx) keeps its data in Linux `ext4` disk images — the system disk `disk.img` and the home image `home.img`. macOS has no native ext4 support, so ordinarily the only way to see inside those images is to boot the VM. Bromure Agentic Coding avoids that with its own dependency-free, userland ext4 reader and writer: it parses the on-disk format directly and shows you the tree.
+macOS has no native ext4 support, so ordinarily the only way to see inside a machine's disk images is to boot the VM. Bromure avoids that with its own dependency-free ext4 reader and writer: it parses the on-disk format directly and shows you the tree.
 
-**Workspaces ▸ Open ext4 file…** opens any ext4 (also `ext2` or `ext3`) `.img` — a raw filesystem or an MBR/GPT-partitioned disk — in a Finder-like window. Nothing is mounted, no VM boots, and no elevated privileges are needed.
+**Workspaces › Open ext4 file…** opens any ext4 (also `ext2` or `ext3`) `.img` — a raw filesystem or an MBR/GPT-partitioned disk — in a Finder-like window. Nothing is mounted, no VM boots, and no elevated privileges are needed.
 
-> **Note:** The image opens **read-only** by default — safe even if a workspace VM still has the disk attached. Editing is a separate, explicitly gated step (see [Editing an image](#editing-an-image)).
+> **Note:** The image opens **read-only** by default — safe even if a VM still has the disk attached. Editing is a separate, explicitly gated step (see [Editing an image](#editing-an-image)).
 
-### What you can open: the disks inside a workspace
+### What you can open
 
-A workspace lives under `~/Library/Application Support/BromureAC/profiles/<uuid>/`. Two images there are worth browsing, plus their rollback snapshots:
+A machine lives under `~/Library/Application Support/BromureAC/profiles/<uuid>/`. Two images there are worth browsing, plus their rollback checkpoints:
 
 | Image | What the browser shows | Toolbar info line reads |
 | --- | --- | --- |
-| `disk.img` | The Ubuntu system root — `/etc`, `/var`, `/usr`, `/opt`, and so on. The disk is a GPT layout (a 512 MiB EFI partition plus the ext4 root); the browser locates the ext4 root automatically. | `partition @…MiB` |
-| `home.img` | The guest's `/home/ubuntu` directly at the filesystem root — dotfiles, project checkouts, `.ssh`, shell history, and the paste cache under `.bromure/`. | `raw` |
-| `checkpoints/<ts>.img` | A boot-proven rollback snapshot of `disk.img`. | `partition @…MiB` |
-| `checkpoints/home/<ts>.img` | A rollback snapshot of `home.img`. | `raw` |
+| `disk.img` | The Ubuntu system root — `/etc`, `/var`, `/usr`, `/opt`, and so on. The disk is a GPT layout (an EFI partition plus the ext4 root); the browser locates the ext4 root automatically. | `partition @…MiB` |
+| `home.img` | The guest's `/home/ubuntu` directly at the filesystem root — dotfiles, project checkouts, `.ssh`, shell history, and Bromure's own folder `.bromure/`. | `raw` |
+| `checkpoints/<ts>.img` | A per-boot checkpoint of `disk.img`. | `partition @…MiB` |
+| `checkpoints/home/<ts>.img` | A per-boot checkpoint of `home.img` — the points **Rewind home…** lists. | `raw` |
 
-The home image behaves this way because the guest formats it with `mkfs.ext4` and mounts it *over* `/home/ubuntu` on boot — so the image's own root directory **is** that home folder. On a workspace still using the legacy shared-folder home there is no `home.img` to open; see [Sessions](06-sessions.mdx) for the storage models and the one-time upgrade.
+The home image behaves this way because the guest mounts it *over* `/home/ubuntu` on boot, so the image's own root directory **is** that home folder. Kubernetes nodes, registries and the messaging connector keep their disks under `kube/<id>/nodes/<uuid>/` instead, and open the same way.
 
 ### Opening an image
 
-1. Choose **Workspaces ▸ Open ext4 file…**.
-2. An open panel titled **Open ext4 Disk Image** appears — "Choose an ext4 .img disk image (raw or partitioned)." — starting in `~/Library/Application Support/BromureAC`. Navigate into a workspace's `profiles/<uuid>/` folder and pick `disk.img`, `home.img`, or a file under `checkpoints/`.
+1. Choose **Workspaces › Open ext4 file…**.
+2. An open panel titled **Open ext4 Disk Image** appears — "Choose an ext4 .img disk image (raw or partitioned)." — starting in `~/Library/Application Support/BromureAC`. Navigate into a machine's `profiles/<uuid>/` folder and pick `disk.img`, `home.img`, or a file under `checkpoints/`.
 3. The browser opens in a window titled **ext4 — «filename»**, showing the filesystem root.
 
-The toolbar's info line (bottom-left) summarizes the volume: its label, total size, whether the filesystem was found raw or at a partition offset, and its state — `clean`, `not cleanly unmounted`, or `journal needs recovery`. There is one window per image; reopening an image that is already open just focuses its window.
+The toolbar's info line summarizes the volume: its label, total size, whether the filesystem was found raw or at a partition offset, and its state — `clean`, `not cleanly unmounted`, or `journal needs recovery`. There is one window per image; reopening an image that is already open just focuses its window.
 
 ### Browsing, previewing, and extracting
 
@@ -49,29 +86,44 @@ The main view is a three-column table — **Name**, **Size**, and **Type** — w
 
 ### Editing an image
 
-Editing is deliberately behind a gate. Click **Enable Editing…** in the toolbar; a warning appears:
+Editing is deliberately behind a gate. Click **Enable Editing…** in the toolbar; the alert **Enable editing of this disk image?** warns:
 
 > Only edit an image whose workspace VM is stopped. Writing to a disk that a running VM has open will corrupt it.
 
-Confirm and the image reopens read-write, with an orange **Editing** pencil badge in the toolbar. A file's context menu then gains **Replace…**: pick a host file whose contents overwrite the selected file *in place*. The editor recomputes the inode's `metadata_csum` checksum, so the result stays consistent and needs no repair.
+Click **Enable Editing** and the image reopens read-write, with an orange **Editing** badge in the toolbar. A file's context menu then gains **Replace…**: pick a host file whose contents overwrite the selected file *in place*. The editor recomputes the inode's checksum, so the result stays consistent.
 
-> **Warning:** Replacement is **in-place only**. The new contents must fit the file's already-allocated blocks — a larger file is refused with **That file would need to grow** (growing, creating, and deleting files is not yet enabled). Inline-data files cannot be edited. Writes are refused while the journal needs recovery — run `fsck` first (below). And never edit an image that a running VM has attached.
+> **Warning:** Replacement is **in-place only**. The new contents must fit the file's already-allocated blocks — a larger file is refused with **That file would need to grow** (growing, creating, and deleting files is not enabled). Inline-data files cannot be edited. Writes are refused while the journal needs recovery — run fsck first (below). And never edit an image that a running VM has attached.
 
-### Running fsck
+## Checking and repairing a disk
 
-The toolbar's **Run fsck…** button runs `fsck.ext4` (`e2fsck`) against the open image to replay the journal and repair the filesystem. It confirms first — "Run fsck.ext4 on this image?", noting that the workspace VM must be stopped and that the tool can modify the image — then runs a forced auto-repair. For a raw image `fsck` runs on the file directly; for a partitioned disk the image is attached with `hdiutil` without mounting, the ext4 slice is checked, and the image is detached afterward. No elevated privileges are involved.
+Bromure checks and repairs ext4 images with its own built-in checker — there is nothing to install (macOS ships no `e2fsprogs`, and Bromure doesn't use it). You meet it in three places:
 
-Results appear in a report sheet with a plain-language summary — "Filesystem is clean.", "Filesystem errors were corrected.", or "Filesystem errors remain UNCORRECTED." — plus the full tool output; the image is then reopened.
+- **Automatically, at boot.** When a machine's boot stops on filesystem errors, its stage shows **DISK ERROR** — "The system disk failed its boot-time filesystem check, and the boot cannot continue." — with **Repair Disk** and **Reset System Disk…**. **Repair Disk** stops the VM, runs the checker on the system disk, and boots again; nothing is deleted. If the next boot fails again, reset is the way forward. See [Troubleshooting](17-troubleshooting.mdx#a-machines-boot-stops-on-a-disk-error).
+- **In the ext4 browser.** The toolbar's **Run fsck…** button.
+- **From the command line.** `bromure-cli vm fsck <workspace> [--repair] [--home]` — see [CLI, API & MCP](16-automation-cli.mdx#checking-a-disk-from-the-command-line).
 
-> **Note:** macOS ships no `e2fsprogs`. If the tool is missing, an alert reads **fsck.ext4 is not installed** with the fix `brew install e2fsprogs`. The app searches its own bundle first, then `$PATH`, then Homebrew's keg-only `e2fsprogs` locations.
+In the browser, **Run fsck…** asks **Check this image?** — "This replays the filesystem journal if it is dirty and verifies the metadata. The workspace VM must be stopped. It can modify the image." — with **Run fsck** and **Cancel**. The result appears in a sheet titled **fsck.ext4**, with a one-line summary above the full output:
 
-### When to reach for it
+| Summary | Meaning |
+|---|---|
+| "Filesystem is clean." | Nothing to do. |
+| "Filesystem repaired; it is now consistent." | The journal was replayed; the image is now exactly what the guest kernel last committed. |
+| "Filesystem has errors this checker cannot repair." | Damage beyond an unfinished journal. |
 
-The browser turns a stopped workspace's disk into something you can inspect and salvage from the host:
+The image is then reopened, so the browser shows the repaired state.
 
-- **Recover a file** from a workspace you would rather not boot — pull out an uncommitted change or a log from `home.img` with **Extract…**.
-- **Inspect a checkpoint** before you roll back, to confirm it holds what you expect. Pair this with **Restore home…** and **Reset to base…**, both covered under [checkpoints and rollback](06-sessions.mdx#checkpoints-and-rollback).
-- **Rescue a workspace that won't boot** — replace one bad config file in place, then run `fsck` if the write left the journal needing recovery. See [Troubleshooting](17-troubleshooting.mdx) for boot-failure diagnosis.
+What the checker does, and doesn't:
+
+- **Repair** replays the filesystem journal and clears the "needs recovery" flag. This is the whole story for nearly every broken Bromure disk: images become unclean when a VM is stopped mid-write or dies, not through bit rot.
+- **Verify** always checks the superblock and group-descriptor checksums, then walks the tree from the root, validating every reachable inode's checksum and extent tree. It reports what it finds but doesn't patch it.
+- For damage the checker can't repair, the honest fix is Linux's own `e2fsck` inside a VM. The guest already checks the home image on every boot, and Kubernetes nodes and registries fall back to a throwaway machine that runs `e2fsck` on their disks automatically. For a workspace's system disk, **Reset to base…** re-clones it and leaves the home untouched.
+
+### When to reach for these tools
+
+- **Undo damage to your home** — an agent deleted the wrong folder, or a dotfile change broke your shell: **Rewind home…** to the last good boot.
+- **Recover a file** from a machine you would rather not boot — pull out an uncommitted change or a log from `home.img` with **Extract…**.
+- **Inspect a checkpoint** before you rewind, to confirm it holds what you expect: open it from `checkpoints/home/` in the ext4 browser.
+- **Rescue a machine that won't boot** — let **Repair Disk** replay the journal; if a bad config file is the cause, replace it in place with the browser and run fsck. See [Troubleshooting](17-troubleshooting.mdx) for boot-failure diagnosis.
 
 ## Developer defaults
 
@@ -80,15 +132,18 @@ A few low-level knobs are read from the app's UserDefaults domain, `io.bromure.a
 | Key | Effect | Default |
 | --- | --- | --- |
 | `vm.homeImageGB` | Apparent (guest-visible) size, in GiB, of a **newly created** ext4 home image. The host file is sparse, so this costs nothing up front. Clamped to 8–1024. | `64` |
-| `vm.mtu` | MTU clamp for a workspace VM's primary NIC, written into the guest on each boot. The default of `1280` is VPN-safe (WireGuard, IKEv2, and corporate PMTU paths). | `1280` |
+| `vm.mtu` | MTU clamp for a machine VM's primary NIC, written into the guest on each boot. The default of `1280` is VPN-safe (WireGuard, IKEv2, and corporate PMTU paths). | `1280` |
 | `terminal.allowGraphics` | Re-enables in-terminal image rendering (kitty graphics protocol) from the guest. Off by default because it means the host decoding guest-supplied image bytes — and the same channel could draw fake UI over the terminal. Turn it on only if you want agents to render images inline and accept that risk. | `NO` |
+| `ui.terminalBell` | Lets a terminal's bell ring. Off by default: agents ring the bell at the end of every turn, and the sidebar's status already tells you. | `NO` |
 
-For example, to make future workspaces' home images appear as 128 GiB:
+For example, to make future machines' home images appear as 128 GiB:
 
 ```
 defaults write io.bromure.agentic-coding vm.homeImageGB -int 128
 ```
 
-> **Note:** `vm.homeImageGB` affects only home images created *after* the change; existing images keep their size. A home image can be grown later (an online truncate plus `resize2fs`) but not shrunk.
+> **Note:** `vm.homeImageGB` affects only home images created *after* the change; existing images keep their size. A home image can be grown later but not shrunk.
 
-> **Tip:** For genuinely throwaway work, `bromure-ac vm run --rm` boots a Docker-style disposable workspace whose disk is deleted when the VM stops — documented in [Automation & the CLI](16-automation-cli.mdx).
+> **Tip:** For genuinely throwaway work, `bromure-cli vm run --rm` boots a Docker-style disposable workspace whose disk is deleted when the VM stops — documented in [CLI, API & MCP](16-automation-cli.mdx).
+
+The full list of UserDefaults keys and environment variables is in the [Appendix](19-appendix.mdx).

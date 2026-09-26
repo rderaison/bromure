@@ -1,118 +1,133 @@
 ---
 title: "Quick Start"
-description: "Create your first workspace, run your first agent task in a sandboxed VM, inspect the trace, and suspend and resume the session — in about ten minutes."
+description: "From the onboarding wizard to a finished task: start a session, answer the agent's question, look at the files it changed, inspect the trace, then archive the session and bring it back."
 order: 3
 ---
 
 # Quick Start
 
-This chapter walks you through your first complete session with Bromure Agentic Coding: creating a workspace, choosing an agent and how it authenticates, sharing a project folder into the sandbox, running a first task, inspecting what the agent sent over the network, and closing the session so you can pick it up again later. Plan for about ten minutes.
+This chapter walks you through your first session with Bromure Agentic Coding: finishing the onboarding wizard, asking an agent to do something, answering its question, looking at what it changed, checking what it sent over the network, and putting the session away so you can pick it up later. Plan for about ten minutes, most of it spent on the first download.
 
-The walkthrough deliberately uses defaults everywhere it can. Every setting you touch here has a full reference later in the manual — links are provided along the way and collected in [Where to go next](#where-to-go-next).
+The walkthrough uses defaults wherever it can. Every screen you meet here has a full chapter later; links along the way point to them, and [Where to go next](#where-to-go-next) collects them.
 
 ## Before you begin
 
 You need:
 
-- Bromure Agentic Coding installed and launched at least once, with the base OS image ready — see [Installation](02-installation.mdx). (A Mac with Apple Silicon running macOS 14 or later is required.)
-- A way to authenticate the coding agent. For Claude Code — the default agent — that is either an Anthropic API key or a Claude subscription you can sign in to. Both paths are covered in step 4 below.
-- Optionally, a project folder on your Mac you want the agent to work on. A small git repository makes the best first test, but any folder works.
+- A Mac with Apple Silicon running macOS 14 or later, with Bromure Agentic Coding installed — see [Installation & First Run](02-installation.mdx).
+- A way for the agent to reach a model. For Claude Code, the default agent, that is either a Claude subscription you can sign in to or an Anthropic API key. Other agents work the same way with their own providers.
 
-One idea to hold on to before you start: the agent runs inside a disposable Ubuntu VM, and your real credentials never enter that VM. The VM only ever holds fake placeholder tokens; a host-side proxy swaps them for the real values at the moment a request leaves your Mac. This is the [wire boundary](18-glossary.mdx), and it is why the walkthrough asks you to paste an API key into the app rather than into the terminal.
+One idea to keep in mind: the agent runs inside an isolated Linux machine, and your real credentials never enter it. The machine only holds fake stand-ins; a proxy on your Mac swaps them for the real values as each request leaves. That is the [wire boundary](18-glossary.mdx), and it is why you sign in or paste keys in the app rather than inside the machine.
 
-## Create your first workspace
+## Step 1: Finish the onboarding wizard
 
-A workspace is the unit of isolation: one Ubuntu VM with its own system disk, its own persistent home folder, its own agents, credentials, and security policies. You can create as many as you like; this walkthrough creates one.
+The first time you open the app, the onboarding wizard walks you through six steps. [Installation & First Run](02-installation.mdx#first-run-the-onboarding-wizard) describes each one; for this walkthrough:
 
-1. Open the main window. The left sidebar is headed **WORKSPACES**; at its bottom sits a black circular **+** button (tooltip: **New workspace**). Click it.
+1. On **Welcome**, click **Get Started**. The **Install** step downloads and sets up the base image. Leave the window open until it moves on by itself.
+2. On **Credentials**, click **Scan This Mac** to see which of your existing credentials the app can bring in, or **Not Now** to skip. On **Choose**, tick what you want and click **Import** (or **Skip**).
+3. On **Models**, sign in to your provider or paste an API key. For a Claude subscription, choose the Anthropic sign-in, finish signing in in the browser page that opens, and wait for the card to read **Signed in to** Claude. Then click **Continue**.
 
-2. A settings editor opens in a window titled **New workspace**, pre-filled from your preferences template and named "Default workspace" (auto-numbered if that name is taken). The **General** pane is showing. Type a name of your own — for example `My First Project`. The name is the only required field; everything else in this walkthrough is optional polish. If you like, pick a **Color** — it tints the workspace's tile in the sidebar.
+   You can also skip this: an agent with nothing set up offers to sign in the first time it starts.
+4. On **Done**, click **Start Using Bromure**.
 
-Don't click **Create** yet — two panes are worth a visit first.
+The app creates your first machine, **Default workspace**, and opens the main window on the new-session screen.
 
-## Choose an agent and authentication
-
-3. Click **Agents** in the editor's category sidebar. The pane shows one card per supported agent — **Claude Code**, **Codex**, **Grok Build**, **Kimi Code**, and **Oh My Pi** — each with an enable switch. Claude Code is enabled and carries the orange **Primary** pill out of the box: the primary agent is the one that auto-launches in the session's first tab. Other enabled agents are installed and authenticated too, but you start them yourself from a new tab.
-
-<p align="center">
-  <img src="images/editor-agents.en.jpg" width="600" alt="The Agents pane of the workspace editor, showing the Claude Code card with its Primary pill, the four authentication modes, the Anthropic API key field, and the other agents' collapsed cards" />
-</p>
-
-   Inside the Claude Code card you see four authentication modes: **API token**, **Subscription (interactive login)** with a **Register…** link, **Bedrock (AWS)**, and **Local model** (grayed out with "— download a model in Local Models" until a local model is installed). Pick one of the first two:
-
-4. **If you have an Anthropic API key:** select **API token** and paste the key into the **Anthropic API key** field. The key is stored encrypted on the host; the VM receives only a structure-preserving fake, and the proxy substitutes the real key on requests to Anthropic — nowhere else. Leave the **Require approval to use** checkbox off for now; turning it on would make the app ask for your consent the first time each session uses the key (see [Credentials](08-credentials.mdx)).
-
-5. **If you have a Claude subscription:** select **Subscription (interactive login)** — the factory default — and click **Register…**. Bromure boots a temporary, throwaway VM with no access to your folders or credentials, runs the real Claude login inside it, and opens the provider's sign-in page in your Mac's default browser. Sign in there; you have a few minutes before the flow times out. On success the captured tokens are stored encrypted on the host, the throwaway VM is destroyed, and the app asks whether to share the registration with **Every workspace** or **Just this workspace**. Once registered, the card shows a green seal plus **Re-register…** and **Forget** controls. Your workspace VMs never perform OAuth themselves and never hold the real tokens — the host injects them on the wire and handles refresh.
-
-6. That is all the Agents pane needs for a first session. (Enabling **Codex**, **Grok Build**, **Kimi Code**, or **Oh My Pi** alongside works the same way — each card gets its own auth mode — but one agent is plenty today.)
-
-## Share a project folder
-
-7. Click **Folders** in the category sidebar. This pane lists host folders that will be mounted into the VM. As the caption says, each folder is mounted under its real name — for example `~/Documents` on your Mac appears as `~ubuntu/Documents` in the VM — and a workspace is capped at 8 folders. A brand-new workspace shows "No folders shared."
+## Step 2: Start a session
 
 <p align="center">
-  <img src="images/editor-folders.en.jpg" width="600" alt="The Folders pane of the workspace editor, empty, with the Add folder… button" />
+  <img src="images/new-session.en.jpg" width="700" alt="The new-session screen: a greeting, a composer reading Ask for anything — or just press Return to open Claude Code., the chips Agent (Claude Code), Machine (Payments API) and Where (Fresh folder), a blue Start button, machine shortcuts, and a RECENT row of folders." />
 </p>
 
-8. Click **Add folder…** and pick your project folder in the directory picker. It appears in the list with its full host path (remove it later with the minus button if you change your mind). Inside the VM it will be live at `/home/ubuntu/<basename>` — the same files, not a copy, so changes the agent makes are on your Mac instantly.
+The new-session screen greets you with a short line such as "What can I help you with?" and a composer. Under the composer, three chips say how the session will run:
 
-> **Note:** Sharing a folder is optional. Everything under the VM's `/home/ubuntu` is persistent per workspace, so you can also clone a repository inside the VM and keep the sandbox fully separated from your Mac's filesystem. Deleting a workspace never touches shared host folders.
+- **Agent** — which coding agent to use. Claude Code is selected; click the chip to choose another. An agent you haven't set up yet says "Sign in when it starts".
+- **Machine** — which machine it runs on. With one machine, it's **Default workspace**. The chip's help tells you whether the machine is running or "asleep, wakes up when you start".
+- **Where** — which folder it works in. **Fresh folder** is the default: a new folder of its own in the machine's home, named after your message and started as a git repository. You can also pick **A folder** (one that already exists in the machine, or a new path) or **A repository** to check out.
 
-9. Click **Create**. The editor closes and your workspace appears in the sidebar with the state label **Off**.
+Type what you want done in the composer — for example:
 
-## Start the session
+> Write a small Python script that prints the ten most common words in a text file, with a test.
 
-10. Click the workspace's row in the sidebar. The right-hand stage shows the workspace's dashboard: an **Off** pill under the name, cards for **CPU**, **Memory**, **vCPUs**, **Disk**, and **Uptime** (mostly dashes and zeros before the first launch — the disk is created on first start), a **CONFIGURATION** summary listing your agent and auth mode, the Guardrails and Prompt-injection scan states, and your shared folders. Click the **Start** button at the top right.
+Press Return, or click **Start**. (Option-Return adds a new line instead. Pressing Return with an empty composer just opens the agent without a first message.)
+
+A new session appears in the sidebar and on the stage. If the machine was off, it starts first ("Waking up…", then "Starting Claude Code…"); the first start of a machine takes longer than the next ones. When the agent is up, your message is delivered to it.
+
+> **Note:** If the agent has no way to reach its model yet, the chat shows a **Sign in to** card instead of starting, and the sidebar row reads "Sign in needed". Follow the card: the sign-in runs on your Mac, and the agent starts again when it's done. See [The Chat](06a-chat.mdx).
+
+## Step 3: Watch the agent work
 
 <p align="center">
-  <img src="images/workspaces.en.jpg" width="700" alt="The main window: the WORKSPACES sidebar with two workspaces and the + button, and the dashboard of a stopped workspace showing CPU, Memory, vCPUs, Disk and Uptime cards, a CONFIGURATION summary, and the Start button" />
+  <img src="images/sessions-home.en.jpg" width="700" alt="The main window with a working session: the sidebar lists sessions grouped by state, and the chat shows activity lines such as 1 tool call · 1 file read and Thought · 1 edit · 1 command, a Changed 1 file +4 −1 line, and the composer with a red Stop button." />
 </p>
 
-11. On first launch Bromure creates the workspace's private system disk as a copy-on-write clone of the shared base image — this is instant and costs almost no disk space — and boots the VM with 4 vCPUs and the RAM shown on the dashboard (sized to your Mac by default: 4, 6, or 8 GB). While the VM boots, an animated overlay with the workspace name and a progress bar covers the pane; it fades the moment the guest's first terminal comes up, typically within seconds. If no terminal appears within 30 seconds the overlay flips to a **DIVE FAILED** panel with **Keep Waiting** and **Reset Base Image…** buttons — see [Troubleshooting](17-troubleshooting.mdx) if that happens.
+The chat shows the agent's replies as text, and what it does in between as compact **activity lines** — for example "1 tool call · 1 file read" or "Thought · 1 edit · 1 command". Click an activity line to see the details (the commands it ran, the files it read, the edits it made); click again to hide them. Edits, commands, to-do lists, tables, and diagrams appear as cards.
 
-12. When the boot completes you are looking at a terminal on the stage, and the primary agent — Claude Code — is already running in it, ready for a prompt. You never run `claude login` inside the VM; authentication was handled at the wire boundary. In the sidebar, the workspace's status dot is now green, the state label reads Running, and its first tab (labeled with the foreground program, e.g. `claude`) is nested under the workspace row along with a Docker node. The window toolbar now shows a cluster of controls for this VM: its IP address as a click-to-copy pill, and buttons to browse files, reboot, inspect the trace, edit the workspace, pop the session out into its own window, and toggle the browser and repo-file panes.
+While the agent works:
 
-## Run your first task
+- The session sits under **Working** in the sidebar, with an orange status dot.
+- The composer's red **Stop** button (or Escape) interrupts the agent.
+- You can type your next message at any time; it is sent to the agent.
 
-13. Type a task at the Claude Code prompt, referencing the shared folder by its in-VM path. For example:
+When a turn changes files, the turn ends with a line such as **Changed 2 files +38 −0**. Click it to open the review window on exactly what that turn changed. See [Branches & Review](06c-branches.mdx).
 
-    ```
-    Read the code in ~/my-project and summarize what it does.
-    Then add a README.md with build instructions.
-    ```
+## Step 4: Answer the agent's question
 
-    Watch the status dot on the tab's icon in the sidebar: it pulses orange while the agent works, turns green when the agent is done, and turns red when the agent needs your input.
+Agents sometimes stop and ask you to choose. When that happens, the session moves to **Needs you** at the top of the sidebar (with a red dot), and the chat shows a question card:
 
-14. Because the shared folder is a live mount, the `README.md` the agent writes is immediately on your Mac — check it in Finder if you like. If your folder is a git repository, the repo file-explorer pane opens automatically when the active tab's working directory enters the repo, showing an IDE-style tree with git status and per-file diffs; you can also toggle it any time with ⌃⌘E. Press ⌘T for an additional plain shell tab alongside the agent — every tab is a window of the same in-VM `tmux` session.
+<p align="center">
+  <img src="images/session-question.en.jpg" width="700" alt="A session titled Fix double charge on checkout in the Needs you state: a blue question card headed The agent is asking, with three options and a Submit button." />
+</p>
 
-15. Anything else the agent does — `apt install`, `npm install`, writing throwaway files in the VM home — stays inside the sandbox. The system disk and home folder persist between sessions, and both can be reset independently later ([Workspaces](05-workspaces.mdx)).
+The card is headed **The agent is asking** (or "The agent is asking *n* questions — answer them all, then Submit" when there are several). Pick an option and click **Submit**. The card folds to a single grey line showing your answer, and the agent carries on.
 
-## Inspect the trace
+## Step 5: Look at the files
 
-16. Press ⇧⌘I (or click the **Inspect trace** toolbar button) to open the Trace Inspector. New workspaces record at the **AI request details** level: every network request the agent made is listed with host, status, and latency, and for known LLM hosts the full request and response bodies are captured too. Select one of the requests to Anthropic and the inspector renders it as a conversation — provider and model header with token counts, the system prompt, and the user, assistant, and tool messages as chat bubbles.
+The agent works inside the machine, not on your Mac. To see its files, use the **Files pane** on the right of the window. It opens by itself the first time a session's folder has changes; open or close it with the Files pane button in the session's toolbar or ⌃⌘E.
 
-17. Two things worth noticing on your first trace. First, the swap report: the fake API token the VM holds was exchanged for your real credential on the wire, exactly once per request, scoped to the provider's host. Second, everything captured stays on your Mac, encrypted at rest. Trace levels, retention caps, and leak warnings are covered in [Tracing](11-tracing.mdx).
+The pane lists the session's folder. From it you can:
 
-## Close and resume
+- Open a subfolder, or go up with the up-arrow button.
+- Drag a file to the Finder to copy it to your Mac, or drag files from the Finder into the pane to copy them into the machine.
+- Right-click a file for **Save to Downloads** or **Copy Path**.
 
-18. Close the session: hover the workspace row in the sidebar and click its **×** button (or press ⌘W on its last tab). New workspaces have their close action set to **Ask**, so a prompt appears — "Close “My First Project”?" — with the buttons **Run in the Background**, **Suspend**, **Shut Down**, and **Cancel**, and the explanation: "Run in the background keeps the VM running so you can reattach later. Suspend saves its state to disk. Shut down powers it off."
+To share files with the agent directly, drop them on the chat composer: each becomes an attachment chip, copied into the machine when you send. See [Machines](06f-machines.mdx) for the Files pane in full.
 
-19. Click **Suspend**. The VM's RAM is snapshotted to disk and the sidebar row's state label changes to **Suspended**. Nothing is lost — not the agent's conversation, not your shell history, not the tab layout.
+## Step 6: See what the agent sent
 
-20. Resume: click the workspace and press **Resume** on its dashboard (or use the row's **⋯** menu → **Resume**). The session restores near-instantly, exactly where you left it — the same terminals, with Claude Code mid-conversation.
+Everything the agent sent to the internet went through the proxy on your Mac. To see it, open the **machine menu** — the capsule with the machine's name in the session's toolbar — and choose **Inspect Trace**. The Trace Inspector opens on this machine's trace: model calls with their token counts, tool calls, commands, file reads and writes, and every host the agent contacted. You can also open it with **Window › Trace Inspector…** (⇧⌘I).
 
-21. If you always want the same behavior on close, open the row's **⋯** menu → **Edit…** and set **When closing the window** in the General pane to **Suspend** (or **Run in the background** / **Shut down**) so the prompt never appears. See [Settings — General](07-settings/general.mdx).
+For a summary of what the security engines did — blocked connections, brokered credentials, checked packages — choose **Window › Security Timeline…**. See [Tracing & Audit](11-tracing.mdx) and [Security Overview & Timeline](11a-security-timeline.mdx).
 
-> **Tip:** A suspended or shut-down workspace keeps its system disk and home folder. Destroying data is always an explicit act — **Reset disk**, **Erase home…**, or **Delete workspace** — and even deleting a workspace never touches the host folders you shared into it.
+## Step 7: Put the session away
+
+When the agent finishes its turn, the session moves to **Ready** (green dot). You can leave it there and come back to it, or put it away:
+
+- **Archive.** Right-click the session in the sidebar and choose **Archive** — or **End & Archive** while the agent is still running, which also stops it. The session moves into the **Archived** fold at the bottom of the session list. Its conversation stays readable.
+- **End session.** Choose **End session** from the same menu to stop the agent; the session moves to **Finished**. Pressing ⌘W with the session on stage does the same after asking **End “…”?** — "The agent stops. The conversation stays in its folder and can be resumed later." — with **End Session** and **Cancel**.
+
+Archiving or ending (from the menu or with ⌘W) shows a short notice at the bottom of the window — for example "Archived “Word counter”" — with an **Undo** button (⌘Z) for a few seconds.
+
+Sessions also change state on their own: when a machine is shut down or suspended, its sessions move to **Paused**, and finished sessions are archived automatically after three days.
+
+## Step 8: Bring it back
+
+A session doesn't need to be running to be read or continued. Click the paused, finished, or archived session in the sidebar:
+
+<p align="center">
+  <img src="images/session-rest.en.jpg" width="700" alt="A paused session titled Stream the nightly CSV export: the header has a Resume button, the conversation so far is shown, and a line at the end reads Paused. Your next message picks it up from here." />
+</p>
+
+The conversation is shown from a copy kept on your Mac, even with the machine off. A line at the end says how to continue — "Paused. Your next message picks it up from here." for a paused session, or "Archived. Your next message brings it back and carries on from here." for an archived one.
+
+To continue, type a message and send it. The app starts the machine if needed, reopens the agent's conversation where it left off, and delivers your message. An archived session returns to the main list. To reopen the agent without a message, click **Resume** in the session header, or press ⌘⏎ on a paused or finished session.
 
 ## Where to go next
 
-- [Concepts](04-concepts.mdx) — the mental model behind what you just did: workspaces, the VM lifecycle, the wire boundary, and how the pieces fit together.
-- [Workspaces](05-workspaces.mdx) — duplicating, resetting, and deleting workspaces; storage layers, checkpoints, and the preferences template every new workspace is forked from.
-- [Sessions](06-sessions.mdx) — tabs and git worktrees, the terminal Grid, the agentic browser pane, file transfer in and out of the VM, and every keyboard shortcut.
-- [Settings reference](07-settings/index.mdx) — every settings pane, one page each, including [Agents](07-settings/agents.mdx) and [Folders](07-settings/folders.mdx) from this walkthrough.
-- [Credentials](08-credentials.mdx) — the full credential catalog (git tokens, SSH keys, AWS, Kubernetes, container registries, databases, and more), approval prompts, and how the fake-to-real swap works in detail.
-- [Tracing](11-tracing.mdx) — trace levels, the Trace Inspector, and leak detection.
-- [Supply Chain](09-supply-chain.mdx) and [Prompt Injection](10-prompt-injection.mdx) — the protections you can layer onto a workspace before pointing an agent at untrusted code.
-- [Fusion](12-fusion.mdx) and [Local Models](13-local-models.mdx) — answering prompts with multiple models at once, and running models on your Mac instead of the cloud.
-- [Automation & CLI](16-automation-cli.mdx) — driving workspaces from scripts, the HTTP API, and the `bromure-cli mcp` server.
+- [Concepts & Architecture](04-concepts.mdx) — how sessions, machines, rooms, and branches relate, and what persists where.
+- [The Sessions Home](05-sessions-home.mdx) — every part of the main window, the ⌘K command palette, and session menus.
+- [Starting a Session](06-new-session.mdx) and [The Chat](06a-chat.mdx) — all the options for starting and talking to an agent.
+- [Rooms](06b-rooms.mdx) and [Branches & Review](06c-branches.mdx) — running several sessions on one piece of work, and trying things on a branch.
+- [Machines](06f-machines.mdx) — creating more machines, terminals, the Grid, and resetting or rewinding a machine.
+- [Settings Reference](07-settings/index.mdx) — every setting of a machine, starting with [Folders](07-settings/folders.mdx) to share a folder from your Mac and [Credentials](07-settings/credentials.mdx) to give the agent more keys.
+- [Models & Providers](13-models.mdx) — signing in to more providers and choosing each agent's model.
+- [Credentials & the Wire Boundary](08-credentials.mdx) — how your keys stay out of the machine.

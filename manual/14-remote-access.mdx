@@ -1,16 +1,16 @@
 ---
-title: "Remote Access & the Rich Client"
-description: "Reach a running Bromure Agentic Coding over SSH — from a terminal menu, the CLI, or a rich client that mirrors it 1:1, on your LAN by address or from anywhere through a bromure.io account — and expose VM services safely."
+title: "Remote Access & Clients"
+description: "Reach a running Bromure Agentic Coding over SSH — from a terminal menu, the CLI, or a rich client on a Mac, iPhone, iPad or Apple Vision Pro that mirrors its sessions, rooms and machines — and expose VM services safely."
 order: 14
 ---
 
-# Remote Access & the Rich Client
+# Remote Access & Clients
 
-A workspace VM lives on one Mac, but the person who wants to drive it is not always sitting at that Mac. Bromure Agentic Coding can be reached remotely, and every remote path rides a single, optional, disabled-by-default SSH front door. Turn it on and you get three ways in: a person can `ssh` in from any terminal and land in a menu; you can manage the front door itself from the command line; and a **rich client** — another Mac running the app, or **Bromure Remote** on iPhone, iPad, or Apple Vision Pro — can connect and mirror the whole instance (its grid, workspaces, terminals, and dashboards) in a live window.
+A machine (a workspace, in the settings editor) lives on one Mac, but the person who wants to drive it is not always sitting at that Mac. Bromure Agentic Coding can be reached remotely, and every remote path rides a single, optional, disabled-by-default SSH front door. Turn it on and you get three ways in: a person can `ssh` in from any terminal and land in a menu; you can manage the front door itself from the command line; and a **rich client** — another Mac running the app, or **Bromure Remote** on iPhone, iPad, or Apple Vision Pro — can connect and mirror the whole instance — its sessions, rooms and Switchboard, machines, terminals and boards — in a live window.
 
 The rich client reaches a server two ways. On the same network you add it **directly by address**. From anywhere else you **sign in to a bromure.io account** and pick the server from a directory: the two devices are introduced by bromure.io and then talk **peer-to-peer**, with no port-forwarding, no VPN, and no address to remember — and once you're signed in, your own devices authorize each other so the connection is **passwordless** with no manual key setup.
 
-This chapter covers enabling remote access on the host, each of the entry points, how the rich client mirrors a remote 1:1 (by address and via bromure.io), reaching services inside remote VMs, exposing a dev server to the internet, and the security model that keeps all of it safe. Fleet-scale enrollment and cloud telemetry are a different system entirely — see [Enterprise](15-enterprise.mdx). The complete command reference lives in [Automation & the CLI](16-automation-cli.mdx).
+This chapter covers enabling remote access on the host, each of the entry points, how the rich client mirrors a remote (by address and via bromure.io), editing a remote's Preferences, the iPhone, iPad and Vision Pro clients, reaching services inside remote VMs, exposing a dev server to the internet, and the security model that keeps all of it safe. Fleet-scale enrollment and cloud telemetry are a different system entirely — see [Enterprise](15-enterprise.mdx). The complete command reference lives in [CLI, API & MCP](16-automation-cli.mdx).
 
 ## The three ways in
 
@@ -20,7 +20,7 @@ Everything below depends on the SSH front door being enabled (it is off by defau
 |---|---|---|
 | **Plain SSH** | A person at any terminal (`ssh -p 2222 you@mac`) | The [remote menu](#signing-in-over-plain-ssh) — a curses-style TUI. A raw shell is never reachable. |
 | **The `bromure-cli remote` CLI** | You, on the host itself | Manage the front door: enable/disable, keys, status. See [Enabling remote access on the host](#enabling-remote-access-on-the-host). |
-| **The rich client** | Another Mac running the app, or Bromure Remote on iOS / iPadOS / visionOS | A live 1:1 [mirror window](#mirroring-a-remote-with-the-rich-client) of the remote instance, with bidirectional edits — reached [by address](#by-address-same-network) on a LAN or [through a bromure.io account](#through-a-bromureio-account-from-anywhere) from anywhere. |
+| **The rich client** | Another Mac running the app, or Bromure Remote on iOS / iPadOS / visionOS | A live [mirror](#mirroring-a-remote-with-the-rich-client) of the remote instance, with bidirectional edits — reached [by address](#by-address-same-network) on a LAN or [through a bromure.io account](#through-a-bromureio-account-from-anywhere) from anywhere. |
 
 The server is *embedded* — it is Apple's swift-nio-ssh library built into the app, not macOS's own `sshd`. That distinction matters: because the app runs its own server, it can verify your macOS account password through OpenDirectory without you ever enabling **Remote Login** in System Settings and without administrator rights. It listens only for the exact macOS user who launched `bromure-cli`, and it forces every interactive login into the remote menu. The only machine-facing exceptions are four whitelisted commands the rich client uses (`bromure-fatclient/1 control`, `forward <ip> <port>`, `forward-udp <ip>`, and `browser-mcp <vm>`); anything else a human types behaves like a login and drops into the menu.
 
@@ -77,32 +77,30 @@ Password attempts are throttled per source IP by a token bucket: five attempts a
 
 Any terminal can reach the host with `ssh -p 2222 <user>@<mac>`. Instead of a shell, the connection lands in the **remote menu** — a curses-style TUI (internally `bromure-cli __remote-menu`) forced onto every human login. A raw shell is never reachable through it.
 
-The menu mirrors the app: a unified **Workspaces** list with live state glyphs (● running, ◌ booting, ⏸ suspended, ○ off), plus **Models** and **Trace** sections. From it you can:
+The menu predates the sessions-first redesign and is organized around machines: a **Workspaces** list with live state glyphs (● running, ◌ booting, ⏸ suspended, ○ off), plus **Models** (the installed models and the on-device catalog) and **Trace** (summaries, host names, leaks) sections. From it you can:
 
-- **Create a workspace** with a single-screen form, with a **Full settings…** door into all fourteen configuration panes (General, Agents, Local Models, Fusion, Folders, Credentials, Environment, MCP, Tracing, Guardrails, Supply Chain, Prompt Injection, Appearance, Resources).
+- **Create a workspace** with a single-screen form, with a **Full settings…** door into per-pane settings forms.
 - **Start, suspend, kill, reboot, or delete** any workspace.
-- **Edit every setting.** Secrets show as `•••• (set)`; leaving a secret blank keeps the stored value.
-- **Manage worktrees** — create, merge, attach a terminal, or discard — with the same nesting as the GUI.
+- **Edit settings.** Secrets show as `•••• (set)`; leaving a secret blank keeps the stored value.
+- **Manage worktrees** — create, merge, attach a terminal, or discard.
 - **Generate SSH keys**, toggle Fusion and model routing, and browse trace summaries.
 - **Attach** to any tmux tab or a running Docker container.
 
+> **Note:** The menu's settings forms can't edit the [Models board](13-models.mdx). Their **Models** form is read-only: it lists the server's providers (API key or subscription) and says whether the workspace overrides the global settings. Choose providers and models from a Mac, in Preferences or in a mirror's remote Preferences.
+
 Navigate with the arrow keys, Enter to select, and `q` or Esc to go back; **Exit (disconnect)** ends the session. Selecting **Attach** hands the terminal to the guest's tmux; `Ctrl-b d` detaches back to the menu. While you are attached, an overlay keychord (default `Ctrl-]`) pops a host-side controller — switch tabs, open a new tab, manage worktrees, toggle Fusion or routing, edit settings, reboot, suspend, or disconnect — without the keystroke ever reaching the guest. Attaching to a container prompts for the shell (Enter = `sh`).
 
-> **Note:** The menu needs a real terminal. Connecting without a TTY prints a hint to reconnect with `ssh -t`. Starting a cold workspace waits up to about 20 seconds for the guest's tmux session before attaching. If a workspace uses **Subscription** auth, the menu reminds you to run the tool's login (for example `claude login`) inside the VM after it boots.
+> **Note:** The menu needs a real terminal. Connecting without a TTY prints a hint to reconnect with `ssh -t`. Starting a cold workspace waits up to about 20 seconds for the guest's tmux session before attaching.
 
 The overlay chord is configurable on the *host* Mac (the machine being connected to) via the file `~/Library/Application Support/BromureAC/remote/overlay-key` — accepted forms are `C-]`, `^]`, `0x1d`, or `29` — or the `BROMURE_OVERLAY_KEY` environment variable.
 
 ## Mirroring a remote with the rich client
 
-The rich client turns this Mac's copy of Bromure Agentic Coding into a live mirror of a remote one. You get a full window that renders the remote using the exact same sidebar, grid, and terminal views you already know — the same layout shown below for a local instance — but titled **Remote — `<name>`**, and every edit you make runs on the remote and echoes back.
-
-<p align="center">
-  <img src="images/workspaces.en.jpg" width="700" alt="The Bromure Agentic Coding workspace browser: a WORKSPACES sidebar with Grid and AUTOMATIONS sections, and a detail pane showing CPU, Memory, vCPUs, Disk, and Uptime cards above a CONFIGURATION summary. A rich-client mirror window renders a remote instance using this same layout." />
-</p>
+The rich client turns this Mac's copy of Bromure Agentic Coding — or **Bromure Remote** on iPhone, iPad or Apple Vision Pro — into a live mirror of a remote one. On a Mac you get a full window titled **Remote — `<name>`** that looks and works like the local main window: the sessions home, rooms and the Switchboard, the machines, the task and automation boards. Everything you do runs on the remote and echoes back.
 
 ### Connecting
 
-Open **Workspaces → Connect to Remote Bromure…** (⇧⌘K). The window sums up the choice: *"Mirror another Mac running Bromure — its grid, workspaces, tabs and automations. Sign in to reach your servers from anywhere, or add one directly by address on your LAN."* Both paths land in the same [mirror window](#the-mirror-window); they differ only in how the two Macs find each other and authorize.
+Open **Workspaces › Connect to Remote Bromure…** (⇧⌘K). The window sums up the choice: *"Mirror another Mac running Bromure — its grid, workspaces, tabs and automations. Sign in to reach your servers from anywhere, or add one directly by address on your LAN."* Both paths land in the same [mirror window](#the-mirror-window); they differ only in how the two devices find each other and authorize.
 
 > **Note:** The SSH handshake adapts to the link: connect and handshake budgets scale with the measured round-trip time, so a high-latency link (hotel Wi-Fi, cellular, a continent away) connects slowly instead of timing out.
 
@@ -113,17 +111,17 @@ Use this on a LAN where you know the Mac's address and don't need a bromure.io a
 1. **On the remote Mac**, enable remote access (the **Remote Access** window or `bromure-cli remote enable`).
 2. **On this Mac**, click **+**, enter a **Name** (for example, `rack mini`), **Address**, **Port** (default `2222`), and **Remote user**, then click **Connect**. Saved rows show `user@address:port` and the last-connected time.
 3. On **first contact**, a sheet shows the remote's SSH host-key fingerprint. Verify it against the remote's **Remote Access** window, then click **Trust & Continue**. The pin is remembered for this endpoint; later connections are silent unless the key changes, in which case the button turns red and reads **Trust New Key & Continue** — a possible man-in-the-middle.
-4. The client tries public-key auth with this Mac's dedicated key. If this Mac isn't authorized yet, it falls back to the remote user's macOS **login password** (button: **Sign In**); a successful password login enrolls this Mac's key on the remote over the tunnel, so every later connection is passwordless. To pre-authorize without ever typing a password, click **Show this Mac's key** and run `bromure-cli remote key add '<this Mac's key>'` on the remote.
+4. The client tries public-key auth with this device's dedicated key. If it isn't authorized yet, it falls back to the remote user's macOS **login password** (button: **Sign In**); a successful password login enrolls this device's key on the remote over the tunnel, so every later connection is passwordless. To pre-authorize without ever typing a password, click **Show this Mac's key** and run `bromure-cli remote key add '<this Mac's key>'` on the remote.
 
-After the first connect, double-click a saved server for one-click reconnects; each row's context menu offers **Connect**, **Edit…**, and **Remove**.
+After the first connect, double-click a saved server for one-click reconnects; each row's context menu offers **Connect**, **Edit…**, and **Remove**. Bromure Remote on iPhone and iPad offers the same flow under **Add a server by address**.
 
 #### Through a bromure.io account (from anywhere)
 
-Signing in to bromure.io lets a client reach your servers across networks — a coffee-shop Wi-Fi to a Mac at home — with **no port-forwarding, no VPN, and no address to remember**. bromure.io only introduces the two Macs and relays bytes when a direct path is impossible; the SSH session itself stays end-to-end encrypted between the two Macs.
+Signing in to bromure.io lets a client reach your servers across networks — a coffee-shop Wi-Fi to a Mac at home — with **no port-forwarding, no VPN, and no address to remember**. bromure.io only introduces the two devices and relays bytes when a direct path is impossible; the SSH session itself stays end-to-end encrypted between them.
 
-1. **Sign in.** Choose the app-name menu's **Log in to bromure.io…** and sign in through your browser (or expand the code section and enter a six-word enrollment code plus a **Device Name**). Every device you enroll shares the same account.
+1. **Sign in.** On a Mac, choose the app-name menu's **Log in to bromure.io…** and sign in through your browser (or expand the code section and enter a six-word enrollment code plus a **Device Name**). In Bromure Remote, sign in from its start screen. Every device you enroll shares the same account.
 2. **On the remote Mac**, enable **Remote Access**. A server appears in the directory only while its front door is on and it is heartbeating bromure.io.
-3. **On this Mac**, open **Connect to Remote Bromure…**. Your servers are listed under **My servers · bromure.io** with a live online dot and last-seen time. Double-click one (or select it and click **Connect**). The status reads *"Connecting to `<name>` via bromure.io…"* while a peer-to-peer path is established — direct, router-port-mapped, or relayed — then the mirror window opens.
+3. **On the client**, open **Connect to Remote Bromure…**. Your servers are listed under **My servers · bromure.io** with a live online dot and last-seen time. Double-click one (or select it and click **Connect**). The status reads *"Connecting to `<name>` via bromure.io…"* while a peer-to-peer path is established — direct, router-port-mapped, or relayed — then the mirror opens.
 
 There is **no address to type, no host-key sheet, and no password** in this path: your own devices trust each other through your account (below), and the host key is pinned automatically.
 
@@ -131,45 +129,88 @@ There is **no address to type, no host-key sheet, and no password** in this path
 
 Once you are signed in, every device you enroll shares its SSH identity through your account, so any of your devices reaches any of your servers with **no password and no manual `bromure-cli remote key add`**:
 
-- Each device **publishes its SSH public key** to bromure.io on launch. Each of your servers (Remote Access on) **pulls your devices' keys** and installs them into its `authorized_keys` within seconds — over the same device channel, so a device you enrolled a moment ago is authorized almost immediately, no key copied by hand.
+- Each device **publishes its SSH public key** to bromure.io on launch. Each of your servers (Remote Access on) **pulls your devices' keys** and installs them into its `authorized_keys` within seconds, so a device you enrolled a moment ago is authorized almost immediately.
 - A server also publishes the **macOS login it runs as**, so the client dials it as the correct user automatically (the very field the by-address path asks you to fill in).
 - Keys are **scoped to your own devices** — never another user's, even inside the same organization.
 - **Signing out** on a device retires it: its key is dropped from your servers and it disappears from the directory, so signing back in never leaves a stale duplicate. A device **unused for 90 days** also stops being authorized until it next checks in. And from the bromure.io **web console** you can **log out** any of your devices on demand.
 
-> **Note:** The rich client generates its own dedicated ed25519 keypair (comment `bromure-ac-fatclient`) the first time you use it, stored under the remote-client directory — this is the key published to your account. For a **by-address** connect the host-key pin belongs to the endpoint (`address:port`), not the user, so editing a saved server's address or port drops the pin and re-triggers the fingerprint sheet; a **bromure.io** connect pins the peer's key through the account instead. The macOS app and **Bromure Remote** (the iOS / iPadOS / visionOS client) both use this account model — the mobile and spatial apps are client-only mirrors, reached exactly the same way (sign in, pick a server, connect). On Apple Vision Pro the client is native to the space: terminals pin as their own windows around you and the grid becomes a stage. The by-address path is macOS-only.
+> **Note:** The rich client generates its own dedicated ed25519 keypair (comment `bromure-ac-fatclient`) the first time you use it — this is the key published to your account. For a **by-address** connect the host-key pin belongs to the endpoint (`address:port`), not the user, so editing a saved server's address or port drops the pin and re-triggers the fingerprint sheet; a **bromure.io** connect pins the peer's key through the account instead.
 
 ### The mirror window
 
-The mirror window opens automatically after a successful connect. Its sidebar collapses to the same icon rail as the local window. Click a workspace row to mount its live terminal (if running) or its VM dashboard with **Start** / **Resume** (if off or suspended); the stage follows state transitions live. Tab clicks switch optimistically and are confirmed by the next state poll. Terminals render with the workspace's own [appearance](../07-settings/appearance.mdx) — its fonts and colors mirror from the host, and appearance edits restyle live surfaces without a reconnect.
+The mirror window opens automatically after a successful connect. It is the [sessions home](05-sessions-home.mdx) of the remote Mac: the same sidebar (sessions, rooms, the Switchboard, tasks, automations, **Virtual Machines** with any Kubernetes clusters and registries), the same stage and the same header. Start a session with **New session** (⌘N), chat with it, answer its questions, open a [room](06b-rooms.mdx) with its grid of chats, or talk to the remote's [Switchboard](06e-switchboard.mdx) — it all happens on the remote, and the ⌘K palette works too.
 
-Its titlebar toolbar mirrors the local per-VM pill, left to right: the network-tunnel toggle (remote windows only), the IP pill, the Fusion bolt, **Browse files** (folder), **Reboot the VM**, **Edit workspace** (gearshape), **Pop out to its own window**, **Show or hide the agentic browser (⌃⌘B)** (globe), and **Show or hide repo files (⌃⌘E)**. The Docker dashboard opens from the sidebar, exactly as it does locally.
+The header has the same controls as the local window: the **Linux** pill for a session's terminal, the **machine menu** named after the machine (**Settings…**, **Machine Details**, **Copy IP Address**, **Inspect Trace**, **Pop Out to Its Own Window**, **Reboot**), the Fusion bolt, **Show or hide the agentic browser (⌃⌘B)** and **Show or hide the Files pane (⌃⌘E)**. A mirror window adds one control of its own, the network-tunnel toggle (see [The system-wide network tunnel](#the-system-wide-network-tunnel)). Terminals render with the machine's own [appearance](07-settings/appearance.mdx).
 
-A few affordances behave specially over the mirror:
+A few things behave specially over the mirror:
 
-- **Edit workspace** opens the same profile editor as local, but backed by a secrets-blanked read and a secret-preserving save (see [Secrets stay on the host](#secrets-stay-on-the-host)). **Generate new SSH key** works and shows you the new public key.
-- **Browse files** opens a Finder-like per-VM window titled **Files — `<workspace>` (`<host>`)** over the guest filesystem — Home plus up to eight shared folders — with drag-in and drag-out transfer over the tunnel.
-- **Reboot the VM** asks **Soft** vs **Hard** locally, then sends the verb.
-- **Pop out** opens an extra live terminal window that auto-closes if the workspace stops.
+- **Settings…** opens the same settings editor as local, backed by a secrets-blanked read and a secret-preserving save (see [Secrets stay on the host](#secrets-stay-on-the-host)). Its **Models** pane edits that remote machine's override of the *remote* Mac's model settings. **Generate new SSH key** works and shows you the new public key.
+- **The Files pane** (⌃⌘E) browses the machine's files over the tunnel. It replaces the separate file-browser window of earlier releases. See [Machines](06f-machines.mdx).
+- **Reboot** asks **Soft** vs **Hard** locally, then sends the verb.
+- **Pop Out to Its Own Window** opens an extra live terminal window that closes itself if the machine stops.
 
-Under the hood, the mirror polls the remote's `/state` snapshot every 0.75 seconds over an SSH-tunnelled control-socket bridge, and renders it through the same views as a local window. Short control calls multiplex over one SSH ControlMaster connection per host; interactive terminal attaches deliberately use their own dedicated SSH connections, because a multiplexed channel buffers the spontaneous output (tmux repaints) that a terminal needs immediately. Over a **bromure.io** connection the same bridge and terminal streams ride the peer-to-peer SSH path (reached through a local loopback shim), and the mirror behaves identically.
+If the remote runs an older Bromure without the sessions API, the mirror falls back to the older machine-first layout.
 
-### What mirrors, and what works remotely
+### Menus act on the mirror in front
 
-The mirror is comprehensive. It renders every workspace with its live run state, all tabs and worktrees (fully nested), the grid layout, automations, VM dashboards for off and suspended workspaces, the Docker dashboard, vitals (CPU, memory, load, disk, uptime, IP, ports), the [Security Timeline](11-tracing.mdx#the-security-timeline-window) (the host ships its engines' recent decisions with the state stream), and live interactive terminals. [Local Models](13-local-models.mdx) settings are shown from the server's state and edits route to the server — model downloads and the engine run on the host, never on the client. Subscription sign-ins work end to end from the client: a **Register…** flow runs on the host, but the provider's sign-in page (or device-code URL) opens in *your* browser, and for providers that never surface a URL the client shows the login VM's terminal so you can finish interactively. Edits are bidirectional and converge on every connected client at the next poll: start/stop/suspend/reboot, tab operations, grid edits (whole-layout, last-writer-wins), automation edits, the Fusion toggle, Docker actions, settings saves, and file transfers.
+When a mirror window is the key window, these menu items act on the remote Mac instead of this one:
 
-A few operations are **not** available from the rich client in this version:
+| Item | Effect on the mirrored Mac |
+|---|---|
+| **New Session…** (⌘N) | Opens the mirror's new-session screen. |
+| **Workspaces › New Room…** | Creates the room on the remote. |
+| **Next Room** (⌃⌘R) | Cycles through the remote's rooms (archived rooms are skipped). |
+| **Workspaces › Infrastructure › Create Kubernetes Cluster…** / **Create Registry…** | Opens the creation sheet in the mirror, so the [cluster or registry](13a-kubernetes.mdx) is built on the remote. |
+| **Preferences…** (⌘,) | Opens Preferences targeting the remote (below). |
 
-- **Prompt-driven worktree operations** — creating a new worktree, merging, resolving a conflict, or seeding an automation — are not remoted in v1. Do those on the host's own GUI or through the [remote menu](#signing-in-over-plain-ssh) (which *does* support create, merge, and resolve). The mirror still displays every worktree, and **remove** and **attach terminal** work remotely.
-- **Grid-layout edits** need a GUI window open on the remote. A fully headless remote (app running, no unified window) mirrors everything else but cannot accept a layout change.
-- **Host-side-only affordances** — importing an SSH key from a file, and subscription registration — are hidden in the remote settings editor.
+### Remote Preferences
+
+Press ⌘, with a mirror window in front and Preferences opens on **that** Mac's defaults, titled **Preferences — `<host>`**. Whenever a mirror window is open, a **Settings for:** picker at the top of Preferences switches between **This Mac** and each connected remote; each target gets its own editor, so drafts never cross machines. While the remote's settings load the window reads "Loading preferences from `<host>`…"; if that fails it shows **Couldn't load the remote preferences** with **Retry**.
+
+Everything is round-tripped through the remote: secrets arrive blanked and are kept unless you type a new one. The **Models** pane edits the remote's global model settings — API keys are shown redacted — and changes are saved when you click **Save**, unlike local Preferences, where the Models board saves as you edit (see [Models & Providers](13-models.mdx)). This Mac's own app-wide settings — the **Automation** pane and the **Workspace subnet** and **Remote transport** sections of Resources — are not shown for a remote, nor in a remote machine's editor.
+
+### Signing in to providers remotely
+
+Subscription sign-ins work end to end from the client. **Sign in with *provider*** runs the capture on the remote, but the provider's sign-in page (or device-code URL) opens in *your* browser; for a provider that never shows a URL, the client shows the sign-in VM's terminal so you can finish interactively. A sign-in started from a remote machine's settings asks the scope question — **Every workspace** or **Just this workspace** — on your screen; if nobody answers, it stays with **Just this workspace**. A sign-in started from remote Preferences is always shared by every machine on the remote. **Log out…** works remotely too.
+
+### Branches and review remotely
+
+**New Branch…**, **Review Changes** and **Merge into *branch*** work from the mirror for a session with a folder of its own, exactly as on the remote's own screen (see [Branches & Review](06c-branches.mdx)). In Bromure Remote, a session's menu offers **New worktree…**.
+
+### Asking a session on the mirrored Mac
+
+While this Mac mirrors a remote, a session here can [ask a session on the remote](06d-delegation.mdx) by its `@nickname`: remote sessions appear in the composer's **@** list and to the agents with their host's name, and files attached to a request travel through the tunnel into the peer's inbox. Answers, steering and closing all route back the same way. The reverse direction — the remote's agents asking a session on this Mac — is not available, because the remote has no channel back to the client.
+
+### What mirrors
+
+The mirror shows every machine with its live run state, sessions and rooms, tabs and branches, the Grid, automations, the coding-task board, machine details and vitals, the Docker dashboard, Kubernetes clusters and registries, live interactive terminals, and the remote's security events, which appear in the [Security Timeline](11a-security-timeline.mdx) next to this Mac's — its machine filter offers **All machines**, **This Mac** and each mirrored host. On-device models and their downloads run on the remote, never on the client. Edits converge on every connected client: starting, stopping and rebooting machines, session and room operations, tab operations, Grid edits (whole layout, last writer wins), automation edits, the Fusion toggle, Docker actions, settings saves and file transfers.
+
+The mirror follows the remote through a push channel (`GET /state/subscribe`) over an SSH-tunnelled bridge to the remote's control socket; while the push channel is up the client only re-reads the full state every 5 seconds as a heartbeat, and falls back to reading it every 0.75 seconds if the channel drops. Short control calls multiplex over one SSH connection per host; interactive terminal attaches use their own dedicated SSH connections, because a multiplexed channel would buffer the immediate output a terminal needs. Over a **bromure.io** connection the same bridge and terminal streams ride the peer-to-peer path, and the mirror behaves identically.
+
+Chats are sparing with the link too. The first time you open a remote session's chat, it loads only the latest ~1.5 MB of the conversation; scrolling up to **Load earlier conversation** fetches older parts. A chat you open again — clicking back to a session, or a room shown again — starts from the history already downloaded and fetches only the new messages.
+
+A few operations are **not** available from the rich client:
+
+- **Grid-layout edits** need a GUI window open on the remote. A fully headless remote (app running, no main window) mirrors everything else but cannot accept a layout change.
+- **Importing an SSH key from a file** is hidden in remote settings editors.
+
+### Bromure Remote on iPhone, iPad and Apple Vision Pro
+
+Bromure Remote is a client-only mirror, reached exactly the same way (sign in and pick a server, or add one by address). It is sessions-first like the Mac:
+
+- **iPhone** — a **Sessions** list with a count of sessions that need you, a new-session screen ("What can I help you with?"), and a screen per session: its chat, a **Linux** button for its terminal, and a menu with **Resume**, **Rename…**, **New worktree…**, the machine's settings, **Archive** (or **End & Archive**), **End session** and **Delete session**. A room opens as a tab per session, swiping between them, with the room's Switchboard.
+- **iPad** — a persistent sidebar with sessions, rooms and machines; a room shows its grid of chats like the Mac.
+- **Apple Vision Pro** — the iPad layout, plus spatial windows: pin any terminal as its own window anywhere in the room, open the Grid as a dedicated stage window, or turn the whole grid into floating windows with **Pin All as Windows**.
+
+In a room, one composer at the bottom has a **To** picker — the room's Switchboard or any session in it — and an attach menu (**Photo Library**, **Choose Files**, **Paste Image**); attachments are uploaded into the target's machine when you send. On iPhone and iPad, a session that needs your input can reach you as a push notification while the app is in the background; tapping it opens that session. The Models board isn't available on these devices; change models from a Mac.
 
 ### Pending decision prompts
 
-Some actions raise a decision on the remote — a home-storage upgrade, a base-image drift reset, a compromised-VM wipe, a close-action question, or a **credential-exfiltration alert** (the compromise detector pausing a VM that tried to leak a credential). These surface in the `/state` snapshot as pending prompts and appear as local alerts in *your* mirror window; your answer rides back over the tunnel. If a prompt goes unanswered, it times out to the safe choice — for an exfiltration alert, shutting the paused VM down. A pending prompt never blocks the host's control plane: the rest of the mirror (and every other workspace) stays live while the alert is up. The MITM consent prompts that a running agent can trigger (credential use, supply-chain pass-through, guardrail writes, prompt injection) are handled by a separate, guest-unforgeable path documented under [Remote consent handling](15-enterprise.mdx#remote-consent-handling).
+Some actions raise a decision on the remote — a home-storage upgrade, a base-image drift reset, a compromised-VM wipe, a close-action question, a provider sign-in's scope question, or a **credential-exfiltration alert** (the compromise detector pausing a VM that tried to leak a credential). These appear as alerts in *your* mirror window, and your answer rides back over the tunnel. If a prompt goes unanswered it times out to the safe choice. A pending prompt never blocks the remote's control plane: the rest of the mirror stays live while the alert is up. The consent prompts a running agent can trigger (credential use, supply-chain pass-through, guardrail writes, prompt injection) are handled by a separate, guest-unforgeable path documented under [Remote consent handling](15-enterprise.mdx#remote-consent-handling).
 
 ### Secrets stay on the host
 
-Secrets never cross the link. When the rich client reads a remote profile to populate the editor, every secret field arrives **blanked**. On save, a blank field means "keep the stored value" and a typed one replaces it. API keys, tokens, and MCP environment secrets stay on the remote Mac. The rich client authenticates by SSH key alone once paired — there are no password prompts during mirroring.
+Secrets never cross the link. When the rich client reads a remote machine's settings or the remote's Preferences, every secret field arrives **blanked** (model-provider API keys arrive as a redacted stand-in). On save, a blank or redacted field means "keep the stored value" and a typed one replaces it. API keys, tokens, subscription sign-ins and MCP environment secrets stay on the remote Mac. The rich client authenticates by SSH key alone once paired — there are no password prompts during mirroring.
 
 ## Reaching services on the remote's VMs
 
@@ -177,9 +218,9 @@ A remote workspace's dev server lives at a private address like `http://192.168.
 
 ### The browser pane (automatic, PAC-scoped)
 
-The mirror window's collapsible right-side browser pane (the globe toolbar button, or ⌃⌘B) is a **local** Chromium VM whose page traffic to the remote workspace subnet is tunnelled over SSH. A generated [PAC](18-glossary.mdx) (proxy auto-config) script routes only the remote subnet through a per-host SOCKS forwarder and everything else DIRECT, and destinations are resolved on the remote side — so navigating to a remote dev server's literal `http://192.168.64.x:port` just works. The remote agent's own browser-control MCP stream is relayed to this pane, so the remote coding agent drives the browser you are looking at.
+The mirror window's collapsible browser pane (the globe button in the header, or ⌃⌘B) is a **local** Chromium VM whose page traffic to the remote workspace subnet is tunnelled over SSH. A generated [PAC](18-glossary.mdx) (proxy auto-config) script routes only the remote subnet through a per-host SOCKS forwarder and everything else DIRECT, and destinations are resolved on the remote side — so navigating to a remote dev server's literal `http://192.168.64.x:port` just works. The remote agent's own browser-control MCP stream is relayed to this pane, so the remote coding agent drives the browser you are looking at.
 
-Select a running remote workspace and press ⌃⌘B. The pane does nothing until the first `/state` snapshot has delivered the remote's subnet and the SOCKS forwarder is up (a log line notes "tunnel not ready" until then). Its local browser VM is pinned to subnet `192.168.127.0/24` (gateway `192.168.127.1`) so it can never collide with a workspace subnet. Persistent browser profiles live on this Mac, keyed by the remote workspace ID.
+Select a session or machine on a running remote machine and press ⌃⌘B. The pane does nothing until the first state update has delivered the remote's subnet and the SOCKS forwarder is up (a log line notes "tunnel not ready" until then). Its local browser VM is pinned to subnet `192.168.127.0/24` (gateway `192.168.127.1`) so it can never collide with a workspace subnet. Persistent browser profiles live on this Mac, keyed by the remote machine's ID.
 
 > **Note:** The browser pane requires this Mac to be Apple Silicon with the browser base image installed locally. The SOCKS forwarder binds `0.0.0.0` (so the browser VM can reach it at the vmnet gateway) but accepts connections only from loopback and the pinned `192.168.127.x` browser subnet — it is never an open relay.
 
@@ -193,7 +234,7 @@ For fixed forwards there is hidden CLI plumbing: `bromure-cli __forward <hostID>
 
 ### The system-wide network tunnel
 
-When you want *any* local app — not just the browser pane — to reach remote VMs at their literal addresses, enable the per-host tunnel with the mirror toolbar's network toggle (the triangle-path icon, first in the toolbar). Its tooltip reads **Enable direct network access to the remote's VMs (192.168.x.x from any local app)**.
+When you want *any* local app — not just the browser pane — to reach remote VMs at their literal addresses, enable the per-host tunnel with the mirror window's network toggle (the connected-dots icon, first among the header's controls). Its tooltip reads **Enable direct network access to the remote's VMs (192.168.x.x from any local app)**.
 
 A one-time privileged helper — a launchd daemon installed via SMAppService, no `sudo` — creates a `utun` interface and routes the remote subnet to it, then hands the interface's file descriptor back to the app. A userspace TCP/UDP stack in the app terminates each flow and splices it over the same SSH forward channels, using your SSH identity. There are no `pf` rules and no kernel forwarding.
 
@@ -203,7 +244,7 @@ The first time you enable it, an alert titled **Allow Bromure's network helper**
 2. In the alert, open **System Settings → General → Login Items** and allow **Bromure Agentic Coding** (macOS asks for administrator credentials once).
 3. The app polls for the approval (every 2 seconds, up to 5 minutes) and connects automatically the moment it lands. While it waits, the toggle tooltip reads **Waiting for approval in System Settings › Login Items…**.
 
-When the tunnel is up the tooltip reads **Direct network access to the remote's VMs is ON — click to turn off**; if it fails, **Network tunnel failed — click to retry**. Toggling off stops the tunnel, and when the last host disables it the daemon is unregistered. The setting is remembered per host.
+If the remote hasn't reported its machine subnet yet (no machine has started), the tooltip reads **Waiting for the remote to report its workspace subnet (start a workspace) — click to cancel**. When the tunnel is up the tooltip reads **Direct network access to the remote's VMs is ON — click to turn off**; if it fails, **Network tunnel failed — click to retry**. Toggling off stops the tunnel, and when the last host disables it the daemon is unregistered. The setting is remembered per host.
 
 > **Note:** The tunnel needs an administrator account for the one-time approval. Without one, Bromure keeps working over the built-in SOCKS path — the helper is only needed to reach remote VMs from *other* apps. If macOS refuses the registration outright, an alert titled **Couldn't install the network helper** explains, and the toggle retries on the next click. A `ping` to a remote guest is answered locally by the tunnel: it confirms that routing is up, not that the guest is alive.
 
@@ -211,7 +252,7 @@ When the tunnel is up the tooltip reads **Direct network access to the remote's 
 
 You can mirror several remotes at once; each opens its own window, SOCKS forwarder, and (optionally) tunnel. The trap this used to hit: every install historically used the same `192.168.64.0/24` network for its workspace VMs, so two mirrored remotes advertised identical subnets and the system-wide VPN could not tell them apart.
 
-**Per-install subnets** fix this at the source. Each Mac now picks a *random* `/24` inside `172.16.0.0/12` — skipping Docker's `172.17`–`172.20` range and any `/24` the host is already on — and uses it for all of its workspace VMs, so two independent installs almost never collide (172.16/12 is also the private range least likely to clash with a corporate LAN or VPN). On the first launch after updating, Bromure offers to migrate this Mac onto a private subnet — **Migrate Now**, **Later**, or **Don't Ask Again** — and you can change or re-randomise it any time under **Settings → Resources → Workspace subnet**. Guest addressing is pure DHCP from Bromure's own switch, so this is entirely host-side (no image rebuild), and the remote advertises its chosen subnet in `/state` so the rich client and the tunnel follow it automatically.
+**Per-install subnets** fix this at the source. Each Mac now picks a *random* `/24` inside `172.16.0.0/12` — skipping Docker's `172.17`–`172.20` range and any `/24` the host is already on — and uses it for all of its workspace VMs, so two independent installs almost never collide (172.16/12 is also the private range least likely to clash with a corporate LAN or VPN). Fresh installs start on such a subnet; you can see, change or re-randomise it any time under **Preferences › Resources › Workspace subnet**. Guest addressing is pure DHCP from Bromure's own switch, so this is entirely host-side (no image rebuild), and the remote advertises its chosen subnet in its state so the rich client and the tunnel follow it automatically.
 
 For the rare case where two remotes *still* share a subnet, the first is routed literally and the second is given a `100.64.<n>.0/24` CGNAT-space alias, with a 1:1 host-octet-preserving remap so both can be reached at once.
 
@@ -219,13 +260,13 @@ For the rare case where two remotes *still* share a subnet, the first is routed 
 
 ## Exposing a dev server to the internet
 
-Separately from all of the above, an individual HTTP service running inside a workspace can be exposed to the public internet with a per-port [Cloudflare quick tunnel](18-glossary.mdx). Open a running workspace's dashboard, find the service under the ports card, and click the globe (tooltip: **Expose to the internet (Cloudflare quick tunnel)**). Bromure runs one `cloudflared` process for that origin and gives you a random `https://<name>.trycloudflare.com` URL — no Cloudflare account needed. One tunnel and one URL per service; exposing or unexposing one never disturbs the others.
+Separately from all of the above, an individual HTTP service running inside a workspace can be exposed to the public internet with a per-port [Cloudflare quick tunnel](18-glossary.mdx). Open a running machine's details (the machine menu › **Machine Details**), find the service under the ports card, and click the globe (tooltip: **Expose to the internet (Cloudflare quick tunnel)**). Bromure runs one `cloudflared` process for that origin and gives you a random `https://<name>.trycloudflare.com` URL — no Cloudflare account needed. One tunnel and one URL per service; exposing or unexposing one never disturbs the others.
 
 The globe's color tracks state: gray = off, orange = installing or starting, green = running, red = failed. A status line under the port shows progress (**Downloading & verifying cloudflared (~18 MB, one-time)…**, then **Starting tunnel…**) or the clickable public hostname with a copy button.
 
-The first time you expose anything, a one-time consent dialog titled **Expose services to the internet via Cloudflare Tunnel?** covers the download, verification, Cloudflare's Terms of Service, and the fact that anyone with the random URL can reach the service. Click the globe again to stop.
+The first time you expose anything, a one-time consent dialog titled **Expose services to the internet via Cloudflare Tunnel?** covers the download, verification, the tunnel processes (recorded in the Security Timeline), Cloudflare's Terms of Service, and the fact that anyone with the random URL can reach the service. Click the globe again to stop.
 
-The `cloudflared` binary is a pinned release, verified twice before it ever runs: the SHA-256 of the downloaded archive is checked against a hash baked into the app, and a Developer ID code-signature check confirms Cloudflare's team ID. Every step is recorded in the Supply Chain Log (see [Supply-Chain Protection](09-supply-chain.mdx)). It runs with `--no-autoupdate`.
+The `cloudflared` binary is a pinned release, verified twice before it ever runs: the SHA-256 of the downloaded archive is checked against a hash baked into the app, and a Developer ID code-signature check confirms Cloudflare's team ID. It runs with `--no-autoupdate`.
 
 > **Warning:** Quick-tunnel URLs are public to anyone who has them, and the hostname **rotates** whenever the tunnel restarts (a reboot, an unexpose/re-expose, or a crash). Only HTTP(S) origins get a globe — SSH and well-known raw-TCP or database ports (22, 1433, 3306, 3389, 5432, 5672, 5900, 6379, 9092, 11211, 27017) and UDP never do, because a browser could not reach them through Cloudflare's edge. All of a workspace's tunnels are torn down when its VM suspends or shuts down. A hash mismatch on download refuses installation until the pin is updated in an app release.
 
@@ -240,11 +281,11 @@ The forwarder tears itself down after 300 seconds so the loopback port is never 
 Remote access is powerful, so it is worth being precise about its boundaries.
 
 - **Off by default, one door.** No remote path exists until you enable the SSH server. Every path — human menu, CLI, rich client, port forwards, browser MCP — rides that one server and no other.
-- **Encryption and transport.** All traffic is SSH. The rich client's control polling, terminal attaches, file transfers, port forwards, and browser-MCP relay all travel inside the SSH connection. Because swift-nio-ssh has no post-quantum key exchange, a modern OpenSSH client will print a "not using a post-quantum key exchange" warning; this is expected and does not indicate a downgrade attack.
+- **Encryption and transport.** All traffic is SSH. The rich client's state stream and control calls, terminal attaches, file transfers, port forwards, and browser-MCP relay all travel inside the SSH connection. Because swift-nio-ssh has no post-quantum key exchange, a modern OpenSSH client will print a "not using a post-quantum key exchange" warning; this is expected and does not indicate a downgrade attack.
 - **bromure.io is a broker, not a middleman.** In the account path, bromure.io only *introduces* your two devices and — when no direct peer-to-peer path can be built — relays opaque bytes through a TURN relay (over TLS). It never terminates the SSH session: the encrypted tunnel runs end-to-end between your two Macs. SSH keys are shared only among the devices of **your own account** (never another user's), each server pulls its owner's device keys itself, and enrolling / signing out is how a device's trust is granted and retired. A signed-out or 90-day-idle device stops being authorized.
 - **Who can log in.** Only the exact macOS user who launched the app. Password auth is verified against OpenDirectory (no Remote Login, no PAM changes, no admin rights), and public-key auth accepts only keys you have enrolled. Password attempts are rate-limited per source IP; keys are not.
 - **What a session can do.** A human login can only reach the remote menu — never a shell — so it can create, configure, and drive workspaces, but it cannot run arbitrary host commands. The rich client's four machine verbs are similarly narrow: a control-socket bridge, a forward to a guest on the vmnet subnet, and a browser-MCP relay. Forwards to the host itself, the gateway, or the internet are refused.
-- **Secrets never leave the host.** Remote profile reads are secrets-blanked and saves are secret-preserving; API keys, tokens, and MCP environment secrets stay on the remote Mac.
+- **Secrets never leave the host.** Remote settings reads are secrets-blanked (model-provider keys redacted) and saves are secret-preserving; API keys, tokens, subscription sign-ins and MCP environment secrets stay on the remote Mac.
 - **Trust on first use.** The rich client pins the remote's host key per endpoint on first contact and warns loudly on any later change.
 - **Guest-unforgeable consent.** MITM consent prompts raised by a running agent are rendered on the *host* side of the terminal pump, where a compromised guest can neither see nor forge them; any timeout or detach resolves to deny. See [Remote consent handling](15-enterprise.mdx#remote-consent-handling).
 
@@ -263,7 +304,7 @@ Remote access is powerful, so it is worth being precise about its boundaries.
 | "This Mac's bromure.io device was revoked. Sign in again." | This device was logged out / revoked (by you, the web console, or 90-day idle) | Re-enroll: app-name menu → **Log in to bromure.io…**. |
 | Red **Trust New Key & Continue** sheet | The remote's host key changed since it was pinned | Verify out of band; only continue if you know why the key changed (reinstall, new Mac) — otherwise it may be a man-in-the-middle. |
 | Live connections drop after editing keys | Adding or removing an authorized key restarts the listener | Expected; reconnect. |
-| Browser pane stays blank | The SOCKS forwarder or subnet is not ready yet | Wait for the first `/state` poll; ensure the workspace is running and this Mac has the browser image installed. |
+| Browser pane stays blank | The SOCKS forwarder or subnet is not ready yet | Wait for the mirror's first state update; ensure the machine is running and this Mac has the browser image installed. |
 | A forward is refused | The target is not a guest on the remote's vmnet subnet | Forwards can only reach workspace VMs, never the host, gateway, or internet. |
 | Tunnel toggle stuck at **Waiting for approval…** | The privileged helper is not approved yet | Approve **Bromure Agentic Coding** in System Settings → General → Login Items (needs admin). Without it, SOCKS still works. |
 | Grid-layout edits don't take on the remote | The remote is headless | Grid edits need a GUI window open on the remote; everything else still mirrors. |
@@ -282,4 +323,4 @@ Server-side state lives under `~/Library/Application Support/BromureAC/remote/`:
 | `192.168.127.0/24` | The rich client's pinned local browser-VM subnet. |
 | `100.64.<n>.0/24` | CGNAT alias subnets assigned on a fleet subnet collision. |
 
-The relevant UserDefaults keys (domain `io.bromure.agentic-coding`) are `remoteAccess.enabled`, `remoteAccess.port`, `remoteAccess.bindAddress`, `remoteAccess.passwordAuth`, `remoteAccess.pubkeyAuth`, `fatclient.tunnel.<host-UUID>`, and `cloudflareTunnel.consented`. Diagnostic environment variables include `BROMURE_OVERLAY_KEY` (remote-menu chord), `BROMURE_FATCLIENT_LOG` (verbose rich-client logging), and `BROMURE_FATCLIENT_UTUN` (force-enable the system-wide tunnel opt-in — the toolbar toggle is the product path). The full CLI reference, including the hidden `__forward`, `__forward-socks`, `__dial`, and `__attach-window` plumbing, is in [Automation & the CLI](16-automation-cli.mdx).
+The relevant UserDefaults keys (domain `io.bromure.agentic-coding`) are `remoteAccess.enabled`, `remoteAccess.port`, `remoteAccess.bindAddress`, `remoteAccess.passwordAuth`, `remoteAccess.pubkeyAuth`, `fatclient.tunnel.<host-UUID>`, and `cloudflareTunnel.consented`. Diagnostic environment variables include `BROMURE_OVERLAY_KEY` (remote-menu chord), `BROMURE_FATCLIENT_LOG` (verbose rich-client logging), and `BROMURE_FATCLIENT_UTUN` (force-enable the system-wide tunnel opt-in — the toolbar toggle is the product path). The full CLI reference, including the hidden `__forward`, `__forward-socks`, `__dial`, and `__attach-window` plumbing, is in [CLI, API & MCP](16-automation-cli.mdx).

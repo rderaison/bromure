@@ -1,68 +1,76 @@
 ---
 title: "Browser"
-description: "Configure the workspace's embedded, agent-drivable Chromium: whether it stays signed in, and how the shared browser image is installed."
-order: 7.14
+description: "Configure a machine's embedded, agent-drivable Chromium: whether it stays signed in, what it may access, and the shared browser image."
+order: 7.8
 ---
 
 # Browser
 
-Every workspace ships with an embedded Chromium browser that its agents can drive — navigate, click, type, take screenshots, read the console and network log — through the built-in `browser` MCP server. The browser runs in **its own disposable VM**, separate from the workspace's Ubuntu VM, so a page an agent opens can never touch the agent's own environment. The **Browser** pane controls two things: whether that browser remembers your sign-ins between sessions, and how the shared browser image is downloaded to your Mac.
+Every machine (a workspace, in the settings editor) comes with an embedded Chromium browser that its agents can drive — navigate, click, type, take screenshots, read the console and network log — through the built-in `bromure-browser` MCP server. The browser runs in **its own disposable VM**, separate from the machine's Linux VM, so a page the agent opens can't touch the agent's environment. The **Browser** pane sets whether the browser remembers sign-ins, what it may access on your Mac, and manages the shared browser image.
 
 <p align="center">
-  <img src="../images/editor-browser.en.jpg" width="600" alt="The Browser pane of the Edit workspace window, showing the Stay signed in to websites toggle (off); a Permissions section with Allow file uploads and Allow file downloads on and Allow camera and Allow microphone off; and a Browser image section marked Installed with a Re-download button" />
+  <img src="../images/editor-browser.en.jpg" width="600" alt="The Browser pane: the Stay signed in to websites toggle (off) with its explanation; a PERMISSIONS section with Allow file uploads and Allow file downloads ticked and Allow camera and Allow microphone unticked; and a Browser image section reading Not installed, with a Download Now button" />
 </p>
 
-The pane opens with the same summary the app shows above the controls: this workspace has an embedded Chromium browser its agents can drive through the built-in `browser` MCP server, and it runs in its own disposable VM. The pane sets policy only — you drive the browser itself from the agentic browser pane in the session window (⌃⌘B), and the agent drives it through the MCP tools. Both are covered in [Sessions](../06-sessions.mdx), and the full list of `browser_*` tools is in [Automation & the CLI](../16-automation-cli.mdx).
+The pane sets policy only. You use the browser from the browser pane of the main window (⌃⌘B), and agents use it through their MCP tools — see [The Embedded Browser](../06g-browser.mdx).
 
 ## Stay signed in to websites
 
-The **Stay signed in to websites** toggle decides whether the browser is ephemeral or persistent:
+- **Off (default)** — the browser starts from a clean profile every time and forgets everything when it closes. No cookies, logins or history survive.
+- **On** — cookies, logins and history are kept on an encrypted disk belonging to this machine, under `~/Library/Application Support/BromureAC/browser-profiles/`, so the agent stays signed in to sites between sessions. The disk is never shared with another machine.
 
-- **Off (default)** — the browser starts from a clean profile every time and forgets everything when the window closes. No cookies, logins, or history survive. This is the fully disposable behavior that matches the rest of the workspace's isolation model.
-- **On** — cookies, logins, and history are kept on an **encrypted per-workspace disk** at `~/Library/Application Support/BromureAC/browser-profiles/<workspace-id>/image/profile.img`, so the agent stays signed in to sites between sessions. The profile disk belongs to this one workspace and is never shared with another.
+Turning it off doesn't delete the saved disk: it is ignored while the setting is off and used again if you turn it back on.
 
-Because the persistence setting changes how the browser VM is booted, changing it restarts that VM. When you save a change, the app warns:
+> **Note:** A signed-in browser the agent can drive is a standing credential the agent can use on any page. Leave this off unless a workflow needs a persistent login.
 
-> Changing "Stay signed in to websites" takes effect by restarting this workspace's browser — its open tabs will close. Saved sign-ins stay on the encrypted per-workspace disk: they're used while the setting is on and simply ignored while it's off.
+## Permissions
 
-Turning the setting off does not delete the saved profile disk — it is simply ignored while off, and used again if you turn the setting back on.
+| Permission | Default | Effect |
+|---|---|---|
+| **Allow file uploads** | On | Pages can receive files you or the agent upload. |
+| **Allow file downloads** | On | Pages can save files. |
+| **Allow camera** | Off | Exposes your Mac's camera to pages the browser opens, and keeps WebRTC enabled. |
+| **Allow microphone** | Off | Exposes your Mac's microphone the same way. |
 
-> **Note:** Persisting sign-ins trades isolation for convenience. A logged-in browser that an agent can drive is a standing credential the agent can use on any page it visits; leave this off unless a workflow genuinely needs a persistent login.
+As the pane says, turning the camera or microphone on exposes that device "to pages the browser (and the agent) opens".
 
-## The browser image
+## When changes apply
 
-The browser VM boots from a shared **browser image** — the same Alpine + Chromium image the sibling [Bromure](https://bromure.io) web browser uses. It is downloaded once and shared by every workspace, so the **Browser image** section at the bottom of the pane is app-wide, not per-workspace. What it shows depends on where the image came from:
+Permissions and **Stay signed in to websites** take effect when the browser next starts. If this machine's browser is open when you save, the app asks first:
+
+> **Restart the browser for “*name*”?** Changing the browser's permissions (uploads, downloads, camera, microphone) or “Stay signed in to websites” takes effect by restarting this workspace's browser — its open tabs will close.
+
+**Restart & Save** applies the change and restarts the browser; **Cancel** returns to the editor without saving.
+
+## Browser image
+
+The browser VM boots from a shared **browser image**, downloaded once and used by every machine — the same image the Bromure web browser uses. The **Browser image** section is therefore app-wide:
 
 | State | Caption | Action |
 |---|---|---|
-| **Installed by Bromure Web** | "Installed by Bromure Web (size) — shared with Agentic Coding, managed by the Bromure app." | None — the Bromure web app owns and updates it. |
-| **Downloaded by Agentic Coding** | "Installed (size) — downloaded from `dl.bromure.io` into `~/Library/Application Support/BromureAC/browser`." | **Re-download** |
-| **Not installed** | "Not installed. Downloaded automatically the first time a workspace opens the browser, or download it now." | **Download Now** |
+| Installed by the Bromure web app | "Installed by Bromure Web (*size*) — shared with Agentic Coding, managed by the Bromure app." | None — the Bromure app keeps it up to date. |
+| Downloaded by Agentic Coding | "Installed (*size*) — downloaded from dl.bromure.io into ~/Library/Application Support/BromureAC/browser." | **Re-download** |
+| Not installed | "Not installed. Downloaded automatically the first time a workspace opens the browser, or download it now." | **Download Now** |
 
-When Bromure Agentic Coding downloaded the image itself, **Re-download** fetches a fresh copy. It confirms first — **Re-download the browser image?** — with the explanation:
+**Re-download** asks **Re-download the browser image?** — "Downloads a fresh copy (a few GB) and replaces the current image. Open browser sessions keep running and pick up the new image next time they start." While a download runs, the section shows its progress; a failure appears in red.
 
-> Downloads a fresh copy (a few GB) and replaces the current image. Open browser sessions keep running and pick up the new image next time they start.
+You don't have to install the image here. The first time any machine opens its browser, the browser pane asks **Install the browser?** with **Download & Install** and **Not Now**; nothing is downloaded until you accept.
 
-While an install or re-download runs, the section shows a live progress bar and percentage in place of the button; a failure is shown inline in red.
-
-### First-open consent
-
-You do not have to install the image from this pane. The first time any workspace opens its browser pane, the session window shows a one-time consent card before anything is fetched — **Install the browser?**, with the note that Chromium runs in its own disposable VM and a one-time download of about 500 MB installed to your Library folder, and the buttons **Download & Install** / **Not Now**. Nothing is downloaded until you accept. Because the image is shared, installing it once — from this pane or from that card — serves every workspace.
-
-## The browser VM's lifecycle
-
-The browser VM is created lazily, only when the pane (or an agent tool call) first needs it, and it is reclaimed when idle:
-
-- Hidden for about **10 seconds**, the VM is suspended in memory so it stops using CPU while its state is preserved.
-- With the pane closed for about **5 minutes**, the VM is torn down entirely; the next open cold-boots a fresh one.
-
-An agent's `browser` MCP tool call can boot and reveal the browser for the selected workspace on its own, but it will never re-open a pane you have deliberately closed. The browser VM shares the workspace's NAT network segment, so an agent can reach a dev server the workspace is running by the workspace VM's LAN IP — never `localhost`, because the browser is a different VM. See [Sessions](../06-sessions.mdx) for how the pane behaves in the window.
+The browser-image section is not shown in the iPhone, iPad or Vision Pro client — the image lives on the Mac that runs the machines.
 
 ## Settings reference
 
 | Setting | Type | Default | Scope |
 |---|---|---|---|
-| **Stay signed in to websites** | Toggle | Off (fully ephemeral) | Per workspace |
-| **Browser image** | Status + **Download Now** / **Re-download** | Not installed (auto-offered on first browser open) | App-wide (shared with all workspaces and with Bromure Web) |
+| **Stay signed in to websites** | Toggle | Off | This machine |
+| **Allow file uploads** | Checkbox | On | This machine |
+| **Allow file downloads** | Checkbox | On | This machine |
+| **Allow camera** | Checkbox | Off | This machine |
+| **Allow microphone** | Checkbox | Off | This machine |
+| **Browser image** | Status, **Download Now** / **Re-download** | Not installed | The whole Mac (shared with the Bromure web app) |
 
-Like every per-workspace pane, **Stay signed in to websites** can also be set on the preferences template so new workspaces inherit it — see [Settings Reference](index.mdx). The persistent profile disk is encrypted with the same host-held key that protects the rest of your workspace secrets; the credential model is described in [Credentials & the wire boundary](../08-credentials.mdx).
+## Related chapters
+
+- [The Embedded Browser](../06g-browser.mdx) — using the browser pane, and how agents drive it.
+- [MCP](mcp.mdx) — the built-in `bromure-browser` server.
+- [Settings Reference](index.mdx) — all panes at a glance.

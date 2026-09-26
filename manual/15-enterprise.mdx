@@ -17,7 +17,7 @@ The word "fleet" spans two features that are worth keeping distinct, because the
 - **bromure.io enrollment** (this chapter) registers a Mac with your workspace and streams session metadata to the cloud, authenticated by a mutual-TLS certificate issued by your organization's CA.
 - **The rich client** ([Remote Access](14-remote-access.mdx)) lets one Mac mirror *other* Macs' running instances over SSH, authenticated by SSH host keys and enrolled public keys.
 
-Neither depends on the other. You can enroll without ever using the rich client, mirror hosts without enrolling any of them, or do both. Enrollment's mTLS stack is fleet telemetry only; rich-client mirroring trusts SSH — the two are deliberately not merged in this version.
+Neither depends on the other. You can enroll without ever using the rich client, mirror hosts without enrolling any of them, or do both. Enrollment's mTLS stack is fleet telemetry only; rich-client mirroring trusts SSH — the two are deliberately not merged in this version. The same **Log in to bromure.io…** sign-in also lets the rich client find your servers and exchange SSH keys between your own devices, but the mirror session itself is still authenticated by SSH.
 
 ## Enrolling with Bromure Enterprise Manager
 
@@ -57,7 +57,7 @@ At request time the certificate and key are packaged into an in-memory PKCS#12 a
 
 ## The enrollment status panel
 
-Once enrolled, the same menu item renames itself to **bromure.io Enrollment…** and opens a status panel (title **bromure.io enrollment**) instead of the entry form. It shows **Workspace**, **User**, **Device**, **Server**, **Enrolled** (date), and **Certificate** rows — all text-selectable. The **Certificate** row reads **Valid until `<date>`** or, if it lapsed, **Expired — renewing automatically**.
+Once you are connected, the same app-menu item changes its name: it reads **Log out of bromure.io…** when you signed in with a personal bromure.io account, and **bromure.io Enrollment…** when this Mac is enrolled in an organization (with a code or an enterprise account). Either way it opens a status panel (title **bromure.io enrollment**) instead of the entry form. It shows **Workspace**, **User**, **Device**, **Server**, **Enrolled** (date), and **Certificate** rows — all text-selectable. The **Certificate** row reads **Valid until `<date>`** or, if it lapsed, **Expired — renewing automatically**.
 
 Two buttons sit at the bottom: **Renew certificate** forces a new leaf certificate; **Sign out** un-enrolls (destructive — see below). Health problems appear as an orange warning banner:
 
@@ -93,11 +93,17 @@ Enrolled, non-private sessions stream structured [cloud events](18-glossary.mdx)
 | `supply_chain.fetch` | Ecosystem, package, version, request kind, outcome, and reason. |
 | `vm.disk_reset` | The reason and the base-image versions involved. |
 | `prompt_injection.detection` | Detector, method, action, host, source, score, signals, tool-use id, and the whole flagged snippet (up to 20,000 characters). |
-| `egress.firewall` | One event per [egress-firewall](07-settings/guardrails.mdx#the-egress-firewall) verdict: host, port, protocol, and the action taken. |
+| `egress.firewall` | One event per [egress-firewall](07-settings/guardrails.mdx#outbound-connections-egress-firewall) verdict: host, port, protocol, and the action taken. |
 | `credential.exfiltration` | The compromise detector caught a fake credential leaving the VM for a host outside its scope — credential name, declared and observed hosts, previews only. |
+| `credential.exfiltration_allowed` | You answered **Allow** on a compromise alert: the observed host, allowed for the rest of that session only. |
+| `guardrails.block` | A [guardrail](07-settings/guardrails.mdx) blocked a request: host, method, path, and the reason. |
+| `tls.upstream_untrusted` | An upstream server's certificate wasn't trusted: host, reason, and error code. |
+| `tls.insecure_bypass` | A request asked to skip upstream certificate validation (no real credentials are injected into such a request): the host. |
+| `privacy.pii_swap` | [PII protection](10a-pii.mdx) replaced personal data in an AI request: the host, the number of replacements per category, and the latency — never the personal data itself. |
+| `agent.delegation` | A message between [agents working together](06d-delegation.mdx): the delegation's title, the message kind, sender and recipient, whether it was delivered or withheld, and the message text shortened to 200 characters (plus the flagged snippet, same length, when the prompt-injection scan withheld it). |
 | Detailed HTTP logs | Per-request metadata from the transparent interception layer (method, host, path, status, sizes), giving admins the workspace's outbound HTTP surface beyond its AI traffic. |
 
-Streaming state is visible in every session window and mirrored in the fleet reporting an admin sees.
+The security-relevant events (blocks, credential brokering, supply chain, PII, delegation and the like) also appear in this Mac's own [Security Timeline](11a-security-timeline.mdx), enrolled or not.
 
 ### What never leaves the Mac
 
@@ -109,7 +115,7 @@ This is the part to be precise about. The stream is metadata; the content of you
 
 Buffered events are held in memory only; a hard quit discards any not yet flushed, and there is no disk-backed retry queue. That is accepted by design — telemetry is best-effort, never at the expense of your work.
 
-> **Warning:** There is one deliberate exception to the metadata-only rule: `prompt_injection.detection` uploads the **whole flagged snippet** (up to 20,000 characters), so an administrator can see exactly what the agent was about to read. This is content, not metadata — the trade is that a prompt-injection attempt is precisely the thing security teams need to inspect verbatim. Everything else remains previews, paths, counts, and masks. See [Prompt-Injection Protection](10-prompt-injection.mdx) for what triggers a detection.
+> **Warning:** There are two deliberate exceptions to the metadata-only rule. `prompt_injection.detection` uploads the **whole flagged snippet** (up to 20,000 characters), so an administrator can see exactly what the agent was about to read — a prompt-injection attempt is precisely the thing security teams need to inspect verbatim. And `agent.delegation` carries the first 200 characters of each message agents send each other. Everything else remains previews, paths, counts, and masks. See [Prompt-Injection Protection](10-prompt-injection.mdx) for what triggers a detection.
 
 ### Batching and delivery
 
@@ -117,9 +123,9 @@ Events are batched in memory and posted to the analytics ingest endpoint, authen
 
 ## Private mode
 
-Streaming is opt-out per workspace. The **Private mode** toggle (eye-slash icon) in a workspace's editor keeps that workspace's activity entirely local: no metadata is streamed, the title-bar indicator disappears for it, and the administrator's session list sees nothing from it. The local Trace Inspector is unaffected — it keeps recording per its own [trace level](11-tracing.mdx). The toggle is off (streaming enabled) for every workspace, and appears only on enrolled Macs, since it would do nothing otherwise.
+Streaming is opt-out per machine (a workspace, in the settings editor). The **Private mode** switch (eye-slash icon) in the settings editor's **Tracing** pane keeps that workspace's activity entirely local: no metadata is streamed, the streaming indicator disappears for it, and the administrator's session list sees nothing from it. The local Trace Inspector is unaffected — it keeps recording per its own [trace level](11-tracing.mdx). The toggle is off (streaming enabled) for every workspace, and appears only on enrolled Macs, since it would do nothing otherwise.
 
-Private mode lives with the [Tracing](07-settings/tracing.mdx) settings in the workspace editor. On an un-enrolled Mac the switch is simply absent, which is why the pane below shows only the trace picker:
+It sits under the **Session trace** picker in the [Tracing](07-settings/tracing.mdx) pane. On an un-enrolled Mac the switch is simply absent, which is why the pane below shows only the trace picker:
 
 <p align="center">
   <img src="images/editor-tracing.en.jpg" width="600" alt="The Tracing pane of the Edit workspace window on an un-enrolled Mac, showing only the Session trace picker set to AI request details. On an enrolled Mac a Private mode switch appears in this pane." />
@@ -131,7 +137,7 @@ Events are gated at emit time — private-mode traffic never even enters the upl
 
 ### The streaming indicator
 
-Whenever a Mac is enrolled and a workspace is *not* in private mode, a pulsing red recording-style dot appears in that session window's toolbar (and as a dot on unified-window sidebar rows). Its tooltip reads "Session metadata is being sent to bromure.io. Toggle the workspace's Private Mode to stop streaming." and its accessibility label is **Streaming to bromure.io**. The dot is purely informational and is hidden when un-enrolled or in private mode.
+Whenever a Mac is enrolled and a machine is *not* in private mode, a pulsing red recording-style dot appears in the main window's header while that machine (one of its terminal tabs or its details, rather than a session's chat) is on the stage. Its tooltip reads "Session metadata is being sent to bromure.io". The dot is purely informational and is hidden when un-enrolled or in private mode.
 
 ## Egress IP registration
 
@@ -148,7 +154,7 @@ Two of the streamed event types are what make enterprise-tier reporting useful a
 
 On the bromure.io side, each enrolled Mac appears as a row on the workspace's `/agentic-coding/installs` page, identified by its install ID and showing the device name you set, the user, and a last-seen timestamp kept fresh by the 10-minute heartbeat. From there an administrator reviews the streamed session metadata, the supply-chain inventory, token-usage rollups, and prompt-injection detections for the whole fleet.
 
-This is distinct from the rich client's notion of a "fleet" — mirroring several *remote hosts* at once over SSH — which is covered in [Remote Access](14-remote-access.mdx#multiple-remotes-fleet-subnet-routing). The two never share a trust root.
+This is distinct from the rich client's notion of a "fleet" — mirroring several *remote hosts* at once over SSH — which is covered in [Remote Access](14-remote-access.mdx#multiple-remotes-per-install-subnets--fleet-routing). The two never share a trust root.
 
 ## Remote consent handling
 
@@ -199,4 +205,4 @@ POST {ingest URL}   {"events":[…]}                   (mTLS, no bearer)
 | Remote-consent timeout | 120 seconds |
 | Prompt-injection snippet cap | 20,000 characters |
 
-Server and endpoint overrides (no GUI) are `BROMURE_MANAGED_URL` (or `managed.serverURL`, default `https://bromure.io/api`), `BROMURE_AC_INGEST_URL` (or `managed.acIngestURL`, default `https://analytics.bromure.io/ac-ingest`), and `BROMURE_AC_REGISTER_IP_URL` (or `managed.acRegisterIPURL`). The full command reference is in [Automation & the CLI](16-automation-cli.mdx).
+Server and endpoint overrides (no GUI) are `BROMURE_MANAGED_URL` (or `managed.serverURL`, default `https://bromure.io/api`), `BROMURE_AC_INGEST_URL` (or `managed.acIngestURL`, default `https://analytics.bromure.io/ac-ingest`), and `BROMURE_AC_REGISTER_IP_URL` (or `managed.acRegisterIPURL`). The full command reference is in [CLI, API & MCP](16-automation-cli.mdx).

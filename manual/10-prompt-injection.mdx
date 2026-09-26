@@ -11,7 +11,9 @@ An autonomous coding agent reads whatever its task puts in front of it: source f
 - **Prompt-injection detection** scans the agent's AI traffic on-device with local models and flags injected instructions before (or as) they reach the model.
 - **Guardrails** classifies the agent's calls to your infrastructure — Kubernetes, AWS, git forges, databases, and more — and blocks or prompts on writes and destructive operations, so even a successfully hijacked agent cannot quietly `kubectl delete` its way through production.
 
-This chapter explains the threat, each detector, what happens on a hit, the Guardrails policy engine and its consent dialogs, and the practical limits of all of it. The field-by-field settings references live in [Prompt Injection settings](07-settings/prompt-injection.mdx) and [Guardrails settings](07-settings/guardrails.mdx).
+This chapter explains the threat, each detector, what happens on a hit, the Guardrails policy engine and its consent dialogs, and the practical limits of all of it. Both are set per machine (a workspace, in the settings editor). The field-by-field settings references live in [Prompt Injection settings](07-settings/prompt-injection.mdx) and [Guardrails settings](07-settings/guardrails.mdx).
+
+> **Note:** A third host-side protection works on the same AI traffic but for a different purpose: [PII Protection](10a-pii.mdx) swaps personal data for stand-ins before a request reaches the model provider.
 
 ## The attack: prompt injection in a coding agent
 
@@ -37,10 +39,10 @@ Detection runs in the host-side proxy, on the agent's outbound AI traffic — th
 Everything happens on-device. The classifiers are local ONNX models running via ONNX Runtime on your Mac; no content is sent to any cloud service for scanning, and on unmanaged installs no detection data leaves the machine at all (managed installs can forward detections to their organization — see the note in [When a detector fires](#when-a-detector-fires-log-ask-or-block)).
 
 <p align="center">
-  <img src="images/editor-prompt-injection.en.jpg" width="600" alt="The Prompt Injection pane of the Edit workspace window, showing the two detector toggles and the disabled 'When an injection is detected' radio group" />
+  <img src="images/editor-prompt-injection.en.jpg" width="600" alt="The Prompt Injection pane of the Web app workspace editor, showing the two detector toggles and the disabled 'When an injection is detected' radio group" />
 </p>
 
-Both detectors are per-workspace toggles in the **Prompt Injection** pane of the **Edit workspace** window (the red warning-triangle icon in the sidebar). Both are **off** by default — each requires a substantial model download the first time you enable it.
+Both detectors are per-machine toggles in the **Prompt Injection** pane, under **Security** in the machine's settings. Both are **off** by default — each requires a substantial model download the first time you enable it.
 
 ## The detectors
 
@@ -90,7 +92,7 @@ Several safeguards make the download robust:
 - **Free-disk preflight.** A doomed download is refused up front with a critical alert: **Not enough disk space to download the prompt-injection model**.
 - **Minimum-size floors.** Each file has a size floor, so a truncated download or an HTML error page saved as `model.onnx` fails loudly instead of silently disabling the detector.
 - **Atomic, resumable.** Downloads are atomic per file, and a retry skips files already present and valid. Concurrent downloads of the same model are deduplicated.
-- **Automatic recovery.** If a workspace has a detector enabled but its model is missing at app launch or after a profile save, a background download starts automatically. Progress and outcome land in the Security Log.
+- **Automatic recovery.** If a machine has a detector enabled but its model is missing at app launch or after a settings save, a background download starts automatically. Progress and outcome are written to the app log.
 
 To remove a model, delete its folder under `~/Library/Application Support/BromureAC/Models/`. An optional `bromure-injection.json` placed in a model folder overrides `maxLength`, `injectionLabelIndex`, and `threshold` for that detector.
 
@@ -102,7 +104,7 @@ One shared per-workspace response — the **When an injection is detected** radi
 
 | Mode | Behavior |
 |---|---|
-| **Log but continue** (default) | The detection is recorded to the Security Log (and forwarded to bromure.io on managed installs); the request proceeds. Scanning happens *after* the response has been relayed, so this mode adds **zero latency**. |
+| **Log but continue** (default) | The detection is recorded in the Security Timeline (and forwarded to bromure.io on managed installs); the request proceeds. Scanning happens *after* the response has been relayed, so this mode adds **zero latency**. |
 | **Ask me what to do** | The outbound request is paused before any byte reaches the AI host, and a dialog shows you the flagged text for a decision. |
 | **Block unilaterally** | The request is refused outright; the model never sees the poisoned content. |
 
@@ -124,13 +126,17 @@ In **Block unilaterally** mode — or when you answer an Ask dialog with **Block
 Bromure blocked this request: possible <detector> detected in <source>.
 ```
 
-The model never receives the poisoned content; the agent sees a clean, explainable failure it can report to you. The resolved outcome ("allowed" or "blocked") is recorded to the Security Log and, on managed installs, forwarded as a cloud event.
+The model never receives the poisoned content; the agent sees a clean, explainable failure it can report to you. The resolved outcome ("allowed" or "blocked") is recorded in the Security Timeline and, on managed installs, forwarded as a cloud event.
 
-> **Note:** On bromure.io-enrolled Macs, each detection is forwarded as a `prompt_injection.detection` event carrying the detector, method, action, host, source, score, heuristic signals, and — unlike the local log's 160-character preview — the whole flagged snippet, capped at 20 KB. These events are suppressed by the workspace's **Private mode** toggle and never sent on unmanaged installs. See [Tracing & Audit](11-tracing.mdx) and [Enterprise](15-enterprise.mdx).
+> **Note:** On bromure.io-enrolled Macs, each detection is forwarded as a `prompt_injection.detection` event carrying the detector, method, action, host, source, score, heuristic signals, and — unlike the Security Timeline's short preview — the whole flagged snippet, capped at 20 KB. These events are suppressed by the machine's **Private mode** toggle and never sent on unmanaged installs; the local Security Timeline records them either way. See [Tracing & Audit](11-tracing.mdx) and [Enterprise](15-enterprise.mdx).
 
-## Watching detections: the Security Log
+## Watching detections: the Security Timeline
 
-Detections, rules-file findings, model-download progress, and enforcement outcomes all surface in the [Security Log](18-glossary.mdx) window — open **Window** → **Security Log…**. Injection lines look like:
+Every detection and enforcement outcome appears in the [Security Timeline](11a-security-timeline.mdx) — open **Window** → **Security Timeline…**, then pick **Prompt injection** in the **Timeline** tab's engine filter. Each row shows the detector and where the text came from, followed by the first 90 characters of the flagged text in the **Condition** column, and the outcome in the **Decision** column: **log** (green) in **Log but continue** mode, and **allowed** (green) or **blocked** (red) once an Ask or Block decision has been made. A block also shows under **Latest blocks** on the **Overview** tab.
+
+The Timeline keeps events for 90 days, across restarts. Its rows carry only a short preview of the flagged content — the full text appears only in the Ask dialog (and, on managed installs, in the cloud event).
+
+The detector's own log lines — scores, rules-file signals with their severity, model-download progress — go to the app log at `~/Library/Logs/BromureAC/bromure-ac.log`. They look like:
 
 ```
 [prompt-injection] source FLAG score=0.973 toolUse=… preview="…"
@@ -138,21 +144,21 @@ Detections, rules-file findings, model-download progress, and enforcement outcom
 [prompt-injection] blocked: rogue instructions in /path/CLAUDE.md → api.anthropic.com
 ```
 
-The first form is the source-code detector (with the model's score and a short preview); the second is the rules-file detector (with the file path and the heuristic signals that fired, each tagged with its severity); the third records an enforcement outcome. Local log lines carry only a 160-character preview of the flagged content — the full text appears only in the Ask dialog (and, on managed installs, in the cloud event).
+The first form is the source-code detector (with the model's score and a short preview); the second is the rules-file detector (with the file path and the heuristic signals that fired, each tagged with its severity); the third records an enforcement outcome.
 
-The window itself — an in-memory ring of roughly the last 5,000 lines, mirrored to stderr, with filtering and auto-scroll — is described in detail in [Supply-Chain Protection](09-supply-chain.mdx), which shares it.
+Messages that agents send each other through [delegation](06d-delegation.mdx) are scanned too, by the source-code detector's model when it is installed. Every such message is an **Agent delegation** row in the Timeline — blue "relayed", or red "withheld — prompt injection" when the scan held it back.
 
 ## Guardrails
 
-Prompt-injection detection tries to catch the hijack; [Guardrails](18-glossary.mdx) limits what a hijacked (or merely overenthusiastic) agent can *do*. Guardrails has two layers. The **write policies** described in this section form a per-workspace, host-enforced policy engine that classifies every API call the agent makes to a guarded protocol as a **read**, a **write**, or a **destructive** operation, and applies the workspace's mode for that resource. Beneath them sits the **egress firewall** — an ordered, pf-style ruleset over every connection the VM opens (host, IP/CIDR, protocol, port, and per-HTTP-verb for web traffic), enforced both at the virtual switch and in the proxy, with the VM's port-80/443 flows transparently diverted into the proxy so nothing inside the guest can opt out. The firewall's table editor, rule syntax, and the transparent-interception escape hatch are documented in [Guardrails settings](07-settings/guardrails.mdx#the-egress-firewall). As the pane puts it: Guardrails strips destructive operations from the protocols this agent speaks; it is enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it, and blocked calls return a hard error the agent sees.
+Prompt-injection detection tries to catch the hijack; [Guardrails](18-glossary.mdx) limits what a hijacked (or merely overenthusiastic) agent can *do*. Guardrails has two layers. The **write policies** described in this section form a per-workspace, host-enforced policy engine that classifies every API call the agent makes to a guarded protocol as a **read**, a **write**, or a **destructive** operation, and applies the workspace's mode for that resource. Beneath them sits the **egress firewall** — an ordered, pf-style ruleset over every connection the VM opens (host, IP/CIDR, protocol, port, and per-HTTP-verb for web traffic), enforced both at the virtual switch and in the proxy, with the VM's port-80/443 flows transparently diverted into the proxy so nothing inside the guest can opt out. The firewall's table editor and rule syntax are documented in [Guardrails settings](07-settings/guardrails.mdx#outbound-connections-egress-firewall). Every firewall verdict is a **Firewall** row in the Security Timeline. As the pane puts it: Guardrails strips destructive operations from the protocols this agent speaks; it is enforced on the host — inside the proxy — so a misbehaving or compromised agent in the VM can't bypass it, and blocked calls return a hard error the agent sees.
 
 <p align="center">
-  <img src="images/editor-guardrails.en.jpg" width="600" alt="The Guardrails pane of the Edit workspace window, with per-resource mode pickers for Kubernetes, AWS, DigitalOcean, Docker registries, and GitHub, each set to Off with a caption describing its scope" />
+  <img src="images/editor-guardrails.en.jpg" width="600" alt="The Guardrails pane of the Web app workspace editor: the explanation of Ask before use and write policies, the empty state 'No credentials to guard', and the Outbound connections section with Unmatched traffic set to Allow, an Add rule button and a folded pf format disclosure" />
 </p>
 
 ### The four modes
 
-Each guarded resource gets its own mode picker:
+The pane lists the machine's configured credentials. Each one gets an **Ask before use** toggle and, when its service has one, a write-policy picker; the policy is per service, so two credentials for the same service (two GitHub tokens, say) share it. With no credentials configured, the pane reads **No credentials to guard**. The picker offers four modes:
 
 | Mode | Reads | Writes (create/update) | Destructive (delete/drop/terminate) |
 |---|---|---|---|
@@ -197,6 +203,16 @@ On headless SSH/CLI-driven workspaces, the same four choices are offered as a tm
 
 Blocked calls return a protocol-appropriate 403-style error body — a Kubernetes `Status` JSON, an AWS `AccessDeniedException`, a registry `DENIED` payload — whose message ends "blocked by Bromure Guardrails". The agent gets a clean, ordinary API failure it can report and often route around, rather than a hung connection. Prompt-injection blocks use HTTP 451 and supply-chain blocks use HTTP 451 with their own body prefix, so the three systems are distinguishable at a glance in logs and agent output.
 
+### Escape hatches
+
+Three per-machine toggles at the bottom of the Guardrails pane loosen interception for hosts and clients that break under it, without turning the proxy off. All apply live:
+
+- **Allow per-request insecure bypass (X-bromure-insecure)** — on by default. An agent whose request to a self-signed or private-CA host fails validation can retry it with the header `X-bromure-insecure: yes`; that one request skips upstream certificate validation, carries no real credential, and is recorded in the Security Timeline.
+- **Disable transparent interception** — off by default. Stops the network-level divert, so raw sockets and certificate-pinned clients reach the network directly. Proxy-aware tools and the agent's own API calls still go through the proxy (and so keep the credential swap, tracing, Guardrails and prompt-injection scanning); traffic that ignores the proxy settings escapes the egress rules.
+- **Don't alert on credential exfiltration** — off by default. Suppresses the compromise alert and VM pause; the leak is still blocked and recorded.
+
+Details and trade-offs are in [Credentials & the Wire Boundary](08-credentials.mdx#escape-hatches).
+
 ## Performance and resource use
 
 - **Log mode is free.** Under **Log but continue**, scanning runs after the response has already been relayed to the agent — detection adds zero latency to the agent loop.
@@ -209,7 +225,7 @@ Blocked calls return a protocol-appropriate 403-style error body — a Kubernete
 
 Prompt-injection detection is a strong filter, not a guarantee. Know its edges:
 
-- **No model, no detection.** A detector is a silent no-op until its model is installed. If the toggle is on but the download failed (disk full, network down), the workspace runs unprotected — the failure is logged to the Security Log, and a disk-full condition raises a modal alert, but nothing blocks the agent in the meantime.
+- **No model, no detection.** A detector is a silent no-op until its model is installed. If the toggle is on but the download failed (disk full, network down), the machine runs unprotected — the failure is written to the app log, and a disk-full condition raises a modal alert, but nothing blocks the agent in the meantime.
 - **Classifiers have a threshold.** A sufficiently novel or subtle injection can score below 0.5 and pass. Conversely, security-adjacent legitimate text (a README *about* prompt injection, for example) can score above it — which is why **Log but continue** is the default and **Ask** exists.
 - **Medium-severity heuristics never enforce.** Capability keywords (`rm -rf`, credential paths, curl-pipe-to-shell) in a rules file are logged for review but do not pause or block on their own — they are far too common in legitimate developer documentation.
 - **Only AI traffic is scanned.** The detectors watch what the agent sends to the model. An instruction the model has already internalized executes through ordinary tool calls; that is Guardrails' layer, plus the credential decoys and compromise detection described in [Credentials](08-credentials.mdx).
@@ -219,15 +235,18 @@ Defense in depth is the intended posture: detection, Guardrails, decoy credentia
 
 ## Configuring the panes
 
-Both systems are configured per workspace in the **Edit workspace** window:
+Both systems are configured per machine, under **Security** in the machine's settings:
 
 | Setting | Pane | Type | Default |
 |---|---|---|---|
 | **Detect prompt injection in source code** | Prompt Injection | Toggle (model download on first enable, ~298 MB) | Off |
 | **Detect rogue instructions in CLAUDE.md files and similar** | Prompt Injection | Toggle (model download on first enable, ~603 MB) | Off |
 | **When an injection is detected** | Prompt Injection | Radio: **Log but continue** / **Ask me what to do** / **Block unilaterally** (disabled until a detector is on) | Log but continue |
-| **Kubernetes**, **AWS**, **DigitalOcean**, **Docker registries**, **GitHub**, **GitLab**, **Bitbucket**, per-database rows | Guardrails | Picker: **Off** / **Prompt before write** / **Block destructive** / **Read-only** | Prompt before write (new workspaces); Off for pre-existing profiles |
+| Write policy, per configured credential's service (Kubernetes, AWS, DigitalOcean, Docker registries, GitHub, GitLab, Bitbucket, databases) | Guardrails | Picker: **Off** / **Prompt before write** / **Block destructive** / **Read-only** | Prompt before write (new workspaces); Off for pre-existing profiles |
+| **Ask before use**, per configured credential | Guardrails | Toggle | Off |
 | **Outbound connections** (egress firewall) | Guardrails | Ordered allow/deny rule table + **Unmatched traffic** default | No rules; unmatched traffic allowed |
 | **Disable transparent interception** | Guardrails | Toggle | Off (interception on) |
+| **Allow per-request insecure bypass (X-bromure-insecure)** | Guardrails | Toggle | On |
+| **Don't alert on credential exfiltration** | Guardrails | Toggle | Off |
 
 The full field-by-field references are [Prompt Injection settings](07-settings/prompt-injection.mdx) and [Guardrails settings](07-settings/guardrails.mdx). Every detection and enforcement outcome is auditable after the fact — see [Tracing & Audit](11-tracing.mdx).

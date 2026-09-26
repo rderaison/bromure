@@ -1,16 +1,18 @@
 ---
 title: "Bromure Agentic Coding — User Manual"
-description: "The complete user manual for Bromure Agentic Coding: installation, concepts, settings reference, security model, and automation."
+description: "The complete user manual for Bromure Agentic Coding 5.0.0: installation, sessions, rooms and machines, the settings reference, the security model, models, and automation."
 order: 0
 ---
 
 # Bromure Agentic Coding — User Manual
 
-Welcome to the official user manual for **Bromure Agentic Coding**, the macOS app that runs AI coding agents — Claude Code, Codex CLI, Grok CLI, Kimi Code, Oh My Pi, and ordinary shell tooling — inside disposable Linux VMs, with a host-side gateway that keeps your real credentials out of the agent's reach.
+Welcome to the official user manual for **Bromure Agentic Coding**, the macOS app that runs AI coding agents — Claude Code, Codex, Grok, Kimi Code, Oh My Pi, and ordinary shell tooling — inside isolated Linux virtual machines on your Mac, with a host-side gateway that keeps your real credentials out of the agent's reach.
 
-This manual documents version **4.6.0**. It requires macOS 14 (Sonoma) or later on Apple Silicon. If you are new here, read [Introduction](01-introduction.mdx) and then [Quick Start](03-quick-start.mdx); everything else is reference you can reach for as you need it.
+This manual documents version **5.0.0**. It requires macOS 14 (Sonoma) or later on Apple Silicon.
 
-> **New to the app?** The fastest path to a running agent is [Installation](02-installation.mdx) followed by the [Quick Start](03-quick-start.mdx) walkthrough.
+Version 5.0.0 is organized around **sessions**: each conversation with an agent is a row in the sidebar, and you talk to it in a chat. The Linux VMs that sessions run in are called **machines** in the main window. The settings editor still calls them **workspaces**; the two words mean the same thing.
+
+> **New to the app?** Start with [Installation & First Run](02-installation.mdx), then follow the [Quick Start](03-quick-start.mdx). Read [Concepts & Architecture](04-concepts.mdx) when you want the full picture. Use everything else as reference.
 
 ## Table of contents
 
@@ -18,62 +20,86 @@ This manual documents version **4.6.0**. It requires macOS 14 (Sonoma) or later 
 
 | Chapter | What it covers |
 |---|---|
-| [1. Introduction](01-introduction.mdx) | What the app is, the single-boundary security model, the pillar features, and how it compares to other tools. |
-| [2. Installation](02-installation.mdx) | System requirements, downloading and installing the app, the first-launch setup flow, base-image updates, migration, and uninstalling. |
-| [3. Quick Start](03-quick-start.mdx) | From a fresh install to a running agent in about ten minutes: create a workspace, choose an agent, share a folder, run a task, and inspect the trace. |
+| [1. Introduction](01-introduction.mdx) | What the app is, the single-boundary security model, the main features, and how it compares to other tools. |
+| [2. Installation & First Run](02-installation.mdx) | System requirements, installing the app, the six-step onboarding wizard, base-image updates, the command-line tool, storage, moving to a new Mac, and uninstalling. |
+| [3. Quick Start](03-quick-start.mdx) | From the wizard to a finished task: start a session, answer the agent's question, look at the changed files, inspect the trace, then archive the session and bring it back. |
+| [4. Concepts & Architecture](04-concepts.mdx) | Sessions, machines, rooms, and branches; session states; host and guest; the wire boundary; what persists; vsock and MCP ports; networking. |
 
-### Foundations
+### Everyday use
 
 | Chapter | What it covers |
 |---|---|
-| [4. Concepts & Architecture](04-concepts.mdx) | Host vs. guest, workspaces vs. sessions vs. VMs, the VM lifecycle, the wire boundary, storage, vsock bridges, and networking. |
-| [5. Workspaces](05-workspaces.mdx) | The workspace browser: status pills, resource cards, the configuration summary, and creating, duplicating, resetting, and deleting workspaces. |
-| [6. Sessions](06-sessions.mdx) | The unified session window: starting and closing sessions, tabs and worktrees, the browser and file panes, file transfer, and checkpoints. |
-| [The Embedded Browser](06a-browser.mdx) | Using the workspace's built-in Chromium: driving it yourself, letting the agent drive it through the browser tools, staying signed in, and privacy. |
-| [Automations](06b-automations.mdx) | Scheduled, unattended agent runs on a kanban board: creating them, triggers and schedules, chained automations, run history, and answering their prompts. |
-| [Coding Tasks](06c-coding-tasks.mdx) | The coding kanban: briefs, agent-planned phases with dependencies, autonomous runs in worktrees, diff review with line comments, and merging. |
+| [5. The Sessions Home](05-sessions-home.mdx) | The main window: the sidebar and its collapsed rail, session rows and their menus, the session header, the machine menu, the Linux pill, the ⌘K command palette, and archiving, ending, deleting, and undo. |
+| [6. Starting a Session](06-new-session.mdx) | The new-session screen: choosing the agent, the machine, and where it works (a fresh folder, one of yours, or a repository), attaching files, recent starts, and asking another session with @. |
+| [6.1 The Chat](06a-chat.mdx) | Talking to an agent: the composer, attachments, slash commands and the inline terminal, question cards, activity lines, changed-files summaries, sign-in cards, stopping, editing and resending, and search. |
+| [6.2 Rooms](06b-rooms.mdx) | Grouping related sessions into a room: the grid of live chats, layouts and tabs, zooming into one cell, the room's own Switchboard, and sending to the whole room. |
+| [6.3 Branches & Review](06c-branches.mdx) | Branch sessions on their own git worktree, merging them back, the Branches window, and the review window with line comments. |
+| [6.4 Agents Working Together](06d-delegation.mdx) | Delegation to child sessions, requests to other sessions by @nickname, the Delegations panel, file hand-off, limits, and cross-machine requests. |
+| [6.5 Switchboard & Messaging](06e-switchboard.mdx) | The Switchboard session that keeps track of every other session, its safety rules, and the Messaging Connector for Signal, WhatsApp, and Slack. |
+| [6.6 Machines](06f-machines.mdx) | The Virtual Machines section: creating, starting, suspending, and deleting machines, Rewind home and Reset disk, terminals and the Grid, the Files pane, and the clipboard. |
+| [6.7 The Embedded Browser](06g-browser.mdx) | The Chromium browser beside a session: driving it yourself, letting the agent drive it through the browser tools, staying signed in, and privacy. |
+| [6.8 Automations](06h-automations.mdx) | Scheduled, unattended agent runs on a kanban board: triggers, schedules, chains, run history, answering their prompts, and the Automations MCP server. |
+| [6.9 Coding Tasks](06i-coding-tasks.mdx) | The coding kanban: briefs, agent-planned phases, autonomous runs in worktrees, review with line comments, and merging. |
 
 ### Settings reference
 
 | Chapter | What it covers |
 |---|---|
-| [7. Settings Reference](07-settings/index.mdx) | How to open the **Edit workspace** editor and a page-per-pane reference for all sixteen panes. |
+| [7. Settings Reference](07-settings/index.mdx) | How to open the settings editor and Preferences, the grouped pane list and **Search settings**, the Defaults template, and what saves when. |
 
-The settings reference has one page per pane: [General](07-settings/general.mdx), [Agents](07-settings/agents.mdx), [Local Models](07-settings/local-models.mdx), [Fusion](07-settings/fusion.mdx), [Folders](07-settings/folders.mdx), [Credentials](07-settings/credentials.mdx), [Environment](07-settings/environment.mdx), [MCP](07-settings/mcp.mdx), [Tracing](07-settings/tracing.mdx), [Guardrails](07-settings/guardrails.mdx), [Supply Chain](07-settings/supply-chain.mdx), [Prompt Injection](07-settings/prompt-injection.mdx), [Appearance](07-settings/appearance.mdx), [Browser](07-settings/browser.mdx), [Resources](07-settings/resources.mdx), and the app-wide [Automation](07-settings/automation.mdx) pane.
+The settings reference has one page per pane, in the editor's order:
 
-### The pillars in depth
+- **Workspace:** [General](07-settings/general.mdx), [Appearance](07-settings/appearance.mdx)
+- **Models:** [Models](07-settings/models.mdx), [Fusion](07-settings/fusion.mdx)
+- **Machine:** [Folders](07-settings/folders.mdx), [Environment](07-settings/environment.mdx), [MCP](07-settings/mcp.mdx), [Browser](07-settings/browser.mdx), [Resources](07-settings/resources.mdx)
+- **Security:** [Credentials](07-settings/credentials.mdx), [Tracing](07-settings/tracing.mdx), [Guardrails](07-settings/guardrails.mdx), [Supply Chain](07-settings/supply-chain.mdx), [Prompt Injection](07-settings/prompt-injection.mdx), [PII Protection](07-settings/pii-protection.mdx)
+- **App** (Preferences only): [Automation](07-settings/automation.mdx)
+
+### Security & the wire boundary
 
 | Chapter | What it covers |
 |---|---|
-| [8. Credentials & the Wire Boundary](08-credentials.mdx) | How real secrets stay on the host and the agent gets only fakes: the MITM proxy, per-credential lifecycles, approvals, and the compromise detector. |
-| [9. Supply-Chain Protection](09-supply-chain.mdx) | Vetting, rewriting, and blocking package installs before the agent sees them — the age gate, OSV, socket.dev, Depi, and script stripping. |
-| [10. Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx) | On-device detectors that scan the agent's AI traffic for injected instructions, plus guardrails that strip destructive infrastructure operations. |
+| [8. Credentials & the Wire Boundary](08-credentials.mdx) | How real secrets stay on the host while the agent gets only fakes: the MITM proxy, sign-ins and API keys, per-credential approvals, and the compromise alert. |
+| [9. Supply-Chain Protection](09-supply-chain.mdx) | Checking, rewriting, and blocking package installs before the agent sees them: the age gate, OSV, socket.dev, Depi, and install-script stripping. |
+| [10. Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx) | On-device detectors that scan the agent's AI traffic for injected instructions, the egress firewall, and guardrails on destructive operations. |
+| [10.5 PII Protection](10a-pii.mdx) | Swapping personal data for consistent stand-ins before a conversation leaves your Mac, and restoring it in the replies. |
 | [11. Tracing & Audit](11-tracing.mdx) | What a session trace records, the Trace Inspector, encryption at rest, retention, exporting, and privacy. |
-| [12. Fusion — the Multi-Model Panel](12-fusion.mdx) | Answering each prompt with several models at once, judged and synthesized on the wire into a single reply. |
-| [13. Local & Hybrid Inference](13-local-models.mdx) | Running models on your own Apple Silicon with MLX, the model catalog, hybrid cloud/local fallback, and inference metrics. |
+| [11.5 Security Overview & Timeline](11a-security-timeline.mdx) | The Security Timeline window: the 24-hour Overview, per-machine protections, and the filterable, exportable Timeline of every security decision. |
+
+### Models & infrastructure
+
+| Chapter | What it covers |
+|---|---|
+| [12. Fusion — the Multi-Model Panel](12-fusion.mdx) | Answering each prompt with several models at once, judged and combined into a single reply on the wire. |
+| [13. Models & Providers](13-models.mdx) | The global Models board: providers (sign-ins, API keys, Amazon Bedrock, OpenRouter, custom servers, on-device models), per-agent model choices, per-workspace overrides, and live changes. |
+| [13.5 Kubernetes Clusters & Registries](13a-kubernetes.mdx) | Running k3s clusters and a private container registry in their own VMs beside your machines: storage, load balancing, add-ons, access, and the infrastructure MCP server. |
 
 ### Beyond one Mac
 
 | Chapter | What it covers |
 |---|---|
-| [14. Remote Access & the Rich Client](14-remote-access.mdx) | Reaching your sandbox from anywhere — the rich client mirror, the CLI, SSH, tunnels, PAC, and the remote security model. |
-| [15. Enterprise — Enrollment & Fleet](15-enterprise.mdx) | Enrolling with Bromure Enterprise Manager, what telemetry uploads (and what does not), the fleet view, and off-boarding. |
+| [14. Remote Access & Clients](14-remote-access.mdx) | Mirroring a remote Bromure from another Mac, iPhone, iPad, or Apple Vision Pro; remote Preferences; the CLI over SSH, tunnels, and PAC; and the remote security model. |
+| [15. Enterprise — Enrollment & Fleet](15-enterprise.mdx) | Enrolling with bromure.io, what telemetry uploads (and what does not), the fleet view, and off-boarding. |
 
 ### Reference
 
 | Chapter | What it covers |
 |---|---|
-| [16. CLI, Automation & MCP](16-automation-cli.mdx) | The `bromure-cli` command-line interface, the loopback control API, the MCP server, and AppleScript. |
-| [Advanced](16a-advanced.mdx) | Power-user tools, including the ext4 file browser for reading a stopped workspace's home image without booting it. |
-| [17. Troubleshooting](17-troubleshooting.mdx) | Diagnosing setup, VM, authentication, TLS, supply-chain, disk-space, and remote-access problems, organized by symptom. |
-| [18. Glossary](18-glossary.mdx) | Definitions of every term of art used in this manual. |
-| [19. Appendix](19-appendix.mdx) | Reference tables: on-disk locations, network ports, environment variables and launch arguments, and the guest-VM cheat sheet. |
+| [16. CLI, API & MCP](16-automation-cli.mdx) | The `bromure-cli` command-line tool, the loopback control API, the MCP servers, and AppleScript. |
+| [16.5 Advanced](16a-advanced.mdx) | Power-user tools: the ext4 file browser and file-system check, and restoring or rewinding a machine's home. |
+| [17. Troubleshooting](17-troubleshooting.mdx) | Diagnosing setup, machine, sign-in, TLS, supply-chain, disk-space, and remote-access problems, organized by symptom. |
+| [18. Glossary](18-glossary.mdx) | Definitions of every term used in this manual. |
+| [19. Appendix](19-appendix.mdx) | Reference tables: on-disk locations, network and vsock ports, environment variables, defaults, keyboard shortcuts, and the guest cheat sheet. |
 
 ## Conventions used in this manual
 
-- **Bold** text names an on-screen control exactly as the app labels it — a button, menu item, toggle, or pane (for example, **Start this VM at login**).
-- `Monospace` text is a command, file path, environment variable, or literal value you type or see (for example, `bromure-cli run` or `~/Library/Application Support/BromureAC`).
-- Screenshots show the English interface. The app is fully localized; your screens will match your macOS language.
+- **Bold** text names an on-screen control or label exactly as the app shows it in English — a button, menu item, toggle, pane, or sidebar section (for example, **New session** or **Start this VM at login**).
+- `Monospace` text is a command, file path, environment variable, or literal value you type or see (for example, `bromure-cli vm ls` or `~/Library/Application Support/BromureAC`).
+- A path such as **Workspaces › Infrastructure › Messaging Connector…** is a menu path: the menu, then each submenu or item in order. **Preferences › Models** means the Models pane of the Preferences window.
+- **Machine** and **workspace** mean the same thing: one isolated Linux VM with its settings. The main window says *machine*; the settings editor, menus such as **New Workspace…**, and the CLI say *workspace* (or *profile*).
+- A **session** is one conversation with an agent, in one folder, on one machine. It is not a run of a machine; see [Concepts & Architecture](04-concepts.mdx).
+- Keyboard shortcuts use the macOS symbols: ⌘ Command, ⌥ Option, ⌃ Control, ⇧ Shift, ⏎ Return, ⎋ Escape.
+- Screenshots show the English interface with synthetic demo content. The app is localized, so your screens follow your macOS language.
 - Notes, tips, and warnings appear as callouts:
 
 > **Note:** Background information worth knowing.
@@ -84,4 +110,4 @@ The settings reference has one page per pane: [General](07-settings/general.mdx)
 
 ## Where else to look
 
-Product downloads, the technical whitepaper, and the detailed feature matrix live at [bromure.io](https://bromure.io). For questions this manual does not answer, [Troubleshooting](17-troubleshooting.mdx) collects diagnostic procedures, and the [Glossary](18-glossary.mdx) defines the vocabulary.
+Product downloads, the technical whitepaper, and the detailed feature matrix are at [bromure.io](https://bromure.io). For questions this manual does not answer, [Troubleshooting](17-troubleshooting.mdx) collects diagnostic procedures, and the [Glossary](18-glossary.mdx) defines the vocabulary.

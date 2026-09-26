@@ -1,0 +1,123 @@
+---
+title: "Security Overview & Timeline"
+description: "The Security Timeline window: a 24-hour overview of what Bromure's security engines decided, and a filterable, exportable record of every decision, kept for 90 days."
+order: 11.5
+---
+
+# Security Overview & Timeline
+
+Bromure's protections all run on the host, inside the proxy and the virtual network switch: the credential swap, the egress firewall, Guardrails, the supply-chain checks, prompt-injection detection and PII Protection. Every time one of them makes a decision — swaps a credential, blocks a connection, checks a package, withholds a message — it records it. The **Security Timeline** window shows those decisions: an **Overview** of the last 24 hours, and a **Timeline** of every event.
+
+It answers a different question from [tracing](11-tracing.mdx). A trace records the traffic itself — "what did the agent send?" — and only when you turn tracing on. The Security Timeline records what the security engines *decided* about that traffic, and it is always on: every machine, enrolled or not, private mode or not, with nothing to configure.
+
+## Opening the window
+
+Choose **Window** → **Security Timeline…**, or press ⌘K and pick **Security Timeline**. The window opens on the **Overview** tab; the segmented control at the top left switches between **Overview** and **Timeline**. There is one window for the whole app; choosing the menu item again brings it forward.
+
+## The Overview tab
+
+<p align="center">
+  <img src="images/security-overview.en.jpg" width="700" alt="The Security Timeline window on its Overview tab: 'Last 24 hours' with five tiles (4 Blocked, 5 Allowed, 2 Credentials brokered, 2 Packages checked, 0 PII swapped), a Protections table with a row for each of Payments API, Web app and Data pipeline and columns Firewall, Supply chain, Guardrails, Prompt injection, PII protection and Credential brokering, and a Latest blocks list with a firewall block, a Guardrails block and a prompt-injection block" />
+</p>
+
+The Overview is headed **Last 24 hours** — "What Bromure's security engines decided for your agents." It has three parts.
+
+### Tiles
+
+Five tiles count the last 24 hours of events:
+
+| Tile | Counts |
+|---|---|
+| **Blocked** | Every event whose decision was a block (red in the Timeline), from any engine. |
+| **Allowed** | Every event whose decision was to let something through (green in the Timeline), from any engine. |
+| **Credentials brokered** | **Credential brokering** events: credential swaps, blocked exfiltration attempts, and hosts you allowed from the compromise alert. |
+| **Packages checked** | **Supply chain** events: every package fetch the proxy saw. |
+| **PII swapped** | The number of personal-data **values** [PII Protection](10a-pii.mdx) swapped for stand-ins — values, not requests. |
+
+Click a tile to jump to the **Timeline** tab. **Credentials brokered**, **Packages checked** and **PII swapped** open it filtered on their engine; **Blocked** and **Allowed** open it on all engines, filtered on that outcome.
+
+### Protections
+
+The **Protections** table lists each machine on this Mac, with its colour, and shows which protections it has on — a green check for on, a grey dash for off:
+
+| Column | Checked when |
+|---|---|
+| **Firewall** | The machine has outbound-connection rules in its Guardrails pane, or denies unmatched traffic. |
+| **Supply chain** | At least one supply-chain layer is on (the age gate, OSV, socket.dev, script stripping or the lockfile prompt). |
+| **Guardrails** | Guardrails actually restrict something: a service with a write policy other than **Off**, a database guardrail, an outbound-connection rule, or any credential set to **Ask before use**. The per-request insecure bypass (X-bromure-insecure) doesn't count, since it relaxes rather than restricts. |
+| **Prompt injection** | At least one prompt-injection detector is on. |
+| **PII protection** | PII Protection's master switch is on with at least one category. |
+| **Credential brokering** | Always: the credential swap can't be turned off. |
+
+Use it to spot a machine that runs with fewer protections than the others. To change one, open that machine's settings (see [Settings Reference](07-settings/index.mdx)).
+
+### Latest blocks
+
+**Latest blocks** lists the most recent blocks of the last 24 hours, newest first, up to eight: what was blocked, the engine and decision, and how long ago. The list is hidden when nothing was blocked.
+
+## The Timeline tab
+
+<p align="center">
+  <img src="images/security-timeline.en.jpg" width="700" alt="The Security Timeline window on its Timeline tab: a Filter events… field, the All engines pop-up, '8 events', Export… and Clear buttons, and a table with Time, Workspace, Engine, Condition and Decision columns listing PII protection, Prompt injection, Supply chain, Firewall and Credential brokering rows, colour-coded blue, red and green" />
+</p>
+
+The Timeline is one table of every event, newest first:
+
+| Column | Shows |
+|---|---|
+| **Time** | Date and time of the decision. |
+| **Workspace** | The machine it happened on. When you mirror remote Macs, it reads *Mac* · *machine*. |
+| **Engine** | Which engine decided, with its icon. |
+| **Condition** | What the engine saw: the host, package, snippet, key… Hover for the full text; the text can be selected and copied. |
+| **Decision** | What it decided, colour-coded. |
+
+Colours read the same way everywhere in the window:
+
+- **Green** — allowed: let through, passed, signed.
+- **Red** — blocked: denied, refused, withheld.
+- **Blue** — informational: a transformation that is neither a pass nor a block, such as a credential swap, an age-gated version list or stripped install scripts.
+
+The toolbar above the table filters it:
+
+- **Filter events…** matches text in the engine, condition, decision, machine and Mac names.
+- The engine pop-up (**All engines** by default) lists the engines that have events.
+- The outcome pop-up (**All outcomes** by default) narrows the table to **Blocked** or **Allowed** events.
+- When you mirror at least one remote Mac, a machine pop-up appears: **All machines**, **This Mac**, or one remote Mac.
+- The event count ("8 events") reflects the filters.
+
+**Clear** empties the window. It only hides events: they stay on disk, but cleared events don't come back when the app restarts. **Export…** is described [below](#exporting-events).
+
+## The engines
+
+| Engine | What its rows record | Example decisions |
+|---|---|---|
+| **Credential brokering** | Credential swaps on the wire ([Credentials](08-credentials.mdx)), exfiltration attempts, and hosts allowed from the compromise alert. | "swapped in sk-a…9f" (blue); "blocked — exfiltration attempt, VM paused" (red), or "blocked — exfiltration attempt (alerts off, VM not paused)" when the machine has exfiltration alerts turned off; "allowed by user for this session" (green) |
+| **Credential used** | SSH signatures and AWS SigV4 signings the host performed for the agent. | "signed" (green) |
+| **Firewall** | Egress-firewall verdicts, per host, port and protocol. A flow is reported again only once a minute has passed since its last report. | "allow" (green); "deny" (red) |
+| **Guardrails** | Write-policy blocks ([Guardrails](07-settings/guardrails.mdx)), with the method and path. | "blocked — …" (red) |
+| **Supply chain** | Every package fetch, including `apt` `.deb` downloads ([Supply-Chain Protection](09-supply-chain.mdx)). | "checked", "downloaded" (green); "checked — versions newer than the cooldown hidden", "install scripts stripped" (blue); "blocked — …" (red) |
+| **Prompt injection** | Detector hits, with the detector, the source and a short snippet ([Prompt-Injection Detection](10-prompt-injection.mdx)). | "log", "allowed" (green); "blocked" (red) |
+| **PII protection** | Requests in which personal data was swapped, with counts by kind and the host — never the values ([PII Protection](10a-pii.mdx)) — and requests whose scan ran out of model budget. | "swapped for stand-ins" (blue); "partial — model budget reached; pattern rules only" (blue) |
+| **Agent delegation** | Each message one agent sent another through [delegation](06d-delegation.mdx). | "relayed" (blue); "withheld — prompt injection" (red) |
+| **Upstream TLS** | Upstream certificates the host refused to trust, and uses of the per-request insecure bypass. | "blocked — …" (red); "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" (green) |
+
+The Timeline records security decisions only. File reads, commands, tool calls and model usage are not in it; they belong to [tracing](11-tracing.mdx).
+
+## Exporting events
+
+**Export…** (in the toolbar on both tabs) saves events as a CSV file, named `bromure-security-<date>.csv` by default. From the **Timeline** tab it saves exactly what the table shows, with the filters applied; from the **Overview** tab it saves every event in the window. Rows are oldest first, with the columns `time` (ISO 8601), `machine` ("This Mac" or the remote Mac's name), `workspace`, `engine`, `condition`, `decision` and `outcome` (`allowed`, `blocked` or `info`).
+
+## Storage and retention
+
+- Every event is appended to a daily file in `~/Library/Application Support/BromureAC/security-timeline/`, one JSON line per event, named `<yyyy-MM-dd>.jsonl` (UTC dates).
+- Files older than **90 days** are deleted.
+- At launch the window reloads the most recent **5,000** events, and holds at most 5,000 in memory; older events stay in the files.
+- Events hold previews only: token previews like `sk-a…f9q3`, snippet previews, PII counts. No secret or personal value is written.
+
+## Remote Macs
+
+The engines run on the Mac that hosts the machines. When a [remote client](14-remote-access.mdx) mirrors another Mac, it receives that Mac's most recent events and shows them in its own Security Timeline window, alongside its local ones. Each mirrored Mac's events are kept apart from this Mac's, so the machine pop-up can separate them and the **Workspace** column names the Mac.
+
+## Relation to enterprise telemetry
+
+On a Mac enrolled with bromure.io, the same engine events are also sent to the organization as cloud events (`credential.token_swap`, `egress.firewall`, `supply_chain.fetch`, `prompt_injection.detection`, `privacy.pii_swap` and others), unless the machine is in **Private mode**. The local Security Timeline is independent of that: it records every event whether or not the Mac is enrolled and whether or not private mode is on. See [Tracing & Audit](11-tracing.mdx#private-mode-and-enterprise-telemetry) and [Enterprise](15-enterprise.mdx).

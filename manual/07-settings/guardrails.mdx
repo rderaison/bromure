@@ -1,110 +1,97 @@
 ---
 title: "Guardrails"
-description: "Per-resource policies that strip destructive operations from the agent's infrastructure traffic, plus the per-workspace egress firewall."
-order: 7.10
+description: "Ask-before-use and write policies for a machine's credentials, the per-machine egress firewall, and the escape hatches for traffic interception and exfiltration alerts."
+order: 7.12
 ---
 
 # Guardrails
 
-[Guardrails](../18-glossary.mdx) is Bromure Agentic Coding's host-side control over how a workspace's credentials may be used. As the pane itself puts it: Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent in the VM can't bypass it. Only credentials you've configured appear here.
+[Guardrails](../18-glossary.mdx) control how a machine's credentials may be used (a machine is a workspace, in the settings editor), which connections its VM may open, and how strictly its traffic is intercepted. In the pane's own words: "Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here."
 
 <p align="center">
-  <img src="../images/editor-guardrails.en.jpg" width="600" alt="The Guardrails pane of the workspace settings editor: a per-credential row with its ask-before-use checkbox, then the Outbound connections egress-firewall section with its Unmatched traffic Allow/Deny control, Add rule button, pf-format disclosure, and the Disable transparent interception toggle" />
+  <img src="../images/editor-guardrails.en.jpg" width="600" alt="The Guardrails pane of the machine Web app: the explanation of ask-before-use and write policies, an empty state reading No credentials to guard, then the Outbound connections section with its explanation, an Unmatched traffic control set to Allow, an Add rule button and a pf format disclosure" />
 </p>
 
-The pane shows **one row per configured credential**, in the same order the [Credentials](credentials.mdx) pane lists them. Each row shows the credential's title and host(s) and carries two controls:
+The pane has three parts: one row per credential, the **Outbound connections** firewall, and three switches at the bottom. Everything in it applies to a running machine as soon as you click **Save** — no restart. The deeper mechanics are in [Prompt-Injection Detection & Guardrails](../10-prompt-injection.mdx).
 
-- An **Ask before use** checkbox (labelled **Require approval to use** on the control itself) — the per-credential consent gate, moved here from the Credentials pane.
-- An inline **write policy** picker, shown only where the credential's service supports one.
+## Credential rows
 
-If the workspace has no credentials, the pane shows an empty state — **No credentials to guard** — pointing you back to the Credentials pane. Enforcement details, error formats, and audit trails are covered in the [prompt-injection and guardrails deep dive](../10-prompt-injection.mdx).
+The pane lists every credential configured in [Credentials](credentials.mdx), in the same order. Each row shows the credential's name and hosts, a **Require approval to use** checkbox, and — where the service supports one — a write-policy picker. With no credentials, the pane shows **No credentials to guard** and points you to the Credentials pane.
 
-## Ask before use
+### Require approval to use (ask before use)
 
-Every row has an **Ask before use** checkbox, off by default. When it is on, the first time that credential is used in a session the proxy pauses and pops a consent dialog offering time-bounded grants — 5 minutes, 1 hour, or the rest of the session — or **Don't allow**. Grants are in-memory only and are wiped when the session window closes, and every live decision is listed in **Window → Credential Approvals…**. The consent model, the coalescing of concurrent prompts, and the approvals window are covered in [Credentials & the wire boundary](../08-credentials.mdx).
+Off by default. When on, the first time the credential is used in a session the proxy pauses the request and asks, offering **Allow for 5 minutes**, **Allow for 1 hour**, **Allow for the rest of the session**, or **Don't allow**. Grants live in memory and end with the session; **Window › Credential Approvals…** lists the current ones. See [Credentials & the Wire Boundary](../08-credentials.mdx).
 
-This checkbox applies to any credential, including plain API keys, SSH keys, and manual tokens — the rows that have no write policy show only this control.
+> **Note:** An automation that uses a credential with approval on can't run fully unattended: it pauses at the dialog until you answer on the Mac. The automation editor warns about this.
 
-## Write policy
+### Write policy
 
-Where a credential's service can classify its own traffic, the row also shows a **write policy** picker. It appears for:
+A write-policy picker appears for:
 
-- **Git forges** — GitHub, GitLab, Bitbucket tokens.
-- **AWS** credentials.
-- **DigitalOcean** tokens.
-- **Container registries** (Docker Hub, ghcr.io, and others).
-- **Kubernetes** contexts.
-- **Database** endpoints (MongoDB, ClickHouse, Elasticsearch).
-
-Every write policy offers the same four modes:
+- git forge tokens (GitHub, GitLab, Bitbucket)
+- AWS credentials
+- DigitalOcean tokens
+- container registries
+- Kubernetes contexts
+- database endpoints (MongoDB, ClickHouse, Elasticsearch)
 
 | Mode | Behavior |
 |---|---|
 | **Off** | No filtering. |
-| **Prompt before write** | Reads pass through. Every write pauses for a host-side consent dialog showing the exact operation, with time-bounded grants (see below). |
-| **Block destructive** | Deletes, drops, and terminates are blocked; creates and updates pass. |
-| **Read-only** | Every mutation is blocked; only reads pass. |
+| **Prompt before write** | Reads pass. Each write pauses for a dialog showing the exact operation. |
+| **Block destructive** | Deletes, drops and terminations are blocked; creates and updates pass. |
+| **Read-only** | Every change is blocked; only reads pass. |
 
-New workspaces default to **Prompt before write** on every service that supports a policy (via the preferences template). Workspaces created before Guardrails existed — or profiles whose JSON omits the field — decode as **Off**.
+New machines use **Prompt before write** for every service (from the Defaults template). Machines created before Guardrails existed load as **Off**.
 
-> **Note:** The write policy is **per service**, not per credential. Two credentials for the same service — say two GitHub tokens — share one policy, so changing the picker on either row changes it for both.
+> **Note:** A write policy is per service, not per credential, as the pane notes: "two credentials for the same service (e.g. two GitHub tokens) share one policy." Changing either row changes both.
 
-> **Note:** Guardrails classifies operations; it does not hide credentials. The credential itself is still injected and swapped by the proxy as configured under [Credentials](credentials.mdx). Combine a **Read-only** write policy with the same row's **Ask before use** checkbox for defense in depth.
-
-## How each service classifies calls
+## How each service is classified
 
 | Service | Scope | Classification |
 |---|---|---|
-| **Kubernetes** | The Kubernetes API servers from this workspace's kubeconfigs | `GET`/`HEAD`/`OPTIONS` = read; `DELETE` = destructive (includes `deletecollection`); other verbs = write. Blocked calls return a Kubernetes `Status` 403 JSON that `kubectl` renders cleanly. |
-| **AWS** | All `*.amazonaws.com` hosts | The action name from the `X-Amz-Target` header (JSON-protocol services such as DynamoDB and Lambda) or the `Action=` form parameter (query-protocol services such as EC2, IAM, SQS) is classified by prefix: `Delete*`/`Terminate*`/`Remove*`/`Purge*`/`Destroy*`/`Deregister*`/`Revoke*` = destructive; `Get*`/`List*`/`Describe*` and similar = read. Falls back to the HTTP method for S3 and REST-style requests. Blocked calls return an `AccessDeniedException` body. |
-| **DigitalOcean** | `api.digitalocean.com` and `*.digitalocean.com` | HTTP method: `DELETE` = destructive; `GET`/`HEAD` = read. |
-| **Container registries** | The registries configured under Credentials, plus Docker Hub endpoints | Pull (`GET`) = read; push (`PUT`/`POST`) = write; `DELETE` = destructive. Blocked calls return a registry-style `DENIED` error body. |
-| **GitHub** | `github.com` REST API and git over HTTPS | Method-based for REST. `git push` (`git-receive-pack`) counts as a write — blocked in **Read-only**, prompted in **Prompt before write**; `git fetch` (`git-upload-pack`) is always a read. |
-| **GitLab** | `gitlab.com` REST API and git over HTTPS | Same classification logic as GitHub. |
-| **Bitbucket** | `bitbucket.org` REST API and git over HTTPS | Same classification logic as GitHub. |
+| **Kubernetes** | The API servers in this machine's kubeconfigs | `GET`/`HEAD`/`OPTIONS` read; `DELETE` (including `deletecollection`) destructive; other verbs write. Blocked calls return a Kubernetes `Status` 403 that `kubectl` shows cleanly. |
+| **AWS** | `*.amazonaws.com` | The action name (`X-Amz-Target` header or `Action=` parameter) by prefix: `Delete*`, `Terminate*`, `Remove*`, `Purge*`, `Destroy*`, `Deregister*`, `Revoke*` destructive; `Get*`, `List*`, `Describe*` and similar read. S3 and REST-style calls fall back to the HTTP method. Blocked calls return `AccessDeniedException`. |
+| **DigitalOcean** | `*.digitalocean.com` | `DELETE` destructive; `GET`/`HEAD` read. |
+| **Container registries** | Configured registries and Docker Hub | Pull read; push write; `DELETE` destructive. Blocked calls return a registry `DENIED` error. |
+| **GitHub / GitLab / Bitbucket** | The forge's REST API and git over HTTPS | REST by method. `git push` is a write (blocked in **Read-only**, prompted in **Prompt before write**); `git fetch` is always a read. |
 
-Database endpoints classify by engine:
+Database endpoints are classified by engine:
 
 | Engine | Read | Write | Destructive |
 |---|---|---|---|
 | MongoDB (Atlas Data API) | `find`, `findOne`, `aggregate` | `insert`, `update`, `replace` | `deleteOne`, `deleteMany` |
-| ClickHouse | SQL whose leading keyword is `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`, `WITH` … | `INSERT`, `CREATE`, `ALTER`, … | `DROP`, `TRUNCATE`, `DELETE`, and `ALTER … DELETE` / `DROP COLUMN` / `DROP PARTITION` / `CLEAR` |
-| Elasticsearch | `_search`, `_msearch`, `_count`, `_mget`, `_sql`, and other query endpoints (even over `POST`) | `_bulk`, `_update`, document indexing | `DELETE` and `_delete_by_query` |
+| ClickHouse | `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`, `WITH` … | `INSERT`, `CREATE`, `ALTER` … | `DROP`, `TRUNCATE`, `DELETE`, and `ALTER … DELETE` / `DROP COLUMN` / `DROP PARTITION` / `CLEAR` |
+| Elasticsearch | `_search`, `_msearch`, `_count`, `_mget`, `_sql` and other queries (even over `POST`) | `_bulk`, `_update`, indexing | `DELETE`, `_delete_by_query` |
 
-An orange inline warning appears when a policy is set but there is nothing for it to scope to — no kubeconfigs for a Kubernetes context, no host set for a database endpoint — since the guard then has no hosts to apply to.
+An orange warning appears when a policy has nothing to apply to — a Kubernetes context without a kubeconfig, a database endpoint without a host.
 
-> **Note:** For ClickHouse, if no SQL text is visible in the request, **Read-only** blocks the request (Bromure cannot prove it is a read) while **Block destructive** lets it through (it errs open).
+> **Note:** For ClickHouse, if no SQL text is visible in the request, **Read-only** blocks it (it can't be proven a read) while **Block destructive** lets it through.
 
-## The consent dialog (Prompt before write)
+### The write dialog
 
-In **Prompt before write** mode, reads pass silently and every write pauses for a host dialog titled `Allow write on "<scope>" from workspace "<name>"?`. The dialog body shows the exact operation verbatim — the literal SQL statement for a database, or `METHOD /path` for a REST call — so you approve what will actually run, not a summary. The buttons are:
+In **Prompt before write**, a write pauses for **Allow write on "*scope*" from workspace "*name*"?**, showing the operation verbatim — the SQL statement, or `METHOD /path`. The choices:
 
-- **Allow for 15 minutes** (the default button)
-- **Allow once** — deliberately creates no grant, so the very next write re-prompts. Useful for auditing a chatty agent write-by-write.
+- **Allow for 15 minutes** (default)
+- **Allow once** — creates no grant, so the next write asks again.
 - **Allow for the rest of the session**
-- **Don't allow** — the agent receives the same hard error the block modes produce. The refusal is remembered for 60 seconds so an agent retrying the same write in a loop does not re-prompt every second.
+- **Don't allow** — the agent gets the same error the blocking modes return. The refusal is remembered for 60 seconds so a retry loop doesn't re-prompt every second.
 
-Grants are scoped per workspace and per protocol scope: one Kubernetes API host, AWS as a whole, one container registry, each git forge as a whole, or one database host. Allowing ClickHouse writes on one host grants nothing anywhere else. Concurrent identical writes coalesce onto a single dialog, and all decisions are in-memory only — session-scoped grants are wiped at session teardown.
+Grants are per machine and per scope: one Kubernetes API server, AWS as a whole, one registry, each forge, or one database host. Identical concurrent writes share one dialog. When the machine is used headless over SSH or the CLI, the same choices are asked inside the machine's tmux; no answer means deny.
 
-When the workspace is driven headless over SSH or the CLI, the same four choices are offered as a text prompt inside the workspace's tmux; no answer means deny.
+## Outbound connections (egress firewall)
 
-> **Note:** Guardrails write-grants are not listed in any window. The **Credential Approvals** window (Window menu → **Credential Approvals…**) shows credential-consent decisions — the **Ask before use** grants — only; a write-policy grant expires on its own clock or at session teardown.
-
-## The egress firewall
-
-Below the credential rows, the pane hosts the workspace's **Outbound connections** firewall: an ordered rule table that governs which connections the VM may open at all — any protocol, any destination, not just the services Guardrails classifies. Rules are matched top to bottom, first match wins, and a segmented **Unmatched traffic** control picks the default for anything no rule matches: **Allow** (the default for new workspaces) or **Deny** for a locked-down, allow-list posture.
-
-Each rule has five parts:
+"Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins." Rules cover any protocol and any destination, not just the services above. **Unmatched traffic** sets what happens to a connection no rule matches: **Allow** (default) or **Deny** for an allow-list setup. **Add rule** appends a row.
 
 | Column | Values | Meaning |
 |---|---|---|
-| **Action** | `allow` / `deny` | What happens to a matching flow. |
-| **Proto** | `tcp` / `udp` / `web` / `any` | `web` is HTTP(S)-over-TCP — the one protocol whose rules can also restrict request methods. |
-| **Host / CIDR** | `any`, a hostname, or an IPv4 CIDR | Hostnames suffix-match: `example.com` covers the apex and every subdomain; `*.example.com` covers subdomains only. A bare IP is a /32. |
-| **Ports** | `any`, a port, a range (`8000-8999`), or a list | Empty means any port. |
-| **Methods** | HTTP verbs, `web` rules only | With `allow`, an allowlist (`GET,POST` — only those verbs pass); with `deny`, a blocklist (`PUT,DELETE` — those verbs are refused, everything else passes). `read-only` is shorthand for GET/HEAD/OPTIONS. |
+| **Action** | `allow` / `deny` | What happens to a match. |
+| **Proto** | `tcp` / `udp` / `web` / `any` | `web` is HTTP(S), the only protocol whose rules can also restrict methods. |
+| **Host / CIDR** | `any`, a hostname, or an IPv4 CIDR | `example.com` covers the domain and all subdomains; `*.example.com` subdomains only. A bare IP is a /32. |
+| **Ports** | `any`, a port, a range (`8000-8999`) or a list | Empty means any. |
+| **Methods** | HTTP verbs, `web` rules only | With `allow`, only these verbs pass (`GET,POST`); with `deny`, these verbs are refused (`PUT,DELETE`). `read-only` means GET/HEAD/OPTIONS. |
 
-A disclosure at the bottom shows the same ruleset in its canonical **pf format** — one rule per line, ending in `default allow` or `default deny` — which is how the rules are stored and what the CLI and managed profiles carry:
+The **pf format** disclosure shows the same rules as text — one per line, ending in `default allow` or `default deny` — which is how they are stored and what the CLI and managed profiles use:
 
 ```
 allow tcp api.github.com:443
@@ -115,24 +102,58 @@ deny  any 10.0.0.0/8
 default deny
 ```
 
-Enforcement is host-side and layered, so a compromised agent cannot route around it: the virtual network switch applies the rules to every flow by destination IP and DNS-snooped hostname (all protocols, including plain TCP and UDP), and the MiTM proxy applies them again by TLS server name and — for `web` rules — by individual HTTP method. The method dimension is what lets a workspace *read* an API it is not allowed to *write*: `allow web api.example.com GET,POST` gives the agent queries without mutations, at the wire, regardless of what tool inside the VM makes the request.
+Enforcement happens on the Mac, in two layers: the virtual network switch checks every connection by destination IP and by the hostname seen in DNS (all protocols), and the proxy checks again by TLS server name and, for `web` rules, by HTTP method. That is what lets a machine read an API it may not write to: `allow web api.example.com GET,POST` gives the agent queries without changes, whatever tool it uses.
 
-Rule edits **apply to running sessions immediately** — saving the workspace refreshes the live policy without a reboot, including for headless sessions. Every verdict is recorded as a Firewall row in the [Security Timeline](../11-tracing.mdx) window, and on enrolled installs as an `egress.firewall` event in the organization's stream.
+Every decision is recorded in the [Security Timeline](../11a-security-timeline.mdx), and on enrolled Macs sent to your organization.
 
-> **Note:** Local inference is exempt by construction: an `allow` rule for the on-host inference endpoint (`bromure.llm`) is prepended ahead of your rules, so even `default deny` cannot cut agents off from [Local Models](local-models.mdx). That traffic never leaves your Mac.
+> **Note:** Local models are always reachable: an allow rule for the on-Mac inference endpoint is placed ahead of your rules, so even `default deny` can't cut agents off from an on-device model.
 
-## Transparent interception
+## Disable transparent interception
 
-The firewall would be advisory if the VM could simply ignore the proxy, so it no longer can: the virtual switch **transparently diverts the VM's port-80 and port-443 flows into the host proxy** — no environment variables required, nothing the guest can unset. Plain HTTP on port 80 is intercepted and inspected the same way HTTPS is. This is on by default for every workspace.
+By default, the virtual switch diverts the VM's HTTP and HTTPS connections (ports 80 and 443) into Bromure's proxy at the network layer, so the proxy sees them even when a program ignores the proxy settings.
 
-The escape hatch is the **Disable transparent interception** toggle beneath the rule table. Turning it on stops the switch from diverting :80/:443, so Guardrails and the firewall's `web` rules only see traffic that cooperatively uses the proxy environment variables — use it only for a workspace that genuinely breaks under interception (for example, heavy certificate pinning not covered by the built-in passthrough list), and treat the firewall as advisory while it is on.
+Turning on **Disable transparent interception** stops only that forced diversion. Programs that open raw connections, and apps that pin certificates, then reach the network — and the real server certificate — directly. The proxy itself stays on: `HTTP_PROXY` / `HTTPS_PROXY` remain set, so proxy-aware tools (apt, git, pip, curl, node…) and the agents' own API calls still go through Bromure and keep credential swapping, tracing and guardrails. Applies live, no restart.
+
+Use it for a machine with a client that breaks under interception. While it is on, traffic from programs that bypass the proxy settings is not seen by the firewall's `web` rules or the write policies.
+
+## Allow per-request insecure bypass (X-bromure-insecure)
+
+A narrower escape hatch for self-signed or private-CA servers. When a request to such a host fails certificate validation, the agent can retry it with the header `X-bromure-insecure: yes`, and Bromure skips validating that server's certificate for that request. Interception, tracing and the leak guard stay on, and Bromure puts no real credential into such a request — only the VM's stand-ins go out. Every use is recorded in the Security Timeline.
+
+On by default: it only acts when the VM explicitly sends the header. Turn it off to refuse the header outright.
+
+## Don't alert on credential exfiltration
+
+When a credential is seen heading to a host it doesn't belong to, Bromure blocks the request, pauses the VM, and shows a compromise alert with **Shut down**, **Block**, **Allow**, and **Save for Investigation**. **Allow** trusts that destination for the rest of the session. See [Credentials & the Wire Boundary](../08-credentials.mdx).
+
+**Don't alert on credential exfiltration** turns off that alert for this machine. The leak is still blocked and still recorded in the Security Timeline, as "blocked — exfiltration attempt (alerts off, VM not paused)" — only the interruption goes away. Applies live, no restart. Default: off.
 
 ## What the agent sees when a call is blocked
 
-Blocked calls return a protocol-appropriate 403-style error body — a Kubernetes `Status` JSON, an AWS `AccessDeniedException`, a registry `DENIED` payload — whose message ends "blocked by Bromure Guardrails". The agent sees a clean, ordinary API failure it can report, rather than a hung connection. (Supply-chain blocks use HTTP 451 instead, precisely so the two are distinguishable at a glance — see [Supply Chain](supply-chain.mdx).)
+A blocked call returns an ordinary error in the service's own format — a Kubernetes `Status`, an AWS `AccessDeniedException`, a registry `DENIED` — whose message ends "blocked by Bromure Guardrails". The agent sees a clean failure it can report, not a hung connection. (Supply-chain blocks use HTTP 451 instead, so the two are easy to tell apart — see [Supply Chain](supply-chain.mdx).)
 
 ## Limitations
 
-- **Git force-push** cannot be distinguished from a normal push on the wire, so **Block destructive** does not block it — only **Read-only** and **Prompt before write** gate pushes. Explicit deletions through the forge REST APIs are still caught.
-- Kubernetes and container-registry policies only apply to hosts derived from the workspace's kubeconfigs and configured registries; database policies need the endpoint's host set under Credentials. A guard with nothing to scope to filters nothing (the pane warns you inline).
-- The write policies cover the services listed above; traffic to other hosts is governed by the egress firewall's host/port/method rules rather than semantic classification. For package downloads see [Supply Chain](supply-chain.mdx), and for the agent's AI traffic see [Prompt Injection](prompt-injection.mdx).
+- A force-push looks like a normal push on the wire, so **Block destructive** doesn't stop it; **Read-only** and **Prompt before write** do gate pushes. Deletions through the forge's REST API are caught.
+- Kubernetes and registry policies only cover hosts from this machine's kubeconfigs and registries; a database policy needs the endpoint's host.
+- Other hosts are governed by the firewall's host, port and method rules, not by service-level classification.
+- The rule table is not shown in the iPhone, iPad or Vision Pro client; rules set on the Mac still apply.
+
+## Settings reference
+
+| Setting | Type | Default |
+|---|---|---|
+| **Require approval to use** | Checkbox per credential | Off |
+| Write policy | **Off** / **Prompt before write** / **Block destructive** / **Read-only**, per service | **Prompt before write** for new machines |
+| **Unmatched traffic** | **Allow** / **Deny** | Allow |
+| Rules | Ordered table (**Add rule**), also shown as **pf format** | None |
+| **Disable transparent interception** | Toggle | Off |
+| **Allow per-request insecure bypass (X-bromure-insecure)** | Toggle | On |
+| **Don't alert on credential exfiltration** | Toggle | Off |
+
+## Related chapters
+
+- [Credentials](credentials.mdx) — the credentials these rows govern.
+- [Prompt-Injection Detection & Guardrails](../10-prompt-injection.mdx) — enforcement in depth.
+- [Security Overview & Timeline](../11a-security-timeline.mdx) — every block and allow, per machine.
+- [Settings Reference](index.mdx) — all panes at a glance.

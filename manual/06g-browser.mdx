@@ -1,0 +1,157 @@
+---
+title: "The Embedded Browser"
+description: "Using the machine's built-in Chromium — driving it yourself, letting the agent drive it through the browser MCP tools, staying signed in, and privacy."
+order: 6.7
+---
+
+# The Embedded Browser
+
+Every machine (a workspace, in the settings editor) comes with its own web browser: a full Chromium that opens as a pane beside the chat or terminal. It exists so an agent can *see the web* — open the app it just built, read a docs page, reproduce a bug, click through a flow — and so you can watch (and drive) the same browser it does. The browser runs in its own disposable sidecar VM, separate from the machine's VM, so a hostile page can never touch the agent's files or your Mac.
+
+This chapter is the complete guide to using it: opening it, driving it by hand, letting the agent drive it through the built-in [browser MCP server](18-glossary.mdx), keeping sign-ins, and the privacy model. Everything here also applies when a remote agent drives it over a [rich-client](14-remote-access.mdx) connection.
+
+## Opening the browser
+
+Toggle the browser pane with **⌃⌘B**, or click the **globe** button in the toolbar, next to the machine menu. It opens as a split on the right edge of the stage, beside the session's chat or the machine's terminal. Each machine has its own browser: the pane shows the browser of the machine behind whatever is on the stage. In a [room](06b-rooms.mdx), the globe and the pane follow the focused cell's session.
+
+The very first time you open it — per Mac, not per machine — a consent card asks **Install the browser?** with **Download & Install** and **Not Now**. The browser image is a one-time download (the card states its size, roughly 500 MB), shared by every machine. While it downloads, the pane shows **Setting up the browser** with a progress bar. You can also pre-fetch it from the machine's [Browser settings](07-settings/browser.mdx) with **Download Now**.
+
+Once installed, the browser VM boots lazily the first time any machine opens the pane (or the first time an agent calls a browser tool), which takes a second or two. You do not manage this VM directly — it is created, suspended, and torn down for you (see [Lifecycle and resource use](#lifecycle-and-resource-use)).
+
+> **Note:** The browser runs in a *different* VM from the one your agent's shell runs in. The two share a private network (see [Loading a dev server](#loading-a-dev-server-the-agent-started)), but they are not the same machine — a file the agent writes in its home directory is not on the browser's disk, and `localhost` in the browser is not the agent's `localhost`.
+
+## Driving it yourself
+
+The pane is a chrome-less browser view under a compact, Safari-style tab bar:
+
+| Control | What it does |
+|---|---|
+| **Back / forward** | The arrow buttons, or **⌘[** and **⌘]**. |
+| **Tab pills** | One pill per open tab. The *active* pill doubles as the address field ("Search or enter URL"): type a bare hostname and `https://` is prepended; type anything that is not a URL and it becomes a Google search. |
+| **+** | New tab (**⌘T** while the pane has focus). |
+| **DevTools** | Toggle Chromium's Developer Tools (**F12**) — the full element inspector, console, and network panel. |
+| **Site info** | Click the favicon for a site-information popover, including the certificate chain on HTTPS pages. |
+| **Share** | The standard macOS share menu for the current page. |
+
+Drag the pane's left edge to resize it (default 640 points, adjustable between 380 and 1400). Drag it below the minimum width to close the pane.
+
+> **Note:** While the browser view has keyboard focus, **⌘Q** and **⌘Tab** are captured by the guest so that in-page shortcuts work — they will not quit the app or switch macOS apps. Click the terminal or the sidebar to hand those shortcuts back to macOS.
+
+## Loading a dev server the agent started
+
+The most common reason to open the browser is to look at something the agent is building. Because the browser VM shares the same private network as the machine's VM, it can reach a dev server the agent started directly — but **not** at `localhost`, because the browser is a separate machine.
+
+Reach the dev server by the *machine's* IP address:
+
+1. Start the server in the agent's terminal as usual (for example a dev server on port 3000).
+2. Copy the machine's IP address: open the machine menu in the toolbar (the capsule with the machine's name) and choose **Copy IP Address (…)**. You can also read it on the [machine dashboard](06f-machines.mdx#the-machine-dashboard), or run `hostname -I` in the machine's terminal.
+3. In the browser, navigate to `http://<machine-ip>:3000`.
+
+The agent, when it drives the browser itself, is instructed to do exactly this — reach dev servers by the LAN IP, never `localhost` — so its screenshots and checks hit the right server.
+
+## Letting the agent drive it
+
+The browser is *agentic*: every agent on the machine is handed a built-in `browser` MCP server automatically, with no configuration. Its tools let the agent open pages, click, type, read the DOM, take screenshots, and inspect the console and network — driving the very pane you see. You and the agent share one browser: a page the agent opens appears in your pane, and a tab you open is visible to the agent's `browser_list_tabs`.
+
+You do not turn this on. Just ask the agent to do something that needs a browser — for example:
+
+```
+Open http://<machine-ip>:3000, click "Sign up", fill the form with a test
+account, and tell me if the confirmation page renders. Screenshot it.
+```
+
+The agent's tool calls can boot and reveal the browser automatically for its machine; if the pane was closed, a tool call opens it and waits for the cold boot. (The pane never *re-opens itself* after you have closed it manually within a session, so you always stay in control of whether it is visible.)
+
+### Prompts that trigger the browser
+
+There is no "use the browser" command — the agent reaches for the `browser_*` tools whenever your request can only be answered by loading, seeing, or acting on a real page. In practice, anything that names a URL, asks the agent to *look at* or *click* something rendered, or asks for a screenshot, a console log, or network activity will pull the browser in. A few shapes that reliably do:
+
+- **See something you built** — "Open my dev server at `http://<machine-ip>:3000` and tell me whether the dashboard renders." / "Take a full-width screenshot of the landing page." / "I changed the header to blue — reload the page and confirm it looks right."
+- **Reproduce or test a flow** — "Go to the sign-up page, fill it with a test account, submit, and tell me if the confirmation screen appears." / "Click through checkout and stop at the first step that errors."
+- **Read or extract from a page** — "Open `<docs URL>` and summarize the authentication section." / "List every outbound link on this page." / "Grab the pricing table as Markdown."
+- **Debug a client-side problem** — "The Buy button does nothing — open the page, click it, and check the console and network log for the failing request." (The agent uses `browser_console` and `browser_network` to read exactly what you would see in DevTools, without you copying anything out.)
+
+The more concretely you point at a page or an on-screen action, the more directly the agent goes to the browser. If you only *describe* a result ("does signup work?"), the agent will usually still open the browser to check — but naming the URL or the button removes a round trip. Remember to give it the machine's IP address, not `localhost`, for dev servers (see [Loading a dev server](#loading-a-dev-server-the-agent-started)).
+
+### The browser tools
+
+The server exposes 23 tools, grouped by what they do:
+
+| Group | Tools |
+|---|---|
+| **Navigation** | `browser_navigate`, `browser_back`, `browser_forward`, `browser_reload`, `browser_wait_for` |
+| **Tabs** | `browser_new_tab`, `browser_list_tabs`, `browser_activate_tab`, `browser_close_tab` |
+| **Reading the page** | `browser_get_text`, `browser_get_html`, `browser_get_links`, `browser_screenshot` (with a full-page option), `browser_evaluate` (run JavaScript) |
+| **Interacting** | `browser_click`, `browser_fill`, `browser_type`, `browser_press_key`, `browser_pick_element` |
+| **Diagnostics** | `browser_console`, `browser_network`, `browser_network_summary`, `browser_clear_network` |
+
+`browser_evaluate` runs arbitrary JavaScript in the page and returns the result, and `browser_network` / `browser_console` give the agent the same request log and console output you would read in DevTools — which is how an agent debugs a failing fetch or a client-side error without you copying anything out by hand. `browser_pick_element` is the one that involves you directly, and it gets its own section below.
+
+### Pointing at an element
+
+Words are a clumsy way to identify one element on a busy page — "the second card", "that broken button", "the misaligned label". When the agent can't tell which element you mean, ask it to let you *point*, and it will hand control to you instead of guessing:
+
+```
+One card in this grid is misaligned — let me point at it. Then read that
+element's classes and tell me why it's off.
+```
+
+Behind that, the agent calls `browser_pick_element`, which **arms an interactive picker directly in the browser pane**: elements highlight as you move the mouse over them, and a "click an element" banner appears at the top. Click the element you mean, and the agent immediately receives its exact CSS selector — nothing to describe, copy, or paste. You have about 60 seconds to click before the picker times out and the agent gets nothing back.
+
+You never press an "enable picker" button or open any menu — arming the picker *is* the agent's tool call, so it happens the instant you ask. Phrasings that reliably trigger it: **"let me point at it"**, **"I'll click the one I mean"**, **"which element? I'll show you"**, or just **"point-and-pick"**. Once the agent has the selector it can do anything with that element — click it, read its text or classes, watch it, or use it as an anchor to explain a layout bug — so a good follow-through is to say what you want done with the element in the same breath as offering to point at it.
+
+> **Tip:** The picker is the fastest way to bridge "I can see the problem, you can't." Instead of describing a visual glitch, point at the offending element and let the agent inspect the real DOM node.
+
+Under the hood the tools reach the browser over a generated Python stdio shim, `bromure-browser-mcp.py`, staged read-only into the agent's VM at `/mnt/bromure-meta/`. It dials the host over [vsock](18-glossary.mdx) port 5830 and reconnects forever, so the tools never disappear from the agent's tool list even across browser teardowns. The full tool reference lives in [CLI, API & MCP](16-automation-cli.mdx#the-browser-server).
+
+> **Note:** On a [rich client](14-remote-access.mdx), a remote machine's browser-MCP traffic can be relayed over the SSH connection so its agents drive the browser pane you are watching locally. The relay carries every agent on that machine at once, so several sessions on one machine can all use the browser through it.
+
+## Staying signed in vs. staying disposable
+
+By default the browser is **disposable**: its disk is an ephemeral clone that is deleted when the browser is torn down, so cookies, logins, and history vanish with it. Every fresh open starts clean. This is the safe default — nothing an agent does in the browser persists or leaks into later work.
+
+When you need sign-ins to survive — logging into a staging site the agent will revisit, keeping a session across restarts — enable **Stay signed in to websites** in the machine's [Browser settings](07-settings/browser.mdx). Chromium's profile then lives on an encrypted, per-machine disk under `~/Library/Application Support/BromureAC/browser-profiles/` and survives teardowns. Toggling the setting restarts the machine's browser, so you are warned before the change is saved.
+
+> **Warning:** Turning on **Stay signed in** trades disposability for convenience. Saved cookies and logins are exactly the kind of thing a prompt-injected agent would try to exfiltrate. Prefer the disposable default for any machine pointed at untrusted code, and reserve persistence for browsers that only ever visit sites you trust.
+
+## Lifecycle and resource use
+
+The browser VM is managed for you and kept cheap when idle:
+
+- It is created lazily on first open (or first agent tool call) and boots from the shared 500 MB image as a copy-on-write clone.
+- A hidden browser **suspends after about 10 seconds** and is **torn down entirely after 5 minutes** collapsed, freeing its memory and disk.
+- The pane's open/closed state is remembered per machine while the app runs, but deliberately not across app restarts — a disposable browser would not survive a restart anyway.
+
+Unlike machines, the sidecar browser VM *is* served from a pre-warmed pool, which is why opening the pane usually feels instant after the first time.
+
+## Keyboard shortcuts
+
+These apply while the browser pane has keyboard focus:
+
+| Shortcut | Action |
+|---|---|
+| ⌃⌘B | Toggle the browser pane |
+| ⌘T / ⌘W | New / close browser tab |
+| ⇧⌘T | New browser tab, whenever the browser pane is shown (otherwise ⇧⌘T opens the Tasks board) |
+| ⌘[ / ⌘] | Back / forward |
+| ⌘R | Reload |
+| ⌘L | Focus the address field (the active tab pill) |
+| F12 | Toggle DevTools |
+
+## Troubleshooting
+
+**The pane shows an install prompt instead of a page.** The browser image is not downloaded yet. Click **Download & Install**, or pre-fetch it from [Browser settings](07-settings/browser.mdx) → **Download Now** (about 500 MB).
+
+**The agent's page won't load / shows connection refused.** The agent is almost certainly using `localhost`. The browser is a separate VM — it must reach the dev server by the machine's IP address (**Copy IP Address (…)** in the toolbar's machine menu, or `hostname -I` in the machine's terminal), as in [Loading a dev server](#loading-a-dev-server-the-agent-started).
+
+**⌘Q or ⌘Tab do nothing.** The browser view has focus and is capturing them for in-page use. Click the terminal or the sidebar to return those shortcuts to macOS.
+
+**Logins disappear between sessions.** That is the disposable default. Enable **Stay signed in to websites** in [Browser settings](07-settings/browser.mdx) to keep a persistent profile.
+
+**The browser pane won't re-open on its own after the agent used it.** By design: once you close the pane manually, it stays closed until you re-open it, even if the agent keeps issuing browser tool calls (which still run — you just don't see the pane). Press ⌃⌘B to bring it back.
+
+## Related settings and tools
+
+- [Browser settings](07-settings/browser.mdx) — the **Stay signed in to websites** toggle and browser-image management.
+- [Machines](06f-machines.mdx) — the machine menu, the dashboard, and the Files pane that sits beside the browser.
+- [CLI, API & MCP](16-automation-cli.mdx#the-browser-server) — the full `browser_*` tool reference and the vsock transport.

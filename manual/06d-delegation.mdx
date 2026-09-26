@@ -1,0 +1,143 @@
+---
+title: "Agents Working Together"
+description: "How one agent hands a piece of work to a new agent session, or asks an existing session by its @nickname, with every message brokered, screened and logged by the host."
+order: 6.4
+---
+
+# Agents Working Together
+
+Agents in Bromure can work together. One agent can hand a scoped piece of work to a fresh agent. It can also ask a session that is already running, in the same machine or another one, for something it knows or can do. You can prompt this yourself ("ask @payments for the webhook schema"), or an agent can decide to do it on its own.
+
+The two agents never talk directly. Every message goes through the Bromure host, which:
+
+- shows each session only the conversations it is part of
+- screens every message for prompt injection
+- records every message in the Security Timeline
+- copies any files that travel along between machines
+
+This chapter says "machine" for what the settings editor calls a **workspace**.
+
+## Delegations and requests
+
+There are two kinds of exchange:
+
+| | **Delegation** | **Request** |
+| --- | --- | --- |
+| Who does the work | A **new** session, started for it | A session that **already exists**, named by its @nickname |
+| Where | By default in a git worktree branched off the delegator's folder, on its own branch. It runs in the same folder when the folder isn't a repository, and in a folder of its own when delegated into another machine. | Wherever that session already runs |
+| How it opens | With the delegator's title, brief, what "done" means (the *contract*) and the paths to stay within | As a one-line notice at the peer's prompt |
+| How it ends | The delegate **delivers**. The delegator accepts or rejects it with `close_delegation`, or cancels it. The delegate's session is then archived, while its branch stays for you to merge or drop. | The peer's `deliver` is the reply. Nothing is started or ended on its side. |
+
+A delegate is nested under its delegator in the sidebar, like a [branch session](06c-branches.mdx). A delegation into another machine starts that machine if it is off. It does so quietly, without taking over the chat you are looking at.
+
+### How messages reach an agent
+
+An agent receives messages in three ways:
+
+- **Waiting:** if the agent is blocked in `wait` or `ask`, it gets the message at once.
+- **Idle:** if its prompt is idle, the host types a one-line notice there, telling it to call `read_inbox`.
+- **Busy:** if it is mid-turn, or a dialog is up on its screen, the notice waits until the prompt is free.
+
+A notice still unread a few minutes later is sent again, up to three times. If the recipient's agent has ended, the message resumes it. For example, steering an ended delegate brings it back where it was.
+
+What the host still owes a session is saved on the message itself, so it survives a restart of the app.
+
+## @nicknames
+
+A **nickname** is how you and other agents address a session. Set one with **Nickname…** in the session's right-click menu or its header **⋯** menu.
+
+The sheet explains: "How other agents reach “*session*”: they ask it with request(to: "@name"), and you can write @name in any composer. Letters, digits, dots, dashes and underscores." It previews the result ("Will be @payments"). Click **Set**, or **Clear** to remove it.
+
+Nicknames are unique on the Mac. Picking one already in use is refused ("@payments is already “Payments API refactor”."). The nickname shows next to the session's title in the sidebar, the header and room cells, and you can search the sidebar for it.
+
+### The @ palette
+
+Type **@** in a chat's composer or on the [new-session screen](06-new-session.mdx) to get a palette of sessions you can name:
+
+- It lists every session except the current one.
+- Sessions with a nickname show as they are. Sessions without one show with the nickname they would get, derived from the title and tagged **new name**. Picking one of those gives the session that nickname on the spot, so the @name you just typed is one an agent can resolve.
+- Name matches rank above title matches, and named sessions above unnamed ones.
+- **↑** and **↓** move, **Tab** or **⏎** completes, and **Esc** dismisses.
+
+Writing "@name" in a message doesn't send anything by itself. It tells your agent which peer you mean, and the agent then uses `request` to ask it.
+
+## The bromure-delegation tools
+
+Every agent session gets the `bromure-delegation` MCP server (vsock port 5835). The host identifies the calling session by the terminal window its tool shim runs in, never by anything the agent claims.
+
+| Tool | Who uses it | What it does |
+| --- | --- | --- |
+| `delegate` | delegator | Starts a delegate: title, brief, contract, scope, agent (the delegator's own by default), `worktree` true/false, an optional other `workspace`, and files to send along. |
+| `request` | asker | Asks a peer by `@nick` (or session id), with optional files. It waits for the reply: 50 seconds by default, up to 600. |
+| `list_peers` | any | Lists the sessions it can reach, with their nicknames, titles, machines, agents and states, and the machines it may delegate into. |
+| `list_delegations` | any | Lists its delegations and requests, from either end, with their status and last word. |
+| `read_inbox` | any | Takes the messages waiting for it, oldest first. |
+| `wait` | any | Blocks until a message arrives: 50 seconds by default, up to 600. |
+| `ask` | delegate / peer | Asks the one who asked a blocking question, and waits for the answer. |
+| `report` | delegate | Sends a progress note. It never interrupts the delegator. |
+| `deliver` | delegate / peer | Hands in the work (what changed, how to verify it, what is left open), or replies to a request. It can send files back. |
+| `answer` | delegator | Answers a delegate's or peer's question. |
+| `steer` | delegator | Sends a follow-up or a course correction, with optional files. |
+| `close_delegation` | delegator | Closes a delivered delegation as accepted or rejected, with a note. |
+| `cancel` | delegator | Stops a delegate before it delivers, or withdraws a request. |
+| `worktree_create`, `worktree_status`, `worktree_merge` | any | Start branch sessions off its own folder, follow them, and ask *you* to merge one. See [Branches & Review](06c-branches.mdx). |
+
+### Trust and questions
+
+Agents are told that you set them up to work together. A request, brief, answer or steer from another agent is to be treated as if you had asked it, without checking back with you. The host's prompt-injection screening still applies.
+
+**Questions go back the way the work came**, so you stay in one window:
+
+1. A delegate or peer that needs a decision uses `ask` to reach the one who asked it. It never asks its own user.
+2. The asking agent answers from its own conversation if it can.
+3. If it can't, it puts the question to you, word for word and saying who asks, then sends your reply back with `answer`.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Delegation nesting (a delegate delegating further) | 3 levels |
+| Open delegations and requests per session | 8 |
+| `wait`, `ask` and `request` timeout | 50 s by default, 600 s at most |
+| Files per message | 20 (send a folder or an archive for more; a folder travels as a tarball) |
+| Total size of a message's files | 64 MB |
+
+A request to an archived session is refused until you bring the session back.
+
+## Files and the inbox
+
+Machines share no filesystem, so files named in a message are copied by the host. They land in the recipient machine's `~/.bromure/inbox/<id>/`, before the recipient reads the message that mentions them.
+
+Paths are resolved relative to the sender's folder, and `~` is the sender's home. Between two sessions on the same machine, the copy is local.
+
+## Screening and audit
+
+Every brief, request, question, answer, report, delivery and steer is scanned by the on-device [prompt-injection detector](10-prompt-injection.mdx) before it is relayed.
+
+- A message that trips the detector is **withheld**. It stays on the record, marked blocked. The sender is told why, is shown the offending snippet, and is asked to rephrase in plain terms.
+- Every message, relayed or withheld, is a row in the [Security Timeline](11a-security-timeline.mdx) under the engine **Agent delegation**, with the decision **relayed** or **withheld — prompt injection**. On enrolled installs, the rows also go to the organization's audit log. See [Enterprise](15-enterprise.mdx).
+
+## The Delegations panel
+
+When a session has delegated or asked something, a **Delegations** panel appears above its composer. Its header counts the delegations and any waiting questions and deliveries ("1 question", "2 deliveries"). The chevron folds it.
+
+Each row shows:
+
+- the other session's avatar and title (click it to **Open the delegate's session**, or **Open the peer's session** for a request)
+- a **request** tag for requests
+- the state: **Starting**, **Working**, **Asked a question**, **Delivered**, **Accepted**, **Rejected**, **Cancelled** or **Failed**
+- the machine's name when the other session runs on another machine
+- its branch
+- the last word exchanged, for example "Delegate delivered: …"
+
+When a delegate or peer has asked a question, its row shows the question with an **Answer for the agent…** field and **Send**. "Your agent can answer it too — this sends yours in its place." Answering there skips the round trip through your agent.
+
+On the other end, a delegate's or peer's own chat shows a strip saying whom it answers to. The strip reads "Delegated by *session*" or "Request from *session*", with the state and a **Show delegator** (or **Show requester**) link.
+
+A delegate that ends without delivering fails its delegation, and the delegator is told. Finished delegations (accepted, rejected, cancelled or failed) archive the delegate's session. It stays readable in the Archived fold.
+
+## Across machines, and across Macs
+
+- **Across machines on this Mac:** by default, agents in any machine can reach every other machine, both to delegate into it and to ask its sessions. To restrict a machine, open its settings, **General** pane, **Reach** section, and turn off **Every workspace**: a switch appears for each other machine, and its agents may reach only the ones you turn on (with none on, only the sessions on their own machine). The rule is one-way: whether the other machine's agents can reach back is set on that machine. A restricted machine also stops offering the sessions of remote Macs it mirrors (see the next point).
+- **Across Macs:** when this Mac mirrors a remote Bromure in a [fat-client window](14-remote-access.mdx), agents in a machine left on **Every workspace** can also send requests to the sessions on that server, by @nickname. The request travels through the mirror's tunnel, files included. In the Delegations panel, the row names the host it went to. This works from the Mac to the server it mirrors, not the other way round.
+- **Mirrors show delegations read-only.** A fat-client window shows the Delegations panel of the server's sessions, but you can't answer questions from there.

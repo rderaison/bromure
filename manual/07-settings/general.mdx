@@ -1,44 +1,55 @@
 ---
 title: "General"
-description: "Workspace identity and window behavior: name, accent color, close action, start at login, and notes."
+description: "A machine's identity and window behavior: name, color, what closing the window does, start at login, notes, and which machines its agents may reach."
 order: 7.1
 ---
 
 # General
 
-The **General** pane holds the workspace's identity and its window behavior. It is the first pane the editor shows, with the workspace name as the page heading. Everything here is cosmetic or behavioral — nothing in this pane affects the VM's contents, credentials, or security posture.
+The **General** pane holds a machine's identity and what happens when you close its window. (A machine is what the settings editor calls a workspace.) It is the first pane the editor shows. Nothing here changes the VM's contents or credentials.
 
 <p align="center">
-  <img src="../images/editor-general.en.jpg" width="600" alt="The General settings pane: Name, Color, When closing the window, Start this VM at login, and Notes" />
+  <img src="../images/editor-general.en.jpg" width="600" alt="The General pane for the machine Web app: Name Web app, Color Blue, When closing the window Ask, Start this VM at login off, and an empty Notes (optional) field" />
 </p>
 
 ## Settings
 
 | Setting | Description |
 |---|---|
-| **Name** | The display name shown in the main window's sidebar. This is the only field required to save a workspace. New workspaces are pre-named `Default workspace` (auto-numbered `Default workspace 2`, `3`, … if the name is taken). Hidden in the Preferences flavor of the editor, where the template is always named `Defaults`. |
-| **Color** | The workspace's accent color. Menu of eight presets: **Blue** (default), **Red**, **Green**, **Orange**, **Purple**, **Pink**, **Teal**, **Gray**. Tints the workspace's server-rack tile in the sidebar, the selection highlight, and tab accents. |
-| **When closing the window** | What happens to the VM when you close its session window: **Run in the background**, **Suspend**, **Shut down**, or **Ask**. Default: **Ask**. |
-| **Start this VM at login** | Boots this workspace automatically when you log in to your Mac. Default: off. |
-| **Notes (optional)** | A free-form multi-line note attached to the workspace. Default: empty. |
+| **Name** | The machine's name, shown in the sidebar's **Virtual Machines** section, the machine menu, session headers, and the editor's title. The only field required to save. New machines are pre-named `Default workspace` (numbered `Default workspace 2`, `3`, … if the name is taken). Hidden in Preferences, where the template is always named **Defaults**. |
+| **Color** | The machine's accent color: **Blue** (default), **Red**, **Green**, **Orange**, **Purple**, **Pink**, **Teal**, or **Gray**. It tints the machine's tile in the sidebar, the dot in the machine menu, and the machine's session avatars. |
+| **When closing the window** | What happens to the running VM when you close its window: **Run in the background**, **Suspend**, **Shut down**, or **Ask**. Default: **Ask**. |
+| **Start this VM at login** | Boots this machine when you log in to your Mac. Default: off. Hidden in Preferences. |
+| **Notes (optional)** | A free-form note kept with the machine. Default: empty. Hidden in Preferences. |
+| **Reach** | Which other machines this machine's agents may delegate to and ask by @nickname. **Every workspace** (default: on), or, with it off, a switch per other machine. Hidden in Preferences. |
 
-## Window-close behavior
+Name and color apply to a running machine as soon as you save.
 
-The **When closing the window** menu decides the fate of a running VM when its session window closes:
+## When closing the window
 
-- **Run in the background** — the window closes but the VM keeps running, detached. It stays available in the sidebar (state **Running**) and you can reopen it at any time; long-running agent jobs continue uninterrupted.
-- **Suspend** — the VM's RAM is saved to disk and the VM stops consuming CPU. Resuming is nearly instant and restores the session exactly where it left off. The sidebar shows **Suspended**.
-- **Shut down** — a clean ACPI poweroff. The next start is a normal boot. The sidebar shows **Off**.
-- **Ask** (default) — a prompt appears each time the window closes, offering the three choices above.
+- **Run in the background** — the window closes and the VM keeps running. Agents keep working and you can reopen the machine at any time.
+- **Suspend** — the VM's memory is saved to disk and the VM stops using CPU. Resuming is nearly instant and picks up exactly where it left off.
+- **Shut down** — a clean power-off. The next start is a normal boot.
+- **Ask** (default) — the app asks each time, offering the three choices above.
 
-See [Sessions](../06-sessions.mdx) for how these states appear in the sidebar and how to resume or restart a workspace.
+See [Machines](../06f-machines.mdx) for how running, suspended and stopped machines appear in the sidebar.
 
-## Starting a workspace at login
+## Starting a machine at login
 
-Turning on **Start this VM at login** installs a per-user macOS LaunchAgent (`io.bromure.agentic-coding.boot`) — no administrator password required. At your next macOS login it starts `bromure-cli` headless and boots this workspace, so the agent environment is ready before you open the app. The LaunchAgent is removed automatically as soon as no workspace has the option enabled.
+Turning on **Start this VM at login** installs a per-user macOS LaunchAgent (`io.bromure.agentic-coding.boot`); no administrator password is needed. At your next login it starts Bromure Agentic Coding without a window and boots this machine, so it is ready before you open the app. The LaunchAgent is removed as soon as no machine has the option on.
+
+## Reach
+
+The **Reach** section, at the bottom of the pane, decides where this machine's agents may send work. Its caption: "Agents in this workspace can hand work to agents elsewhere (a delegation runs in the other workspace) and ask a session there by its @nickname; files travel along. Which workspaces they may reach:"
+
+- **Every workspace** (on by default) — the agents may reach every other machine on this Mac, and the sessions of remote Macs this Mac mirrors.
+- Turn it off to list the other machines, each with its own switch; the agents may reach only the ones you turn on. With no other machine yet, the section says "No other workspace yet — agents here can only reach each other." A restricted machine's agents don't reach remote Macs.
+
+The rule is one-way: whether another machine's agents can reach this one is set in that machine's own **Reach** section. See [Agents Working Together](../06d-delegation.mdx).
 
 ## Related chapters
 
-- [Workspaces](../05-workspaces.mdx) — creating, duplicating, resetting, and deleting workspaces.
-- [Sessions](../06-sessions.mdx) — the session window, VM states, and lifecycle actions.
+- [Machines](../06f-machines.mdx) — creating, duplicating, resetting, and deleting machines.
+- [Agents Working Together](../06d-delegation.mdx) — delegation and @nickname requests, which **Reach** limits.
+- [The Sessions Home](../05-sessions-home.mdx) — where machines and their sessions appear.
 - [Settings Reference](index.mdx) — all panes at a glance.

@@ -1,345 +1,437 @@
 ---
 title: "Glossary"
-description: "Definitions of the terms used throughout Bromure Agentic Coding's interface, documentation, and command line."
+description: "Plain-language definitions of the terms used throughout Bromure Agentic Coding's interface, documentation, and command line."
 order: 18
 ---
 
 # Glossary
 
-This glossary defines the terms you meet in Bromure Agentic Coding's windows, in its command line, and throughout this manual. Where the app's interface and its code use different names for the same thing — most notably **workspace** (UI) and *profile* (code, `profile.json`, CLI flags) — both names appear, cross-referenced to a single entry. When a term has a chapter that treats it in depth, a **See** link follows the definition.
+This glossary defines the terms you meet in Bromure Agentic Coding's windows, in its command line, and throughout this manual. Where the app uses two names for the same thing, both appear, cross-referenced to one entry. The most important pair: the sidebar and the session screens say **machine**, while the settings editor, the CLI and the code say **workspace** (and the code also says *profile*) — all three mean the same isolated Linux VM. When a term has a chapter that treats it in depth, a **See** link follows the definition.
+
+## 0–9
+
+**1Password reference** — A credential stored as a pointer into 1Password (`op://vault/item/field`, or the `{{ op://… }}` form) instead of the secret itself. Bromure asks the `op` CLI for the real value on the Mac when the machine starts and every 2 minutes after; only the pointer is saved, and the VM only ever holds a stand-in. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
 ## A
 
-**1Password reference** — A credential value stored as a 1Password secret reference (`op://vault/item/field`, or the `{{ op://… }}` brace form) rather than the secret itself. Bromure resolves it host-side with the `op` CLI at launch and re-resolves every 2 minutes; only the reference is ever on disk and the VM only ever holds a fake. See [Credentials](08-credentials.mdx).
+**AC MCP server** — The MCP server you start with `bromure-ac mcp` so an AI tool on your Mac (Claude Code, Claude Desktop) can list, open and configure machines through `bromure_ac_*` tools. It needs the automation API turned on. Not to be confused with the MCP servers built into each VM. See [CLI, API & MCP](16-automation-cli.mdx#the-ac-mcp-server-bromure-ac-mcp).
 
-**AC MCP server** — The stdio Model Context Protocol server started by `bromure-cli mcp`, exposing `bromure_ac_*` tools that let an outside agent manage workspaces and sessions. It wraps the automation HTTP API and AppleScript. See [Automation & CLI](16-automation-cli.mdx).
+**Activity line** — The collapsed summary a chat shows in place of an agent's raw tool calls, such as "3 commands · 2 files read · 1 edit". While the agent works it reads "Reading …", "Running …" or "Thinking…". Click it (**Show what the agent did**) to see each step. See [The Chat](06a-chat.mdx).
 
-**Age gate** — The supply-chain layer that refuses package versions younger than a cutoff (2 days by default), on the theory that a freshly published release is the one most likely to be a just-hijacked package. Floating references silently resolve to the newest allowed version. See [Supply-Chain Protection](09-supply-chain.mdx).
+**Age gate** — The supply-chain check that refuses package versions younger than a cutoff (2 days by default), because a freshly published release is the one most likely to come from a just-hijacked account. A request for "the latest" version quietly gets the newest version old enough to pass. See [Supply-Chain Protection](09-supply-chain.mdx).
 
-**Agent status dot** — The colored dot on a tab's agent icon: orange pulsing means the agent is working, green means it finished, red means it needs your input. See [Sessions](06-sessions.mdx).
+**Agent** — A coding assistant program that runs inside a machine: **Claude Code**, **Codex**, **Grok Build**, **Kimi Code**, or **Oh My Pi**. Every agent is available on every machine; you pick one per session. Which model it talks to is set in **Models**. See [Starting a Session](06-new-session.mdx).
 
-**Agentic browser pane** — The right-hand split that hosts a per-workspace disposable Chromium VM, controllable by both you and the agent (through the built-in browser MCP server). See [Sessions](06-sessions.mdx).
+**Agent session** — See *Session*.
 
-**Allowlist entry format** — The `ecosystem:name` syntax (for example `npm:axios`, `pypi:requests`) used by the age-gate exemption list and the install-script allowlist; a bare `name` matches the package in every ecosystem. Matching is case-insensitive. See [Supply-Chain Protection](09-supply-chain.mdx).
+**Agentic browser pane** — The right-hand split (⌃⌘B) showing a Chromium browser that runs in its own disposable VM. You and the agent can both use it; the agent drives it through the built-in browser MCP server. See [The Embedded Browser](06g-browser.mdx).
 
-**APFS copy-on-write (CoW) clone** — A file created with `clonefile(2)` that at first shares all data blocks with its source — instant and free — and grows only as writes diverge. Bromure uses it for workspace system disks, browser session disks, and checkpoints; non-APFS volumes fall back to a full copy. See [Concepts](04-concepts.mdx).
+**Allowlist entry format** — The `ecosystem:name` syntax (for example `npm:axios`, `pypi:requests`) used by the age-gate exemption list and the install-script allowlist; a bare `name` matches the package in every ecosystem. Matching ignores case. See [Supply-Chain Protection](09-supply-chain.mdx).
 
-**Attached terminal** — A plain terminal tab opened inside a worktree's checkout, shown nested under that worktree in the sidebar. See [Sessions](06-sessions.mdx).
+**APFS copy-on-write (CoW) clone** — A file copy that starts out sharing all of its data with the original — so it is instant and takes no space — and only uses disk space as the two differ. Bromure uses it for machine system disks, checkpoints and browser disks; on a non-APFS volume it falls back to a full copy. See [Concepts & Architecture](04-concepts.mdx).
 
-**Authorized keys** — The app-managed list of SSH public keys allowed to log in to the embedded SSH server (file `remote/authorized_keys`), edited from the Remote Access window or with `bromure-cli remote key add/ls/rm`. Supported key types are ed25519 and ecdsa. See [Remote Access](14-remote-access.mdx).
+**Archived** — A session you have put away. It leaves the main list for the **Archived** fold at the bottom of the sidebar, stays readable, and comes back as soon as you send it a message or choose **Unarchive**. Sessions archive themselves after 3 days (rooms and Switchboards excepted), and delegations, tasks and automation runs archive when they finish. See [The Sessions Home](05-sessions-home.mdx).
 
-**Automation API** — The opt-in loopback TCP form of the control plane (default `127.0.0.1:9223`), enabled in Preferences → Automation. Its debug and exec routes additionally require the `BROMURE_DEBUG_CLAUDE` environment variable. See [Automation & CLI](16-automation-cli.mdx).
+**Attached terminal** — A plain shell tab opened in a worktree's checkout on a machine's terminal, shown nested under that worktree. See [Machines](06f-machines.mdx).
 
-**AWS resigner** — The host component that detects AWS-bound requests, strips the guest's invalid SigV4 signature, injects the real session token, and re-signs with the real secret before the request leaves the Mac. It is fail-closed. See [Credentials](08-credentials.mdx).
+**Authorized keys** — The list of SSH public keys allowed to log in to Bromure's own SSH server (file `remote/authorized_keys`), managed from the Remote Access window or with `bromure-cli remote key add/ls/rm`. Supported key types are ed25519 and ecdsa. See [Remote Access & Clients](14-remote-access.mdx).
+
+**Automation API** — The optional loopback HTTP form of the control plane (default `127.0.0.1:9223`), turned on in **Preferences › Automation**. Most control routes also require the `BROMURE_DEBUG_CLAUDE` environment variable. See [CLI, API & MCP](16-automation-cli.mdx).
+
+**AWS resigner** — The part of the proxy that recognizes requests to AWS, throws away the guest's (invalid) signature, and re-signs the request with your real AWS credentials before it leaves the Mac. If it can't re-sign, the request is refused. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
 ## B
 
-**Base image** — The shared, signed Ubuntu 24.04 disk image (`base.img`, 24 GB sparse) that every workspace system disk is cloned from. It is created once at first launch, either by downloading the redistributable prebuilt image from `dl.bromure.io` (preferred) or by building locally; workspaces never modify it directly. See [Installation](02-installation.mdx).
+**Base image** — The shared, signed Ubuntu disk image (`base.img`) that every machine's system disk is copied from. It is installed once, during onboarding, by downloading it from `dl.bromure.io` or building it locally; machines never modify it. See [Installation & First Run](02-installation.mdx).
 
-**binfmt / QEMU emulation** — The Linux mechanism that registers QEMU as the interpreter for foreign-architecture binaries, letting Docker in the arm64 VM run amd64 images. Emulated images run slower and carry a purple "emulated" badge.
+**Bedrock (Amazon Bedrock)** — Amazon's hosted-model service, available as a provider in **Models**. Every agent can use it: Claude Code natively, the others through Bedrock's OpenAI-compatible API. Requests are signed with the machine's AWS credentials, or a Bedrock API key. See [Models & Providers](13-models.mdx).
 
-**Bromure (Web)** — The sibling browser app, in which each web session runs in a throwaway Alpine + Chromium VM destroyed when the window closes (bundle ID `io.bromure.app`). Bromure Agentic Coding shares its code base but makes the opposite lifecycle choice.
+**binfmt / QEMU emulation** — The Linux mechanism that lets Docker in the arm64 VM run amd64 images by emulating them. Emulated containers run slower and carry a purple "emulated" badge.
 
-**Bromure Agentic Coding** — This product: a macOS app that sandboxes AI coding agents in persistent, per-workspace Linux VMs behind a host-side credential proxy. The binary is `bromure-cli`; the bundle ID is `io.bromure.agentic-coding`.
+**Branch session** — A session that works on its own git branch, in a separate worktree off another session's folder, so its changes don't touch the original until you merge them. Start one with **New Branch…**; its header shows the branch name, commit count and a **Merge into …** button. See [Branches & Review](06c-branches.mdx).
 
-**Bromure Agentic Coding Root CA** — The per-install certificate authority generated at first launch. Its public certificate is mounted into every VM's trust store so the proxy can present forged per-host TLS leaf certificates the guest accepts; its private key never leaves the host, and a fresh CA is minted if the `ca/` directory is deleted. See [Concepts](04-concepts.mdx).
+**Branches window** — The window opened by **Branches on This Machine…** that lists a machine's session branches, including ones no session uses any more, with **Open in a Session**, **Review** and **Discard**. See [Branches & Review](06c-branches.mdx).
 
-**bromure-cli (CLI)** — The command-line interface to a running app, usually symlinked to `/usr/local/bin`. It exposes the terminal commands (`vm`, `exec`, `trace`, `remote`, and others) while hiding app-internal subcommands. See [Automation & CLI](16-automation-cli.mdx).
+**Bromure (Web)** — The sibling browser app, in which each web session runs in a throwaway Linux + Chromium VM destroyed when the window closes (bundle ID `io.bromure.app`). Bromure Agentic Coding shares its code base but keeps its machines.
 
-**bromure.llm** — The synthetic hostname (no real DNS record) that guest agents target for local inference; the proxy intercepts it, applies injection detection and tracing, and forwards to the on-host engine. See [Local Models](13-local-models.mdx).
+**Bromure Agentic Coding** — This product: a macOS app that runs AI coding agents in persistent, isolated Linux VMs behind a host-side proxy that keeps real credentials off the VM. The app binary is `bromure-ac`; the bundle ID is `io.bromure.agentic-coding`.
 
-**bromure-local** — The sentinel model id guest agents are pinned to; the host remaps it to the workspace's active local model, so switching models needs no agent restart. See [Local Models](13-local-models.mdx).
+**Bromure Agentic Coding Root CA** — The certificate authority created on your Mac at first launch. Every VM trusts it, which lets the proxy read and rewrite the VM's HTTPS traffic; its private key never leaves the Mac, and deleting the `ca/` folder makes Bromure create a new one. See [Concepts & Architecture](04-concepts.mdx).
 
-**Browser MCP server** — The built-in `browser` MCP server available to the agent in every workspace, whose `browser_*` tools drive the workspace's embedded Chromium (in a separate disposable VM) over a stdio-to-vsock shim. See [Sessions](06-sessions.mdx).
+**bromure-cli** — The short name for the command-line interface, installed as a symlink in `/usr/local/bin` with **Install Command-Line Tool…** in the app menu. Under this name the binary shows only the terminal commands (`vm`, `trace`, `model`, `remote`, and others). See [CLI, API & MCP](16-automation-cli.mdx).
+
+**bromure.llm** — A made-up hostname (it has no real DNS record) that agents use to reach an on-device model. The proxy catches it, applies its checks and tracing, and forwards the request to the model running on the Mac. See [Models & Providers](13-models.mdx).
+
+**Browser MCP server** — The built-in `browser` MCP server every agent gets, whose 23 `browser_*` tools drive the machine's agentic browser. See [The Embedded Browser](06g-browser.mdx).
+
+**Built-in MCP servers** — The MCP servers Bromure adds to every VM without any setup: browser, automations, infrastructure and delegation for every agent; the task board for coding tasks; and the switchboard server for the Switchboard. Each talks to the host over its own vsock port (5830–5836). See [CLI, API & MCP](16-automation-cli.mdx#mcp-servers-inside-the-vms).
 
 ## C
 
-**Chained automation** — An automation with the **After automation** trigger, fired when an upstream automation reports done. The `{{chain.branch}}` and `{{chain.automation}}` template variables carry context from the upstream run. See [Automation & CLI](16-automation-cli.mdx).
+**Chained automation** — An automation with the **After automation** trigger, which fires when another automation finishes. The `{{chain.branch}}` and `{{chain.automation}}` variables carry details from the earlier run. See [Automations](06h-automations.mdx).
 
-**Checkpoint** — A per-boot copy-on-write snapshot of a workspace's system disk or ext4 home, kept on a tiered retention ladder (roughly 3 boots / 7 days / 4 weeks) and restorable while the VM is stopped. See [Workspaces](05-workspaces.mdx).
+**Checkpoint** — A copy-on-write snapshot of a machine's system disk or home, taken on each successful boot and kept on a ladder (the last few boots, one a day for a week, one a week for a month). Home checkpoints are what **Rewind home…** restores. See [Advanced](16a-advanced.mdx).
 
-**Client key** — The rich client's own ed25519 keypair (comment `bromure-ac-fatclient`); its public half must be enrolled on the remote, done automatically by one-time password pairing or manually with `bromure-cli remote key add`. See [Remote Access](14-remote-access.mdx).
+**Client key** — The rich client's own SSH keypair (comment `bromure-ac-fatclient`). Its public half must be authorized on the remote Mac, which happens automatically when you pair, or manually with `bromure-cli remote key add`. See [Remote Access & Clients](14-remote-access.mdx).
 
-**Close action** — The per-workspace choice of what closing the session window does: **Run in the background**, **Suspend**, **Shut down**, or **Ask** each time. See [Sessions](06-sessions.mdx).
+**Close action** — The per-machine choice of what closing its window does: **Run in the background**, **Suspend**, **Shut down**, or **Ask** each time. See [General settings](07-settings/general.mdx).
 
-**Cloud event stream** — The mTLS-authenticated telemetry (LLM calls, tool calls, commands, credential uses, compromise events, lifecycle) shipped to an enrolled organization's ingest endpoint. It is gated on enrollment and suppressed in Private mode. See [Enterprise](15-enterprise.mdx).
+**Cloud event stream** — The activity record (model calls, tool calls, commands, credential uses, compromise events) that an enrolled Mac sends to its organization's bromure.io server. It only exists on enrolled Macs and stops for machines in Private mode. See [Enterprise](15-enterprise.mdx).
 
-**Cloudflare quick tunnel** — A per-service `cloudflared` process that publishes one guest HTTP service at a random `https://….trycloudflare.com` URL with no account required; the URL changes whenever the tunnel restarts. See [Remote Access](14-remote-access.mdx).
+**Cloudflare quick tunnel** — A way to publish one web service running in a machine at a random `https://….trycloudflare.com` address, with no Cloudflare account; the address changes whenever the tunnel restarts. See [Remote Access & Clients](14-remote-access.mdx).
 
-**Compromise detection** — The always-on scan of outbound VM traffic for a fake token headed to a host it was not minted for — the signature of credential exfiltration. A hit blocks the request (HTTP 451), pauses the VM instantly, and raises a critical alert. See [Credentials](08-credentials.mdx).
+**Coding task** — A card on the **Coding Tasks** board (⇧⌘T) that an agent plans, implements and hands back for review in its own branch. See [Coding Tasks](06i-coding-tasks.mdx).
 
-**Compromised (marked)** — The persistent flag set on a workspace after a compromise event; the workspace refuses to boot again until it is explicitly wiped. Shared folders are not wiped and may still hold contaminated files. See [Credentials](08-credentials.mdx).
+**Command palette** — The ⌘K search box ("Search sessions, rooms, machines, actions…") that jumps to any session, room or machine, finds text in conversations, and runs common actions. See [The Sessions Home](05-sessions-home.mdx).
 
-**Consent broker** — The host component that displays approval dialogs for gated credentials, guardrail prompts, and supply-chain holds, and tracks the time-bounded grants they produce. Grants are in memory only and are wiped at session teardown. See [Credentials](08-credentials.mdx).
+**Composer** — The message box at the bottom of a chat. ⏎ sends, ⌥⏎ adds a new line, and you can drop or paste files onto it; while the agent works, a red **Stop** button (Esc) replaces send. See [The Chat](06a-chat.mdx).
 
-**Control socket** — The owner-only HTTP-over-Unix-socket control plane (`~/Library/Application Support/BromureAC/control.sock`) that the CLI and GUI use to talk to the running app; the rich client tunnels this exact API over SSH. See [Remote Access](14-remote-access.mdx).
+**Compromise detection** — Bromure's constant check for a machine's stand-in credential heading to a host it wasn't created for — the sign of an attempt to steal it. The request is blocked, the VM pauses, and an alert offers **Shut down**, **Block**, **Allow** or **Save for Investigation**. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
-**Controller overlay** — The host-drawn menu opened by the overlay keychord (default `Ctrl-]`) while attached to a workspace's tmux: tab switching, worktrees, Fusion, routing, settings, reboot, suspend, and disconnect. The trigger key never reaches the guest. See [Remote Access](14-remote-access.mdx).
+**Compromised (marked)** — The flag a machine gets when you answer a compromise alert with **Shut down** or **Save for Investigation**. It won't boot again until you confirm **Wipe and Launch**, which erases its disk and home; shared folders are not wiped. See [Troubleshooting](17-troubleshooting.mdx#the-machine-is-marked-compromised).
+
+**Consent broker** — The host component that shows approval prompts — for protected credentials, guardrails and held packages — and remembers the time-limited permissions you give. Those permissions live only in memory and end with the machine's session. See [Credentials & the Wire Boundary](08-credentials.mdx).
+
+**Control socket** — The owner-only local connection (`~/Library/Application Support/BromureAC/control.sock`) that the CLI and a rich client use to talk to the running app. See [CLI, API & MCP](16-automation-cli.mdx).
+
+**Controller overlay** — The menu drawn by the Mac, not the VM, when you press the overlay keys (default `Ctrl-]`) while attached to a machine's terminal over SSH: tabs, worktrees, Fusion, routing, settings, reboot, suspend, and disconnect. The keys never reach the VM. See [Remote Access & Clients](14-remote-access.mdx).
+
+**Custom server** — A provider in **Models** that points at an OpenAI-compatible model server you run yourself (vLLM, Ollama, LM Studio, `llama-server`). Recommended for local models on another computer or GPU. See [Models & Providers](13-models.mdx).
 
 ## D
 
-**Depi** — A drop-in secure npm registry by Lupin & Holmes that serves pre-vetted packages. Instead of a lookup, Bromure re-routes all npm registry traffic to it with your API key injected host-side. See [Supply-Chain Protection](09-supply-chain.mdx).
+**Defaults** — See *Preferences template*.
 
-**Dive screen** — The animated boot overlay shown until the guest terminal is live; it flips to "DIVE FAILED" after 30 seconds without a terminal. See [Sessions](06-sessions.mdx).
+**Delegate** — A session another session started to do a piece of work for it. It appears under its delegator in the sidebar, with "Delegated by …". See [Agents Working Together](06d-delegation.mdx).
 
-**Drift detection** — The per-workspace comparison of the base-image version stamped at clone time against the current one; a mismatch (after an image update) makes the workspace offer a reset onto the new base. An image update never touches existing workspace disks by itself. See [Workspaces](05-workspaces.mdx).
+**Delegation** — One agent handing a scoped piece of work to another: it starts a fresh session (in a worktree, or on another machine), follows its progress, answers its questions, and receives its delivery. All messages pass through the host, which screens them for prompt injection. See [Agents Working Together](06d-delegation.mdx).
+
+**Delegator** — The session that started a delegation. **Show delegator** jumps to it. See [Agents Working Together](06d-delegation.mdx).
+
+**Depi** — A drop-in secure npm registry by Lupin & Holmes that serves pre-vetted packages. When enabled, Bromure sends all npm registry traffic there, adding your API key on the Mac. See [Supply-Chain Protection](09-supply-chain.mdx).
+
+**Dive screen** — The animated boot screen shown on a machine's stage until its terminal answers. After 30 seconds without a terminal it turns into **DIVE FAILED**, and a boot stopped by a disk error shows **DISK ERROR**. See [Troubleshooting](17-troubleshooting.mdx#a-machine-wont-start-boot-or-resume).
+
+**Drift detection** — The comparison between the base-image version a machine's system disk was copied from and the one now installed. When they differ, the machine asks **A newer base image is available.** at its next start (**Yes, upgrade** / **No** / **Remind me later**). An image update never changes a machine's disk by itself. See [Troubleshooting](17-troubleshooting.mdx#a-newer-base-image-is-available).
 
 ## E
 
-**Egress firewall** — The per-workspace, ordered, pf-style ruleset over every connection the VM opens — by host, IP/CIDR, protocol, port, and (for `web` rules) HTTP method — enforced at the virtual switch and again in the proxy, with a default-allow or default-deny for unmatched traffic. See [Guardrails settings](07-settings/guardrails.mdx#the-egress-firewall).
+**Egress firewall** — A machine's ordered list of rules allowing or denying the connections its VM opens — by host, IP range, protocol, port and, for web traffic, HTTP method — with a default for anything unmatched. It is enforced on the Mac, where the agent can't reach it. See [Guardrails settings](07-settings/guardrails.mdx).
 
-**Enrollment code** — A six-word code (for example `bromure-cli enroll --code acid-aloe-arson-bench-cat-drum`) that binds an install to an organization, issues its mTLS leaf certificate, and enables managed profiles and the cloud event stream. See [Enterprise](15-enterprise.mdx).
+**Enrollment code** — A six-word code (for example `bromure-cli enroll --code acid-aloe-arson-bench-cat-drum`) that links a Mac to an organization on bromure.io. See [Enterprise](15-enterprise.mdx).
 
-**Enrollment health** — The server-side acceptance state of an install — OK, "token rejected" (re-enroll), or "revoked" (an admin killed it) — shown as a banner in the enrollment status panel. See [Enterprise](15-enterprise.mdx).
+**Enrollment health** — Whether the organization's server still accepts this Mac: OK, "token rejected" (enroll again), or "revoked" (an admin removed it). See [Enterprise](15-enterprise.mdx).
+
+**External engine** — See *Custom server*.
 
 ## F
 
-**Fake token** — A structure-preserving stand-in (for example `brm_…`, `sk-ant-api03-brm-…`, `xai-brm-…`) written into the VM in place of a real credential. It is deterministically derived from the real value and a per-install salt, so it does not rotate between sessions, and it is useless anywhere except through the proxy. Also called a placeholder or decoy credential. See [Credentials](08-credentials.mdx).
+**Fake token** — A look-alike credential (for example `brm_…`, `sk-ant-api03-brm-…`) that Bromure puts in the VM instead of your real one. It is useless on its own: only the proxy on the Mac can swap it for the real value, and only for the host it was made for. It stays the same across restarts. Also called a stand-in, placeholder or decoy. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
-**File-explorer pane** — The read-only repository tree with diff and preview, fed by git commands run inside the guest. See [Sessions](06-sessions.mdx).
+**Files pane** — The right-hand split (⌃⌘E) that shows the session's folder with git status, diffs and previews. Drag files out to the Finder or in to upload them. See [The Chat](06a-chat.mdx).
 
-**External engine** — A user-supplied OpenAI-compatible inference server (vLLM, Ollama, LM Studio, `llama-server`) that a workspace's Local Models can target instead of the built-in MLX engine. See [Local Models](13-local-models.mdx#using-your-own-engine-vllm--ollama).
-
-**Fusion** — The multi-model feature in which several models answer, a judge synthesizes a final answer, and the whole exchange is applied on the wire at the proxy boundary. See [Fusion](12-fusion.mdx).
+**Fusion** — The feature in which several models answer the same question and a judge model combines their answers into one; it happens in the proxy, invisibly to the agent. See [Fusion — the Multi-Model Panel](12-fusion.mdx).
 
 ## G
 
-**Grant scope** — The unit one Guardrails approval covers — a single Kubernetes API host, AWS as a whole, one Docker registry, one database host, or one git forge. Approving one scope grants nothing else. See [Guardrails settings](07-settings/guardrails.mdx).
+**Grant scope** — What one Guardrails approval covers — a single Kubernetes API host, AWS as a whole, one Docker registry, one database host, or one git forge. Approving one grants nothing else. See [Guardrails settings](07-settings/guardrails.mdx).
 
-**Grid** — The stage surface that shows several workspace terminals side by side, reached from a pinned **Grid** node in the sidebar that tabs are dragged onto. See [Sessions](06-sessions.mdx).
+**Grid** — A view, under **Virtual Machines**, showing several machine terminals side by side. **Add Terminal to Grid** (⌘D) adds the current one. See [Machines](06f-machines.mdx).
 
-**Guardrails** — The host-side policy engine that filters mutating operations per protocol, with four modes: **Off**, **Prompt before write**, **Block destructive**, and **Read-only**. Blocked calls surface to the agent as an ordinary `403` API error. See [Guardrails settings](07-settings/guardrails.mdx).
+**Guardrails** — The host-side rules that limit what an agent can change through your credentials, with four modes: **Off**, **Prompt before write**, **Block destructive**, and **Read-only**. A blocked call reaches the agent as an ordinary `403` error. See [Guardrails settings](07-settings/guardrails.mdx).
 
 ## H
 
-**Headless agent** — The windowless `bromure-cli run --headless` process that hosts VMs and the control socket without a GUI; it is autostarted by CLI commands and by the boot-at-login helper. See [Automation & CLI](16-automation-cli.mdx).
+**Headless agent** — The app running without a window (`bromure-ac run --headless`), still hosting machines and the control socket. CLI commands and start-at-login start it on demand. See [CLI, API & MCP](16-automation-cli.mdx).
 
-**Health gate (EWMA)** — The conservative upstream-health tracker for hybrid routing: the cloud is marked unhealthy after three or more failures in the last ~10 requests, or when the exponentially weighted moving average of time-to-first-token exceeds 8 seconds, and it recovers after three clean probes. While unhealthy, new hybrid sessions go straight to local. See [Local Models](13-local-models.mdx).
+**Heartbeat** — A background check-in with the enrollment server every ten minutes, which keeps the Mac's "last seen" time current and renews its certificate when due. See [Enterprise](15-enterprise.mdx).
 
-**Heartbeat** — A ten-minute background ping to the enrollment server that keeps the install's last-seen time fresh, learns about revocation, and piggybacks the leaf-certificate renewal check. See [Enterprise](15-enterprise.mdx).
+**Hidden-Unicode signals** — Invisible characters used to hide instructions from human readers: zero-width characters, text-direction overrides and Unicode tag characters. Bromure detects them with simple, near-certain rules. See [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx).
 
-**Hidden-Unicode signals** — Invisible characters used to smuggle instructions past human reviewers: zero-width characters, bidirectional overrides, and Unicode tag characters. Bromure detects them deterministically with near-zero false positives. See [Prompt Injection](10-prompt-injection.mdx).
+**home.img (ext4 home)** — The disk image holding a machine's `/home/ubuntu`: your projects, dotfiles, keys and agent state. It is separate from the system disk, so it survives a system-disk reset, and it can be rolled back with **Rewind home…**. See [Advanced](16a-advanced.mdx).
 
-**home.img (ext4 home)** — The sparse raw ext4 image holding `/home/ubuntu`, attached as a second virtio-blk disk. It survives a system-disk reset, shrinks on the host as guest files are deleted, and replaces the legacy shared-folder ("virtiofs") home model; existing workspaces are offered a one-time migration. See [Workspaces](05-workspaces.mdx).
+**Host key fingerprint** — The short fingerprint of a Mac's SSH server key, shown in the Remote Access window and by `bromure-cli remote status`, so someone connecting can check they reached the right Mac. See [Remote Access & Clients](14-remote-access.mdx).
 
-**Host key fingerprint** — The SHA-256 fingerprint of the remote's ed25519 SSH host key, shown in the Remote Access window and by `bromure-cli remote status` so a connecting user can verify it out of band. See [Remote Access](14-remote-access.mdx).
-
-**Host scope** — The destination host a credential swap is bound to. Matching is exact-or-subdomain and case-insensitive, never substring; a blank scope means "inject on any host, and never ask." See [Credentials](08-credentials.mdx).
+**Host scope** — The destination a credential swap is tied to. The host must match exactly or be a subdomain, never a partial string; an empty scope means "any host, never ask". See [Credentials & the Wire Boundary](08-credentials.mdx).
 
 ## I
 
-**Image catalog** — The signed manifest at `dl.bromure.io` (`img-catalog.json`) naming the current base image (UUID, version, SHA-256) and every postinstall step. The app refuses unsigned, invalid, or rolled-back catalogs, and ships a bundled copy as the offline baseline. See [Installation](02-installation.mdx).
+**Image catalog** — The signed list at `dl.bromure.io` (`img-catalog.json`) naming the current base image and its extra install steps. The app refuses a catalog that is unsigned, invalid or older than the one it has. See [Installation & First Run](02-installation.mdx).
 
-**Injection score / threshold** — The model's probability (0 to 1) that a span is a prompt injection; a span is flagged when the score meets the threshold (default 0.5). See [Prompt Injection](10-prompt-injection.mdx).
+**Infrastructure MCP server** — The built-in MCP server (vsock 5834) that tells agents which Kubernetes clusters and registries their machine may use, and lets them check, create and start them. See [Kubernetes Clusters & Registries](13a-kubernetes.mdx).
 
-**Injection screen** — The mandatory prompt-injection check run on an event trigger's text (title, body, author, comments) before a scheduled automation fires; a failure blocks the run rather than launching the agent. See [Automation & CLI](16-automation-cli.mdx).
+**Injection score / threshold** — The detector's estimate (0 to 1) that a piece of content is a prompt injection; content is flagged when the score reaches the threshold (0.5 by default). See [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx).
 
-**Install** — One enrolled copy of Bromure Agentic Coding on one Mac, identified by an install ID and listed on the admin's installs page with device name, user, and last-seen time. See [Enterprise](15-enterprise.mdx).
+**Injection screen** — The compulsory prompt-injection check on an event's text (title, body, author, comments) before an event-triggered automation starts; if it fails, the run is blocked. See [Automations](06h-automations.mdx).
 
-**Install token** — A bearer secret issued at enrollment and kept in the macOS Keychain, used to authenticate the heartbeat and certificate-signing calls (not telemetry uploads). A 401 or 403 on it means the install must re-enroll. See [Enterprise](15-enterprise.mdx).
+**Inline terminal** — A small live terminal that opens inside a chat when a slash command needs a picker or menu, with **Interact** / **Fold** and **Continue in Linux**. See [The Chat](06a-chat.mdx).
 
-**Install-script stripping** — The on-the-fly removal of the `preinstall`, `install`, `postinstall`, and `prepare` hooks from an npm tarball's `package.json` — the hooks malicious packages use to run code at install time. See [Supply-Chain Protection](09-supply-chain.mdx).
+**Install** — One enrolled copy of the app on one Mac, listed on the organization's installs page with its device name, user and last-seen time. See [Enterprise](15-enterprise.mdx).
 
-**itemKey** — The stable event identity (`pr:123`, `issue:45`, `commit:abc1234`, `linear:ENG-1`) recorded on automation runs so the same pull request, issue, or commit never fires an automation twice. See [Automation & CLI](16-automation-cli.mdx).
+**Install token** — A secret issued at enrollment and kept in the macOS Keychain, used for the heartbeat and certificate renewal. If the server rejects it, the Mac must enroll again. See [Enterprise](15-enterprise.mdx).
+
+**Install-script stripping** — Removing the scripts an npm package asks to run at install time (`preinstall`, `install`, `postinstall`, `prepare`) — the usual way malicious packages run code. See [Supply-Chain Protection](09-supply-chain.mdx).
+
+**itemKey** — The identity an event-triggered automation records for what it handled (`pr:123`, `issue:45`, `commit:abc1234`, `linear:ENG-1`), so the same pull request or issue never starts it twice. See [Automations](06h-automations.mdx).
 
 ## J
 
-**Judge** — In Fusion, the model that weighs the drafts and writes the final answer; it can be any usable provider or a local model. See [Fusion](12-fusion.mdx).
+**Judge** — In Fusion, the model that reads the other models' answers and writes the final one. See [Fusion — the Multi-Model Panel](12-fusion.mdx).
+
+## K
+
+**Kubernetes cluster** — A small k3s cluster Bromure runs on your Mac, made of sibling VMs ("nodes") listed under **Virtual Machines › Kubernetes**. Machines on its access list get it in `~/.kube/config`. Separate from the Kubernetes *credentials* you can add to a machine for outside clusters. See [Kubernetes Clusters & Registries](13a-kubernetes.mdx).
 
 ## L
 
-**Leaf certificate** — An install's client certificate, issued by the organization's CA against a locally generated key and presented during mTLS handshakes to the analytics service. It is auto-renewed 72 hours before expiry. See [Enterprise](15-enterprise.mdx).
+**Leaf certificate** — An enrolled Mac's own certificate, issued by its organization and used to prove the Mac's identity when it sends activity data. It renews itself before it expires. See [Enterprise](15-enterprise.mdx).
 
-**Leak (unswapped credential)** — A bearer-style token in an outbound request that Bromure did not mint — likely a real secret pasted directly into the VM, bypassing the swap system. It is flagged in traces with a short preview and a suspicion class. See [Tracing](11-tracing.mdx).
+**Leak (unswapped credential)** — A token in an outgoing request that Bromure did not create — probably a real secret pasted straight into the VM, bypassing the swap. Traces flag it with a short preview. See [Tracing & Audit](11-tracing.mdx).
 
-**Leg** — One model's independent answer inside a Fusion exchange. Leg A is always the primary Claude session; other legs are Codex, Grok, or a local model. See [Fusion](12-fusion.mdx).
+**Leg** — One model's answer inside a Fusion exchange. See [Fusion — the Multi-Model Panel](12-fusion.mdx).
 
-**Local build** — The fallback install path in which a throwaway Alpine helper VM debootstraps Ubuntu onto a fresh disk on your Mac (about 10 minutes), producing the same base image as the download path. See [Installation](02-installation.mdx).
+**Linux pill** — The toolbar button (⌥⌘U) that jumps from a session to the terminal tab behind it on its machine; there it reads **Session** and jumps back. Useful when an agent's terminal needs attention the chat can't show. See [The Sessions Home](05-sessions-home.mdx).
 
-**Lockfile-pinned install** — An install whose tarball integrity hashes are pinned in a lockfile (`npm ci`, `pip --require-hashes`). Bromure cannot rewrite those tarballs without breaking verification, so it can only pass them through (optionally after a consent prompt) or block them. See [Supply-Chain Protection](09-supply-chain.mdx).
+**Local build** — Building the base image on your Mac (about 10 minutes) when downloading it isn't possible. It produces the same image. See [Installation & First Run](02-installation.mdx).
+
+**Lockfile-pinned install** — An install whose package checksums are fixed in a lockfile (`npm ci`, `pip --require-hashes`). Bromure can't rewrite those packages without breaking the checksum, so it can only let them through or block them. See [Supply-Chain Protection](09-supply-chain.mdx).
+
+**Longhorn** — The distributed storage Bromure can install in a Kubernetes cluster (on by default), giving each node a data disk and the storage class `bromure-longhorn`. See [Kubernetes Clusters & Registries](13a-kubernetes.mdx).
 
 ## M
 
-**Managed profile** — An Ed25519-signed workspace configuration pushed from an organization's control plane, carrying pre-approved tool configs, allow-listed providers, and optionally server-minted credentials. See [Enterprise](15-enterprise.mdx).
+**Machine** — The session screens' name for a workspace: one isolated, persistent Ubuntu VM with its own disks, credentials, folders and security settings. Every session runs on a machine. Machines are listed under **Virtual Machines**. See [Machines](06f-machines.mdx).
 
-**MCP server** — A Model Context Protocol tool server configured per workspace (HTTP or stdio), translated into each agent's native config format and injected at VM boot. See [MCP settings](07-settings/mcp.mdx).
+**Machine menu** — The toolbar capsule with the current machine's name and color. It offers **Settings…**, **Machine Details**, **Copy IP Address**, **Inspect Trace**, **Pop Out to Its Own Window** and **Reboot**. See [The Sessions Home](05-sessions-home.mdx).
 
-**Meta share** — The per-launch, read-only virtiofs directory shared into the guest carrying that boot's fake-token environment files, proxy settings, the CA certificate, guest agents, and MCP configs. It is rebuilt on every boot and holds no durable state. See [Concepts](04-concepts.mdx).
+**Managed profile** — A machine configuration signed and pushed by an organization, with approved tools, allowed providers and, optionally, credentials issued by the server. See [Enterprise](15-enterprise.mdx).
 
-**Metadata (package)** — A registry's version listing for one package (an npm packument, PyPI's JSON or simple index, and so on). The age gate rewrites metadata so that too-fresh versions simply do not exist from the agent's point of view. See [Supply-Chain Protection](09-supply-chain.mdx).
+**MCP server** — A Model Context Protocol server: a program that gives an agent extra tools. You add your own per machine in the **MCP** pane; Bromure translates them for each agent. See [MCP settings](07-settings/mcp.mdx) and *Built-in MCP servers*.
 
-**MITM proxy** — The per-workspace host process that terminates the VM's TLS using the Bromure root CA, inspects and rewrites each request (including the fake-to-real credential swap), and re-encrypts to the real upstream. It is where every security control is enforced. See [Concepts](04-concepts.mdx).
+**Messaging connector** — A small managed machine that links Bromure to Signal, WhatsApp or Slack, so you can talk to the Switchboard from your phone. Its messaging keys stay on that machine. Opened from **Workspaces › Infrastructure › Messaging Connector…**. See [Switchboard & Messaging](06e-switchboard.mdx).
 
-**MLX** — Apple's machine-learning framework for Apple Silicon; Bromure's local inference engine runs MLX-format model weights, never GGUF. See [Local Models](13-local-models.mdx).
+**Meta share** — A read-only folder Bromure rebuilds at every boot and shares into the VM, holding that boot's stand-in credentials, proxy settings, CA certificate, guest helpers and MCP configuration. See [Concepts & Architecture](04-concepts.mdx).
 
-**Model catalog** — The curated, versioned list of MLX models with download size, minimum unified memory, and tool-calling status; it is bundled in the app and refreshed from `dl.bromure.io`. See [Local Models](13-local-models.mdx).
+**Metadata (package)** — A registry's list of versions for one package. The age gate edits it so that too-new versions simply don't exist for the agent. See [Supply-Chain Protection](09-supply-chain.mdx).
 
-**ModernBERT (claudemd-guard)** — Bromure's fine-tuned classifier for rogue instruction files, run locally to complement the deterministic heuristic scanner. See [Prompt Injection](10-prompt-injection.mdx).
+**MITM proxy** — The proxy on the Mac that sits in the middle of the VM's HTTPS traffic: it decrypts each request with the Bromure CA, checks and rewrites it (including swapping stand-in credentials for real ones), and re-encrypts it to the real server. Every security control is applied there. See [Concepts & Architecture](04-concepts.mdx).
 
-**mTLS** — Mutual TLS: the enterprise analytics ingest authenticates an install by its leaf certificate rather than a token, so no credential rides with the telemetry payload. See [Enterprise](15-enterprise.mdx).
+**MLX** — Apple's machine-learning framework for Apple Silicon. Bromure's on-device models are MLX models. See [Models & Providers](13-models.mdx).
+
+**Model catalog** — The curated list of on-device models, with download size, memory needs and tool-calling status, bundled with the app and refreshed from `dl.bromure.io`. See [Models & Providers](13-models.mdx).
+
+**Models** — Where you choose which provider and model each agent uses: **Preferences › Models** for every machine, and a machine's own **Models** pane to change it for that machine only. See [Models & Providers](13-models.mdx).
+
+**Models override** — A machine's own model settings, turned on with **Custom model settings for this workspace**. **Inherit, with changes** keeps the global settings and changes only what you set; **Standalone** ignores the global settings entirely. See [Models settings](07-settings/models.mdx).
+
+**ModernBERT (claudemd-guard)** — Bromure's own classifier for poisoned instruction files, run on the Mac alongside simple rule-based checks. See [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx).
+
+**mTLS** — Mutual TLS: both sides of a connection prove who they are with certificates. An enrolled Mac identifies itself this way, so no password travels with its data. See [Enterprise](15-enterprise.mdx).
 
 ## N
 
-**NAT mode / Bridged mode** — The two per-workspace network modes. In NAT (the default) the VM lives on Bromure's private `192.168.x.0/24` behind the Mac and is reachable only from the Mac; in Bridged the VM appears as a device on a chosen physical interface's LAN. See [Concepts](04-concepts.mdx).
+**NAT mode / Bridged mode** — A machine's two network modes. In NAT (the default) the VM sits on Bromure's private subnet behind the Mac and only the Mac can reach it; in Bridged it appears as its own device on a real network. See [Concepts & Architecture](04-concepts.mdx).
 
-**Native terminal** — The host-side libghostty rendering of a tab, attached to its tmux window over vsock — as opposed to the VM's graphical framebuffer. See [Sessions](06-sessions.mdx).
+**Native terminal** — A machine's terminal tab drawn by the Mac (with the Ghostty engine) and connected to the VM's tmux, rather than a picture of the VM's screen. See [Machines](06f-machines.mdx).
+
+**Nickname (@nickname)** — A short, unique name you give a session with **Nickname…**. Other agents can ask it for help with `@name`, and you can address it with `@name` in any composer. See [Agents Working Together](06d-delegation.mdx).
 
 ## O
 
-**Org CA** — The organization's certificate authority on the bromure.io server that signs each install's leaf certificate; its certificate is stored locally as `ca.crt`. See [Enterprise](15-enterprise.mdx).
+**Oh My Pi (omp)** — One of the five bundled agents. It works with several providers but only with API keys, not subscriptions. See [Models & Providers](13-models.mdx).
 
-**OSV** — The Open Source Vulnerabilities database (osv.dev), a free, no-key aggregation of the GitHub Advisory Database, PyPI advisories, Go's vulnerability database, RubySec, and others, queried per package version. See [Supply-Chain Protection](09-supply-chain.mdx).
+**On-device model** — A model that runs on your Mac itself with MLX, one generation at a time, with nothing sent to the cloud. Listed as **On-device models** in **Models**. See [Models & Providers](13-models.mdx).
 
-**Oh My Pi (omp)** — The fifth bundled coding agent: provider-agnostic (Anthropic by default; OpenAI, xAI, z.ai, or any OpenAI-compatible endpoint), API-key auth only. See [Agents settings](07-settings/agents.mdx).
+**Onboarding wizard** — The first-run window that installs the base image and sets you up, in steps: Welcome, Install, Credentials, Choose, Models, Done. See [Installation & First Run](02-installation.mdx).
 
-**Outbox** — The per-launch, writable virtiofs directory the guest drops one-shot event files into — a URL for the host to open, tab-closed events, and similar — separate from the read-only meta share. See [Concepts](04-concepts.mdx).
+**OpenRouter** — A provider in **Models** that gives access to many models with one API key. Claude Code reaches it directly; other agents go through Bromure's translation. See [Models & Providers](13-models.mdx).
+
+**Org CA** — The organization's certificate authority on bromure.io, which issues each enrolled Mac's certificate. See [Enterprise](15-enterprise.mdx).
+
+**OSV** — The Open Source Vulnerabilities database (osv.dev), a free collection of known package vulnerabilities that Bromure checks each package version against. See [Supply-Chain Protection](09-supply-chain.mdx).
+
+**Outbox** — A writable folder the VM uses to send small one-off messages to the Mac — a link to open, a closed tab — separate from the read-only meta share. See [Concepts & Architecture](04-concepts.mdx).
 
 ## P
 
-**Pane** — One workspace's UI unit: its terminal surfaces, decorations, and tab model, hostable either inside the unified window or popped out into its own window. See [Sessions](06-sessions.mdx).
+**Pane** — One machine's terminal area in the main window: its tab bar and terminal views. It can be popped out into its own window and put back without affecting the VM. See [Machines](06f-machines.mdx).
 
-**Pending decision prompt** — A lifecycle decision (home-storage upgrade, base-image drift reset, compromised-VM wipe) raised by a remotely initiated launch, surfaced to the initiating client and resolved to the safe non-destructive choice on timeout. See [Remote Access](14-remote-access.mdx).
+**Pending decision prompt** — A question Bromure would normally ask in an alert — a base-image upgrade, a disk repair, a compromise — sent instead to a connected rich client when nobody is at the Mac. If nobody answers in time, the safe choice is taken. See [CLI, API & MCP](16-automation-cli.mdx#answering-pending-prompts).
 
-**Pop out / re-dock** — Moving a workspace's pane into its own window and back into the unified window, without affecting the VM. See [Sessions](06-sessions.mdx).
+**PII protection** — An optional per-machine feature (off by default) that replaces personal data — names, emails and phone numbers, card and bank numbers, ID numbers, street addresses — with realistic stand-ins before a conversation leaves the Mac, and puts the real values back in the replies. See [PII Protection](10a-pii.mdx).
 
-**Postinstall step** — A catalog-declared command run as root in a chroot on the base image to install non-redistributable software (Claude Code, Codex CLI, Grok CLI, the Google Cloud SDK, and more). Each step has a permanent UUID, and steps published after install require explicit consent through the "New recommended packages" prompt. See [Installation](02-installation.mdx).
+**Pop out / re-dock** — Moving a machine's terminal into its own window (**Pop Out to Its Own Window**) and back into the main window. The VM keeps running either way. See [Machines](06f-machines.mdx).
 
-**Preferences template ("Defaults")** — The hidden pseudo-workspace edited from Bromure → Preferences…; every new workspace is forked from it, inheriting all of its settings and secrets. See [Workspaces](05-workspaces.mdx).
+**Postinstall step** — An extra install step, published in the image catalog, that adds software Bromure can't redistribute (the agents' CLIs, cloud SDKs) to the base image. New steps need your consent through the "New recommended packages" prompt. See [Installation & First Run](02-installation.mdx).
 
-**Primary agent** — The coding agent auto-launched in the session's first tab. Other enabled agents are installed and authenticated but started manually from a new tab. See [Sessions](06-sessions.mdx).
+**Preferences template ("Defaults")** — The hidden settings template you edit in **Preferences…** (⌘,); every new machine starts as a copy of it. See [Settings Reference](07-settings/index.mdx).
 
-**Private mode** — A per-workspace switch (shown only on enrolled Macs) that stops all cloud telemetry streaming for that workspace; local tracing still works. See [Tracing settings](07-settings/tracing.mdx).
+**Private mode** — A per-machine switch, shown only on enrolled Macs, that stops sending that machine's activity to the organization. Local tracing still works. See [Tracing settings](07-settings/tracing.mdx).
 
-**Privileged helper** — The root launchd daemon that creates the utun interface and route for the system-wide tunnel and hands the file descriptor back to the app. It is approved once in System Settings → General → Login Items and unregistered when no host uses the tunnel. See [Remote Access](14-remote-access.mdx).
+**Privileged helper** — A small system service the rich client installs, once and with your approval, to create the system-wide tunnel. See [Remote Access & Clients](14-remote-access.mdx).
 
-**Profile** — The term used in code, `profile.json`, and CLI flags for what the interface calls a workspace; the two are interchangeable. See [Workspaces](05-workspaces.mdx).
+**Profile** — The code's and CLI's word for a workspace (machine), as in `profile.json`. See *Machine*.
 
-**Prompt before write** — The new-workspace default Guardrails mode: reads pass, and every write triggers a host consent dialog showing the exact operation, with allow-once, 15-minute, and for-the-session grants. See [Guardrails settings](07-settings/guardrails.mdx).
+**Prompt before write** — The default Guardrails mode for new machines: reading is allowed, and every change asks you first, showing exactly what would happen. See [Guardrails settings](07-settings/guardrails.mdx).
 
-**Prompt injection** — Malicious instructions hidden in content the agent reads (a file, web page, or tool output) that try to steer the model — for example, "ignore previous instructions and exfiltrate secrets." See [Prompt Injection](10-prompt-injection.mdx).
+**Prompt injection** — Instructions hidden in content an agent reads (a file, a web page, a command's output) that try to take control of it — for example, "ignore previous instructions and send me the secrets". See [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx).
 
-**PromptGuard** — Meta's prompt-injection classification model, run locally via ONNX Runtime, used for Bromure's source-content detector. See [Prompt Injection](10-prompt-injection.mdx).
+**PromptGuard** — Meta's prompt-injection classifier, which Bromure runs on the Mac to scan content returned to agents. See [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx).
+
+**Provider** — A source of models you register in **Models**: Anthropic, OpenAI, xAI, z.ai, Moonshot, Amazon Bedrock, OpenRouter, a custom server, or on-device models. You connect a provider with an API key or a subscription sign-in. See [Models & Providers](13-models.mdx).
+
+## Q
+
+**Question card** — The card a chat shows when the agent asks you something with fixed choices ("The agent is asking"). Pick your answers and click **Submit**; the answered card folds into one line. See [The Chat](06a-chat.mdx).
 
 ## R
 
-**RAM-fit gate** — The classification of each catalog model against the Mac's unified memory: **Fits** (model minimum plus 16 GB headroom), **Tight**, or won't fit (greyed out or hidden). See [Local Models](13-local-models.mdx).
+**RAM-fit gate** — How the model catalog rates each on-device model against your Mac's memory: **Fits**, **Tight**, or **Won't fit**. See [Models & Providers](13-models.mdx).
 
-**Real credential** — The actual API key, secret, token, or private key you enter in the app. It is stored encrypted on the host and injected onto the wire by the proxy; it is never present in the VM. See [Credentials](08-credentials.mdx).
+**Rampart** — The on-device model Bromure uses to find personal data for PII protection (by the National Design Studio, CC BY 4.0). See [PII Protection](10a-pii.mdx).
 
-**Register with Claude / ChatGPT / Grok** — The one-time flow that captures a real subscription credential in a throwaway isolated VM and stores it encrypted on the host for reuse by every session. See [Credentials](08-credentials.mdx).
+**Reach policy** — The rule that decides which other machines a machine's agents may delegate to or send requests to. By default every machine can reach every other; set it in the **Reach** section of a machine's **General** pane. See [Agents Working Together](06d-delegation.mdx).
 
-**Remote consent** — MITM consent prompts (credential use, supply chain, guardrails, prompt injection) rendered as numbered menus on the attached user's terminal during a remote session; they are host-side and guest-unforgeable, and any timeout or dismissal means deny. See [Remote Access](14-remote-access.mdx).
+**Real credential** — The actual key, token or password you enter in Bromure. It is stored encrypted on the Mac and added to requests by the proxy; it never enters the VM. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
-**Remote host** — A configured remote `bromure-cli` instance (name, address, SSH port, user, pinned host key) in the rich client's Recent Servers list; each opens its own mirror window. See [Remote Access](14-remote-access.mdx).
+**Registry** — A private Docker image registry Bromure runs in its own VM on your Mac, listed under **Virtual Machines › Registries**. Machines on its access list can push and pull, and find its address in `$BROMURE_REGISTRY`. See [Kubernetes Clusters & Registries](13a-kubernetes.mdx).
 
-**Remote menu** — The curses-style TUI (`bromure-cli __remote-menu`) every human SSH login is forced into. It mirrors the CLI and GUI operations — workspace lifecycle, all settings panes, worktrees, models, traces, and tmux attach — and a raw shell is never reachable. See [Remote Access](14-remote-access.mdx).
+**Remote consent** — Approval prompts shown as numbered menus on your own terminal while you are attached to a machine remotely. The VM can't fake them, and any timeout means "no". See [Remote Access & Clients](14-remote-access.mdx).
 
-**Require approval to use** — A per-credential checkbox (off by default) that makes the host pop a consent dialog before the credential is first used in a session, offering time-bounded grants (5 minutes, 1 hour, or the rest of the session). See [Credentials](08-credentials.mdx).
+**Remote host** — Another Mac running Bromure that you connect to from the rich client, saved with its name, address, port, user and pinned host key. See [Remote Access & Clients](14-remote-access.mdx).
 
-**Reset disk** — Reverting a workspace's system disk to a fresh clone of the base image; the persistent home survives. See [Workspaces](05-workspaces.mdx).
+**Remote menu** — The text menu every SSH login to Bromure lands in instead of a shell, covering machines, settings, worktrees, models and traces. See [Remote Access & Clients](14-remote-access.mdx).
 
-**Rich client** — A local `bromure-cli` acting as a live one-to-one mirror of a remote `bromure-cli` over SSH — grid, workspaces, tabs, worktrees, automations, and terminals, with bidirectional edits. The remote is always authoritative. See [Remote Access](14-remote-access.mdx).
+**Request** — The second kind of delegation: instead of starting a new session, an agent asks an existing one, by its @nickname, and gets its reply. See [Agents Working Together](06d-delegation.mdx).
 
-**Roster** — The guest-published list of tmux windows (`tabs.txt`), refreshed roughly every 0.7 seconds, that drives the tab bar, active-tab tracking, worktree metadata, and boot detection. See [Sessions](06-sessions.mdx).
+**Require approval to use** — A per-credential option that makes Bromure ask you before the credential is first used in a machine's session, with time-limited approvals. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
-**Routing (Cloud / Local / Hybrid)** — The per-workspace choice of backend for agent LLM traffic: always cloud (the default), always the on-host local model, or cloud with policy-driven local fallback. It is orthogonal to Fusion. See [Local Models](13-local-models.mdx).
+**Reset disk** — Replacing a machine's system disk with a fresh copy of the base image. Software installed with `apt` is lost; the home survives. See [Machines](06f-machines.mdx).
 
-**Rules file / rogue instructions** — The "rules file backdoor" threat: poisoned instruction files (`CLAUDE.md`, `AGENTS.md`, `GROK.md`) that agents auto-load into their system prompt as trusted authority, often hidden from human review with invisible Unicode. See [Prompt Injection](10-prompt-injection.mdx).
+**Review window** — The window that shows a session's or task's changes as diffs — **Uncommitted**, **All changes**, **Last commit** or **This turn** — where you can comment on lines and send the comments to the agent. See [Branches & Review](06c-branches.mdx).
 
-**Run record** — One entry in an automation's run history, with an outcome (launched, skipped, failed, or blocked), a detail line, the worktree branch slug, and, for event triggers, the dedup itemKey. See [Automation & CLI](16-automation-cli.mdx).
+**Rewind home** — Rolling a stopped machine's home folder back to how it was at an earlier boot, from the machine's **⋯ › Rewind home…**. The current home is kept as a new point, so a rewind can be undone. See [Advanced](16a-advanced.mdx#rewinding-a-machines-home).
+
+**Rich client** — A copy of Bromure that shows and controls another Mac's Bromure over SSH — its sessions, rooms, machines, terminals and settings — as if it were local. The remote Mac stays in charge. Also on iPhone, iPad and Vision Pro. See [Remote Access & Clients](14-remote-access.mdx).
+
+**Room** — A group of sessions shown side by side in a grid of live chats, with its own Switchboard. Create one with **New Room…** or by dragging one session onto another. See [Rooms](06b-rooms.mdx).
+
+**Room Switchboard** — A Switchboard that only sees the sessions in its room, shown in a dock at the bottom of the room. See [Rooms](06b-rooms.mdx).
+
+**Roster** — The list of a machine's tmux windows that the VM publishes continuously; the Mac builds the terminal tab bar from it. See [Machines](06f-machines.mdx).
+
+**Routing (Cloud / Local)** — Whether a running machine's agents talk to their cloud providers or to the local model; switch it with `bromure-cli vm routing`. See [Models & Providers](13-models.mdx).
+
+**Rules file / rogue instructions** — Poisoned instruction files (`CLAUDE.md`, `AGENTS.md`, and similar) that agents load automatically and trust, often hiding their payload with invisible characters. See [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx).
+
+**Run record** — One entry in an automation's history: whether the run launched, was skipped, failed or was blocked, with a detail line. See [Automations](06h-automations.mdx).
 
 ## S
 
-**Scheduled automation** — A recurring, unattended agent run bound to one workspace: a trigger (a schedule, a GitHub pull request/issue/commit, a Linear issue, or a chain), a prompt, and a repo path. Each fire launches the agent in a fresh git worktree. See [Automation & CLI](16-automation-cli.mdx).
+**Scheduled automation** — A recurring, unattended agent run tied to one machine, started by a schedule or an event (a GitHub pull request, issue or commit, a Linear issue, or another automation). Each run happens in its own git worktree. See [Automations](06h-automations.mdx).
 
-**Secrets vault master key** — The macOS Keychain-held AES-256 key that encrypts every at-rest secret and captured trace body; if the Keychain is unreachable it falls back to a `0600` key file. See [Credentials](08-credentials.mdx).
+**Secrets vault master key** — The key, kept in the macOS Keychain, that encrypts every secret and captured trace Bromure stores. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
-**Security Log** — The live viewer (Window → Security Log…) of every security event the proxy emits — supply-chain checks and blocks, prompt-injection detections, Depi re-routes, and routing, Fusion, and remote events — kept in a roughly 5,000-line in-memory ring buffer and mirrored to stderr. See [Supply-Chain Protection](09-supply-chain.mdx).
+**Security Overview** — The first tab of the Security Timeline window: the last 24 hours at a glance (**Blocked**, **Allowed**, **Credentials brokered**, **Packages checked**, **PII swapped**), each machine's protections, and the latest blocks. See [Security Overview & Timeline](11a-security-timeline.mdx).
 
-**Security Timeline** — The chronological, filterable table (Window → Security Timeline…) of every decision the security engines made — credential swaps, firewall verdicts, package checks, guardrail enforcements, prompt-injection scans, credential uses — colour-coded by outcome and mirrored to rich clients. See [Tracing](11-tracing.mdx#the-security-timeline-window).
+**Security Timeline** — The window (**Window › Security Timeline…**) listing every decision Bromure's security engines made, which you can filter and export to CSV. Always recorded and kept 90 days. See [Security Overview & Timeline](11a-security-timeline.mdx).
 
-**Session** — One continuous run of a workspace's VM, from start or resume until it shuts down or suspends. Some state is deliberately session-scoped, such as credential approval grants and denials. See [Sessions](06-sessions.mdx).
+**Session** — One conversation with one agent, in one folder, on one machine. Sessions are the main list in the sidebar; each has a title the agent sets, a status, and a chat. A session keeps its conversation when it ends and can be picked back up with a new message. (In the CLI and the control API, "session" can also mean a machine's window — see [CLI, API & MCP](16-automation-cli.mdx).) See [The Sessions Home](05-sessions-home.mdx).
 
-**SigV4** — AWS Signature Version 4 request signing, which Bromure re-computes host-side with the real credentials because AWS signatures cannot be swapped in a header. See [Credentials](08-credentials.mdx).
+**Session states** — Where a session stands, shown on its row and as groups in the sidebar: **Needs you** (it is asking you something), **Working**, **Ready** (it finished its turn and waits for you), **Paused** (its agent isn't running, but your next message picks it up), **Finished**, and **Archived**. See [The Sessions Home](05-sessions-home.mdx).
 
-**socket.dev** — A commercial package-reputation service (bring-your-own key) that flags compromised packages — malware, typosquats, rogue install scripts — and known CVEs; Bromure consults it host-side before letting an artifact through. See [Supply-Chain Protection](09-supply-chain.mdx).
+**SigV4** — AWS's request-signing method. Bromure re-signs AWS requests on the Mac with your real credentials, because an AWS signature can't simply be swapped. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
-**Sparkle** — The auto-update framework embedded in the app; it checks bromure.io daily and powers **Check for Updates…**. The same signing key also signs the image catalogs. See [Installation](02-installation.mdx).
+**Slash palette** — The list of commands that opens when you type `/` in the composer: the agent's built-in commands plus the skills and commands found in your setup. See [The Chat](06a-chat.mdx).
 
-**SSH front door** — The app's optional embedded SSH server (not macOS's `sshd`). It is off by default; when on, it is the single transport for human remote logins, the rich client, and network forwarding. See [Remote Access](14-remote-access.mdx).
+**socket.dev** — A commercial package-reputation service (you bring the key) that flags malware, typosquats and known vulnerabilities; Bromure asks it about packages before letting them through. See [Supply-Chain Protection](09-supply-chain.mdx).
 
-**ssh-agent bridge** — The in-process ssh-agent served to the VM over vsock. The guest can request identities and signatures but can never read the private key bytes. See [Credentials](08-credentials.mdx).
+**Sparkle** — The auto-update system built into the app, behind **Check for Updates…**. See [Installation & First Run](02-installation.mdx).
 
-**Stage** — The right-hand area of the unified window that shows the selected tab's terminal, or an overlay surface (Grid, a dashboard, the automation editor), with the browser and file panes as inner splits. See [Sessions](06-sessions.mdx).
+**SSH front door** — Bromure's own optional SSH server (not macOS's). Off by default; when on, it carries remote logins and rich-client connections. See [Remote Access & Clients](14-remote-access.mdx).
 
-**Sticky session** — The hybrid-routing coherence guard: once a conversation is routed to a backend, it stays there for the rest of the session, so a coding trajectory never swaps models mid-flight. See [Local Models](13-local-models.mdx).
+**ssh-agent bridge** — The SSH agent Bromure offers the VM. The VM can ask it to sign with a key but can never read the key itself. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
-**Streaming indicator** — The pulsing red dot in a session window's toolbar showing that session metadata is being streamed to bromure.io (enrolled, non-private workspaces only). See [Enterprise](15-enterprise.mdx).
+**Stage** — The large area to the right of the sidebar, showing what you selected: a session's chat, a room, the new-session screen, a machine's terminal, the Grid, or a board. The browser and Files panes open beside it. See [The Sessions Home](05-sessions-home.mdx).
 
-**Subscription mode** — The auth mode in which an agent uses an interactive-login (OAuth) subscription instead of an API key. The real OAuth tokens live only on the host; the guest runs with a bogus key and the proxy injects a live token. See [Credentials](08-credentials.mdx).
+**Stand-in** — A realistic replacement value. For credentials, see *Fake token*. For PII protection, a made-up name, `@example.com` email, same-format phone number or test card number swapped in for the real one; the same real value always gets the same stand-in within a machine. See [PII Protection](10a-pii.mdx).
 
-**Suspend / saved state** — Pausing the VM and writing its RAM to `vm.state` (with the tab layout in `tabs.json`), so the next launch resumes exactly where it left off. Restoring requires the workspace's persistent machine identifier and MAC. See [Concepts](04-concepts.mdx).
+**Status dot** — The small dot on a session's avatar in the sidebar that shows its state at a glance, for example whether it is working or needs you. See [The Sessions Home](05-sessions-home.mdx).
 
-**System disk** — A workspace's boot disk (`disk.img`), an APFS copy-on-write clone of the base image created instantly on first launch and kept between sessions. It holds `apt` installs and system config; **Reset disk** discards it while the home survives. See [Concepts](04-concepts.mdx).
+**Streaming indicator** — A pulsing red dot in a popped-out machine window's toolbar, shown when that machine's activity is being sent to bromure.io (enrolled Macs, machines not in Private mode). See [Enterprise](15-enterprise.mdx).
 
-**System-wide tunnel (utun)** — An optional per-host feature that routes a remote workspace subnet into a utun interface so any local process can reach remote VMs at their literal addresses. It requires the one-time privileged helper. See [Remote Access](14-remote-access.mdx).
+**Subscription mode** — Using an agent through your account's subscription (Claude, ChatGPT, Grok, Kimi) instead of an API key. The sign-in is kept on the Mac, which refreshes it; the VM only ever sees a stand-in key. See [Models & Providers](13-models.mdx).
+
+**Suspend / saved state** — Pausing a machine and saving its memory to disk (`vm.state`), so its next start resumes exactly where it was. If the saved state can't be restored — for example after a settings change — the machine boots fresh instead. See [Troubleshooting](17-troubleshooting.mdx#a-suspended-machine-doesnt-resume-where-it-left-off).
+
+**Switchboard** — A special Claude session that keeps track of all your other sessions: ask it what's going on, have it answer a waiting session, or start new work — from the Mac or, through the messaging connector, from your phone. It must quote your own words before acting for you. Formerly called Conductor. See [Switchboard & Messaging](06e-switchboard.mdx).
+
+**Synology storage class** — The Kubernetes storage class `bromure-synology`, which stores a cluster's volumes on a Synology NAS over iSCSI or SMB; when configured it becomes the cluster's default. See [Kubernetes Clusters & Registries](13a-kubernetes.mdx).
+
+**System disk** — A machine's boot disk (`disk.img`), a copy-on-write copy of the base image. It holds software installed with `apt` and system settings; **Reset disk** replaces it while the home survives. See [Concepts & Architecture](04-concepts.mdx).
+
+**System-wide tunnel (utun)** — An optional rich-client feature that lets any program on your Mac reach a remote Mac's machines at their own addresses. It needs the privileged helper. See [Remote Access & Clients](14-remote-access.mdx).
 
 ## T
 
-**Tab** — A tmux window inside the workspace VM's single tmux session. tmux is authoritative; the host mirrors its roster as the tab bar. See [Sessions](06-sessions.mdx).
+**Tab** — One terminal tab on a machine: a tmux window inside the VM. Agent sessions run in tabs too; the **Linux** pill shows a session's tab. See [Machines](06f-machines.mdx).
 
-**Transparent interception** — The virtual switch diverting a VM's port-80/443 flows into the host proxy with no cooperation from the guest — on by default, so the firewall, guardrails, and scanning apply to all web traffic, not just traffic that honors proxy environment variables. See [Guardrails settings](07-settings/guardrails.mdx#transparent-interception).
+**"To" target** — The recipient chip at the start of a room's composer: the room's Switchboard, one session, or **The whole room at once**. Change it with **Send to…**. See [Rooms](06b-rooms.mdx).
 
-**Token swap** — The proxy operation that replaces a fake token in an outbound request's header (and, for opted-in entries, body) with the real value, scoped to the credential's destination host. See [Credentials](08-credentials.mdx).
+**TOFU (trust on first use)** — How the rich client trusts a remote Mac: you confirm its key fingerprint the first time, and it is remembered. A later change raises a prominent warning. See [Remote Access & Clients](14-remote-access.mdx).
 
-**TOFU (trust on first use)** — The rich client's host-key trust model: the remote's SSH host-key fingerprint is shown once for manual confirmation, then pinned per endpoint. A later mismatch triggers a prominent "host key has CHANGED" warning. See [Remote Access](14-remote-access.mdx).
+**Token swap** — The proxy replacing a stand-in credential in an outgoing request with the real one, only for the host the credential belongs to. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
-**Tool-calling verified** — A model-catalog badge meaning the exact quantized build was smoke-tested for agent-grade tool calling; values are verified, untested, or broken. See [Local Models](13-local-models.mdx).
+**Tool turn vs. text turn** — In Fusion, a reply that calls tools (passed through from one model so the agent's tools run) versus a plain-text answer (which is fused). See [Fusion — the Multi-Model Panel](12-fusion.mdx).
 
-**Tool turn vs. text turn** — The Fusion distinction between a response containing tool calls (an action, passed through unfused so the agent's tools run) and a plain-text answer (which is fused). See [Fusion](12-fusion.mdx).
+**Tool-calling verified** — A model-catalog badge saying the exact model build was tested for reliable agent tool use. See [Models & Providers](13-models.mdx).
 
-**tool_result span** — One block of untrusted external content (a file read, web fetch, or command output) that the agent streams back to the model; it is the unit the source-injection detector scores. See [Prompt Injection](10-prompt-injection.mdx).
+**tool_result span** — One piece of outside content (a file read, a web page, a command's output) returned to the agent's model; the unit the injection detector scores. See [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx).
 
-**Trace level** — How much of a workspace's traffic the proxy records: **Off**, **Activity only** (metadata), **AI request details** (bodies for known LLM hosts, the new-workspace default), or **Everything**. See [Tracing](11-tracing.mdx).
+**Trace Inspector** — The window (**Window › Trace Inspector…**, ⇧⌘I) for browsing recorded traffic. See [Tracing & Audit](11-tracing.mdx).
 
-**Trace Inspector** — The Window-menu viewer (⇧⌘I) for recorded traffic, with filters, leak and swap badges, and Conversation and Raw detail views. See [Tracing](11-tracing.mdx).
+**Trace level** — How much of a machine's traffic the proxy records: **Off**, **Activity only**, **AI request details** (the default), or **Everything**. See [Tracing & Audit](11-tracing.mdx).
 
-**Trace record** — One recorded proxy exchange: metadata (host, method, path, status, bytes, latency) plus swap and leak reports and, when captured, encrypted request and response bodies. See [Tracing](11-tracing.mdx).
+**Trace record** — One recorded request and response: host, method, path, status, sizes and timing, swap and leak reports, and, when captured, the encrypted bodies. See [Tracing & Audit](11-tracing.mdx).
 
-**TTFT** — Time to first token, the prompt-prefill latency that the hybrid soft-fallback threshold (default 5 seconds) and the health gate operate on. See [Local Models](13-local-models.mdx).
+**Transcript cache** — The copy of each session's conversation the Mac keeps (in `transcripts/` in the support folder), so a chat can be read even while its machine is off. See [The Chat](06a-chat.mdx).
+
+**Transparent interception** — The Mac steering a VM's web traffic (ports 80 and 443) into the proxy even if a program ignores the proxy settings, so the firewall, guardrails and checks apply to everything. On by default. See [Guardrails settings](07-settings/guardrails.mdx).
 
 ## U
 
-**Unified session window** — The single shared window ("Bromure") that hosts all workspaces: a sidebar source list on the left and one stage on the right for the selected workspace. See [Sessions](06-sessions.mdx).
+**Undo toast** — The short notice that appears after you end, archive, delete or move a session, with an **Undo** button (⌘Z). See [The Sessions Home](05-sessions-home.mdx).
 
-**Unverified package hold** — The fail-closed behavior when an enabled reputation source cannot vet a package: the download pauses and asks you, per package and version, rather than silently allowing. Denying blocks with a 451. See [Supply-Chain Protection](09-supply-chain.mdx).
+**Unified session window** — The main Bromure window: the sidebar on the left, the stage on the right. See [The Sessions Home](05-sessions-home.mdx).
+
+**Unverified package hold** — When a reputation check you enabled can't give an answer for a package, Bromure pauses the download and asks you, instead of letting it through silently. See [Supply-Chain Protection](09-supply-chain.mdx).
 
 ## V
 
-**version stamp (base.version)** — The installed base image's version string, for example `200` or `200.1`. The major part tracks the app's bundled image version; the dot-revision increments on every same-major rebuild so workspaces can detect drift. See [Installation](02-installation.mdx).
+**Version stamp (base.version)** — The installed base image's version, for example `201`. When it changes, machines copied from an older version offer to upgrade. See [Installation & First Run](02-installation.mdx).
 
-**virtiofs share** — Apple Virtualization's directory-sharing device. Bromure uses tagged shares for the meta share, the outbox, home bootstrap, and up to eight project folders symlinked into the guest home. See [Concepts](04-concepts.mdx).
+**virtiofs share** — A folder shared from the Mac into the VM. Bromure uses shares for the meta share, the outbox and up to eight project folders. See [Concepts & Architecture](04-concepts.mdx).
 
-**VM pool / warm VM** — The pre-booted, memory-shrunk browser VM the engine keeps ready so opening the agentic browser pane is near-instant; a replacement starts warming as soon as one is claimed. Workspace VMs are not pooled. See [Concepts](04-concepts.mdx).
+**Virtual Machines** — The sidebar section (folded by default) listing your machines, the Grid, and the Kubernetes, Registries and Messaging entries. See [Machines](06f-machines.mdx).
 
-**vmnet** — Apple's userspace virtual-network framework. Shared mode is NAT with DHCP; bridged mode joins the VM to a physical interface's LAN. See [Concepts](04-concepts.mdx).
+**VM pool / warm VM** — A browser VM Bromure keeps started in advance so the agentic browser opens almost instantly. Machines themselves are not pooled. See [Concepts & Architecture](04-concepts.mdx).
 
-**vsock (virtio socket)** — The host-to-guest socket transport that needs no network, over which Bromure runs its control bridges: the proxy path, ssh-agent, token agents, clipboard, file transfer, browser MCP, and boot detection. See [Concepts](04-concepts.mdx).
+**vmnet** — Apple's virtual-network framework, which Bromure uses to connect machines to the network. See [Concepts & Architecture](04-concepts.mdx).
+
+**vsock (virtio socket)** — A direct channel between the Mac and a VM that needs no network. Bromure runs its internal links over it: the proxy path, the SSH agent, clipboard and files, and the built-in MCP servers. See [Concepts & Architecture](04-concepts.mdx).
 
 ## W
 
-**WebSocket transcript** — The readable, chronological rendering of a traced WebSocket session's frames (defragmented, unmasked, inflated), stored as that trace record's response body. See [Tracing](11-tracing.mdx).
+**WebSocket transcript** — A readable, in-order rendering of a traced WebSocket conversation, stored with its trace record. See [Tracing & Audit](11-tracing.mdx).
 
-**Wire boundary** — The product's central idea: all outbound HTTPS from the guest passes through the host-side MITM proxy, and every protection — secret-keeping, credential scoping, supply-chain scanning, injection detection, tracing — is enforced at that one point the agent cannot reach around. See [Concepts](04-concepts.mdx).
+**Wire boundary** — The product's central idea: everything the VM sends out passes through the proxy on the Mac, and every protection — keeping secrets, scoping credentials, checking packages, detecting injections, tracing — happens at that one point the agent can't get around. See [Concepts & Architecture](04-concepts.mdx).
 
-**Workspace (profile)** — One isolated agent environment: a persistent Ubuntu VM with its own system disk, ext4 home, agents, credentials, folders, and policies, stored under `~/Library/Application Support/BromureAC/profiles/<uuid>/`. It is called a workspace in the interface and a profile in code, `profile.json`, and CLI flags. See [Workspaces](05-workspaces.mdx).
+**Workspace** — The settings editor's and CLI's name for a machine. See *Machine*.
 
-**Workspace subnet** — The private `/24` network Bromure's own vmnet switch leases to this Mac's workspace VMs. Chosen at random inside `172.16.0.0/12` per install (it was a shared `192.168.64.0/24`) so a rich client mirroring several remotes never sees colliding subnets; view or re-randomise it under Settings → Resources. See [Remote Access](14-remote-access.mdx).
+**Workspace subnet** — The private network your machines are on. New installs pick a random `/24` inside `172.16.0.0/12`, so several Macs mirrored by one rich client don't collide; change it under **Preferences › Resources › Workspace subnet**. See [Troubleshooting](17-troubleshooting.mdx#the-machines-subnet-clashes-with-a-network-you-use).
 
-**Worktree run (branch slug)** — An automation run executed in a git worktree on branch `wt/<slug>`, where the slug combines a sanitized name, a timestamp, and a per-event suffix so repeated fires never collide. See [Automation & CLI](16-automation-cli.mdx).
-
-**Worktree tab** — A tab running a nested agent in a git worktree checkout (branch `wt/<slug>`), shown indented under its parent tab with a branch glyph. See [Sessions](06-sessions.mdx).
+**Worktree** — A second checkout of a git repository, on its own branch, in its own folder. Branch sessions, coding tasks and automation runs each work in one, so their changes stay apart until merged. On a machine's terminal, **New worktree** (⇧⌘G) and **Merge worktree** (⇧⌘M) manage them by hand. See [Branches & Review](06c-branches.mdx).
 
 ## X
 
-**X-Bromure-Rewritten / X-Bromure-Block** — The response headers Bromure adds so wire rewrites and blocks are identifiable: `X-Bromure-Rewritten: supply-chain` on age-filtered or script-stripped responses, and `X-Bromure-Block: supply-chain` (or `depi-auth`) on blocks. See [Supply-Chain Protection](09-supply-chain.mdx).
+**X-Bromure-Rewritten / X-Bromure-Block** — Response headers Bromure adds so its changes are recognizable: `X-Bromure-Rewritten: supply-chain` when it edited a package response, and `X-Bromure-Block: supply-chain` (or `depi-auth`) when it blocked one. See [Supply-Chain Protection](09-supply-chain.mdx).

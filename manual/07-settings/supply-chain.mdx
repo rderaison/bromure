@@ -1,26 +1,26 @@
 ---
 title: "Supply Chain"
 description: "Policies applied to every package the agent downloads — age gating, vulnerability checks, reputation filtering, install-script stripping, and lockfile consent."
-order: 7.11
+order: 7.13
 ---
 
 # Supply Chain
 
-Coding agents install a lot of packages, and a freshly compromised dependency is one of the most direct ways to poison a sandbox. The **Supply Chain** pane configures the per-workspace policy Bromure Agentic Coding applies to every package fetch. As the pane's own description says: Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM and applies these policies before the agent sees the response; the in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides.
+Coding agents install a lot of packages, and a freshly compromised dependency is one of the most direct ways to poison a sandbox. The **Supply Chain** pane configures the policy Bromure Agentic Coding applies to every package fetch a machine makes (a machine is a workspace, in the settings editor). As the pane's own description says: Bromure scans every package fetch (npm, PyPI, Cargo, RubyGems, Maven, NuGet, Go modules, Packagist) through the host MITM and applies these policies before the agent sees the response; the in-VM `.npmrc` / `pip.conf` can only further restrict these settings — they cannot loosen them. Use the per-package allowlists for surgical overrides.
 
 <p align="center">
-  <img src="../images/editor-supply-chain.en.jpg" width="600" alt="The Supply Chain pane of the workspace settings editor, showing the Age gate group enabled with a 2-day minimum and the OSV vulnerability check group" />
+  <img src="../images/editor-supply-chain.en.jpg" width="600" alt="The Supply Chain pane of the machine Web app: the Age gate group with Refuse packages younger than the cutoff ticked, a 2-day minimum and an Add entry button for exempt packages, and the OSV vulnerability check group with its lookup unticked and Block at severity set to High and above" />
 </p>
 
-The pane groups five independently toggled layers: **Age gate**, **OSV vulnerability check**, **Package filtering**, **Install scripts**, and **Lockfile-pinned installs** (scroll for the last three). This page documents the settings; the full pipeline — ecosystem coverage, the Security Log, response headers, and compromise detection — is covered in the [Supply-chain protection chapter](../09-supply-chain.mdx).
+The pane groups five independently toggled layers: **Age gate**, **OSV vulnerability check**, **Package filtering**, **Install scripts**, and **Lockfile-pinned installs** (scroll for the last three). This page documents the settings; the full pipeline — ecosystem coverage, response headers, and compromise detection — is covered in [Supply-Chain Protection](../09-supply-chain.mdx).
 
 ## How enforcement works
 
 All checks run in the host-side proxy, never inside the VM. Reputation-service API keys (socket.dev, Depi) are held on the host only and never exported into the VM. When a check fires, the proxy blocks the download with an HTTP [451](../18-glossary.mdx) response carrying a plaintext reason (for example, "npm package foo@1.2.3 published 4 hours ago — policy requires 2 days minimum"); `npm`, `pip`, and `cargo` print that text verbatim, so both the agent and you see exactly why an install failed. Blocked responses carry the header `X-Bromure-Block: supply-chain`; rewritten responses carry `X-Bromure-Rewritten: supply-chain`.
 
-Policy edits apply live: saving the workspace pushes the new policy to running sessions immediately — no VM restart — and each change is confirmed with a `[supply-chain] policy engaged` line in the Security Log (Window menu → **Security Log…**).
+Policy edits apply live: saving pushes the new policy to a running machine immediately, with no restart. Package checks and blocks are recorded in the [Security Timeline](../11a-security-timeline.mdx) — the **Supply chain** filter in its Timeline tab, and the **Packages checked** tile in its Overview.
 
-> **Note:** Packages already present in npm's or pip's local cache never touch the network, so nothing is checked or logged for them. A quiet Security Log during an install can simply mean everything was cached.
+> **Note:** Packages already present in npm's or pip's local cache never touch the network, so nothing is checked or recorded for them. A quiet Timeline during an install can simply mean everything was cached.
 
 ## Age gate
 
@@ -53,21 +53,23 @@ With **socket.dev** selected, paste an API token into **API key** (the **Get an 
 - **Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)** — blocks on attack-shaped supply-chain-risk signals: definitive malware indicators at any severity; noisier signals such as obfuscated code, install scripts, typosquatting, or shell access only when socket.dev rates them high or critical (so a package with a benign `postinstall` is not blocked). Off by default.
 - **Block packages with known CVEs** — blocks on socket.dev's vulnerability bucket at or above the **CVE block threshold** (default **High and above**; the picker is disabled until this toggle is on). Off by default.
 
-> **Note:** socket.dev has no Cargo support. With socket.dev filtering enabled, every crates.io artifact yields no verdict and triggers the unverified-package hold described below — effectively a prompt per crate version. Disable socket.dev for Rust-heavy workspaces, or expect to answer prompts.
+> **Note:** socket.dev has no Cargo support. With socket.dev filtering enabled, every crates.io artifact yields no verdict and triggers the unverified-package hold described below — effectively a prompt per crate version. Disable socket.dev for Rust-heavy machines, or expect to answer prompts.
 
 ### Depi
 
 With **Depi** selected and an API key entered (the **Get an API key** link opens landh.tech), the proxy re-routes every npm registry request — metadata, tarballs, audit, everything addressed to `registry.npmjs.org` — to Depi's npm-compatible secure registry at `depi-npm-proxy.landh.tech`, attaching your key as a host-injected Bearer token. Depi serves pre-vetted packages, so instead of a per-package lookup, the whole registry is replaced. The other layers (age gate, OSV, script stripping) still apply on top: Depi replaces socket.dev, not the local policy.
 
-While the key field is empty, an orange warning reads **Enter an API key — Depi stays off without one.** If Depi rejects the key, the npm install fails with a clear Bromure error, the rejection is recorded in the Security Log, and a one-shot alert is raised. Depi affects npm only; other ecosystems are untouched.
+While the key field is empty, an orange warning reads **Enter an API key — Depi stays off without one.** If Depi rejects the key, the npm install fails with a clear Bromure error, the rejection is recorded in the Security Timeline, and a one-shot alert is raised. Depi affects npm only; other ecosystems are untouched.
 
 ## Install scripts
 
-**Strip preinstall / install / postinstall / prepare from npm tarballs on the fly** removes the hooks malicious npm packages use to run code at install time. Bromure rewrites the tarball in flight — removes the script keys from the package's `package.json`, recomputes the tar checksum, re-gzips — and scrubs the integrity hashes from the registry metadata so npm's own verification still passes for unpinned installs. Strips are logged in orange in the Security Log; on any parse failure the original tarball passes through untouched (this layer fails open rather than break a well-formed install).
+**Strip preinstall / install / postinstall / prepare from npm tarballs on the fly** removes the hooks malicious npm packages use to run code at install time. Bromure rewrites the tarball in flight — removes the script keys from the package's `package.json`, recomputes the tar checksum, re-gzips — and scrubs the integrity hashes from the registry metadata so npm's own verification still passes for unpinned installs. Strips are recorded in the Security Timeline; on any parse failure the original tarball passes through untouched (this layer fails open rather than break a well-formed install).
 
 Binding compilers that genuinely need install scripts (better-sqlite3, node-canvas, …) go in **Allow install scripts for**, format `npm:better-sqlite3`.
 
 Off by default; npm only (PyPI sdists are never rewritten — `setup.py` is arbitrary code).
+
+> **Note:** Separately from this setting, npm inside the VM has its own install-script allow-list. The machine's managed `~/.npmrc` lets npm run install scripts for the coding-agent packages Bromure ships (Claude Code, Codex, Kimi Code and Oh My Pi), so their self-updates install correctly. That is npm's own rule, not a Bromure policy.
 
 ## Lockfile-pinned installs
 
@@ -81,7 +83,7 @@ Turn on **Prompt before passing lockfile-pinned tarballs through unmodified (`np
 
 If an enabled reputation source (OSV or socket.dev) cannot produce a verdict — network down, rate-limited, auth failure, unsupported ecosystem — Bromure fails closed rather than silently allowing. The download is held and a dialog asks, per package and version, whether to accept the unverified package; denying blocks with a 451. Approvals are keyed per `package@version`, so one answer cannot blanket an entire dependency graph.
 
-This is deliberate protection against an attacker inducing rate limits to sneak packages through. It also means fully offline work with OSV or socket.dev enabled will prompt for every uncached package — disable those layers for offline use. In headless SSH/CLI sessions the same question is asked inside the workspace's tmux; no answer means deny.
+This is deliberate protection against an attacker inducing rate limits to sneak packages through. It also means fully offline work with OSV or socket.dev enabled will prompt for every uncached package — disable those layers for offline use. When the machine is used headless over SSH or the CLI, the same question is asked inside the machine's tmux; no answer means deny.
 
 ## Settings reference
 
@@ -102,4 +104,4 @@ This is deliberate protection against an attacker inducing rate limits to sneak 
 | **Allow install scripts for** | List (`npm:better-sqlite3`) | Empty |
 | **Prompt before passing lockfile-pinned tarballs through unmodified** | Toggle | Off |
 
-API keys entered here live in the workspace's `profile.json` on the host (never in the VM); all reputation calls originate from the host proxy. For the Security Log, per-ecosystem interception details, and the compromise-detection alarm that pairs with these policies, see the [Supply-chain protection chapter](../09-supply-chain.mdx).
+API keys entered here stay on the Mac, in the machine's `profile.json`, and never enter the VM; all reputation calls come from the proxy on the Mac. For per-ecosystem interception details and the compromise alarm that pairs with these policies, see [Supply-Chain Protection](../09-supply-chain.mdx); for the record of every check, see [Security Overview & Timeline](../11a-security-timeline.mdx).

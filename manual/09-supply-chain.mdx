@@ -6,9 +6,9 @@ order: 9
 
 # Supply-Chain Protection
 
-An autonomous coding agent installs packages constantly — scaffolding a project pulls in hundreds of dependencies without a human ever reading a name, let alone a changelog. That makes the package registry the single widest channel for hostile code to enter the sandbox: a typosquatted name, a freshly hijacked release, or a malicious `postinstall` script runs with the agent's full permissions the moment `npm install` finishes. Bromure Agentic Coding treats every package fetch as untrusted input and applies a per-workspace policy to it on the host, before a single byte reaches the VM.
+An autonomous coding agent installs packages constantly — scaffolding a project pulls in hundreds of dependencies without a human ever reading a name, let alone a changelog. That makes the package registry the single widest channel for hostile code to enter the sandbox: a typosquatted name, a freshly hijacked release, or a malicious `postinstall` script runs with the agent's full permissions the moment `npm install` finishes. Bromure Agentic Coding treats every package fetch as untrusted input and applies a per-machine policy to it on the host, before a single byte reaches the VM.
 
-This chapter explains what is intercepted, each check in the pipeline, what happens when a check fires, and how to read the results in the Security Log. The field-by-field settings reference for the pane lives in [Supply Chain settings](07-settings/supply-chain.mdx).
+This chapter explains what is intercepted, each check in the pipeline, what happens when a check fires, and how to read the results in the Security Timeline. Supply-chain policy is set per machine (a workspace, in the settings editor). The field-by-field settings reference for the pane lives in [Supply Chain settings](07-settings/supply-chain.mdx).
 
 ## Why package installs are the attack surface
 
@@ -28,9 +28,9 @@ Every network request the VM makes passes through the host-side MITM proxy (see 
 - **Artifact** — the downloadable file for one specific version: an npm `.tgz`, a Python wheel or sdist, a `.crate`, `.gem`, `.nupkg`, or Go module `.zip`. OSV lookups, socket.dev checks, script stripping, and hard blocks all happen at artifact-fetch time.
 - **Passthrough** — everything else on those hosts (search, authentication). Untouched.
 
-Interception is automatic as soon as at least one supply-chain layer is enabled for the workspace (or the workspace is enrolled with bromure.io, in which case fetches are observed for telemetry even with every enforcement layer off). There is nothing to install or configure inside the VM.
+Every package fetch is classified and recorded in the [Security Timeline](11a-security-timeline.mdx), whatever the policy; the checks themselves run only for the layers you enable. There is nothing to install or configure inside the VM.
 
-> **Note:** Packages already present in npm's or pip's local cache never hit the network, so nothing is checked — or logged — for them. A quiet Security Log during an install can simply mean everything came from cache.
+> **Note:** Packages already present in npm's or pip's local cache never hit the network, so nothing is checked — or recorded — for them. A quiet Timeline during an install can simply mean everything came from cache.
 
 ## Verdicts: allow, rewrite, block, hold
 
@@ -38,9 +38,9 @@ Supply-chain layers are individual on/off toggles, each with a fixed action — 
 
 | Outcome | What happens | Visible marker |
 |---|---|---|
-| **Allowed** | The response passes through untouched. | Green check in the Security Log; an "inspecting" line confirms the proxy saw it. |
-| **Rewritten** | The proxy modified the response: too-fresh versions removed from metadata, or install scripts stripped from a tarball. The package manager proceeds normally. | `X-Bromure-Rewritten: supply-chain` response header; orange "stripped" lines in the log. |
-| **Blocked** | The download is refused with an HTTP [451](18-glossary.mdx) ("Unavailable For Legal Reasons") response. | `X-Bromure-Block: supply-chain` header; red line in the log. |
+| **Allowed** | The response passes through untouched. | Green **checked** / **downloaded** row in the Security Timeline. |
+| **Rewritten** | The proxy modified the response: too-fresh versions removed from metadata, or install scripts stripped from a tarball. The package manager proceeds normally. | `X-Bromure-Rewritten: supply-chain` response header; blue row in the Timeline. |
+| **Blocked** | The download is refused with an HTTP [451](18-glossary.mdx) ("Unavailable For Legal Reasons") response. | `X-Bromure-Block: supply-chain` header; red row in the Timeline. |
 | **Held for consent** | The download pauses while Bromure asks you — for lockfile-pinned pass-throughs and for packages no enabled reputation source could vet. Denying converts the hold into a 451 block. | A system consent alert; the decision is logged. |
 
 A 451 block carries a plaintext body that begins with `Bromure Supply-Chain Security blocked this request:` followed by the exact reason, for example:
@@ -70,14 +70,14 @@ The proxy intercepts eight package ecosystems. Not every check supports every ec
 Two gaps worth knowing about:
 
 - **Age gate — Maven, NuGet, Go.** These three ecosystems do not carry per-version publish timestamps in their standard metadata responses, so their metadata passes through unfiltered and the artifact backstop has no data to act on. The age gate effectively does not block them today; npm, PyPI, Cargo, RubyGems, and Packagist are fully covered.
-- **socket.dev — Cargo.** socket.dev has no Cargo support. With socket.dev filtering enabled, every `crates.io` artifact yields no verdict and therefore triggers the unverified-package consent prompt (see [Offline and degraded behavior](#offline-and-degraded-behavior)). If your workspace does heavy Rust work, either answer the prompts or pick a different provider.
+- **socket.dev — Cargo.** socket.dev has no Cargo support. With socket.dev filtering enabled, every `crates.io` artifact yields no verdict and therefore triggers the unverified-package consent prompt (see [Offline and degraded behavior](#offline-and-degraded-behavior)). If your machine does heavy Rust work, either answer the prompts or pick a different provider.
 
 ## The age gate
 
 The age gate refuses package versions younger than a configurable number of days, on the theory that a freshly published release is the one most likely to be a just-hijacked package — malicious versions are usually reported and yanked quickly, and waiting out that window costs almost nothing for regular development. It is the only layer enabled by default, with a 2-day minimum.
 
 <p align="center">
-  <img src="images/editor-supply-chain.en.jpg" width="600" alt="The Supply Chain pane of the Edit workspace window, showing the Age gate group with Refuse packages younger than the cutoff checked and Minimum age set to 2 days, and the OSV vulnerability check group unchecked below it" />
+  <img src="images/editor-supply-chain.en.jpg" width="600" alt="The Supply Chain pane of the Web app workspace editor, showing the Age gate group with Refuse packages younger than the cutoff checked and Minimum age set to 2 days, and the OSV vulnerability check group unchecked below it" />
 </p>
 
 It works through two cooperating mechanisms:
@@ -85,7 +85,7 @@ It works through two cooperating mechanisms:
 - **Metadata rewriting.** The proxy strips too-fresh versions out of the registry's version listing and re-aims `latest` and other dist-tags at the newest surviving version. Floating references — `pkg@latest`, semver ranges — are therefore never hard-blocked: the package manager silently resolves to the newest version old enough to pass. From the agent's point of view, versions younger than the cutoff simply do not exist yet.
 - **Artifact-fetch backstop.** Every per-version publish time the proxy sees in metadata is cached in memory (up to 50,000 entries). If the agent then requests a pinned, too-fresh version directly, the fetch is blocked with a 451 that states the package's actual age and the required minimum. For pip — whose default PEP 503 HTML index carries no timestamps — Bromure performs an on-demand lookup of `https://pypi.org/pypi/<pkg>/<version>/json` to obtain the publish time.
 
-To configure it, open the workspace's **Supply Chain** pane and use the **Age gate** group:
+To configure it, open the machine's **Supply Chain** pane and use the **Age gate** group:
 
 1. Toggle **Refuse packages younger than the cutoff**.
 2. Set **Minimum age:** with the stepper (0–90 days).
@@ -123,7 +123,7 @@ Two independent blocks are available:
 - **Block compromised packages (rogue install scripts, malware-flagged, typosquats, suspicious telemetry)** — fires on socket.dev's attack-shaped supply-chain-risk issues. Definitive malware signals (malware, known malware, GPT-detected malware, troll packages, compromised SSH keys) block at any severity. Noisier attack-shaped signals — obfuscated code, suspicious strings, install scripts, typosquatting, shell access, unusual HTTPS use — block only when socket.dev rates them high or critical, so a package with a benign `postinstall` does not get caught. Pure quality and attribute signals (new author, environment-variable reads, network access, telemetry) deliberately never block.
 - **Block packages with known CVEs** — fires on socket.dev's vulnerability bucket at or above the **CVE block threshold:** picker (same four levels as OSV; default **High and above**).
 
-Both blocks are off by default. Results are cached for the app run, at most 16 calls run in parallel, and transient failures are retried 5 times with backoff. Authentication errors are surfaced in the Security Log with the HTTP status and a preview of the response body.
+Both blocks are off by default. Results are cached for the app run, at most 16 calls run in parallel, and transient failures are retried 5 times with backoff. Authentication errors are written to the app log with the HTTP status and a preview of the response body.
 
 > **Note:** If you enable OSV and socket.dev's CVE block together, both will check every artifact — that is allowed (they are different layers), just redundant for CVE coverage. Many users pair socket.dev's compromised-package block with the free OSV check instead.
 
@@ -131,7 +131,7 @@ Both blocks are off by default. Results are cached for the app run, at most 16 c
 
 [Depi](18-glossary.mdx) is a drop-in secure npm registry by Lupin & Holmes (landh.tech) that serves pre-vetted packages. Instead of looking packages up, Bromure re-routes *every* npm registry request — metadata, tarballs, audit, anything addressed to `registry.npmjs.org` or `*.npmjs.org` — to Depi's npm-compatible filtering registry at `depi-npm-proxy.landh.tech:443`, attaching your key as an `Authorization: Bearer` header and stripping any Authorization header the guest sent. Depi rewrites tarball URLs in its packuments to point at itself, so those follow-up fetches get the key injected host-side too.
 
-To enable it, select **Depi** in the radio and paste your key into the **API key:** secure field (**Get an API key** opens landh.tech). While the field is empty, an orange warning reads **Enter an API key — Depi stays off without one.** Each re-routed request is logged in the Security Log:
+To enable it, select **Depi** in the radio and paste your key into the **API key:** secure field (**Get an API key** opens landh.tech). While the field is empty, an orange warning reads **Enter an API key — Depi stays off without one.** Each re-routed request is written to the app log:
 
 ```
 [depi] GET registry.npmjs.org/… → https://depi-npm-proxy.landh.tech
@@ -151,6 +151,8 @@ npm's `preinstall`, `install`, `postinstall`, and `prepare` hooks run arbitrary 
 Because the tarball bytes change, the proxy also scrubs `dist.integrity` and `dist.shasum` from the package's registry metadata, so npm computes the hash itself from the stripped tarball and its verification still passes for unpinned installs. Each strip is logged ("stripped install scripts from" the package and version, shown in orange); tarballs that were inspected and found clean are tagged with the `X-Bromure-Rewritten: supply-chain` header only. On any parse failure the original tarball passes through untouched — this layer fails open, because it must never brick a well-formed install.
 
 Some packages genuinely need install scripts — native binding compilers such as `better-sqlite3` or `node-canvas`. Add those to **Allow install scripts for** (format `npm:better-sqlite3`) and they keep their hooks.
+
+> **Note:** This proxy layer is separate from npm's own install-script policy inside the VM. Recent npm versions run install scripts only for packages on an `allow-scripts` list, so Bromure's managed `~/.npmrc` in every machine allows them for exactly the agent CLIs it ships — `@anthropic-ai/claude-code`, `@openai/codex`, `@moonshot-ai/kimi-code` and `@oh-my-pi/pi-coding-agent` — so that an agent updating itself with `npm install -g` gets its native binary. Every other package follows npm's default. If you turn on script stripping here, add those packages to **Allow install scripts for** as well, or the agents' self-updates lose their install step.
 
 The toggle is off by default, and two limits apply:
 
@@ -178,11 +180,11 @@ All supply-chain ask-the-user paths — the lockfile pass-through and the unveri
 
 Active grants and denies are listed as **Supply chain decisions** — separate from guardrail decisions — in the approvals UI (the **Window** → **Credential Approvals…** area), where you can revoke a grant early. Grants are in-memory only and do not survive an app restart.
 
-In remote SSH/CLI sessions there is no GUI dialog: the same question is rendered as a chooser inside the workspace's tmux. No answer means deny. See [Remote Access](14-remote-access.mdx).
+In remote SSH/CLI sessions there is no GUI dialog: the same question is rendered as a chooser inside the machine's tmux. No answer means deny. See [Remote Access](14-remote-access.mdx).
 
 ## Configuring the policy
 
-Supply-chain policy is configured per workspace, in the **Supply Chain** pane of the **Edit workspace** window (the yellow shipping-box icon in the sidebar). The full field-by-field reference is in [Supply Chain settings](07-settings/supply-chain.mdx); the defaults at a glance:
+Supply-chain policy is configured per machine, in the **Supply Chain** pane under **Security** in the machine's settings. The full field-by-field reference is in [Supply Chain settings](07-settings/supply-chain.mdx); the defaults at a glance:
 
 | Setting | Default |
 |---|---|
@@ -195,7 +197,7 @@ Supply-chain policy is configured per workspace, in the **Supply Chain** pane of
 
 Three operational details:
 
-- **Edits apply live.** Saving the workspace pushes the new policy to running sessions immediately — the proxy reads it per request, so no VM restart is ever needed. Each new or changed policy is confirmed with a one-line summary in the Security Log, for example:
+- **Edits apply live.** Saving the settings pushes the new policy to running sessions immediately — the proxy reads it per request, so no VM restart is ever needed. Each new or changed policy is confirmed with a one-line summary in the app log, for example:
 
   ```
   [supply-chain] policy engaged for 1a2b3c4d: age-gate=2d osv=high socket.dev=compromised+cve=high strip-scripts
@@ -205,25 +207,25 @@ Three operational details:
 - **Where it is stored.** The policy lives in the workspace's `profile.json` under `~/Library/Application Support/BromureAC/profiles/<id>/` (only non-default fields are written). The socket.dev and Depi API keys are stored there too — host-side only, shown as secure fields in the UI, and never copied into the VM. There are no supply-chain-specific environment variables or launch arguments.
 - **Remote configuration.** The SSH/TUI remote menu exposes the same **Supply Chain** pane with the same fields, so a headless instance can be configured without the GUI. See [Remote Access](14-remote-access.mdx).
 
-## The Security Log window
+## Watching installs in the Security Timeline
 
-Everything the supply-chain pipeline does is visible in the Security Log — open **Window** → **Security Log…**. It is a live tail of every security event the proxy emits: supply-chain lookups and verdicts, 451 blocks, script strips, policy-engaged confirmations, and Depi re-routes, alongside prompt-injection detections, Fusion engage/disengage, LLM routing changes, remote-access events, and worktree lines. One window serves the whole app; choosing the menu item again brings it forward.
+Everything the supply-chain pipeline decides is visible in the [Security Timeline](11a-security-timeline.mdx) — open **Window** → **Security Timeline…** or search for it with ⌘K. The **Packages checked** tile on its **Overview** tab counts the last 24 hours of package fetches; click it, or pick **Supply chain** in the **Timeline** tab's engine filter, to see them one per row.
 
-Rows are color-coded so you can read an install at a glance:
+Each row names the package in its **Condition** column (`npm · axios@1.7.9`) and says what happened in its **Decision** column, colour-coded:
 
-| Color | Meaning | Marker |
+| Decision | Colour | Meaning |
 |---|---|---|
-| Blue | Outbound lookup (OSV, socket.dev, publish-time backstop) | → |
-| Green | Clean verdict — the package passed | ✓ |
-| Red | Block or failure (451, error) | ✗ |
-| Orange | Install scripts stripped from a tarball | "stripped" |
-| Accent | Policy engaged / changed | `[supply-chain]` |
+| **checked** | Green | A package's version listing was fetched and passed. |
+| **downloaded** | Green | A package artifact was fetched and passed. |
+| **checked — versions newer than the cooldown hidden** | Blue | The age gate rewrote a version listing. This is the gate doing its normal job, not a block. |
+| **install scripts stripped** | Blue | Install hooks were removed from an npm tarball. |
+| **blocked — …** | Red | The fetch was refused with a 451; the reason follows the dash (for example **blocked — known malware**). |
 
-The window has a **Filter…** field to narrow the view (type a package name, an ecosystem, or any text from the lines you care about), an **Auto-scroll** checkbox (on by default; uncheck it to stop following the tail while you read), a **Clear** button that wipes the buffer, and a footer showing the entry count ("42 entries", or "7 of 42 entries" while a filter is active). An empty-state message explains when entries will appear.
+Package fetches are **always** recorded, whether or not any supply-chain layer is on — enforcement follows the policy, recording does not. `apt` installs are recorded too: every `.deb` fetched from an Ubuntu or Debian archive pool appears as an `apt` row. They are observed only; none of the checks in this chapter apply to them.
 
-To see it in action: open the window, run any install inside a session (`npm install`, `pip install`, `cargo add`, `gem install`, …), and watch the entries stream in. A fully clean install still produces "inspecting" lines for each artifact — that is deliberate, so a quiet pipeline is distinguishable from a bypassed one.
+To see it in action: open the Timeline, run any install inside a session (`npm install`, `pip install`, `cargo add`, `gem install`, `apt install`, …), and watch the rows arrive. Events are kept on disk for 90 days and survive app restarts; **Clear** only hides the current rows from the window. **Export…** saves what the tab shows as a CSV file.
 
-> **Note:** The buffer is an in-memory ring capped at roughly 5,000 lines and does not persist across app restarts. Every line is also mirrored to the app's stderr, so launching `bromure-cli` from a terminal (or capturing its log output) gives you a durable copy. The window opens at 820×460 and can be resized down to 720×360.
+> **Note:** The Timeline records decisions, not every step. The detailed pipeline lines — each outbound lookup, the "policy engaged" summaries, Depi re-routes, API errors — go to the app log at `~/Library/Logs/BromureAC/bromure-ac.log` (and to the app's stderr when it is launched from a terminal).
 
 ## Offline and degraded behavior
 
@@ -244,21 +246,24 @@ Supply-chain checks reduce the odds of hostile code entering the sandbox; compro
 Every outgoing request from the VM is scanned in a single pass for the decoy ("fake") tokens the credential-swap layer minted. A fake scoped to one host (say, `github.com`) appearing in a request bound for *any other host* is the signature of credential exfiltration. When that happens:
 
 1. The proxy blocks the request with a 451 — the destination never receives a byte.
-2. The VM is paused instantly. If the session was detached, it is force-reattached and revealed. The frozen session frame tints red.
-3. A critical alert appears, titled **This environment may have been compromised**, explaining that Bromure detected an outbound attempt to leak a session credential from the named workspace to a host it was not minted for and that the VM has been paused — with a detail line per leak: a token preview (like `sk-a…f9q3`), the credential's name, the host it was minted for, and the host it was observed heading to.
+2. The VM is paused instantly. If the machine was running in the background, it is brought on screen first. The frozen frame tints red.
+3. A critical alert appears, titled **This environment may have been compromised**, explaining that Bromure detected an outbound attempt to leak a session credential from the named machine to a host it was not minted for and that the VM has been paused — with a detail line per leak: a token preview (like `sk-a…f9q3`), the credential's name, the host it was minted for, and the host it was observed heading to.
 
-The alert offers three responses:
+The alert offers four responses:
 
-- **Shut down** (the default) — stops the VM and marks the workspace [compromised](18-glossary.mdx).
-- **Save for Investigation** — you pick a folder; Bromure exports `disk.img` (a copy of the VM system disk), `home.tar.gz` (the workspace home directory), and `shares/<name>.tar.gz` for each shared folder, then shuts down and marks the workspace compromised. RAM state is discarded.
-- **Continue** — accept the risk and resume; the detector re-fires if it happens again. Esc and Cmd-. deliberately do *not* map to **Continue** — resuming a possibly hostile VM must be an explicit click.
+- **Shut down** (the default) — stops the VM and marks the machine [compromised](18-glossary.mdx).
+- **Block** — stops just this request and resumes the VM; the detector re-fires if the agent tries again.
+- **Allow** — trusts the observed host for the rest of this session: the credential is swapped in and sent there, and requests to it stop being flagged. Use it only for a destination you recognize.
+- **Save for Investigation** — you pick a folder; Bromure exports `disk.img` (a copy of the VM system disk), `home.tar.gz` (the machine's home directory), and `shares/<name>.tar.gz` for each shared folder, then shuts down and marks the machine compromised. RAM state is discarded.
 
-A workspace marked compromised refuses to boot again until you explicitly wipe it, and the wipe flow warns that shared folders are *not* wiped — they may still hold contaminated files, so review them by hand.
+Only **Shut down** answers to Return; the other three need an explicit click. A remote client that mirrors the machine gets **Shut down**, **Block** and **Allow**. The full description, including the per-session allowlist behind **Allow**, is in [Credentials](08-credentials.mdx#the-compromise-detector).
 
-There is nothing to configure: detection is always on for credentials that declare a host scope. Manual credentials without a pinned host ("any host") can never trigger it, and Claude/Codex tokens use a relaxed same-registered-domain match (a token minted for `api.anthropic.com` seen on another `anthropic.com` host does not alarm). Only one alert shows at a time; repeat events while it is open are dropped.
+A machine marked compromised refuses to boot again until you explicitly wipe it, and the wipe flow warns that shared folders are *not* wiped — they may still hold contaminated files, so review them by hand.
+
+Detection is always on for credentials that declare a host scope. Manual credentials without a pinned host ("any host") can never trigger it, and Claude/Codex tokens use a relaxed same-registered-domain match (a token minted for `api.anthropic.com` seen on another `anthropic.com` host does not alarm). Only one alert shows at a time; repeat events while it is open are dropped. A machine can suppress the alert and the pause with **Don't alert on credential exfiltration** in its Guardrails pane; the leak is still blocked and still appears as a red **Credential brokering** row in the Security Timeline (see [Escape hatches](08-credentials.mdx#escape-hatches)).
 
 ## Enterprise visibility
 
-For workspaces enrolled with bromure.io, every metadata and artifact fetch also emits a `supply_chain.fetch` event to the enterprise event stream, carrying the ecosystem, package, version, request kind, outcome (`allowed`, `rewritten`, `blocked`, or `stripped`), and the reason kind (`age_gate`, `osv`, `socket_compromised`, `socket_cve`, `verify_unavailable`, `lockfile_denied`, `scripts_stripped`). Enrollment alone gives administrators organization-wide package-download visibility — an inventory of everything every agent installed — even on workspaces with every enforcement layer switched off.
+For machines on a Mac enrolled with bromure.io, every metadata and artifact fetch also emits a `supply_chain.fetch` event to the enterprise event stream, carrying the ecosystem, package, version, request kind, outcome (`allowed`, `rewritten`, `blocked`, or `stripped`), and the reason kind (`age_gate`, `osv`, `socket_compromised`, `socket_cve`, `verify_unavailable`, `lockfile_denied`, `scripts_stripped`). Enrollment alone gives administrators organization-wide package-download visibility — an inventory of everything every agent installed — even on machines with every enforcement layer switched off.
 
 How enrollment works, and what administrators see on the other end, is covered in [Enterprise](15-enterprise.mdx).
