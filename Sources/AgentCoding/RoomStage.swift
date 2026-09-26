@@ -62,6 +62,10 @@ protocol RoomStageBackend: AnyObject {
     /// its cell still shows what happened. `ended`: the agent is gone for
     /// good, so reading the live file can't wake anything.
     func restingTranscript(for s: AgentSession, ended: Bool) async -> Data?
+    /// Who `s` can be told to ask ("@…"), for a composer with no live chat
+    /// behind it (the target is asleep) — the same list its chat offers.
+    func peerMentions(for s: AgentSession) -> [PeerMention]
+    func assignNickname(_ id: UUID, _ nick: String)
 }
 
 /// This Mac's rooms: the delegate's stores, chats pinned to the local panes.
@@ -102,6 +106,14 @@ final class LocalRoomBackend: RoomStageBackend {
         if let cached = d.agentSessionEngine.transcripts.load(s.id), !cached.isEmpty { return cached }
         guard ended else { return nil }
         return await d.fetchSessionTranscript(s).map { Data($0.utf8) }
+    }
+
+    func peerMentions(for s: AgentSession) -> [PeerMention] {
+        delegate?.peerMentions(forWorkspace: s.profileID, excluding: s.id) ?? []
+    }
+
+    func assignNickname(_ id: UUID, _ nick: String) {
+        delegate?.agentSessionStore.setNickname(id, nick)
     }
 }
 
@@ -358,6 +370,8 @@ struct RoomStageView: View {
     @State private var zoomMoving: UUID?
     /// What's typed for a session that isn't running (sending wakes it).
     @State private var wakeDraft = ""
+    /// Keyboard highlight in the asleep composer's "@" palette.
+    @State private var wakeMentionIndex = 0
 
     private var accent: Color { Color(hex: controller.room?.colorHex ?? "#6366F1") }
 
@@ -996,12 +1010,27 @@ struct RoomStageView: View {
                         .id(ObjectIdentifier(m))   // a fresh composer per target
                 } else if let asleep = toSwitchboard ? controller.switchboard : focused {
                     // Not running: the message wakes it and it carries on.
+                    // "@" offers who it can ask, as its live chat would.
+                    let rows = wakeMentionRows(for: asleep)
+                    if !rows.isEmpty {
+                        SlashCommandPalette(
+                            commands: rows,
+                            agentName: NSLocalizedString("sessions you can ask", comment: "mention palette"),
+                            highlighted: min(wakeMentionIndex, rows.count - 1),
+                            onPick: { completeWakeMention($0, for: asleep) },
+                            onHover: { wakeMentionIndex = $0 },
+                            prefix: "@",
+                            title: NSLocalizedString("Sessions", comment: "mention palette"))
+                        .padding(.horizontal, 12)
+                        .padding(.top, 6)
+                    }
                     ChatComposer(
                         placeholder: String(format: NSLocalizedString("Message %@ — it wakes up and carries on…",
                                                                       comment: "room composer: asleep target"),
                                             toSwitchboard ? NSLocalizedString("the Switchboard", comment: "room composer target") : name),
                         text: $wakeDraft,
                         accent: accent,
+                        onKey: { handleWakeMentionKey($0, for: asleep) },
                         onSend: {
                             let text = wakeDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                             guard !text.isEmpty else { return }
@@ -1024,6 +1053,35 @@ struct RoomStageView: View {
         .background(Color.platformWindowBackground)
         .overlay(alignment: .top) { Divider().opacity(0.5) }
         .onAppear { if controller.switchboard == nil { controller.target = .focused } }
+        .onChange(of: wakeDraft) { _, _ in wakeMentionIndex = 0 }
+    }
+
+    private func wakeMentionRows(for s: AgentSession) -> [SlashCommand] {
+        guard let q = PeerMentionCompletion.query(in: wakeDraft) else { return [] }
+        return PeerMentionCompletion.paletteRows(q, in: controller.backend.peerMentions(for: s))
+    }
+
+    private func completeWakeMention(_ c: SlashCommand, for s: AgentSession) {
+        // A session without a nickname gets the proposed one now, so the
+        // "@name" typed is one the agent can resolve.
+        if let peer = controller.backend.peerMentions(for: s).first(where: { $0.nick == c.name }), !peer.assigned {
+            controller.backend.assignNickname(peer.sessionID, peer.nick)
+        }
+        wakeDraft = PeerMentionCompletion.complete(wakeDraft, with: c.name)
+        wakeMentionIndex = 0
+    }
+
+    /// The palette's keys, before the field acts on them. False = the field's own.
+    private func handleWakeMentionKey(_ key: ComposerKey, for s: AgentSession) -> Bool {
+        let rows = wakeMentionRows(for: s)
+        guard !rows.isEmpty else { return false }
+        switch key {
+        case .up: wakeMentionIndex = max(0, wakeMentionIndex - 1)
+        case .down: wakeMentionIndex = min(rows.count - 1, wakeMentionIndex + 1)
+        case .tab, .enter: completeWakeMention(rows[min(wakeMentionIndex, rows.count - 1)], for: s)
+        case .escape: wakeDraft = PeerMentionCompletion.dismiss(wakeDraft); wakeMentionIndex = 0
+        }
+        return true
     }
 }
 

@@ -2173,6 +2173,16 @@ final class RemoteRoomBackend: RoomStageBackend {
         await window?.controller.fetchSessionTranscript(s.id)
     }
 
+    func peerMentions(for s: AgentSession) -> [PeerMention] {
+        guard let c = window?.controller else { return [] }
+        return PeerMention.candidates(c.sessionStore.sessions, excluding: s.id,
+                                      workspace: { c.profile(for: $0)?.name ?? "" })
+    }
+
+    func assignNickname(_ id: UUID, _ nick: String) {
+        window?.controller.sessionCommand(id, "nickname", body: ["nickname": nick])
+    }
+
     func setLayout(_ room: UUID, _ layout: String) {
         guard let c = window?.controller else { return }
         // At once on the mirror (the next poll confirms), and on the server.
@@ -4700,6 +4710,45 @@ final class RemoteHostWindow: NSWindow {
             contentView?.layoutSubtreeIfNeeded()
             writeSnapshot(to: shot)
             return ["ok": true, "connected": controller.connected, "frame": ["w": Double(frame.width), "h": Double(frame.height)]]
+        case "remote-room":
+            // Show a server room ({room: id or name}, optional) and report each
+            // live chat's history: what it holds vs. what it renders.
+            if let key = p["room"] as? String, let r = controller.roomStore.rooms.first(where: {
+                $0.id.uuidString.caseInsensitiveCompare(key) == .orderedSame
+                    || $0.name.caseInsensitiveCompare(key) == .orderedSame }) {
+                showRoom(r.id)
+            }
+            guard let rc = roomController else {
+                return ["error": "no room on stage",
+                        "rooms": controller.roomStore.rooms.map { $0.name }]
+            }
+            if let text = p["composer"] as? String { rc.targetModel?.composerText = text }
+            if let shot = p["shot"] as? String {
+                contentView?.layoutSubtreeIfNeeded()
+                writeSnapshot(to: shot)
+            }
+            // {fx, fy}: what AppKit hit-tests at that fraction of the window
+            // (top-left origin) — who gets the wheel there.
+            var hits: [String] = []
+            if let fx = p["fx"] as? Double, let fy = p["fy"] as? Double, let cv = contentView {
+                let pt = NSPoint(x: cv.bounds.width * fx, y: cv.bounds.height * (1 - fy))
+                var v = cv.superview?.hitTest(cv.convert(pt, to: cv.superview)) ?? cv.hitTest(pt)
+                while let cur = v {
+                    let sv = (cur as? NSScrollView).map { " offset=\($0.contentView.bounds.origin.y) doc=\($0.documentView?.frame.height ?? -1)" } ?? ""
+                    hits.append(String(describing: type(of: cur)) + sv)
+                    v = cur.superview
+                }
+            }
+            return ["ok": true, "members": rc.members.count, "hits": hits,
+                    "switchboard": rc.switchboard?.id.uuidString ?? "",
+                    "models": rc.models.map { id, m -> [String: Any] in
+                        var st = m.debugHistoryState()
+                        st["session"] = id.uuidString
+                        st["renderLimit"] = m.renderLimit
+                        st["loading"] = m.loading
+                        st["mentions"] = (m.peerMentions?() ?? []).map { "@\($0.nick)" + ($0.assigned ? "" : "*") }
+                        return st
+                    }]
         case "coding-board":
             // Show the mirrored coding board and report its column counts.
             // Optional "shot" writes an offscreen PNG of the window.

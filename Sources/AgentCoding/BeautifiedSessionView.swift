@@ -1923,10 +1923,21 @@ struct BeautifiedSessionView: View {
                     viewportHeight = h
                     model.debugGeometry["viewport"] = h
                 }
-                .onPreferenceChange(TailOffsetKey.self) { tailY in
+                .onPreferenceChange(TailOffsetKey.self) { marker in
+                    // The marker unloaded by the lazy stack: scrolled far up.
+                    // (Read as 0 it looked "past the end" and the overshoot
+                    // snap below yanked a small pane — a room cell, the
+                    // Switchboard dock — back down after a pixel.)
+                    guard let tailY = marker else {
+                        if pinnedToBottom, viewportHeight > 0 { pinnedToBottom = false }
+                        model.debugGeometry["tailY"] = -1
+                        model.debugGeometry["pinned"] = 0
+                        return
+                    }
                     // Within a screen's worth of slack of the end counts as
-                    // "at the tail"; only flips write state.
-                    let pinned = viewportHeight <= 0 || tailY <= viewportHeight + 160
+                    // "at the tail" (a third of a small pane); only flips
+                    // write state.
+                    let pinned = viewportHeight <= 0 || tailY <= viewportHeight + min(160, viewportHeight / 3)
                     if pinned != pinnedToBottom { pinnedToBottom = pinned }
                     model.debugGeometry["tailY"] = tailY
                     model.debugGeometry["pinned"] = pinned ? 1 : 0
@@ -2096,9 +2107,11 @@ struct BeautifiedSessionView: View {
 
     private static let tailID = "beautified-tail"
 
+    /// The tail marker's bottom edge in the scroll view; nil when the lazy
+    /// stack has unloaded it (it's scrolled well below the view).
     private struct TailOffsetKey: PreferenceKey {
-        static var defaultValue: CGFloat = 0
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+        static var defaultValue: CGFloat? = nil
+        static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) { value = nextValue() ?? value }
     }
 }
 

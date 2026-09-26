@@ -299,7 +299,10 @@ struct SlashCommandPalette: View {
                     .padding(.horizontal, 6)
                     .padding(.bottom, 6)
                 }
-                .frame(maxHeight: Self.rowHeight * CGFloat(min(Self.visibleRows, max(1, commands.count))) + 12)
+                // An exact height, not a max: squeezed from outside (a room's
+                // composer bar) a max let the list collapse to nothing under
+                // its header.
+                .frame(height: Self.rowHeight * CGFloat(min(Self.visibleRows, max(1, commands.count))) + 12)
                 .onChange(of: highlighted) { _, i in
                     if commands.indices.contains(i) {
                         withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(commands[i].id, anchor: .center) }

@@ -1772,14 +1772,20 @@ struct SessionRowView: View {
         HStack(spacing: 10) {
             // The machine is the ring's colour (its name in the tooltip):
             // the row's width goes to the title, not to a repeated name.
-            AgentAvatar(tool: session.tool, size: 28, status: dot)
-                .opacity(session.hasEnded ? 0.6 : 1)
-                .padding(2)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(workspaceName.isEmpty ? Color.clear : Color(hex: accentHex).opacity(0.85),
-                                      lineWidth: 1.5))
-                .help(workspaceName)
+            // The status dot sits on top of the ring, not under it.
+            ZStack(alignment: .bottomTrailing) {
+                AgentAvatar(tool: session.tool, size: 28)
+                    .padding(2)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(workspaceName.isEmpty ? Color.clear : Color(hex: accentHex).opacity(0.85),
+                                          lineWidth: 1.5))
+                if let dot {
+                    AgentStatusDot(status: dot).scaleEffect(1.25)
+                }
+            }
+            .opacity(session.hasEnded ? 0.6 : 1)
+            .help(workspaceName)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(title ?? session.title)
