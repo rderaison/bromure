@@ -44,7 +44,7 @@
 "Something went wrong" = "發生錯誤";
 "Try Again" = "重試";
 "Not enough disk space (%llu MB available). Free up space and try again." = "磁碟空間不足（可用 %llu MB）。請釋放空間後重試。";
-"Failed to initialize networking. Please quit and reopen Bromure." = "網路初始化失敗。請結束並重新開啟 Bromure。";
+"Couldn't set up networking. Bromure tries again when your network changes, or click Try Again." = "無法設定網路。網路變更時 Bromure 會自動重試，你也可以按一下「重試」。";
 
 /* ProfileSettingsView — Categories */
 "General" = "一般";

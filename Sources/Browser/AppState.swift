@@ -542,8 +542,28 @@ final class AppState: @unchecked Sendable {
                 onPoolReady?()
             } catch {
                 guard !Task.isCancelled else { return }
+                // Drop the failed pool so Try Again (checkState) and a network
+                // change actually start over — a kept pool made both no-ops.
+                let failed = pool
+                pool = nil
+                Task { await failed?.shutdown() }
                 phase = .error(Self.localizedMessage(for: error))
             }
+        }
+    }
+
+    /// The host's network changed: a pool that failed for want of a network
+    /// tries again, and an idle pre-warmed VM — booted against the old
+    /// network (its LAN rules, its "no traffic" diagnosis) — is replaced.
+    func hostNetworkDidChange() {
+        if pool == nil, case .error = phase {
+            checkState()
+            return
+        }
+        guard poolReady, let pool, pool.hasWarmVM else { return }
+        Task {
+            await pool.discardWarmVM()
+            try? await pool.warmUp()
         }
     }
 
@@ -560,8 +580,8 @@ final class AppState: @unchecked Sendable {
                 )
             case .networkFilterFailed:
                 return NSLocalizedString(
-                    "Failed to initialize networking. Please quit and reopen Bromure.",
-                    comment: "Error shown when vmnet entitlement is not yet effective"
+                    "Couldn't set up networking. Bromure tries again when your network changes, or click Try Again.",
+                    comment: "Error shown when VM networking couldn't be set up"
                 )
             default:
                 break

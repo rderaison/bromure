@@ -8,6 +8,14 @@ public struct HostNetworkInfo {
     public let subnet: UInt32       // gateway & subnetMask
     public let dnsServers: [UInt32]
 
+    /// Stand-in while the Mac has no network at all (no default route): no
+    /// host gateway, no DNS, and a LAN rule that matches nothing — an all-zero
+    /// mask would match, and deny, every address. A NAT VM needs none of the
+    /// host's details to boot; its LAN isolation still rests on
+    /// NetworkFilter's RFC 1918 deny list.
+    public static let offline = HostNetworkInfo(gateway: 0, subnetMask: 0xFFFF_FFFF,
+                                                subnet: 0xFFFF_FFFF, dnsServers: [])
+
     /// Detect the current host network configuration.
     /// Returns nil if no active network interface is found.
     public static func detect() -> HostNetworkInfo? {

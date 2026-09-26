@@ -30,7 +30,7 @@ public enum SandboxError: LocalizedError {
         case .vmStartFailed(let detail):
             return "Failed to start virtual machine: \(detail)"
         case .networkFilterFailed:
-            return "Failed to initialize networking. Please quit and reopen Bromure."
+            return "Couldn't set up networking. Check your network connection and try again."
         case .diskFull(let availableMB, let path):
             return String(format: NSLocalizedString(
                 "Not enough free disk space at %@ (%llu MB available). Free up space and try again.",

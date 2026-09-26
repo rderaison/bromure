@@ -22,6 +22,7 @@ public final class HostNetworkWatcher {
     private let monitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "io.bromure.networkwatcher")
     private var bridges: [ObjectIdentifier: WeakBridge] = [:]
+    private var observers: [@MainActor () -> Void] = []
     private var debounceTask: Task<Void, Never>?
     private var lastIdentity: String?
     private var started = false
@@ -40,6 +41,12 @@ public final class HostNetworkWatcher {
         }
         monitor.start(queue: monitorQueue)
         if hnwDebug { print("[HostNetworkWatcher] started") }
+    }
+
+    /// Called (debounced) after every change of the host's network — e.g.
+    /// to retry what failed for want of one.
+    public func onChange(_ observer: @escaping @MainActor () -> Void) {
+        observers.append(observer)
     }
 
     /// Register a bridge to receive refresh notifications.
@@ -76,6 +83,7 @@ public final class HostNetworkWatcher {
     }
 
     private func fanOut() {
+        for observer in observers { observer() }
         bridges = bridges.filter { $0.value.value != nil }
         if hnwDebug { print("[HostNetworkWatcher] fanning out refresh to \(bridges.count) bridge(s)") }
         for entry in bridges.values {

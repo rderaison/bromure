@@ -44,7 +44,7 @@
 "Something went wrong" = "Something went wrong";
 "Try Again" = "Try Again";
 "Not enough disk space (%llu MB available). Free up space and try again." = "Not enough disk space (%llu MB available). Free up space and try again.";
-"Failed to initialize networking. Please quit and reopen Bromure." = "Failed to initialize networking. Please quit and reopen Bromure.";
+"Couldn't set up networking. Bromure tries again when your network changes, or click Try Again." = "Couldn't set up networking. Bromure tries again when your network changes, or click Try Again.";
 
 /* ProfileSettingsView — Categories */
 "General" = "General";

@@ -200,7 +200,9 @@ public final class VMPool {
         // the vmnet entitlement may not be effective immediately.
         var networkFilter: NetworkFilter?
         for attempt in 1...3 {
-            if let netInfo = HostNetworkInfo.detect() {
+            // NAT boots offline too (the shared switch doesn't need the host's
+            // details); only bridging needs a real interface.
+            if let netInfo = HostNetworkInfo.detect() ?? (bridgedInterface == nil ? .offline : nil) {
                 if bridgedInterface == nil {
                     // NAT: route through the process-wide shared switch — one vmnet
                     // interface for the whole app, with our own DHCP handing each

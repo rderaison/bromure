@@ -211,6 +211,8 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         // Start watching for host network changes so bridged-mode VMs can
         // renew their DHCP lease when Wi-Fi roams or Ethernet switches.
         HostNetworkWatcher.shared.start()
+        // …and so a pool that failed offline retries once the network is back.
+        HostNetworkWatcher.shared.onChange { [weak self] in self?.state.hostNetworkDidChange() }
 
         // Managed-profile sync: initial fetch on launch, periodic refresh
         // every 15 min while the app is running. No-op if not enrolled.

@@ -44,7 +44,7 @@
 "Something went wrong" = "Une erreur est survenue";
 "Try Again" = "R\U00E9essayer";
 "Not enough disk space (%llu MB available). Free up space and try again." = "Espace disque insuffisant (%llu Mo disponibles). Lib\U00E9rez de l\U2019espace et r\U00E9essayez.";
-"Failed to initialize networking. Please quit and reopen Bromure." = "\U00C9chec de l\U2019initialisation du r\U00E9seau. Veuillez quitter et rouvrir Bromure.";
+"Couldn't set up networking. Bromure tries again when your network changes, or click Try Again." = "Impossible de configurer le réseau. Bromure réessaie quand votre réseau change, ou cliquez sur Réessayer.";
 
 /* ProfileSettingsView — Categories */
 "General" = "G\U00E9n\U00E9ral";
