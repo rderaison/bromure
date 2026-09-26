@@ -15,6 +15,7 @@ case "$TARGET" in
         INFO_PLIST="$SOURCE_DIR/Info.plist"
         SDEF_FILE="$SOURCE_DIR/Bromure.sdef"
         ICON_FILE="$SCRIPT_DIR/Resources/AppIcon.icns"
+        ICON_COMPOSER=""
         DMG_NAME="Bromure.dmg"
         RESOURCE_BUNDLE_NAME="bromure_bromure.bundle"
         ;;
@@ -26,6 +27,7 @@ case "$TARGET" in
         INFO_PLIST="$SOURCE_DIR/Info.plist"
         SDEF_FILE=""
         ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureAC.icon"
         DMG_NAME="BromureAgenticCoding.dmg"
         RESOURCE_BUNDLE_NAME="bromure_bromure-ac.bundle"
         ;;
@@ -177,6 +179,26 @@ PLIST
 
 if [ -f "$ICON_FILE" ]; then
     cp "$ICON_FILE" "$RESOURCES_DIR/AppIcon.icns"
+fi
+
+# Tahoe (macOS 26) icon: compile the Icon Composer bundle into Assets.car and
+# point CFBundleIconName at it; without it macOS 26 sets the .icns on a system
+# plate. The .icns above stays as CFBundleIconFile for anything that can't
+# read the catalog. Needs Xcode 26+'s actool; older toolchains keep the .icns.
+if [ -n "$ICON_COMPOSER" ] && [ -d "$ICON_COMPOSER" ]; then
+    ICON_NAME="$(basename "$ICON_COMPOSER" .icon)"
+    ICON_TMP="$(mktemp -d)"
+    if xcrun actool "$ICON_COMPOSER" --compile "$ICON_TMP" \
+            --platform macosx --target-device mac --minimum-deployment-target 14.0 \
+            --app-icon "$ICON_NAME" --output-partial-info-plist "$ICON_TMP/partial.plist" \
+            >/dev/null 2>&1 && [ -f "$ICON_TMP/Assets.car" ]; then
+        cp "$ICON_TMP/Assets.car" "$RESOURCES_DIR/Assets.car"
+        /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$CONTENTS/Info.plist" 2>/dev/null || true
+        /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string $ICON_NAME" "$CONTENTS/Info.plist"
+    else
+        echo "warning: actool couldn't compile $ICON_COMPOSER; shipping the .icns only" >&2
+    fi
+    rm -rf "$ICON_TMP"
 fi
 
 # Browser-only: AppleScript scripting definition.

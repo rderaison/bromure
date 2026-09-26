@@ -209,6 +209,11 @@ struct OnboardingWizardView: View {
         return Image(nsImage: img)
     }
 
+    private var railMark: NSImage? {
+        acResourceBundle.url(forResource: "bromure-mark", withExtension: "png", subdirectory: "ac")
+            .flatMap(NSImage.init(contentsOf:))
+    }
+
     private var rail: some View {
         // The step list is the PRIMARY view here; the photo and scrim are
         // backgrounds behind it. That matters for layout: a background is sized
@@ -217,9 +222,16 @@ struct OnboardingWizardView: View {
         // height and blows the hosting view up to thousands of points).
         VStack(alignment: .leading, spacing: 22) {
             HStack(spacing: 8) {
-                if let icon = NSApp.applicationIconImage {
-                    Image(nsImage: icon)
+                if let mark = railMark {
+                    // The bare brand mark, template-rendered white: the app
+                    // icon is brand blue (invisible on this rail), and on
+                    // macOS 26 `applicationIconImage` comes back on a system
+                    // plate, which a template turns into a white square.
+                    Image(nsImage: mark)
+                        .renderingMode(.template)
                         .resizable().interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .foregroundStyle(.white)
                         .frame(width: 26, height: 26)
                 }
                 Text("Bromure")
@@ -236,9 +248,8 @@ struct OnboardingWizardView: View {
         .padding(.vertical, 22)
         .frame(width: 208, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .top)
-        // Bottom-anchored: the lower half of the photo (lake, reflection,
-        // campfire) is the interesting part, so an overflowing fill should lose
-        // sky, not subject.
+        // Bottom-anchored: the rings sit low in the artwork, so an overflowing
+        // fill should lose the plain top, not the pattern.
         // One background holding both layers: stacked `.background` modifiers
         // go progressively FURTHER back, so a second one would put the scrim
         // behind the photo instead of over it.
@@ -251,10 +262,11 @@ struct OnboardingWizardView: View {
                     // reads as a rail rather than a broken layout.
                     Color.accentColor.opacity(0.85)
                 }
-                // Scrim: heaviest at the top where the wordmark and step list
-                // sit, easing off so the image shows through lower down.
+                // Light scrim: the artwork is a flat brand colour that already
+                // carries white text, so this only quiets the rings behind the
+                // wordmark and step list without muddying the blue.
                 LinearGradient(
-                    colors: [.black.opacity(0.80), .black.opacity(0.55), .black.opacity(0.25)],
+                    colors: [.black.opacity(0.18), .black.opacity(0.06), .clear],
                     startPoint: .top, endPoint: .bottom)
             }
             .clipped()
