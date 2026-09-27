@@ -2919,23 +2919,37 @@ private struct PromptCard: View {
         }
     }
 
-    /// The dialog's options as buttons (the highlighted one prominent —
-    /// it's what Enter would pick), and the way out.
+    /// The dialog's options, one row each (the highlighted one marked —
+    /// it's what Enter would pick), and the way out. Stacked, plain SwiftUI
+    /// rows whose labels wrap: a row of AppKit `.bordered` buttons with long
+    /// labels (/model) overflowed a narrow room cell, and each truncation
+    /// re-invalidated the lazy transcript's layout — a main-thread livelock.
     @ViewBuilder private var pickerBody: some View {
-        HStack(spacing: 6) {
-            ForEach(prompt.options) { option in
-                let highlighted = option.index == (prompt.selectedOption ?? prompt.options.first?.index)
-                Button(option.label) { onPick(option.index) }
-                    .controlSize(.small)
-                    .buttonStyle(.bordered)
-                    .tint(highlighted ? .orange : nil)
+        ForEach(prompt.options) { option in
+            let highlighted = option.index == (prompt.selectedOption ?? prompt.options.first?.index)
+            Button { onPick(option.index) } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Text("\(option.index)").font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.orange).frame(width: 14)
+                    Text(option.label).font(.system(size: 12, weight: highlighted ? .semibold : .medium))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 9).padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(highlighted ? Color.orange.opacity(0.12) : Color.primary.opacity(0.04)))
+                .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(highlighted ? Color.orange.opacity(0.45) : Color.primary.opacity(0.10)))
+                .contentShape(Rectangle())
             }
-            Button(NSLocalizedString("Dismiss", comment: "prompt picker (Esc)")) { onPick(nil) }
-                .controlSize(.small)
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 4)
+            .buttonStyle(.plain)
         }
+        Button(NSLocalizedString("Dismiss", comment: "prompt picker (Esc)")) { onPick(nil) }
+            .buttonStyle(.plain)
+            .font(.system(size: 11.5))
+            .foregroundStyle(.secondary)
         Text(NSLocalizedString("Or open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
             .font(.system(size: 11)).foregroundStyle(.tertiary)
     }

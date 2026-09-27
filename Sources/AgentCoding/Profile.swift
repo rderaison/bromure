@@ -3786,6 +3786,12 @@ public final class ProfileStore {
     ///
     /// Migrates legacy SSH keys from profiles/<id>/ssh into
     /// profiles/<id>/home/.ssh on first run.
+    /// Claude Code `permissions.allow` rules merged into every workspace's
+    /// settings.json (bromure-agentd.py's `_CLAUDE_ALWAYS_ALLOWED` mirrors it
+    /// for the guest-side rewrite). The whole `delegation` server: it only
+    /// reaches the host, which enforces the per-workspace reach policy.
+    static let claudeAlwaysAllowed = ["mcp__delegation"]
+
     public func prepareHomeDirectory(for profile: Profile,
                                      terminalDefaults: TerminalAppDefaults,
                                      tokenPlan: SessionTokenPlan? = nil,
@@ -4149,8 +4155,16 @@ public final class ProfileStore {
             var perms = settings["permissions"] as? [String: Any] ?? [:]
             if perms["defaultMode"] == nil {
                 perms["defaultMode"] = "auto"
-                settings["permissions"] = perms
             }
+            // Agent-to-agent traffic (delegate, report, deliver…) is our own
+            // MCP to the host; auto mode's guardrails kept blocking it.
+            // Merged into the user's list, never replacing it.
+            var allow = perms["allow"] as? [String] ?? []
+            for rule in Self.claudeAlwaysAllowed where !allow.contains(rule) {
+                allow.append(rule)
+            }
+            perms["allow"] = allow
+            settings["permissions"] = perms
             // We used to seed CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 because the
             // framebuffer kitty and Claude Code's fullscreen-TUI mouse capture
             // fought over click-drag selection. tmux now owns the mouse (the
@@ -4838,6 +4852,23 @@ public final class ProfileStore {
         mkdir -p "$HOME/.codex"
         cat /mnt/bromure-meta/codex-local.toml > "$HOME/.codex/config.toml.tmp.$$" \
             && mv -f "$HOME/.codex/config.toml.tmp.$$" "$HOME/.codex/config.toml"
+    fi
+
+    # Grok: agent-to-agent traffic (our delegation MCP to the host) never
+    # waits on an approval. Marker-guarded strip + append; skipped when the
+    # user keeps their own [permission] table (a second one breaks the TOML).
+    # Runs BEFORE the grok-local block: that one strips from
+    # [model.grok-build] to the next table, which would eat our start marker.
+    if command -v grok >/dev/null 2>&1; then
+        mkdir -p "$HOME/.grok"
+        touch "$HOME/.grok/config.toml"
+        if sed '/# >>> bromure-permission/,/# <<< bromure-permission/d' "$HOME/.grok/config.toml" > "$HOME/.grok/config.toml.tmp.$$" 2>/dev/null \\
+           && ! grep -q '^\\[permission\\]' "$HOME/.grok/config.toml.tmp.$$"; then
+            printf '%s\\n' '# >>> bromure-permission' '[permission]' 'allow = ["MCPTool(delegation__*)"]' '# <<< bromure-permission' >> "$HOME/.grok/config.toml.tmp.$$"
+            mv -f "$HOME/.grok/config.toml.tmp.$$" "$HOME/.grok/config.toml"
+        else
+            rm -f "$HOME/.grok/config.toml.tmp.$$"
+        fi
     fi
 
     # Grok local-inference. The grok CLI defaults its model id to "grok-build";

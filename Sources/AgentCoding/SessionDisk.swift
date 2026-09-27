@@ -1668,6 +1668,12 @@ public final class SessionDisk {
     event = "PermissionRequest"
     command = "/home/ubuntu/.bromure/agent-status.sh needsInput"
 
+    # Agent-to-agent traffic (our own delegation MCP to the host) never
+    # waits on an approval. A bare server name matches nothing; the glob does.
+    [[permission.rules]]
+    decision = "allow"
+    pattern = "mcp__delegation__*"
+
     """
 
     /// Open-platform provider entry for token-mode Kimi: config.toml is the
@@ -1852,6 +1858,8 @@ public final class SessionDisk {
             "[mcp_servers.delegation]",
             "command = \"python3\"",
             "args = [\(tomlQuote(delegationMCPShimGuestPath))]",
+            // Agent-to-agent traffic never waits on an approval prompt.
+            "default_tools_approval_mode = \"approve\"",
         ]
         for server in servers {
             // Raw JSON servers are written to Claude Code config only;

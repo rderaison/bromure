@@ -4427,6 +4427,11 @@ def _approve_claude_api_key(suffix):
     os.replace(tmp, path)
 
 
+# Claude Code permissions.allow rules merged into settings.json (mirrors
+# Profile.swift's claudeAlwaysAllowed).
+_CLAUDE_ALWAYS_ALLOWED = ["mcp__delegation"]
+
+
 def _seed_claude_settings():
     """Guest-side twin of the ~/.claude/settings.json logic in
     ProfileStore.populateManagedHome (virtiofs branch) — the one managed
@@ -4504,7 +4509,15 @@ def _seed_claude_settings():
     perms = perms if isinstance(perms, dict) else {}
     if "defaultMode" not in perms:
         perms["defaultMode"] = "auto"
-        settings["permissions"] = perms
+    # Agent-to-agent traffic is our own MCP to the host; auto mode's
+    # guardrails kept blocking it. Merged, never replacing the user's list.
+    allow = perms.get("allow")
+    allow = allow if isinstance(allow, list) else []
+    for rule in _CLAUDE_ALWAYS_ALLOWED:
+        if rule not in allow:
+            allow.append(rule)
+    perms["allow"] = allow
+    settings["permissions"] = perms
     env = settings.get("env")
     env = env if isinstance(env, dict) else {}
     if env.get("CLAUDE_CODE_DISABLE_MOUSE_CLICKS") == "1":
