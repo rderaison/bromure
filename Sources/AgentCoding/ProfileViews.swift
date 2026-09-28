@@ -223,6 +223,10 @@ struct ProfileStorageContext {
     /// of its per-boot checkpoints (ACAppDelegate.restoreHomeStorage — owns
     /// its own picker + confirmation).
     var onRestoreHome: (() -> Void)?
+    /// A fat client's view of a REMOTE workspace: sizes measured on the
+    /// server (the URLs above are only placeholders there), and the erase /
+    /// reset / restore actions left to the server Mac.
+    var remoteSizes: StorageSizes? = nil
 
     static func empty(baseImageURL: URL) -> ProfileStorageContext {
         ProfileStorageContext(
@@ -238,6 +242,61 @@ struct ProfileStorageContext {
             onUpgradeHome: nil,
             onRestoreHome: nil
         )
+    }
+}
+
+/// What each storage layer costs on the Mac that holds it.
+struct StorageSizes: Sendable {
+    var base: Int64 = 0
+    var disk: Int64 = 0
+    var home: Int64 = 0
+    var homeMTime: Date?
+    /// The ext4 home image's guest-visible size (0: no image).
+    var homeCapacity: Int64 = 0
+
+    /// Off the main thread: a virtiofs home is a directory walk.
+    nonisolated static func measure(base: URL, disk: URL?, home: URL?, homeImage: URL?) -> StorageSizes {
+        let b = (try? base.resourceValues(forKeys: [.fileAllocatedSizeKey]))
+            .flatMap { $0.fileAllocatedSize }
+            .map(Int64.init) ?? 0
+        let d = disk.map { allocatedBytes(at: $0) } ?? 0
+        // ext4 home: the image's allocated (sparse-aware) size — O(1),
+        // and it's the real cost on the Mac. virtiofs home: the walk.
+        let h = homeImage.map { allocatedBytes(at: $0) }
+            ?? home.map { directoryBytes(at: $0) } ?? 0
+        let mtime = (homeImage ?? home).flatMap { url -> Date? in
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+            return attrs[.modificationDate] as? Date
+        }
+        let cap = homeImage.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path) }
+            .flatMap { ($0[.size] as? NSNumber)?.int64Value } ?? 0
+        return StorageSizes(base: b, disk: d, home: h, homeMTime: mtime, homeCapacity: cap)
+    }
+
+    nonisolated static func allocatedBytes(at url: URL) -> Int64 {
+        guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
+        let v = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey])
+        if let n = v?.totalFileAllocatedSize { return Int64(n) }
+        if let n = v?.fileAllocatedSize { return Int64(n) }
+        return 0
+    }
+
+    nonisolated static func directoryBytes(at url: URL) -> Int64 {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return 0 }
+        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isRegularFileKey]
+        guard let it = fm.enumerator(at: url, includingPropertiesForKeys: keys, options: [], errorHandler: nil) else {
+            return 0
+        }
+        var total: Int64 = 0
+        for case let u as URL in it {
+            let v = try? u.resourceValues(forKeys: Set(keys))
+            if v?.isRegularFile == true {
+                if let n = v?.totalFileAllocatedSize { total &+= Int64(n) }
+                else if let n = v?.fileAllocatedSize { total &+= Int64(n) }
+            }
+        }
+        return total
     }
 }
 
@@ -393,6 +452,9 @@ enum ModelsPaneMode {
 
 struct ProfileEditorView: View {
     @State private var draft: Profile
+    /// The saved home size, so picking the current size back leaves the
+    /// profile unchanged (no restart prompt for a no-op).
+    private var savedHomeImageGB: Int?
     /// `.remoteGlobal`: the remote's global model settings being edited.
     @State private var remoteGlobalDraft: ModelSettings = ModelSettings()
     /// Terminal bg/text as live `Color`s the ColorPicker binds to directly.
@@ -618,6 +680,7 @@ struct ProfileEditorView: View {
         // values. We always render the editable fields (no inherit toggle).
         p.seedAppearance(from: terminalDefaults)
         _draft = State(initialValue: p)
+        savedHomeImageGB = p.homeImageGB
         _bgColor = State(initialValue: Color(hex: p.customBackgroundHex ?? terminalDefaults.backgroundHex))
         _fgColor = State(initialValue: Color(hex: p.customForegroundHex ?? terminalDefaults.foregroundHex))
         // Caller-supplied isNew lets the picker pre-seed a draft from
@@ -3479,6 +3542,53 @@ struct ProfileEditorView: View {
     }
 
     @ViewBuilder
+    /// The home image's size now, GiB — nil before it exists.
+    private var homeCapacityGB: Int? {
+        if let r = storageContext?.remoteSizes {
+            return r.homeCapacity > 0 ? Int(r.homeCapacity >> 30) : nil
+        }
+        guard let u = storageContext?.profileHomeImageURL,
+              let n = (try? FileManager.default.attributesOfItem(atPath: u.path))?[.size] as? NSNumber
+        else { return nil }
+        return Int(n.int64Value >> 30)
+    }
+
+    private static var defaultHomeGB: Int {
+        #if os(macOS)
+        SessionDisk.resolvedHomeImageGB()
+        #else
+        64
+        #endif
+    }
+
+    /// Grow-only: a running VM can't see its disk grow, so a bigger size
+    /// lands at the workspace's next start (the host grows the image, the
+    /// guest grows the filesystem).
+    private var homeSizeSection: some View {
+        let current = homeCapacityGB ?? Self.defaultHomeGB
+        let chosen = draft.homeImageGB.map { max($0, current) } ?? current
+        let choices = Set([16, 32, 64, 128, 256, 512, 1024, current, chosen])
+            .filter { $0 >= current }.sorted()
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Home folder size")
+                .font(.headline)
+            Picker("", selection: Binding(
+                get: { chosen },
+                set: { draft.homeImageGB = ($0 == current && savedHomeImageGB == nil) ? nil : $0 }
+            )) {
+                ForEach(choices, id: \.self) { gb in
+                    Text(String(format: NSLocalizedString("%d GB", comment: "home folder size"), gb)).tag(gb)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+            Text(NSLocalizedString("A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use.", comment: "home folder size"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var resourcesSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             // Storage stack: top of the pane because it's the "loud"
@@ -3500,6 +3610,11 @@ struct ProfileEditorView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+
+            if draft.homeModel == .ext4 {
+                Divider()
+                homeSizeSection
             }
 
             Divider()
@@ -5389,6 +5504,11 @@ private struct StorageStackView: View {
     @State private var homeMTime: Date?
     @State private var baseBytes: Int64?
 
+    /// A remote workspace (fat client): shown, not erased from here.
+    private var remote: Bool { context.remoteSizes != nil }
+    private static let remoteHelp = NSLocalizedString(
+        "Erasing and restoring storage is done on the server Mac.", comment: "storage, fat client")
+
     var body: some View {
         VStack(spacing: 0) {
             // Top — your home dir.
@@ -5406,10 +5526,10 @@ private struct StorageStackView: View {
                     : .init(
                         label: NSLocalizedString("Erase home…", comment: ""),
                         role: .destructive,
-                        enabled: !context.isRunning
+                        enabled: !remote && !context.isRunning
                             && (context.profileHomeURL != nil
                                 || context.profileHomeImageURL != nil),
-                        disabledHelp: context.isRunning
+                        disabledHelp: remote ? Self.remoteHelp : context.isRunning
                             ? NSLocalizedString("Close the session window first.", comment: "")
                             : NSLocalizedString("Created on first launch.", comment: ""),
                         handler: context.onResetHome
@@ -5422,16 +5542,18 @@ private struct StorageStackView: View {
                         return .init(
                             label: NSLocalizedString("Upgrade storage…", comment: ""),
                             role: nil,
-                            enabled: !context.isRunning,
-                            disabledHelp: NSLocalizedString("Close the session window first.", comment: ""),
+                            enabled: !remote && !context.isRunning,
+                            disabledHelp: remote ? Self.remoteHelp
+                                : NSLocalizedString("Close the session window first.", comment: ""),
                             handler: { context.onUpgradeHome?() })
                     }
                     if context.onRestoreHome != nil {
                         return .init(
                             label: NSLocalizedString("Restore home…", comment: ""),
                             role: nil,
-                            enabled: !context.isRunning,
-                            disabledHelp: NSLocalizedString("Close the session window first.", comment: ""),
+                            enabled: !remote && !context.isRunning,
+                            disabledHelp: remote ? Self.remoteHelp
+                                : NSLocalizedString("Close the session window first.", comment: ""),
                             handler: { context.onRestoreHome?() })
                     }
                     return nil
@@ -5453,8 +5575,8 @@ private struct StorageStackView: View {
                     : .init(
                         label: NSLocalizedString("Reset to base…", comment: ""),
                         role: .destructive,
-                        enabled: !context.isRunning && context.profileDiskURL != nil,
-                        disabledHelp: context.isRunning
+                        enabled: !remote && !context.isRunning && context.profileDiskURL != nil,
+                        disabledHelp: remote ? Self.remoteHelp : context.isRunning
                             ? NSLocalizedString("Close the session window first.", comment: "")
                             : NSLocalizedString("Created on first launch.", comment: ""),
                         handler: context.onResetDisk
@@ -5522,30 +5644,22 @@ private struct StorageStackView: View {
     private func refreshSizes() async {
         // Off-main computation, then push back. Keeps the editor
         // interactive even if the home walk takes a beat.
+        if let r = context.remoteSizes {
+            (baseBytes, diskBytes, homeBytes, homeMTime) = (r.base, r.disk, r.home, r.homeMTime)
+            return
+        }
         let baseURL = context.baseImageURL
         let diskURL = context.profileDiskURL
         let homeURL = context.profileHomeURL
         let homeImageURL = context.profileHomeImageURL
-        let (b, d, h, m) = await Task.detached(priority: .utility) {
-            let base = (try? baseURL.resourceValues(forKeys: [.fileAllocatedSizeKey]))
-                .flatMap { $0.fileAllocatedSize }
-                .map(Int64.init) ?? 0
-            let disk = diskURL.map { Self.allocatedBytes(at: $0) } ?? 0
-            // ext4 home: the image's allocated (sparse-aware) size — O(1),
-            // and it's the real cost on the Mac. virtiofs home: the walk.
-            let home = homeImageURL.map { Self.allocatedBytes(at: $0) }
-                ?? homeURL.map { Self.directoryBytes(at: $0) } ?? 0
-            let mURL = homeImageURL ?? homeURL
-            let mtime = mURL.flatMap { url -> Date? in
-                guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
-                return attrs[.modificationDate] as? Date
-            }
-            return (base, disk, home, mtime)
+        let m = await Task.detached(priority: .utility) {
+            StorageSizes.measure(base: baseURL, disk: diskURL, home: homeURL, homeImage: homeImageURL)
         }.value
+        let (b, d, h) = (m.base, m.disk, m.home)
+        homeMTime = m.homeMTime
         baseBytes = b
         diskBytes = d
         homeBytes = h
-        homeMTime = m
     }
 
     private static let dateFormatter: DateFormatter = {
@@ -5554,36 +5668,6 @@ private struct StorageStackView: View {
         f.timeStyle = .none
         return f
     }()
-
-    // `nonisolated` because these are called from a `Task.detached`
-    // closure that runs off the main actor. The view itself is
-    // MainActor-isolated by virtue of conforming to View, which would
-    // otherwise infer these too.
-    nonisolated private static func allocatedBytes(at url: URL) -> Int64 {
-        guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
-        let v = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey])
-        if let n = v?.totalFileAllocatedSize { return Int64(n) }
-        if let n = v?.fileAllocatedSize { return Int64(n) }
-        return 0
-    }
-
-    nonisolated private static func directoryBytes(at url: URL) -> Int64 {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return 0 }
-        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isRegularFileKey]
-        guard let it = fm.enumerator(at: url, includingPropertiesForKeys: keys, options: [], errorHandler: nil) else {
-            return 0
-        }
-        var total: Int64 = 0
-        for case let u as URL in it {
-            let v = try? u.resourceValues(forKeys: Set(keys))
-            if v?.isRegularFile == true {
-                if let n = v?.totalFileAllocatedSize { total &+= Int64(n) }
-                else if let n = v?.fileAllocatedSize { total &+= Int64(n) }
-            }
-        }
-        return total
-    }
 
     /// "2 minutes ago", "yesterday", "last week" — short, human.
     private func relativeAge(of date: Date) -> String {

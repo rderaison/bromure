@@ -36,7 +36,7 @@ struct ReviewSource {
     var sendLabel: (Int) -> String
     var sendHelp: String
     /// The composer's key hint (⏎ adds a comment; ⇧⌘⏎ sends).
-    var composerHint = NSLocalizedString("⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent", comment: "review composer hint")
+    var composerHint = NSLocalizedString("⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent", comment: "review composer hint")
     var openTerminal: () -> Void
     /// The header's own controls (merge, …).
     var trailing: () -> AnyView = { AnyView(EmptyView()) }

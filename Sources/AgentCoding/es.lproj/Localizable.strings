@@ -1346,7 +1346,7 @@
 "The transcript file has no readable entries." = "El archivo de transcripción no tiene entradas legibles.";
 "No transcript" = "Sin transcripción";
 "This run's transcript couldn't be read." = "No se pudo leer la transcripción de esta ejecución.";
-"⏎ send   ⌥⏎ newline" = "⏎ enviar   ⌥⏎ salto de línea";
+"⏎ send   ⇧⏎ newline" = "⏎ enviar   ⇧⏎ salto de línea";
 "Send (⏎)" = "Enviar (⏎)";
 "The agent asked" = "El agente preguntó";
 "The agent is asking %d questions — answer them all, then Submit" = "El agente hace %d preguntas: respóndelas todas y luego pulsa Enviar";
@@ -1794,7 +1794,7 @@
 "The machine it runs on — running" = "La máquina en la que corre — en marcha";
 "The machine it runs on — asleep, wakes up when you start" = "La máquina en la que corre — dormida, despierta cuando inicias";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "Dónde trabaja: una carpeta nueva, una tuya o un repositorio que obtener";
-"⏎ start   ⌥⏎ newline" = "⏎ iniciar   ⌥⏎ nueva línea";
+"⏎ start   ⇧⏎ newline" = "⏎ iniciar   ⇧⏎ nueva línea";
 "Start the session (⏎)" = "Iniciar la sesión (⏎)";
 "Working in this folder — click to start in a new folder instead" = "Trabajando en esta carpeta — haz clic para iniciar en una carpeta nueva";
 "Work in this folder again" = "Volver a trabajar en esta carpeta";
@@ -2102,6 +2102,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "permitido — validación del certificado omitida (X-bromure-insecure); no se inyectaron credenciales";
 "To-dos" = "Pendientes";
 "⎋ stop   ⏎ send" = "⎋ detener   ⏎ enviar";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ detener   ⏎ enviar   ⇧⏎ salto de línea";
 "Stop the agent (Esc)" = "Detener el agente (Esc)";
 "Completed" = "Completada";
 "Reopened" = "Reabierta";
@@ -2802,7 +2803,7 @@
 "Viewed" = "Visto";
 "Viewed — click to unmark" = "Visto — haz clic para desmarcar";
 "What the changes are compared against" = "Contra qué se comparan los cambios";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ añadir   ⌥⏎ nueva línea   ⇧⌘⏎ enviar al agente";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ añadir   ⇧⏎ nueva línea   ⇧⌘⏎ enviar al agente";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@ (actual)";
@@ -2836,7 +2837,7 @@
 "The current commit" = "El commit actual";
 "This machine has no branches made by Bromure." = "Esta máquina no tiene ramas creadas por Bromure.";
 "last commit %@" = "último commit %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ añadir   ⌥⏎ nueva línea   ⇧⌘⏎ devolver";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ añadir   ⇧⏎ nueva línea   ⇧⌘⏎ devolver";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "Solo responde a tu cuenta de Slack — los canales y todos los demás se ignoran.";
@@ -3129,3 +3130,12 @@
 "%@ stopped as it started: %@" = "%@ se detuvo al arrancar: %@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ lo usaba la sesión archivada “%@”, por última vez el %@. ¿Reutilizarlo para esta sesión?";
 "Delegation" = "Delegación";
+
+/* Added for hotfixes-v5 */
+"Requests" = "Solicitudes";
+"Working for others" = "Trabajo para otros";
+"The model the agent last answered with" = "El modelo con el que el agente respondió por última vez";
+"Time the agent spent working: %d turns, the longest %@" = "Tiempo de trabajo del agente: %d turnos, el más largo %@";
+"Erasing and restoring storage is done on the server Mac." = "El borrado y la restauración del almacenamiento se hacen en el Mac servidor.";
+"Home folder size" = "Tamaño de la carpeta personal";
+"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "Una carpeta personal más grande se aplica la próxima vez que se inicie el espacio de trabajo; no se puede reducir. La imagen de disco solo ocupa el espacio que usan sus archivos.";

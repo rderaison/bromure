@@ -341,6 +341,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // home into it first).
         if let session = sessionDisk, session.homeAttachMode != .virtiofs {
             try session.ensureHomeImageExists()
+            if !session.hasSavedState { try session.growHomeImageIfNeeded() }
             let homeAttachment = try VZDiskImageStorageDeviceAttachment(
                 url: session.homeImageURL, readOnly: false)
             config.storageDevices.append(

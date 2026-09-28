@@ -106,12 +106,10 @@ final class RemoteHostController {
 #if os(macOS)
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
-    /// Decision prompts we're currently showing, in the order shown, so a later
-    /// poll can dismiss the topmost the instant its id leaves /state (answered
-    /// on another surface — another fat client, or the host locally). Only the
-    /// topmost alert is app-modal and directly dismissable; lower ones clear as
-    /// the modal stack unwinds.
-    private var openPromptStack: [(id: String, alert: NSAlert)] = []
+    /// Decision prompts we're currently showing as sheets, so a later poll can
+    /// dismiss one the instant its id leaves /state (answered on another
+    /// surface — another fat client, or the host locally).
+    private var openPrompts: [String: (alert: NSAlert, window: NSWindow)] = [:]
 #else
     /// The remote's pending decision prompts, published for SwiftUI (.alert on
     /// iOS) — same /state + `/prompts/{id}/answer` wire contract as the macOS
@@ -367,7 +365,12 @@ final class RemoteHostController {
     /// UI-facing tunnel state: "off" / "waiting-approval" / "active" / "failed".
     private(set) var tunnelState = "off"
     private var approvalPollTimer: Timer?
-    private var tunnelDefaultsKey: String { "fatclient.tunnel.\(host.id.uuidString)" }
+    /// Keyed on the peer's device id when there is one: a peer host is
+    /// minted afresh (new `id`) on every connect, so an id-keyed opt-in was
+    /// forgotten each time and the VPN offer came back after every reconnect.
+    private var tunnelDefaultsKey: String {
+        "fatclient.tunnel.\(host.peerDeviceID.map { "peer-\($0)" } ?? host.id.uuidString)"
+    }
     /// Persisted per-host opt-in for the system-wide tunnel.
     var tunnelEnabled: Bool {
         UserDefaults.standard.bool(forKey: tunnelDefaultsKey)
@@ -932,21 +935,20 @@ final class RemoteHostController {
         promptedIDs.formIntersection(current)
         // A prompt can be answered on another surface (another fat client, or
         // the host locally) while we're still showing it. When its id leaves
-        // /state, dismiss our alert so the user isn't left staring at a stale
-        // one. This runs re-entrantly: a `runModal()` below keeps the poll timer
-        // firing (its run loop is a `.common` mode), so a later poll lands here
-        // while an alert is up. Only the topmost alert is app-modal and thus
-        // directly abortable; the `modalWindow` guard makes sure we only ever
-        // end our own alert, never some unrelated modal.
-        if let top = openPromptStack.last, !current.contains(top.id),
-           NSApp.modalWindow === top.alert.window {
-            // Drop it before aborting so a re-entrant poll (during the unwind)
-            // doesn't fire a second abortModal at the session underneath.
-            openPromptStack.removeLast()
-            NSApp.abortModal()
+        // /state, take our sheet down so the user isn't left staring at a
+        // stale one.
+        for (id, open) in openPrompts where !current.contains(id) {
+            openPrompts[id] = nil
+            open.window.endSheet(open.alert.window, returnCode: .abort)
         }
         for p in prompts {
             guard let id = p["id"] as? String, !promptedIDs.contains(id) else { continue }
+            // A sheet, never `runModal()`: this runs inside a main-queue block
+            // (the /state stream's delivery), and a modal loop entered there
+            // holds every other main-queue job — the stream, the control
+            // socket, the UI's own updates — until the user clicks. No window
+            // to hang it on yet: leave it for the next snapshot.
+            guard let window = promptWindow() else { continue }
             promptedIDs.insert(id)
             let alert = NSAlert()
             alert.messageText = p["title"] as? String ?? "Bromure — \(host.name)"
@@ -958,21 +960,41 @@ final class RemoteHostController {
                 alert.buttons.first?.keyEquivalent = ""
             }
             NSApp.activate(ignoringOtherApps: true)
-            openPromptStack.append((id: id, alert: alert))
-            let resp = alert.runModal()
-            if let i = openPromptStack.lastIndex(where: { $0.id == id }) {
-                openPromptStack.remove(at: i)
+            openPrompts[id] = (alert, window)
+            // A window already showing a sheet queues this one behind it.
+            alert.beginSheetModal(for: window) { [weak self] resp in
+                guard let self else { return }
+                self.openPrompts[id] = nil
+                // Aborted because the prompt was answered on another surface:
+                // it's already gone from /state, nothing to send back.
+                guard resp != .abort else { return }
+                let choice = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+                self.send("POST", "/prompts/\(ControlClient.encodeSegment(id))/answer",
+                          body: ["choice": max(0, min(choice, buttons.count - 1))])
             }
-            // Aborted because the prompt was answered on another surface: it's
-            // already gone from /state, so there's nothing to send back.
-            if resp == .abort {
-                alert.window.orderOut(nil)
-                continue
-            }
-            let choice = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-            send("POST", "/prompts/\(ControlClient.encodeSegment(id))/answer",
-                 body: ["choice": max(0, min(choice, buttons.count - 1))])
         }
+    }
+
+    /// The window a remote prompt hangs from: this host's mirror window,
+    /// else whatever window the user is looking at.
+    private func promptWindow() -> NSWindow? {
+        let visible = NSApp.windows.filter { $0.isVisible && !$0.isSheet }
+        return visible.first { ($0 as? RemoteHostWindow)?.controller === self }
+            ?? NSApp.keyWindow.flatMap { $0.isSheet ? $0.sheetParent : $0 }
+            ?? NSApp.mainWindow
+            ?? visible.first
+    }
+
+    /// Show an alert as a sheet on the mirror window. Callers here run inside
+    /// main-queue blocks (the /state stream, the browser relay), where a
+    /// `runModal()` would hold the stream and the control socket until the
+    /// user clicks. No window at all: the modal is the only way left.
+    func presentSheet(_ alert: NSAlert,
+                      then done: ((NSApplication.ModalResponse) -> Void)? = nil) {
+        guard let window = promptWindow() else {
+            done?(alert.runModal()); return
+        }
+        alert.beginSheetModal(for: window) { done?($0) }
     }
 #endif
 
@@ -1337,8 +1359,8 @@ final class RemoteHostController {
             approvalPollTimer?.invalidate(); approvalPollTimer = nil
             tunnel?.stop(); tunnel = nil
             tunnelState = "off"
-            let anyEnabled = RemoteHostStore.shared.hosts.contains {
-                UserDefaults.standard.bool(forKey: "fatclient.tunnel.\($0.id.uuidString)")
+            let anyEnabled = UserDefaults.standard.dictionaryRepresentation().contains {
+                $0.key.hasPrefix("fatclient.tunnel.") && ($0.value as? Bool) == true
             }
             if !anyEnabled { FatClientTunnelInstaller.unregister() }
         }
@@ -1386,7 +1408,7 @@ final class RemoteHostController {
         alert.informativeText = NSLocalizedString(
             "The remote hasn't reported its workspace subnet yet — it does so once a workspace VM is running. The tunnel connects automatically as soon as the subnet arrives; start (or resume) a workspace on the remote to trigger it.",
             comment: "")
-        alert.runModal()
+        presentSheet(alert)
     }
 
     private func presentRegistrationFailure(_ why: String) {
@@ -1396,7 +1418,7 @@ final class RemoteHostController {
         alert.informativeText = String(format: NSLocalizedString(
             "macOS refused to register Bromure's privileged network helper:\n\n%@\n\nA privileged helper can only be installed and approved from an administrator account. Bromure keeps working over its built-in per-app tunnel — this helper is only needed to reach the remote's VMs from other apps.",
             comment: ""), why)
-        alert.runModal()
+        presentSheet(alert)
     }
 
     private func guideThroughApproval(interactive: Bool, cidr: String) {
@@ -1405,23 +1427,28 @@ final class RemoteHostController {
             return
         }
         tunnelState = "waiting-approval"
-        if interactive {
-            let alert = NSAlert()
-            alert.messageText = NSLocalizedString("Allow Bromure's network helper", comment: "")
-            alert.informativeText = NSLocalizedString(
-                "Direct network access to the remote's VMs uses a privileged helper.\n\nmacOS asks you to approve it once: System Settings → General → Login Items, then allow “Bromure Agentic Coding” (macOS asks for an administrator's credentials). The tunnel connects automatically as soon as it's approved — nothing else to do.",
-                comment: "")
-            alert.addButton(withTitle: NSLocalizedString("Open Login Items", comment: ""))
-            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
-            if alert.runModal() == .alertFirstButtonReturn {
+        guard interactive else { watchForApproval(); return }
+        let alert = NSAlert()
+        alert.messageText = NSLocalizedString("Allow Bromure's network helper", comment: "")
+        alert.informativeText = NSLocalizedString(
+            "Direct network access to the remote's VMs uses a privileged helper.\n\nmacOS asks you to approve it once: System Settings → General → Login Items, then allow “Bromure Agentic Coding” (macOS asks for an administrator's credentials). The tunnel connects automatically as soon as it's approved — nothing else to do.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Open Login Items", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        presentSheet(alert) { [weak self] resp in
+            guard let self else { return }
+            if resp == .alertFirstButtonReturn {
                 FatClientTunnelInstaller.openApprovalSettings()
+                self.watchForApproval()
             } else {
-                UserDefaults.standard.set(false, forKey: tunnelDefaultsKey)
-                tunnelState = "off"
-                return
+                UserDefaults.standard.set(false, forKey: self.tunnelDefaultsKey)
+                self.tunnelState = "off"
             }
         }
-        // Watch for the approval and connect the moment it lands.
+    }
+
+    /// Watch for the helper's approval and connect the moment it lands.
+    private func watchForApproval() {
         approvalPollTimer?.invalidate()
         let deadline = Date().addingTimeInterval(300)   // stop watching after 5 min; retried on next connect/toggle
         let t = Timer(timeInterval: 2, repeats: true) { [weak self] timer in
@@ -1464,7 +1491,7 @@ final class RemoteHostController {
         alert.informativeText = String(format: NSLocalizedString(
             "%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps.",
             comment: "tunnel start failure alert body; %@ is the reason"), why)
-        alert.runModal()
+        presentSheet(alert)
     }
 
 #endif
@@ -1528,6 +1555,38 @@ final class RemoteHostController {
                 exitCode: 1, stderr: (resp.json["error"] as? String) ?? "profile fetch failed")
         }
         return resp.json
+    }
+
+    /// The workspace's storage layers as the server measures them, for the
+    /// Resources pane. nil from a server that predates the route.
+    func fetchStorageContext(_ id: Profile.ID) async -> ProfileStorageContext? {
+        let host = self.host
+        let path = "/profiles/\(seg(id))?storage=1"
+        guard let resp = try? await Task.detached(priority: .userInitiated, operation: {
+            try RemoteTransport.client(for: host).request("GET", path)
+        }).value, resp.status == 200, let j = resp.json["baseBytes"] as? Int64 ?? (resp.json["baseBytes"] as? Int).map(Int64.init)
+        else { return nil }
+        func bytes(_ k: String) -> Int64 {
+            (resp.json[k] as? Int64) ?? (resp.json[k] as? Int).map(Int64.init) ?? 0
+        }
+        let iso = ISO8601DateFormatter()
+        let homeIsImage = resp.json["homeIsImage"] as? Bool ?? false
+        let hasHome = resp.json["hasHome"] as? Bool ?? false
+        // The view only needs to know which layers exist; these paths are
+        // never read on this Mac (`remoteSizes` stands in for the probes).
+        let here = URL(fileURLWithPath: "/dev/null")
+        var c = ProfileStorageContext.empty(baseImageURL: here)
+        c.baseImageVersion = resp.json["baseVersion"] as? String
+        c.baseImageBuildDate = (resp.json["baseBuildDate"] as? String).flatMap(iso.date(from:))
+        c.profileDiskURL = (resp.json["hasDisk"] as? Bool ?? false) ? here : nil
+        c.profileHomeImageURL = hasHome && homeIsImage ? here : nil
+        c.profileHomeURL = hasHome && !homeIsImage ? here : nil
+        c.isRunning = resp.json["isRunning"] as? Bool ?? false
+        c.remoteSizes = StorageSizes(
+            base: j, disk: bytes("diskBytes"), home: bytes("homeBytes"),
+            homeMTime: (resp.json["homeModified"] as? String).flatMap(iso.date(from:)),
+            homeCapacity: bytes("homeCapacity"))
+        return c
     }
 
     /// Secret-preserving whole-document save (the counterpart of
@@ -1616,6 +1675,7 @@ final class RemoteHostController {
     /// same way.
     static func restartRequiringChanges(from old: Profile, to new: Profile) -> Bool {
         old.memoryGB != new.memoryGB
+            || old.homeImageGB != new.homeImageGB
             || old.networkMode != new.networkMode
             || old.bridgedInterfaceID != new.bridgedInterfaceID
             || old.folderPaths != new.folderPaths
@@ -2982,6 +3042,7 @@ final class RemoteHostWindow: NSWindow {
             let profile: Profile
             var credentialRefs: [CredentialRef]? = nil
             let remoteGlobalModels: ModelSettings
+            let storage = await c.fetchStorageContext(id)
             do {
                 let doc = try await c.fetchProfileDoc(id)
                 // The remote's global Models settings — the base this
@@ -3020,7 +3081,7 @@ final class RemoteHostWindow: NSWindow {
                 profile: profile,
                 isNew: false,
                 terminalDefaults: TerminalAppDefaults.load(),
-                storageContext: nil,
+                storageContext: storage,
                 remoteCredentialRefs: credentialRefs,
                 siblingWorkspaces: controller.profiles.filter { $0.id != profile.id }
                     .map { WorkspaceRef(id: $0.id, name: $0.name) },
@@ -5341,8 +5402,8 @@ final class RemoteHostWindow: NSWindow {
             comment: "")
         alert.addButton(withTitle: NSLocalizedString("Turn On VPN", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Not Now", comment: ""))
-        if alert.runModal() == .alertFirstButtonReturn {
-            controller.setTunnelEnabled(true)
+        controller.presentSheet(alert) { [weak self] resp in
+            if resp == .alertFirstButtonReturn { self?.controller.setTunnelEnabled(true) }
         }
     }
 
@@ -5422,7 +5483,7 @@ final class RemoteHostWindow: NSWindow {
                 self.clearSessionStage()
                 self.controller.selectTab(id, index: index)
                 // A tab from the Machines list is a terminal, full stop.
-                if self.sessionsFirst { self.sessionViewMode = .terminal }
+                self.sessionViewMode = .terminal
                 self.showWorkspace(id, window: index)
             },
             onNewTab: { [weak self] id in self?.controller.newTab(id) },
@@ -5961,7 +6022,11 @@ final class RemoteHostWindow: NSWindow {
         // foreground program says yet (a new session runs a plain shell for
         // its first seconds, which used to leave the raw terminal up).
         if sessionViewMode == .beautified { mountBeautified(for: id, window: idx); return }
-        if viewMode == .beautified && activeIsAgent { mountBeautified(for: id, window: idx); return }
+        // A tab picked from the Machines list is its terminal, whatever the
+        // app-wide default says.
+        if sessionViewMode != .terminal, viewMode == .beautified && activeIsAgent {
+            mountBeautified(for: id, window: idx); return
+        }
         guard let profile = controller.profile(for: id) else {
             unmountTerminal(); return
         }
@@ -6195,6 +6260,8 @@ final class RemoteHostWindow: NSWindow {
     /// globally as the default for subsequent workspaces (same key as local).
     func toggleBeautified(_ id: Profile.ID) {
         viewMode = viewMode == .beautified ? .terminal : .beautified
+        // Asked for by hand: a tab held to its terminal follows the toggle.
+        if sessionViewMode == .terminal { sessionViewMode = nil }
         UserDefaults.standard.set(viewMode == .beautified, forKey: "ui.beautifiedTranscript")
         controller.listModel.beautifiedActive = viewMode == .beautified
         showWorkspace(id)

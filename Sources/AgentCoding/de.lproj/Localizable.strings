@@ -1344,7 +1344,7 @@
 "The transcript file has no readable entries." = "Die Protokolldatei enthält keine lesbaren Einträge.";
 "No transcript" = "Kein Protokoll";
 "This run's transcript couldn't be read." = "Das Protokoll dieses Laufs konnte nicht gelesen werden.";
-"⏎ send   ⌥⏎ newline" = "⏎ senden   ⌥⏎ neue Zeile";
+"⏎ send   ⇧⏎ newline" = "⏎ senden   ⇧⏎ neue Zeile";
 "Send (⏎)" = "Senden (⏎)";
 "The agent asked" = "Der Agent hat gefragt";
 "The agent is asking %d questions — answer them all, then Submit" = "Der Agent stellt %d Fragen — beantworte alle und drücke dann „Absenden“";
@@ -1792,7 +1792,7 @@
 "The machine it runs on — running" = "Die Maschine, auf der sie läuft — läuft";
 "The machine it runs on — asleep, wakes up when you start" = "Die Maschine, auf der sie läuft — schläft, wacht auf, wenn Sie starten";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "Wo gearbeitet wird: ein frischer Ordner, einer von Ihren oder ein Repository zum Auschecken";
-"⏎ start   ⌥⏎ newline" = "⏎ starten   ⌥⏎ neue Zeile";
+"⏎ start   ⇧⏎ newline" = "⏎ starten   ⇧⏎ neue Zeile";
 "Start the session (⏎)" = "Die Sitzung starten (⏎)";
 "Working in this folder — click to start in a new folder instead" = "Arbeitet in diesem Ordner — klicken, um stattdessen in einem neuen Ordner zu starten";
 "Work in this folder again" = "Wieder in diesem Ordner arbeiten";
@@ -2100,6 +2100,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "erlaubt — Zertifikatsprüfung übersprungen (X-bromure-insecure); keine Zugangsdaten eingesetzt";
 "To-dos" = "To-dos";
 "⎋ stop   ⏎ send" = "⎋ stoppen   ⏎ senden";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ stoppen   ⏎ senden   ⇧⏎ neue Zeile";
 "Stop the agent (Esc)" = "Den Agenten stoppen (Esc)";
 "Completed" = "Erledigt";
 "Reopened" = "Wieder geöffnet";
@@ -2800,7 +2801,7 @@
 "Viewed" = "Gesehen";
 "Viewed — click to unmark" = "Gesehen – klicken zum Aufheben";
 "What the changes are compared against" = "Womit die Änderungen verglichen werden";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ Kommentar   ⌥⏎ neue Zeile   ⇧⌘⏎ an Agenten senden";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ Kommentar   ⇧⏎ neue Zeile   ⇧⌘⏎ an Agenten senden";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@ (aktuell)";
@@ -2834,7 +2835,7 @@
 "The current commit" = "Der aktuelle Commit";
 "This machine has no branches made by Bromure." = "Auf dieser Maschine gibt es keine von Bromure erstellten Branches.";
 "last commit %@" = "letzter Commit %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ Kommentar   ⌥⏎ neue Zeile   ⇧⌘⏎ zurückschicken";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ Kommentar   ⇧⏎ neue Zeile   ⇧⌘⏎ zurückschicken";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "Antwortet nur Ihrem Slack-Konto – Kanäle und alle anderen werden ignoriert.";
@@ -3127,3 +3128,12 @@
 "%@ stopped as it started: %@" = "%@ ist beim Start abgebrochen: %@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ gehörte der archivierten Sitzung „%@“, zuletzt am %@. Für diese Sitzung wiederverwenden?";
 "Delegation" = "Delegation";
+
+/* Added for hotfixes-v5 */
+"Requests" = "Anfragen";
+"Working for others" = "Arbeit für andere";
+"The model the agent last answered with" = "Das Modell, mit dem der Agent zuletzt geantwortet hat";
+"Time the agent spent working: %d turns, the longest %@" = "Arbeitszeit des Agenten: %d Durchgänge, der längste %@";
+"Erasing and restoring storage is done on the server Mac." = "Speicher löschen und wiederherstellen erfolgt auf dem Server-Mac.";
+"Home folder size" = "Größe des Home-Ordners";
+"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "Ein größerer Home-Ordner wird beim nächsten Start des Workspace wirksam; verkleinern ist nicht möglich. Das Disk-Image belegt nur den Platz, den seine Dateien nutzen.";

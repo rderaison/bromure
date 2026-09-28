@@ -1344,7 +1344,7 @@
 "The transcript file has no readable entries." = "Le fichier de transcription ne contient aucune entrée lisible.";
 "No transcript" = "Pas de transcription";
 "This run's transcript couldn't be read." = "Impossible de lire la transcription de cette exécution.";
-"⏎ send   ⌥⏎ newline" = "⏎ envoyer   ⌥⏎ nouvelle ligne";
+"⏎ send   ⇧⏎ newline" = "⏎ envoyer   ⇧⏎ nouvelle ligne";
 "Send (⏎)" = "Envoyer (⏎)";
 "The agent asked" = "L’agent a demandé";
 "The agent is asking %d questions — answer them all, then Submit" = "L’agent pose %d questions — répondez à toutes, puis Validez";
@@ -1792,7 +1792,7 @@
 "The machine it runs on — running" = "La machine sur laquelle elle tourne — en cours";
 "The machine it runs on — asleep, wakes up when you start" = "La machine sur laquelle elle tourne — en veille, se réveille au démarrage";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "Où elle travaille : un dossier neuf, l’un des vôtres, ou un dépôt à récupérer";
-"⏎ start   ⌥⏎ newline" = "⏎ démarrer   ⌥⏎ nouvelle ligne";
+"⏎ start   ⇧⏎ newline" = "⏎ démarrer   ⇧⏎ nouvelle ligne";
 "Start the session (⏎)" = "Démarrer la session (⏎)";
 "Working in this folder — click to start in a new folder instead" = "Travaille dans ce dossier — cliquez pour démarrer dans un nouveau dossier";
 "Work in this folder again" = "Retravailler dans ce dossier";
@@ -2100,6 +2100,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "autorisé — validation du certificat ignorée (X-bromure-insecure) ; aucun identifiant injecté";
 "To-dos" = "À faire";
 "⎋ stop   ⏎ send" = "⎋ arrêter   ⏎ envoyer";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ arrêter   ⏎ envoyer   ⇧⏎ nouvelle ligne";
 "Stop the agent (Esc)" = "Arrêter l’agent (Échap)";
 "Completed" = "Terminé";
 "Reopened" = "Rouvert";
@@ -2800,7 +2801,7 @@
 "Viewed" = "Vu";
 "Viewed — click to unmark" = "Vu — cliquez pour retirer";
 "What the changes are compared against" = "Ce à quoi les modifications sont comparées";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ ajouter   ⌥⏎ nouvelle ligne   ⇧⌘⏎ envoyer à l’agent";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ ajouter   ⇧⏎ nouvelle ligne   ⇧⌘⏎ envoyer à l’agent";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@ (actuelle)";
@@ -2834,7 +2835,7 @@
 "The current commit" = "Le commit actuel";
 "This machine has no branches made by Bromure." = "Cette machine n’a aucune branche créée par Bromure.";
 "last commit %@" = "dernier commit %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ ajouter   ⌥⏎ nouvelle ligne   ⇧⌘⏎ renvoyer";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ ajouter   ⇧⏎ nouvelle ligne   ⇧⌘⏎ renvoyer";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "Ne répond qu’à votre compte Slack — les canaux et tous les autres sont ignorés.";
@@ -3127,3 +3128,12 @@
 "%@ stopped as it started: %@" = "%@ s'est arrêté au démarrage : %@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ appartenait à la session archivée « %@ », utilisée pour la dernière fois le %@. Le réutiliser pour cette session ?";
 "Delegation" = "Délégation";
+
+/* Added for hotfixes-v5 */
+"Requests" = "Demandes";
+"Working for others" = "Travail pour d’autres";
+"The model the agent last answered with" = "Le modèle avec lequel l’agent a répondu en dernier";
+"Time the agent spent working: %d turns, the longest %@" = "Temps de travail de l’agent : %d tours, le plus long %@";
+"Erasing and restoring storage is done on the server Mac." = "L’effacement et la restauration du stockage se font sur le Mac serveur.";
+"Home folder size" = "Taille du dossier personnel";
+"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "Un dossier personnel plus grand prend effet au prochain démarrage de l’espace de travail ; il ne peut pas rétrécir. L’image disque n’occupe que la place utilisée par ses fichiers.";

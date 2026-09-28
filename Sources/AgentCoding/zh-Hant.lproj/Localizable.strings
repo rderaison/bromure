@@ -1347,7 +1347,7 @@
 "The transcript file has no readable entries." = "轉錄檔案沒有可讀條目。";
 "No transcript" = "無轉錄";
 "This run's transcript couldn't be read." = "無法讀取此次執行的轉錄。";
-"⏎ send   ⌥⏎ newline" = "⏎ 傳送   ⌥⏎ 換行";
+"⏎ send   ⇧⏎ newline" = "⏎ 傳送   ⇧⏎ 換行";
 "Send (⏎)" = "傳送 (⏎)";
 "The agent asked" = "代理程式曾提問";
 "The agent is asking %d questions — answer them all, then Submit" = "代理程式提出了%d個問題——全部回答後點擊提交";
@@ -1795,7 +1795,7 @@
 "The machine it runs on — running" = "它執行所在的機器 — 執行中";
 "The machine it runs on — asleep, wakes up when you start" = "它執行所在的機器 — 睡眠中，啟動時喚醒";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "它的工作位置：一個新檔案夾、你已有的檔案夾，或要取出的儲存庫";
-"⏎ start   ⌥⏎ newline" = "⏎ 開始   ⌥⏎ 換行";
+"⏎ start   ⇧⏎ newline" = "⏎ 開始   ⇧⏎ 換行";
 "Start the session (⏎)" = "開始工作階段 (⏎)";
 "Working in this folder — click to start in a new folder instead" = "正在此檔案夾中工作 — 按一下改為在新檔案夾中開始";
 "Work in this folder again" = "再次在此檔案夾中工作";
@@ -2103,6 +2103,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "已允許 — 略過憑證驗證 (X-bromure-insecure)；未注入憑證";
 "To-dos" = "待辦事項";
 "⎋ stop   ⏎ send" = "⎋ 停止   ⏎ 傳送";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ 停止   ⏎ 傳送   ⇧⏎ 換行";
 "Stop the agent (Esc)" = "停止代理程式 (Esc)";
 "Completed" = "已完成";
 "Reopened" = "已重新開啟";
@@ -2803,7 +2804,7 @@
 "Viewed" = "已檢視";
 "Viewed — click to unmark" = "已檢視——點按取消";
 "What the changes are compared against" = "變更的比較對象";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ 加入評論   ⌥⏎ 換行   ⇧⌘⏎ 傳送給代理程式";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ 加入評論   ⇧⏎ 換行   ⇧⌘⏎ 傳送給代理程式";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@（目前）";
@@ -2837,7 +2838,7 @@
 "The current commit" = "目前的提交";
 "This machine has no branches made by Bromure." = "此機器上沒有 Bromure 建立的分支。";
 "last commit %@" = "最近提交 %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ 加入評論   ⌥⏎ 換行   ⇧⌘⏎ 退回";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ 加入評論   ⇧⏎ 換行   ⇧⌘⏎ 退回";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "只回覆你的 Slack 帳號——頻道和其他所有人都會被忽略。";
@@ -3130,3 +3131,12 @@
 "%@ stopped as it started: %@" = "%1$@ 啟動時停止：%2$@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ 曾由已封存的工作階段「%2$@」使用，最後一次在 %3$@。要在此工作階段中重新使用嗎？";
 "Delegation" = "委派";
+
+/* Added for hotfixes-v5 */
+"Requests" = "請求";
+"Working for others" = "為他人工作";
+"The model the agent last answered with" = "代理程式最近一次回覆所用的模型";
+"Time the agent spent working: %d turns, the longest %@" = "代理程式工作時間：%d 輪，最長 %@";
+"Erasing and restoring storage is done on the server Mac." = "儲存空間的清除與還原需在伺服器 Mac 上進行。";
+"Home folder size" = "主檔案夾大小";
+"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "較大的主檔案夾會在工作區下次啟動時生效；無法縮小。磁碟映像只佔用其檔案實際使用的空間。";

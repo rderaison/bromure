@@ -169,8 +169,29 @@ public final class SessionDisk {
             throw CocoaError(.fileWriteUnknown)
         }
         defer { try? handle.close() }
-        let bytes = UInt64(Self.resolvedHomeImageGB()) * 1024 * 1024 * 1024
-        try handle.truncate(atOffset: bytes)
+        try handle.truncate(atOffset: homeImageTargetBytes)
+    }
+
+    /// The home image's guest-visible size: the workspace's own setting,
+    /// else the app-wide default.
+    public var homeImageTargetBytes: UInt64 {
+        let gb = profile.homeImageGB.map { min(1024, max(8, $0)) } ?? Self.resolvedHomeImageGB()
+        return UInt64(gb) * 1024 * 1024 * 1024
+    }
+
+    /// Grow an existing home image to its target size (never shrinks). The
+    /// file stays sparse; the guest agent runs resize2fs after mounting.
+    /// Cold boots only: a saved state was taken against the old geometry.
+    public func growHomeImageIfNeeded() throws {
+        guard let attrs = try? fm.attributesOfItem(atPath: homeImageURL.path),
+              let size = (attrs[.size] as? NSNumber)?.uint64Value,
+              size < homeImageTargetBytes else { return }
+        try EphemeralDisk.checkDiskSpace(at: homeImageURL.deletingLastPathComponent().path)
+        guard let handle = FileHandle(forWritingAtPath: homeImageURL.path) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: homeImageTargetBytes)
     }
 
     /// Saved-state file path for VM suspend/restore. Lives in the profile
