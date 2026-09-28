@@ -177,7 +177,7 @@ final class TaskReviewWindowManager {
                     : String(format: NSLocalizedString("Send Back with %d Comments", comment: "review"), n)
                 },
                 sendHelp: NSLocalizedString("Sends the comments to the agent and moves the task back to In Progress (⇧⌘⏎)", comment: "review"),
-                composerHint: NSLocalizedString("⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back", comment: "review composer hint"),
+                composerHint: NSLocalizedString("⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back", comment: "review composer hint"),
                 openTerminal: { if let task = t() { c.openTerminal(task) } },
                 trailing: { [weak self] in
                     AnyView(TaskMergeMenu(

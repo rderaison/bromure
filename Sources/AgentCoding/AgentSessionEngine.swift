@@ -73,7 +73,15 @@ final class AgentSessionEngine {
         // itself.
         if cwd.isEmpty || cwd == "~" || cwd == "~/" {
             let named = req.title?.trimmingCharacters(in: .whitespaces).nonEmpty
-            cwd = "~/" + Self.syntheticFolderName(message: named ?? message, tool: req.tool)
+            // Two blank sessions in the same minute got the same folder
+            // ("claude-260928-1830"): one chat then read the other's
+            // transcript (a fresh agent isn't pinned to its own until its
+            // first prompt), and a wake-up's --continue resumed it for real.
+            let base = "~/" + Self.syntheticFolderName(message: named ?? message, tool: req.tool)
+            let taken = Set(store.sessions.filter { $0.profileID == req.profileID && !$0.isDeleted }.map(\.cwd))
+            cwd = base
+            var n = 2
+            while taken.contains(cwd) { cwd = "\(base)-\(n)"; n += 1 }
         }
         let title = req.title?.trimmingCharacters(in: .whitespaces).nonEmpty
             ?? (message?.nonEmpty).map(AgentSession.title(fromMessage:))

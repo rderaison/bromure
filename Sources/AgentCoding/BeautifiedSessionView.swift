@@ -3080,6 +3080,7 @@ struct DelegationPanel: View {
     /// nil = read-only (a fat client's mirror).
     let answer: ((UUID, UUID, String) -> Void)?
     @AppStorage("sessions.delegationsExpanded") private var expanded = true
+    @AppStorage("sessions.requestsExpanded") private var requestsExpanded = false
     @State private var drafts: [UUID: String] = [:]
 
     private var remoteHosts: [UUID: String] {
@@ -3094,7 +3095,11 @@ struct DelegationPanel: View {
         } else {
             VStack(spacing: 0) {
                 Divider().opacity(0.5)
-                ForEach(asChild) { delegateStrip($0) }
+                if asChild.count == 1 {
+                    delegateStrip(asChild[0])
+                } else if !asChild.isEmpty {
+                    requestList(asChild)
+                }
                 if !mine.isEmpty { delegatorList(mine) }
             }
             .background(Color.platformTextBackground)
@@ -3144,6 +3149,48 @@ struct DelegationPanel: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
         .help(d.brief)
+    }
+
+    /// Several open requests fold under one line, like the delegations:
+    /// stacked strips pushed the agent's own text out of view.
+    private func requestList(_ list: [Delegation]) -> some View {
+        let requests = list.filter(\.isRequest).count
+        return VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { requestsExpanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: requestsExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 10)
+                    Image(systemName: "bubble.left.and.text.bubble.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(requests == list.count
+                         ? NSLocalizedString("Requests", comment: "delegation panel")
+                         : NSLocalizedString("Working for others", comment: "delegation panel"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text("\(list.count)")
+                        .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            if requestsExpanded {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(list) { delegateStrip($0) }
+                    }
+                }
+                .frame(maxHeight: 160)
+            }
+        }
     }
 
     // MARK: Delegator: my delegates

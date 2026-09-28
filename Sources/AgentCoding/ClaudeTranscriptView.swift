@@ -1139,8 +1139,8 @@ struct ChatComposer: View {
             #endif
             HStack(spacing: 8) {
                 Text(hint ?? (working
-                     ? NSLocalizedString("⎋ stop   ⏎ send", comment: "composer hint")
-                     : NSLocalizedString("⏎ send   ⌥⏎ newline", comment: "composer hint")))
+                     ? NSLocalizedString("⎋ stop   ⏎ send   ⇧⏎ newline", comment: "composer hint")
+                     : NSLocalizedString("⏎ send   ⇧⏎ newline", comment: "composer hint")))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.quaternary)
                 Spacer(minLength: 0)

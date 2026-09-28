@@ -178,6 +178,9 @@ final class ACAutomationServer {
 
     // Profile management (CLI `profiles …`).
     var onDescribeProfile: ((_ idOrName: String) -> [String: Any]?)?
+    /// A workspace's storage layers, for a fat client's Resources pane:
+    /// where they live here (sized off the main thread by the route).
+    var onDescribeStorage: ((_ idOrName: String) -> ProfileStorageContext?)?
     var onDeleteProfile: ((_ idOrName: String) -> [String: Any])?
     /// Full-fidelity Profile JSON (secrets blanked) for the `workspaces edit`
     /// round-trip + the TUI raw-JSON hatch. nil when the workspace is unknown.
@@ -1626,7 +1629,27 @@ final class ACAutomationServer {
             // `?full=1` → the whole Profile Codable (secrets blanked) for the
             // `workspaces edit` / raw-JSON round-trip; otherwise the compact
             // describe summary.
-            if query.contains("full=1") || query.contains("full=true") {
+            if query.contains("storage=1") {
+                guard let c = DispatchQueue.main.sync(execute: { self.onDescribeStorage?(id) }) else {
+                    sendResponse(fd: fd, status: 404, body: ["error": "Profile not found"])
+                    return
+                }
+                let m = StorageSizes.measure(base: c.baseImageURL, disk: c.profileDiskURL,
+                                             home: c.profileHomeURL, homeImage: c.profileHomeImageURL)
+                var body: [String: Any] = [
+                    "baseBytes": m.base, "diskBytes": m.disk, "homeBytes": m.home,
+                    "homeCapacity": m.homeCapacity,
+                    "hasDisk": c.profileDiskURL != nil,
+                    "hasHome": c.profileHomeURL != nil || c.profileHomeImageURL != nil,
+                    "homeIsImage": c.profileHomeImageURL != nil,
+                    "isRunning": c.isRunning,
+                ]
+                let iso = ISO8601DateFormatter()
+                if let v = c.baseImageVersion { body["baseVersion"] = v }
+                if let d = c.baseImageBuildDate { body["baseBuildDate"] = iso.string(from: d) }
+                if let t = m.homeMTime { body["homeModified"] = iso.string(from: t) }
+                sendResponse(fd: fd, status: 200, body: body)
+            } else if query.contains("full=1") || query.contains("full=true") {
                 if let d = DispatchQueue.main.sync(execute: { self.onExportProfile?(id) }) {
                     sendResponse(fd: fd, status: 200, body: d)
                 } else {

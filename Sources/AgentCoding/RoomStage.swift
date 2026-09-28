@@ -91,6 +91,13 @@ final class LocalRoomBackend: RoomStageBackend {
         // The session's own agent names the chat ("Kimi is ready"), not the
         // workspace's default one — the tab's label may not say it yet.
         pane.agentHints[w] = s.tool.rawValue
+        // This cell's transcript is this session's — not whatever session
+        // last held the window index (its cached copy is what the resting
+        // cell reads back).
+        if let cache = delegate?.agentSessionEngine.transcripts {
+            let sid = s.id
+            pane.transcriptSinks[w] = { data in cache.save(sid, data) }
+        }
         return pane.makeBeautifiedModel(windowIndex: w, provider: PinnedTranscriptProvider(pane: pane, window: w))
     }
 

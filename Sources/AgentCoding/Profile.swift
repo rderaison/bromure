@@ -1783,6 +1783,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Missing in pre-upgrade JSON → decoder defaults to `.virtiofs`.
     /// New profiles are created `.ext4`.
     public var homeModel: HomeModel
+    /// Size of the ext4 home image, GiB; nil = the app-wide default
+    /// (`SessionDisk.resolvedHomeImageGB`). Grow-only: a larger value takes
+    /// effect at the next cold boot (the host grows home.img, the guest
+    /// agent grows the filesystem) — a running VM can't see its disk grow.
+    public var homeImageGB: Int? = nil
 
     public init(
         id: UUID = UUID(),
@@ -2024,6 +2029,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case bootAtStartup
         case mcpServers
         case homeModel
+        case homeImageGB
     }
 
     public init(from decoder: Decoder) throws {
@@ -2151,6 +2157,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // Pre-upgrade profiles have no homeModel key → they stay on the
         // legacy virtiofs home until the user accepts the migration.
         homeModel = try c.decodeIfPresent(HomeModel.self, forKey: .homeModel) ?? .virtiofs
+        homeImageGB = try c.decodeIfPresent(Int.self, forKey: .homeImageGB)
     }
 
     /// Explicit encoder — skips the legacy `folderPath` key (we only ever
@@ -2331,6 +2338,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // pre-upgrade profile (decoder defaults to .virtiofs), so a new
         // ext4 profile must always carry the key explicitly.
         try c.encode(homeModel, forKey: .homeModel)
+        try c.encodeIfPresent(homeImageGB, forKey: .homeImageGB)
         if !mcpServers.isEmpty {
             try c.encode(mcpServers, forKey: .mcpServers)
         }

@@ -498,6 +498,13 @@ struct SessionHeaderView: View {
                             HStack(spacing: 5) {
                                 AgentAvatar(tool: s.tool, size: 13)
                                 Text(s.tool.displayName)
+                                #if os(macOS)
+                                if let m = TranscriptSearchIndex.shared.model(s.id) {
+                                    Text(m)
+                                        .foregroundStyle(.tertiary)
+                                        .help(NSLocalizedString("The model the agent last answered with", comment: "session header"))
+                                }
+                                #endif
                             }
                             .fixedSize()
                             if !workspaceName(s.profileID).isEmpty {
@@ -545,6 +552,18 @@ struct SessionHeaderView: View {
                                 .help(url)
                             }
                             #if os(macOS)
+                            let turns = TranscriptSearchIndex.shared.turns(s.id)
+                            if !turns.isEmpty {
+                                let busy = turns.reduce(0) { $0 + $1.duration }
+                                let longest = turns.map(\.duration).max() ?? 0
+                                metaDot
+                                HStack(spacing: 4) {
+                                    Image(systemName: "stopwatch").font(.system(size: 10.5))
+                                    Text(TranscriptSearchIndex.duration(busy)).monospacedDigit()
+                                }
+                                .help(String(format: NSLocalizedString("Time the agent spent working: %d turns, the longest %@", comment: "session header"),
+                                             turns.count, TranscriptSearchIndex.duration(longest)))
+                            }
                             if let t = TranscriptSearchIndex.shared.tokens(s.id) {
                                 metaDot
                                 HStack(spacing: 4) {
@@ -1576,7 +1595,7 @@ struct NewSessionView: View {
 
                 Spacer(minLength: 8)
                 #if os(macOS)
-                Text(NSLocalizedString("⏎ start   ⌥⏎ newline", comment: "new session hint"))
+                Text(NSLocalizedString("⏎ start   ⇧⏎ newline", comment: "new session hint"))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.quaternary)
                     .lineLimit(1)

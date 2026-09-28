@@ -20,7 +20,19 @@ final class TranscriptSearchIndex {
         /// The agent's last reply, one line.
         var lastReply: String
         var tokens: TokenUsage
+        /// The model the agent last answered with, as it logged it.
+        var model: String? = nil
+        /// Each turn, from the user's message to the agent's last event
+        /// before the next one — the time the agent spent working. Kept per
+        /// turn (not just summed) for a timeline of where the time went.
+        var turns: [Turn] = []
         var modified: Date
+    }
+
+    struct Turn: Sendable, Equatable {
+        var start: Date
+        var end: Date
+        var duration: TimeInterval { end.timeIntervalSince(start) }
     }
 
     struct TokenUsage: Sendable, Equatable {
@@ -80,18 +92,66 @@ final class TranscriptSearchIndex {
         let items = AgentTranscript.parse(data)
         var parts: [String] = []
         var last = ""
+        var turns: [Turn] = []
+        var open: Turn?
         for item in items {
             switch item.kind {
-            case .userText(let t): parts.append(t)
+            case .userText(let t):
+                parts.append(t)
+                if let o = open, o.end > o.start { turns.append(o) }
+                open = item.timestamp.map { Turn(start: $0, end: $0) }
+                continue
             case .assistantText(let t): parts.append(t); last = t
             default: break
             }
+            if let ts = item.timestamp, let o = open, ts > o.end { open?.end = ts }
         }
+        if let o = open, o.end > o.start { turns.append(o) }
         let oneLine = last.split(whereSeparator: \.isNewline).map(String.init)
             .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
         return Entry(text: parts.joined(separator: "\n\n"),
                      lastReply: String(oneLine.prefix(160)),
-                     tokens: tokens(in: data), modified: modified)
+                     tokens: tokens(in: data), model: model(in: data),
+                     turns: turns, modified: modified)
+    }
+
+    /// The last model the agent logged: Claude's per-message `"model"`,
+    /// Codex's turn context. Claude's `<synthetic>` stand-in is skipped.
+    nonisolated static func model(in data: Data) -> String? {
+        let raw = String(decoding: data.suffix(2_000_000), as: UTF8.self)
+        func last(_ pattern: String) -> String? {
+            guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+            let all = re.matches(in: raw, range: NSRange(raw.startIndex..., in: raw))
+            return all.last.flatMap { Range($0.range(at: 1), in: raw).map { String(raw[$0]) } }
+        }
+        // An assistant message's own model first: a bare "model" key can
+        // just as well sit in a tool's input or a file the agent read.
+        return last(#""message"\s*:\s*\{\s*"model"\s*:\s*"([^"<]{2,80})""#)
+            ?? last(#""model"\s*:\s*"([^"<]{2,80})""#)
+    }
+
+    /// "claude-opus-4-5-20251101" → "Opus 4.5"; anything else as logged.
+    nonisolated static func prettyModel(_ m: String) -> String {
+        guard m.hasPrefix("claude-") else { return m }
+        let parts = m.dropFirst("claude-".count).split(separator: "-").map(String.init)
+            .filter { !($0.count == 8 && $0.allSatisfy(\.isNumber)) }
+        let words = parts.filter { !$0.allSatisfy(\.isNumber) }.map(\.capitalized)
+        let version = parts.filter { $0.allSatisfy(\.isNumber) }.joined(separator: ".")
+        let name = (words + (version.isEmpty ? [] : [version])).joined(separator: " ")
+        return name.isEmpty ? m : name
+    }
+
+    func model(_ id: UUID) -> String? { entries[id]?.model.map(Self.prettyModel) }
+
+    /// Time the agent spent working in a session, turn by turn.
+    func turns(_ id: UUID) -> [Turn] { entries[id]?.turns ?? [] }
+
+    /// "2h 05m", "14m", "40s".
+    nonisolated static func duration(_ t: TimeInterval) -> String {
+        let s = Int(t.rounded())
+        if s >= 3600 { return String(format: "%dh %02dm", s / 3600, (s % 3600) / 60) }
+        if s >= 60 { return "\(s / 60)m" }
+        return "\(s)s"
     }
 
     /// Token use as the agent logged it: Claude's per-message `usage`
