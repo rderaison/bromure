@@ -80,7 +80,7 @@ final class SwitchboardEngine {
     /// global one's, that of the first session that's up — else the last
     /// one used, else Claude.
     func agent(room: UUID?) -> Profile.Tool {
-        let all = sessions.sessions.filter { !$0.isSwitchboard && !$0.isDeleted }
+        let all = allSessions.filter { !$0.isSwitchboard && !$0.isDeleted }
         if let room, let first = all.filter({ $0.roomID == room }).min(by: { $0.createdAt < $1.createdAt }) {
             return first.tool
         }
@@ -160,6 +160,9 @@ final class SwitchboardEngine {
     func switchboard(room: UUID) -> AgentSession? {
         sessions.sessions.first { $0.isSwitchboard && $0.roomID == room && !$0.isDeleted }
     }
+
+    /// This host's sessions plus its attached machines'.
+    private var allSessions: [AgentSession] { delegate?.allSessionRecords ?? sessions.sessions }
 
     /// Every Switchboard there is — the global one and the rooms'.
     var allSwitchboards: [AgentSession] {
@@ -243,7 +246,8 @@ final class SwitchboardEngine {
     private func tick() {
         guard let model = listModel() else { return }
         var seen: Set<UUID> = []
-        for s in sessions.sessions where !s.isSwitchboard && !s.isDeleted && !s.isArchived {
+        // This host's sessions and its attached machines' (a room can hold both).
+        for s in allSessions where !s.isSwitchboard && !s.isDeleted && !s.isArchived {
             seen.insert(s.id)
             let b = SessionHome.bucket(for: s, in: model)
             let prev = lastBuckets[s.id]

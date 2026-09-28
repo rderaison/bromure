@@ -194,4 +194,19 @@ struct MachineLinkTests {
         #expect(kept.first?["id"] as? String == mine.uuidString)
         #expect(kept.first?["profileID"] as? String == machine.uuidString)
     }
+
+    @Test("a machine session's room is the host's to say; it can't seat itself or run a Switchboard")
+    func machineRooms() {
+        let machine = UUID(), mine = UUID(), other = UUID(), room = UUID(), claimed = UUID()
+        let listed: [[String: Any]] = [
+            ["id": mine.uuidString, "roomID": claimed.uuidString],
+            ["id": other.uuidString, "roomID": claimed.uuidString, "role": AgentSession.switchboardRole],
+        ]
+        let kept = AttachedMachine.ownSessions(listed, machine: machine, foreign: [],
+                                               roomOf: { $0 == mine ? room : nil })
+        #expect(kept.first { $0["id"] as? String == mine.uuidString }?["roomID"] as? String == room.uuidString)
+        let o = kept.first { $0["id"] as? String == other.uuidString }
+        #expect(o?["roomID"] == nil)
+        #expect(o?["role"] == nil)
+    }
 }

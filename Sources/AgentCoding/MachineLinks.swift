@@ -490,6 +490,9 @@ final class AttachedMachine {
     /// machines'): a machine listing one is lying — it would have that
     /// session's commands routed to it — and the entry is dropped.
     var foreignSessionIDs: () -> Set<UUID> = { [] }
+    /// The room this host put a session of the machine in (rooms are the
+    /// host's; what the machine says is ignored).
+    var roomOf: (UUID) -> UUID? = { _ in nil }
     private var tabs: [Int: AgentStatus] = [:]
     private var poller: Task<Void, Never>?
     private var relay: DelegationRelayClient?
@@ -541,7 +544,7 @@ final class AttachedMachine {
         ws["id"] = id.uuidString; ws["hostKind"] = "agent-host"
         vm["id"] = id.uuidString; vm["hostKind"] = "agent-host"
         let sessions = Self.ownSessions((r.json["agentSessions"] as? [[String: Any]]) ?? [],
-                                        machine: id, foreign: foreignSessionIDs())
+                                        machine: id, foreign: foreignSessionIDs(), roomOf: roomOf)
         var map: [Int: AgentStatus] = [:]
         for t in (vm["tabs"] as? [[String: Any]]) ?? [] {
             if let i = t["index"] as? Int, let s = (t["agentStatus"] as? String).flatMap(AgentStatus.init(rawValue:)) {
@@ -568,8 +571,8 @@ final class AttachedMachine {
     /// The sessions a machine lists, as this host takes them: each one its
     /// own (its profileID forced to the machine), none that someone else
     /// already owns.
-    nonisolated static func ownSessions(_ listed: [[String: Any]], machine: UUID,
-                                        foreign: Set<UUID>) -> [[String: Any]] {
+    nonisolated static func ownSessions(_ listed: [[String: Any]], machine: UUID, foreign: Set<UUID>,
+                                        roomOf: (UUID) -> UUID? = { _ in nil }) -> [[String: Any]] {
         var seen = Set<UUID>()
         return listed.compactMap { d in
             guard let sid = (d["id"] as? String).flatMap(UUID.init(uuidString:)),
@@ -577,6 +580,10 @@ final class AttachedMachine {
             var d = d
             d["id"] = sid.uuidString
             d["profileID"] = machine.uuidString
+            // Rooms are this host's; a machine can't seat itself in one. Nor
+            // run a room's Switchboard.
+            d["roomID"] = roomOf(sid)?.uuidString
+            if d["role"] as? String == AgentSession.switchboardRole { d["role"] = nil }
             return d
         }
     }

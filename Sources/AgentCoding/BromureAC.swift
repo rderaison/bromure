@@ -2026,6 +2026,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         }
                         return ids
                     }
+                    // Its sessions' rooms are this host's to say.
+                    m.roomOf = { [weak self] sid in
+                        guard let self, let r = self.machineSessionRooms[sid],
+                              self.agentRoomStore.room(r) != nil else { return nil }
+                        return r
+                    }
                     self.attachedMachines[id] = m
                 } else if let m = self.attachedMachines.removeValue(forKey: id) {
                     m.stop()
@@ -7382,17 +7388,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return r
     }
 
-    /// Into a room, or out of any (nil). A Switchboard never moves.
+    /// Into a room, or out of any (nil). A Switchboard never moves. An
+    /// attached machine's session too: its room is kept here, not on the
+    /// machine (see machineSessionRooms).
     func roomMove(_ sid: UUID, to room: UUID?) {
-        guard let s = agentSessionStore.session(sid), !s.isSwitchboard,
+        guard let s = sessionRecord(sid), !s.isSwitchboard,
               room == nil || agentRoomStore.room(room) != nil else { return }
-        agentSessionStore.mutate(sid) { $0.roomID = room }
+        setRoom(sid, room)
     }
 
     /// One session dropped on another: into the other's room, or a new room
     /// (named after it) holding both. The room's id.
     func roomGroup(dragged: UUID, onto: UUID) -> UUID? {
-        guard let target = agentSessionStore.session(onto), let moved = agentSessionStore.session(dragged),
+        guard let target = sessionRecord(onto), let moved = sessionRecord(dragged),
               !target.isSwitchboard, !moved.isSwitchboard, dragged != onto else { return nil }
         if let rid = target.roomID, agentRoomStore.room(rid) != nil {
             roomMove(dragged, to: rid)
@@ -7406,9 +7414,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// The room goes; its sessions stay (back in the list), its Switchboard
     /// is archived.
     func roomUngroup(_ id: UUID) {
-        for s in agentSessionStore.sessions where s.roomID == id {
+        for s in allSessionRecords where s.roomID == id {
             if s.isSwitchboard { agentSessionEngine.archive(s.id) }
-            agentSessionStore.mutate(s.id) { $0.roomID = nil }
+            setRoom(s.id, nil)
         }
         agentRoomStore.remove(id)
     }
@@ -7416,26 +7424,77 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Put the room away with every session in it (and its Switchboard),
     /// like archiving a session: agents end, conversations stay readable.
     func roomArchive(_ id: UUID) {
-        for s in agentSessionStore.sessions where s.roomID == id && !s.isDeleted && !s.isArchived {
-            agentSessionEngine.archive(s.id)
+        for s in allSessionRecords where s.roomID == id && !s.isDeleted && !s.isArchived {
+            sessionAction(s.id, "archive")
         }
         agentRoomStore.setArchived(id, true)
     }
 
     /// Bring an archived room back, with its sessions.
     func roomUnarchive(_ id: UUID) {
-        for s in agentSessionStore.sessions where s.roomID == id && s.isArchived && !s.isDeleted {
-            agentSessionEngine.unarchive(s.id)
+        for s in allSessionRecords where s.roomID == id && s.isArchived && !s.isDeleted {
+            sessionAction(s.id, "unarchive")
         }
         agentRoomStore.setArchived(id, false)
     }
 
     /// Delete the room and every session in it (its Switchboard too).
     func roomDelete(_ id: UUID) {
-        for s in agentSessionStore.sessions where s.roomID == id && !s.isDeleted {
-            agentSessionEngine.delete(s.id)
+        for s in allSessionRecords where s.roomID == id && !s.isDeleted {
+            sessionAction(s.id, "delete")
+            if machine(forSession: s.id) != nil { setRoom(s.id, nil) }
         }
         agentRoomStore.remove(id)
+    }
+
+    /// A session's room, wherever the session lives.
+    private func setRoom(_ sid: UUID, _ room: UUID?) {
+        if let m = machine(forSession: sid) {
+            machineSessionRooms[sid] = room
+            saveMachineSessionRooms()
+            m.sessionStore.mutate(sid) { $0.roomID = room }   // at once; the next poll agrees
+            refreshHomeSessions()
+            ACAutomationServer.noteMutation()
+            return
+        }
+        agentSessionStore.mutate(sid) { $0.roomID = room }
+    }
+
+    /// archive / unarchive / delete, on this host's engine or the machine's.
+    private func sessionAction(_ sid: UUID, _ action: String) {
+        if let m = machine(forSession: sid) { m.hostSessionCommand(sid, action, [:]); return }
+        switch action {
+        case "archive": agentSessionEngine.archive(sid)
+        case "unarchive": agentSessionEngine.unarchive(sid)
+        case "delete": agentSessionEngine.delete(sid)
+        default: break
+        }
+    }
+
+    // MARK: Rooms of attached machines' sessions
+
+    /// Session → room for sessions on attached machines. This host decides
+    /// them — a machine's own word isn't taken (it could put itself in any
+    /// room) — and stamps them on what it reads from the machine.
+    private(set) lazy var machineSessionRooms: [UUID: UUID] = {
+        guard let data = try? Data(contentsOf: machineSessionRoomsURL),
+              let d = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: d.compactMap { k, v in
+            UUID(uuidString: k).flatMap { key in UUID(uuidString: v).map { (key, $0) } }
+        })
+    }()
+
+    private var machineSessionRoomsURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BromureAC/machine-session-rooms.json")
+    }
+
+    private func saveMachineSessionRooms() {
+        // Rooms that no longer exist drop out.
+        let live = Set(agentRoomStore.rooms.map(\.id))
+        machineSessionRooms = machineSessionRooms.filter { live.contains($0.value) }
+        let d = Dictionary(uniqueKeysWithValues: machineSessionRooms.map { ($0.key.uuidString, $0.value.uuidString) })
+        if let data = try? JSONEncoder().encode(d) { try? data.write(to: machineSessionRoomsURL, options: .atomic) }
     }
 
     /// The /agent-rooms verbs a remote client drives.

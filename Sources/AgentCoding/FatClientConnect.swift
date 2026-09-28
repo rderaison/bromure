@@ -340,8 +340,9 @@ final class RemoteConnectModel {
         do {
             let devices = try await client.listDevices(bearer: id.bearer)
             // The directory is already scoped to this user's own servers; just
-            // drop our own row (you don't mirror yourself).
-            p2pServers = devices.filter { !$0.isSelf && !$0.revoked }
+            // drop our own row (you don't mirror yourself) and Bromure Native
+            // Macs (they attach to servers; there's nothing to mirror).
+            p2pServers = devices.filter { !$0.isSelf && !$0.revoked && !$0.isAgentHost }
             directoryEverLoaded = true
             firstLoad401Retries = 0
         } catch ControlPlaneError.http(401, _) where directoryEverLoaded {
