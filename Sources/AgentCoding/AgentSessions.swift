@@ -1148,7 +1148,7 @@ enum SessionHome {
     /// a boot placeholder or the pills painted from a suspend snapshot).
     @MainActor
     static func rosterLive(for profileID: UUID, in model: SessionListModel) -> Bool {
-        model.entries.first { $0.id == profileID }?.model.rosterLive ?? false
+        model.sessionEntry(profileID)?.model.rosterLive ?? false
     }
 
     /// The session's live tab, when its workspace is attached, its roster
@@ -1156,7 +1156,7 @@ enum SessionHome {
     @MainActor
     static func liveTab(for s: AgentSession, in model: SessionListModel) -> TabsModel.Tab? {
         guard let w = s.windowIndex,
-              let entry = model.entries.first(where: { $0.id == s.profileID }),
+              let entry = model.sessionEntry(s.profileID),
               entry.model.rosterLive else { return nil }
         return entry.model.tabs.first { $0.index == w }
     }
@@ -1303,7 +1303,7 @@ enum SessionHome {
             // A workspace on its way up (booting, or attached with tmux not
             // yet heard from) is waking, not asleep.
             let ws = workspaceState(of: s, in: model)
-            let attached = model.entries.contains { $0.id == s.profileID }
+            let attached = model.sessionEntry(s.profileID) != nil
             if ws == .booting || (ws == .running && attached) {
                 return NSLocalizedString("Waking up…", comment: "session status")
             }

@@ -1660,8 +1660,45 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         w.workspacesDidChange()
         // A pane came or went: the selected session's tab may have appeared
         // (boot landed) or the workspace gone to sleep.
-        agentSessionStore.reconcile(entries: w.listModel.entries)
+        agentSessionStore.reconcile(entries: sessionEntries(for: w.listModel))
         w.sessionStageDidChange()
+    }
+
+    /// Entries for running workspaces with no window here (a server's
+    /// headless VMs), kept across refreshes (stable tab ids).
+    private var headlessEntryCache: [Profile.ID: SessionListModel.VMEntry] = [:]
+
+    /// The workspaces the session store binds against: the windowed ones,
+    /// plus every running workspace WITHOUT a window, from the roster the
+    /// host keeps for it anyway (also published on the model, so a
+    /// session there reads as live). Windowed-only, a headless workspace
+    /// (a server's VM started with no window) never reconciled: sessions
+    /// launched in it stayed "launching" with their agent up in a tab, the
+    /// launch timed out, their bucket read "asleep", and every wake — a
+    /// room's Switchboard on each visit — opened another copy.
+    func sessionEntries(for model: SessionListModel) -> [SessionListModel.VMEntry] {
+        let shown = Set(model.entries.map(\.id))
+        var headless: [SessionListModel.VMEntry] = []
+        for (id, session) in runningSessions
+        where !shown.contains(id) && session.kubeClusterID == nil && !session.tabs.isEmpty {
+            let entry = headlessEntryCache[id] ?? SessionListModel.VMEntry(
+                id: id, name: session.profile.name, accentHex: session.profile.color.hexInUI,
+                model: TabsModel())
+            headlessEntryCache[id] = entry
+            let ids = Dictionary(entry.model.tabs.map { ($0.index, $0.id) }, uniquingKeysWith: { a, _ in a })
+            entry.model.tabs = session.tabs.map {
+                TabsModel.Tab(label: $0.label, index: $0.index, containerID: $0.containerID,
+                              cwd: $0.cwd, worktreeBranch: $0.worktreeBranch,
+                              parentBranch: $0.parentBranch, rootRepo: $0.rootRepo,
+                              display: $0.display, repoRoot: $0.repoRoot,
+                              id: ids[$0.index] ?? UUID())
+            }
+            entry.model.rosterLive = true   // only ever the guest's own roster
+            headless.append(entry)
+        }
+        headlessEntryCache = headlessEntryCache.filter { k, _ in headless.contains { $0.id == k } }
+        if model.headlessEntries.map(\.id) != headless.map(\.id) { model.headlessEntries = headless }
+        return model.entries + headless
     }
 
     /// Coarse run state for a profile, for the source-list badge: a live VM is
@@ -5239,6 +5276,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return ["ok": true, "engaged": engaged]
     }
 
+    /// Change one field of the SAVED profile. The running session's copy
+    /// carries the global-model overlay and whatever was staged at boot;
+    /// saving it whole wrote those back and undid any settings edit made
+    /// since (a home-size change among them).
+    @MainActor private func saveField(of id: Profile.ID, _ change: (inout Profile) -> Void) {
+        guard var saved = profiles.first(where: { $0.id == id }) else { return }
+        change(&saved)
+        try? store.save(saved)
+        if let i = profiles.firstIndex(where: { $0.id == id }) { profiles[i] = saved }
+    }
+
     /// `vm routing cloud|local` — set the per-profile backend
     /// routing and push it live to the MITM engine (vLLM.md §4.2).
     @MainActor private func automationSetRouting(idOrName: String, mode: String) -> [String: Any] {
@@ -5251,7 +5299,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var profile = session.profile
         profile.modelRouting = routing
         session.profile = profile
-        try? store.save(profile)
+        saveField(of: id) { $0.modelRouting = routing }
         if let engine = mitmEngine { applyRouting(engine, for: profile) }
         return ["ok": true, "routing": routing.rawValue]
     }
@@ -5271,7 +5319,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         profile.activeModelID = resolved?.id ?? modelID
         session.profile = profile
-        try? store.save(profile)
+        saveField(of: id) { $0.activeModelID = resolved?.id ?? modelID }
         if let engine = mitmEngine { applyRouting(engine, for: profile) }
         // Re-point the sentinel + make the engine serve the new model. The guest
         // keeps its env (ANTHROPIC_MODEL = bromure-local), so the switch takes

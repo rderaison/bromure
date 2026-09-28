@@ -1734,7 +1734,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if listModel.sessionsFirst, filePaneOpen {
             setFilePaneOpen(false, animated: false)
         }
-        delegate.agentSessionStore.reconcile(entries: listModel.entries)
+        delegate.agentSessionStore.reconcile(entries: delegate.sessionEntries(for: listModel))
         if let s = SessionHome.initialSession(in: delegate.agentSessionStore, model: listModel,
                                               remembered: rememberedSessionID) {
             selectSession(s.id)
@@ -1751,8 +1751,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         sessionReconcileTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let delegate = self.acDelegate, self.listModel.sessionsFirst else { return }
-                delegate.agentSessionStore.reconcile(entries: self.listModel.entries)
-                delegate.agentSessionEngine.probeLiveness(entries: self.listModel.entries)
+                let entries = delegate.sessionEntries(for: self.listModel)
+                delegate.agentSessionStore.reconcile(entries: entries)
+                delegate.agentSessionEngine.probeLiveness(entries: entries)
                 self.sessionStageDidChange()
             }
         }
@@ -1893,7 +1894,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// store hasn't seen it yet. Falls back to the plain tab.
     func selectSession(profileID: Profile.ID, windowIndex: Int) {
         guard let delegate = acDelegate else { return }
-        delegate.agentSessionStore.reconcile(entries: listModel.entries)
+        delegate.agentSessionStore.reconcile(entries: delegate.sessionEntries(for: listModel))
         if let s = delegate.agentSessionStore.session(profileID: profileID, windowIndex: windowIndex) {
             selectSession(s.id)
         } else if let entry = listModel.entries.first(where: { $0.id == profileID }),

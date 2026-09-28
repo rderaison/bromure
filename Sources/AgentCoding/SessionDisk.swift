@@ -182,16 +182,27 @@ public final class SessionDisk {
     /// Grow an existing home image to its target size (never shrinks). The
     /// file stays sparse; the guest agent runs resize2fs after mounting.
     /// Cold boots only: a saved state was taken against the old geometry.
-    public func growHomeImageIfNeeded() throws {
+    /// Returns what it did, for the log — a grow that doesn't happen must
+    /// say why (a cold boot once left a 128 GB setting at 64 GB, silently).
+    @discardableResult
+    public func growHomeImageIfNeeded() throws -> String {
+        let gib = { (b: UInt64) in "\(b >> 30) GiB" }
+        let target = homeImageTargetBytes
         guard let attrs = try? fm.attributesOfItem(atPath: homeImageURL.path),
-              let size = (attrs[.size] as? NSNumber)?.uint64Value,
-              size < homeImageTargetBytes else { return }
+              let size = (attrs[.size] as? NSNumber)?.uint64Value else {
+            return "home image unreadable at \(homeImageURL.path) — not grown (target \(gib(target)))"
+        }
+        guard size < target else {
+            return "home image \(gib(size)) (setting \(profile.homeImageGB.map { "\($0) GB" } ?? "default"), target \(gib(target))) — nothing to grow"
+        }
         try EphemeralDisk.checkDiskSpace(at: homeImageURL.deletingLastPathComponent().path)
         guard let handle = FileHandle(forWritingAtPath: homeImageURL.path) else {
             throw CocoaError(.fileWriteUnknown)
         }
         defer { try? handle.close() }
-        try handle.truncate(atOffset: homeImageTargetBytes)
+        try handle.truncate(atOffset: target)
+        let now = ((try? fm.attributesOfItem(atPath: homeImageURL.path))?[.size] as? NSNumber)?.uint64Value ?? 0
+        return "home image grown \(gib(size)) → \(gib(now)) (target \(gib(target)))"
     }
 
     /// Saved-state file path for VM suspend/restore. Lives in the profile

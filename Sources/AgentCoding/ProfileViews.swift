@@ -3567,22 +3567,28 @@ struct ProfileEditorView: View {
     private var homeSizeSection: some View {
         let current = homeCapacityGB ?? Self.defaultHomeGB
         let chosen = draft.homeImageGB.map { max($0, current) } ?? current
-        let choices = Set([16, 32, 64, 128, 256, 512, 1024, current, chosen])
-            .filter { $0 >= current }.sorted()
+        // Any whole GB from the current size up to 1 TB; below the current
+        // size it clamps (the image only grows — shrinking would cut the
+        // filesystem short).
+        let size = Binding<Int>(
+            get: { chosen },
+            set: { v in
+                let gb = min(1024, max(current, v))
+                draft.homeImageGB = (gb == current && savedHomeImageGB == nil) ? nil : gb
+            })
         return VStack(alignment: .leading, spacing: 6) {
             Text("Home folder size")
                 .font(.headline)
-            Picker("", selection: Binding(
-                get: { chosen },
-                set: { draft.homeImageGB = ($0 == current && savedHomeImageGB == nil) ? nil : $0 }
-            )) {
-                ForEach(choices, id: \.self) { gb in
-                    Text(String(format: NSLocalizedString("%d GB", comment: "home folder size"), gb)).tag(gb)
-                }
+            HStack(spacing: 6) {
+                TextField("", value: size, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 72)
+                Text(verbatim: "GB")
+                Stepper("", value: size, in: current...1024, step: 8)
+                    .labelsHidden()
             }
-            .labelsHidden()
-            .fixedSize()
-            Text(NSLocalizedString("A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use.", comment: "home folder size"))
+            Text(String(format: NSLocalizedString("From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.", comment: "home folder size"), current))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
