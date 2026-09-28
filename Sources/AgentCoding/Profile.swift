@@ -4227,6 +4227,7 @@ public final class ProfileStore {
                     return !text.contains(hookScript) && !text.contains("/.bromure/pq-")
                 }
             }
+            hooks["SessionStart"] = hookCmd("start") + othersUnder("SessionStart")
             hooks["UserPromptSubmit"] = hookCmd("working") + othersUnder("UserPromptSubmit")
             hooks["PreToolUse"] = hookCmd("working") + [pqPre] + othersUnder("PreToolUse")
             hooks["PostToolUse"] = [pqPost] + othersUnder("PostToolUse")
@@ -4321,12 +4322,17 @@ public final class ProfileStore {
                 *) exit 0 ;;
               esac
             fi
-            printf '%s' "$signal" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
-              && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
+            # "start" (SessionStart) says nothing about the turn — it's only
+            # here to record the transcript below before the first prompt.
+            if [ "$signal" != "start" ]; then
+              printf '%s' "$signal" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
+                && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
+            fi
             # Remember the transcript per tab: the host then reads THIS
             # agent's transcript even when another agent in the same folder
-            # (a delegate) writes newer files there. A /clear records the new
-            # file on the next prompt. Line 2 = the pane and boot it was
+            # (a delegate) writes newer files there. SessionStart records it
+            # as the agent starts — before its first prompt, while the file
+            # doesn't exist yet — and again on a /clear or a resume. Line 2 = the pane and boot it was
             # written from: window indices get reused (a closed last tab, a
             # fresh boot), and the next tab at this index must not inherit
             # the record — readers drop it when those don't match.

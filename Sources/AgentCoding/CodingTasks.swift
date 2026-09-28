@@ -554,6 +554,18 @@ enum AgentSessionLocator {
     /// every boot and it always stamps, so such a file predates the stamp
     /// and survived on /home (it pinned two room cells to one old file).
     /// `window` is a shell word: a number, or `$i` inside a loop.
+    /// `$f` = the transcript the window's agent pinned, when it's this
+    /// agent's (newer than the floor). A pin whose file doesn't exist yet —
+    /// a fresh Claude that hasn't had a prompt — sets `$pe`: the chat stays
+    /// empty rather than falling back to "the newest file in the folder",
+    /// which in a folder shared with a live session is THAT session's.
+    nonisolated static func pinnedPick(window: Int, since: Int) -> String {
+        pinnedTranscriptBlock(window: String(window), into: "c")
+            + "pe=\"\"; if [ -n \"$c\" ]; then if [ -f \"$c\" ]; then "
+            + "[ -n \"$(find \"$c\" -newermt @\(since) 2>/dev/null)\" ] && f=\"$c\"; "
+            + "else pe=1; fi; fi; "
+    }
+
     nonisolated static func pinnedTranscriptBlock(window: String, into varName: String) -> String {
         "pp=\"$HOME/.bromure/transcript-\(window).path\"; \(varName)=\"\"; "
             + "if [ -f \"$pp\" ]; then \(varName)=$(sed -n 1p \"$pp\" 2>/dev/null); "
@@ -1568,18 +1580,16 @@ final class CodingTaskEngine {
     /// beautified view's incremental reader.
     private nonisolated static func transcriptLocatePrefix(
         path: String, since: Int, agent: String?, pinnedWindow: Int?) -> String {
-        var cmd = "f=\"\"; "
+        var cmd = "f=\"\"; pe=\"\"; "
         // The transcript the tab's agent itself named (its hook records the
         // path per window — see agent-status.sh) wins over "the newest file
         // in the folder": two agents in one folder (a delegate beside its
         // delegator) would otherwise take turns owning each other's view.
         // Still floored: a file older than this process is another's.
         if let w = pinnedWindow {
-            cmd += AgentSessionLocator.pinnedTranscriptBlock(window: String(w), into: "c")
-                + "if [ -n \"$c\" ] && [ -f \"$c\" ] && [ -n \"$(find \"$c\" -newermt @\(since) 2>/dev/null)\" ]; "
-                + "then f=\"$c\"; fi; "
+            cmd += AgentSessionLocator.pinnedPick(window: w, since: since)
         }
-        cmd += "if [ -z \"$f\" ]; then "
+        cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
             + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
             + "fi; "
         return cmd
@@ -2468,18 +2478,16 @@ enum CodingTaskEngine {
                                                   pinnedWindow: Int? = nil) -> String? {
         guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
         else { return nil }
-        var cmd = "f=\"\"; "
+        var cmd = "f=\"\"; pe=\"\"; "
         // The transcript the tab's agent itself named (its hook records the
         // path per window — see agent-status.sh) wins over "the newest file
         // in the folder": two agents in one folder (a delegate beside its
         // delegator) would otherwise take turns owning each other's view.
         // Still floored: a file older than this process is another's.
         if let w = pinnedWindow {
-            cmd += AgentSessionLocator.pinnedTranscriptBlock(window: String(w), into: "c")
-                + "if [ -n \"$c\" ] && [ -f \"$c\" ] && [ -n \"$(find \"$c\" -newermt @\(since) 2>/dev/null)\" ]; "
-                + "then f=\"$c\"; fi; "
+            cmd += AgentSessionLocator.pinnedPick(window: w, since: since)
         }
-        cmd += "if [ -z \"$f\" ]; then "
+        cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
             + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
             + "fi; "
         cmd += "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "

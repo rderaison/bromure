@@ -4549,6 +4549,7 @@ def _seed_claude_settings():
             return []
         return [e for e in existing if hook not in json.dumps(e)]
 
+    hooks["SessionStart"] = _hook_cmd("start") + _keep_others("SessionStart")
     hooks["UserPromptSubmit"] = _hook_cmd("working") + _keep_others("UserPromptSubmit")
     hooks["PreToolUse"] = _hook_cmd("working") + _keep_others("PreToolUse")
     hooks["Stop"] = _hook_cmd("done") + _keep_others("Stop")
