@@ -2,6 +2,7 @@ import AppKit
 
 // Bromure Native. Subcommands (run from the same binary):
 //   __hook <state>     Claude Code's status hook (see ClaudeHooks)
+//   __find <args>      GNU find's -printf subset, for the `find` shim (FindCommand)
 //   __mcp-delegation   the agents' delegation MCP server (see DelegationHub)
 //   __remote-menu      what a plain SSH login gets: a terminal on the agents
 //   claude [args…]     start Claude here as a hosted session and attach
@@ -20,6 +21,8 @@ if args.count >= 2 {
     switch args[1] {
     case "__mcp-delegation":
         exit(DelegationShim.run())
+    case "__find":
+        exit(FindCommand.run(Array(args.dropFirst(2))))
     case "__hook":
         exit(ClaudeHooks.runHook(state: args.count > 2 ? args[2] : "done"))
     case "__remote-menu":

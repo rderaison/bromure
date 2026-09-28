@@ -134,11 +134,17 @@ enum HostEnvironment {
         }'
 
         """#
-        // BSD find's -newerXt can't parse GNU's "@<epoch>" (the client floors
-        // transcripts with `-newermt @N`): turn it into a date BSD reads.
+        // BSD find has no -printf (the file browser lists folders with
+        // `-printf '%y%f\0'`): such calls go to our own `__find` (a readdir
+        // walk, FindCommand). Nor can BSD's -newerXt parse GNU's "@<epoch>"
+        // (the client floors transcripts with `-newermt @N`): turned into a
+        // date BSD reads.
         let find = #"""
         #!/bin/bash
-        # Bromure Native: GNU find's `-newermt @<epoch>` on BSD find.
+        # Bromure Native: GNU find's -printf and `-newermt @<epoch>` on macOS.
+        for a in "$@"; do
+          [ "$a" = "-printf" ] && exec \#(shellQuote(AgentHostPaths.executable)) __find "$@"
+        done
         args=(); conv=0
         for a in "$@"; do
           if [ $conv = 1 ] && [[ "$a" == @* ]]; then

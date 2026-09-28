@@ -52,6 +52,19 @@ enum ClaudeHooks {
         guard let pane = env["TMUX_PANE"], !pane.isEmpty else { return 0 }
         let input = FileHandle.standardInput.readDataToEndOfFile()
         let json = (try? JSONSerialization.jsonObject(with: input)) as? [String: Any] ?? [:]
+        // Claude's Notification fires for more than questions: idle_prompt
+        // comes after the agent merely sat at its prompt for a while — that
+        // is "done", not "needs you" (which also holds delegation notices
+        // back). Only a real prompt is needsInput; other notices (auth,
+        // quota…) say nothing about the turn. As bromure-ac's guest hook.
+        var state = state
+        if state == "needsInput", let type = json["notification_type"] as? String, !type.isEmpty {
+            switch type {
+            case "permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input": break
+            case "idle_prompt": state = "done"
+            default: return 0
+            }
+        }
         let transcript = json["transcript_path"] as? String ?? ""
         let agentSession = json["session_id"] as? String ?? ""
 

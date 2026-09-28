@@ -4728,6 +4728,21 @@ final class RemoteHostWindow: NSWindow {
                 "members": roomController?.members.count ?? 0,
                 "models": roomController?.models.count ?? 0,
             ]
+        case "stage-action":
+            // {id, do: archive|unarchive|close|resume|delete}: the session
+            // menu's own action (End & Archive is `archive` on a live one).
+            guard let s = p["id"] as? String, let id = UUID(uuidString: s),
+                  controller.sessionStore.session(id) != nil else { return ["error": "unknown session"] }
+            let a = sessionStageActions
+            switch p["do"] as? String {
+            case "archive": a.archive(id)
+            case "unarchive": a.unarchive(id)
+            case "close": a.close(id)
+            case "resume": a.resume(id)
+            case "delete": a.delete(id)
+            default: return ["error": "do must be archive, unarchive, close, resume or delete"]
+            }
+            return ["ok": true]
         case "sessions", "select-session", "open-session", "new-session", "linux":
             switch action {
             case "select-session", "open-session":   // open-session: never routed to the local window

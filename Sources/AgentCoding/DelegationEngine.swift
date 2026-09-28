@@ -311,8 +311,14 @@ final class DelegationEngine {
     func remotePeers(from me: AgentSession) -> [(RemoteDelegationLink, AgentSession)] {
         guard remotePeersAllowed(from: me) else { return [] }
         var out: [(RemoteDelegationLink, AgentSession)] = []
+        // A session this host already has (its own, an attached machine's —
+        // a host mirroring itself, or a remote that mirrors this one) is
+        // reached here, not twice through a tunnel; nor listed twice.
+        var seen = Set(sessions.sessions.map(\.id))
+        seen.insert(me.id)
         for link in remoteLinks() {
             for s in link.remoteSessions.sessions where !s.isArchived && !s.isDeleted && s.folderMissing != true {
+                guard seen.insert(s.id).inserted else { continue }
                 out.append((link, s))
             }
         }
