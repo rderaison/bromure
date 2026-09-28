@@ -153,6 +153,11 @@ final class P2PBroker: @unchecked Sendable {
     private var relaySessions: [(grantID: String, listener: P2PRelaySession)] = []
     private var serving = false
     private var serveSSHPort = 2222
+    /// Reachable through outbound connections only: the TURN relay (which we
+    /// dial) and the device channel — no host or port-mapped candidates, no
+    /// router mapping, no srflx guess, so nothing ever connects IN to this
+    /// Mac. The agent host sets it (its sshd listens on loopback only).
+    static var relayOnly = false
     /// Rung 2: a router port mapping (PCP/NAT-PMP) to our sshd, held for as long
     /// as we serve and torn down with it. `handleOffered` advertises it as a
     /// `.portMapped` candidate — a dialer connects straight there, no relay.
@@ -256,11 +261,17 @@ final class P2PBroker: @unchecked Sendable {
             FatClientLog.log("p2p: keys-changed — re-syncing authorized keys")
             NotificationCenter.default.post(name: .bromureAccountKeysChanged, object: nil)
         }
+        let revokedToken = id.bearer
         ch.onRevoked = { [weak self] in
             // Only a browser-enrolled device record is ours to erase; the
             // enterprise identity is managed by BACEnrollment's own lifecycle.
+            // And only the record THIS channel spoke for: after a re-enroll the
+            // old device's channel can still be open, and revoking that old
+            // device must not wipe the new record that replaced it.
             FatClientLog.log("p2p: device channel reported revoked")
-            if case .found = DeviceIdentityStore.load() { DeviceIdentityStore.erase() }
+            if case .found(let rec) = DeviceIdentityStore.load(), rec.deviceToken == revokedToken {
+                DeviceIdentityStore.erase()
+            }
             self?.stopServing()
         }
         ch.connect()
@@ -313,7 +324,7 @@ final class P2PBroker: @unchecked Sendable {
         // hole for the old one — without this, host candidates followed the new
         // port but the router mapping stayed on the old, and every advertised
         // path pointed at a port sshd no longer listens on.
-        if !wasServing || portChanged {
+        if !Self.relayOnly && (!wasServing || portChanged) {
             startPortMapKeepalive(sshPort: sshPort)
         }
     }
@@ -405,7 +416,9 @@ final class P2PBroker: @unchecked Sendable {
         lock.lock(); sessions[grant.id] = session; let port = serveSSHPort; lock.unlock()
         guard let ch = channel else { return }
 
-        var candidates = P2PCandidateGatherer.hostCandidates(sshPort: port)
+        // Relay-only: an empty answer (the dialer still needs the frame),
+        // then the relay trickle below.
+        var candidates = Self.relayOnly ? [] : P2PCandidateGatherer.hostCandidates(sshPort: port)
         // Rung 2: if we hold a live router mapping, advertise it — a dialer that
         // can't reach any host candidate connects straight to this public
         // ip:port, no relay. Ranked above srflx/relay by its kind's priority.
@@ -470,8 +483,10 @@ final class P2PBroker: @unchecked Sendable {
         }
         guard let (listener, info) = started else { return }
         register(listener: listener, for: grant.id)
-        let guess = P2PCandidate(kind: .srflx, proto: .tcp, ip: info.mappedIP, port: sshPort)
-        try? await session.send(.candidate, payload: P2PSignalPayload(candidate: guess), via: ch)
+        if !Self.relayOnly {
+            let guess = P2PCandidate(kind: .srflx, proto: .tcp, ip: info.mappedIP, port: sshPort)
+            try? await session.send(.candidate, payload: P2PSignalPayload(candidate: guess), via: ch)
+        }
         try? await session.send(.candidate, payload: P2PSignalPayload(candidate: info.relay), via: ch)
 
         // Resilience rung: when enabled, also stand up a UDP relay whose

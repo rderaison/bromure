@@ -31,8 +31,23 @@ case "$TARGET" in
         DMG_NAME="BromureAgenticCoding.dmg"
         RESOURCE_BUNDLE_NAME="bromure_bromure-ac.bundle"
         ;;
+    native|agent-host)
+        # Bromure Native: the menu-bar app that attaches a plain Mac's agents
+        # to a Bromure AC (Sources/AgentHost). Bundles its own tmux.
+        TARGET="native"
+        PRODUCT_NAME="bromure-native"
+        APP_NAME="Bromure Native"
+        SOURCE_DIR="$SCRIPT_DIR/Sources/AgentHost"
+        ENTITLEMENTS="$SOURCE_DIR/AgentHost.entitlements"
+        INFO_PLIST="$SOURCE_DIR/Info.plist"
+        SDEF_FILE=""
+        ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
+        ICON_COMPOSER=""
+        DMG_NAME="BromureNative.dmg"
+        RESOURCE_BUNDLE_NAME="bromure_bromure-native.bundle"
+        ;;
     *)
-        echo "Usage: $0 [bromure|bromure-ac]" >&2
+        echo "Usage: $0 [bromure|bromure-ac|native]" >&2
         exit 2
         ;;
 esac
@@ -50,7 +65,7 @@ esac
 #   APPLE_ID="jane@example.com" \
 #   TEAM_ID="ABC123XYZ" \
 #   APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
-#   ./package.sh [bromure|bromure-ac]
+#   ./package.sh [bromure|bromure-ac|native]
 
 DEVELOPER_ID="${DEVELOPER_ID:-}"
 APPLE_ID="${APPLE_ID:-}"
@@ -66,7 +81,7 @@ if [ -z "$DEVELOPER_ID" ]; then
     echo "  APPLE_ID=\"you@example.com\" \\"
     echo "  TEAM_ID=\"ABC123XYZ\" \\"
     echo "  APP_PASSWORD=\"xxxx-xxxx-xxxx-xxxx\" \\"
-    echo "  ./package.sh [bromure|bromure-ac]"
+    echo "  ./package.sh [bromure|bromure-ac|native]"
     echo ""
     echo "List available identities with:"
     echo "  security find-identity -v -p codesigning"
@@ -140,19 +155,24 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$PRODU
 
 # Embed provisioning profile (required for iCloud and other entitlements).
 # Per-product profile if present (e.g. bromure-ac.provisionprofile),
-# else fall back to the shared bromure.provisionprofile.
-PROVISION_PROFILE="$SCRIPT_DIR/$PRODUCT_NAME.provisionprofile"
-[ -f "$PROVISION_PROFILE" ] || PROVISION_PROFILE="$SCRIPT_DIR/bromure.provisionprofile"
-if [ ! -f "$PROVISION_PROFILE" ]; then
-    echo "ERROR: Provisioning profile not found at $PROVISION_PROFILE"
-    exit 1
+# else fall back to the shared bromure.provisionprofile. Bromure Native has
+# no restricted entitlements (no keychain group, no virtualization): no
+# profile — another app's would only mismatch its bundle id.
+if [ "$TARGET" != "native" ]; then
+    PROVISION_PROFILE="$SCRIPT_DIR/$PRODUCT_NAME.provisionprofile"
+    [ -f "$PROVISION_PROFILE" ] || PROVISION_PROFILE="$SCRIPT_DIR/bromure.provisionprofile"
+    if [ ! -f "$PROVISION_PROFILE" ]; then
+        echo "ERROR: Provisioning profile not found at $PROVISION_PROFILE"
+        exit 1
+    fi
+    cp "$PROVISION_PROFILE" "$CONTENTS/embedded.provisionprofile"
 fi
-cp "$PROVISION_PROFILE" "$CONTENTS/embedded.provisionprofile"
 
 # Fat-client privileged tunnel daemon (SMAppService, macOS 13+). Same plist
 # build.sh embeds: without it, SMAppService.daemon(plistName:).register()
 # throws and the network helper never appears in Login Items. Only meaningful
-# for the bromure-ac target; harmless elsewhere.
+# for the bromure-ac target.
+if [ "$TARGET" = "bromure-ac" ]; then
 LAUNCHD_DIR="$CONTENTS/Library/LaunchDaemons"
 mkdir -p "$LAUNCHD_DIR"
 cat > "$LAUNCHD_DIR/io.bromure.fatclient-tunnel.plist" <<PLIST
@@ -176,6 +196,7 @@ cat > "$LAUNCHD_DIR/io.bromure.fatclient-tunnel.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+fi
 
 if [ -f "$ICON_FILE" ]; then
     cp "$ICON_FILE" "$RESOURCES_DIR/AppIcon.icns"
@@ -270,8 +291,25 @@ PLIST
     fi
 fi
 
+# Bromure Native: the tmux it runs agents in (tools/build-tmux.sh, pinned in
+# tools/tmux.version; libevent + utf8proc static, system ncurses).
+if [ "$TARGET" = "native" ]; then
+    if [ ! -x "$SCRIPT_DIR/vendor/tmux/bin/tmux" ]; then
+        echo "vendor/tmux missing — running tools/build-tmux.sh…"
+        "$SCRIPT_DIR/tools/build-tmux.sh"
+    fi
+    cp "$SCRIPT_DIR/vendor/tmux/bin/tmux" "$MACOS_DIR/tmux"
+    echo "Bundled tmux $(cat "$SCRIPT_DIR/vendor/tmux/VERSION" 2>/dev/null)."
+fi
+
 # --- Sign ---
 echo "=== Signing with: $DEVELOPER_ID ==="
+
+# Nested executables first (inside-out, hardened runtime + timestamp — both
+# required for notarisation).
+if [ -x "$MACOS_DIR/tmux" ]; then
+    codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$MACOS_DIR/tmux"
+fi
 
 # Sign nested code inside any embedded frameworks first (inside-out ordering
 # is required for notarisation). Sparkle.framework ships helper tools and

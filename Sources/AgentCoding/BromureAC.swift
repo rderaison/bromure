@@ -1627,6 +1627,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// session's state changes. No-op until the unified window exists.
     func refreshSidebar() {
         guard let w = unifiedWindow else { return }
+        let machines = attachedMachines.values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         w.listModel.profileRows = profiles.map { p in
             SessionListModel.ProfileRow(
                 id: p.id,
@@ -1634,13 +1635,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 accentHex: p.color.hexInUI,
                 state: runState(for: p),
                 compromised: SessionDisk.isCompromised(profile: p, store: store))
+        } + machines.map { m in
+            SessionListModel.ProfileRow(id: m.id, name: m.name, accentHex: m.accentHex,
+                                        state: m.connected ? .running : .off, compromised: false)
         }
+        // Attached machines: a row always, a tab entry while connected (its
+        // roster, like a VM's). Kept out of every local reconcile/probe.
+        let former = w.listModel.machineIDs
+        let ids = Set(machines.map(\.id))
+        if former != ids { w.listModel.machineIDs = ids }
+        let wanted = machines.filter(\.connected).map(\.id)
+        let have = w.listModel.entries.filter { former.contains($0.id) || ids.contains($0.id) }.map(\.id)
+        if have != wanted {
+            w.listModel.entries.removeAll { former.contains($0.id) || ids.contains($0.id) }
+            for m in machines where m.connected {
+                w.listModel.entries.append(SessionListModel.VMEntry(
+                    id: m.id, name: m.name, accentHex: m.accentHex, model: m.tabsModel))
+            }
+        }
+        refreshHomeSessions()
         // The new-session screen holds the workspaces by value: rebuild it
         // when they changed (the first one just saved from the editor).
         w.workspacesDidChange()
         // A pane came or went: the selected session's tab may have appeared
         // (boot landed) or the workspace gone to sleep.
-        agentSessionStore.reconcile(entries: w.listModel.entries)
+        agentSessionStore.reconcile(entries: w.listModel.localEntries)
         w.sessionStageDidChange()
     }
 
@@ -1886,6 +1905,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         e.profiles = { [weak self] in self?.profiles ?? [] }
         // The remote hosts mirrored here: their sessions are peers too.
         e.remoteLinks = { [weak self] in self?.remoteDelegationLinks() ?? [] }
+        // Bromure Agent Hosts: their sessions are delegation parties like ours.
+        e.agentHostLinks = { [weak self] in
+            guard let self else { return [] }
+            let mirrored: [AgentHostLink] = self.remoteHostWindows.values.map(\.controller)
+                .filter { $0.connected && $0.isAgentHost }
+            // Machines attached to this app take part as its own.
+            return mirrored + self.attachedMachines.values.filter(\.connected)
+        }
         // The injection scan every message between agents goes through:
         // its first inference pays a ~0.75 s warm-up (10 ms after) — take
         // it now, off the critical path, not on the first request.
@@ -1909,10 +1936,86 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return e
     }()
 
+    /// Plain Macs attached here (Bromure Agent Host, MachineLinks.swift).
+    private(set) var attachedMachines: [UUID: AttachedMachine] = [:]
+    private var machineLinksObserver: NSObjectProtocol?
+
+    /// What the window lists: this app's sessions and the attached machines'
+    /// (read-only — writes go to their own store or machine). Refreshed as
+    /// either changes.
+    let homeSessionStore = AgentSessionStore(mirror: true)
+
+    /// A session by id, here or on an attached machine — synchronous, unlike
+    /// `homeSessionStore` (which follows a change a runloop turn later).
+    func sessionRecord(_ id: UUID) -> AgentSession? {
+        agentSessionStore.session(id) ?? attachedMachines.values.lazy.compactMap { $0.sessionStore.session(id) }.first
+    }
+
+    func sessionRecord(profileID: UUID, windowIndex: Int) -> AgentSession? {
+        if let m = attachedMachines[profileID] { return m.sessionStore.session(profileID: profileID, windowIndex: windowIndex) }
+        return agentSessionStore.session(profileID: profileID, windowIndex: windowIndex)
+    }
+
+    var allSessionRecords: [AgentSession] {
+        agentSessionStore.sessions + attachedMachines.values.flatMap(\.sessionStore.sessions)
+    }
+
+    /// The attached machine a session runs on, if it isn't one of ours.
+    func machine(forSession id: UUID) -> AttachedMachine? {
+        guard agentSessionStore.session(id) == nil else { return nil }
+        return attachedMachines.values.first { $0.sessionStore.session(id) != nil }
+    }
+
+    func refreshHomeSessions() {
+        homeSessionStore.applyMirror(allSessionRecords)
+    }
+
+    private func trackHomeSessions() {
+        withObservationTracking { _ = agentSessionStore.sessions } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.refreshHomeSessions()
+                    self?.trackHomeSessions()
+                }
+            }
+        }
+    }
+
+    /// Follow machines attaching and detaching: each attached one gets its
+    /// session mirror and delegation relay.
+    func watchAttachedMachines() {
+        guard machineLinksObserver == nil else { return }
+        refreshHomeSessions()
+        trackHomeSessions()
+        machineLinksObserver = NotificationCenter.default.addObserver(
+            forName: MachineLinkHub.machinesChanged, object: nil, queue: .main) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let id = note.object as? UUID else { return }
+                if let name = MachineLinkHub.shared.name(id) {
+                    guard self.attachedMachines[id] == nil else { return }
+                    FatClientLog.log("machines: \(name) attached")
+                    let m = AttachedMachine(id: id, name: name) { [weak self] m in
+                        guard let self else { return nil }
+                        return DelegationMCPServer(profileID: m.id,
+                                                   sessions: { [weak m] in m?.sessionStore },
+                                                   engine: { [weak self] in self?.delegationEngine })
+                    }
+                    m.onChange = { [weak self] in self?.refreshSidebar() }
+                    self.attachedMachines[id] = m
+                } else if let m = self.attachedMachines.removeValue(forKey: id) {
+                    m.stop()
+                }
+                self.refreshSidebar()
+            }
+        }
+    }
+
     /// The connected remote-host mirrors, as the delegation engine reaches
     /// them.
     func remoteDelegationLinks() -> [RemoteDelegationLink] {
-        remoteHostWindows.values.map(\.controller).filter(\.connected)
+        // An agent host holds no delegation records of its own: its sessions
+        // take part through `agentHostLinks` instead.
+        remoteHostWindows.values.map(\.controller).filter { $0.connected && !$0.isAgentHost }
     }
 
     /// Who the "@" palette offers to a composer in workspace `profileID`:
@@ -2808,6 +2911,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let link = EnrollLink(parsing: url.absoluteString) else { continue }
             let state = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "state" })?.value
+            // A handoff Bromure Native on this Mac started (an older
+            // bromure.io always hands back to bromure://): pass it on.
+            let support = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support")
+            let pendingStates = ["BromureNative", "BromureAgentHost"].compactMap {
+                try? String(contentsOf: support.appendingPathComponent("\($0)/pending-enroll-state"), encoding: .utf8)
+            }
+            if let state, pendingStates.contains(state),
+               var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                comps.scheme = "bromure-agent-host"
+                if let forward = comps.url { NSWorkspace.shared.open(forward) }
+                return
+            }
             P2PEnrollmentCoordinator.shared.complete(link, state: state)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -3310,10 +3426,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let keys = try? await client.listSSHKeys(bearer: bearer) else { return }
             // Re-tag each key's comment with our marker + device id, so the
             // reconcile prunes only account keys and never manual ones.
+            // An agent host's key is tagged so it can only attach its machine
+            // (still under `marker`, so the reconcile manages it).
             let lines: [String] = keys.compactMap { k in
                 let p = k.sshPublicKey.split(separator: " ").map(String.init)
                 guard p.count >= 2 else { return nil }
-                return "\(p[0]) \(p[1]) \(marker)\(k.id)"
+                return "\(p[0]) \(p[1]) \(k.authorizedKeysComment)"
             }
             await MainActor.run {
                 RemoteAccessServer.shared.setManagedKeys(marker: marker, lines: lines)
@@ -3489,6 +3607,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             at: socketURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let server = ACAutomationServer(unixSocketPath: socketURL.path)
         wireAutomationCallbacks(into: server)
+        watchAttachedMachines()
         server.start()
         controlServer = server
     }
@@ -4216,7 +4335,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             MainActor.assumeIsolated {
                 guard let self else { return ["error": "no app"] }
                 if let action = params["action"] as? String,
-                   action.hasPrefix("room-") || action.hasPrefix("branch-") || action.hasPrefix("review-") || ["sidebar-search", "select-session", "undo-toast",
+                   action.hasPrefix("room-") || action.hasPrefix("branch-") || action.hasPrefix("review-") || ["sidebar-search", "sidebar-folds", "session-surface", "select-session", "undo-toast",
                                                  "activity-open", "command-held", "appearance"].contains(action) {
                     return self.roomDebug(action, params)
                 }
@@ -7363,6 +7482,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if w.listModel.selectedRoomID == id { w.clearRoom() }
             roomUngroup(id)   // test cleanup: the sessions stay
             return ["ok": true]
+        case "session-surface":
+            return w.debugSessionSurface
+        case "sidebar-folds":
+            // {machines?, native?}: fold/unfold the sidebar's machine sections.
+            if let m = p["machines"] as? Bool { w.listModel.machinesExpanded = m }
+            if let n = p["native"] as? Bool { w.listModel.nativeExpanded = n }
+            return ["ok": true, "machineIDs": w.listModel.machineIDs.map(\.uuidString)]
         case "sidebar-search":
             // Type into the sidebar's search (content matches included).
             w.listModel.sidebarFilter = p["text"] as? String ?? ""
@@ -7597,9 +7723,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func fetchSessionTranscript(_ s: AgentSession) async -> String? {
         let cwd = ScheduledAutomationEngine.guestPath(s.cwd)
         guard let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: 0,
-                                                               agent: s.tool.rawValue),
-              let out = try? await guestExec(profileID: s.profileID, command: cmd, timeout: 20),
-              !out.isEmpty else { return nil }
+                                                               agent: s.tool.rawValue) else { return nil }
+        let out: String?
+        if let m = attachedMachines[s.profileID] {
+            out = try? await m.hostExec(cmd, timeout: 20)   // an attached machine's session
+        } else {
+            out = try? await guestExec(profileID: s.profileID, command: cmd, timeout: 20)
+        }
+        guard let out, !out.isEmpty else { return nil }
         return out
     }
 
@@ -10892,6 +11023,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // What that host holds for sessions of ours (a peer's reply to a
         // request from here) is taken the moment its mirror shows it.
         controller.onDelegationsMirrored = { [weak self] c in self?.delegationEngine.remoteMirrorChanged(c) }
+        // A Bromure Agent Host's agents get this Mac's delegation MCP, as the
+        // sessions of the machine that mirror shows.
+        controller.makeDelegationServer = { [weak self, weak controller] in
+            guard let self, let controller, let id = controller.agentHostID else { return nil }
+            return DelegationMCPServer(profileID: id,
+                                       sessions: { [weak controller] in controller?.sessionStore },
+                                       engine: { [weak self] in self?.delegationEngine })
+        }
         let window = RemoteHostWindow(controller: controller)
         window.center()
         remoteHostWindows[host.id] = window
@@ -11147,6 +11286,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// now — no agent yet, or a path outside the home of a machine that
     /// is off.
     func listGuestFolders(profileID: UUID, path: String) async -> [String]? {
+        if let m = attachedMachines[profileID] {
+            let r = await m.control("POST", "/agent-sessions/folders",
+                                    ["profile": profileID.uuidString, "path": path])
+            return r?.json["folders"] as? [String]
+        }
         guard let profile = profiles.first(where: { $0.id == profileID }) else { return nil }
         let guestPath = SessionHome.guestPath(path)
         let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"

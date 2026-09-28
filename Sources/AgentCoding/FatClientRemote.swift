@@ -381,6 +381,16 @@ enum RemoteTransport {
     /// Open a `browser-mcp <vm>` channel: a raw byte stream carrying the remote
     /// workspace agent's line-delimited JSON-RPC, which the fat client answers
     /// with its own `BrowserMCPServer`.
+    /// A parked `delegation-mcp` channel to a Bromure Agent Host (see
+    /// FatClient.delegationMCPVerb); nil when it can't be opened.
+    static func delegationMCPDial(host rawHost: RemoteHost) -> Int32? {
+        _ = bootstrap
+        ensureClientKey()
+        let host = resolved(rawHost)
+        guard host.sshDestination != nil else { return nil }
+        return SSHDialer.shared.dial(host: host, verb: FatClient.delegationMCPVerb)
+    }
+
     static func browserMCPDial(host rawHost: RemoteHost, vm: String) -> Int32? {
         _ = bootstrap
         ensureClientKey()

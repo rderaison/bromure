@@ -604,7 +604,7 @@ struct DelegationTests {
         let engine: DelegationEngine
         var commands: [String] = []
         init(hostName: String, engine: DelegationEngine) { self.hostName = hostName; self.engine = engine }
-        var remoteSessions: AgentSessionStore { engine.sessions }
+        var remoteSessions: AgentSessionStore { engine.localSessions }
         var remoteDelegations: DelegationStore { engine.store }
         func remoteWorkspaceName(_ id: UUID) -> String { engine.workspaceName(id) }
         func remoteRequest(parentSessionID: UUID, parentLabel: String, parentHost: String,

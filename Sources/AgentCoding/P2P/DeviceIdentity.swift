@@ -50,6 +50,33 @@ struct DeviceRecord: Codable, Equatable {
 /// NEVER be mistaken for "not enrolled" (that would silently orphan the
 /// device on the control plane and force a re-enroll after a screen lock).
 enum DeviceIdentityStore {
+#if AGENT_HOST
+    // The agent host (Sources/AgentHost) is a separate device with no keychain
+    // access group (ad-hoc signed), which the data-protection keychain refuses:
+    // its record is an owner-only file in its support directory instead.
+    enum LoadResult: Equatable {
+        case found(DeviceRecord)
+        case notEnrolled
+        case unavailable(OSStatus)
+    }
+    private static var fileURL: URL { AgentHostPaths.support.appendingPathComponent("device-record.json") }
+
+    static func load() -> LoadResult {
+        guard let data = try? Data(contentsOf: fileURL) else { return .notEnrolled }
+        guard let rec = try? JSONDecoder().decode(DeviceRecord.self, from: data) else { return .unavailable(-1) }
+        return .found(rec)
+    }
+
+    @discardableResult
+    static func store(_ rec: DeviceRecord) -> Bool {
+        guard let data = try? JSONEncoder().encode(rec) else { return false }
+        FileManager.default.createFile(atPath: fileURL.path, contents: data,
+                                       attributes: [.posixPermissions: 0o600])
+        return (try? Data(contentsOf: fileURL)) == data
+    }
+
+    static func erase() { try? FileManager.default.removeItem(at: fileURL) }
+#else
     private static let service = "io.bromure.agentic-coding.p2p"
     private static let account = "device-record"
 
@@ -116,6 +143,7 @@ enum DeviceIdentityStore {
             kSecUseDataProtectionKeychain: true,
         ] as CFDictionary)
     }
+#endif
 }
 
 // MARK: - Signing key

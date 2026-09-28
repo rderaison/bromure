@@ -28,8 +28,20 @@ case "$TARGET" in
         ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
         ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureAC.icon"
         ;;
+    native|agent-host)
+        TARGET="native"
+        PRODUCT_NAME="bromure-native"
+        APP_NAME="Bromure Native"
+        SOURCE_DIR="$SCRIPT_DIR/Sources/AgentHost"
+        ENTITLEMENTS="$SOURCE_DIR/AgentHost.entitlements"
+        INFO_PLIST="$SOURCE_DIR/Info.plist"
+        SDEF_FILE=""
+        RESOURCE_BUNDLE_NAME="bromure_bromure-native.bundle"
+        ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
+        ICON_COMPOSER=""
+        ;;
     *)
-        echo "Usage: $0 [bromure|bromure-ac]" >&2
+        echo "Usage: $0 [bromure|bromure-ac|native]" >&2
         exit 2
         ;;
 esac
@@ -141,7 +153,8 @@ mkdir -p "$RESOURCES_DIR"
 # Fat-client privileged tunnel daemon (SMAppService, macOS 13+). The plist lives
 # in Contents/Library/LaunchDaemons/ and runs `bromure-ac __tunnel-helper` as
 # root once the user approves it in System Settings › Login Items. Only meaningful
-# for the bromure-ac target; harmless elsewhere.
+# for the bromure-ac target.
+if [ "$TARGET" = "bromure-ac" ]; then
 LAUNCHD_DIR="$CONTENTS/Library/LaunchDaemons"
 mkdir -p "$LAUNCHD_DIR"
 BUNDLE_BIN_NAME="$(basename "$BINARY")"
@@ -166,6 +179,7 @@ cat > "$LAUNCHD_DIR/io.bromure.fatclient-tunnel.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+fi
 
 # Copy the per-target icon as AppIcon.icns (matching CFBundleIconFile in
 # both Info.plists). Fall back to the shared icon if the target-specific
@@ -307,6 +321,19 @@ PLIST
         cp -R "$SCRIPT_DIR/vendor/ghostty-resources/terminfo" "$RESOURCES_DIR/terminfo"
         echo "Bundled ghostty resources (native terminal surfaces)."
     fi
+fi
+
+# Bromure Native: bundle the tmux it runs agents in (tools/build-tmux.sh builds
+# it from the pinned tools/tmux.version when missing). Signed on its own,
+# before the outer bundle.
+if [ "$TARGET" = "native" ]; then
+    if [ ! -x "$SCRIPT_DIR/vendor/tmux/bin/tmux" ]; then
+        echo "vendor/tmux missing — running tools/build-tmux.sh…"
+        "$SCRIPT_DIR/tools/build-tmux.sh"
+    fi
+    cp "$SCRIPT_DIR/vendor/tmux/bin/tmux" "$MACOS_DIR/tmux"
+    codesign --force --sign "$SIGN_ID" --options runtime "$MACOS_DIR/tmux"
+    echo "Bundled tmux $(cat "$SCRIPT_DIR/vendor/tmux/VERSION" 2>/dev/null)."
 fi
 
 # Code sign with entitlements.

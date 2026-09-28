@@ -400,6 +400,8 @@ struct FatClientAuthProbe: ParsableCommand {
     func run() throws {
         var host = RemoteHost(name: address, address: address, port: port, user: user)
         host.pinnedHostKey = pinned
+        // This Mac's client key — what a server's authorized_keys needs.
+        print("client key: \(RemoteTransport.clientPublicKey() ?? "none")")
         var scannedLine: String?
         if let info = RemoteTransport.scanHostKey(address: address, port: port) {
             print("host-key fingerprint: \(info.fingerprint)")

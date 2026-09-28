@@ -544,6 +544,40 @@ final class ACAutomationServer {
             if mutating { Self.noteMutation() }
             self.sendResponse(fd: fd, status: status, body: body, gzip: acceptGzip)
         }
+        // An attached machine (Bromure Agent Host) parks its links here, and
+        // requests aimed at it go down one (MachineLinks.swift).
+        if isTrustedLocal {
+            if method == "POST", path == "/machines/link" {
+                guard let idStr = bodyJSON["id"] as? String, let id = UUID(uuidString: idStr) else {
+                    sendResponse(fd: fd, status: 400, body: ["error": "id required"]); return
+                }
+                let name = (bodyJSON["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "Mac"
+                let owner = bodyJSON["owner"] as? String
+                guard MachineLinkHub.shared.mayPark(id: id, owner: owner) else {
+                    sendResponse(fd: fd, status: 403, body: ["error": "That machine is attached by another device"])
+                    return
+                }
+                // The 200 first: once parked, a verb may follow at any moment.
+                let head = Array("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".utf8)
+                guard Darwin.write(fd, head, head.count) == head.count,
+                      MachineLinkHub.shared.park(fd: fd, id: id, name: String(name.prefix(80)), owner: owner)
+                else { Darwin.close(fd); return }
+                return
+            }
+            if method == "POST", path == "/machines/detach" {
+                if let id = (bodyJSON["id"] as? String).flatMap(UUID.init(uuidString:)),
+                   !MachineLinkHub.shared.detach(id: id, owner: bodyJSON["owner"] as? String) {
+                    sendResponse(fd: fd, status: 403, body: ["error": "That machine is attached by another device"])
+                    return
+                }
+                sendResponse(fd: fd, status: 200, body: ["ok": true]); return
+            }
+            if let machine = MachineLinkHub.shared.target(method: method, path: path, body: bodyJSON) {
+                MachineLinkHub.shared.proxy(clientFD: fd, machine: machine, method: method, path: path,
+                                            body: bodyJSON, gzip: acceptGzip)
+                return
+            }
+        }
         switch (method, path) {
         case ("GET", "/health"):
             sendResponse(fd: fd, status: 200, body: [
@@ -799,7 +833,7 @@ final class ACAutomationServer {
         // docker-style VM control plane.
         case ("GET", "/vms"):
             let vms = DispatchQueue.main.sync { self.onListVMs?() ?? [] }
-            sendResponse(fd: fd, status: 200, body: ["vms": vms])
+            sendResponse(fd: fd, status: 200, body: ["vms": vms + MachineLinkHub.shared.stateAdditions().vms])
 
         case ("POST", "/vms"):
             guard debugEnabled || isTrustedLocal else {
@@ -2162,6 +2196,15 @@ final class ACAutomationServer {
             if let delegations = self.onListDelegations?() { d["delegations"] = delegations }
             if let rooms = self.onListAgentRooms?() { d["agentRooms"] = rooms }
             return d
+        }
+        // Attached machines: one more workspace + VM each, and their sessions.
+        let machines = MachineLinkHub.shared.stateAdditions()
+        if !machines.workspaces.isEmpty {
+            snapshot["workspaces"] = ((snapshot["workspaces"] as? [[String: Any]]) ?? []) + machines.workspaces
+            snapshot["vms"] = ((snapshot["vms"] as? [[String: Any]]) ?? []) + machines.vms
+            if let local = snapshot["agentSessions"] as? [[String: Any]] {
+                snapshot["agentSessions"] = local + machines.sessions
+            }
         }
         // The workspace VM subnet, so a fat client can route/tunnel to it. nil
         // until the first VM boots the vmnet interface.

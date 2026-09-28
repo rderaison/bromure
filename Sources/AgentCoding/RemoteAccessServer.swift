@@ -3,7 +3,11 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOSSH
+// The agent host (Sources/AgentHost) compiles this file too, with small
+// stand-ins for SandboxEngine / ProfileStore / SupplyChainLog.
+#if !AGENT_HOST
 import SandboxEngine
+#endif
 
 // MARK: - Remote access (optional embedded SSH server)
 
@@ -85,6 +89,13 @@ final class RemoteAccessServer {
         @Sendable (_ vm: String, _ completion: @escaping @Sendable (Int32) -> Void) -> Void
     var browserMCPResolver: BrowserMCPResolver?
 
+    /// Resolves a `delegation-mcp` channel (the Bromure Agent Host): hands the
+    /// fd of the next agent MCP stream to `offer` once one arrives — possibly
+    /// much later; the channel stays parked until then. `offer` returns false
+    /// when the channel died meanwhile (the fd is then still the caller's).
+    typealias StreamResolver = @Sendable (_ offer: @escaping @Sendable (Int32) -> Bool) -> Void
+    var delegationMCPResolver: StreamResolver?
+
     init(paths: Paths = .default) { self.paths = paths }
 
     enum RemoteError: LocalizedError {
@@ -114,6 +125,7 @@ final class RemoteAccessServer {
         try ensureLayout()
         let hostKey = try loadOrCreateHostKey()
         let authorized = config.pubkeyAuth ? loadAuthorizedNIOKeys() : []
+        let machineOnly = config.pubkeyAuth ? loadMachineOnlyKeys() : [:]
         let exe = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
         let user = NSUserName()
         // Fat clients bridge to this owner-only control socket over SSH.
@@ -121,6 +133,7 @@ final class RemoteAccessServer {
         let forwardResolver = self.forwardResolver
         let udpForwardResolver = self.udpForwardResolver
         let browserMCPResolver = self.browserMCPResolver
+        let delegationMCPResolver = self.delegationMCPResolver
 
         let g = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         // Shared across all connections: the per-source-IP password rate
@@ -132,6 +145,7 @@ final class RemoteAccessServer {
             allowPassword: config.passwordAuth,
             allowPubkey: config.pubkeyAuth,
             authorizedKeys: authorized,
+            machineOnlyKeys: machineOnly,
             throttle: throttle)
         self.authFactory = authFactory   // for hot-reloading keys without a restart
 
@@ -161,6 +175,7 @@ final class RemoteAccessServer {
                 // rate limiter; the throttle state itself is shared.
                 let peerIP = channel.remoteAddress?.ipAddress ?? "unknown"
                 let delegate = authFactory.make(peerIP: peerIP)
+                let grant = delegate.grant
                 return channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandlers([
                         NIOSSHHandler(
@@ -179,7 +194,9 @@ final class RemoteAccessServer {
                                                              controlSocketPath: controlSocketPath,
                                                              forwardResolver: forwardResolver,
                                                              udpForwardResolver: udpForwardResolver,
-                                                             browserMCPResolver: browserMCPResolver))
+                                                             browserMCPResolver: browserMCPResolver,
+                                                             delegationMCPResolver: delegationMCPResolver,
+                                                             grant: grant))
                                 }
                             }),
                         RemoteErrorHandler(),
@@ -284,6 +301,21 @@ final class RemoteAccessServer {
 
     // MARK: Authorized keys
 
+    /// Account keys of Bromure Agent Hosts (bromure.io capability
+    /// `agent-host`), tagged `bromure-account:machine:<device>` by the key
+    /// sync: they may only attach that machine (see RemoteGrant).
+    static let machineKeyMarker = "bromure-account:machine:"
+
+    private func loadMachineOnlyKeys() -> [NIOSSHPublicKey: String] {
+        var out: [NIOSSHPublicKey: String] = [:]
+        for k in listAuthorizedKeys() where k.comment.hasPrefix(Self.machineKeyMarker) {
+            if let pk = try? NIOSSHPublicKey(openSSHPublicKey: k.line) {
+                out[pk] = String(k.comment.dropFirst(Self.machineKeyMarker.count))
+            }
+        }
+        return out
+    }
+
     private func loadAuthorizedNIOKeys() -> Set<NIOSSHPublicKey> {
         var set = Set<NIOSSHPublicKey>()
         for k in listAuthorizedKeys() {
@@ -387,7 +419,8 @@ final class RemoteAccessServer {
     /// go through `start()` from `remoteAccessApply`.
     private func reloadIfRunning() {
         guard running, let cfg = current else { return }
-        authFactory?.updateAuthorizedKeys(cfg.pubkeyAuth ? loadAuthorizedNIOKeys() : [])
+        authFactory?.updateAuthorizedKeys(cfg.pubkeyAuth ? loadAuthorizedNIOKeys() : [],
+                                          machineOnly: cfg.pubkeyAuth ? loadMachineOnlyKeys() : [:])
     }
 
     // MARK: Filesystem

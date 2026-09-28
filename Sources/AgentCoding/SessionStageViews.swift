@@ -511,6 +511,16 @@ struct SessionHeaderView: View {
                                 .onTapGesture { actions.showMachine(s.profileID) }
                                 .contextMenu { machineItems(s, gone: gone) }
                                 .help(NSLocalizedString("The machine this session runs on — click for its details, right-click for its settings", comment: "session header"))
+                                // A native machine: said plainly, every time.
+                                if model.machineIDs.contains(s.profileID) {
+                                    HStack(spacing: 4) {
+                                        NativeMachineBadge(size: 10)
+                                        Text(NativeMachine.notSandboxed)
+                                            .foregroundStyle(NativeMachine.tint)
+                                    }
+                                    .fixedSize()
+                                    .help(NativeMachine.help(workspaceName(s.profileID)))
+                                }
                             }
                             metaDot
                             HStack(spacing: 4) {

@@ -300,7 +300,16 @@ struct ControlPlaneClient {
         let _: Ack = try await post("/v1/devices/self-revoke", body: [:], bearer: bearer)
     }
 
-    struct DeviceSSHKey: Decodable { let id: String; let name: String?; let sshPublicKey: String }
+    struct DeviceSSHKey: Decodable {
+        let id: String; let name: String?; let sshPublicKey: String
+        /// The device's bromure.io capability; "agent-host" keys may only
+        /// attach their machine (RemoteGrant). nil from an older control plane.
+        let capability: String?
+        /// The authorized_keys comment a server tags this key with.
+        var authorizedKeysComment: String {
+            capability == "agent-host" ? "bromure-account:machine:\(id)" : "bromure-account:\(id)"
+        }
+    }
     /// The SSH public keys of the caller's OWN devices — a server installs these
     /// into its authorized_keys so every one of the user's clients connects
     /// passwordless. Per-user scope (never another user's keys).

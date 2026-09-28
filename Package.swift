@@ -99,6 +99,27 @@ let package = Package(
                 .linkedLibrary("c++"),
             ]
         ),
+        // Bromure Native (the agent host): a menu-bar app that runs agents (Claude Code) in
+        // tmux on a plain Mac — no VM — and serves a subset of bromure-ac's
+        // control API over the same embedded SSH server, so a Bromure AC
+        // window mirrors it as a remote machine ("This Mac"). Shares the SSH
+        // server sources with bromure-ac through symlinks in Shared/.
+        .executableTarget(
+            name: "bromure-native",
+            dependencies: [
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
+            ],
+            path: "Sources/AgentHost",
+            exclude: ["Info.plist", "AgentHost.entitlements"],
+            swiftSettings: [.define("AGENT_HOST")],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("OpenDirectory"),
+            ]
+        ),
         .binaryTarget(
             name: "GhosttyKit",
             path: "vendor/GhosttyKit.xcframework"

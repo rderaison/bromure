@@ -437,6 +437,10 @@ final class RemoteHostController {
 
     func stop() {
         Self.liveHosts[host.id] = nil
+#if os(macOS)
+        delegationRelay?.stop()
+        delegationRelay = nil
+#endif
         stateStream?.stop()
         stateStream = nil
         pollTimerBox.timer?.invalidate()
@@ -583,7 +587,20 @@ final class RemoteHostController {
     // MARK: Apply snapshot → models
 
     private func apply(_ snapshot: [String: Any]) {
+        // First: the workspace/VM updates below already consult it.
+        isAgentHost = snapshot["hostKind"] as? String == "agent-host"
+        if listModel.switchboardAvailable == isAgentHost { listModel.switchboardAvailable = !isAgentHost }
+#if os(macOS)
+        updateDelegationRelay()
+#endif
         let workspaces = (snapshot["workspaces"] as? [[String: Any]]) ?? []
+        let attached = Set(workspaces.compactMap { w -> UUID? in
+            guard w["hostKind"] as? String == "agent-host" else { return nil }
+            return (w["id"] as? String).flatMap(UUID.init(uuidString:))
+        })
+        if attached != agentHostWorkspaces { agentHostWorkspaces = attached }
+        // Listed apart, and flagged unsandboxed (see NativeMachine).
+        if listModel.machineIDs != attached { listModel.machineIDs = attached }
         // Guard against a degenerate /state. A 200 poll whose body was truncated
         // or failed to parse arrives as an (almost) empty snapshot, and a partial
         // server snapshot can momentarily carry no workspaces. Applying it wipes
@@ -807,44 +824,7 @@ final class RemoteHostController {
     /// Reconcile a remote roster (array of tab dicts) into a `TabsModel`.
     /// Mirrors `SessionPane.applyTabList` but operates on the model directly.
     private func applyRemoteTabs(_ model: TabsModel, _ tabs: [[String: Any]]) {
-        if model.tabs.count > tabs.count {
-            model.tabs.removeLast(model.tabs.count - tabs.count)
-        }
-        while model.tabs.count < tabs.count {
-            model.tabs.append(TabsModel.Tab(label: "", index: 0))
-        }
-        var activePos = model.activeIndex
-        for (i, t) in tabs.enumerated() {
-            let tab = model.tabs[i]
-            let idx = t["index"] as? Int ?? i
-            let title = t["title"] as? String ?? "shell"
-            if tab.index != idx { tab.index = idx }
-            if tab.label != title { tab.label = title }
-            // `title` is already display-or-label; mirror it into `display` so
-            // `shownLabel`, worktree ordering and the Merge-tab check all work.
-            let display: String? = title
-            if tab.display != display { tab.display = display }
-            let wb = t["worktreeBranch"] as? String
-            if tab.worktreeBranch != wb { tab.worktreeBranch = wb }
-            let pb = t["parentBranch"] as? String
-            if tab.parentBranch != pb { tab.parentBranch = pb }
-            let rr = t["rootRepo"] as? String
-            if tab.rootRepo != rr { tab.rootRepo = rr }
-            let repoRoot = t["repoRoot"] as? String
-            if tab.repoRoot != repoRoot { tab.repoRoot = repoRoot }
-            let cwd = t["cwd"] as? String
-            if tab.cwd != cwd { tab.cwd = cwd }
-            let containerID = t["containerID"] as? String
-            if tab.containerID != containerID { tab.containerID = containerID }
-            if let s = t["agentStatus"] as? String, let st = AgentStatus(rawValue: s) {
-                if tab.agentStatus != st { tab.agentStatus = st }
-            } else if tab.agentStatus != .done {
-                tab.agentStatus = .done
-            }
-            if (t["active"] as? Bool) == true { activePos = i }
-        }
-        if activePos >= model.tabs.count { activePos = max(0, model.tabs.count - 1) }
-        if model.activeIndex != activePos { model.activeIndex = activePos }
+        model.applyRoster(tabs)
     }
 
     /// Mirror the guest's listening sockets into the shared `TabsModel` (feeds
@@ -1034,6 +1014,29 @@ final class RemoteHostController {
     /// The server sends sessions (a build with the sessions-first home); an
     /// older server doesn't, and the window keeps the classic layout.
     private(set) var supportsSessions = false
+
+    /// The server is a Bromure Agent Host (agents in tmux on a plain Mac, no
+    /// VMs): no browser pane to relay, no Switchboard, no machine controls.
+    private(set) var isAgentHost = false
+    /// Workspaces of the server that are attached plain Macs (a Bromure Agent
+    /// Host attached to it): no VM, so no browser pane to relay.
+    private(set) var agentHostWorkspaces: Set<UUID> = []
+#if os(macOS)
+    /// Answers the agent host's agents' delegation MCP with this Mac's
+    /// engine (DelegationRelayClient). Set by the app delegate.
+    var makeDelegationServer: (@MainActor () -> DelegationMCPServer?)?
+    private var delegationRelay: DelegationRelayClient?
+
+    private func updateDelegationRelay() {
+        if isAgentHost, connected, delegationRelay == nil, let make = makeDelegationServer {
+            let host = self.host
+            let relay = DelegationRelayClient(dial: { RemoteTransport.delegationMCPDial(host: host) },
+                                              label: host.name, makeServer: make)
+            delegationRelay = relay
+            relay.start()
+        }
+    }
+#endif
 
     private func applySessions(_ list: [[String: Any]]?) {
         guard let list else { supportsSessions = false; return }
@@ -5284,7 +5287,8 @@ final class RemoteHostWindow: NSWindow {
     /// not only after the user clicks the globe. Idempotent; guarded on a live
     /// VM so we don't spin re-dialing an off workspace.
     private func ensureBrowserRelay(_ id: Profile.ID) {
-        guard browserRelays[id] == nil else { return }
+        guard browserRelays[id] == nil, !controller.isAgentHost,
+              !controller.agentHostWorkspaces.contains(id) else { return }
         let state = controller.runState(for: id)
         guard state == .running || state == .booting else { return }
         let relay = BrowserMCPRelayClient(

@@ -20,11 +20,68 @@ struct DelegationRefusal: Error, CustomStringConvertible {
     var description: String { why }
 }
 
+/// A connected Bromure Agent Host (agents in tmux on a plain Mac, mirrored
+/// through a fat-client window): its sessions take part in delegation as
+/// fully as this Mac's own — the records live here, and what the engine
+/// would do in a guest (run a command, move a file, type a notice, resume,
+/// archive, start a delegate) goes to that Mac over its link.
+@MainActor
+protocol AgentHostLink: AnyObject {
+    /// The machine id its sessions carry as `profileID`.
+    var agentHostID: UUID? { get }
+    var hostName: String { get }
+    var hostSessions: AgentSessionStore { get }
+    func hostExec(_ command: String, timeout: Int) async throws -> String
+    func hostFileOp(_ op: [String: Any], timeout: Int) async throws -> [String: Any]
+    func hostTabStatus(window: Int) -> AgentStatus?
+    func hostSessionCommand(_ id: UUID, _ action: String, _ body: [String: Any])
+    func hostStartSession(tool: Profile.Tool, cwd: String, message: String) async -> UUID?
+}
+
+/// This Mac's sessions and the connected agent hosts', as one set — what
+/// the engine (and the MCP server, through `engine.sessions`) looks up.
+@MainActor
+struct DelegationSessions {
+    let local: AgentSessionStore
+    let hosts: [AgentHostLink]
+
+    var sessions: [AgentSession] { local.sessions + hosts.flatMap(\.hostSessions.sessions) }
+
+    func session(_ id: UUID) -> AgentSession? {
+        local.session(id) ?? hosts.lazy.compactMap { $0.hostSessions.session(id) }.first
+    }
+
+    func session(profileID: UUID, windowIndex: Int) -> AgentSession? {
+        if let h = host(for: profileID) { return h.hostSessions.session(profileID: profileID, windowIndex: windowIndex) }
+        return local.session(profileID: profileID, windowIndex: windowIndex)
+    }
+
+    func host(for profileID: UUID) -> AgentHostLink? {
+        hosts.first { $0.agentHostID == profileID }
+    }
+
+    /// A host's session is its host's record: the delegation links it
+    /// carries are sent there (the mirror catches up on the next poll).
+    func mutate(_ id: UUID, _ change: (inout AgentSession) -> Void) {
+        if local.session(id) != nil { local.mutate(id, change); return }
+        guard let h = hosts.first(where: { $0.hostSessions.session(id) != nil }),
+              var s = h.hostSessions.session(id) else { return }
+        change(&s)
+        var body: [String: Any] = [:]
+        if let p = s.parentSessionID { body["parentSessionID"] = p.uuidString }
+        if let d = s.delegationID { body["delegationID"] = d.uuidString }
+        h.hostSessionCommand(id, "delegation-link", body)
+    }
+}
+
 @MainActor
 final class DelegationEngine {
     let store: DelegationStore
-    let sessions: AgentSessionStore
+    let localSessions: AgentSessionStore
     let sessionEngine: AgentSessionEngine
+    /// The connected Bromure Agent Hosts (see AgentHostLink).
+    var agentHostLinks: @MainActor () -> [AgentHostLink] = { [] }
+    var sessions: DelegationSessions { DelegationSessions(local: localSessions, hosts: agentHostLinks()) }
     private weak var delegate: ACAppDelegate?
 
     /// Scans a text crossing between agents; a non-nil return is the snippet
@@ -90,7 +147,7 @@ final class DelegationEngine {
     init(store: DelegationStore, sessions: AgentSessionStore,
          sessionEngine: AgentSessionEngine, delegate: ACAppDelegate?) {
         self.store = store
-        self.sessions = sessions
+        self.localSessions = sessions
         self.sessionEngine = sessionEngine
         self.delegate = delegate
         ticker = Task { [weak self] in
@@ -114,7 +171,48 @@ final class DelegationEngine {
     }
 
     func workspaceName(_ id: UUID) -> String {
-        profiles().first { $0.id == id }?.name ?? ""
+        if let h = sessions.host(for: id) { return h.hostName }
+        return profiles().first { $0.id == id }?.name ?? ""
+    }
+
+    // MARK: Machines (a workspace's VM, or an agent host)
+
+    func guestExec(profileID: UUID, command: String, timeout: Int = 30) async throws -> String {
+        if let h = sessions.host(for: profileID) { return try await h.hostExec(command, timeout: timeout) }
+        guard let delegate else { throw ACAppDelegate.GuestExecError.connectionFailed }
+        return try await delegate.guestExec(profileID: profileID, command: command, timeout: timeout)
+    }
+
+    func guestFileOp(profileID: UUID, op: [String: Any], timeout: Int = 30) async throws -> [String: Any] {
+        if let h = sessions.host(for: profileID) { return try await h.hostFileOp(op, timeout: timeout) }
+        guard let delegate else { throw ACAppDelegate.GuestExecError.connectionFailed }
+        return try await delegate.guestFileOp(profileID: profileID, op: op, timeout: timeout)
+    }
+
+    /// An agent host is up while its link is (it has no VM to boot).
+    func ensureUp(_ profileID: UUID, quietly: Bool) async -> Bool {
+        if sessions.host(for: profileID) != nil { return true }
+        return await sessionEngine.ensureUp(profileID, quietly: quietly)
+    }
+
+    func resume(_ id: UUID, message: String?, quietly: Bool) {
+        let all = sessions
+        if let s = all.session(id), let h = all.host(for: s.profileID) {
+            var body: [String: Any] = [:]
+            if let message { body["message"] = message }
+            h.hostSessionCommand(id, "resume", body)
+            return
+        }
+        sessionEngine.resume(id, message: message, quietly: quietly)
+    }
+
+    func archive(_ id: UUID) {
+        let all = sessions
+        if let s = all.session(id), let h = all.host(for: s.profileID) {
+            h.hostSessionCommand(id, "archive", [:])
+            return
+        }
+        sessionEngine.archive(id)
     }
 
     /// The sessions `me` may talk to: not put away, in a workspace the
@@ -270,8 +368,16 @@ final class DelegationEngine {
         // delegation on a technicality; an explicit worktree: true still
         // insists (and fails with the reason). Another workspace has no
         // folder of the parent's to branch: the child gets one of its own.
+        // An agent host's delegate runs beside its parent, in the same folder
+        // (worktrees are made by bromure-agentd, which a plain Mac lacks).
+        let targetHost = sessions.host(for: targetProfileID)
         let useWorktree: Bool
-        if elsewhere {
+        if targetHost != nil {
+            if worktree == true {
+                throw DelegationRefusal("Delegates on “\(targetHost!.hostName)” run in your folder — worktrees aren't available there; pass worktree: false.")
+            }
+            useWorktree = false
+        } else if elsewhere {
             useWorktree = false
         } else if let worktree {
             useWorktree = worktree
@@ -281,7 +387,12 @@ final class DelegationEngine {
             useWorktree = false
         }
         let childID: UUID?
-        if useWorktree {
+        if let targetHost {
+            childID = await targetHost.hostStartSession(tool: tool, cwd: parent.cwd, message: opening)
+            guard childID != nil else {
+                throw DelegationRefusal("“\(targetHost.hostName)” couldn't start the delegate.")
+            }
+        } else if useWorktree {
             childID = sessionEngine.startWorktree(from: parentID, name: title, tool: tool, message: opening)
         } else {
             childID = sessionEngine.start(.init(profileID: targetProfileID, tool: tool,
@@ -299,7 +410,13 @@ final class DelegationEngine {
         briefMessage.readAt = briefMessage.at      // the child opens with it
         d.messages = [briefMessage]
         store.upsert(d)
-        sessions.mutate(childID) { $0.parentSessionID = parentID; $0.delegationID = d.id }
+        if let targetHost {
+            // Not in the mirror yet: tell the host directly.
+            targetHost.hostSessionCommand(childID, "delegation-link", [
+                "parentSessionID": parentID.uuidString, "delegationID": d.id.uuidString])
+        } else {
+            sessions.mutate(childID) { $0.parentSessionID = parentID; $0.delegationID = d.id }
+        }
         audit(parent.profileID, auditData(title: title, kind: .brief, from: .parent, to: .child, text: brief))
         BACDebug.log("delegation", "“\(parent.title)” delegated “\(title)” (\(tool.rawValue)\(useWorktree ? ", worktree" : "")\(elsewhere ? ", in \(target?.name ?? "")" : ""))")
         return d
@@ -395,11 +512,11 @@ final class DelegationEngine {
     /// inbox on a remote host, chunk by chunk through the tunnel.
     private func uploadToRemote(_ link: RemoteDelegationLink, delegation id: UUID,
                                 from: AgentSession, path raw: String) async throws {
-        guard let delegate else { throw DelegationRefusal("Files can't travel without the machines.") }
+        guard delegate != nil else { throw DelegationRefusal("Files can't travel without the machines.") }
         let src = Self.resolve(raw, cwd: from.cwd)
         let name = (src as NSString).lastPathComponent
         guard !name.isEmpty, name != ".", name != ".." else { throw DelegationRefusal("Can't send “\(raw)”.") }
-        let probe = ((try? await delegate.guestExec(
+        let probe = ((try? await self.guestExec(
             profileID: from.profileID,
             command: "if [ -d \(Self.q(src)) ]; then echo dir; elif [ -f \(Self.q(src)) ]; then stat -c %s \(Self.q(src)); else echo missing; fi",
             timeout: 15)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -411,20 +528,20 @@ final class DelegationEngine {
             readPath = "/tmp/bromure-xfer-\(DelegationNotice.shortID(UUID())).tgz"
             sendName = name + ".tgz"
             extract = true
-            _ = try await delegate.guestExec(
+            _ = try await self.guestExec(
                 profileID: from.profileID,
                 command: "tar -C \(Self.q((src as NSString).deletingLastPathComponent)) -czf \(Self.q(readPath)) \(Self.q(name))",
                 timeout: 180)
         }
         defer {
             if extract {
-                Task { _ = try? await delegate.guestExec(profileID: from.profileID, command: "rm -f \(Self.q(readPath))", timeout: 10) }
+                Task { _ = try? await self.guestExec(profileID: from.profileID, command: "rm -f \(Self.q(readPath))", timeout: 10) }
             }
         }
         var offset: Int64 = 0
         var first = true
         while true {
-            let resp = try await delegate.guestFileOp(
+            let resp = try await self.guestFileOp(
                 profileID: from.profileID,
                 op: ["op": "read", "path": readPath, "offset": offset, "length": Self.remoteChunk], timeout: 60)
             guard let b64 = resp["data"] as? String, let data = Data(base64Encoded: b64) else {
@@ -484,27 +601,27 @@ final class DelegationEngine {
     /// the peer's inbox; `extract` unpacks a tarball once complete.
     func receiveRemoteFile(delegationID: UUID, name: String, data: Data, append: Bool, extract: Bool) async throws {
         guard let d = store.delegation(delegationID), d.parentRemote != nil,
-              let peer = sessions.session(d.childSessionID), let delegate else {
+              let peer = sessions.session(d.childSessionID), delegate != nil else {
             throw DelegationRefusal("Unknown request.")
         }
         let safe = (name as NSString).lastPathComponent
         guard !safe.isEmpty, safe != ".", safe != "..", !name.contains("/") else { throw DelegationRefusal("Bad file name.") }
-        guard await sessionEngine.ensureUp(peer.profileID, quietly: true) else {
+        guard await ensureUp(peer.profileID, quietly: true) else {
             throw DelegationRefusal("The peer's workspace didn't start in time.")
         }
         let dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))"
         let target = dest + "/" + safe
         if !append {
-            _ = try await delegate.guestExec(profileID: peer.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)
+            _ = try await self.guestExec(profileID: peer.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)
         }
         let soFar = (pendingRemoteFiles[delegationID] ?? []).reduce(Int64(0)) { $0 + Int64($1.utf8.count) }
         _ = soFar
-        _ = try await delegate.guestFileOp(
+        _ = try await self.guestFileOp(
             profileID: peer.profileID,
             op: ["op": "write", "path": target, "data": data.base64EncodedString(), "append": append], timeout: 60)
         if extract, data.count < Self.remoteChunk {
             // The last chunk of a tarball: unpack it where it landed.
-            _ = try await delegate.guestExec(
+            _ = try await self.guestExec(
                 profileID: peer.profileID,
                 command: "tar -xzf \(Self.q(target)) -C \(Self.q(dest)) && rm -f \(Self.q(target))", timeout: 180)
             let unpacked = dest + "/" + String(safe.dropLast(4))
@@ -577,13 +694,13 @@ final class DelegationEngine {
     /// parent, read off the peer's machine — only paths a message names.
     func readRemoteFile(delegationID: UUID, path: String, offset: Int64, length: Int) async throws -> [String: Any] {
         guard let d = store.delegation(delegationID), d.parentRemote != nil,
-              let peer = sessions.session(d.childSessionID), let delegate else {
+              let peer = sessions.session(d.childSessionID), delegate != nil else {
             throw DelegationRefusal("Unknown request.")
         }
         guard d.messages.contains(where: { $0.to == .parent && ($0.files ?? []).contains(path) }) else {
             throw DelegationRefusal("Not a file of this request.")
         }
-        return try await delegate.guestFileOp(
+        return try await self.guestFileOp(
             profileID: peer.profileID,
             op: ["op": "read", "path": path, "offset": offset, "length": min(max(length, 1), Self.remoteChunk)],
             timeout: 60)
@@ -624,10 +741,10 @@ final class DelegationEngine {
     /// the parent's inbox for that request; the local paths (the far ones
     /// where a copy failed, so nothing is silently lost).
     private func landRemoteFiles(_ link: RemoteDelegationLink, _ d: Delegation, _ m: DelegationMessage) async -> [String] {
-        guard let delegate, let parent = sessions.session(d.parentSessionID), let files = m.files else { return m.files ?? [] }
+        guard delegate != nil, let parent = sessions.session(d.parentSessionID), let files = m.files else { return m.files ?? [] }
         let dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))"
-        guard await sessionEngine.ensureUp(parent.profileID, quietly: true),
-              (try? await delegate.guestExec(profileID: parent.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)) != nil
+        guard await ensureUp(parent.profileID, quietly: true),
+              (try? await self.guestExec(profileID: parent.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)) != nil
         else { return files }
         var out: [String] = []
         for far in files {
@@ -639,7 +756,7 @@ final class DelegationEngine {
             while true {
                 guard let chunk = try? await link.remoteDownload(delegation: d.id, path: far, offset: offset, length: Self.remoteChunk) else { ok = false; break }
                 if first || !chunk.data.isEmpty {
-                    guard (try? await delegate.guestFileOp(
+                    guard (try? await self.guestFileOp(
                         profileID: parent.profileID,
                         op: ["op": "write", "path": target, "data": chunk.data.base64EncodedString(), "append": !first],
                         timeout: 60)) != nil else { ok = false; break }
@@ -687,9 +804,9 @@ final class DelegationEngine {
     /// Is the session's folder inside a git checkout? Unknowable without
     /// the machine (no delegate, in tests): then no.
     private func isGitRepository(_ s: AgentSession) async -> Bool {
-        guard let delegate else { return false }
+        guard delegate != nil || sessions.host(for: s.profileID) != nil else { return false }
         let path = ScheduledAutomationEngine.guestPath(s.cwd)
-        let out = (try? await delegate.guestExec(
+        let out = (try? await self.guestExec(
             profileID: s.profileID,
             command: "git -C \(Self.q(path)) rev-parse --is-inside-work-tree 2>/dev/null", timeout: 15)) ?? ""
         return out.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
@@ -910,7 +1027,7 @@ final class DelegationEngine {
     private func retireChild(_ d: Delegation) {
         guard !d.isRequest,
               let child = sessions.session(d.childSessionID), !child.isDeleted, !child.isArchived else { return }
-        sessionEngine.archive(d.childSessionID)
+        archive(d.childSessionID)
     }
 
     // MARK: Inbox
@@ -979,15 +1096,15 @@ final class DelegationEngine {
     /// Returns the paths as the recipient sees them. On one machine it is a
     /// plain copy. The recipient's workspace is started if it's off.
     func transfer(_ paths: [String], from: AgentSession, toProfile: UUID, inbox: String) async throws -> [String] {
-        guard let delegate else { throw DelegationRefusal("Files can't travel without the machines.") }
+        guard delegate != nil else { throw DelegationRefusal("Files can't travel without the machines.") }
         guard paths.count <= Self.transferMaxFiles else {
             throw DelegationRefusal("At most \(Self.transferMaxFiles) files per message — send a folder, or an archive.")
         }
-        guard await sessionEngine.ensureUp(toProfile, quietly: true) else {
+        guard await ensureUp(toProfile, quietly: true) else {
             throw DelegationRefusal("The recipient's workspace didn't start in time.")
         }
         let dest = "\(Self.inboxBase)/\(inbox)"
-        _ = try await delegate.guestExec(profileID: toProfile, command: "mkdir -p \(Self.q(dest))", timeout: 15)
+        _ = try await self.guestExec(profileID: toProfile, command: "mkdir -p \(Self.q(dest))", timeout: 15)
         var out: [String] = []
         var total: Int64 = 0
         for raw in paths {
@@ -995,7 +1112,7 @@ final class DelegationEngine {
             let name = (src as NSString).lastPathComponent
             guard !name.isEmpty, name != ".", name != ".." else { throw DelegationRefusal("Can't send “\(raw)”.") }
             let target = dest + "/" + name
-            let probe = ((try? await delegate.guestExec(
+            let probe = ((try? await self.guestExec(
                 profileID: from.profileID,
                 command: "if [ -d \(Self.q(src)) ]; then echo dir; elif [ -f \(Self.q(src)) ]; then stat -c %s \(Self.q(src)); else echo missing; fi",
                 timeout: 15)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1003,7 +1120,7 @@ final class DelegationEngine {
                 throw DelegationRefusal("No such file on your machine: \(raw)")
             }
             if from.profileID == toProfile {
-                _ = try await delegate.guestExec(profileID: toProfile,
+                _ = try await self.guestExec(profileID: toProfile,
                                                  command: "cp -a \(Self.q(src)) \(Self.q(target))", timeout: 120)
                 out.append(target)
                 continue
@@ -1011,13 +1128,13 @@ final class DelegationEngine {
             if probe == "dir" {
                 let tgz = "/tmp/bromure-xfer-\(DelegationNotice.shortID(UUID())).tgz"
                 let parent = (src as NSString).deletingLastPathComponent
-                _ = try await delegate.guestExec(
+                _ = try await self.guestExec(
                     profileID: from.profileID,
                     command: "tar -C \(Self.q(parent)) -czf \(Self.q(tgz)) \(Self.q(name))", timeout: 180)
                 total += try await copyFile(from: from.profileID, path: tgz, to: toProfile, path: target + ".tgz",
                                             budgetLeft: Self.transferCap - total)
-                _ = try? await delegate.guestExec(profileID: from.profileID, command: "rm -f \(Self.q(tgz))", timeout: 10)
-                _ = try await delegate.guestExec(
+                _ = try? await self.guestExec(profileID: from.profileID, command: "rm -f \(Self.q(tgz))", timeout: 10)
+                _ = try await self.guestExec(
                     profileID: toProfile,
                     command: "tar -xzf \(Self.q(target + ".tgz")) -C \(Self.q(dest)) && rm -f \(Self.q(target + ".tgz"))",
                     timeout: 180)
@@ -1034,11 +1151,11 @@ final class DelegationEngine {
     /// One file, chunk by chunk through the host; the bytes moved.
     private func copyFile(from srcProfile: UUID, path src: String, to dstProfile: UUID, path dst: String,
                           budgetLeft: Int64) async throws -> Int64 {
-        guard let delegate else { throw DelegationRefusal("Files can't travel without the machines.") }
+        guard delegate != nil else { throw DelegationRefusal("Files can't travel without the machines.") }
         var offset: Int64 = 0
         var first = true
         while true {
-            let resp = try await delegate.guestFileOp(
+            let resp = try await self.guestFileOp(
                 profileID: srcProfile,
                 op: ["op": "read", "path": src, "offset": offset, "length": Self.transferChunk], timeout: 60)
             guard let b64 = resp["data"] as? String, let data = Data(base64Encoded: b64) else {
@@ -1049,7 +1166,7 @@ final class DelegationEngine {
                 throw DelegationRefusal("\(src) is \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) — up to \(ByteCountFormatter.string(fromByteCount: Self.transferCap, countStyle: .file)) travels per message.")
             }
             if first || !data.isEmpty {
-                _ = try await delegate.guestFileOp(
+                _ = try await self.guestFileOp(
                     profileID: dstProfile,
                     op: ["op": "write", "path": dst, "data": b64, "append": !first], timeout: 60)
             }
@@ -1120,7 +1237,7 @@ final class DelegationEngine {
             }
         }
         items.sort { $0.1.at < $1.1.at }
-        guard !items.isEmpty, let s = sessions.session(sessionID), let delegate, !s.isDeleted else { return }
+        guard !items.isEmpty, let s = sessions.session(sessionID), delegate != nil, !s.isDeleted else { return }
         if s.isLaunching { return }
         let lines = items.map { d, m in
             m.to == .parent ? DelegationNotice.toParent(m, in: d) : DelegationNotice.toChild(m, in: d)
@@ -1144,7 +1261,7 @@ final class DelegationEngine {
             // that was asleep wakes to the request.
             markNoticed()
             BACDebug.log("delegation", "resuming “\(s.title)” with \(items.count) notice(s)")
-            sessionEngine.resume(sessionID, message: line, quietly: true)
+            resume(sessionID, message: line, quietly: true)
             return
         }
         // Typed only into a tab the liveness probe has seen this agent in:
@@ -1163,7 +1280,7 @@ final class DelegationEngine {
         markNoticed()
         Task {
             let t0 = Date()
-            _ = try? await delegate.guestExec(
+            _ = try? await self.guestExec(
                 profileID: s.profileID,
                 command: CodingTaskEngine.typeCommand(tabIndex: w, text: line), timeout: 15)
             BACDebug.log("delegation", "typed notice into “\(s.title)” took=\(BACDebug.ms(t0))")
@@ -1187,7 +1304,9 @@ final class DelegationEngine {
     }
 
     private func tabStatus(_ s: AgentSession) -> AgentStatus? {
-        guard let w = s.windowIndex, let delegate else { return nil }
+        guard let w = s.windowIndex else { return nil }
+        if let h = sessions.host(for: s.profileID) { return h.hostTabStatus(window: w) }
+        guard let delegate else { return nil }
         return delegate.pane(for: s.profileID)?.model.tabs.first { $0.index == w }?.agentStatus
     }
 

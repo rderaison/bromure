@@ -3,7 +3,11 @@ import NIOCore
 import NIOPosix
 import NIOSSH
 import OpenDirectory
+// The agent host (Sources/AgentHost) compiles this file too, with small
+// stand-ins for SandboxEngine / ProfileStore / SupplyChainLog.
+#if !AGENT_HOST
 import SandboxEngine
+#endif
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -37,6 +41,21 @@ enum SystemPassword {
     }
 }
 
+/// What a connection may do once authenticated. Filled in by its
+/// `RemoteAuthDelegate`, read by its channels (`SSHPTYSessionHandler`).
+final class RemoteGrant: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _machineOnly: String?
+    /// Set when the key is a Bromure Agent Host's: the account device it
+    /// belongs to. Such a connection may only attach that machine
+    /// (`machine-link` / `machine-detach`) — never the control API, a shell,
+    /// or a forward.
+    var machineOnly: String? {
+        get { lock.lock(); defer { lock.unlock() }; return _machineOnly }
+        set { lock.lock(); _machineOnly = newValue; lock.unlock() }
+    }
+}
+
 /// Single-user auth: only the user who launched bromure-ac, via an enrolled
 /// public key and/or that user's macOS account password.
 final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @unchecked Sendable {
@@ -44,6 +63,10 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
     private let allowPassword: Bool
     private let allowPubkey: Bool
     private let authorizedKeys: Set<NIOSSHPublicKey>
+    /// Keys that may only attach a machine → the account device they're for.
+    private let machineOnlyKeys: [NIOSSHPublicKey: String]
+    /// This connection's grant, decided here.
+    let grant = RemoteGrant()
     /// Shared across every connection; rate-limits password attempts per
     /// source IP. See `RemoteAuthThrottle`.
     private let throttle: RemoteAuthThrottle
@@ -51,12 +74,13 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
     private let peerIP: String
 
     init(username: String, allowPassword: Bool, allowPubkey: Bool,
-         authorizedKeys: Set<NIOSSHPublicKey>,
+         authorizedKeys: Set<NIOSSHPublicKey>, machineOnlyKeys: [NIOSSHPublicKey: String] = [:],
          throttle: RemoteAuthThrottle, peerIP: String) {
         self.username = username
         self.allowPassword = allowPassword
         self.allowPubkey = allowPubkey
         self.authorizedKeys = authorizedKeys
+        self.machineOnlyKeys = machineOnlyKeys
         self.throttle = throttle
         self.peerIP = peerIP
     }
@@ -84,6 +108,7 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
             // identical (both instant), so this path leaks nothing about
             // which name is right.
             let ok = allowPubkey && request.username == username && authorizedKeys.contains(pk.publicKey)
+            if ok { grant.machineOnly = machineOnlyKeys[pk.publicKey] }
             FatClientLog.log("srv-auth: publickey user=\(request.username) allow=\(allowPubkey) "
                 + "nameMatch=\(request.username == username) inSet=\(authorizedKeys.contains(pk.publicKey)) "
                 + "keys=\(authorizedKeys.count) → \(ok ? "SUCCESS" : "FAILURE")")
@@ -138,14 +163,17 @@ final class RemoteAuthDelegateFactory: @unchecked Sendable {
     private let allowPubkey: Bool
     private let lock = NSLock()
     private var authorizedKeys: Set<NIOSSHPublicKey>
+    private var machineOnlyKeys: [NIOSSHPublicKey: String]
     private let throttle: RemoteAuthThrottle
 
     init(username: String, allowPassword: Bool, allowPubkey: Bool,
-         authorizedKeys: Set<NIOSSHPublicKey>, throttle: RemoteAuthThrottle) {
+         authorizedKeys: Set<NIOSSHPublicKey>, machineOnlyKeys: [NIOSSHPublicKey: String] = [:],
+         throttle: RemoteAuthThrottle) {
         self.username = username
         self.allowPassword = allowPassword
         self.allowPubkey = allowPubkey
         self.authorizedKeys = authorizedKeys
+        self.machineOnlyKeys = machineOnlyKeys
         self.throttle = throttle
     }
 
@@ -154,14 +182,14 @@ final class RemoteAuthDelegateFactory: @unchecked Sendable {
     /// drops live SSH sessions. New connections authenticate against the updated
     /// set; connections already past auth are untouched. Called off the event
     /// loop (the key-sync path); `make` reads it on the loop — hence the lock.
-    func updateAuthorizedKeys(_ keys: Set<NIOSSHPublicKey>) {
-        lock.lock(); authorizedKeys = keys; lock.unlock()
+    func updateAuthorizedKeys(_ keys: Set<NIOSSHPublicKey>, machineOnly: [NIOSSHPublicKey: String] = [:]) {
+        lock.lock(); authorizedKeys = keys; machineOnlyKeys = machineOnly; lock.unlock()
     }
 
     func make(peerIP: String) -> RemoteAuthDelegate {
-        lock.lock(); let keys = authorizedKeys; lock.unlock()
+        lock.lock(); let keys = authorizedKeys; let machine = machineOnlyKeys; lock.unlock()
         return RemoteAuthDelegate(username: username, allowPassword: allowPassword,
-                                  allowPubkey: allowPubkey, authorizedKeys: keys,
+                                  allowPubkey: allowPubkey, authorizedKeys: keys, machineOnlyKeys: machine,
                                   throttle: throttle, peerIP: peerIP)
     }
 }
@@ -286,6 +314,9 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     private let forwardResolver: RemoteAccessServer.ForwardResolver?
     private let udpForwardResolver: RemoteAccessServer.UDPForwardResolver?
     private let browserMCPResolver: RemoteAccessServer.BrowserMCPResolver?
+    private let delegationMCPResolver: RemoteAccessServer.StreamResolver?
+    /// What this connection may do (a Bromure Agent Host's key: attach only).
+    private let grant: RemoteGrant?
     /// Inbound SSH bytes that arrived before the forward fd was ready (the vsock
     /// connect is async), flushed once it is.
     private var pendingInbound: [UInt8] = []
@@ -340,13 +371,17 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     init(menuExe: String, user: String, controlSocketPath: String,
          forwardResolver: RemoteAccessServer.ForwardResolver? = nil,
          udpForwardResolver: RemoteAccessServer.UDPForwardResolver? = nil,
-         browserMCPResolver: RemoteAccessServer.BrowserMCPResolver? = nil) {
+         browserMCPResolver: RemoteAccessServer.BrowserMCPResolver? = nil,
+         delegationMCPResolver: RemoteAccessServer.StreamResolver? = nil,
+         grant: RemoteGrant? = nil) {
         self.menuExe = menuExe
         self.user = user
         self.controlSocketPath = controlSocketPath
         self.forwardResolver = forwardResolver
         self.udpForwardResolver = udpForwardResolver
         self.browserMCPResolver = browserMCPResolver
+        self.delegationMCPResolver = delegationMCPResolver
+        self.grant = grant
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -384,8 +419,22 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
                 context.channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil)
             }
         case let e as SSHChannelRequestEvent.ShellRequest:
+            guard grant?.machineOnly == nil else { refuse(context, e.wantReply, "a shell"); return }
             startMenu(context: context, wantReply: e.wantReply)
         case let e as SSHChannelRequestEvent.ExecRequest:
+            // A Bromure Agent Host's key attaches its machine, and that's all.
+            let owner = grant?.machineOnly.map { "device:" + $0 }
+            if let link = FatClient.parseMachineLink(e.command) {
+                startMachineLink(context: context, wantReply: e.wantReply, request: "/machines/link",
+                                 id: link.id, name: link.name, owner: owner)
+                return
+            }
+            if let id = FatClient.parseMachineDetach(e.command) {
+                startMachineLink(context: context, wantReply: e.wantReply, request: "/machines/detach",
+                                 id: id, name: nil, owner: owner)
+                return
+            }
+            guard owner == nil else { refuse(context, e.wantReply, e.command); return }
             // A fat client asks for the control-socket bridge or a guest TCP
             // forward by name. Anything else keeps ForceCommand semantics:
             // ignore the command, run the menu.
@@ -398,6 +447,8 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
                 startUDPForwardBridge(context: context, wantReply: e.wantReply, ip: ip)
             } else if let vm = FatClient.parseBrowserMCP(e.command) {
                 startBrowserMCPBridge(context: context, wantReply: e.wantReply, vm: vm)
+            } else if e.command == FatClient.delegationMCPVerb {
+                startDelegationMCPBridge(context: context, wantReply: e.wantReply)
             } else {
                 startMenu(context: context, wantReply: e.wantReply)
             }
@@ -518,7 +569,26 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// The SSH `authorized_keys` gate stands in for the socket's owner-only
     /// (0600) file mode. Reuses the same read-pump machinery as the menu path,
     /// with `childPID = -1` so teardown/finish skip the process reap.
-    private func startControlBridge(context: ChannelHandlerContext, wantReply: Bool) {
+    private func refuse(_ context: ChannelHandlerContext, _ wantReply: Bool, _ what: String) {
+        FatClientLog.log("srv: refused \(what.prefix(60)) — an agent host's key may only attach its machine")
+        if wantReply { context.channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
+        context.channel.close(promise: nil)
+    }
+
+    /// A machine link (or detach): the control socket, with the request
+    /// written by us — the owner in it comes from this connection's grant,
+    /// never from the client — then a plain byte pipe (the link's verbs).
+    private func startMachineLink(context: ChannelHandlerContext, wantReply: Bool,
+                                  request: String, id: UUID, name: String?, owner: String?) {
+        var body: [String: Any] = ["id": id.uuidString]
+        if let name { body["name"] = name }
+        if let owner { body["owner"] = owner }
+        let payload = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        let head = "POST \(request) HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: \(payload.count)\r\n\r\n"
+        startControlBridge(context: context, wantReply: wantReply, preamble: Data(head.utf8) + payload)
+    }
+
+    private func startControlBridge(context: ChannelHandlerContext, wantReply: Bool, preamble: Data? = nil) {
         guard !started else { return }
         started = true
         let channel = context.channel
@@ -528,6 +598,16 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
             if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
             channel.close(promise: nil)
             return
+        }
+        if let preamble {
+            // Small, and the socket is still blocking: written whole.
+            let ok = preamble.withUnsafeBytes { Darwin.write(sockFD, $0.baseAddress, $0.count) } == preamble.count
+            guard ok else {
+                Darwin.close(sockFD)
+                if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
+                channel.close(promise: nil)
+                return
+            }
         }
         master = sockFD
         // Non-blocking BEFORE the flush so the write path can't block on a full
@@ -638,6 +718,35 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
                 FatClientLog.log("browser-mcp: resolver \(vm) -> fd=\(fd)")
                 self.wireResolvedFD(channel: channel, wantReply: wantReply, fd: fd)
             }
+        }
+    }
+
+    /// Park the channel until the agent host has an agent's delegation-MCP
+    /// stream for it, then byte-pump the two (the agent host only; bromure-ac
+    /// has no resolver and refuses). Same machinery as the browser-mcp bridge.
+    private func startDelegationMCPBridge(context: ChannelHandlerContext, wantReply: Bool) {
+        guard !started else { return }
+        started = true
+        let channel = context.channel
+        guard let resolver = delegationMCPResolver else {
+            if wantReply { channel.triggerUserOutboundEvent(ChannelFailureEvent(), promise: nil) }
+            channel.close(promise: nil)
+            return
+        }
+        // Accept the request now: the stream may be hours away, and the
+        // client's dial must not time out waiting for the reply.
+        if wantReply { channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
+        let el = channel.eventLoop
+        resolver { [weak self] fd in
+            // A channel the client dropped while parked: decline, so the
+            // stream goes to the next one.
+            guard self != nil, channel.isActive else { return false }
+            el.execute {
+                guard let self else { Darwin.close(fd); return }
+                FatClientLog.log("delegation-mcp: stream -> fd=\(fd)")
+                self.wireResolvedFD(channel: channel, wantReply: false, fd: fd)
+            }
+            return true
         }
     }
 

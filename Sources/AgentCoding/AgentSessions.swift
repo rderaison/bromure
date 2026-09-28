@@ -1632,6 +1632,7 @@ enum SwitchboardGate {
 
     @MainActor
     static func isVisible(_ sessions: [AgentSession], in model: SessionListModel) -> Bool {
+        guard model.switchboardAvailable else { return false }
         if activeCount(sessions, in: model) >= 2 { return true }
         guard let c = switchboard(in: sessions) else { return false }
         let b = SessionHome.bucket(for: c, in: model)
@@ -1774,6 +1775,31 @@ struct AgentAvatar: View {
 
 // MARK: - Row + sections
 
+/// A native machine: a plain Mac attached to this app (Bromure Agent Host)
+/// whose agents run directly on it — no VM, no sandbox, none of the
+/// isolation the virtual machines give. Everything it hosts carries this
+/// cue, so an unsandboxed agent is never mistaken for a sandboxed one.
+enum NativeMachine {
+    static let sectionTitle = NSLocalizedString("Native Machines", comment: "sidebar section")
+    static let sectionNarrowTitle = NSLocalizedString("Native", comment: "sidebar section, when narrow")
+    static let notSandboxed = NSLocalizedString("Not sandboxed", comment: "native machine")
+    static func help(_ machine: String) -> String {
+        String(format: NSLocalizedString("Runs natively on %@ — not in a sandboxed VM. Its agents can reach everything on that Mac.",
+                                         comment: "native machine"), machine)
+    }
+    static let tint = Color.orange
+}
+
+/// The cue itself: a small shield with a slash.
+struct NativeMachineBadge: View {
+    var size: CGFloat = 10
+    var body: some View {
+        Image(systemName: "shield.slash.fill")
+            .font(.system(size: size, weight: .semibold))
+            .foregroundStyle(NativeMachine.tint)
+    }
+}
+
 struct SessionRowView: View {
     let session: AgentSession
     let workspaceName: String
@@ -1797,6 +1823,9 @@ struct SessionRowView: View {
     var snippet: String? = nil
     /// The last reply, shown on hover.
     var preview: String? = nil
+    /// Runs on a native machine (not sandboxed): its ring is dashed orange,
+    /// with the badge.
+    var native = false
     @State private var hovering = false
 
     private var mergeTint: Color? {
@@ -1820,14 +1849,23 @@ struct SessionRowView: View {
                     .padding(2)
                     .overlay(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(workspaceName.isEmpty ? Color.clear : Color(hex: accentHex).opacity(0.85),
-                                          lineWidth: 1.5))
+                            .strokeBorder(native ? NativeMachine.tint
+                                          : workspaceName.isEmpty ? Color.clear : Color(hex: accentHex).opacity(0.85),
+                                          style: StrokeStyle(lineWidth: 1.5, dash: native ? [3, 2] : [])))
                 if let dot {
                     AgentStatusDot(status: dot).scaleEffect(1.25)
                 }
             }
+            .overlay(alignment: .topLeading) {
+                if native {
+                    NativeMachineBadge(size: 9)
+                        .padding(1.5)
+                        .background(Circle().fill(Color.acSidebar))
+                        .offset(x: -4, y: -4)
+                }
+            }
             .opacity(session.hasEnded ? 0.6 : 1)
-            .help(workspaceName)
+            .help(native ? NativeMachine.help(workspaceName) : workspaceName)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(title ?? session.title)
@@ -2357,7 +2395,8 @@ struct SessionSectionsView: View {
             title: SessionHome.distinctTitle(s, among: store.sessions, in: model),
             shortcut: model.commandHeld ? shortcutNumbers[s.id] : nil,
             snippet: filter.isEmpty || s.title.localizedCaseInsensitiveContains(filter) ? nil : contentHits[s.id],
-            preview: lastReply(s.id))
+            preview: lastReply(s.id),
+            native: model.machineIDs.contains(s.profileID))
         .overlay {
             if dropSession == s.id {
                 RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.accentColor, lineWidth: 2)
