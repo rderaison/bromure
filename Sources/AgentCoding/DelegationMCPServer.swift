@@ -192,16 +192,29 @@ final class DelegationMCPServer: MCPLineHandler {
                     return errorResult("Your session runs in the home folder, which can't be branched — only a project folder can.")
                 }
                 let initGit = args["init_git"] as? Bool ?? false
-                if !initGit, let st = await se.gitState(profileID: me.profileID, cwd: me.cwd), !st.isRepo {
+                let host = engine.sessions.host(for: me.profileID)
+                let state = host != nil ? await host!.hostGitState(me.id) : await se.gitState(profileID: me.profileID, cwd: me.cwd)
+                if !initGit, let st = state, !st.isRepo {
                     return errorResult("\(me.cwd) isn't a git repository. Pass init_git: true to make it one (git init + a first commit) — ask your user first.")
                 }
                 let tool = (args["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) ?? me.tool
                 let prompt = (args["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let sid = se.startWorktree(from: me.id, name: title, tool: tool,
-                                                 message: prompt?.isEmpty == false ? prompt : nil,
-                                                 initGit: initGit,
-                                                 base: (args["base"] as? String).flatMap { $0.isEmpty ? nil : $0 })
-                else { return errorResult("Couldn't start it.") }
+                let base = (args["base"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                let sid: UUID
+                if let host {
+                    switch await host.hostStartWorktree(from: me.id, name: title, tool: tool,
+                                                        message: prompt?.isEmpty == false ? prompt : nil,
+                                                        initGit: initGit, base: base) {
+                    case .success(let id): sid = id
+                    case .failure(let why): return errorResult("Couldn't start it: \(why.message)")
+                    }
+                } else {
+                    guard let id = se.startWorktree(from: me.id, name: title, tool: tool,
+                                                    message: prompt?.isEmpty == false ? prompt : nil,
+                                                    initGit: initGit, base: base)
+                    else { return errorResult("Couldn't start it.") }
+                    sid = id
+                }
                 // The branch and checkout are known once its tab reports in.
                 let deadline = Date().addingTimeInterval(45)
                 while Date() < deadline {
@@ -225,7 +238,10 @@ final class DelegationMCPServer: MCPLineHandler {
                 guard !mine.isEmpty else {
                     return textResult("No branches: you aren't in a worktree and haven't started any. worktree_create starts one.")
                 }
-                await se.probeBranchesNow(profileID: me.profileID, sessions: mine.filter { $0.profileID == me.profileID })
+                // A native machine probes its own branches (every 20 s).
+                if engine.sessions.host(for: me.profileID) == nil {
+                    await se.probeBranchesNow(profileID: me.profileID, sessions: mine.filter { $0.profileID == me.profileID })
+                }
                 let rows = mine.compactMap { engine.sessions.session($0.id) }.map { s -> [String: Any] in
                     var o: [String: Any] = [
                         "session_id": s.id.uuidString, "title": s.title,
@@ -266,7 +282,18 @@ final class DelegationMCPServer: MCPLineHandler {
                                        : "That session isn't on a branch of its own.")
                 }
                 let into = (args["into"] as? String)?.trimmingCharacters(in: .whitespaces)
-                if let why = await engine.sessionEngine.requestMerge(
+                if let host = engine.sessions.host(for: target.profileID) {
+                    var body: [String: Any] = ["squash": args["squash"] as? Bool ?? false, "askedBy": me.id.uuidString]
+                    if let into, !into.isEmpty { body["into"] = into }
+                    guard let r = await host.hostControl("POST", "/agent-sessions/\(target.id.uuidString)/branch-request", body)
+                    else { return errorResult("\(host.hostName) didn't answer.") }
+                    if let why = r.json["error"] as? String { return errorResult(why) }
+                    // The mirror carries the request on its next poll.
+                    let deadline = Date().addingTimeInterval(5)
+                    while Date() < deadline, engine.sessions.session(target.id)?.branchMerge == nil {
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                    }
+                } else if let why = await engine.sessionEngine.requestMerge(
                     target.id, into: into?.isEmpty == false ? into : nil,
                     squash: args["squash"] as? Bool ?? false, askedBy: me.id) {
                     return errorResult(why)

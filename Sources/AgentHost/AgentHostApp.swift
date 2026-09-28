@@ -33,6 +33,7 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do { try ControlServer.shared.start() } catch {
             AgentHostLog.log("control: \(error)")
         }
+        SessionEngine.shared.startBranchLoop()
         do { try DelegationHub.shared.start() } catch {
             AgentHostLog.log("delegation: \(error)")
         }

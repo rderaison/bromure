@@ -190,6 +190,35 @@ final class ControlServer: @unchecked Sendable {
                 reply(404, ["error": "No transcript"])
             }
 
+        case ("POST", "/agent-sessions/worktree-open"):
+            // The Branches window: {dir, branch, parent, root, display, tool}.
+            guard let dir = req.body["dir"] as? String, let branch = req.body["branch"] as? String else {
+                reply(400, ["error": "dir and branch required"]); return
+            }
+            let r = engine.openBranch(dir: dir, branch: branch, parent: req.body["parent"] as? String ?? "",
+                                      root: req.body["root"] as? String ?? "",
+                                      display: req.body["display"] as? String ?? "",
+                                      tool: req.body["tool"] as? String ?? "claude")
+            switch r {
+            case .success(let s): reply(200, ["ok": true, "id": s.id.uuidString, "window": s.window])
+            case .failure(let e): reply(e.status, ["error": e.message])
+            }
+
+        case ("POST", "/agent-sessions/worktree-discard"):
+            guard let root = req.body["root"] as? String, let branch = req.body["branch"] as? String else {
+                reply(400, ["error": "root and branch required"]); return
+            }
+            let sid = (req.body["session"] as? String).flatMap(UUID.init(uuidString:))
+            DispatchQueue.global().async { engine.discardWorktree(root: root, branch: branch, session: sid) }
+            reply(200, ["ok": true])
+
+        case ("POST", "/agent-sessions/git-state"):
+            // The new-branch sheet: is this session's folder a repo, which
+            // branches, what .worktreeinclude copies.
+            guard let idStr = req.body["id"] as? String, let id = UUID(uuidString: idStr),
+                  let s = engine.session(id) else { reply(404, ["error": "No such session"]); return }
+            reply(200, Worktrees.folderState(s.cwd))
+
         case ("POST", let p) where p.hasPrefix("/agent-sessions/"):
             let parts = String(p.dropFirst("/agent-sessions/".count)).split(separator: "/", maxSplits: 1).map(String.init)
             guard parts.count == 2, let id = UUID(uuidString: parts[0].removingPercentEncoding ?? parts[0]) else {
@@ -300,6 +329,12 @@ final class ControlServer: @unchecked Sendable {
     private func vmEntry(_ snap: SessionEngine.Snapshot) -> [String: Any] {
         let tabs: [[String: Any]] = snap.windows.map { w in
             var t: [String: Any] = ["index": w.index, "title": w.title, "active": w.active, "cwd": w.cwd]
+            if !w.worktree.isEmpty {
+                t["isWorktree"] = true
+                t["worktreeBranch"] = w.worktree
+                if !w.parentBranch.isEmpty { t["parentBranch"] = w.parentBranch }
+                if !w.rootRepo.isEmpty { t["rootRepo"] = w.rootRepo }
+            }
             if snap.agents[w.index] != nil {
                 // A hook's last word; an agent that just started has none yet.
                 t["agentStatus"] = snap.prompting.contains(w.index) ? "needsInput"

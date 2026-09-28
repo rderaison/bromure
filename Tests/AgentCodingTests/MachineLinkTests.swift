@@ -48,4 +48,22 @@ struct MachineLinkTests {
         #expect(hub.detach(id: id, owner: "device:one"))
         #expect(hub.name(id) == nil)
     }
+
+    @Test("branch calls reach the machine whose session or workspace they name")
+    func branchRouting() {
+        let hub = MachineLinkHub.shared
+        let id = UUID(), sid = UUID()
+        var fds: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+        defer { close(fds[1]); _ = hub.detach(id: id, owner: nil) }
+        #expect(hub.park(fd: fds[0], id: id, name: "M", owner: nil))
+        hub.setFragment(id, .init(workspace: [:], vm: [:], sessions: [],
+                                  sessionIDs: [sid.uuidString.uppercased()], connected: true))
+        #expect(hub.target(method: "POST", path: "/agent-sessions/git-state", body: ["id": sid.uuidString.lowercased()]) == id)
+        #expect(hub.target(method: "POST", path: "/agent-sessions/git-state", body: ["id": UUID().uuidString]) == nil)
+        #expect(hub.target(method: "POST", path: "/agent-sessions/\(sid.uuidString)/worktree", body: [:]) == id)
+        #expect(hub.target(method: "POST", path: "/agent-sessions/worktree-open", body: ["profile": id.uuidString]) == id)
+        #expect(hub.target(method: "POST", path: "/agent-sessions/worktree-discard", body: ["profile": id.uuidString]) == id)
+        #expect(hub.target(method: "POST", path: "/agent-sessions/worktree-open", body: ["profile": UUID().uuidString]) == nil)
+    }
 }

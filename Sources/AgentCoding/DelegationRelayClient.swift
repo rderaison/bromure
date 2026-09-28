@@ -176,6 +176,10 @@ extension RemoteHostController: AgentHostLink {
         sessionCommand(id, action, body: body)
     }
 
+    func hostControl(_ method: String, _ path: String, _ body: [String: Any]?) async -> (status: Int, json: [String: Any])? {
+        await controlRequest(method, path, body)
+    }
+
     func hostStartSession(tool: Profile.Tool, cwd: String, message: String) async -> UUID? {
         guard let id = agentHostID else { return nil }
         return await startSession(profileID: id, tool: tool, cwd: cwd, cloneURL: nil, message: message)

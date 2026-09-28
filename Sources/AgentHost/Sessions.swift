@@ -29,8 +29,37 @@ struct HostSession: Codable, Equatable {
     /// session that started this one as its delegate, and their delegation.
     var parentSessionID: UUID?
     var delegationID: UUID?
+    /// A branch session (Worktrees.swift): the session it branched from,
+    /// its branch, the branch it came from and the main checkout — and what
+    /// the last probe read, and a merge under way (the shapes Bromure AC's
+    /// BranchInfo / BranchMerge decode).
+    var worktreeOf: UUID?
+    var worktreeBranch: String?
+    var branchParent: String?
+    var branchRoot: String?
+    var branchInfo: BranchInfo?
+    var branchMerge: BranchMerge?
+    var folderMissing: Bool?
     /// The transcript the agent's hook last reported (host-only).
     var transcriptPath: String?
+}
+
+struct BranchInfo: Codable, Equatable {
+    var ahead: Int
+    var behind: Int
+    var changed: Int
+    var checkedAt: Date
+}
+
+struct BranchMerge: Codable, Equatable {
+    var target: String
+    var squash: Bool
+    var removeAfter: Bool
+    var startedAt: Date
+    /// requested / merging / conflicts / merged / failed
+    var phase: String
+    var detail: String?
+    var askedBy: UUID?
 }
 
 /// Owns the sessions and keeps them bound to tmux windows. A window we open
@@ -334,6 +363,58 @@ final class SessionEngine: @unchecked Sendable {
             s.title = t
             s.userTitled = true
             if let live { Tmux.setWindowOption(live, "@display", t) }
+        case "worktree":
+            // {name, tool?, message?, initGit?, base?}: a new session on a
+            // branch of this one's folder.
+            var name = ((body["name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty {
+                // No name: after the message's first words.
+                let words = ((body["message"] as? String) ?? "").split(whereSeparator: \.isWhitespace).prefix(6)
+                name = words.isEmpty ? "branch" : words.joined(separator: " ")
+            }
+            return startWorktree(from: s, name: name, tool: (body["tool"] as? String) ?? s.tool,
+                                 message: body["message"] as? String,
+                                 initGit: body["initGit"] as? Bool ?? false, base: body["base"] as? String)
+                .map { ["ok": true, "id": $0.id.uuidString, "window": $0.window] }
+        case "branch-request":
+            // An agent asks to merge (worktree_merge): it waits for the user.
+            guard s.worktreeBranch != nil else { return .failure(.bad("not a branch session")) }
+            if let p = s.branchMerge?.phase, p == "merging" || p == "conflicts" {
+                return .failure(.bad("a merge is already under way"))
+            }
+            s.branchMerge = BranchMerge(target: (body["into"] as? String) ?? s.branchParent ?? "main",
+                                        squash: body["squash"] as? Bool ?? false, removeAfter: true,
+                                        startedAt: Date(), phase: "requested",
+                                        askedBy: (body["askedBy"] as? String).flatMap(UUID.init(uuidString:)))
+        case "branch-merge":
+            guard s.worktreeBranch != nil else { return .failure(.bad("not a branch session")) }
+            let into = (body["into"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? s.branchMerge?.target ?? s.branchParent ?? "main"
+            s.branchMerge = BranchMerge(target: into, squash: body["squash"] as? Bool ?? false,
+                                        removeAfter: body["removeAfter"] as? Bool ?? true,
+                                        startedAt: Date(), phase: "merging", askedBy: s.branchMerge?.askedBy)
+            let snapshot = s
+            DispatchQueue.global().async { self.merge(snapshot) }
+        case "branch-decline":
+            guard let m = s.branchMerge, m.phase == "requested" else { return .success(["ok": true]) }
+            s.branchMerge = nil
+            let asker = m.askedBy.flatMap { self.session($0) } ?? s
+            let msg = "The user declined merging '\(s.worktreeBranch ?? "")' into '\(m.target)' for now. Don't ask again unless they bring it up."
+            DispatchQueue.global().async { _ = self.command(asker.id, "resume", ["message": msg]) }
+        case "branch-pr":
+            guard let branch = s.worktreeBranch else { return .failure(.bad("not a branch session")) }
+            let into = (body["into"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? s.branchParent ?? "main"
+            let msg = Worktrees.pullRequestPrompt(branch: branch, into: into)
+            DispatchQueue.global().async { _ = self.command(id, "resume", ["message": msg]) }
+        case "branch-discard":
+            // The checkout, the branch and the session.
+            guard let branch = s.worktreeBranch else { return .failure(.bad("not a branch session")) }
+            if let live { Tmux.killWindow(live) }
+            if let root = s.branchRoot { DispatchQueue.global().async { Worktrees.remove(root: root, branch: branch) } }
+            s.windowIndex = nil
+            s.deletedAt = Date()
+        case "branch-keep":
+            // Nothing reopens branches at boot here: keeping is the default.
+            return .success(["ok": true])
         case "delegation-link":
             s.parentSessionID = (body["parentSessionID"] as? String).flatMap(UUID.init(uuidString:))
             s.delegationID = (body["delegationID"] as? String).flatMap(UUID.init(uuidString:))
@@ -382,6 +463,161 @@ final class SessionEngine: @unchecked Sendable {
         let size = (try? h.seekToEnd()) ?? 0
         try? h.seek(toOffset: size > cap ? size - cap : 0)
         return try? h.readToEnd()
+    }
+
+    // MARK: Branches
+
+    /// A session on a new branch of `parent`'s folder (Worktrees.make), its
+    /// agent started there with `message`.
+    func startWorktree(from parent: HostSession, name: String, tool: String, message: String?,
+                       initGit: Bool, base: String?) -> Result<(id: UUID, window: Int), HostError> {
+        guard Self.tools.contains(tool) else { return .failure(.bad("unknown agent \(tool)")) }
+        let made: Worktrees.Made
+        switch Worktrees.make(from: parent.cwd, name: name, initGit: initGit, base: base, tool: tool) {
+        case .success(let m): made = m
+        case .failure(let e): return .failure(e)
+        }
+        let id = UUID()
+        let msg = message.flatMap { $0.isEmpty ? nil : $0 }
+        let inner = Self.launchCommand(tool: tool, message: msg, resume: nil, cloneURL: nil)
+        guard let idx = Tmux.newWindow(cwd: made.dir, name: tool, command: Self.wrap(inner), options: [
+            "@display": name, "@bromure_session": id.uuidString,
+            "@worktree": made.branch, "@parent_branch": made.parent, "@root_repo": made.root,
+        ]) else { return .failure(.failed("Couldn't open a tmux window")) }
+        var s = HostSession(id: id, profileID: hostID, tool: tool, title: name, cwd: made.dir, createdAt: Date())
+        s.openingMessage = msg
+        s.windowIndex = idx
+        s.launchingSince = Date()
+        s.launchDisplay = name
+        s.userTitled = true
+        s.worktreeOf = parent.id
+        s.worktreeBranch = made.branch
+        s.branchParent = made.parent
+        s.branchRoot = made.root
+        queue.sync {
+            sessions.append(s)
+            saveLocked()
+            lastRefresh = .distantPast
+        }
+        notify()
+        AgentHostLog.log("sessions: branch \(made.branch) of “\(parent.title)” → window \(idx)")
+        return .success((id, idx))
+    }
+
+    /// The Branches window's "Open in a session": an agent in a branch's
+    /// checkout nobody looks after, known as that branch.
+    func openBranch(dir: String, branch: String, parent: String, root: String, display: String,
+                    tool: String) -> Result<(id: UUID, window: Int), HostError> {
+        guard dir.hasPrefix(NSHomeDirectory() + "/.bromure/worktrees/") else { return .failure(.bad("Not a Bromure worktree")) }
+        let r = start(.init(tool: tool, cwd: dir))
+        guard case .success(let made) = r else { return r }
+        for (k, v) in ["@worktree": branch, "@parent_branch": parent, "@root_repo": root,
+                       "@display": display.isEmpty ? branch : display] where !v.isEmpty {
+            Tmux.setWindowOption(made.window, k, v)
+        }
+        update(made.id) {
+            $0.title = display.isEmpty ? branch : display
+            $0.userTitled = true
+            $0.worktreeBranch = branch
+            $0.branchParent = parent.isEmpty ? nil : parent
+            $0.branchRoot = root.isEmpty ? nil : root
+        }
+        return r
+    }
+
+    /// The Branches window's "Discard": with its session, or just the
+    /// checkout and the branch.
+    func discardWorktree(root: String, branch: String, session: UUID?) {
+        if let session, self.session(session)?.worktreeBranch == branch {
+            _ = command(session, "branch-discard", [:])
+            return
+        }
+        guard !root.isEmpty, branch.hasPrefix("wt/") else { return }
+        Worktrees.remove(root: root, branch: branch)
+        AgentHostLog.log("sessions: discarded left-behind \(branch)")
+    }
+
+    private func update(_ id: UUID, _ change: (inout HostSession) -> Void) {
+        queue.sync {
+            guard let i = sessions.firstIndex(where: { $0.id == id }) else { return }
+            let before = sessions[i]
+            change(&sessions[i])
+            if sessions[i] != before { saveLocked() }
+        }
+        notify()
+    }
+
+    /// The merge the user asked for: on its own when the branch is clean,
+    /// else the session's agent finishes it (watched by the branch loop).
+    private func merge(_ s: HostSession) {
+        guard let branch = s.worktreeBranch, let root = s.branchRoot, let m = s.branchMerge else { return }
+        let outcome = Worktrees.tryMerge(root: root, branch: branch, into: m.target, source: s.cwd, squash: m.squash)
+        AgentHostLog.log("sessions: merge \(branch) → \(m.target): \(outcome)")
+        if outcome == .merged { landed(s.id); return }
+        update(s.id) { $0.branchMerge?.phase = "conflicts" }
+        _ = command(s.id, "resume", ["message": Worktrees.mergePrompt(branch: branch, into: m.target,
+                                                                      squash: m.squash, why: outcome)])
+    }
+
+    /// The branch is in: tell whoever asked, and tidy up as asked.
+    private func landed(_ id: UUID) {
+        guard let s = session(id), let m = s.branchMerge else { return }
+        update(id) { $0.branchMerge?.phase = "merged"; $0.branchInfo = nil }
+        if let asker = m.askedBy, asker != id, session(asker) != nil {
+            _ = command(asker, "resume", ["message": "'\(s.worktreeBranch ?? "")' (session “\(s.title)”) is merged into '\(m.target)'."])
+        }
+        guard m.removeAfter, let branch = s.worktreeBranch, let root = s.branchRoot else { return }
+        if let w = s.windowIndex { Tmux.killWindow(w) }
+        Worktrees.remove(root: root, branch: branch)
+        update(id) {
+            $0.windowIndex = nil
+            $0.agentAlive = false
+            $0.folderMissing = true
+            if $0.endedAt == nil { $0.endedAt = Date() }
+            $0.archivedAt = Date()
+        }
+    }
+
+    /// Every few seconds: merges finishing; every 20 s: each open branch's
+    /// ahead / behind / uncommitted counts.
+    func startBranchLoop() {
+        Thread.detachNewThread { [weak self] in
+            var tick = 0
+            while let self {
+                Thread.sleep(forTimeInterval: 5)
+                tick += 1
+                let all = self.queue.sync { self.sessions }
+                for s in all {
+                    guard let branch = s.worktreeBranch, let root = s.branchRoot, s.deletedAt == nil else { continue }
+                    if let m = s.branchMerge, m.phase == "merging" || m.phase == "conflicts" {
+                        if Worktrees.landed(root: root, branch: branch, target: m.target, squash: m.squash) {
+                            self.landed(s.id)
+                        } else if Date().timeIntervalSince(m.startedAt) > 30 * 60 {
+                            self.update(s.id) {
+                                $0.branchMerge?.phase = "failed"
+                                $0.branchMerge?.detail = "The merge hasn't landed after 30 minutes — ask the agent where it stands."
+                            }
+                        }
+                        continue
+                    }
+                    guard tick % 4 == 0, s.branchMerge?.phase != "merged", s.folderMissing != true else { continue }
+                    if let p = Worktrees.probe(dir: s.cwd, parent: s.branchParent),
+                       let data = try? JSONSerialization.data(withJSONObject: p.info) {
+                        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+                        let info = try? dec.decode(BranchInfo.self, from: data)
+                        self.update(s.id) {
+                            let changed = $0.branchInfo.map { o in
+                                o.ahead != info?.ahead || o.behind != info?.behind || o.changed != info?.changed } ?? true
+                            if changed { $0.branchInfo = info }
+                            if $0.branchRoot == nil { $0.branchRoot = p.root }
+                            if $0.branchParent == nil { $0.branchParent = p.parent }
+                        }
+                    } else if !FileManager.default.fileExists(atPath: s.cwd) {
+                        self.update(s.id) { $0.folderMissing = true }
+                    }
+                }
+            }
+        }
     }
 
     // MARK: Launch commands

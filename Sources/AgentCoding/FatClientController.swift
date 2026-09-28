@@ -1173,6 +1173,16 @@ final class RemoteHostController {
         send("POST", "/agent-sessions/worktree-discard", body: body)
     }
 
+    /// Any control call, its reply (the delegation engine's hostControl).
+    func controlRequest(_ method: String, _ path: String, _ body: [String: Any]?) async -> (status: Int, json: [String: Any])? {
+        let host = self.host
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request(method, path, body: body, recvTimeoutSeconds: 60)
+        }.value
+        pollOnce()
+        return resp.map { ($0.status, $0.json) }
+    }
+
     /// POST /agent-sessions/git-state — what the session's folder is,
     /// git-wise. nil when the machine can't be asked.
     func sessionGitState(_ id: UUID) async -> GitFolderState? {

@@ -1526,12 +1526,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             },
             archive: { [weak self] id in
                 guard let self, let delegate = self.acDelegate else { return }
-                if self.routeToMachine(id, "archive") { return }
                 // A branch with work on it: keep it or throw it away?
                 if let s = delegate.sessionRecord(id), SessionHome.branchNeedsWord(s) {
                     self.askBranchFate(s, deleting: false)
                     return
                 }
+                if self.routeToMachine(id, "archive") { return }
                 let title = delegate.sessionRecord(id)?.title ?? ""
                 delegate.agentSessionEngine.archive(id)
                 self.sessionStageDidChange()
@@ -1547,10 +1547,34 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self?.sessionStageDidChange()
             },
             delete: { [weak self] id in
+                if let s = self?.acDelegate?.sessionRecord(id), SessionHome.branchNeedsWord(s),
+                   self?.acDelegate?.machine(forSession: id) != nil {
+                    self?.askBranchFate(s, deleting: true)
+                    return
+                }
                 if self?.routeToMachine(id, "delete") == true { return }
                 self?.confirmDeleteSession(id)
             },
             newWorktree: { [weak self] id, req in
+                if let m = self?.acDelegate?.machine(forSession: id) {
+                    // On a native machine: its host makes the checkout and
+                    // the session; select it once the mirror carries it.
+                    Task { @MainActor [weak self] in
+                        var body: [String: Any] = ["name": req.name, "tool": req.tool.rawValue, "initGit": req.initGit]
+                        if let msg = req.message { body["message"] = msg }
+                        if let base = req.base { body["base"] = base }
+                        let r = await m.hostControl("POST", "/agent-sessions/\(id.uuidString)/worktree", body)
+                        guard let self, let newID = (r?.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+                            if let err = r?.json["error"] as? String { self?.debugToast(err) }
+                            return
+                        }
+                        for _ in 0..<20 where self.acDelegate?.sessionRecord(newID) == nil {
+                            try? await Task.sleep(nanoseconds: 250_000_000)
+                        }
+                        self.selectSession(newID)
+                    }
+                    return
+                }
                 guard let self, let delegate = self.acDelegate,
                       let newID = delegate.agentSessionEngine.startWorktree(
                           from: id, name: req.name, tool: req.tool, message: req.message,
@@ -1559,20 +1583,32 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self.selectSession(newID)
             },
             gitState: { [weak self] id in
+                if let m = self?.acDelegate?.machine(forSession: id) {
+                    guard let r = await m.hostControl("POST", "/agent-sessions/git-state", ["id": id.uuidString]),
+                          r.status == 200 else { return nil }
+                    return GitFolderState(json: r.json)
+                }
                 guard let engine = self?.acDelegate?.agentSessionEngine,
                       let s = engine.store.session(id) else { return nil }
                 return await engine.gitState(profileID: s.profileID, cwd: s.cwd)
             },
             mergeBranch: { [weak self] id, into, squash, removeAfter in
+                var body: [String: Any] = ["squash": squash, "removeAfter": removeAfter]
+                if let into { body["into"] = into }
+                if self?.routeToMachine(id, "branch-merge", body) == true { return }
                 self?.acDelegate?.agentSessionEngine.mergeBranch(id, into: into, squash: squash, removeAfter: removeAfter)
             },
             branchPullRequest: { [weak self] id in
+                if self?.routeToMachine(id, "branch-pr") == true { return }
                 self?.acDelegate?.agentSessionEngine.branchPullRequest(id)
                 self?.sessionStageDidChange()
             },
             discardBranch: { [weak self] id in self?.confirmDiscardBranch(id) },
             showBranches: { [weak self] pid in self?.acDelegate?.branchesWindows.open(profileID: pid) },
-            declineMerge: { [weak self] id in self?.acDelegate?.agentSessionEngine.declineMerge(id) },
+            declineMerge: { [weak self] id in
+                if self?.routeToMachine(id, "branch-decline") == true { return }
+                self?.acDelegate?.agentSessionEngine.declineMerge(id)
+            },
             reviewBranch: { [weak self] id in self?.acDelegate?.sessionReviews.open(sessionID: id) },
             represent: { [weak self] id in
                 guard let self, self.selectedSessionID == id else { return }
@@ -1672,7 +1708,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         guard let s = acDelegate?.sessionRecord(id) else { return }
         BranchAlerts.confirmDiscard(s, on: self) { [weak self] in
             guard let self else { return }
-            self.acDelegate?.agentSessionEngine.discardBranch(id)
+            if !self.routeToMachine(id, "branch-discard") {
+                self.acDelegate?.agentSessionEngine.discardBranch(id)
+            }
             if self.selectedSessionID == id { self.clearSessionStage(); self.selectInitialSession() }
             else { self.sessionStageDidChange() }
         }
@@ -1687,7 +1725,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             guard let self else { return }
             let engine = delegate.agentSessionEngine
             if discard {
-                engine.discardBranch(id)
+                if !self.routeToMachine(id, "branch-discard") { engine.discardBranch(id) }
+            } else if self.routeToMachine(id, "branch-keep") {
+                _ = self.routeToMachine(id, deleting ? "delete" : "archive")
             } else {
                 engine.keepBranchQuietly(id)
                 deleting ? engine.delete(id) : engine.archive(id)
@@ -1700,7 +1740,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             } else if !deleting {
                 self.toasts.show(String(format: NSLocalizedString("Archived %@ · branch kept", comment: "undo toast"),
                                         UndoToastHost.quoted(s.title))) { [weak self] in
-                    self?.acDelegate?.agentSessionEngine.unarchive(id)
+                    if self?.routeToMachine(id, "unarchive") != true {
+                        self?.acDelegate?.agentSessionEngine.unarchive(id)
+                    }
                     self?.sessionStageDidChange()
                 }
             }
@@ -2357,6 +2399,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                                      subtitle: RoomTally.summary(r, delegate.allSessionRecords, in: listModel),
                                      icon: "square.grid.2x2.fill", tint: Color(hex: r.colorHex), keywords: "room") { [weak self] in
                 self?.showRoom(r.id)
+            })
+        }
+        for m in delegate.attachedMachines.values {
+            items.append(PaletteItem(section: .machines,
+                                     title: String(format: NSLocalizedString("Branches on %@", comment: "branches window title"), m.name),
+                                     icon: "arrow.triangle.branch", tint: .purple, keywords: "worktrees git stale native") { [weak self] in
+                self?.acDelegate?.branchesWindows.open(profileID: m.id)
             })
         }
         for p in delegate.profiles {

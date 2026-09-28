@@ -35,7 +35,34 @@ protocol AgentHostLink: AnyObject {
     func hostFileOp(_ op: [String: Any], timeout: Int) async throws -> [String: Any]
     func hostTabStatus(window: Int) -> AgentStatus?
     func hostSessionCommand(_ id: UUID, _ action: String, _ body: [String: Any])
+    /// Any other call to the host's control API (branches: git-state,
+    /// worktree, branch-*), with its reply.
+    func hostControl(_ method: String, _ path: String, _ body: [String: Any]?) async -> (status: Int, json: [String: Any])?
     func hostStartSession(tool: Profile.Tool, cwd: String, message: String) async -> UUID?
+}
+
+struct HostRefusal: Error { let message: String }
+
+extension AgentHostLink {
+    /// A branch session off `parent` on the host (its Worktrees.make).
+    func hostStartWorktree(from parent: UUID, name: String, tool: Profile.Tool, message: String?,
+                           initGit: Bool = false, base: String? = nil) async -> Result<UUID, HostRefusal> {
+        var body: [String: Any] = ["name": name, "tool": tool.rawValue, "initGit": initGit]
+        if let message, !message.isEmpty { body["message"] = message }
+        if let base, !base.isEmpty { body["base"] = base }
+        guard let r = await hostControl("POST", "/agent-sessions/\(parent.uuidString)/worktree", body) else {
+            return .failure(HostRefusal(message: "\(hostName) didn't answer"))
+        }
+        if let id = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) { return .success(id) }
+        return .failure(HostRefusal(message: r.json["error"] as? String ?? "status \(r.status)"))
+    }
+
+    /// The host's GitFolderState for a session's folder.
+    func hostGitState(_ session: UUID) async -> GitFolderState? {
+        guard let r = await hostControl("POST", "/agent-sessions/git-state", ["id": session.uuidString]),
+              r.status == 200 else { return nil }
+        return GitFolderState(json: r.json)
+    }
 }
 
 /// This Mac's sessions and the connected agent hosts', as one set — what
@@ -368,16 +395,10 @@ final class DelegationEngine {
         // delegation on a technicality; an explicit worktree: true still
         // insists (and fails with the reason). Another workspace has no
         // folder of the parent's to branch: the child gets one of its own.
-        // An agent host's delegate runs beside its parent, in the same folder
-        // (worktrees are made by bromure-agentd, which a plain Mac lacks).
+        // A native machine makes its worktrees itself (Worktrees.swift).
         let targetHost = sessions.host(for: targetProfileID)
         let useWorktree: Bool
-        if targetHost != nil {
-            if worktree == true {
-                throw DelegationRefusal("Delegates on “\(targetHost!.hostName)” run in your folder — worktrees aren't available there; pass worktree: false.")
-            }
-            useWorktree = false
-        } else if elsewhere {
+        if elsewhere {
             useWorktree = false
         } else if let worktree {
             useWorktree = worktree
@@ -387,8 +408,13 @@ final class DelegationEngine {
             useWorktree = false
         }
         let childID: UUID?
-        if let targetHost {
-            childID = await targetHost.hostStartSession(tool: tool, cwd: parent.cwd, message: opening)
+        if let targetHost, useWorktree {
+            switch await targetHost.hostStartWorktree(from: parentID, name: title, tool: tool, message: opening) {
+            case .success(let id): childID = id
+            case .failure(let why): throw DelegationRefusal("“\(targetHost.hostName)” couldn't branch your folder: \(why.message)")
+            }
+        } else if let targetHost {
+            childID = await targetHost.hostStartSession(tool: tool, cwd: elsewhere ? "~" : parent.cwd, message: opening)
             guard childID != nil else {
                 throw DelegationRefusal("“\(targetHost.hostName)” couldn't start the delegate.")
             }

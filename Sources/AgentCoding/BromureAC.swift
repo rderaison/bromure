@@ -11411,11 +11411,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Every branch on a machine, and the ones nobody looks after.
     private(set) lazy var branchesWindows = BranchesWindowManager(
         context: BranchesWindowManager.Context(
-            machineName: { [weak self] id in self?.profile(for: id)?.name ?? "" },
-            list: { [weak self] id in await self?.agentSessionEngine.listWorktrees(profileID: id) },
-            sessions: { [weak self] in self?.agentSessionStore.sessions ?? [] },
+            machineName: { [weak self] id in
+                self?.profile(for: id)?.name ?? self?.attachedMachines[id]?.name ?? ""
+            },
+            list: { [weak self] id in
+                // A native machine lists its worktrees with the same script.
+                if let m = self?.attachedMachines[id] {
+                    guard let out = try? await m.hostExec(WorktreeEntry.guestCommand, timeout: 30) else { return nil }
+                    return WorktreeEntry.parse(out)
+                }
+                return await self?.agentSessionEngine.listWorktrees(profileID: id)
+            },
+            sessions: { [weak self] in self?.allSessionRecords ?? [] },
             openSession: { [weak self] pid, entry, tool in
                 guard let self else { return }
+                if let m = self.attachedMachines[pid] {
+                    Task { @MainActor [weak self] in
+                        let r = await m.hostControl("POST", "/agent-sessions/worktree-open", [
+                            "profile": pid.uuidString, "dir": entry.dir, "branch": entry.branch,
+                            "parent": entry.parent, "root": entry.root, "display": entry.display,
+                            "tool": tool.rawValue])
+                        guard let self, let id = (r?.json["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
+                        for _ in 0..<20 where self.sessionRecord(id) == nil {
+                            try? await Task.sleep(nanoseconds: 250_000_000)
+                        }
+                        self.ensureUnifiedWindow().selectSession(id)
+                    }
+                    return
+                }
                 let id = self.agentSessionEngine.openBranchSession(profileID: pid, entry: entry, tool: tool)
                 self.ensureUnifiedWindow().selectSession(id)
             },
@@ -11427,9 +11450,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             },
             review: { [weak self] id in self?.sessionReviews.open(sessionID: id) },
             discard: { [weak self] pid, entry, s in
+                if let m = self?.attachedMachines[pid] {
+                    var body: [String: Any] = ["profile": pid.uuidString, "root": entry.root, "branch": entry.branch]
+                    if let s { body["session"] = s.id.uuidString }
+                    Task { _ = await m.hostControl("POST", "/agent-sessions/worktree-discard", body) }
+                    return
+                }
                 self?.agentSessionEngine.discardWorktree(profileID: pid, entry: entry, session: s?.id)
             },
-            defaultTool: { [weak self] id in self?.profile(for: id)?.tool ?? .claude }))
+            defaultTool: { [weak self] id in
+                self?.profile(for: id)?.tool ?? self?.attachedMachines[id]?.profile.tool ?? .claude
+            }))
 
     /// Review windows for sessions: their changes, comments for the agent.
     private(set) lazy var sessionReviews = SessionReviewWindowManager(

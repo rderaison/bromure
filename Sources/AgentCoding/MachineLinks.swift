@@ -208,8 +208,13 @@ final class MachineLinkHub: @unchecked Sendable {
         }
         let parts = p.split(separator: "/")
         if p.hasPrefix("/vms/") || p.hasPrefix("/sessions/") { return machine(parts.dropFirst().first) }
-        if p == "/agent-sessions/start" || p == "/agent-sessions/folders" {
+        if ["/agent-sessions/start", "/agent-sessions/folders", "/agent-sessions/worktree-open",
+            "/agent-sessions/worktree-discard"].contains(p) {
             return (body["profile"] as? String).flatMap { machine(Substring($0)) }
+        }
+        if p == "/agent-sessions/git-state" {
+            let key = (body["id"] as? String ?? "").uppercased()
+            return fragments.first { $0.value.sessionIDs.contains(key) }?.key
         }
         if p.hasPrefix("/agent-sessions/"), let sid = parts.dropFirst().first {
             let key = (String(sid).removingPercentEncoding ?? String(sid)).uppercased()
@@ -419,6 +424,10 @@ extension AttachedMachine: AgentHostLink {
     }
 
     func hostTabStatus(window: Int) -> AgentStatus? { tabs[window] }
+
+    func hostControl(_ method: String, _ path: String, _ body: [String: Any]?) async -> (status: Int, json: [String: Any])? {
+        await call(method, path, body)
+    }
 
     func hostSessionCommand(_ sid: UUID, _ action: String, _ body: [String: Any]) {
         Task { _ = await call("POST", "/agent-sessions/\(sid.uuidString)/\(action)", body) }
