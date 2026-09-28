@@ -347,6 +347,11 @@ final class RemoteHostController {
     private var peerFailStreak = 0
     /// Bumped every apply; the window observes it to refresh the stage.
     private(set) var revision = 0
+    /// The newest snapshot applied (server run + generation). The push
+    /// stream and a poll race; an older snapshot applied after a newer one
+    /// flicked a just-made change (a rename) back for a moment.
+    private var appliedEpoch: String?
+    private var appliedGeneration = -1
 
     /// The remote's workspace subnet (CIDR, e.g. "192.168.64.0/24"), read from
     /// `/state`. Needed by the browser pane's PAC and the fleet router to decide
@@ -586,6 +591,13 @@ final class RemoteHostController {
     // MARK: Apply snapshot → models
 
     private func apply(_ snapshot: [String: Any]) {
+        // Older than what's on screen (same server run): drop it. A server
+        // without the stamp is applied as before.
+        if let epoch = snapshot["epoch"] as? String, let gen = snapshot["generation"] as? Int {
+            if epoch == appliedEpoch, gen < appliedGeneration { return }
+            appliedEpoch = epoch
+            appliedGeneration = gen
+        }
         let workspaces = (snapshot["workspaces"] as? [[String: Any]]) ?? []
         // Guard against a degenerate /state. A 200 poll whose body was truncated
         // or failed to parse arrives as an (almost) empty snapshot, and a partial
@@ -1065,7 +1077,36 @@ final class RemoteHostController {
             guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
             return try? dec.decode(AgentSession.self, from: data)
         }
-        sessionStore.applyMirror(sessions)
+        var mirrored = sessions
+        // A rename just sent: keep showing it until the server says so too
+        // (a few seconds at most) instead of the old title for a round trip.
+        for (id, pending) in pendingTitles {
+            guard let i = mirrored.firstIndex(where: { $0.id == id }) else { continue }
+            if mirrored[i].title == pending.title || Date().timeIntervalSince(pending.at) > 5 {
+                pendingTitles[id] = nil
+            } else {
+                mirrored[i].title = pending.title
+                mirrored[i].userTitled = true
+            }
+        }
+        sessionStore.applyMirror(mirrored)
+    }
+
+    /// Renames sent to the server and not yet in a snapshot.
+    private var pendingTitles: [UUID: (title: String, at: Date)] = [:]
+
+    /// Rename a session: shown at once, then confirmed by the server.
+    func renameSession(_ id: UUID, _ title: String) {
+        let t = title.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return }
+        pendingTitles[id] = (t, Date())
+        var list = sessionStore.sessions
+        if let i = list.firstIndex(where: { $0.id == id }) {
+            list[i].title = t
+            list[i].userTitled = true
+            sessionStore.applyMirror(list)
+        }
+        sessionCommand(id, "rename", body: ["title": t])
     }
 
     /// The server's rooms of sessions. An older server sends none: no Rooms
@@ -2727,6 +2768,10 @@ final class RemoteHostWindow: NSWindow {
         let sidebar = makeSidebar()
         sidebarHost = NSHostingView(rootView: sidebar)
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
+        // Never let SwiftUI size the window: a long sidebar (or a chat) laid
+        // out at full screen made its fitting height the window's minimum,
+        // so after leaving full screen it could no longer shrink.
+        sidebarHost.sizingOptions = []
         stage.translatesAutoresizingMaskIntoConstraints = false
         stage.wantsLayer = true
         stage.layer?.backgroundColor = NSColor.black.cgColor
@@ -2884,6 +2929,11 @@ final class RemoteHostWindow: NSWindow {
         let sidebarDivider = NSBox()
         sidebarDivider.boxType = .separator
         sidebarDivider.translatesAutoresizingMaskIntoConstraints = false
+        // A separator's intrinsic height is 1pt at hugging 750, above the
+        // window's hold-size priority: pinned top to bottom, it pulled the
+        // window down to nothing the moment nothing else propped it up.
+        sidebarDivider.setContentHuggingPriority(.defaultLow, for: .vertical)
+        sidebarDivider.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         content.addSubview(sidebarDivider)
         // Keep the drag strips topmost so an open pane host never intercepts the
         // half of a handle that overlaps it (re-adding moves them to the front).
@@ -4090,7 +4140,7 @@ final class RemoteHostWindow: NSWindow {
             resume: { [weak self] id in self?.controller.sessionCommand(id, "resume") },
             close: { [weak self] id in self?.controller.sessionCommand(id, "close") },
             rename: { [weak self] id, title in
-                self?.controller.sessionCommand(id, "rename", body: ["title": title])
+                self?.controller.renameSession(id, title)
             },
             setNickname: { [weak self] id, nick, reclaim in
                 // Checked against the mirror first (`checkNickname`); the
@@ -4717,6 +4767,54 @@ final class RemoteHostWindow: NSWindow {
         }
         let focused = { (self.firstResponder === self.mountedTermView) && self.mountedTermView != nil }
         switch action {
+        case "window-fullscreen":
+            NSApp.activate(ignoringOtherApps: true)
+            makeKeyAndOrderFront(nil)
+            DispatchQueue.main.async { self.toggleFullScreen(nil) }
+            return ["ok": true, "behavior": collectionBehavior.rawValue]
+        case "window-zoom":
+            zoom(nil)
+            return ["frame": [frame.width, frame.height].map { $0.rounded() }]
+        case "window-info":
+            // What pins the window's size: its limits, what layout needs, and
+            // every required constraint holding a width or height.
+            func size(_ s: NSSize) -> [CGFloat] { [s.width.rounded(), s.height.rounded()] }
+            var pinning: [String] = []
+            for axis in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
+                for c in contentView?.constraintsAffectingLayout(for: axis) ?? [] where c.priority.rawValue > 500 {
+                    pinning.append("\(axis == .horizontal ? "H" : "V") p\(Int(c.priority.rawValue)) \(c)")
+                }
+                // Hugging above the window's hold-size priority (500) pulls the
+                // window down to its content.
+                func walk(_ v: NSView, _ depth: Int) {
+                    let hug = v.contentHuggingPriority(for: axis).rawValue
+                    if hug > 500, v.intrinsicContentSize != NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric) {
+                        pinning.append("\(axis == .horizontal ? "H" : "V") hug\(Int(hug)) \(type(of: v)) intrinsic=\(v.intrinsicContentSize)")
+                    }
+                    if depth < 3 { v.subviews.forEach { walk($0, depth + 1) } }
+                }
+                if let cv = contentView { walk(cv, 0) }
+            }
+            return ["frame": [frame.origin.x, frame.origin.y, frame.width, frame.height].map { $0.rounded() },
+                    "minSize": size(minSize), "contentMinSize": size(contentMinSize),
+                    "fitting": size(contentView?.fittingSize ?? .zero),
+                    "fullScreen": styleMask.contains(.fullScreen),
+                    "sidebar": sidebarWidthConstraint.constant, "browser": browserWidthConstraint.constant,
+                    "filePane": filePaneWidthConstraint.constant,
+                    "constraints": pinning,
+                    // Which piece needs that much: each pane's own fitting size.
+                    "subviews": (contentView?.subviews ?? []).map { v -> String in
+                        let f = v.fittingSize
+                        return "\(type(of: v)) fit=\(Int(f.width))x\(Int(f.height)) frame=\(Int(v.frame.width))x\(Int(v.frame.height)) hidden=\(v.isHidden)"
+                    } + stage.subviews.map { v -> String in
+                        let f = v.fittingSize
+                        return "  stage/\(type(of: v)) fit=\(Int(f.width))x\(Int(f.height)) frame=\(Int(v.frame.width))x\(Int(v.frame.height))"
+                    }]
+        case "window-resize":
+            // Ask for a size; the answer is what the window actually took.
+            let w = p["width"] as? Double ?? 900, h = p["height"] as? Double ?? 600
+            setFrame(NSRect(x: frame.origin.x, y: frame.origin.y, width: w, height: h), display: true)
+            return ["frame": [frame.width, frame.height].map { $0.rounded() }]
         // Sessions-first home over the mirror: list (with the buckets this
         // client computes), select one, the new-session screen, Linux mode.
         // Each takes an optional "shot" (offscreen PNG of the window).
@@ -5667,6 +5765,7 @@ final class RemoteHostWindow: NSWindow {
             onResume:      { c.startWorkspace(id) })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []   // never let SwiftUI size the window
         dashboardHost = host
         shownDashboard = (id, state)
         mount(host)
@@ -5723,6 +5822,7 @@ final class RemoteHostWindow: NSWindow {
             initialContainerID: container)
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []   // never let SwiftUI size the window
         dockerHost = host
         dockerShownFor = id
         mount(host)
@@ -6094,6 +6194,7 @@ final class RemoteHostWindow: NSWindow {
             model: bootCueModel, onReset: {}, onKeepWaiting: {}))
         bootCueHost = host
         host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []   // never let SwiftUI size the window
         // Added directly (not via `mount`, which clears siblings) so it sits
         // ON TOP of the mounted terminal; the next `mount(_:)` removes it.
         if host.superview !== stage {
@@ -6158,6 +6259,9 @@ final class RemoteHostWindow: NSWindow {
         beautifiedTabIndex = tabIndex
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
+        // A long conversation's fitting height (thousands of points) must
+        // never become the window's minimum.
+        host.sizingOptions = []
         host.translatesAutoresizingMaskIntoConstraints = false
         mountedBeautifiedHost = host
         mount(host)

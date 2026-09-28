@@ -10877,16 +10877,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @MainActor private func resolveFatClientForward(ip: String, port: Int,
                                                     completion: @escaping @Sendable (Int32) -> Void) {
-        guard let session = runningSessions.values.first(where: { $0.lastIP == ip }),
+        // A VM's own address: its agent dials its own loopback. Any other
+        // address on the VM network (a MetalLB / VM-scoped LoadBalancer IP,
+        // owned by ARP or an extra address on a node): relayed through a VM
+        // that can reach it, which dials the address itself.
+        let owner = runningSessions.values.first(where: { $0.lastIP == ip })
+        guard let session = owner ?? relayVM(forVMNetIP: ip),
               let dev = session.sandbox.socketDevice else {
-            FatClientLog.log("forward-resolver: no running VM at \(ip)")
+            FatClientLog.log("forward-resolver: no running VM at or reaching \(ip)")
             completion(-1); return
         }
+        let header = owner != nil ? "\(port)\n" : "\(ip):\(port)\n"
         dev.connect(toPort: 5010) { result in
             switch result {
             case .success(let conn):
                 let vfd = conn.fileDescriptor
-                let header = "\(port)\n"
                 let sent = header.withCString { Darwin.write(vfd, $0, strlen($0)) }
                 guard sent > 0 else { FatClientLog.log("forward-resolver: header write failed"); completion(-1); return }
                 var sp: [Int32] = [0, 0]
@@ -10901,13 +10906,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     FatForward.splice(dupFD, peer)
                     _ = hold
                 }
-                FatClientLog.log("forward-resolver: \(ip):\(port) -> vsock relay ok")
+                FatClientLog.log("forward-resolver: \(ip):\(port) -> vsock relay ok\(owner == nil ? " (via \(session.profile.name))" : "")")
                 completion(sp[0])
             case .failure(let err):
                 FatClientLog.log("forward-resolver: vsock 5010 connect failed: \(err)")
                 completion(-1)
             }
         }
+    }
+
+    /// The VM that relays to an address on the VM network no VM owns: a
+    /// node of the Kubernetes cluster whose LoadBalancer range holds it
+    /// (kube-proxy there answers for MetalLB and VM-scoped Services), else
+    /// any cluster node, else any running VM — each reaches the whole
+    /// subnet, which the host process can't dial itself.
+    @MainActor private func relayVM(forVMNetIP ip: String) -> RunningSession? {
+        guard let v = VMNetSwitch.parseIPv4(ip),
+              VMNetSwitch.shared.subnet?.containsGuest(ip) == true else { return nil }
+        let live = runningSessions.values.filter { $0.sandbox.socketDevice != nil && $0.lastIP != nil }
+        let nodes = live.filter { $0.kubeClusterID != nil }
+        for cluster in kubeClusterStore.clusters {
+            guard let r = cluster.metallbRange else { continue }
+            let ends = r.split(separator: "-").compactMap { VMNetSwitch.parseIPv4(String($0)) }
+            guard ends.count == 2, (ends[0]...ends[1]).contains(v) else { continue }
+            if let n = nodes.first(where: { $0.kubeClusterID == cluster.id }) { return n }
+        }
+        return nodes.first ?? live.first
     }
 
     @MainActor func installFatClientUDPForwardResolver() {
@@ -10925,15 +10949,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// ("UDP\n" header). One vsock relay carries all UDP to the guest, framed.
     @MainActor private func resolveFatClientForwardUDP(ip: String,
                                                        completion: @escaping @Sendable (Int32) -> Void) {
-        guard let session = runningSessions.values.first(where: { $0.lastIP == ip }),
+        let owner = runningSessions.values.first(where: { $0.lastIP == ip })
+        guard let session = owner ?? relayVM(forVMNetIP: ip),
               let dev = session.sandbox.socketDevice else {
-            FatClientLog.log("udp-forward-resolver: no running VM at \(ip)"); completion(-1); return
+            FatClientLog.log("udp-forward-resolver: no running VM at or reaching \(ip)"); completion(-1); return
         }
+        // Relayed (see the TCP resolver): the guest sends to `ip` itself.
+        let header = owner != nil ? "UDP\n" : "UDP \(ip)\n"
         dev.connect(toPort: 5010) { result in
             switch result {
             case .success(let conn):
                 let vfd = conn.fileDescriptor
-                let sent = "UDP\n".withCString { Darwin.write(vfd, $0, strlen($0)) }
+                let sent = header.withCString { Darwin.write(vfd, $0, strlen($0)) }
                 guard sent > 0 else { FatClientLog.log("udp-forward-resolver: header write failed"); completion(-1); return }
                 var sp: [Int32] = [0, 0]
                 guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0 else { completion(-1); return }
