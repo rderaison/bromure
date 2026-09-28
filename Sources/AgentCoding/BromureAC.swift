@@ -1142,6 +1142,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     let store = ProfileStore()
     var profiles: [Profile] = [] {
         didSet {
+            OpenShellAdvisorModeCache.shared.refresh(profiles)
             // Single funnel: every assignment to `profiles` (load,
             // save, delete, restore) flows through here, so the
             // private-profile set on the cloud emitter and any open
@@ -2499,6 +2500,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                       egressPolicy: profile.resolvedEgressPolicy,
                                       allowInsecureBypass: g.allowInsecureBypass)
         config.exfiltrationAlertsDisabled = profile.disableExfiltrationAlerts
+        config.strictCredentials = profile.effectiveStrictCredentials
         return config
     }
 
@@ -3086,6 +3088,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self?.handleCompromise(event)
                 }
             }
+            wireOpenShellAdvisor(engine)
+            AgentWatchdog.shared.modeProvider = { OpenShellAdvisorModeCache.shared.watchdogMode(for: $0) }
+            AgentWatchdog.shared.onTrip = { [weak self] pid, mode, signals in
+                Task { @MainActor [weak self] in self?.handleWatchdogTrip(pid, mode: mode, signals: signals) }
+            }
+            // Switch-side outbound volume, sampled for the watchdog.
+            Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    for (pid, session) in self.runningSessions {
+                        AgentWatchdog.shared.sampleBytes(profileID: pid, total: session.sandbox.egressByteCount, interval: 5)
+                    }
+                }
+            }
+            VMNetSwitch.shared.identityGate = { pid, sport, dst, dport, hosts, policy in
+                BinaryIdentityService.shared.gate(profileID: pid, sport: sport, dstIP: dst, dport: dport,
+                                                  hostnames: hosts, policy: policy)
+            }
             // Warm the trace ring from disk so `bromure-ac trace` shows recent
             // history right after the agent starts, not just live traffic.
             engine.traceStore.reload()
@@ -3205,6 +3225,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Remote access (optional SSH front door)
 
+    /// `BROMURE_AC_NO_REMOTE=1`: no SSH front door and no P2P serving — for a
+    /// test instance running beside the real one.
+    nonisolated static var remoteAccessSuppressed: Bool {
+        ProcessInfo.processInfo.environment["BROMURE_AC_NO_REMOTE"] == "1"
+    }
+
     /// UserDefaults-backed remote config. Defaults: disabled, port 2222,
     /// bind 0.0.0.0, both auth methods on.
     func remoteAccessConfig() -> RemoteAccessServer.Config {
@@ -3230,6 +3256,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// this again from their completion path.
     @MainActor func startRemoteAccessIfNeeded() {
         guard UserDefaults.standard.bool(forKey: "remoteAccess.enabled") else { return }
+        // A side-by-side test instance shares this Mac's device identity and
+        // preferences: it must not answer for the Mac (SSH front door, P2P).
+        guard !Self.remoteAccessSuppressed else {
+            SupplyChainLog.shared.record("[remote] disabled for this instance (BROMURE_AC_NO_REMOTE).")
+            return
+        }
         guard imageManager.hasBaseImage, installTask == nil else {
             SupplyChainLog.shared.record(
                 "[remote] SSH front door deferred until the base image is installed.")
@@ -3689,6 +3721,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return ["error": "no app"] }
                 let action = params["action"] as? String ?? ""
                 switch action {
+                case "open-editor":
+                    // Open a workspace's settings (E2E / doc-screenshot hook);
+                    // BROMURE_EDITOR_CATEGORY picks the pane.
+                    guard let key = params["profile"] as? String,
+                          let p = self.profileByNameOrID(key) else { return ["error": "unknown profile"] }
+                    self.openEditorWindow(editing: p)
+                    if let h = params["height"] as? Double, let w = self.editorWindow {
+                        var f = w.frame
+                        f.origin.y += f.height - h
+                        f.size.height = h
+                        w.setFrame(f, display: true)
+                    }
+                    return ["ok": true]
                 case "wizard":
                     // First-run wizard (doc/E2E hook): press its primary or
                     // secondary button, and report the step it's on.
@@ -8759,6 +8804,68 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    /// Strict sandbox: listen for the VM's root attestor (binary identity).
+    /// A fresh boot forgets the previous attestor's pinned secret (a new
+    /// attestor mints a new one); a restore keeps it, so only the attestor
+    /// that was running when the VM was suspended can reattach.
+    @MainActor
+    func attachIdentityBridge(profile: Profile, socketDevice: VZVirtioSocketDevice, restoring: Bool) {
+        guard profile.effectiveStrictSandbox else { return }
+        let secret = store.profileDirectory(for: profile).appendingPathComponent("attestor.secret")
+        if !restoring { try? FileManager.default.removeItem(at: secret) }
+        BinaryIdentityService.shared.attach(profileID: profile.id, socketDevice: socketDevice, secretFile: secret)
+    }
+
+    /// Connect the OpenShell policy advisor to the live workspaces: mode and
+    /// effective policy per workspace, credential scopes for its risk check,
+    /// and the approval path (append the rule to the workspace's policy text,
+    /// save, apply live — the same route an editor save takes).
+    private func wireOpenShellAdvisor(_ engine: MitmEngine) {
+        let advisor = OpenShellAdvisor.shared
+        let modes = OpenShellAdvisorModeCache.shared
+        advisor.modeProvider = { modes.mode(for: $0) }
+        advisor.policyProvider = { [weak engine] in engine?.guardrailsConfig(for: $0)?.egressPolicy?.openShell }
+        advisor.credentialScopesProvider = { [weak engine] pid in
+            engine?.swapper.entries(for: pid).compactMap { $0.host } ?? []
+        }
+        advisor.applyApproved = { [weak self] pid, proposal in
+            await MainActor.run { [weak self] () -> String? in
+                guard let self, let existing = self.profile(for: pid) else { return "workspace not found" }
+                var updated = existing
+                do {
+                    updated.networkPolicy = try OpenShellPolicy.insertingRules(proposal.yaml, into: existing.networkPolicy)
+                    if let result = OpenShellGovernance.shared.check(policyYAML: updated.networkPolicy,
+                                                                      providerRules: updated.openShellProviderRules),
+                       !result.passed {
+                        return "outside the organization boundary — \(result.summary)"
+                    }
+                    try self.persistEditedProfile(&updated, editing: existing, generateSSH: false)
+                } catch {
+                    return "\(error)"
+                }
+                self.applyLiveEditToRunningSession(updated)
+                return nil
+            }
+        }
+        modes.refresh(profiles)
+        // A new organization boundary / managed policy re-resolves every
+        // running workspace's firewall at once.
+        NotificationCenter.default.addObserver(forName: OpenShellGovernance.changedNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reapplyOpenShellGovernance() }
+        }
+    }
+
+    @MainActor
+    func reapplyOpenShellGovernance() {
+        OpenShellAdvisorModeCache.shared.refresh(profiles)
+        for (id, session) in runningSessions {
+            let profile = profiles.first { $0.id == id } ?? session.profile
+            mitmEngine?.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: id)
+            session.sandbox.applyEgressPolicy(profile.resolvedEgressPolicy)
+        }
+    }
+
     /// Shared save + app-state reconciliation for a created/edited profile.
     /// Deliberately AppKit-free (no NSAlert, no window ops) so the headless
     /// control-socket path can call it too — the GUI-only bits (folder-discard
@@ -9001,6 +9108,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             editing = nil
         }
 
+        // An OpenShell policy that doesn't validate would fail closed on the
+        // next session; refuse it here like the GUI's disabled Save.
+        if profile.usesOpenShellPolicy {
+            do { _ = try OpenShellPolicy.parse(profile.networkPolicy) } catch {
+                return ["ok": false, "error": "Invalid OpenShell policy: \(error)"]
+            }
+            if let r = OpenShellGovernance.shared.check(policyYAML: profile.networkPolicy,
+                                                        providerRules: profile.openShellProviderRules),
+               !r.passed {
+                return ["ok": false, "error": "OpenShell policy is outside the organization boundary: \(r.summary)"]
+            }
+        }
+
         var toSave = profile
         do {
             try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH)
@@ -9172,10 +9292,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case keyboardSettings
         case terminalAppearance
         case gitIdentity
+        case strictSandbox
     }
 
     private func restartLabel(for change: RestartChange) -> String {
         switch change {
+        case .strictSandbox:
+            return NSLocalizedString("Strict sandbox", comment: "restart-required change")
         case .memory:
             return NSLocalizedString("VM memory", comment: "")
         case .networking:
@@ -9231,6 +9354,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             changes.append(.networking)
         }
         if old.folderPaths != new.folderPaths { changes.append(.sharedFolders) }
+        if old.effectiveStrictSandbox != new.effectiveStrictSandbox { changes.append(.strictSandbox) }
         // Note: a plain API-key change is NOT here — it's applied live
         // (api_key.env + swap map). Only switching the tool itself or its
         // auth mode needs a restart, since that re-runs the agent
@@ -9285,6 +9409,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // `guardrails` struct — without this, removing/adding rules is
             // silently ignored until app restart.
             || old.egressRules != new.egressRules
+            || old.networkPolicy != new.networkPolicy
+            || old.openShellProviders != new.openShellProviders
             || old.supplyChain != new.supplyChain
             || old.promptInjection != new.promptInjection
             || old.pii != new.pii
@@ -9325,6 +9451,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // guest re-sources a consistent proxy env for the new mode (see the
             // applyInterceptDisabled call in applyLiveSessionRefresh).
             || old.disableTransparentProxy != new.disableTransparentProxy
+            || old.strictCredentials != new.strictCredentials
     }
 
     /// Apply env-var / credential / guardrail edits to a running session
@@ -9418,8 +9545,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // (kubectl, whose kubeconfig CA trusts the MiTM leaf) could be left
         // pointed the wrong way and fail with "certificate signed by unknown
         // authority".
-        if old.disableTransparentProxy != new.disableTransparentProxy {
-            sandbox?.applyInterceptDisabled(new.disableTransparentProxy)
+        if old.effectiveDisableTransparentProxy != new.effectiveDisableTransparentProxy {
+            sandbox?.applyInterceptDisabled(new.effectiveDisableTransparentProxy)
         }
 
         guard sessionRefreshAffectingChange(from: old, to: new) else { return }
@@ -10326,6 +10453,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
+                self.attachIdentityBridge(profile: profile, socketDevice: dev,
+                                          restoring: sandbox.didRestore)
                 // Browser MCP listener (vsock 5830): the agents' stdio shim
                 // connects here; we serve the browser tools, driving the
                 // unified window's embedded browser (opening it on demand).
@@ -12265,6 +12394,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     }
                 }
 
+            case .allow where !event.unmanagedFingerprints.isEmpty:
+                // Strict credential mode: approve exactly these credentials for
+                // this session (not the host for every other credential).
+                UnmanagedCredentialGuard.shared.allowForSession(event.unmanagedFingerprints,
+                                                                profileID: event.profileID)
+                BACEventEmitter.shared.emitDetached(
+                    profileID: event.profileID,
+                    eventType: "credential.exfiltration_allowed",
+                    eventData: ["observed_host": .string(event.observedHost),
+                                "scope": .string("session"), "unmanaged": .bool(true)])
+                window.setSuspendedTint(false)
+                if vm.state == .paused {
+                    do { try await vm.resume() }
+                    catch {
+                        FileHandle.standardError.write(Data(
+                            "[ac] compromise: resume failed (\(error))\n".utf8))
+                    }
+                }
+
             case .allow:
                 // User vouches for this destination. Authorize the observed
                 // host(s) as extra swap destinations FOR THIS SESSION ONLY
@@ -12488,6 +12636,58 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     enum CompromiseAction { case allow, block, shutdown, saveForInvestigation }
+
+    /// The agent watchdog tripped. Quarantine mode: cut the VM off the network
+    /// at the switch first (immediate — before any UI), pause it, then ask.
+    @MainActor
+    func handleWatchdogTrip(_ pid: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) {
+        guard mode == .quarantine, let session = runningSessions[pid] else { return }
+        let sandbox = session.sandbox
+        sandbox.setNetworkQuarantined(true)
+        FileHandle.standardError.write(Data("[watchdog] quarantined \(session.profile.name)\n".utf8))
+        Task { @MainActor in
+            if let vm = sandbox.vm, vm.canPause { try? await vm.pause() }
+            let kinds = Array(Set(signals.map(\.kind))).sorted().joined(separator: ", ")
+            let title = NSLocalizedString("The agent watchdog quarantined this workspace", comment: "watchdog alert title")
+            var info = String(format: NSLocalizedString(
+                "“%@” behaved outside its normal pattern (%@) within a minute. Its network is cut and the VM is paused.",
+                comment: "watchdog alert body"), session.profile.name, kinds) + "\n\n"
+            for s in signals.suffix(8) { info += "  • \(s.kind): \(s.detail)\n" }
+            let buttons = [NSLocalizedString("Shut down", comment: ""),
+                           NSLocalizedString("Keep quarantined", comment: "watchdog: resume with network cut"),
+                           NSLocalizedString("Release", comment: "watchdog: restore network and resume")]
+            let choice: Int
+            if canPresentBlockingModal {
+                let alert = NSAlert()
+                alert.alertStyle = .critical
+                alert.messageText = title
+                alert.informativeText = info + "\n" + NSLocalizedString(
+                    "Keep quarantined resumes the VM with its network still cut, so you can look inside. Release restores the network.",
+                    comment: "")
+                for b in buttons { alert.addButton(withTitle: b) }
+                for b in alert.buttons.dropFirst() { b.keyEquivalent = "" }
+                NSApp.activate(ignoringOtherApps: true)
+                switch alert.runModal() {
+                case .alertSecondButtonReturn: choice = 1
+                case .alertThirdButtonReturn:  choice = 2
+                default:                        choice = 0
+                }
+            } else {
+                choice = await PendingPromptBroker.shared.askAsync(
+                    profileID: pid, title: title, message: info, buttons: buttons, fallback: 1, timeout: 180)
+            }
+            switch choice {
+            case 2:
+                sandbox.setNetworkQuarantined(false)
+                AgentWatchdog.shared.release(profileID: pid)
+                if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
+            case 1:
+                if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
+            default:
+                sandbox.vm?.stop(completionHandler: { _ in })
+            }
+        }
+    }
 
 
     /// Wire the standard set of sandbox callbacks for `win`. Used by
@@ -12767,6 +12967,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         mitmEngine?.kimiSubscriptionStore.unregisterBogusKeys(for: profile.id)
         shellBridges[profile.id]?.stop()
         shellBridges.removeValue(forKey: profile.id)
+        BinaryIdentityService.shared.detach(profileID: profile.id, socketDevice: nil)
+        OpenShellAdvisor.shared.reset(profileID: profile.id)
+        AgentWatchdog.shared.reset(profileID: profile.id)
+        UnmanagedCredentialGuard.shared.reset(profileID: profile.id)
         browserMCPBridges[profile.id]?.stop()
         browserMCPBridges.removeValue(forKey: profile.id)
         taskMCPBridges[profile.id]?.stop()
@@ -13490,6 +13694,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
+                self.attachIdentityBridge(profile: profile, socketDevice: dev,
+                                          restoring: sandbox.didRestore)
                 // Browser MCP listener (vsock 5830): the agents' stdio shim
                 // connects here; we serve the browser tools, driving the
                 // unified window's embedded browser (opening it on demand).

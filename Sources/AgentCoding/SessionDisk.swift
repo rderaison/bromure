@@ -615,6 +615,20 @@ public final class SessionDisk {
                         [.posixPermissions: NSNumber(value: 0o755)],
                         ofItemAtPath: adDest.path)
                 }
+                // Strict sandbox: the root attestor ships beside agentd, and
+                // the marker tells agentd to start it and drop root paths.
+                let attestSrc = adURL.deletingLastPathComponent().appendingPathComponent("bromure-attestd.py")
+                let attestDest = tmp.appendingPathComponent("bromure-attestd.py")
+                if let data = try? Data(contentsOf: attestSrc), (try? Data(contentsOf: attestDest)) != data {
+                    try data.write(to: attestDest, options: .atomic)
+                    try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: attestDest.path)
+                }
+                let marker = tmp.appendingPathComponent("strict-sandbox")
+                if profile.effectiveStrictSandbox {
+                    try Data("1\n".utf8).write(to: marker, options: .atomic)
+                } else {
+                    try? fm.removeItem(at: marker)
+                }
             }
 
             if let shURL = assets.shellAgentURL {
@@ -707,12 +721,17 @@ public final class SessionDisk {
             // tracing + guardrails. (Previously this dropped the env too, which
             // made "disable transparent interception" silently kill the proxy +
             // token swap entirely.)
-            proxyLines += [
-                "export http_proxy=http://127.0.0.1:\(proxyPort)",
-                "export https_proxy=http://127.0.0.1:\(proxyPort)",
-                "export HTTP_PROXY=http://127.0.0.1:\(proxyPort)",
-                "export HTTPS_PROXY=http://127.0.0.1:\(proxyPort)",
-            ]
+            // Strict sandbox is the exception: a connection through the local
+            // proxy bridge can't be attributed to the executable behind it, so
+            // everything goes through transparent interception instead.
+            if !profile.effectiveStrictSandbox {
+                proxyLines += [
+                    "export http_proxy=http://127.0.0.1:\(proxyPort)",
+                    "export https_proxy=http://127.0.0.1:\(proxyPort)",
+                    "export HTTP_PROXY=http://127.0.0.1:\(proxyPort)",
+                    "export HTTPS_PROXY=http://127.0.0.1:\(proxyPort)",
+                ]
+            }
             let noProxy = (["localhost", "127.0.0.1", "::1"] + extraNoProxy).joined(separator: ",")
             proxyLines += [
                 "export NO_PROXY=\(noProxy)",

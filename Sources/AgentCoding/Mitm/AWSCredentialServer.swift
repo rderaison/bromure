@@ -69,6 +69,12 @@ public final class AWSCredentialServer: @unchecked Sendable {
         byProfile.removeValue(forKey: profileID)
     }
 
+    /// The workspace's AWS access key id (not secret — the guest holds it,
+    /// paired with a fake secret). nil when AWS isn't configured.
+    public func accessKeyID(for profileID: UUID) -> String? {
+        entry(for: profileID)?.accessKeyID
+    }
+
     private func entry(for profileID: UUID) -> Entry? {
         lock.lock(); defer { lock.unlock() }
         return byProfile[profileID]

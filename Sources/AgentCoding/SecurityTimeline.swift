@@ -282,6 +282,44 @@ public final class SecurityTimeline {
                        "\(fake) → \(host)",
                        String(format: NSLocalizedString("swapped in %@", comment: "Security Timeline decision"), real), .info)
 
+        case "watchdog.trip":
+            var kinds: [String] = []
+            if case .array(let a)? = d["kinds"] { kinds = a.compactMap { if case .string(let s) = $0 { return s }; return nil } }
+            let quarantine = str(d, "action") == "quarantine"
+            return row(NSLocalizedString("Agent watchdog", comment: "Security Timeline engine"),
+                       String(format: NSLocalizedString("score %d in a minute: %@", comment: "watchdog condition"),
+                              int(d, "score") ?? 0, kinds.joined(separator: ", ")),
+                       quarantine
+                           ? NSLocalizedString("quarantined — network cut, VM paused", comment: "Security Timeline decision")
+                           : NSLocalizedString("drift detected", comment: "Security Timeline decision"),
+                       quarantine ? .blocked : .info)
+
+        case "policy.proposal":
+            let status = str(d, "status") ?? "submitted"
+            var auto = false
+            if case .bool(let v)? = d["auto"] { auto = v }
+            let kind: Decision = status == "approved" ? .allowed : (status == "rejected" ? .blocked : .info)
+            return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"),
+                       "\(str(d, "rule") ?? "rule") (\(str(d, "host") ?? "?"):\(int(d, "port") ?? 0)) — \(str(d, "source") == "mechanistic" ? "drafted" : "agent proposal")",
+                       status + (auto ? " (automatic)" : "") + (str(d, "reason").map { " — \($0)" } ?? ""), kind)
+
+        case "egress.middleware":
+            let action = str(d, "action") ?? "?"
+            return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"),
+                       "\(str(d, "middleware") ?? "middleware") on \(str(d, "host") ?? "?")",
+                       action == "redact" ? "redacted \(int(d, "count") ?? 0) value(s)" : action,
+                       action == "deny" ? .blocked : .info)
+
+        case "credential.unmanaged":
+            var paused = true
+            if case .bool(let v)? = d["vm_paused"] { paused = v }
+            return row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                       "\(str(d, "preview") ?? "***") (\(str(d, "kind") ?? "secret"), \(str(d, "location") ?? "request")) → \(str(d, "host") ?? "?")",
+                       paused
+                           ? NSLocalizedString("blocked — credential not issued by Bromure, VM paused", comment: "Security Timeline decision")
+                           : NSLocalizedString("blocked — credential not issued by Bromure", comment: "Security Timeline decision"),
+                       .blocked)
+
         case "credential.exfiltration":
             let fake = str(d, "fake_preview") ?? "fake"
             let cred = str(d, "credential") ?? "session token"
@@ -358,7 +396,14 @@ public final class SecurityTimeline {
             let port = int(d, "port").map { ":\($0)" } ?? ""
             let proto = str(d, "proto").map { " \($0)" } ?? ""
             let action = (str(d, "action") ?? "allowed").lowercased()
-            let kind: Decision = action.contains("allow") ? .allowed : .blocked
+            // OpenShell request (L7) decisions name the request and the reason;
+            // an `audit` endpoint records the violation but forwards it.
+            let kind: Decision = action == "audit" ? .info : (action.contains("allow") ? .allowed : .blocked)
+            if str(d, "layer") == "l7", let method = str(d, "method") {
+                let cond = "\(method) \(host)\(port)\(str(d, "path") ?? "")"
+                let decision = str(d, "reason").map { "\(action) — \($0)" } ?? action
+                return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"), cond, decision, kind)
+            }
             return row(NSLocalizedString("Firewall", comment: "Security Timeline engine"), "\(host)\(port)\(proto)", action, kind)
 
         case "credential.ssh_sign":

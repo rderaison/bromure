@@ -122,4 +122,8 @@ public struct CompromiseEvent: Sendable {
     public let observedHost: String
     public let leaks: [CompromiseLeak]
     public let timestamp: Date
+    /// Strict credential mode: fingerprints of the unmanaged credentials that
+    /// tripped the alert. "Allow" approves exactly these for the session
+    /// (rather than opening the host to every swapped credential).
+    public var unmanagedFingerprints: [String] = []
 }

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(SandboxEngine)
+import SandboxEngine
+#endif
 
 /// Per-profile fake→real token map. Built each time a session is
 /// launched from the profile's saved tools + git creds + (later)
@@ -50,12 +53,20 @@ public struct TokenMap: Sendable {
         /// never be injected into a `lambda` call.
         public let acceptSiblings: Bool
 
+        /// Request-path selectors (OpenShell endpoint `path` syntax) the swap
+        /// is limited to; empty = any path. A fake on a bound host but another
+        /// path goes out unswapped (the upstream sees a useless placeholder),
+        /// exactly like an OpenShell placeholder outside its endpoint binding.
+        public let paths: [String]
+
         public init(fake: String, real: String, host: String? = nil,
                     header: Header = .authorization,
                     body: Bool = false,
                     acceptSiblings: Bool = false,
                     consentCredentialID: String? = nil,
-                    consentDisplayName: String? = nil) {
+                    consentDisplayName: String? = nil,
+                    paths: [String] = []) {
+            self.paths = paths
             self.fake = fake
             self.real = real
             self.host = host
@@ -165,6 +176,13 @@ public final class TokenSwapper: @unchecked Sendable {
         self.compromiseHandler = handler
     }
 
+    /// Raise the compromise alert for an event detected outside the swap map
+    /// (strict credential mode).
+    public func raiseCompromise(_ event: CompromiseEvent) {
+        lock.lock(); let handler = compromiseHandler; lock.unlock()
+        handler?(event)
+    }
+
     /// Snapshot of the current entries for a profile. Used by the
     /// exec-credential poller to mutate a single entry without
     /// rebuilding the whole map from scratch.
@@ -219,6 +237,14 @@ public final class TokenSwapper: @unchecked Sendable {
                     ? Self.hostMatchesScopeFamily(host: host, scope: h)
                     : Self.hostMatchesScope(host: host, scope: h)
                 if !matched && !sessionAllowed { continue }
+            }
+
+            if !entry.paths.isEmpty {
+                #if canImport(SandboxEngine)
+                let target = headerStr.prefix { $0 != "\r" }.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+                guard let path = OpenShellPolicy.canonicalPath(ofTarget: target),
+                      entry.paths.contains(where: { OpenShellPolicy.pathSelector($0, matches: path) }) else { continue }
+                #endif
             }
 
             let inHeader = (headerStr.range(of: entry.fake) != nil)

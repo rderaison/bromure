@@ -289,6 +289,9 @@ final class P2PBroker: @unchecked Sendable {
     /// this Mac's outbound dials, so one install is a server AND a client at
     /// once. Idempotent.
     func startServing(sshPort: Int) {
+        // A side-by-side test instance (BROMURE_AC_NO_REMOTE=1) shares this
+        // Mac's device identity: it must never advertise as the Mac.
+        guard ProcessInfo.processInfo.environment["BROMURE_AC_NO_REMOTE"] != "1" else { return }
         guard let id = currentIdentity() else { return }
         lock.lock()
         let portChanged = serving && serveSSHPort != sshPort

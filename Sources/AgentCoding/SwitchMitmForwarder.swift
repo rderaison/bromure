@@ -102,7 +102,8 @@ final class SwitchMitmForwarder: VMNetTCPInterceptor, @unchecked Sendable {
         // attributed connection would inject another session's real credentials),
         // so splice raw instead.
         if let pid = profileID {
-            engine.acceptTransparentFlow(appFD: endB, profileID: pid, destIP: destIP, destPort: destPort)
+            engine.acceptTransparentFlow(appFD: endB, profileID: pid, destIP: destIP, destPort: destPort,
+                                         srcPort: Int(seg.srcPort))
         } else {
             MitmPassthrough.splice(appFD: endB, destIP: destIP, destPort: destPort)
         }
@@ -124,7 +125,7 @@ final class SwitchMitmForwarder: VMNetTCPInterceptor, @unchecked Sendable {
 /// through this requirement ends that chain here, the way the vsock path's
 /// listener-delegate callback does, instead of warning at every caller.
 protocol TransparentFlowAccepting: AnyObject {
-    nonisolated func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int)
+    nonisolated func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int)
 }
 
 extension MitmEngine: TransparentFlowAccepting {}

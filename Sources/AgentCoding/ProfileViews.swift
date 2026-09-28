@@ -3818,11 +3818,39 @@ struct ProfileEditorView: View {
                 // mirrors profiles but neither edits nor enforces egress
                 // rules, so the pane simply omits the table there.
                 #if os(macOS)
-                EgressRulesEditor(pfText: $draft.egressRules)
+                FirewallEditor(draft: $draft)
                 #endif
 
                 VStack(alignment: .leading, spacing: 2) {
+                    Picker("Agent watchdog", selection: $draft.watchdogMode) {
+                        Text("Off").tag("off")
+                        Text("Alert").tag("alert")
+                        Text("Quarantine").tag("quarantine")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 360)
+                    Text("Watches the session as a whole from outside the VM — bursts of blocked requests, credentials that don't belong, tampering, new destinations once the session has settled, and outbound volume far above its own baseline (counted at the network switch, independently of the proxy). Past a threshold within a minute it records a detection finding; in Quarantine it also cuts the VM's network and pauses it in milliseconds, then asks you. Applies live.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.bottom, 8)
+
+                    Toggle("Only allow credentials Bromure injects (strict mode)", isOn: $draft.strictCredentials)
+                        .disabled(Profile.organizationRequiresStrictCredentials)
+                    Text("Blocks any request that carries a credential Bromure didn't put there — an API key or token the agent found in a file, an environment dump or a git config, or guessed. Bromure's own credentials still flow to the hosts they're bound to, and tokens a site issues inside the VM (a login, an OAuth flow) can be sent back to that site. A blocked request raises the compromise alert; Allow approves that one credential for the session. Strict mode inspects every HTTP(S) request, so transparent interception stays on and the no-MITM list is ignored. Raw TCP (SSH, databases) can't be inspected: deny it with the firewall. Applies live.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.bottom, draft.strictCredentials && !draft.unboundCredentialNames.isEmpty ? 2 : 8)
+                    if draft.strictCredentials, !draft.unboundCredentialNames.isEmpty {
+                        Label("Give these credentials a host filter before saving (strict mode doesn't allow credentials usable on any host): "
+                              + draft.unboundCredentialNames.joined(separator: ", "),
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption2).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.bottom, 8)
+                    }
+
                     Toggle("Disable transparent interception", isOn: $draft.disableTransparentProxy)
+                        .disabled(draft.strictCredentials)
                     Text("Transparent interception (on by default) diverts the VM's HTTP/HTTPS into Bromure at the network layer, so the proxy sees the traffic even when a client doesn't use the proxy env vars. Turn it off and that forced divert stops: raw sockets and cert-pinned clients (Signal and similar) reach the real network — and the real upstream cert — directly. This does NOT disable the proxy itself: HTTP(S)_PROXY stays set, so proxy-aware tools (apt/git/pip/curl/node…) and the agent's own API calls still go through Bromure and keep credential/token swap, tracing, and guardrails. Applies live, no restart. Use for a workspace with a client that breaks under transparent interception.")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -4442,7 +4470,22 @@ struct ProfileEditorView: View {
         // Only the name is required to save. Empty API key is allowed
         // (token mode users may want to paste the key after creation;
         // subscription mode never needs one).
-        !draft.name.trimmingCharacters(in: .whitespaces).isEmpty
+        guard !draft.name.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        #if os(macOS)
+        // A broken OpenShell policy fails closed (no network but the provider
+        // layer), so it can't be saved; the editor shows why.
+        if draft.usesOpenShellPolicy, (try? OpenShellPolicy.parse(draft.networkPolicy)) == nil { return false }
+        // …and must fit inside the organization boundary.
+        if draft.usesOpenShellPolicy,
+           OpenShellGovernance.shared.check(policyYAML: draft.networkPolicy,
+                                            providerRules: draft.openShellProviderRules)?.passed == false {
+            return false
+        }
+        #endif
+        // Strict credential mode binds every credential to its hosts; a custom
+        // token with no host filter would be injected anywhere.
+        if draft.strictCredentials, !draft.unboundCredentialNames.isEmpty { return false }
+        return true
     }
 
     @ViewBuilder

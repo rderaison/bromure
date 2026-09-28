@@ -25,7 +25,9 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     public enum DefaultAction: String, Sendable, Equatable, Codable { case allow, deny }
 
     /// What a matched flow is permitted to do at the connection layer.
-    public enum Verdict: Sendable, Equatable { case allow, deny, mitm }
+    /// `splice` relays without terminating TLS (an OpenShell `tls: skip`
+    /// endpoint) even for a host the MiTM would otherwise intercept.
+    public enum Verdict: Sendable, Equatable { case allow, deny, mitm, splice }
 
     /// A rule target: any, a hostname (suffix-matched), or an IPv4 host/CIDR.
     public enum Target: Sendable, Equatable, Codable {
@@ -121,16 +123,40 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     public var defaultAction: DefaultAction
     public var rules: [Rule]
 
+    /// An OpenShell sandbox policy that replaces the pf rules for this
+    /// workspace. When set, `rules` / `defaultAction` are ignored: every
+    /// connection verdict comes from it (default deny), and inspected requests
+    /// are checked with `OpenShellPolicy.evaluateRequest` in the MiTM.
+    public var openShell: OpenShellPolicy?
+
+    /// OpenShell `binaries` are enforced: the workspace runs a strict sandbox
+    /// whose root attestor reports each connection's executable. Rules then
+    /// apply only to their listed binaries; a connection with no attested
+    /// identity matches only Bromure's provider rules.
+    public var enforceBinaries: Bool = false
+
     public init(defaultAction: DefaultAction = .allow, rules: [Rule] = []) {
         self.defaultAction = defaultAction
         self.rules = rules
+    }
+
+    public init(openShell: OpenShellPolicy) {
+        self.defaultAction = .deny
+        self.rules = []
+        self.openShell = openShell
     }
 
     /// The all-allow policy — the non-breaking default for a profile with no
     /// rules configured.
     public static let allowAll = EgressPolicy(defaultAction: .allow, rules: [])
 
-    public var isActive: Bool { defaultAction == .deny || !rules.isEmpty }
+    public var isActive: Bool { openShell != nil || defaultAction == .deny || !rules.isEmpty }
+
+    /// Whether a flow with no identifiable hostname at L4 should be handed to
+    /// the MiTM (on an intercepted port) rather than decided at the switch:
+    /// OpenShell rules are keyed by hostname, which the SNI / Host header
+    /// supplies authoritatively once the flow reaches the MiTM.
+    public var defersToInterception: Bool { openShell != nil }
 
     // MARK: - Evaluation
 
@@ -145,7 +171,18 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     /// forces MiTM (overriding passthrough); `.allow` = permit (normal MiTM-vs-
     /// passthrough logic still applies at the SNI layer). Used by both the switch
     /// (IP/snoop) and the MiTM (SNI).
-    public func verdict(ip: UInt32?, hostnames: [String], proto: Proto, port: UInt16) -> Verdict {
+    public func verdict(ip: UInt32?, hostnames: [String], proto: Proto, port: UInt16,
+                        identity: OpenShellPolicy.BinaryIdentity? = nil) -> Verdict {
+        if let openShell {
+            // OpenShell endpoints are TCP-only: any other transport is denied.
+            guard proto != .udp else { return .deny }
+            switch openShell.evaluateConnect(hostnames: hostnames, ip: ip, port: port,
+                                             identity: identity, enforceBinaries: enforceBinaries) {
+            case .deny: return .deny
+            case .allow(_, let inspect, let tlsSkip):
+                return tlsSkip ? .splice : (inspect ? .mitm : .allow)
+            }
+        }
         guard let rule = firstMatch(ip: ip, hostnames: hostnames, proto: proto, port: port) else {
             return defaultAction == .deny ? .deny : .allow
         }
@@ -167,6 +204,9 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     /// forbid a method (allow-list or deny-list per its action). Everything
     /// else permits — connection deny is handled at the connection layer.
     public func permitsMethod(hostnames: [String], port: UInt16, method: String) -> Bool {
+        // OpenShell request rules are evaluated on the full request (method,
+        // path, query) by `OpenShellPolicy.evaluateRequest`, not here.
+        if openShell != nil { return true }
         guard let rule = firstMatch(ip: nil, hostnames: hostnames, proto: .tcp, port: port) else { return true }
         return rule.methodAllowed(method)
     }
@@ -306,6 +346,9 @@ extension EgressPolicy {
         let mask: UInt32 = bits == 0 ? 0 : (0xFFFF_FFFF << (32 - UInt32(bits)))
         return .cidr(net: ip, mask: mask)
     }
+
+    /// Public dotted-quad parser for callers outside SandboxEngine.
+    public static func parseIPv4Address(_ s: String) -> UInt32? { parseIPv4(s) }
 
     static func parseIPv4(_ s: String) -> UInt32? {
         let octets = s.split(separator: ".", omittingEmptySubsequences: false)

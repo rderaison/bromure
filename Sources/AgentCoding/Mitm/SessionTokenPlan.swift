@@ -18,14 +18,18 @@ public struct SessionTokenPlan: Sendable {
         public let consentCredentialID: String?
         /// Display name shown in the consent prompt.
         public let consentDisplayName: String
+        /// Request-path selectors the swap is limited to (empty = any path).
+        public var pathScopes: [String] = []
         public init(realValue: String, fakeValue: String, purpose: Purpose,
                     consentCredentialID: String? = nil,
-                    consentDisplayName: String = "") {
+                    consentDisplayName: String = "",
+                    pathScopes: [String] = []) {
             self.realValue = realValue
             self.fakeValue = fakeValue
             self.purpose = purpose
             self.consentCredentialID = consentCredentialID
             self.consentDisplayName = consentDisplayName
+            self.pathScopes = pathScopes
         }
     }
 
@@ -134,7 +138,8 @@ public struct SessionTokenPlan: Sendable {
                 body: bodyScan(for: e.purpose),
                 consentCredentialID: e.consentCredentialID,
                 consentDisplayName: e.consentCredentialID != nil
-                    ? e.consentDisplayName : nil
+                    ? e.consentDisplayName : nil,
+                paths: e.pathScopes
             )
         }
         return TokenMap(entries: mapped)
@@ -207,6 +212,13 @@ public struct SessionTokenPlan: Sendable {
             }
         }
         return nil
+    }
+
+    /// Every host scope a credential in this plan is injected on (a domain,
+    /// matched exact-or-subdomain). Feeds the OpenShell provider layer: a
+    /// destination Bromure injects a credential for must stay reachable.
+    public var credentialHostScopes: [String] {
+        entries.compactMap { hostScope(for: $0.purpose)?.lowercased() }
     }
 
     private func hostScope(for purpose: Purpose) -> String? {
@@ -324,8 +336,11 @@ public struct SessionTokenPlan: Sendable {
                 out.append((envName, e.fakeValue))
             }
         }
-        return out
+        return out + aliasExports
     }
+
+    /// Extra `(envName, fake)` exports for manual tokens' `envVarAliases`.
+    public var aliasExports: [(String, String)] = []
 
     /// All manual entries with their (display name, env var, fake)
     /// triple. Used for the welcome message so the user knows which
@@ -351,6 +366,7 @@ public extension Profile {
     /// only way fakes change.
     func makeTokenPlan(salt: Data, claudeSubscriptionAvailable: Bool = false) -> SessionTokenPlan {
         var entries: [SessionTokenPlan.Entry] = []
+        var aliasExports: [(String, String)] = []
 
         // Claude Code through Amazon Bedrock with a Bedrock API key: the key
         // rides on the Claude spec (`.bedrock` auth + apiKey) and is swapped
@@ -483,7 +499,11 @@ public extension Profile {
                                      hostFilter: host),
                     consentCredentialID: consentID,
                     consentDisplayName: entry.name.isEmpty
-                        ? "manual token" : "“\(entry.name)” token"))
+                        ? "manual token" : "“\(entry.name)” token",
+                    pathScopes: entry.pathFilters))
+            }
+            for alias in entry.envVarAliases where !alias.isEmpty && alias != entry.envVarName {
+                aliasExports.append((alias, fake))
             }
         }
 
@@ -720,7 +740,9 @@ public extension Profile {
             bogus = SessionTokenPlan.claudeSubscriptionBogusKey(salt: salt, profileID: id)
         }
 
-        return SessionTokenPlan(entries: entries, claudeSubscriptionBogusKey: bogus)
+        var plan = SessionTokenPlan(entries: entries, claudeSubscriptionBogusKey: bogus)
+        plan.aliasExports = aliasExports
+        return plan
     }
 }
 

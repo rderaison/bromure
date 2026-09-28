@@ -57,6 +57,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import shlex
 import pty
 import re
 import select
@@ -5235,6 +5236,57 @@ def _on_signal(signum, frame):
     _RUNNING.clear()
 
 
+# ---------------------------------------------------------------------------
+# Strict sandbox (OpenShell binary identity): the host marks the workspace by
+# staging `strict-sandbox` in the meta share. Before any agent code runs,
+# agentd starts the root attestor (bromure-attestd, a supervised root unit the
+# agent user can't touch), then revokes that user's root paths — sudo, the
+# docker group, the autologin console — and exits so systemd restarts it with
+# the reduced credentials. Everything agentd spawns afterwards (tmux, the
+# agents) inherits no way back to root, which is what makes the attestor's
+# answers trustworthy to the host.
+# ---------------------------------------------------------------------------
+STRICT_MARKER = os.path.join(META, "strict-sandbox")
+STRICT_DONE = "/run/bromure-strict.done"
+
+
+def strict_sandbox_requested():
+    return os.path.exists(STRICT_MARKER)
+
+
+def strict_sandbox_applied():
+    return os.path.exists(STRICT_DONE)
+
+
+def task_strict_sandbox():
+    if not strict_sandbox_requested() or strict_sandbox_applied():
+        return
+    attestd = os.path.join(META, "bromure-attestd.py")
+    script = r"""
+systemctl stop getty@tty1.service >/dev/null 2>&1
+systemctl mask --runtime getty@tty1.service >/dev/null 2>&1
+loginctl terminate-user ubuntu >/dev/null 2>&1
+rm -f /run/bromure-attestd.ready
+if [ -r %(attestd)s ]; then
+  systemd-run --unit=bromure-attestd --collect -p Restart=always -p RestartSec=1       /usr/bin/python3 %(attestd)s >/dev/null 2>&1
+  for i in $(seq 1 100); do [ -f /run/bromure-attestd.ready ] && break; sleep 0.1; done
+fi
+# Revoke regardless: without the attestor the host fails closed on binaries.
+for g in docker sudo lxd adm; do gpasswd -d ubuntu "$g" >/dev/null 2>&1; done
+rm -f /etc/sudoers.d/90-ubuntu
+printf 'ubuntu ALL=(ALL) !ALL
+' > /etc/sudoers.d/zz-bromure-strict
+chmod 0440 /etc/sudoers.d/zz-bromure-strict
+touch %(done)s
+[ -f /run/bromure-attestd.ready ]
+""" % {"attestd": shlex.quote(attestd), "done": STRICT_DONE}
+    p = subprocess.run(["sudo", "-n", "sh", "-c", script], capture_output=True, text=True, timeout=60)
+    log("strict", "applied (attestor %s); restarting with reduced credentials"
+        % ("connected" if p.returncode == 0 else "NOT connected — binary rules fail closed"))
+    # systemd (Restart=always) brings agentd back without the groups it had.
+    os._exit(75)
+
+
 def _run_once(name, fn):
     """Run a one-shot startup task; log and swallow any failure (non-fatal)."""
     try:
@@ -5260,18 +5312,24 @@ def main():
         pass
 
     # 2. One-shot session tasks (each isolated; a failure never aborts boot).
-    _run_once("hostname", task_apply_hostname)
-    _run_once("unit", task_fix_systemd_unit)
-    _run_once("mtu", task_set_mtu)
-    _run_once("ca", task_install_ca)
-    _run_once("docker-proxy", task_apt_and_docker_proxy)
-    _run_once("apt-ipv4", task_apt_force_ipv4)
-    _run_once("timezone", task_set_timezone)
-    # Home storage BEFORE anything that touches ~ (folder-share symlinks,
-    # the tmux session): on ext4/migrate boots this mounts the real home.
-    _run_once("home", task_home_setup)
-    _run_once("folder-shares", task_folder_shares)
-    _run_once("agent-stubs", task_heal_agent_stubs)
+    # Under an applied strict sandbox these privileged tasks already ran in
+    # the first incarnation (and sudo is gone now): skip straight on.
+    if not strict_sandbox_applied():
+        _run_once("hostname", task_apply_hostname)
+        _run_once("unit", task_fix_systemd_unit)
+        _run_once("mtu", task_set_mtu)
+        _run_once("ca", task_install_ca)
+        _run_once("docker-proxy", task_apt_and_docker_proxy)
+        _run_once("apt-ipv4", task_apt_force_ipv4)
+        _run_once("timezone", task_set_timezone)
+        # Home storage BEFORE anything that touches ~ (folder-share symlinks,
+        # the tmux session): on ext4/migrate boots this mounts the real home.
+        _run_once("home", task_home_setup)
+        _run_once("folder-shares", task_folder_shares)
+        _run_once("agent-stubs", task_heal_agent_stubs)
+        # Last privileged step, before anything agent-facing starts. Exits
+        # the process when it applies (systemd restarts agentd).
+        _run_once("strict", task_strict_sandbox)
     _run_once("session", create_session)
 
     # One-shot background jobs (fire-and-forget, not supervised).

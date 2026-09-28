@@ -514,3 +514,68 @@ enum WSTranscriptRenderer {
 private extension Optional where Wrapped == Bool {
     func intoBool() -> Bool { self ?? false }
 }
+
+/// Client→upstream gate for a WebSocket whose OpenShell policy doesn't let the
+/// client send text messages (`WEBSOCKET_TEXT` not allowed on the upgrade
+/// path, under `enforcement: enforce`). Walks frame headers as bytes stream by
+/// — payloads are skipped, never buffered — and cuts the stream at the first
+/// text frame, so not a byte of it reaches the upstream.
+final class WSClientTextGate: @unchecked Sendable {
+    private var header = Data()
+    private var remainingPayload = 0
+    private(set) var tripped = false
+
+    /// The prefix of `chunk` that may be forwarded, and whether the stream must
+    /// stop after it (a text frame started).
+    func filter(_ chunk: Data) -> (forward: Data, stop: Bool) {
+        if tripped { return (Data(), true) }
+        var i = chunk.startIndex
+        while i < chunk.endIndex {
+            if remainingPayload > 0 {
+                let n = min(remainingPayload, chunk.endIndex - i)
+                remainingPayload -= n
+                i += n
+                continue
+            }
+            let frameStart = i - header.count
+            header.append(chunk[i])
+            i += 1
+            guard let (opcode, headerLen, payloadLen) = Self.parseHeader(header) else { continue }
+            _ = headerLen
+            header.removeAll(keepingCapacity: true)
+            if opcode == 0x1 {
+                tripped = true
+                return (chunk[chunk.startIndex..<max(chunk.startIndex, frameStart)], true)
+            }
+            remainingPayload = payloadLen
+        }
+        return (chunk, false)
+    }
+
+    /// (opcode, header length, payload length) once `h` holds a whole header.
+    static func parseHeader(_ h: Data) -> (UInt8, Int, Int)? {
+        guard h.count >= 2 else { return nil }
+        let b0 = h[h.startIndex], b1 = h[h.startIndex + 1]
+        var len = Int(b1 & 0x7F)
+        var need = 2
+        if len == 126 { need += 2 } else if len == 127 { need += 8 }
+        if b1 & 0x80 != 0 { need += 4 }
+        guard h.count >= need else { return nil }
+        if len == 126 {
+            len = (Int(h[h.startIndex + 2]) << 8) | Int(h[h.startIndex + 3])
+        } else if len == 127 {
+            len = 0
+            for k in 0..<8 { len = (len << 8) | Int(h[h.startIndex + 2 + k]) }
+        }
+        return (b0 & 0x0F, need, len)
+    }
+
+    /// A server→client close frame (unmasked), status 1008 "policy violation".
+    static func closeFrame(reason: String) -> Data {
+        var payload = Data([0x03, 0xF0])                    // 1008
+        payload.append(Data(reason.utf8.prefix(120)))
+        var f = Data([0x88, UInt8(payload.count)])
+        f.append(payload)
+        return f
+    }
+}

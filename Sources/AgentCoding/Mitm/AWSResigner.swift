@@ -39,6 +39,9 @@ public final class AWSResigner: @unchecked Sendable {
         self.credServer = credServer
     }
 
+    /// See `AWSCredentialServer.accessKeyID(for:)`.
+    public func accessKeyID(for profileID: UUID) -> String? { credServer.accessKeyID(for: profileID) }
+
     public enum Outcome {
         /// Not an AWS host, or no `Authorization: AWS4-HMAC-SHA256` —
         /// nothing to do; caller forwards `rawRequest` as-is.

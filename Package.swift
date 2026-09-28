@@ -114,6 +114,8 @@ let package = Package(
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
                 .product(name: "BigInt", package: "BigInt"),
                 .product(name: "X509", package: "swift-certificates"),
+                // OpenShell sandbox policies (OpenShellPolicy.swift) are YAML.
+                .product(name: "Yams", package: "Yams"),
             ],
             path: "Sources/SandboxEngine",
             resources: [.copy("Resources/vm-setup"),

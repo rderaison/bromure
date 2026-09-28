@@ -473,10 +473,19 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
 
         var win = winsize(ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0)
         let home = NSHomeDirectory()
-        let env = ["TERM=\(term)",
+        var env = ["TERM=\(term)",
                    "PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
                    "HOME=\(home)", "USER=\(user)", "LOGNAME=\(user)",
                    "LANG=en_US.UTF-8"]
+        // An instance running under a relocated home (CFFIXED_USER_HOME —
+        // HOME alone doesn't move Foundation's directories) must hand it on:
+        // otherwise the menu, and any agent it autostarts, resolves the REAL
+        // home and drives the other instance's workspaces and clusters.
+        let inherited = ProcessInfo.processInfo.environment
+        for key in ["CFFIXED_USER_HOME", "BROMURE_AC_AUTOMATION_PORT", "BROMURE_AC_REMOTE_PORT",
+                    "BROMURE_AC_NO_REMOTE"] {
+            if let v = inherited[key] { env.append("\(key)=\(v)") }
+        }
         let (pid, masterFD) = PTYSpawn.spawn(path: menuExe,
                                              argv: [menuExe, "__remote-menu"],
                                              env: env, win: &win)

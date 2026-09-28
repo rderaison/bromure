@@ -325,6 +325,9 @@ public final class VMNetSwitch: @unchecked Sendable {
         portGuestMAC[id] = nil
         portEgressPolicy[id] = nil
         portInterceptDisabled.remove(id)
+        quarantinedPorts.remove(id)
+        egressByteCounts[id] = nil
+        attestedFlows = attestedFlows.filter { $0.key.portID != id }
         egressSeen = egressSeen.filter { $0.key.portID != id }
         let intercept = interceptor
         if releaseLease {
@@ -982,6 +985,26 @@ public final class VMNetSwitch: @unchecked Sendable {
         portEgressPolicy[id] = policy
     }
 
+    /// Quarantine a VM's port: drop every unicast IP frame it sends (see
+    /// `handleEgress`). Used by the agent watchdog; reversible.
+    public func setQuarantined(_ on: Bool, for handle: FileHandle) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let id = portByHandle[ObjectIdentifier(handle)] else { return }
+        if on { quarantinedPorts.insert(id) } else { quarantinedPorts.remove(id) }
+    }
+
+    /// Off-subnet bytes a VM's port has sent since it attached.
+    public func egressByteCount(for handle: FileHandle) -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let id = portByHandle[ObjectIdentifier(handle)] else { return 0 }
+        return egressByteCounts[id] ?? 0
+    }
+
+    private var quarantinedPorts: Set<Int> = []
+    private var egressByteCounts: [Int: UInt64] = [:]
+
     /// Toggle transparent interception for a VM's port mid-session. When
     /// disabled, off-subnet flows are never diverted into the MiTM (the L4
     /// firewall still applies).
@@ -1001,6 +1024,14 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// the Bromure CA, so MiTM would break them).
     private func handleEgress(_ srcPortID: Int, _ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
         let ethertype = Self.u16(buf, 12)
+
+        // Quarantine (the agent watchdog): no unicast IP leaves the VM — not
+        // off-subnet, not the gateway (DNS), not peers. ARP still answers so
+        // the link stays up for a release.
+        if ethertype == 0x0800 || ethertype == 0x86DD {
+            lock.lock(); let quarantined = quarantinedPorts.contains(srcPortID); lock.unlock()
+            if quarantined { return true }
+        }
 
         // ---- IPv6 ----
         // The firewall + MiTM are IPv4-only, so routable IPv6 egress is an
@@ -1032,6 +1063,10 @@ public final class VMNetSwitch: @unchecked Sendable {
         let g = portGovernance(srcPortID)
         guard let pid = g.pid else { return false }          // non-session → native
 
+        // Outbound volume per VM, for the watchdog's exfiltration signal
+        // (counted here, independent of the proxy's own accounting).
+        lock.lock(); egressByteCounts[srcPortID, default: 0] &+= UInt64(n); lock.unlock()
+
         let hostnames = dnsCache.names(for: dstIP)
         let ipProto = buf[14 + 9]
         // An IP fragment (MF set, or a non-zero fragment offset) can't be
@@ -1060,7 +1095,44 @@ public final class VMNetSwitch: @unchecked Sendable {
         guard let (proto, _, _) = l4 else { return false }
 
         let ep: EgressPolicy.Proto = proto == 6 ? .tcp : .udp
-        let verdict = g.policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport) ?? .allow
+        var verdict = g.policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport) ?? .allow
+
+        // An OpenShell policy is keyed by hostname, which the snooped DNS cache
+        // may not hold for this address (DoH, cached lookups, shared CDN IPs).
+        // On an intercepted port the MiTM re-decides with the TLS SNI / Host
+        // header — and fails closed on flows that carry neither — so hand the
+        // flow over instead of dropping it here.
+        if verdict == .deny, proto == 6, g.policy?.defersToInterception == true,
+           g.interceptor != nil, g.interceptPorts.contains(dport) {
+            verdict = .allow
+        }
+
+        // Binary identity (strict sandbox + an OpenShell policy's `binaries`):
+        // a new TCP connection the MiTM won't see is decided for the
+        // executable that opened it. The first SYN is held while the guest's
+        // attestor answers (the guest retransmits it); later packets of an
+        // allowed connection pass on the remembered decision.
+        if proto == 6, let policy = g.policy, policy.enforceBinaries,
+           !(g.interceptor != nil && g.interceptPorts.contains(dport)) {
+            let sport = Self.u16(buf, 14 + ihl)
+            let key = AttestedFlow(portID: srcPortID, sport: sport, dstIP: dstIP, dport: dport)
+            if Self.isTCPSyn(buf, n) {
+                guard let gate = identityGate else { verdict = .deny; return dropDenied() }
+                switch gate(pid, sport, dstIP, dport, hostnames, policy) {
+                case nil:      return true                       // attestation in flight
+                case .deny?:   verdict = .deny
+                default:       verdict = .allow; rememberAttested(key)
+                }
+            } else if isAttested(key) {
+                verdict = .allow
+            }
+        }
+        func dropDenied() -> Bool {
+            fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
+                       proto: proto, port: dport, denied: true)
+            if Self.isTCPSyn(buf, n) { injectIPToPort(srcPortID, ipPacket: Self.buildTCPReset(buf, n)) }
+            return true
+        }
 
         if verdict == .deny {
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
@@ -1144,6 +1216,32 @@ public final class VMNetSwitch: @unchecked Sendable {
         guard proto == 6 || proto == 17 else { return nil }              // TCP/UDP
         guard (u16(buf, 14 + 6) & 0x1FFF) == 0 else { return nil }       // first fragment only
         return (proto, u32(buf, 14 + 16), u16(buf, 14 + ihl + 2))
+    }
+
+    /// Hook for binary-identity enforcement (set by the app): the verdict for
+    /// a new TCP connection from `srcPort` given the executable the guest's
+    /// attestor names for it, or nil while that answer is still coming.
+    public var identityGate: (@Sendable (_ profileID: UUID, _ srcPort: UInt16, _ dstIP: UInt32,
+                                         _ dport: UInt16, _ hostnames: [String],
+                                         _ policy: EgressPolicy) -> EgressPolicy.Verdict?)?
+
+    private struct AttestedFlow: Hashable { let portID: Int; let sport: UInt16; let dstIP: UInt32; let dport: UInt16 }
+    private var attestedFlows: [AttestedFlow: Date] = [:]
+
+    private func rememberAttested(_ k: AttestedFlow) {
+        lock.lock(); defer { lock.unlock() }
+        attestedFlows[k] = Date()
+        if attestedFlows.count > 8192 {                 // drop the stalest half
+            let cut = attestedFlows.values.sorted()[attestedFlows.count / 2]
+            attestedFlows = attestedFlows.filter { $0.value > cut }
+        }
+    }
+
+    private func isAttested(_ k: AttestedFlow) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard attestedFlows[k] != nil else { return false }
+        attestedFlows[k] = Date()
+        return true
     }
 
     private static func isTCPSyn(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {

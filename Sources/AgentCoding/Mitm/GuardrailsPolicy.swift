@@ -223,6 +223,11 @@ public struct GuardrailsConfig: Sendable {
     /// VM isn't paused — the Security Timeline row must say so.
     public var exfiltrationAlertsDisabled: Bool = false
 
+    /// Strict credential mode (`Profile.strictCredentials`): block requests
+    /// carrying credentials Bromure didn't inject, and inspect every flow
+    /// (no passthrough).
+    public var strictCredentials: Bool = false
+
     public init(kubernetes: GuardrailsPolicy.Mode, kubeHosts: Set<String>,
                 aws: GuardrailsPolicy.Mode = .off,
                 digitalOcean: GuardrailsPolicy.Mode = .off,

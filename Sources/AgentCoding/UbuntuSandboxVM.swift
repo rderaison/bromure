@@ -231,6 +231,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         VMNetSwitch.shared.setEgressPolicy(policy, for: switchPort)
     }
 
+    /// Cut (or restore) all of this VM's network traffic at the switch.
+    public func setNetworkQuarantined(_ on: Bool) {
+        guard let switchPort else { return }
+        VMNetSwitch.shared.setQuarantined(on, for: switchPort)
+    }
+
+    /// Off-subnet bytes this VM has sent (switch-side count).
+    public var egressByteCount: UInt64 {
+        guard let switchPort else { return 0 }
+        return VMNetSwitch.shared.egressByteCount(for: switchPort)
+    }
+
     /// Toggle transparent (IP-stack) interception for this VM's switch port
     /// mid-session — the live counterpart of the `interceptDisabled:` flag set
     /// at `attachPort` on cold boot. When disabled, off-subnet TCP is never
@@ -363,7 +375,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             // Fall back to Apple's NAT if the switch can't bring up vmnet.
             if let port = VMNetSwitch.shared.attachPort(profileID: sessionDisk?.profile.id,
                                                         egressPolicy: sessionDisk?.profile.resolvedEgressPolicy,
-                                                        interceptDisabled: sessionDisk?.profile.disableTransparentProxy ?? false) {
+                                                        interceptDisabled: sessionDisk?.profile.effectiveDisableTransparentProxy ?? false) {
                 net.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: port)
                 self.switchPort = port
             } else {
@@ -588,6 +600,10 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// metadata + outbox dirs use stable per-profile paths, and the
     /// MAC + machine identifier are persisted in the profile dir.
     @MainActor
+    /// This session resumed a saved RAM snapshot (vs. a fresh boot) — the
+    /// guest's processes, including a strict sandbox's attestor, carried on.
+    public private(set) var didRestore = false
+
     public func restore() async throws {
         guard let vm = vm, let session = sessionDisk else {
             throw UbuntuImageError.installerStoppedEarly
@@ -608,6 +624,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // journal, page cache) against a newer disk and corrupt the fs.
         session.clearSavedState()
         try await vm.resume()
+        didRestore = true
         state = .running
         startOutboxPolling()
         // Touch the resume marker on the meta share — the guest's

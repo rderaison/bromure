@@ -271,16 +271,26 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
     /// When true, every fake→real substitution for this token prompts
     /// the user on the host. See `ConsentBroker`.
     public var requireApproval: Bool
+    /// Request-path selectors (OpenShell endpoint `path` syntax, e.g.
+    /// `/v1/**`) the swap is limited to. Empty = any path. Set when the token
+    /// comes from an OpenShell provider profile whose endpoints narrow by path.
+    public var pathFilters: [String] = []
+    /// Extra env var names that also receive the fake (a provider profile's
+    /// `env_vars` beyond the first, e.g. `GH_TOKEN` next to `GITHUB_TOKEN`).
+    public var envVarAliases: [String] = []
 
     public init(id: UUID = UUID(), name: String = "", realValue: String = "",
                 envVarName: String = "", hostFilters: [String] = [],
-                requireApproval: Bool = false) {
+                requireApproval: Bool = false, pathFilters: [String] = [],
+                envVarAliases: [String] = []) {
         self.id = id
         self.name = name
         self.realValue = realValue
         self.envVarName = envVarName
         self.hostFilters = hostFilters
         self.requireApproval = requireApproval
+        self.pathFilters = pathFilters
+        self.envVarAliases = envVarAliases
     }
 
     public var isUsable: Bool {
@@ -299,6 +309,7 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
         // `hostFilter` (singular) is the legacy pre-multi-host key, decoded for
         // migration only; new profiles write `hostFilters`.
         case id, name, realValue, envVarName, hostFilter, hostFilters, requireApproval
+        case pathFilters, envVarAliases
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -314,6 +325,8 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
             hostFilters = []
         }
         requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+        pathFilters = try c.decodeIfPresent([String].self, forKey: .pathFilters) ?? []
+        envVarAliases = try c.decodeIfPresent([String].self, forKey: .envVarAliases) ?? []
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -323,6 +336,22 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
         try c.encode(envVarName, forKey: .envVarName)
         if !hostFilters.isEmpty { try c.encode(hostFilters, forKey: .hostFilters) }
         if requireApproval { try c.encode(true, forKey: .requireApproval) }
+        if !pathFilters.isEmpty { try c.encode(pathFilters, forKey: .pathFilters) }
+        if !envVarAliases.isEmpty { try c.encode(envVarAliases, forKey: .envVarAliases) }
+    }
+}
+
+/// An OpenShell provider profile attached to a workspace: the profile YAML as
+/// imported, the instance name its `_provider_<name>` rule carries, and the
+/// workspace credentials (`manualTokens`) minted from it.
+public struct OpenShellProviderAttachment: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var instanceName: String
+    public var profileYAML: String
+    public var tokenIDs: [UUID]
+    public init(id: UUID = UUID(), instanceName: String, profileYAML: String, tokenIDs: [UUID]) {
+        self.id = id; self.instanceName = instanceName
+        self.profileYAML = profileYAML; self.tokenIDs = tokenIDs
     }
 }
 
@@ -1468,9 +1497,46 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// (switch L4 + SNI) and, via `web` rules, HTTP method restrictions.
     public var egressRules: String = ""
 
+    /// An NVIDIA OpenShell sandbox policy (YAML, schema version 1). When
+    /// non-empty it REPLACES `egressRules`: connections are default-deny and
+    /// allowed only by its `network_policies` (plus the provider layer Bromure
+    /// derives from the workspace's own credentials and agents), and requests
+    /// on inspected endpoints are checked in the MiTM. See `OpenShellPolicy`.
+    public var networkPolicy: String = ""
+
+    /// OpenShell provider profiles attached to this workspace. Each adds a
+    /// `_provider_<name>` rule (its endpoints) to the effective OpenShell
+    /// policy; its credentials live in `manualTokens`, bound to those endpoints.
+    public var openShellProviders: [OpenShellProviderAttachment] = []
+
+    /// OpenShell policy advisor for this workspace (`OpenShellAdvisor`):
+    /// whether agents may propose rules via `http://policy.local`, and whether
+    /// risk-free proposals are approved automatically. Stored as the raw mode
+    /// (`off` / `review` / `auto`).
+    public var openShellAdvisorMode: String = "off"
+
+    /// Agent watchdog (`AgentWatchdog`): `off`, `alert` (record a detection
+    /// finding when the session drifts), or `quarantine` (also cut the VM's
+    /// network and pause it). Stored raw so the iOS mirror can carry it.
+    public var watchdogMode: String = "off"
+
+    /// Whether the workspace's firewall is an OpenShell policy.
+    public var usesOpenShellPolicy: Bool {
+        !networkPolicy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// Parsed firewall rules, or allow-all when empty/unparseable (never blocks
-    /// on a bad rule — the editor validates before save).
+    /// on a bad rule — the editor validates before save). An OpenShell policy
+    /// that fails to parse is the exception: it fails CLOSED (deny all but the
+    /// provider layer), as OpenShell does.
     public var resolvedEgressPolicy: EgressPolicy {
+        #if canImport(SandboxEngine)
+        // An organization boundary puts every workspace under OpenShell: its
+        // own policy (checked against the boundary), or the boundary itself.
+        if usesOpenShellPolicy || OpenShellGovernance.shared.boundaryYAML != nil {
+            return resolvedOpenShellEgressPolicy
+        }
+        #endif
         guard !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .allowAll }
         #if canImport(SandboxEngine)
         guard var policy = try? EgressPolicy.parse(egressRules) else { return .allowAll }
@@ -1499,6 +1565,59 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// unbypassable; this is an escape hatch for a workspace that breaks under
     /// interception (e.g. heavy cert-pinning not covered by the passthrough list).
     public var disableTransparentProxy: Bool = false
+
+    /// Strict credential mode: block any outbound request carrying a
+    /// credential Bromure didn't inject for that destination (a token the
+    /// agent found or guessed). Implies full interception — the transparent
+    /// proxy can't be disabled and the no-MITM passthrough list is ignored for
+    /// this workspace, so every HTTP(S) request is inspected. See
+    /// `UnmanagedCredentialGuard`.
+    public var strictCredentials: Bool = false
+
+    /// Custom credentials with no host filter (injected on any host) — not
+    /// allowed under strict credential mode.
+    public var unboundCredentialNames: [String] {
+        manualTokens.filter { $0.isUsable && $0.effectiveHostScopes == [""] }
+            .map { $0.name.isEmpty ? $0.envVarName : $0.name }
+    }
+
+    /// Strict sandbox: agents in this workspace get no path to root in the
+    /// guest (no sudo, no docker group, no console session) and a root-owned
+    /// attestor reports which executable opened each connection, so an
+    /// OpenShell policy's `binaries` are enforced (OpenShell RFC 0012 binary
+    /// identity). The cooperative proxy env is dropped — every connection goes
+    /// through transparent interception, where it can be attributed. Applies at
+    /// the next VM start.
+    public var strictSandbox: Bool = false
+
+    /// Strict modes as actually applied: the workspace's own switches, or the
+    /// organization's requirement (bromure.io managed policy).
+    public var effectiveStrictCredentials: Bool {
+        Self.organizationRequiresStrictCredentials || strictCredentials
+    }
+
+    /// The organization (bromure.io managed policy) requires strict credential
+    /// mode on every workspace of this install.
+    public static var organizationRequiresStrictCredentials: Bool {
+        #if os(macOS)
+        return OpenShellGovernance.shared.managed?.requireStrictCredentials == true
+        #else
+        return false
+        #endif
+    }
+
+    public var effectiveStrictSandbox: Bool {
+        #if os(macOS)
+        if OpenShellGovernance.shared.managed?.requireStrictSandbox == true { return true }
+        #endif
+        return strictSandbox
+    }
+
+    /// Interception opt-out as actually applied: strict credential mode
+    /// overrides the escape hatch.
+    public var effectiveDisableTransparentProxy: Bool {
+        disableTransparentProxy && !effectiveStrictCredentials && !effectiveStrictSandbox
+    }
 
     /// Suppress the interruptive "environment may be compromised" alert when a
     /// session credential is seen heading to a host it wasn't minted for. The
@@ -2003,7 +2122,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case kubeconfigs
         case guardrails
         case egressRules
+        case networkPolicy
+        case openShellProviders
+        case openShellAdvisorMode
+        case watchdogMode
         case disableTransparentProxy
+        case strictCredentials
+        case strictSandbox
         case disableExfiltrationAlerts
         case supplyChain
         case promptInjection
@@ -2126,7 +2251,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         guardrails = try c.decodeIfPresent(GuardrailsPolicy.self, forKey: .guardrails) ?? GuardrailsPolicy()
         egressRules = try c.decodeIfPresent(String.self, forKey: .egressRules) ?? ""
+        networkPolicy = try c.decodeIfPresent(String.self, forKey: .networkPolicy) ?? ""
+        openShellProviders = try c.decodeIfPresent([OpenShellProviderAttachment].self,
+                                                   forKey: .openShellProviders) ?? []
+        openShellAdvisorMode = try c.decodeIfPresent(String.self, forKey: .openShellAdvisorMode) ?? "off"
+        watchdogMode = try c.decodeIfPresent(String.self, forKey: .watchdogMode) ?? "off"
         disableTransparentProxy = try c.decodeIfPresent(Bool.self, forKey: .disableTransparentProxy) ?? false
+        strictCredentials = try c.decodeIfPresent(Bool.self, forKey: .strictCredentials) ?? false
+        strictSandbox = try c.decodeIfPresent(Bool.self, forKey: .strictSandbox) ?? false
         disableExfiltrationAlerts = try c.decodeIfPresent(Bool.self, forKey: .disableExfiltrationAlerts) ?? false
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
         promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
@@ -2276,6 +2408,24 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(guardrails, forKey: .guardrails)
         if !egressRules.isEmpty {
             try c.encode(egressRules, forKey: .egressRules)
+        }
+        if !networkPolicy.isEmpty {
+            try c.encode(networkPolicy, forKey: .networkPolicy)
+        }
+        if !openShellProviders.isEmpty {
+            try c.encode(openShellProviders, forKey: .openShellProviders)
+        }
+        if openShellAdvisorMode != "off" {
+            try c.encode(openShellAdvisorMode, forKey: .openShellAdvisorMode)
+        }
+        if watchdogMode != "off" {
+            try c.encode(watchdogMode, forKey: .watchdogMode)
+        }
+        if strictCredentials {
+            try c.encode(strictCredentials, forKey: .strictCredentials)
+        }
+        if strictSandbox {
+            try c.encode(strictSandbox, forKey: .strictSandbox)
         }
         if disableExfiltrationAlerts {
             try c.encode(disableExfiltrationAlerts, forKey: .disableExfiltrationAlerts)

@@ -436,6 +436,8 @@ public final class BACEnrollment {
 
     public func unenroll() async {
         BACEnrollmentStore.destroy()
+        // The organization's OpenShell policy no longer applies.
+        OpenShellGovernance.shared.setManaged(nil)
         // Drop any cached SecIdentity so the next enrollment doesn't reuse
         // the previous leaf for an mTLS handshake.
         BACMTLSIdentity.purge()
@@ -528,11 +530,13 @@ public final class BACHeartbeat {
             // rather than silently failing managed uploads forever.
             await BACEnrollment.shared.heartbeat()
             await BACEnrollment.shared.renewLeafCertIfNeeded()
+            await OpenShellManagedPolicySync.fetch()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 10 * 60 * 1_000_000_000)
                 if Task.isCancelled { break }
                 await BACEnrollment.shared.heartbeat()
                 await BACEnrollment.shared.renewLeafCertIfNeeded()
+                await OpenShellManagedPolicySync.fetch()
                 _ = self
             }
         }

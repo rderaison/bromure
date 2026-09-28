@@ -29,6 +29,8 @@ struct SecurityTimelineView: View {
 
     private enum Tab: String { case overview, timeline }
     @State private var tab: Tab = .overview
+    @AppStorage(OCSFExporter.enabledKey) private var ocsfEnabled = false
+    @AppStorage(OCSFExporter.schemaVersionKey) private var ocsfSchema = OCSFExporter.currentSchema
 
     @State private var query = ""
     @State private var engineFilter: String?
@@ -143,6 +145,7 @@ struct SecurityTimelineView: View {
         .fixedSize()
         .disabled(timeline.allEvents.isEmpty)
         .help(NSLocalizedString("Save the events (with any filter applied) as a CSV file", comment: "security timeline"))
+        ocsfMenu
         if tab == .timeline {
             Button(NSLocalizedString("Clear", comment: "")) { timeline.clear() }
                 .controlSize(.small)
@@ -189,6 +192,30 @@ struct SecurityTimelineView: View {
             .labelsHidden()
             .fixedSize()
         }
+    }
+
+    /// Continuous OCSF JSONL export for a SIEM (the format NVIDIA OpenShell
+    /// sandboxes write), with a schema downgrade for older consumers.
+    private var ocsfMenu: some View {
+        Menu {
+            Toggle(NSLocalizedString("Write OCSF JSON logs", comment: "security timeline"), isOn: $ocsfEnabled)
+            Picker(NSLocalizedString("Schema", comment: "security timeline OCSF"), selection: $ocsfSchema) {
+                Text("OCSF 1.8.0").tag("1.8.0")
+                Text(NSLocalizedString("OCSF 1.3.0 (Security Lake, Splunk, CrowdStrike)", comment: "security timeline OCSF"))
+                    .tag("1.3.0")
+            }
+            Divider()
+            Button(NSLocalizedString("Show OCSF Logs in Finder", comment: "security timeline")) {
+                let dir = OCSFExporter.shared.directory
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                NSWorkspace.shared.activateFileViewerSelecting([dir])
+            }
+        } label: {
+            Label("OCSF", systemImage: ocsfEnabled ? "dot.radiowaves.left.and.right" : "doc.badge.gearshape")
+        }
+        .controlSize(.small)
+        .fixedSize()
+        .help(NSLocalizedString("Stream every security event as OCSF JSON (one file per day) for a SIEM", comment: "security timeline"))
     }
 
     /// CSV of what the Timeline shows (filters applied), oldest first.

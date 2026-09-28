@@ -1,5 +1,6 @@
 import Foundation
 @preconcurrency import Virtualization
+import SandboxEngine
 
 /// Process-lifetime MITM coordinator. Owns the CA, the cert cache,
 /// the token swap maps, and the ssh-agent keystore. ACAppDelegate
@@ -111,6 +112,7 @@ public final class MitmEngine {
     public nonisolated func setGuardrailsConfig(_ config: GuardrailsConfig, for profileID: UUID) {
         guardrailsLock.lock(); defer { guardrailsLock.unlock() }
         guardrailsConfigs[profileID] = config
+        UnmanagedCredentialGuard.shared.setEnabled(config.strictCredentials, for: profileID)
     }
     public nonisolated func guardrailsConfig(for profileID: UUID) -> GuardrailsConfig? {
         guardrailsLock.lock(); defer { guardrailsLock.unlock() }
@@ -119,6 +121,8 @@ public final class MitmEngine {
     public nonisolated func clearGuardrailsConfig(for profileID: UUID) {
         guardrailsLock.lock(); defer { guardrailsLock.unlock() }
         guardrailsConfigs.removeValue(forKey: profileID)
+        UnmanagedCredentialGuard.shared.setEnabled(false, for: profileID)
+        UnmanagedCredentialGuard.shared.reset(profileID: profileID)
     }
 
     // Same shape for supply-chain policy. Looked up per-request
@@ -477,19 +481,37 @@ public final class MitmEngine {
     /// spliced raw (fail open); everything else is MiTM'd through the identical
     /// per-profile policy chain as the vsock path. Takes ownership of `appFD`.
     @available(macOS, deprecated: 10.15)
-    public nonisolated func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int) {
+    public nonisolated func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int,
+                                                  srcPort: Int = 0) {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { close(appFD); return }
+
+            // Strict sandbox: ask the guest's root attestor which executable
+            // opened this connection (by its source port), before any policy
+            // decision. No answer = no identity = only provider rules apply.
+            var identity: OpenShellPolicy.BinaryIdentity?
+            if self.guardrailsConfig(for: profileID)?.egressPolicy?.enforceBinaries == true, srcPort > 0 {
+                identity = await BinaryIdentityService.shared.identity(
+                    profileID: profileID, sport: UInt16(truncatingIfNeeded: srcPort),
+                    dst: destIP, dport: UInt16(truncatingIfNeeded: destPort))
+            }
 
             // Plain HTTP (:80) — no TLS. Peek the Host header to identify the
             // destination (the switch has no SNI for cleartext), apply the egress
             // policy, then MiTM as cleartext (or splice on passthrough / non-HTTP).
+            let destAddr = EgressPolicy.parseIPv4Address(destIP)
             if destPort == 80 {
-                let host = Self.peekHTTPHost(fd: appFD) ?? destIP
-                var shouldSplice = PassthroughList.current().matches(host)
+                let peeked = Self.peekHTTPHost(fd: appFD)
+                let host = peeked ?? destIP
+                let strict80 = self.guardrailsConfig(for: profileID)?.strictCredentials ?? false
+                var shouldSplice = !strict80 && PassthroughList.current().matches(host)
                 if let policy = self.guardrailsConfig(for: profileID)?.egressPolicy {
-                    switch policy.verdict(ip: nil, hostnames: [host], proto: .tcp,
-                                          port: UInt16(truncatingIfNeeded: destPort)) {
+                    // pf rules keep their name-only check here; OpenShell also
+                    // needs the address (allowed_ips, private-range guard).
+                    let os = policy.openShell != nil
+                    switch policy.verdict(ip: os ? destAddr : nil,
+                                          hostnames: os ? (peeked.map { [$0] } ?? []) : [host], proto: .tcp,
+                                          port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                     case .deny:
                         SupplyChainLog.shared.record(
                             "[firewall] ✗ deny tcp \(host):\(destPort) (\(profileID.uuidString.prefix(8)))")
@@ -497,21 +519,24 @@ public final class MitmEngine {
                             eventData: ["action": .string("deny"), "proto": .string("tcp"),
                                         "host": .string(host), "port": .int(destPort), "layer": .string("l4")])
                         close(appFD); return
-                    case .mitm:  shouldSplice = false
-                    case .allow: break
+                    case .mitm:   shouldSplice = false
+                    case .splice: shouldSplice = true
+                    case .allow:  break
                     }
                 }
                 if shouldSplice {
                     MitmPassthrough.splice(appFD: appFD, destIP: destIP, destPort: destPort)
                 } else {
-                    await self.makeConnection(fd: appFD, profileID: profileID)
+                    await self.makeConnection(fd: appFD, profileID: profileID, identity: identity)
                         .runTransparentHTTP(host: host, port: destPort)
                 }
                 return
             }
 
             let decision = TLSClientHello.peek(fd: appFD)
-            let passthrough = PassthroughList.current()
+            // Strict credential mode inspects every flow: no passthrough list.
+            let strict = self.guardrailsConfig(for: profileID)?.strictCredentials ?? false
+            let passthrough = strict ? PassthroughList.none : PassthroughList.current()
             let host: String
             var shouldSplice: Bool
             switch decision {
@@ -529,35 +554,52 @@ public final class MitmEngine {
             // Egress firewall by SNI hostname (the authoritative check for TLS,
             // and the fallback for hostnames the switch couldn't DNS-resolve at
             // L4). deny → close; a `web` rule → force MiTM over passthrough.
-            if case .sni(let sni) = decision,
-               let policy = self.guardrailsConfig(for: profileID)?.egressPolicy {
-                switch policy.verdict(ip: nil, hostnames: [sni], proto: .tcp, port: UInt16(truncatingIfNeeded: destPort)) {
+            // An OpenShell policy also decides SNI-less and non-TLS flows (by
+            // destination address) instead of letting them fail open: its rules
+            // are default-deny, and the switch deferred these flows to us.
+            let sniHost: String? = { if case .sni(let s) = decision { return s }; return nil }()
+            if let policy = self.guardrailsConfig(for: profileID)?.egressPolicy,
+               sniHost != nil || policy.openShell != nil {
+                switch policy.verdict(ip: policy.openShell != nil ? destAddr : nil,
+                                      hostnames: sniHost.map { [$0] } ?? [], proto: .tcp,
+                                      port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                 case .deny:
+                    let label = sniHost ?? destIP
                     SupplyChainLog.shared.record(
-                        "[firewall] ✗ deny tcp \(sni):\(destPort) (\(profileID.uuidString.prefix(8)))")
+                        "[firewall] ✗ deny tcp \(label):\(destPort) (\(profileID.uuidString.prefix(8)))")
                     BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                         eventData: ["action": .string("deny"), "proto": .string("tcp"),
-                                    "host": .string(sni), "port": .int(destPort), "layer": .string("sni")])
+                                    "host": .string(label), "port": .int(destPort), "layer": .string("sni")])
                     close(appFD); return
-                case .mitm:  shouldSplice = false               // `web` rule overrides passthrough
-                case .allow: break
+                case .mitm:   shouldSplice = false              // `web` rule / inspected endpoint overrides passthrough
+                case .splice: shouldSplice = true               // OpenShell `tls: skip`
+                case .allow:  break
                 }
             }
 
             if shouldSplice {
+                // Strict credential mode can't vouch for an uninspected
+                // non-TLS stream on an HTTP(S) port; only an explicit OpenShell
+                // `tls: skip` endpoint is relayed raw.
+                if strict, sniHost == nil {
+                    SupplyChainLog.shared.record(
+                        "[firewall] ✗ deny uninspectable tcp \(destIP):\(destPort) — strict credentials (\(profileID.uuidString.prefix(8)))")
+                    close(appFD); return
+                }
                 MitmPassthrough.splice(appFD: appFD, destIP: destIP, destPort: destPort)
                 return
             }
 
-            let conn = self.makeConnection(fd: appFD, profileID: profileID)
+            let conn = self.makeConnection(fd: appFD, profileID: profileID, identity: identity)
             await conn.runTransparentTLS(host: host, port: destPort)
         }
     }
 
     /// Build a MITM connection wired to this engine's per-profile policy chain.
     /// Shared by the TLS (:443) and cleartext (:80) transparent paths.
-    private nonisolated func makeConnection(fd: Int32, profileID: UUID) -> HTTPMitmConnection {
-        HTTPMitmConnection(
+    private nonisolated func makeConnection(fd: Int32, profileID: UUID,
+                                            identity: OpenShellPolicy.BinaryIdentity? = nil) -> HTTPMitmConnection {
+        let conn = HTTPMitmConnection(
             fd: fd,
             profileID: profileID,
             certCache: self.certCache,
@@ -576,6 +618,8 @@ public final class MitmEngine {
             guardrailsProvider: { [weak self] in self?.guardrailsConfig(for: profileID) },
             supplyChainProvider: { [weak self] in self?.supplyChainPolicy(for: profileID) }
         )
+        conn.binaryIdentity = identity
+        return conn
     }
 
     /// MSG_PEEK the start of a plain-HTTP request and extract the destination
