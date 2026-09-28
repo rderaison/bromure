@@ -253,6 +253,25 @@ struct BromureAC: ParsableCommand {
                                                  storageContext: nil, onSave: { _, _ in }, onCancel: {})
                                   .frame(width: 900, height: 1080))
                 size = NSSize(width: 900, height: 1080)
+            case "remote-access-off", "remote-access-on":
+                // Remote Access window, offline: stand-in status and account.
+                let on = which == "remote-access-on"
+                let st: [String: Any] = ["enabled": on, "running": on, "port": 2222, "bindAddress": "0.0.0.0",
+                                         "passwordAuth": false, "pubkeyAuth": true,
+                                         "fingerprint": "SHA256:q3Vx8k2mN0pZtY6rL1eH9cWfA4uJ7sDbG5nKiO2xRyE",
+                                         "connect": "ssh -p 2222 sonya@192.168.1.42",
+                                         "authorizedKeys": on ? [["fingerprint": "SHA256:7FhQ2mXcV9pLk3Rz…aY0w", "comment": "bromure-account: Sonya's MacBook Air"]] : []]
+                view = AnyView(RemoteAccessSettingsView(status: { st }, apply: { _ in st }, addKey: { _ in st },
+                                                        removeKey: { _ in st }, demoAccount: on ? "Pothos & Co." : nil, demoRender: true))
+                size = NSSize(width: 560, height: 760)
+            case "connect-picker":
+                // Connect to Remote Bromure, offline: one stand-in bromure.io server.
+                let m = RemoteConnectModel(onConnected: { _ in })
+                m.demoAccount = "Pothos & Co."
+                let json = #"[{"id":"d-studio-7f2c","name":"Mac Studio","capability":"server","revoked":false,"online":true,"lastSeenAt":null,"self":false,"sshUsername":"sonya"}]"#
+                m.demoServers = (try? JSONDecoder().decode([DeviceInfo].self, from: Data(json.utf8))) ?? []
+                view = AnyView(RemoteConnectView(model: m, onClose: {}))
+                size = NSSize(width: 560, height: 520)
             case "machinemenu":
                 view = AnyView(HStack(spacing: 8) {
                     Spacer()
@@ -1309,13 +1328,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         debugRenderWindow(unifiedWindow, to: path)
     }
 
-    func debugRenderWindow(_ win: NSWindow?, to path: String) -> [String: Any] {
+    func debugRenderWindow(_ win: NSWindow?, to path: String, contentOnly: Bool = false) -> [String: Any] {
         guard let win, let contentView = win.contentView else {
             return ["error": "no such window"]
         }
         // Render the whole window frame view (incl. titlebar + toolbar), not just
-        // the content area, so the toolbar controls are captured too.
-        let content = contentView.superview ?? contentView
+        // the content area, so the toolbar controls are captured too. A popover's
+        // frame is a material that doesn't draw offscreen: content only there.
+        let content = contentOnly ? contentView : (contentView.superview ?? contentView)
         func frameDict(_ v: NSView) -> [String: Any] {
             ["x": Int(v.frame.minX), "y": Int(v.frame.minY),
              "w": Int(v.frame.width), "h": Int(v.frame.height)]
@@ -3667,6 +3687,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     w.dismissInfrastructureSheet()
                     if which == "newcluster" { w.showNewKubeCluster() } else { w.showNewRegistry() }
                     window = w.attachedSheet ?? w
+                case "popover":
+                    // The visible popover's own window (e.g. a Models source popover).
+                    window = NSApp.windows.first { $0.isVisible && String(describing: type(of: $0)).contains("Popover") }
+                case let w where w.hasPrefix("cluster:") || w.hasPrefix("registry:"):
+                    // A cluster's / registry's dashboard as the stage ("cluster:<name>").
+                    let name = String(w.drop(while: { $0 != ":" }).dropFirst())
+                    let kube = self.kubeClusterStore
+                    let win = self.ensureUnifiedWindow()
+                    win.dismissInfrastructureSheet()
+                    win.expandMachines()
+                    if w.hasPrefix("cluster:") {
+                        guard let c = kube.clusters.first(where: { $0.name == name }) else { return ["error": "unknown cluster"] }
+                        win.showKubeDashboard(c.id)
+                    } else {
+                        guard let r = kube.registries.first(where: { $0.name == name }) else { return ["error": "unknown registry"] }
+                        win.showRegistryDashboard(r.id)
+                    }
+                    window = win
                 case let w where w.hasPrefix("rewind:"):
                     // The Rewind-home sheet for a workspace ("rewind:<name or id>").
                     guard let profile = self.profileByNameOrID(String(w.dropFirst(7)))
@@ -3677,7 +3715,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     window = win.attachedSheet ?? win
                 default:       window = self.unifiedWindow
                 }
-                return self.debugRenderWindow(window, to: path)
+                return self.debugRenderWindow(window, to: path, contentOnly: which == "popover")
             }
         }
         // Drive the settings editor over the control socket (doc-screenshot
@@ -6950,7 +6988,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                     promptInjection: p.promptInjection.isActive,
                                     pii: p.pii.isActive)
                 }
-            }))
+            },
+            // Doc/video captures: open on the event log instead of the Overview.
+            startOnTimeline: ProcessInfo.processInfo.environment["BROMURE_DEBUG_TIMELINE_TAB"] == "timeline"))
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         securityTimelineWindow = win

@@ -417,6 +417,8 @@ struct CodingKanbanView: View {
     /// Live tab status for a started task, via the sidebar's tab models
     /// (observable — status changes redraw the board).
     private func liveStatus(of task: CodingTask) -> AgentStatus? {
+        // Demo fixture (doc/video captures): in-progress cards run, no VM behind them.
+        if DemoMode.isOn, task.stage == .inProgress { return .working }
         guard let slug = task.branchSlug,
               let entry = model.entries.first(where: { $0.id == task.profileID })
         else { return nil }

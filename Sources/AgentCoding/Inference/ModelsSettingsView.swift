@@ -160,6 +160,10 @@ struct ModelsSettingsView: View {
         .padding(18)
         .onAppear {
             if resolved.localServer != nil { probeLocalServer() }
+            // Doc/video captures: open the Custom server popover.
+            if ProcessInfo.processInfo.environment["BROMURE_DEMO_OPEN_SOURCE"] == "custom" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { openSource = .customServer }
+            }
             syncSubscriptions()
             fetchUsableProviderModels()
             // A provider registered outside this pane (an API key the
@@ -902,6 +906,12 @@ struct ModelsSettingsView: View {
 
     private func probeLocalServer() {
         guard let s = resolved.localServer, let base = URL(string: s.baseURL) else { return }
+        // Doc/video captures: a stand-in model list, no network.
+        if let demo = ProcessInfo.processInfo.environment["BROMURE_DEMO_PROBE_MODELS"] {
+            localServerModels = demo.split(separator: ",").map(String.init)
+            localServerProbe = .ok(localServerModels.count)
+            return
+        }
         localServerProbe = .probing
         let key = s.apiKey
         Task {

@@ -325,8 +325,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// browser (asleep, it has no toolbar globe to close one with).
     private var liveSessionOnStage: AgentSession? {
         guard let sid = selectedSessionID, !listModel.newSessionSelected,
-              let s = acDelegate?.agentSessionStore.session(sid),
-              pane(s.profileID) != nil,
+              let s = acDelegate?.agentSessionStore.session(sid) else { return nil }
+        // Demo fixture (doc/video captures): its live sessions have no VM.
+        if DemoMode.isLive(s.id) { return s }
+        guard pane(s.profileID) != nil,
               SessionHome.liveTabPosition(for: s, in: listModel) != nil else { return nil }
         return s
     }
@@ -1144,7 +1146,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             browserPaneHost.isHidden = false
             // Boots/resumes id and suspends (never tears down) the
             // previously shown one — it stays alive on its own pane state.
-            showBrowser(for: id)
+            // The demo fixture has no VM to boot a browser in.
+            if !DemoMode.isOn { showBrowser(for: id) }
         } else if let prev = shownBrowser {
             // Pane collapsed for the selected workspace: hide the shown
             // browser. Arm teardown ONLY when the user explicitly closed

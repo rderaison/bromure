@@ -274,8 +274,12 @@ final class RemoteConnectModel {
     /// heartbeating bromure.io greys out within a refresh cycle.
     private var directoryTimer: Timer?
 
-    var signedIn: Bool { account.signedIn }
-    var accountLabel: String? { account.accountLabel }
+    /// Doc/video renders: a stand-in account and server list (no keychain,
+    /// no bromure.io calls).
+    var demoAccount: String?
+    var demoServers: [DeviceInfo]?
+    var signedIn: Bool { demoAccount != nil || account.signedIn }
+    var accountLabel: String? { demoAccount ?? account.accountLabel }
     /// Managed (enterprise) identity — owned by the managed-enrollment
     /// lifecycle, so this window must not offer Sign Out for it (the
     /// coordinator refuses it anyway).
@@ -303,6 +307,7 @@ final class RemoteConnectModel {
     /// starts observing identity changes so a sign-in completed while the window
     /// is open refreshes the list.
     func refreshAccount() {
+        if let demoServers { p2pServers = demoServers; return }
         account.refresh()
         if identityObserver == nil {
             identityObserver = NotificationCenter.default.addObserver(
