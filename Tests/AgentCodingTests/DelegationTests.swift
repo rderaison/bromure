@@ -550,14 +550,17 @@ struct DelegationTests {
     func transcriptPin() {
         let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: "/home/ubuntu/proj", since: 1_758_300_000,
                                                          agent: nil, pinnedWindow: 3)!
-        #expect(cmd.hasPrefix("f=\"\"; pp=\"$HOME/.bromure/transcript-3.path\"; "))
+        #expect(cmd.hasPrefix("f=\"\"; pe=\"\"; pp=\"$HOME/.bromure/transcript-3.path\"; "))
         // Only a file this process could have written; else the folder's newest.
         #expect(cmd.contains("find \"$c\" -newermt @1758300000"))
-        #expect(cmd.contains("if [ -z \"$f\" ]; then d='/home/ubuntu/proj'"))
+        // Pinned but not written yet (a fresh Claude, no prompt): no fallback
+        // to the folder's newest — in a shared folder that's another session's.
+        #expect(cmd.contains("else pe=1; fi; fi; "))
+        #expect(cmd.contains("if [ -z \"$f\" ] && [ -z \"$pe\" ]; then d='/home/ubuntu/proj'"))
         #expect(cmd.contains("tail -c 300000 \"$f\""))
         let plain = CodingTaskEngine.planTranscriptCommand(guestCwd: "/home/ubuntu/proj", since: 0, agent: "claude")!
         #expect(!plain.contains("transcript-"))
-        #expect(plain.hasPrefix("f=\"\"; if [ -z \"$f\" ]; then "))
+        #expect(plain.hasPrefix("f=\"\"; pe=\"\"; if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "))
     }
 
     @Test("a resume targets the session's own conversation once its id is known")
@@ -583,6 +586,12 @@ struct DelegationTests {
         var c = AgentSession(profileID: UUID(), tool: .codex, title: "B", cwd: "~/proj")
         c.agentTranscriptID = "60fb3816-3c57-4774-99e4-0508ff1ca840"
         #expect(AgentSessionEngine.resumeFlags(for: c) == Profile.Tool.codex.resumeFlags)
+        // Another session in the folder: "continue the last one here" would
+        // be ITS conversation — no id of our own means a fresh start.
+        s.agentTranscriptID = nil
+        #expect(AgentSessionEngine.resumeFlags(for: s, sharedFolder: true) == "")
+        s.agentTranscriptID = "60fb3816-3c57-4774-99e4-0508ff1ca840"
+        #expect(AgentSessionEngine.resumeFlags(for: s, sharedFolder: true) == "--resume 60fb3816-3c57-4774-99e4-0508ff1ca840")
     }
 
     @Test("paths a message names resolve against the sender's folder")
