@@ -41,8 +41,8 @@ case "$TARGET" in
         ENTITLEMENTS="$SOURCE_DIR/AgentHost.entitlements"
         INFO_PLIST="$SOURCE_DIR/Info.plist"
         SDEF_FILE=""
-        ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
-        ICON_COMPOSER=""
+        ICON_FILE="$SCRIPT_DIR/Resources/BromureNativeIcon.icns"
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureNative.icon"
         DMG_NAME="BromureNative.dmg"
         RESOURCE_BUNDLE_NAME="bromure_bromure-native.bundle"
         ;;

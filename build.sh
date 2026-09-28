@@ -37,8 +37,8 @@ case "$TARGET" in
         INFO_PLIST="$SOURCE_DIR/Info.plist"
         SDEF_FILE=""
         RESOURCE_BUNDLE_NAME="bromure_bromure-native.bundle"
-        ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
-        ICON_COMPOSER=""
+        ICON_FILE="$SCRIPT_DIR/Resources/BromureNativeIcon.icns"
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureNative.icon"
         ;;
     *)
         echo "Usage: $0 [bromure|bromure-ac|native]" >&2
