@@ -382,6 +382,29 @@ public final class SessionDisk {
         return result
     }
 
+    // MARK: - EFI variable store
+
+    /// This workspace's own EFI variable store. Every VM used to boot on the
+    /// one `efivars.bin` beside the base image, which VZ writes in place;
+    /// macOS 27 holds it for the running VM, so a second VM failed with
+    /// "Invalid virtual machine configuration. The boot loader is invalid."
+    public var efiVarsURL: URL {
+        diskURL.deletingLastPathComponent().appendingPathComponent("efivars.bin")
+    }
+
+    /// The store this boot uses: the workspace's own, copied from the base
+    /// store the first time. A suspended VM with no copy yet resumes on the
+    /// shared one it was saved with (a different store is a different
+    /// configuration); its next cold boot takes its own.
+    public func efiVariableStoreURL(base: URL) throws -> URL {
+        if fm.fileExists(atPath: efiVarsURL.path) { return efiVarsURL }
+        if hasSavedState { return base }
+        try fm.createDirectory(at: efiVarsURL.deletingLastPathComponent(),
+                               withIntermediateDirectories: true)
+        try fm.copyItem(at: base, to: efiVarsURL)
+        return efiVarsURL
+    }
+
     // MARK: - Disk
 
     /// Create the per-profile disk if it doesn't exist. Uses APFS
@@ -407,6 +430,9 @@ public final class SessionDisk {
         if result != 0 {
             try fm.copyItem(at: baseDiskURL, to: diskURL)
         }
+        // A fresh disk from the base: its EFI variables come from the base
+        // again too (re-copied on this boot).
+        try? fm.removeItem(at: efiVarsURL)
         didCloneOnLastEnsure = true
     }
 

@@ -695,6 +695,9 @@ final class SessionPane {
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         host.translatesAutoresizingMaskIntoConstraints = false
+        // A long conversation's fitting height must never become the
+        // window's minimum (it pinned the window at full-screen size).
+        host.sizingOptions = []
         mountedBeautifiedHost = host
         containerView.addSubview(host, positioned: .below, relativeTo: suspendedTintView)
         NSLayoutConstraint.activate([

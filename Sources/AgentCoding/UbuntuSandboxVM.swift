@@ -317,7 +317,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
 
         let bootLoader = VZEFIBootLoader()
-        bootLoader.variableStore = VZEFIVariableStore(url: imageManager.efiVarsURL)
+        bootLoader.variableStore = VZEFIVariableStore(
+            url: try sessionDisk?.efiVariableStoreURL(base: imageManager.efiVarsURL)
+                ?? imageManager.efiVarsURL)
         config.bootLoader = bootLoader
 
         let platform = VZGenericPlatformConfiguration()

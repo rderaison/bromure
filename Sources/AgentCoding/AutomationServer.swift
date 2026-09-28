@@ -56,6 +56,8 @@ final class ACAutomationServer {
     // does) otherwise got the pre-change state for up to the TTL.
     private static let mutationLock = NSLock()
     nonisolated(unsafe) private static var mutationGeneration = 0
+    /// This app run, for `generation` ordering across restarts.
+    static let epoch = UUID().uuidString
     static func noteMutation() {
         mutationLock.lock(); mutationGeneration &+= 1; mutationLock.unlock()
     }
@@ -2192,6 +2194,13 @@ final class ACAutomationServer {
             snapshot["vmnetSubnet"] = subnet.cidrString
             snapshot["vmnetGateway"] = subnet.startAddressString
         }
+        // Ordering for clients: the push stream and a poll can deliver two
+        // snapshots out of order, and applying the older one after a write
+        // reverted it on screen (a rename flicked back to the old title).
+        // The generation only grows within one app run; the epoch says
+        // which run, so a restarted server isn't read as "older".
+        snapshot["generation"] = generation
+        snapshot["epoch"] = Self.epoch
         snapshotCache = snapshot
         snapshotCacheAt = Date()
         snapshotCacheGeneration = generation
