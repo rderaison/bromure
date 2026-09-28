@@ -189,9 +189,64 @@ final class MachineLinkHub: @unchecked Sendable {
             + (gzip ? "X-Bromure-Gzip: 1\r\n" : "")
             + "Content-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
         guard Self.writeAll(fd, Data(head.utf8) + payload) else { close(fd); close(clientFD); return }
-        Self.splice(clientFD, fd)
+        Self.relay(clientFD, fd)
         close(fd)
         close(clientFD)
+    }
+
+    /// Like splice, but a reply that states its Content-Length ends there:
+    /// over an SSH link the machine's close never arrives, so waiting for it
+    /// held every proxied call (a folder listing, an exec) until the
+    /// client's receive timeout. Streams without one (the framed PTY) run to
+    /// EOF as before.
+    static func relay(_ client: Int32, _ machine: Int32) {
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            var buf = [UInt8](repeating: 0, count: 65536)
+            while true {
+                let n = read(client, &buf, buf.count)
+                if n <= 0 { break }
+                if !writeAll(machine, Data(buf[0..<n])) { break }
+            }
+            shutdown(machine, SHUT_WR)
+            done.signal()
+        }
+        var buf = [UInt8](repeating: 0, count: 65536)
+        var head = Data()
+        var remaining: Int?      // body bytes still to forward, once known
+        var streaming = false    // no Content-Length: to EOF
+        loop: while true {
+            let n = read(machine, &buf, buf.count)
+            if n <= 0 { break }
+            var chunk = Data(buf[0..<n])
+            if remaining == nil && !streaming {
+                head.append(chunk)
+                guard let sep = head.range(of: Data("\r\n\r\n".utf8)) else {
+                    if head.count > 1 << 20 { streaming = true; if !writeAll(client, head) { break loop } }
+                    continue
+                }
+                let header = String(decoding: head[..<sep.lowerBound], as: UTF8.self)
+                let length = header.components(separatedBy: "\r\n").lazy.compactMap { line -> Int? in
+                    let kv = line.split(separator: ":", maxSplits: 1)
+                    guard kv.count == 2, kv[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length"
+                    else { return nil }
+                    return Int(kv[1].trimmingCharacters(in: .whitespaces))
+                }.first
+                let body = head.count - sep.upperBound
+                if let length { remaining = length - body } else { streaming = true }
+                chunk = head
+                head = Data()
+            } else if let r = remaining {
+                remaining = r - chunk.count
+            }
+            if let r = remaining, r < 0 { chunk = chunk.dropLast(-r); remaining = 0 }
+            if !writeAll(client, chunk) { break }
+            if remaining == 0 { break }
+        }
+        // Done (or gone): wake the other direction's read.
+        shutdown(client, SHUT_RDWR)
+        shutdown(machine, SHUT_RDWR)
+        done.wait()
     }
 
     /// Is this request for an attached machine? Its id when it is: a VM route

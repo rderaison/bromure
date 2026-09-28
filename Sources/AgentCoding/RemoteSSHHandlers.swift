@@ -367,6 +367,10 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// touched on `ioQueue`.
     private var outBuffer: [UInt8] = []
     private var writeSource: DispatchSourceWrite?
+    /// The client sent EOF: once everything before it is written, `master`
+    /// is half-closed so its reader sees the end (ioQueue only).
+    private var inputEOF = false
+    private var eofForwarded = false
 
     init(menuExe: String, user: String, controlSocketPath: String,
          forwardResolver: RemoteAccessServer.ForwardResolver? = nil,
@@ -411,6 +415,14 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         switch event {
+        case let e as ChannelEvent where e == .inputClosed:
+            // The far end is done writing (a Bromure Native answering over a
+            // machine link, say): pass the EOF on. Dropping it left the
+            // control socket's reader waiting for a close that never came.
+            ioQueue.async { [weak self] in
+                self?.inputEOF = true
+                self?.forwardEOFIfDrained()
+            }
         case let e as SSHChannelRequestEvent.PseudoTerminalRequest:
             term = e.term
             cols = UInt16(clamping: e.terminalCharacterWidth)
@@ -482,6 +494,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// Move any pre-fd bytes into the write buffer once `master` is up. Called on
     /// `ioQueue` after a bridge sets `master`.
     private func flushPending() {
+        defer { forwardEOFIfDrained() }
         guard master >= 0, !pendingInbound.isEmpty else { return }
         outBuffer.insert(contentsOf: pendingInbound, at: 0)   // pre-fd bytes come first
         pendingInbound = []
@@ -505,6 +518,15 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
             }
         }
         writeSource?.cancel(); writeSource = nil   // fully drained
+        forwardEOFIfDrained()
+    }
+
+    /// Half-close `master` after the client's EOF, once nothing is left to
+    /// write. A PTY isn't a socket: shutdown fails there, harmlessly.
+    private func forwardEOFIfDrained() {
+        guard inputEOF, !eofForwarded, master >= 0, outBuffer.isEmpty, pendingInbound.isEmpty else { return }
+        eofForwarded = true
+        Darwin.shutdown(master, SHUT_WR)
     }
 
     private func armWriteSource() {

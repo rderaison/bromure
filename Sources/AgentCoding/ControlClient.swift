@@ -88,10 +88,26 @@ struct ControlClient {
 
         var resp = Data()
         var buf = [UInt8](repeating: 0, count: 65536)
+        // To Content-Length when the reply states one, else to EOF: a hop
+        // whose close is slow to arrive (an SSH-linked machine behind the
+        // server) must not hold a complete reply until the receive timeout.
+        var expected: Int?
         while true {
             let n = buf.withUnsafeMutableBufferPointer { Darwin.read(fd, $0.baseAddress!, $0.count) }
             if n <= 0 { break }
             resp.append(contentsOf: buf[0..<n])
+            if expected == nil, let sep = resp.range(of: Data([13, 10, 13, 10])) {
+                let header = String(decoding: resp[..<sep.lowerBound], as: UTF8.self)
+                for line in header.components(separatedBy: "\r\n") {
+                    let kv = line.split(separator: ":", maxSplits: 1)
+                    if kv.count == 2, kv[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length",
+                       let len = Int(kv[1].trimmingCharacters(in: .whitespaces)) {
+                        expected = sep.upperBound - resp.startIndex + len
+                    }
+                }
+                if expected == nil { expected = -1 }   // none stated: to EOF
+            }
+            if let e = expected, e >= 0, resp.count >= e { break }
         }
         // Split header/body on the RAW bytes: the body may be BINARY (a
         // zlib-compressed response, negotiated via X-Bromure-Gzip) and a

@@ -66,4 +66,52 @@ struct MachineLinkTests {
         #expect(hub.target(method: "POST", path: "/agent-sessions/worktree-discard", body: ["profile": id.uuidString]) == id)
         #expect(hub.target(method: "POST", path: "/agent-sessions/worktree-open", body: ["profile": UUID().uuidString]) == nil)
     }
+
+    /// A machine end that answers and then never closes (an SSH link whose
+    /// close doesn't arrive): the reply must still come through at once.
+    private static func silentMachine(reply: String) -> (fd: Int32, keepOpen: Int32) {
+        var fds: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+        let far = fds[1]
+        Thread.detachNewThread {
+            var buf = [UInt8](repeating: 0, count: 4096)
+            _ = read(far, &buf, buf.count)                 // the request
+            _ = reply.withCString { write(far, $0, strlen($0)) }
+        }
+        return (fds[0], far)
+    }
+
+    @Test("a proxied reply ends at its Content-Length, not at the machine's close")
+    func relayStopsAtLength() throws {
+        let body = #"{"folders":["a","b"]}"#
+        let m = Self.silentMachine(reply: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
+        defer { close(m.keepOpen) }
+        var c: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &c)
+        defer { close(c[1]) }
+        _ = "GET / HTTP/1.1\r\n\r\n".withCString { write(m.fd, $0, strlen($0)) }
+        let t0 = Date()
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { MachineLinkHub.relay(c[0], m.fd); done.signal() }
+        #expect(done.wait(timeout: .now() + 3) == .success)
+        #expect(Date().timeIntervalSince(t0) < 2)
+        var buf = [UInt8](repeating: 0, count: 4096)
+        var got = Data()
+        while true { let n = read(c[1], &buf, buf.count); if n <= 0 { break }; got.append(contentsOf: buf[0..<n]) }
+        #expect(String(decoding: got, as: UTF8.self).hasSuffix(body))
+        close(c[0]); close(m.fd)
+    }
+
+    @Test("the control client returns a complete reply without waiting for the close")
+    func clientStopsAtLength() throws {
+        let body = #"{"ok":true}"#
+        let m = Self.silentMachine(reply: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
+        defer { close(m.keepOpen) }
+        let client = ControlClient(socketPath: "/nonexistent", dial: { m.fd })
+        let t0 = Date()
+        let r = try client.request("GET", "/x", recvTimeoutSeconds: 10)
+        #expect(Date().timeIntervalSince(t0) < 2)
+        #expect(r.status == 200)
+        #expect(r.json["ok"] as? Bool == true)
+    }
 }
