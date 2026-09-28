@@ -553,16 +553,46 @@ final class ACAutomationServer {
                 }
                 let name = (bodyJSON["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "Mac"
                 let owner = bodyJSON["owner"] as? String
-                guard MachineLinkHub.shared.mayPark(id: id, owner: owner) else {
-                    sendResponse(fd: fd, status: 403, body: ["error": "That machine is attached by another device"])
+                // A machine may not take the id of a workspace or VM here:
+                // their traffic would be routed to it.
+                let reserved: Set<UUID> = DispatchQueue.main.sync {
+                    let lists = (self.onListWorkspaces?() ?? []) + (self.onListVMs?() ?? [])
+                    return Set(lists.compactMap { ($0["id"] as? String).flatMap(UUID.init(uuidString:)) })
+                }
+                let verdict = MachineLinkHub.shared.admit(id: id, owner: owner, reserved: reserved)
+                if case .refused(let why) = verdict {
+                    sendResponse(fd: fd, status: 403, body: ["error": why])
                     return
                 }
                 // The 200 first: once parked, a verb may follow at any moment.
-                let head = Array("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".utf8)
+                // A machine the user hasn't let in yet hears that it waits.
+                let fleet = verdict == .pending ? "X-Bromure-Fleet: pending\r\n" : ""
+                let head = Array("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\(fleet)\r\n".utf8)
                 guard Darwin.write(fd, head, head.count) == head.count,
-                      MachineLinkHub.shared.park(fd: fd, id: id, name: String(name.prefix(80)), owner: owner)
+                      MachineLinkHub.shared.park(fd: fd, id: id, name: String(name.prefix(80)), owner: owner,
+                                                 reserved: reserved)
                 else { Darwin.close(fd); return }
                 return
+            }
+            if method == "POST", path == "/machines/approve" {
+                // The user's answer to a machine asking to join (or a
+                // listed / blocked one): {id, allow}.
+                guard let id = (bodyJSON["id"] as? String).flatMap(UUID.init(uuidString:)),
+                      let allow = bodyJSON["allow"] as? Bool else {
+                    sendResponse(fd: fd, status: 400, body: ["error": "id and allow required"]); return
+                }
+                guard MachineLinkHub.shared.decide(id: id, allow: allow) else {
+                    sendResponse(fd: fd, status: 404, body: ["error": "No such machine"]); return
+                }
+                sendResponse(fd: fd, status: 200, body: ["ok": true]); return
+            }
+            if method == "POST", path == "/machines/forget" {
+                // Unblock: the machine asks again next time it dials.
+                guard let id = (bodyJSON["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+                    sendResponse(fd: fd, status: 400, body: ["error": "id required"]); return
+                }
+                MachineLinkHub.shared.forget(id: id)
+                sendResponse(fd: fd, status: 200, body: ["ok": true]); return
             }
             if method == "POST", path == "/machines/detach" {
                 if let id = (bodyJSON["id"] as? String).flatMap(UUID.init(uuidString:)),
@@ -2197,6 +2227,10 @@ final class ACAutomationServer {
             if let rooms = self.onListAgentRooms?() { d["agentRooms"] = rooms }
             return d
         }
+        // Machines asking to join (the fleet dialog) and the blocked ones.
+        let admissions = MachineLinkHub.shared.admissionState()
+        if !admissions.pending.isEmpty { snapshot["pendingMachines"] = admissions.pending }
+        if !admissions.blocked.isEmpty { snapshot["blockedMachines"] = admissions.blocked }
         // Attached machines: one more workspace + VM each, and their sessions.
         let machines = MachineLinkHub.shared.stateAdditions()
         if !machines.workspaces.isEmpty {

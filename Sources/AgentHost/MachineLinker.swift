@@ -35,10 +35,13 @@ final class MachineLinker: @unchecked Sendable {
     private var parkedCount = 0
     private var lastError: String?
     private var live: Set<Int32> = []
+    /// Parked, but the server's user hasn't let this Mac into the fleet yet.
+    private var awaitingApproval = false
 
     var current: Target? { lock.lock(); defer { lock.unlock() }; return target }
     var isLinked: Bool { lock.lock(); defer { lock.unlock() }; return parkedCount > 0 }
     var error: String? { lock.lock(); defer { lock.unlock() }; return lastError }
+    var isAwaitingApproval: Bool { lock.lock(); defer { lock.unlock() }; return awaitingApproval && parkedCount > 0 }
 
     static var localControlSocket: String {
         FileManager.default.homeDirectoryForCurrentUser
@@ -130,7 +133,18 @@ final class MachineLinker: @unchecked Sendable {
                 continue
             }
             guard track(fd, gen) else { close(fd); return }
-            guard Self.readAccepted(fd) else {
+            switch Self.readAccepted(fd) {
+            case .accepted(let pending):
+                lock.lock(); awaitingApproval = pending; lock.unlock()
+            case .refused(let why):
+                // Blocked by the server's user (or refused outright): ask
+                // again rarely, not every few seconds.
+                untrack(fd); close(fd)
+                note(error: why.map { "\(t.label): \($0)" } ?? "\(t.label) refused this Mac")
+                AgentHostLog.log("attach: \(t.label) refused: \(why ?? "?")")
+                Thread.sleep(forTimeInterval: 120)
+                continue
+            case .failed:
                 untrack(fd); close(fd)
                 note(error: "\(t.label) didn't accept this Mac (is it up to date?)")
                 Thread.sleep(forTimeInterval: backoff)
@@ -143,6 +157,8 @@ final class MachineLinker: @unchecked Sendable {
             // Parked. The server writes a verb when it needs us.
             let verb = Self.readLine(fd)
             setParked(-1)
+            // A verb only comes to a machine in the fleet.
+            if verb != nil { lock.lock(); awaitingApproval = false; lock.unlock() }
             guard let verb else { untrack(fd); close(fd); Thread.sleep(forTimeInterval: 1); continue }
             Thread.detachNewThread { [weak self] in
                 self?.serve(fd, verb: verb)
@@ -218,15 +234,37 @@ final class MachineLinker: @unchecked Sendable {
     }()
 
     /// The server's answer to a link request; true once it parked it.
-    private static func readAccepted(_ fd: Int32) -> Bool {
+    enum Acceptance { case accepted(pending: Bool), refused(String?), failed }
+
+    /// The park's reply: in (or waiting for the user's answer), refused
+    /// (403, with the server's reason), or no sense to be made of it.
+    private static func readAccepted(_ fd: Int32) -> Acceptance {
         var head = Data()
         var b = [UInt8](repeating: 0, count: 1)
         while head.count < 4096 {
-            guard read(fd, &b, 1) == 1 else { return false }
+            guard read(fd, &b, 1) == 1 else { return .failed }
             head.append(b[0])
             if head.count >= 4, head.suffix(4) == Data("\r\n\r\n".utf8) { break }
         }
-        return String(decoding: head, as: UTF8.self).hasPrefix("HTTP/1.1 200")
+        let text = String(decoding: head, as: UTF8.self)
+        if text.hasPrefix("HTTP/1.1 200") {
+            return .accepted(pending: text.lowercased().contains("x-bromure-fleet: pending"))
+        }
+        guard text.hasPrefix("HTTP/1.1 403") else { return .failed }
+        // The reason is in the JSON body, up to Content-Length.
+        let len = text.lowercased().range(of: "content-length:").map {
+            Int(text[$0.upperBound...].drop(while: { $0 == " " }).prefix(while: { $0.isNumber })) ?? 0
+        } ?? 0
+        var body = [UInt8](repeating: 0, count: min(max(len, 0), 4096))
+        var got = 0
+        while got < body.count {
+            let want = body.count - got
+            let n = body.withUnsafeMutableBytes { read(fd, $0.baseAddress! + got, want) }
+            if n <= 0 { break }
+            got += n
+        }
+        let json = (try? JSONSerialization.jsonObject(with: Data(body[0..<got]))) as? [String: Any]
+        return .refused(json?["error"] as? String)
     }
 
     private static func readLine(_ fd: Int32) -> String? {

@@ -114,4 +114,84 @@ struct MachineLinkTests {
         #expect(r.status == 200)
         #expect(r.json["ok"] as? Bool == true)
     }
+
+    private static func link() -> (Int32, Int32) {
+        var fds: [Int32] = [0, 0]
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+        return (fds[0], fds[1])
+    }
+
+    @Test("a machine may not take the id of a workspace or VM here")
+    func reservedIDs() {
+        let hub = MachineLinkHub.shared
+        let id = UUID()
+        let (a, b) = Self.link()
+        defer { close(a); close(b) }
+        #expect(hub.admit(id: id, owner: "device:x", reserved: [id]) == .refused("That id belongs to a workspace on this host"))
+        #expect(!hub.park(fd: a, id: id, name: "M", owner: nil, reserved: [id]))
+        #expect(hub.name(id) == nil)
+    }
+
+    @Test("an agent host's machine waits for the user; allowed it joins, blocked it stays out")
+    func admission() {
+        let hub = MachineLinkHub.shared
+        let id = UUID(), sid = UUID()
+        let (a, b) = Self.link()
+        defer { close(b); hub.forget(id: id); _ = hub.detach(id: id, owner: nil) }
+        #expect(hub.admit(id: id, owner: "device:one", reserved: []) == .pending)
+        #expect(hub.park(fd: a, id: id, name: "Waiting Mac", owner: "device:one"))
+        // Waiting: listed for the dialog, but nothing routes to it.
+        #expect(hub.name(id) == nil)
+        #expect(hub.admissionState().pending.contains { $0["id"] as? String == id.uuidString })
+        hub.setFragment(id, .init(workspace: [:], vm: [:], sessions: [], sessionIDs: [sid.uuidString], connected: true))
+        #expect(hub.target(method: "POST", path: "/vms/\(id.uuidString)/exec", body: [:]) == nil)
+        // Another device can't answer for it by parking under its id.
+        #expect(hub.admit(id: id, owner: "device:two", reserved: []) != .pending)
+        // Allowed: its parked link goes live.
+        #expect(hub.decide(id: id, allow: true))
+        #expect(hub.name(id) == "Waiting Mac")
+        #expect(hub.target(method: "POST", path: "/vms/\(id.uuidString)/exec", body: [:]) == id)
+        #expect(hub.admit(id: id, owner: "device:one", reserved: []) == .allowed)
+        // Blocked: dropped, and refused from now on — its own device too.
+        #expect(hub.decide(id: id, allow: false))
+        #expect(hub.name(id) == nil)
+        if case .refused = hub.admit(id: id, owner: "device:one", reserved: []) {} else { Issue.record("not refused") }
+        #expect(hub.admissionState().blocked.contains { $0["id"] as? String == id.uuidString })
+        // Unblocked: it asks again.
+        hub.forget(id: id)
+        #expect(hub.admit(id: id, owner: "device:one", reserved: []) == .pending)
+    }
+
+    @Test("answers and owners survive a restart")
+    func persistence() throws {
+        let hub = MachineLinkHub.shared
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("machines-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: url); hub.storeURL = nil }
+        hub.storeURL = url
+        let id = UUID()
+        let (a, b) = Self.link()
+        defer { close(b) }
+        #expect(hub.park(fd: a, id: id, name: "M", owner: "device:one"))
+        #expect(hub.decide(id: id, allow: true))
+        _ = hub.detach(id: id, owner: "device:one")
+        hub.storeURL = url          // as a relaunch reads it
+        #expect(hub.admit(id: id, owner: "device:one", reserved: []) == .allowed)
+        if case .refused = hub.admit(id: id, owner: "device:two", reserved: []) {} else { Issue.record("owner not kept") }
+        hub.forget(id: id)
+    }
+
+    @Test("a machine's sessions are its own: no one else's id, no other workspace")
+    func ownSessions() {
+        let machine = UUID(), vmWorkspace = UUID(), vmSession = UUID(), mine = UUID()
+        let listed: [[String: Any]] = [
+            ["id": vmSession.uuidString, "profileID": vmWorkspace.uuidString, "title": "stolen"],
+            ["id": mine.uuidString.lowercased(), "profileID": vmWorkspace.uuidString, "title": "mine"],
+            ["id": mine.uuidString, "profileID": machine.uuidString, "title": "twin"],
+            ["title": "no id"],
+        ]
+        let kept = AttachedMachine.ownSessions(listed, machine: machine, foreign: [vmSession])
+        #expect(kept.count == 1)
+        #expect(kept.first?["id"] as? String == mine.uuidString)
+        #expect(kept.first?["profileID"] as? String == machine.uuidString)
+    }
 }

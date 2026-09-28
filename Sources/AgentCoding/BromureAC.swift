@@ -1644,6 +1644,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let former = w.listModel.machineIDs
         let ids = Set(machines.map(\.id))
         if former != ids { w.listModel.machineIDs = ids }
+        // Machines asking to join, and blocked ones (the fleet dialog and
+        // the sidebar's answers).
+        let admissions = MachineLinkHub.shared.admissionState()
+        let pending = FleetMachine.list(admissions.pending), blocked = FleetMachine.list(admissions.blocked)
+        if w.listModel.pendingMachines != pending { w.listModel.pendingMachines = pending }
+        if w.listModel.blockedMachines != blocked { w.listModel.blockedMachines = blocked }
         let wanted = machines.filter(\.connected).map(\.id)
         let have = w.listModel.entries.filter { former.contains($0.id) || ids.contains($0.id) }.map(\.id)
         if have != wanted {
@@ -1939,6 +1945,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Plain Macs attached here (Bromure Agent Host, MachineLinks.swift).
     private(set) var attachedMachines: [UUID: AttachedMachine] = [:]
     private var machineLinksObserver: NSObjectProtocol?
+    private var admissionsObserver: NSObjectProtocol?
 
     /// What the window lists: this app's sessions and the attached machines'
     /// (read-only — writes go to their own store or machine). Refreshed as
@@ -1985,6 +1992,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// session mirror and delegation relay.
     func watchAttachedMachines() {
         guard machineLinksObserver == nil else { return }
+        // The user's answers to machines asking to join, kept across launches.
+        MachineLinkHub.shared.storeURL = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BromureAC/machines.json")
+        admissionsObserver = NotificationCenter.default.addObserver(
+            forName: MachineLinkHub.admissionsChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshSidebar() }
+        }
         refreshHomeSessions()
         trackHomeSessions()
         machineLinksObserver = NotificationCenter.default.addObserver(
@@ -2001,6 +2016,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                                    engine: { [weak self] in self?.delegationEngine })
                     }
                     m.onChange = { [weak self] in self?.refreshSidebar() }
+                    // A session id this host (or another machine) owns can't
+                    // be claimed by this one.
+                    m.foreignSessionIDs = { [weak self, weak m] in
+                        guard let self else { return [] }
+                        var ids = Set(self.agentSessionStore.sessions.map(\.id))
+                        for (other, o) in self.attachedMachines where other != m?.id {
+                            ids.formUnion(o.sessionStore.sessions.map(\.id))
+                        }
+                        return ids
+                    }
                     self.attachedMachines[id] = m
                 } else if let m = self.attachedMachines.removeValue(forKey: id) {
                     m.stop()
@@ -2008,6 +2033,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.refreshSidebar()
             }
         }
+    }
+
+    /// The fleet answers from this Mac's own window.
+    func fleetAction(_ id: UUID, _ action: FleetAction, on window: NSWindow?) {
+        switch action {
+        case .allow: MachineLinkHub.shared.decide(id: id, allow: true)
+        case .unblock: MachineLinkHub.shared.forget(id: id)
+        case .block:
+            if let m = attachedMachines[id] {
+                FleetAdmissionPrompter.confirmRemove(m.name, on: window) {
+                    MachineLinkHub.shared.decide(id: id, allow: false)
+                }
+            } else {
+                MachineLinkHub.shared.decide(id: id, allow: false)
+            }
+        }
+        refreshSidebar()
     }
 
     /// The connected remote-host mirrors, as the delegation engine reaches

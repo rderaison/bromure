@@ -247,7 +247,8 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func addAttachItems(to menu: NSMenu, account: P2PAccount) {
         let linker = MachineLinker.shared
         if let t = linker.current {
-            menu.addItem(disabled(linker.isLinked ? "Attached to \(t.label)" : "Attaching to \(t.label)…"))
+            menu.addItem(disabled(linker.isAwaitingApproval ? "Waiting for approval on \(t.label)…"
+                                  : linker.isLinked ? "Attached to \(t.label)" : "Attaching to \(t.label)…"))
             if !linker.isLinked, let err = linker.error { menu.addItem(disabled(err)) }
             let d = NSMenuItem(title: "Detach", action: #selector(detach), keyEquivalent: "")
             d.target = self

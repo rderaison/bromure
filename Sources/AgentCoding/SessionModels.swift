@@ -334,6 +334,10 @@ final class SessionListModel {
     var machineIDs: Set<UUID> = []
     /// The sidebar's Native Machines section is unfolded.
     var nativeExpanded = true
+    /// Native machines asking to join this host's fleet (the user decides),
+    /// and the ones the user blocked.
+    var pendingMachines: [FleetMachine] = []
+    var blockedMachines: [FleetMachine] = []
     /// The entries backed by this app's own VMs.
     var localEntries: [VMEntry] { machineIDs.isEmpty ? entries : entries.filter { !machineIDs.contains($0.id) } }
 
@@ -533,4 +537,28 @@ extension TabsModel {
         if activePos >= tabs.count { activePos = max(0, tabs.count - 1) }
         if activeIndex != activePos { activeIndex = activePos }
     }
+}
+
+/// A native machine as the fleet's admission lists name it.
+struct FleetMachine: Identifiable, Equatable, Sendable {
+    let id: UUID
+    var name: String
+
+    /// `pendingMachines` / `blockedMachines` of /state.
+    static func list(_ any: Any?) -> [FleetMachine] {
+        ((any as? [[String: Any]]) ?? []).compactMap { d in
+            guard let id = (d["id"] as? String).flatMap(UUID.init(uuidString:)) else { return nil }
+            return FleetMachine(id: id, name: d["name"] as? String ?? "Mac")
+        }
+    }
+}
+
+/// What the user can do about a native machine and a host's fleet.
+enum FleetAction: Sendable {
+    /// Let a waiting (or blocked) machine in.
+    case allow
+    /// Refuse it, now and from now on (drops it if it's in).
+    case block
+    /// Forget a blocked machine's answer: it asks again when it next dials.
+    case unblock
 }

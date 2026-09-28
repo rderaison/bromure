@@ -601,6 +601,12 @@ final class RemoteHostController {
         if attached != agentHostWorkspaces { agentHostWorkspaces = attached }
         // Listed apart, and flagged unsandboxed (see NativeMachine).
         if listModel.machineIDs != attached { listModel.machineIDs = attached }
+        // Native machines asking to join the server's fleet (the dialog),
+        // and the blocked ones.
+        let pendingMachines = FleetMachine.list(snapshot["pendingMachines"])
+        if listModel.pendingMachines != pendingMachines { listModel.pendingMachines = pendingMachines }
+        let blockedMachines = FleetMachine.list(snapshot["blockedMachines"])
+        if listModel.blockedMachines != blockedMachines { listModel.blockedMachines = blockedMachines }
         // Guard against a degenerate /state. A 200 poll whose body was truncated
         // or failed to parse arrives as an (almost) empty snapshot, and a partial
         // server snapshot can momentarily carry no workspaces. Applying it wipes
@@ -1097,6 +1103,16 @@ final class RemoteHostController {
     /// The delegations mirror just changed — the local delegation engine
     /// looks for what the remote holds for sessions of this Mac.
     var onDelegationsMirrored: ((RemoteHostController) -> Void)?
+
+    /// The user's answer about a native machine and the server's fleet:
+    /// POST /machines/approve {id, allow} or /machines/forget {id}.
+    func fleetAction(_ id: UUID, _ action: FleetAction) {
+        switch action {
+        case .allow: send("POST", "/machines/approve", body: ["id": id.uuidString, "allow": true])
+        case .block: send("POST", "/machines/approve", body: ["id": id.uuidString, "allow": false])
+        case .unblock: send("POST", "/machines/forget", body: ["id": id.uuidString])
+        }
+    }
 
     /// POST /sessions/start — the new session's id once the server has it.
     func startSession(profileID: Profile.ID, tool: Profile.Tool, cwd: String,
@@ -2679,6 +2695,12 @@ final class RemoteHostWindow: NSWindow {
         guard let content = contentView else { return }
         let sidebar = makeSidebar()
         sidebarHost = NSHostingView(rootView: sidebar)
+        // Native machines asking to join the server's fleet.
+        fleetPrompter = FleetAdmissionPrompter(
+            model: controller.listModel,
+            hostName: { [weak self] in self.map { $0.controller.host.name.isEmpty ? $0.controller.host.address : $0.controller.host.name } },
+            window: { [weak self] in self },
+            act: { [weak self] id, action in self?.controller.fleetAction(id, action) })
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
         stage.translatesAutoresizingMaskIntoConstraints = false
         stage.wantsLayer = true
@@ -3977,6 +3999,8 @@ final class RemoteHostWindow: NSWindow {
 
     /// A remote machine's branches: listed over the tunnel; opening and
     /// discarding go to the server.
+    private var fleetPrompter: FleetAdmissionPrompter?
+
     private lazy var branchesWindows = BranchesWindowManager(
         context: BranchesWindowManager.Context(
             machineName: { [weak self] id in self?.controller.profile(for: id)?.name ?? "" },
@@ -5487,7 +5511,18 @@ final class RemoteHostWindow: NSWindow {
             onSelectRegistry: { [weak self] id in self?.showRegistryDashboard(id) },
             onNewRegistry: { [weak self] in self?.showNewRegistry() },
             onRegistryAction: { [weak self] id, action in self?.performRegistryAction(id, action) },
-            onRewindHome: { [weak self] id in self?.showRewindHome(id) })
+            onRewindHome: { [weak self] id in self?.showRewindHome(id) },
+            onFleet: { [weak self] id, action in self?.fleetAction(id, action) })
+    }
+
+    /// Remove (block) asks first when the machine is in the fleet.
+    private func fleetAction(_ id: UUID, _ action: FleetAction) {
+        let c = controller
+        if action == .block, let name = c.listModel.profileRows.first(where: { $0.id == id })?.name {
+            FleetAdmissionPrompter.confirmRemove(name, on: self) { c.fleetAction(id, .block) }
+        } else {
+            c.fleetAction(id, action)
+        }
     }
 
     // MARK: Stage

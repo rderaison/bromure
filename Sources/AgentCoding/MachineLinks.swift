@@ -25,14 +25,26 @@ final class MachineLinkHub: @unchecked Sendable {
 
     private let cond = NSCondition()
     private var parked: [UUID: [Int32]] = [:]
+    /// Machines in the fleet with links here, by name. Only these are
+    /// listed, routed to and served delegation.
     private var names: [UUID: String] = [:]
-    /// Who attached each machine ("device:<id>", from the SSH grant of an
-    /// agent host's key): only they may park links for it or detach it.
-    /// A local caller (owner-only control socket) or a full-access key
-    /// sends none and isn't bound.
-    private var owners: [UUID: String] = [:]
+    /// Machines that asked to join and wait for the user's answer: their
+    /// links park, but nothing reaches them (and they reach nothing) yet.
+    private var pending: [UUID: (name: String, owner: String?)] = [:]
+    /// The user's answers, kept across launches (`storeURL`): each machine
+    /// id allowed or blocked, bound to the device that asked ("device:<id>",
+    /// from the SSH grant of an agent host's key) — only that device may
+    /// park links for it or detach it, after a restart too.
+    private var admissions: [UUID: Admission] = [:]
     /// What the pollers last read from each machine, for /state.
     private var fragments: [UUID: Fragment] = [:]
+
+    struct Admission: Codable {
+        var name: String
+        var owner: String?
+        var allowed: Bool
+        var at: Date
+    }
 
     struct Fragment {
         var workspace: [String: Any]
@@ -42,50 +54,165 @@ final class MachineLinkHub: @unchecked Sendable {
         var connected: Bool
     }
 
-    /// Posted (main queue) when a machine parks its first link or detaches.
+    /// Posted (main queue) when a machine joins (its first link, admitted)
+    /// or leaves.
     static let machinesChanged = Notification.Name("io.bromure.machineLinks.changed")
+    /// Posted (main queue) when a machine starts or stops waiting for an
+    /// answer.
+    static let admissionsChanged = Notification.Name("io.bromure.machineLinks.admissions")
+
+    /// Where the answers are kept; nil keeps them in memory (tests).
+    var storeURL: URL? {
+        didSet {
+            cond.lock()
+            admissions = [:]
+            if let storeURL, let data = try? Data(contentsOf: storeURL) {
+                let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+                admissions = (try? dec.decode([UUID: Admission].self, from: data)) ?? [:]
+            }
+            cond.unlock()
+        }
+    }
+
+    private func saveLocked() {
+        guard let storeURL else { return }
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        guard let data = try? enc.encode(admissions) else { return }
+        try? FileManager.default.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: storeURL, options: [.atomic])
+        chmod(storeURL.path, 0o600)
+    }
 
     // MARK: Links
 
-    func mayPark(id: UUID, owner: String?) -> Bool {
+    enum Admit: Equatable { case allowed, pending, refused(String) }
+
+    /// Whether `owner` may park a link for machine `id`. `reserved`: the ids
+    /// of this host's workspaces and VMs — a machine taking one would have
+    /// their traffic routed to it. A caller with no owner (this Mac's own
+    /// control socket, or a full-access key) is trusted as it already is
+    /// everywhere else, and joins without asking.
+    func admit(id: UUID, owner: String?, reserved: Set<UUID>) -> Admit {
         cond.lock(); defer { cond.unlock() }
-        guard let owner, let bound = owners[id] else { return true }
-        return bound == owner
+        if reserved.contains(id) { return .refused("That id belongs to a workspace on this host") }
+        if let a = admissions[id] {
+            if let owner, let bound = a.owner, bound != owner {
+                return .refused("That machine is attached by another device")
+            }
+            if !a.allowed { return .refused("This server blocked that machine") }
+            return .allowed
+        }
+        if let owner, let p = pending[id], let bound = p.owner, bound != owner {
+            return .refused("That machine is attached by another device")
+        }
+        return owner == nil ? .allowed : .pending
     }
 
-    /// `POST /machines/link {id, name, owner?}`: keep `fd` for later. False
-    /// when the machine belongs to another owner (a stolen agent-host key
-    /// can't pose as another machine and take its traffic).
+    /// Kept for callers that only need the yes/no.
+    func mayPark(id: UUID, owner: String?) -> Bool {
+        if case .refused = admit(id: id, owner: owner, reserved: []) { return false }
+        return true
+    }
+
+    /// `POST /machines/link {id, name, owner?}`: keep `fd` for later — live
+    /// if the machine is in the fleet, else waiting for the user's answer.
+    /// False when it may not park at all.
     @discardableResult
-    func park(fd: Int32, id: UUID, name: String, owner: String?) -> Bool {
+    func park(fd: Int32, id: UUID, name: String, owner: String?, reserved: Set<UUID> = []) -> Bool {
+        let verdict = admit(id: id, owner: owner, reserved: reserved)
+        if case .refused = verdict { return false }
         cond.lock()
-        if let owner {
-            if let bound = owners[id], bound != owner { cond.unlock(); return false }
-            owners[id] = owner
+        var joined = false, asked = false
+        if verdict == .allowed {
+            if admissions[id] == nil, owner != nil {
+                admissions[id] = Admission(name: name, owner: owner, allowed: true, at: Date())
+                saveLocked()
+            }
+            joined = names[id] == nil
+            names[id] = name
+        } else {
+            asked = pending[id] == nil
+            pending[id] = (name, owner)
         }
-        let isNew = names[id] == nil
-        names[id] = name
         parked[id, default: []].append(fd)
         cond.broadcast()
         cond.unlock()
-        if isNew {
-            DispatchQueue.main.async { NotificationCenter.default.post(name: Self.machinesChanged, object: id) }
-        }
+        if joined { DispatchQueue.main.async { NotificationCenter.default.post(name: Self.machinesChanged, object: id) } }
+        if asked { Self.noteAdmissions() }
         return true
+    }
+
+    /// The user's answer for a waiting (or listed, or blocked) machine.
+    /// Allowing admits it — its links already parked go live; blocking
+    /// drops it and refuses it from now on. False when `id` isn't known.
+    @discardableResult
+    func decide(id: UUID, allow: Bool) -> Bool {
+        cond.lock()
+        let wait = pending[id]
+        let known = wait != nil || names[id] != nil || admissions[id] != nil
+        guard known else { cond.unlock(); return false }
+        let name = wait?.name ?? names[id] ?? admissions[id]?.name ?? "Mac"
+        let owner = wait?.owner ?? admissions[id]?.owner
+        admissions[id] = Admission(name: name, owner: owner, allowed: allow, at: Date())
+        saveLocked()
+        pending[id] = nil
+        var fds: [Int32] = []
+        var changed = false
+        if allow {
+            if wait != nil, !(parked[id]?.isEmpty ?? true) { names[id] = name; changed = true }
+        } else {
+            fds = parked.removeValue(forKey: id) ?? []
+            changed = names.removeValue(forKey: id) != nil
+            fragments[id] = nil
+        }
+        cond.broadcast()
+        cond.unlock()
+        fds.forEach { close($0) }
+        if changed { DispatchQueue.main.async { NotificationCenter.default.post(name: Self.machinesChanged, object: id) } }
+        Self.noteAdmissions()
+        return true
+    }
+
+    /// Forget a blocked machine's answer: it asks again when it next dials.
+    func forget(id: UUID) {
+        cond.lock()
+        let had = admissions.removeValue(forKey: id) != nil
+        if had { saveLocked() }
+        cond.unlock()
+        if had { Self.noteAdmissions() }
+    }
+
+    /// For /state: who waits for an answer, who is blocked.
+    func admissionState() -> (pending: [[String: Any]], blocked: [[String: Any]]) {
+        cond.lock(); defer { cond.unlock() }
+        let p = pending.map { ["id": $0.key.uuidString, "name": $0.value.name] as [String: Any] }
+            .sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+        let b = admissions.filter { !$0.value.allowed }
+            .map { ["id": $0.key.uuidString, "name": $0.value.name] as [String: Any] }
+            .sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+        return (p, b)
+    }
+
+    private static func noteAdmissions() {
+        ACAutomationServer.noteMutation()
+        DispatchQueue.main.async { NotificationCenter.default.post(name: admissionsChanged, object: nil) }
     }
 
     /// `POST /machines/detach {id, owner?}`: forget the machine and its links.
     @discardableResult
     func detach(id: UUID, owner: String?) -> Bool {
         cond.lock()
-        if let owner, let bound = owners[id], bound != owner { cond.unlock(); return false }
-        owners[id] = nil
+        if let owner, let bound = admissions[id]?.owner ?? pending[id]?.owner, bound != owner {
+            cond.unlock(); return false
+        }
         let fds = parked.removeValue(forKey: id) ?? []
+        let wasPending = pending.removeValue(forKey: id) != nil
         names[id] = nil
         fragments[id] = nil
         cond.unlock()
         fds.forEach { close($0) }
         DispatchQueue.main.async { NotificationCenter.default.post(name: Self.machinesChanged, object: id) }
+        if wasPending { Self.noteAdmissions() }
         return true
     }
 
@@ -359,6 +486,10 @@ final class AttachedMachine {
     /// Something shown changed (connection, roster, sessions): the app
     /// refreshes its sidebar.
     var onChange: (() -> Void)?
+    /// Session ids that belong to someone else (this host's own, other
+    /// machines'): a machine listing one is lying — it would have that
+    /// session's commands routed to it — and the entry is dropped.
+    var foreignSessionIDs: () -> Set<UUID> = { [] }
     private var tabs: [Int: AgentStatus] = [:]
     private var poller: Task<Void, Never>?
     private var relay: DelegationRelayClient?
@@ -402,9 +533,15 @@ final class AttachedMachine {
         let before = sessionStore.sessions
         connected = true
         name = MachineLinkHub.shared.name(id) ?? name
-        let ws = (r.json["workspaces"] as? [[String: Any]])?.first ?? [:]
-        let vm = (r.json["vms"] as? [[String: Any]])?.first ?? [:]
-        let sessions = (r.json["agentSessions"] as? [[String: Any]]) ?? []
+        // What the machine says of itself is pinned to what it is: its own id
+        // everywhere, a native machine (the unsandboxed cues key off
+        // hostKind), and only sessions nobody else owns.
+        var ws = (r.json["workspaces"] as? [[String: Any]])?.first ?? [:]
+        var vm = (r.json["vms"] as? [[String: Any]])?.first ?? [:]
+        ws["id"] = id.uuidString; ws["hostKind"] = "agent-host"
+        vm["id"] = id.uuidString; vm["hostKind"] = "agent-host"
+        let sessions = Self.ownSessions((r.json["agentSessions"] as? [[String: Any]]) ?? [],
+                                        machine: id, foreign: foreignSessionIDs())
         var map: [Int: AgentStatus] = [:]
         for t in (vm["tabs"] as? [[String: Any]]) ?? [] {
             if let i = t["index"] as? Int, let s = (t["agentStatus"] as? String).flatMap(AgentStatus.init(rawValue:)) {
@@ -426,6 +563,22 @@ final class AttachedMachine {
             sessionIDs: Set(sessions.compactMap { ($0["id"] as? String)?.uppercased() }),
             connected: true))
         if !wasConnected || sessionStore.sessions != before { onChange?() }
+    }
+
+    /// The sessions a machine lists, as this host takes them: each one its
+    /// own (its profileID forced to the machine), none that someone else
+    /// already owns.
+    nonisolated static func ownSessions(_ listed: [[String: Any]], machine: UUID,
+                                        foreign: Set<UUID>) -> [[String: Any]] {
+        var seen = Set<UUID>()
+        return listed.compactMap { d in
+            guard let sid = (d["id"] as? String).flatMap(UUID.init(uuidString:)),
+                  !foreign.contains(sid), seen.insert(sid).inserted else { return nil }
+            var d = d
+            d["id"] = sid.uuidString
+            d["profileID"] = machine.uuidString
+            return d
+        }
     }
 
     /// A stand-in workspace for the local window's views (terminal colors,

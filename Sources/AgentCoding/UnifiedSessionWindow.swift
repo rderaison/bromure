@@ -457,7 +457,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onRegistryAction: { [weak self] id, action in self?.performRegistryAction(id, action) },
             onSelectConnector: { _ in ConnectorWindowController.show() },
             onConnectorAction: { id, action in ConnectorWindowController.perform(id, action) },
-            onRewindHome: { [weak self] id in self?.showRewindHome(id) })
+            onRewindHome: { [weak self] id in self?.showRewindHome(id) },
+            onFleet: { [weak self] id, action in self?.acDelegate?.fleetAction(id, action, on: self) })
+        // Native machines asking to join this Mac's fleet.
+        fleetPrompter = FleetAdmissionPrompter(
+            model: listModel, hostName: { nil }, window: { [weak self] in self },
+            act: { [weak self] id, action in self?.acDelegate?.fleetAction(id, action, on: self) })
         // NonMovable so a drag inside the sidebar — notably dragging a tab
         // row onto the Grid — selects/drags the row instead of moving the
         // whole window (the window is isMovableByWindowBackground).
@@ -1688,6 +1693,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             self?.roomController?.refresh()
         }
     }
+
+    private var fleetPrompter: FleetAdmissionPrompter?
 
     /// The toast that offers Undo after a quick action.
     private lazy var toasts = UndoToastHost(window: self)
@@ -3535,6 +3542,8 @@ struct SessionSidebar: View {
     var onConnectorAction: (UUID, KubeRowAction) -> Void = { _, _ in }
     /// A machine's "Rewind home…": the window puts up the sheet.
     var onRewindHome: (Profile.ID) -> Void = { _ in }
+    /// Admit, remove (block) or unblock a native machine.
+    var onFleet: (UUID, FleetAction) -> Void = { _, _ in }
     /// The search text lives on the model (the debug hooks set it too).
     private var sessionFilter: String {
         get { model.sidebarFilter }
@@ -3698,7 +3707,7 @@ struct SessionSidebar: View {
     @ViewBuilder
     private var nativeSection: some View {
         let rows = model.profileRows.filter { model.machineIDs.contains($0.id) }
-        if !rows.isEmpty {
+        if !rows.isEmpty || !model.pendingMachines.isEmpty || !model.blockedMachines.isEmpty {
             SidebarSectionHeader(title: NativeMachine.sectionTitle,
                                  narrowTitle: NativeMachine.sectionNarrowTitle,
                                  expanded: model.nativeExpanded,
@@ -3710,7 +3719,14 @@ struct SessionSidebar: View {
                 ForEach(rows) { row in
                     NativeMachineSection(row: row,
                                          entry: model.entries.first { $0.id == row.id },
-                                         onSelectTab: onSelectTab)
+                                         onSelectTab: onSelectTab,
+                                         onRemove: { onFleet(row.id, .block) })
+                }
+                ForEach(model.pendingMachines) { m in
+                    FleetAdmissionRow(machine: m, blocked: false, onAction: { onFleet(m.id, $0) })
+                }
+                ForEach(model.blockedMachines) { m in
+                    FleetAdmissionRow(machine: m, blocked: true, onAction: { onFleet(m.id, $0) })
                 }
             }
         }
@@ -4665,6 +4681,7 @@ private struct NativeMachineSection: View {
     let row: SessionListModel.ProfileRow
     var entry: SessionListModel.VMEntry?
     let onSelectTab: (Profile.ID, Int) -> Void
+    var onRemove: () -> Void = {}
     @State private var hovering = false
 
     var body: some View {
@@ -4703,6 +4720,11 @@ private struct NativeMachineSection: View {
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .help(NativeMachine.help(row.name))
+            .contextMenu {
+                Button(role: .destructive, action: onRemove) {
+                    Label(NSLocalizedString("Remove from Fleet…", comment: "native machine"), systemImage: "xmark.shield")
+                }
+            }
 
             if let entry {
                 VStack(alignment: .leading, spacing: 1) {
@@ -4719,6 +4741,52 @@ private struct NativeMachineSection: View {
                     }
                 }
                 .padding(.leading, 14)
+            }
+        }
+    }
+}
+
+/// A native machine waiting for the user's answer, or blocked: its name,
+/// dimmed, and the answer at hand.
+private struct FleetAdmissionRow: View {
+    let machine: FleetMachine
+    let blocked: Bool
+    let onAction: (FleetAction) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(NativeMachine.tint.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                .frame(width: 24, height: 24)
+                .overlay(Image(systemName: blocked ? "nosign" : "questionmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary))
+            VStack(alignment: .leading, spacing: 0) {
+                Text(machine.name)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .foregroundStyle(.tertiary)
+                Text(blocked ? NSLocalizedString("Blocked", comment: "native machine")
+                             : NSLocalizedString("Wants to join", comment: "native machine"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(blocked ? AnyShapeStyle(.tertiary) : AnyShapeStyle(NativeMachine.tint))
+            }
+            Spacer(minLength: 4)
+            if !blocked {
+                Button(NSLocalizedString("Allow", comment: "fleet admission")) { onAction(.allow) }
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .contextMenu {
+            if blocked {
+                Button(NSLocalizedString("Unblock", comment: "fleet admission")) { onAction(.unblock) }
+                Button(NSLocalizedString("Allow Now", comment: "fleet admission")) { onAction(.allow) }
+            } else {
+                Button(NSLocalizedString("Allow", comment: "fleet admission")) { onAction(.allow) }
+                Button(NSLocalizedString("Block", comment: "fleet admission"), role: .destructive) { onAction(.block) }
             }
         }
     }
