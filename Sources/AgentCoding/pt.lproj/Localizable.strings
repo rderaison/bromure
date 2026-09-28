@@ -3136,4 +3136,4 @@
 "Time the agent spent working: %d turns, the longest %@" = "Tempo de trabalho do agente: %d turnos, o mais longo %@";
 "Erasing and restoring storage is done on the server Mac." = "Apagar e restaurar o armazenamento é feito no Mac servidor.";
 "Home folder size" = "Tamanho da pasta pessoal";
-"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "Uma pasta pessoal maior entra em vigor na próxima vez que o espaço de trabalho iniciar; não pode ser reduzida. A imagem de disco só ocupa o espaço que seus arquivos usam.";
+"From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "De %d GB (o tamanho atual — uma pasta pessoal não pode diminuir) até 1024 GB. Uma pasta maior entra em vigor na próxima vez que o espaço de trabalho iniciar. A imagem de disco só ocupa o espaço que seus arquivos usam.";

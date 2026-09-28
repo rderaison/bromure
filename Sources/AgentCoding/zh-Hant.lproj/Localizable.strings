@@ -3139,4 +3139,4 @@
 "Time the agent spent working: %d turns, the longest %@" = "代理程式工作時間：%d 輪，最長 %@";
 "Erasing and restoring storage is done on the server Mac." = "儲存空間的清除與還原需在伺服器 Mac 上進行。";
 "Home folder size" = "主檔案夾大小";
-"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "較大的主檔案夾會在工作區下次啟動時生效；無法縮小。磁碟映像只佔用其檔案實際使用的空間。";
+"From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "從 %d GB（目前大小——主檔案夾無法縮小）到 1024 GB。較大的主檔案夾會在工作區下次啟動時生效。磁碟映像只佔用其檔案實際使用的空間。";

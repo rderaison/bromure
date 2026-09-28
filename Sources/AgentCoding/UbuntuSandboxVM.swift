@@ -341,7 +341,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // home into it first).
         if let session = sessionDisk, session.homeAttachMode != .virtiofs {
             try session.ensureHomeImageExists()
-            if !session.hasSavedState { try session.growHomeImageIfNeeded() }
+            // Logged either way (~/Library/Logs/BromureAC/bromure-ac.log): a size
+            // change that doesn't land has to say why.
+            let homeNote = session.hasSavedState
+                ? "saved state present — home image kept at its size until a cold boot"
+                : try session.growHomeImageIfNeeded()
+            AppLog.stamp("'\(session.profile.name)': \(homeNote)")
             let homeAttachment = try VZDiskImageStorageDeviceAttachment(
                 url: session.homeImageURL, readOnly: false)
             config.storageDevices.append(
