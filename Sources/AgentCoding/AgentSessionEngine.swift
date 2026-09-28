@@ -73,7 +73,15 @@ final class AgentSessionEngine {
         // itself.
         if cwd.isEmpty || cwd == "~" || cwd == "~/" {
             let named = req.title?.trimmingCharacters(in: .whitespaces).nonEmpty
-            cwd = "~/" + Self.syntheticFolderName(message: named ?? message, tool: req.tool)
+            // Two blank sessions in the same minute got the same folder
+            // ("claude-260928-1830"): one chat then read the other's
+            // transcript (a fresh agent isn't pinned to its own until its
+            // first prompt), and a wake-up's --continue resumed it for real.
+            let base = "~/" + Self.syntheticFolderName(message: named ?? message, tool: req.tool)
+            let taken = Set(store.sessions.filter { $0.profileID == req.profileID && !$0.isDeleted }.map(\.cwd))
+            cwd = base
+            var n = 2
+            while taken.contains(cwd) { cwd = "\(base)-\(n)"; n += 1 }
         }
         let title = req.title?.trimmingCharacters(in: .whitespaces).nonEmpty
             ?? (message?.nonEmpty).map(AgentSession.title(fromMessage:))
@@ -236,7 +244,7 @@ final class AgentSessionEngine {
                 } else {
                     // The agent exited, its shell is still there: relaunch
                     // in place so the conversation history is right at hand.
-                    let words: [String] = [s.tool.rawValue, Self.resumeFlags(for: s), Self.roleFlags(for: s)]
+                    let words: [String] = [s.tool.rawValue, Self.resumeFlags(for: s, sharedFolder: sharesFolder(s)), Self.roleFlags(for: s)]
                     var cmd = words.filter { !$0.isEmpty }.joined(separator: " ")
                     // Claude and Oh My Pi take the message on the command
                     // line: typing it once the agent "looks alive" raced the
@@ -293,7 +301,7 @@ final class AgentSessionEngine {
         // to their resume flag; Codex and Kimi don't, so it's typed once
         // they're up.
         let inline = message != nil && (s.tool == .claude || s.tool == .omp)
-        launch(id, prompt: inline ? (message ?? "") : "", flags: Self.resumeFlags(for: s), alreadyUp: true)
+        launch(id, prompt: inline ? (message ?? "") : "", flags: Self.resumeFlags(for: s, sharedFolder: sharesFolder(s)), alreadyUp: true)
         if !inline, let message { deliverWhenAlive(id, message) }
     }
 
@@ -689,6 +697,9 @@ final class AgentSessionEngine {
             + "| grep -E -o -m1 '\(agentNames)' "
             + "| head -1); "
             + AgentSessionLocator.pinnedTranscriptBlock(window: "$i", into: "tp")
+            // Pinned at SessionStart before anything was said: no
+            // conversation to resume by that id yet.
+            + "[ -f \"$tp\" ] || tp=\"\"; "
             + "tid=\"${tp##*/}\"; tid=\"${tid%.jsonl}\"; "
             + "printf '%s\\t%s\\t%s\\t%s\\n' \"$i\" \"${a:-none}\" \"$tid\" \"$title\"; done"
     }
@@ -736,11 +747,22 @@ final class AgentSessionEngine {
         s.isSwitchboard ? SwitchboardEngine.launchFlags(for: s.tool) : ""
     }
 
-    static func resumeFlags(for s: AgentSession) -> String {
+    /// `sharedFolder`: another session works in the same folder. With no
+    /// transcript id of its own, the agent's "continue the last one here"
+    /// would pick up THAT session's conversation — start fresh instead.
+    static func resumeFlags(for s: AgentSession, sharedFolder: Bool = false) -> String {
         if s.tool == .claude, let id = s.agentTranscriptID, isTranscriptID(id) {
             return "--resume \(id)"
         }
-        return s.tool.resumeFlags
+        return sharedFolder ? "" : s.tool.resumeFlags
+    }
+
+    /// Whether another (not deleted) session on the same machine works in
+    /// `s`'s folder.
+    func sharesFolder(_ s: AgentSession) -> Bool {
+        store.sessions.contains {
+            $0.id != s.id && !$0.isDeleted && $0.profileID == s.profileID && $0.cwd == s.cwd
+        }
     }
 
     /// Apply one probe line to the session bound to that window.

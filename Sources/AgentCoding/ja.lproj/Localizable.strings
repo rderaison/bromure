@@ -1344,7 +1344,7 @@
 "The transcript file has no readable entries." = "トランスクリプトファイルに読み取れる項目がありません。";
 "No transcript" = "トランスクリプトなし";
 "This run's transcript couldn't be read." = "この実行のトランスクリプトを読み取れませんでした。";
-"⏎ send   ⌥⏎ newline" = "⏎ 送信   ⌥⏎ 改行";
+"⏎ send   ⇧⏎ newline" = "⏎ 送信   ⇧⏎ 改行";
 "Send (⏎)" = "送信 (⏎)";
 "The agent asked" = "エージェントからの質問（回答済み）";
 "The agent is asking %d questions — answer them all, then Submit" = "エージェントが%d件の質問をしています — すべて回答してから送信してください";
@@ -1792,7 +1792,7 @@
 "The machine it runs on — running" = "実行するマシン — 実行中";
 "The machine it runs on — asleep, wakes up when you start" = "実行するマシン — スリープ中、開始すると起動します";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "作業場所：新しいフォルダ、既存のフォルダ、またはチェックアウトするリポジトリ";
-"⏎ start   ⌥⏎ newline" = "⏎ 開始   ⌥⏎ 改行";
+"⏎ start   ⇧⏎ newline" = "⏎ 開始   ⇧⏎ 改行";
 "Start the session (⏎)" = "セッションを開始 (⏎)";
 "Working in this folder — click to start in a new folder instead" = "このフォルダで作業中 — クリックすると代わりに新しいフォルダで開始します";
 "Work in this folder again" = "もう一度このフォルダで作業";
@@ -2100,6 +2100,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "許可 — 証明書の検証をスキップ (X-bromure-insecure)。認証情報は注入されません";
 "To-dos" = "To-do";
 "⎋ stop   ⏎ send" = "⎋ 停止   ⏎ 送信";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ 停止   ⏎ 送信   ⇧⏎ 改行";
 "Stop the agent (Esc)" = "エージェントを停止 (Esc)";
 "Completed" = "完了";
 "Reopened" = "再開";
@@ -2800,7 +2801,7 @@
 "Viewed" = "確認済み";
 "Viewed — click to unmark" = "確認済み — クリックで解除";
 "What the changes are compared against" = "変更の比較対象";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ コメント追加   ⌥⏎ 改行   ⇧⌘⏎ エージェントに送信";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ コメント追加   ⇧⏎ 改行   ⇧⌘⏎ エージェントに送信";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@ (現在)";
@@ -2834,7 +2835,7 @@
 "The current commit" = "現在のコミット";
 "This machine has no branches made by Bromure." = "このマシンには Bromure が作成したブランチがありません。";
 "last commit %@" = "最終コミット %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ コメント追加   ⌥⏎ 改行   ⇧⌘⏎ 差し戻す";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ コメント追加   ⇧⏎ 改行   ⇧⌘⏎ 差し戻す";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "あなたの Slack アカウントにだけ応答します。チャンネルや他の人は無視されます。";
@@ -3127,3 +3128,12 @@
 "%@ stopped as it started: %@" = "%1$@ は起動時に停止しました：%2$@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%1$@ はアーカイブ済みのセッション「%2$@」が使っていました（最終使用 %3$@）。このセッションで再利用しますか？";
 "Delegation" = "委任";
+
+/* Added for hotfixes-v5 */
+"Requests" = "リクエスト";
+"Working for others" = "他のセッションの依頼";
+"The model the agent last answered with" = "エージェントが最後に応答したモデル";
+"Time the agent spent working: %d turns, the longest %@" = "エージェントの作業時間：%d ターン、最長 %@";
+"Erasing and restoring storage is done on the server Mac." = "ストレージの消去と復元はサーバーの Mac で行います。";
+"Home folder size" = "ホームフォルダのサイズ";
+"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "大きくしたホームはワークスペースの次回起動時に反映されます。縮小はできません。ディスクイメージはファイルが使う分だけ容量を消費します。";

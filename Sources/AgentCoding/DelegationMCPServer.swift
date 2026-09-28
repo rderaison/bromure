@@ -102,6 +102,33 @@ final class DelegationMCPServer: MCPLineHandler {
         func strings(_ v: Any?) -> [String] {
             ((v as? [String]) ?? []).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         }
+        /// The `nickname` argument, normalized and checked BEFORE anything is
+        /// started, so a taken name fails the call rather than leaving an
+        /// unnamed session behind.
+        func requestedNickname(_ args: [String: Any]) throws -> String? {
+            guard let raw = (args["nickname"] as? String)?.trimmingCharacters(in: .whitespaces),
+                  !raw.isEmpty else { return nil }
+            guard let nick = DelegationNotice.normalizeNickname(raw) else {
+                throw DelegationRefusal("“\(raw)” isn't a usable nickname: letters, digits, - _ . only, up to 32.")
+            }
+            if case .refused(let why) = engine.sessions.checkNickname(UUID(), nick) {
+                throw DelegationRefusal(why)
+            }
+            return nick
+        }
+        /// Name the new session. A child on another host isn't in this
+        /// store: say so rather than pretend.
+        func applyNickname(_ nick: String, to child: UUID, into out: inout [String: Any]) {
+            guard engine.sessions.session(child) != nil else {
+                out["nickname_note"] = "Not applied: the new session runs on another host."
+                return
+            }
+            if let why = engine.sessions.setNickname(child, nick, reclaim: true) {
+                out["nickname_note"] = why
+            } else {
+                out["nickname"] = "@" + nick
+            }
+        }
         func item(_ d: Delegation, _ m: DelegationMessage) -> [String: Any] {
             var o: [String: Any] = [
                 "delegation_id": d.id.uuidString, "delegation": d.title,
@@ -150,6 +177,7 @@ final class DelegationMCPServer: MCPLineHandler {
                 guard let title = args["title"] as? String, let brief = args["brief"] as? String else {
                     return errorResult("title and brief are required")
                 }
+                let nickname = try requestedNickname(args)
                 let tool = (args["tool"] as? String).flatMap(Profile.Tool.init(rawValue:))
                 let d = try await engine.delegate(
                     from: me.id, title: title, brief: brief,
@@ -165,6 +193,7 @@ final class DelegationMCPServer: MCPLineHandler {
                     "status": d.status.rawValue,
                     "next": "Keep working; call wait (or read_inbox) when you need its result. It may ask you something first.",
                 ]
+                if let nickname { applyNickname(nickname, to: d.childSessionID, into: &out) }
                 if let f = d.messages.first?.files, !f.isEmpty { out["files_landed"] = f }
                 if let ws = engine.sessions.session(d.childSessionID)?.profileID {
                     out["workspace"] = engine.workspaceName(ws)
@@ -191,6 +220,7 @@ final class DelegationMCPServer: MCPLineHandler {
                 guard SessionHome.hasFolder(me) else {
                     return errorResult("Your session runs in the home folder, which can't be branched — only a project folder can.")
                 }
+                let nickname = try requestedNickname(args)
                 let initGit = args["init_git"] as? Bool ?? false
                 let host = engine.sessions.host(for: me.profileID)
                 let state = host != nil ? await host!.hostGitState(me.id) : await se.gitState(profileID: me.profileID, cwd: me.cwd)
@@ -225,6 +255,7 @@ final class DelegationMCPServer: MCPLineHandler {
                 if let err = s?.lastError, s?.worktreeBranch == nil { return errorResult(err) }
                 var out: [String: Any] = ["session_id": sid.uuidString, "title": s?.title ?? title,
                                           "tool": tool.rawValue]
+                if let nickname { applyNickname(nickname, to: sid, into: &out) }
                 if let b = s?.worktreeBranch { out["branch"] = b; out["path"] = s?.cwd ?? "" }
                 else { out["note"] = "Still starting — worktree_status shows its branch and path in a moment." }
                 out["next"] = "It runs on its own; worktree_status shows its progress, worktree_merge asks the user to merge it."

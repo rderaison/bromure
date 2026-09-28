@@ -1345,7 +1345,7 @@
 "The transcript file has no readable entries." = "The transcript file has no readable entries.";
 "No transcript" = "No transcript";
 "This run's transcript couldn't be read." = "This run's transcript couldn't be read.";
-"⏎ send   ⌥⏎ newline" = "⏎ send   ⌥⏎ newline";
+"⏎ send   ⇧⏎ newline" = "⏎ send   ⇧⏎ newline";
 "Send (⏎)" = "Send (⏎)";
 "The agent asked" = "The agent asked";
 "The agent is asking %d questions — answer them all, then Submit" = "The agent is asking %d questions — answer them all, then Submit";
@@ -1807,7 +1807,7 @@
 "The machine it runs on — running" = "The machine it runs on — running";
 "The machine it runs on — asleep, wakes up when you start" = "The machine it runs on — asleep, wakes up when you start";
 "Where it works: a fresh folder, one of yours, or a repository to check out" = "Where it works: a fresh folder, one of yours, or a repository to check out";
-"⏎ start   ⌥⏎ newline" = "⏎ start   ⌥⏎ newline";
+"⏎ start   ⇧⏎ newline" = "⏎ start   ⇧⏎ newline";
 "Start the session (⏎)" = "Start the session (⏎)";
 "Working in this folder — click to start in a new folder instead" = "Working in this folder — click to start in a new folder instead";
 "Work in this folder again" = "Work in this folder again";
@@ -2135,6 +2135,7 @@
 "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" = "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected";
 "To-dos" = "To-dos";
 "⎋ stop   ⏎ send" = "⎋ stop   ⏎ send";
+"⎋ stop   ⏎ send   ⇧⏎ newline" = "⎋ stop   ⏎ send   ⇧⏎ newline";
 "Stop the agent (Esc)" = "Stop the agent (Esc)";
 "Completed" = "Completed";
 "Reopened" = "Reopened";
@@ -2835,7 +2836,7 @@
 "Viewed" = "Viewed";
 "Viewed — click to unmark" = "Viewed — click to unmark";
 "What the changes are compared against" = "What the changes are compared against";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent" = "⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send to agent";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent" = "⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send to agent";
 
 /* Added 2026-09-26: branches + kanban review */
 "%@ (current)" = "%@ (current)";
@@ -2869,7 +2870,7 @@
 "The current commit" = "The current commit";
 "This machine has no branches made by Bromure." = "This machine has no branches made by Bromure.";
 "last commit %@" = "last commit %@";
-"⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back" = "⏎ add comment   ⌥⏎ newline   ⇧⌘⏎ send back";
+"⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back" = "⏎ add comment   ⇧⏎ newline   ⇧⌘⏎ send back";
 
 /* Added 2026-09-26: messaging connector + Slack */
 "Answers your Slack account only — channels and everyone else are ignored." = "Answers your Slack account only — channels and everyone else are ignored.";
@@ -3162,3 +3163,12 @@
 "%@ stopped as it started: %@" = "%@ stopped as it started: %@";
 "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?" = "@%@ was used by archived session “%@”, last on %@. Reuse it for this session?";
 "Delegation" = "Delegation";
+
+/* Added for hotfixes-v5 */
+"Requests" = "Requests";
+"Working for others" = "Working for others";
+"The model the agent last answered with" = "The model the agent last answered with";
+"Time the agent spent working: %d turns, the longest %@" = "Time the agent spent working: %d turns, the longest %@";
+"Erasing and restoring storage is done on the server Mac." = "Erasing and restoring storage is done on the server Mac.";
+"Home folder size" = "Home folder size";
+"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use.";

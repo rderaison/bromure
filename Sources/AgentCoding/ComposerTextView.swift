@@ -220,6 +220,13 @@ final class ComposerNSTextView: NSTextView {
     override func doCommand(by selector: Selector) {
         switch selector {
         case #selector(insertNewline(_:)):
+            // Shift-Return reaches here as a plain insertNewline: — AppKit
+            // binds only Option-Return to a distinct selector.
+            if let e = NSApp.currentEvent, e.type == .keyDown,
+               e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .shift {
+                insertText("\n", replacementRange: selectedRange())
+                return
+            }
             if onKey?(.enter) == true { return }
             onSubmit()
         case #selector(insertNewlineIgnoringFieldEditor(_:)), #selector(insertLineBreak(_:)):

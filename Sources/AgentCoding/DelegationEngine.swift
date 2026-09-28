@@ -99,6 +99,41 @@ struct DelegationSessions {
         if let d = s.delegationID { body["delegationID"] = d.uuidString }
         h.hostSessionCommand(id, "delegation-link", body)
     }
+
+    /// Nicknames are unique across this host and its machines: `raw` for
+    /// `id`, checked against every store.
+    func checkNickname(_ id: UUID, _ raw: String) -> AgentSessionStore.NicknameVerdict {
+        let here = local.checkNickname(id, raw)
+        if here != .ok { return here }
+        for h in hosts {
+            let there = h.hostSessions.checkNickname(id, raw)
+            if there != .ok { return there }
+        }
+        return .ok
+    }
+
+    /// Name a session wherever it lives (a machine's is named on the
+    /// machine). The refusal, else nil.
+    @discardableResult
+    func setNickname(_ id: UUID, _ raw: String?, reclaim: Bool = false) -> String? {
+        // Taken on a machine (a name there can't be reclaimed from here).
+        if let raw {
+            for h in hosts where h.hostSessions.session(id) == nil {
+                switch h.hostSessions.checkNickname(id, raw) {
+                case .ok: break
+                case .refused(let why), .reclaim(let why): return why
+                }
+            }
+        }
+        if local.session(id) != nil { return local.setNickname(id, raw, reclaim: reclaim) }
+        guard let h = hosts.first(where: { $0.hostSessions.session(id) != nil }) else {
+            return NSLocalizedString("Unknown session.", comment: "nickname")
+        }
+        if let raw, case .refused(let why) = local.checkNickname(id, raw) { return why }
+        h.hostSessionCommand(id, "nickname", ["nickname": raw ?? "", "reclaim": reclaim])
+        h.hostSessions.mutate(id) { $0.nickname = raw.flatMap(DelegationNotice.normalizeNickname) }
+        return nil
+    }
 }
 
 @MainActor

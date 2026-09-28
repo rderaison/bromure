@@ -1783,6 +1783,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Missing in pre-upgrade JSON → decoder defaults to `.virtiofs`.
     /// New profiles are created `.ext4`.
     public var homeModel: HomeModel
+    /// Size of the ext4 home image, GiB; nil = the app-wide default
+    /// (`SessionDisk.resolvedHomeImageGB`). Grow-only: a larger value takes
+    /// effect at the next cold boot (the host grows home.img, the guest
+    /// agent grows the filesystem) — a running VM can't see its disk grow.
+    public var homeImageGB: Int? = nil
 
     public init(
         id: UUID = UUID(),
@@ -2024,6 +2029,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case bootAtStartup
         case mcpServers
         case homeModel
+        case homeImageGB
     }
 
     public init(from decoder: Decoder) throws {
@@ -2151,6 +2157,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // Pre-upgrade profiles have no homeModel key → they stay on the
         // legacy virtiofs home until the user accepts the migration.
         homeModel = try c.decodeIfPresent(HomeModel.self, forKey: .homeModel) ?? .virtiofs
+        homeImageGB = try c.decodeIfPresent(Int.self, forKey: .homeImageGB)
     }
 
     /// Explicit encoder — skips the legacy `folderPath` key (we only ever
@@ -2331,6 +2338,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         // pre-upgrade profile (decoder defaults to .virtiofs), so a new
         // ext4 profile must always carry the key explicitly.
         try c.encode(homeModel, forKey: .homeModel)
+        try c.encodeIfPresent(homeImageGB, forKey: .homeImageGB)
         if !mcpServers.isEmpty {
             try c.encode(mcpServers, forKey: .mcpServers)
         }
@@ -4219,6 +4227,7 @@ public final class ProfileStore {
                     return !text.contains(hookScript) && !text.contains("/.bromure/pq-")
                 }
             }
+            hooks["SessionStart"] = hookCmd("start") + othersUnder("SessionStart")
             hooks["UserPromptSubmit"] = hookCmd("working") + othersUnder("UserPromptSubmit")
             hooks["PreToolUse"] = hookCmd("working") + [pqPre] + othersUnder("PreToolUse")
             hooks["PostToolUse"] = [pqPost] + othersUnder("PostToolUse")
@@ -4313,12 +4322,17 @@ public final class ProfileStore {
                 *) exit 0 ;;
               esac
             fi
-            printf '%s' "$signal" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
-              && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
+            # "start" (SessionStart) says nothing about the turn — it's only
+            # here to record the transcript below before the first prompt.
+            if [ "$signal" != "start" ]; then
+              printf '%s' "$signal" > "$d/.agent-status-$idx.tmp" 2>/dev/null \
+                && mv -f "$d/.agent-status-$idx.tmp" "$d/agent-status-$idx.txt" 2>/dev/null || true
+            fi
             # Remember the transcript per tab: the host then reads THIS
             # agent's transcript even when another agent in the same folder
-            # (a delegate) writes newer files there. A /clear records the new
-            # file on the next prompt. Line 2 = the pane and boot it was
+            # (a delegate) writes newer files there. SessionStart records it
+            # as the agent starts — before its first prompt, while the file
+            # doesn't exist yet — and again on a /clear or a resume. Line 2 = the pane and boot it was
             # written from: window indices get reused (a closed last tab, a
             # fresh boot), and the next tab at this index must not inherit
             # the record — readers drop it when those don't match.

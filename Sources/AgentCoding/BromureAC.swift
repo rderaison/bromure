@@ -4466,6 +4466,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ?? ["error": "unavailable"]
         }
         server.onDescribeProfile = { [weak self] key in self?.automationProfileDescribe(key) }
+        server.onDescribeStorage = { [weak self] key in
+            guard let self, let p = self.profileByNameOrID(key) else { return nil }
+            return self.makeStorageContext(for: p)
+        }
         server.onExportProfile = { [weak self] key in self?.automationProfileExport(key) }
         server.onCreateProfile = { [weak self] doc in
             self?.automationUpsertProfile(idOrName: nil, doc: doc) ?? ["ok": false, "error": "unavailable"]
@@ -9387,6 +9391,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// coalesce diffs into a small, user-facing list of bullet points.
     private enum RestartChange: CaseIterable {
         case memory
+        case homeSize
         case networking
         case sharedFolders
         case primaryTool
@@ -9410,6 +9415,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         switch change {
         case .memory:
             return NSLocalizedString("VM memory", comment: "")
+        case .homeSize:
+            return NSLocalizedString("Home folder size", comment: "")
         case .networking:
             return NSLocalizedString("Network mode", comment: "")
         case .sharedFolders:
@@ -9458,6 +9465,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func restartRequiringChanges(from old: Profile, to new: Profile) -> [String] {
         var changes: [RestartChange] = []
         if old.memoryGB != new.memoryGB { changes.append(.memory) }
+        if old.homeImageGB != new.homeImageGB { changes.append(.homeSize) }
         if old.networkMode != new.networkMode
             || old.bridgedInterfaceID != new.bridgedInterfaceID {
             changes.append(.networking)

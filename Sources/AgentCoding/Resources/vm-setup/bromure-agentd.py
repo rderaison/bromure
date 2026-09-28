@@ -4549,6 +4549,7 @@ def _seed_claude_settings():
             return []
         return [e for e in existing if hook not in json.dumps(e)]
 
+    hooks["SessionStart"] = _hook_cmd("start") + _keep_others("SessionStart")
     hooks["UserPromptSubmit"] = _hook_cmd("working") + _keep_others("UserPromptSubmit")
     hooks["PreToolUse"] = _hook_cmd("working") + _keep_others("PreToolUse")
     hooks["Stop"] = _hook_cmd("done") + _keep_others("Stop")
@@ -4581,6 +4582,26 @@ def _fsck_home_if_needed(dev):
                        capture_output=True, text=True, errors="replace")
     log("home", "e2fsck done (exit %d): %s"
         % (p.returncode, (p.stdout + p.stderr).strip()[:500]))
+
+
+def _grow_home_fs(dev):
+    """The host grows home.img when the workspace's home size goes up
+    (at a cold boot — a running VM never sees its disk grow). ext4 grows
+    online, so this runs on the mounted filesystem; with nothing to gain
+    resize2fs just says so."""
+    try:
+        dev_bytes = int(_capture(["sudo", "blockdev", "--getsize64", dev]).strip() or 0)
+        head = _capture(["sudo", "dumpe2fs", "-h", dev])
+        count = int(re.search(r"^Block count:\s+(\d+)", head, re.M).group(1))
+        size = int(re.search(r"^Block size:\s+(\d+)", head, re.M).group(1))
+    except (AttributeError, ValueError):
+        return
+    # Only a real gap (the host grew the image) is worth a resize.
+    if dev_bytes - count * size < 64 * 1024 * 1024:
+        return
+    p = subprocess.run(["sudo", "resize2fs", dev], capture_output=True, text=True, errors="replace")
+    log("home", "resize2fs %s (exit %d): %s"
+        % (dev, p.returncode, (p.stdout + p.stderr).strip()[:300]))
 
 
 def task_home_setup():
@@ -4628,6 +4649,7 @@ def task_home_setup():
         return
     _sudo(["chown", "ubuntu:ubuntu", HOME_MOUNT])
     _sudo(["chmod", "755", HOME_MOUNT])
+    _grow_home_fs(dev)
     # mkfs scaffolding: lost+found is only e2fsck's relink target, and it
     # reads as clutter in every home listing (ls, the agent, the file
     # browser). rmdir removes it only when empty — after a real fsck

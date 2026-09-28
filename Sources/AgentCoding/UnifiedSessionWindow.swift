@@ -3253,9 +3253,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if selectedID != id { select(profileID: id) }
         guard let pane = pane(id) else { return }
         pane.switchTo(index: index)
-        // Sessions-first: a tab picked by hand from the Machines list is a
-        // terminal — the chat is what sessions are for.
-        if listModel.sessionsFirst, asTerminal {
+        // A tab picked by hand from the Machines list is a terminal — the
+        // chat is what sessions are for.
+        if asTerminal {
             pane.sessionOnStage = false
             pane.setViewMode(.terminal, persist: false)
             pane.updateNativeTerminalMount()
@@ -3816,7 +3816,8 @@ struct SessionSidebar: View {
                 onReset: onReset,
                 onDelete: onDelete,
                 onAddAllToGrid: onAddAllToGrid,
-                onRewindHome: onRewindHome)
+                onRewindHome: onRewindHome,
+                sessionStore: model.sessionsFirst ? sessionStore : nil)
         }
     }
 }
@@ -4480,10 +4481,23 @@ private struct VMSection: View {
     let onDelete: (Profile.ID) -> Void
     let onAddAllToGrid: (Profile.ID) -> Void
     let onRewindHome: (Profile.ID) -> Void
+    /// Sessions-first: a tab whose session the user renamed shows that name.
+    var sessionStore: AgentSessionStore? = nil
 
     @State private var hovering = false
 
     private var isLive: Bool { row.state == .running || row.state == .booting }
+
+    /// The tab's label: the tmux one, unless the session on it was named by
+    /// hand — its `@display` can't follow (it's what binds the session to
+    /// the tab), so the rename would otherwise never reach the sidebar.
+    private func label(of tab: TabsModel.Tab) -> String {
+        if let s = sessionStore?.session(profileID: row.id, windowIndex: tab.index),
+           s.userTitled == true, !s.hasEnded, !s.isDeleted, !s.title.isEmpty {
+            return s.title
+        }
+        return tab.shownLabel
+    }
 
     private var stateLabel: String? {
         switch row.state {
@@ -4567,7 +4581,7 @@ private struct VMSection: View {
                         let idx = item.idx
                         let tab = item.tab
                         TabRow(
-                            label: tab.shownLabel,
+                            label: label(of: tab),
                             // Derive the icon from the shown label: a worktree
                             // tab's display ("Refactor website (claude)")
                             // names its tool, so agentKind's contains-match

@@ -50,6 +50,7 @@ enum DelegationMCPCatalog {
                 "tool": ["type": "string", "enum": ["claude", "codex", "grok", "kimi", "omp"], "description": "Which agent runs it (default: the same as you)."],
                 "init_git": ["type": "boolean", "description": "If your folder isn't a git repository yet, make it one first (git init + a first commit of what's there). Only with your user's agreement."],
                 "base": ["type": "string", "description": "The branch to start from (default: your folder's current commit). The new branch merges back into it."],
+                "nickname": ["type": "string", "description": "An @nickname for the new session (letters, digits, - _ .; up to 32) — what you, the user and other agents reach it by. Refused if a live session already has it."],
             ], "required": ["title"]],
         ],
         [
@@ -78,6 +79,7 @@ enum DelegationMCPCatalog {
                 "worktree": ["type": "boolean", "description": "Run in a worktree off your folder (default true when your folder is a git repository). false = the same folder."],
                 "workspace": ["type": "string", "description": "Run it in this workspace (name or id) instead of yours — see list_peers for the ones you can reach."],
                 "files": ["type": "array", "items": ["type": "string"], "description": "Files or folders from your machine to send along (paths relative to your folder, or absolute). They land in the delegate's ~/.bromure/inbox/<id>/."],
+                "nickname": ["type": "string", "description": "An @nickname for the new session (letters, digits, - _ .; up to 32) — what you, the user and other agents reach it by. Refused if a live session already has it."],
             ], "required": ["title", "brief"]],
         ],
         [
