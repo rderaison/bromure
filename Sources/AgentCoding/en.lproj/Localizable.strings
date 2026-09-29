@@ -3217,3 +3217,8 @@
 "%@ — timeline" = "%@ — timeline";
 "Room timeline: who worked when, and on what" = "Room timeline: who worked when, and on what";
 "Time the agent spent working: %d turns, the longest %@ — click for where it went" = "Time the agent spent working: %d turns, the longest %@ — click for where it went";
+
+/* Installer: Local Network access (Sequoia) */
+"Bromure Needs Local Network Access" = "Bromure Needs Local Network Access";
+"The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then." = "The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then.";
+"Open Local Network Settings" = "Open Local Network Settings";

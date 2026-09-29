@@ -6658,6 +6658,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // paths use .partial files and only swap + rewrite the stamp
         // when the new image is fully in place.
         initProgress.reset()
+        armLocalNetworkWarning()
         ensureInstallWindow()
         // Driven by the wizard, the install runs inside its Install step (the
         // rail keeps the user oriented); the standalone installer view is for
@@ -6803,6 +6804,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// meanwhile keep a bootable base.
     private func startPostinstall(_ steps: [PostinstallStep]) {
         initProgress.reset()
+        armLocalNetworkWarning()
         ensureInstallWindow()
         renderInitializing(
             title: "Installing recommended packages",
@@ -6850,6 +6852,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @MainActor
+    /// The installer VM couldn't reach Bromure on this Mac (its package
+    /// proxy). On Sequoia that's the Local Network privilege — or its VM
+    /// routes going stale — so say what to do; the install carries on
+    /// downloading directly. macOS 26 no longer gates the VM's private
+    /// interface this way, so nothing to say there.
+    private func armLocalNetworkWarning() {
+        initProgress.onHostProxyUnreachable = { [weak self] in
+            guard ProcessInfo.processInfo.operatingSystemVersion.majorVersion == 15,
+                  let self, let win = self.mainWindow else { return }
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString(
+                "Bromure Needs Local Network Access", comment: "installer alert")
+            alert.informativeText = NSLocalizedString(
+                "The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then.",
+                comment: "installer alert")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: NSLocalizedString("Open Local Network Settings", comment: "installer alert"))
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            // A sheet, not runModal: the install keeps running under it.
+            alert.beginSheetModal(for: win) { response in
+                guard response == .alertFirstButtonReturn,
+                      let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")
+                else { return }
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
     private func presentBakeNetworkHealerPrompt(force: Bool) async {
         let alert = NSAlert()
         alert.messageText = NSLocalizedString(

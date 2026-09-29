@@ -7,6 +7,24 @@ import Testing
 @MainActor
 struct InitProgressModelTests {
 
+    @Test("The guest's proxy-unreachable line fires the Local Network hook once, even split across chunks")
+    func proxyUnreachableHook() {
+        let m = InitProgressModel()
+        m.reset()
+        var fired = 0
+        m.onHostProxyUnreachable = { fired += 1 }
+        m.appendLog("[ac-postinstall] entering ubuntu chroot\r\n[ac-postinstall-chroot] host proxy 172.22.231.1:49675 unreach")
+        #expect(fired == 0)
+        m.appendLog("able from the guest — fetching directly\r\n")
+        #expect(fired == 1)
+        m.appendLog("[ac-postinstall-chroot] host proxy 172.22.231.1:49675 unreachable from the guest — fetching directly\n")
+        #expect(fired == 1)
+        // A new run re-arms it.
+        m.reset()
+        m.appendLog("host proxy x unreachable from the guest\n")
+        #expect(fired == 2)
+    }
+
     @Test("Download → expand → postinstall maps onto the 60/20/20 split")
     func downloadPathWeighting() {
         let m = InitProgressModel()

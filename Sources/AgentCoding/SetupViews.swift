@@ -66,6 +66,11 @@ final class InitProgressModel {
     var narrateBrowserGuestLog = false
     private var browserProgress = BrowserInstallProgress()
 
+    /// Called once per run when the guest reports it couldn't reach the
+    /// host's package proxy (postinstall.sh's "unreachable from the guest").
+    @ObservationIgnored var onHostProxyUnreachable: (() -> Void)?
+    private var reportedProxyUnreachable = false
+
     private let maxLines = 100
     private var lines: [String] = []
     private var trailing: String = ""
@@ -87,6 +92,7 @@ final class InitProgressModel {
         narrateBrowserGuestLog = false
         browserProgress = BrowserInstallProgress()
         expectedTotalLines = 7500
+        reportedProxyUnreachable = false
     }
 
     /// No-op holdover so callers that paired `reset()` with `stop()`
@@ -215,6 +221,10 @@ final class InitProgressModel {
             let line = String(buf[..<nl])
             lines.append(line)
             linesSeen += 1
+            if !reportedProxyUnreachable, line.contains("unreachable from the guest") {
+                reportedProxyUnreachable = true
+                onHostProxyUnreachable?()
+            }
             if narrateBrowserGuestLog {
                 // Browser-image install: the guest log narrates the pill
                 // and drives the tail segment via the shared mapper (its
