@@ -2112,8 +2112,18 @@ struct SessionSectionsView: View {
     /// A session's last reply, for its row's tooltip.
     var lastReply: (UUID) -> String? = { _ in nil }
     @AppStorage("sessions.listExpanded") private var expanded = true
-    /// Rooms folded in the sidebar (their members hidden).
-    @State private var foldedRooms: Set<UUID> = []
+    /// Rooms folded in the sidebar (their members hidden) — remembered
+    /// across launches, on this Mac and in a fat client alike (room ids are
+    /// unique across machines).
+    @AppStorage("sessions.foldedRooms") private var foldedRoomsRaw = ""
+    private var foldedRooms: Set<UUID> {
+        Set(foldedRoomsRaw.split(separator: ",").compactMap { UUID(uuidString: String($0)) })
+    }
+    private func toggleFold(_ id: UUID) {
+        var s = foldedRooms
+        if s.contains(id) { s.remove(id) } else { s.insert(id) }
+        foldedRoomsRaw = s.map(\.uuidString).sorted().joined(separator: ",")
+    }
     /// The room a drag hovers.
     @State private var dropRoom: UUID?
     /// The session a drag hovers (dropping groups the two into a room).
@@ -2465,7 +2475,7 @@ struct SessionSectionsView: View {
             onSelect: { actions.openRoom(r.id) },
             onFold: {
                 withAnimation(.easeInOut(duration: 0.15)) {
-                    if foldedRooms.contains(r.id) { foldedRooms.remove(r.id) } else { foldedRooms.insert(r.id) }
+                    toggleFold(r.id)
                 }
             })
         .dropDestination(for: String.self) { items, _ in
