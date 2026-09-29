@@ -4887,6 +4887,31 @@ final class RemoteHostWindow: NSWindow {
                 "members": roomController?.members.count ?? 0,
                 "models": roomController?.models.count ?? 0,
             ]
+        case "fc-drop":
+            // {path}: attach a host file to the chat composer, as a drop would.
+            // It reads any file on this Mac and uploads it: debug builds only
+            // (a fat client's control bridge reaches this socket as "local").
+            guard ProcessInfo.processInfo.environment["BROMURE_DEBUG_CLAUDE"] != nil else {
+                return ["error": "fc-drop needs BROMURE_DEBUG_CLAUDE"]
+            }
+            guard let m = beautifiedModel else { return ["error": "no chat on stage"] }
+            guard let path = p["path"] as? String,
+                  let data = try? Data(contentsOf: URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+            else { return ["error": "unreadable path"] }
+            let ext = (path as NSString).pathExtension
+            let isImage = ["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp"].contains(ext.lowercased())
+            m.drop([DroppedFile(name: (path as NSString).lastPathComponent, data: data, isImage: isImage)])
+            return ["ok": true, "pending": m.pendingAttachments.count, "image": isImage]
+        case "fc-send":
+            // The composer's Return: `text` first, when given.
+            guard let m = beautifiedModel else { return ["error": "no chat on stage"] }
+            if let t = p["text"] as? String { m.composerText = t }
+            m.send()
+            return ["ok": true]
+        case "fc-drop-images":
+            // The drop pictures the chat holds, by the path its turns name.
+            guard let m = beautifiedModel else { return ["error": "no chat on stage"] }
+            return ["ok": true, "images": m.imagesByPath.mapValues { $0.count }]
         case "stage-action":
             // {id, do: archive|unarchive|close|resume|delete}: the session
             // menu's own action (End & Archive is `archive` on a live one).
@@ -4940,6 +4965,11 @@ final class RemoteHostWindow: NSWindow {
                 "connected": controller.connected,
                 "revision": controller.revision,
                 "vmnetSubnet": controller.vmnetSubnet ?? "",
+                // The native-machine view: which workspaces read as native
+                // (hostKind agent-host), and whether that section is unfolded.
+                "nativeMachines": controller.listModel.profileRows
+                    .filter { controller.listModel.machineIDs.contains($0.id) }.map(\.name),
+                "nativeExpanded": controller.listModel.nativeExpanded,
                 "workspaces": controller.listModel.profileRows.map {
                     ["id": $0.id.uuidString, "name": $0.name, "state": "\($0.state)"] as [String: Any]
                 },
@@ -4967,6 +4997,25 @@ final class RemoteHostWindow: NSWindow {
             contentView?.layoutSubtreeIfNeeded()
             writeSnapshot(to: shot)
             return ["ok": true, "connected": controller.connected, "frame": ["w": Double(frame.width), "h": Double(frame.height)]]
+        case "sidebar-scroll":
+            // {to: top|bottom, shot?}: scroll the sidebar (what's below the
+            // session list — machines — in a headless shot).
+            func scrollViews(_ v: NSView) -> [NSScrollView] {
+                (v as? NSScrollView).map { [$0] } ?? v.subviews.flatMap(scrollViews)
+            }
+            guard let host = sidebarHost, let sv = scrollViews(host).max(by: {
+                ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }),
+                  let doc = sv.documentView else { return ["error": "no sidebar scroll view"] }
+            let bottom = (p["to"] as? String) != "top"
+            let y = doc.isFlipped ? (bottom ? max(0, doc.frame.height - sv.contentView.bounds.height) : 0)
+                                  : (bottom ? 0 : max(0, doc.frame.height - sv.contentView.bounds.height))
+            sv.contentView.scroll(to: NSPoint(x: 0, y: y))
+            sv.reflectScrolledClipView(sv.contentView)
+            if let shot = p["shot"] as? String {
+                contentView?.layoutSubtreeIfNeeded()
+                writeSnapshot(to: shot)
+            }
+            return ["ok": true, "docHeight": Double(doc.frame.height), "y": Double(y)]
         case "sidebar":
             // {collapsed: Bool} — the icon rail, or the full sidebar back.
             setSidebarCollapsed(p["collapsed"] as? Bool ?? !sidebarCollapsed, animated: false)

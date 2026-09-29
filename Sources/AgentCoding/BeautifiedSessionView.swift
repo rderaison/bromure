@@ -245,12 +245,22 @@ enum GuestDrop {
     private static let imageExtensions: Set<String> = [
         "png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tiff", "tif", "bmp",
     ]
+    /// A drop path as staged (`baseDir/<leaf>`), whatever home the turn
+    /// shows it under: a native Mac's agent reads `/Users/<you>/.bromure/
+    /// drops/<leaf>` (Bromure Native maps the Linux home to the real one).
+    static func canonical(_ path: String) -> String {
+        guard !path.hasPrefix(baseDir + "/"), let r = path.range(of: "/.bromure/drops/"),
+              path.hasPrefix("/") else { return path }
+        return baseDir + "/" + path[r.upperBound...]
+    }
+
     /// The drop paths in a turn's text that name images, in order.
     static func imagePaths(in text: String) -> [String] {
         var out: [String] = []
         for tok in text.split(whereSeparator: { $0.isWhitespace }) {
             let path = String(tok)
-            guard path.hasPrefix(baseDir + "/") || path.hasPrefix(legacyBaseDir + "/"),
+            guard path.hasPrefix(baseDir + "/") || path.hasPrefix(legacyBaseDir + "/")
+                    || (path.hasPrefix("/") && path.contains("/.bromure/drops/")),
                   imageExtensions.contains((path as NSString).pathExtension.lowercased()),
                   !out.contains(path) else { continue }
             out.append(path)
@@ -1307,7 +1317,7 @@ final class BeautifiedSessionModel: ObservableObject {
         for item in parsedItems {
             guard case .userText(let text) = item.kind else { continue }
             for path in GuestDrop.imagePaths(in: text) where imagesByPath[path] == nil {
-                if let kept = DropImageStore.load(path) { imagesByPath[path] = kept }
+                if let kept = DropImageStore.load(GuestDrop.canonical(path)) { imagesByPath[path] = kept }
             }
         }
     }

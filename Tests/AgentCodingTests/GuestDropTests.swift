@@ -131,4 +131,16 @@ struct GuestDropTests {
         #expect(eOps.first?["append"] as? Bool == false)
         #expect(eOps.first?["data"] as? String == "")
     }
+
+    @Test("a drop path under a native Mac's home is the staged drop")
+    func nativeHomeDrops() {
+        let staged = GuestDrop.baseDir + "/20260929-101500-ab12-0_shot.png"
+        let native = "/Users/someone/.bromure/drops/20260929-101500-ab12-0_shot.png"
+        #expect(GuestDrop.canonical(native) == staged)
+        #expect(GuestDrop.canonical(staged) == staged)
+        #expect(GuestDrop.canonical("/tmp/other/x.png") == "/tmp/other/x.png")
+        #expect(GuestDrop.canonical("relative/.bromure/drops/x.png") == "relative/.bromure/drops/x.png")
+        #expect(GuestDrop.imagePaths(in: "Look at \(native) please") == [native])
+        #expect(GuestDrop.imagePaths(in: "notes at /Users/someone/.bromure/drops/0_a.txt").isEmpty)
+    }
 }

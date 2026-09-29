@@ -161,7 +161,9 @@ enum Tmux {
     /// Type `text` into the window's prompt, then Enter — split like the
     /// client's own `typeCommand`, so a TUI sees a paste followed by a key.
     static func type(_ idx: Int, _ text: String) {
-        run(["send-keys", "-t", "\(session):\(idx)", "-l", text])
+        // Paths a client names for a Linux guest (drops, inbox) are under
+        // /home/ubuntu; here they live in the real home.
+        run(["send-keys", "-t", "\(session):\(idx)", "-l", HostExec.mapHome(text)])
         Thread.sleep(forTimeInterval: 0.6)
         run(["send-keys", "-t", "\(session):\(idx)", "Enter"])
     }

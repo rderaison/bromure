@@ -640,7 +640,7 @@ final class SessionEngine: @unchecked Sendable {
             cmd = tool
         }
         for a in extraArgs { cmd += " \(shellQuote(a))" }
-        if let message { cmd += " \(shellQuote(message))" }
+        if let message { cmd += " \(shellQuote(HostExec.mapHome(message)))" }
         if let cloneURL {
             let folder = ((cloneURL as NSString).lastPathComponent as NSString).deletingPathExtension
             cmd = "git clone \(shellQuote(cloneURL)) && cd \(shellQuote(folder)) && \(cmd)"

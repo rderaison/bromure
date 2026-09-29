@@ -13,6 +13,24 @@ enum HostExec {
         s.replacingOccurrences(of: guestHome, with: NSHomeDirectory())
     }
 
+    /// A client command, mapped: the home in its text, and in the text it
+    /// carries base64-encoded (`echo <b64> | base64 -d …` — how a message is
+    /// typed into an agent, "…staged in /home/ubuntu/.bromure/drops/…"). Only
+    /// a payload that decodes to UTF-8 text naming the Linux home changes.
+    static func mapCommand(_ command: String) -> String {
+        var out = mapHome(command)
+        guard out.contains("base64 -d") else { return out }
+        let rx = try! NSRegularExpression(pattern: #"echo ([A-Za-z0-9+/]+={0,2}) \| base64 -d"#)
+        let ns = out as NSString
+        for m in rx.matches(in: out, range: NSRange(location: 0, length: ns.length)).reversed() {
+            let r = m.range(at: 1)
+            guard let data = Data(base64Encoded: ns.substring(with: r)),
+                  let text = String(data: data, encoding: .utf8), text.contains(guestHome + "/") else { continue }
+            out = (out as NSString).replacingCharacters(in: r, with: Data(mapHome(text).utf8).base64EncodedString())
+        }
+        return out
+    }
+
     static func run(_ body: [String: Any]) -> (status: Int, body: [String: Any]) {
         let timeout = TimeInterval((body["timeout"] as? Int) ?? 30)
         let r: HostProcess.Result
@@ -25,7 +43,7 @@ enum HostExec {
         } else {
             let command = (body["command"] as? String) ?? ""
             guard !command.isEmpty else { return (400, ["error": "Missing 'command' field"]) }
-            r = HostProcess.run(executable: "/bin/bash", args: ["-c", mapHome(command)],
+            r = HostProcess.run(executable: "/bin/bash", args: ["-c", mapCommand(command)],
                                 env: HostEnvironment.forCommands(), cwd: NSHomeDirectory(), timeout: timeout)
         }
         if UserDefaults.standard.bool(forKey: "debugExec") {
@@ -130,7 +148,7 @@ enum PTYBridge {
         } else if command.isEmpty {
             shellCommand = "exec \(shellQuote(Tmux.userShell)) -l"
         } else {
-            shellCommand = HostExec.mapHome(command)
+            shellCommand = HostExec.mapCommand(command)
         }
         var env = HostEnvironment.forCommands()
         env["TERM"] = "xterm-256color"
