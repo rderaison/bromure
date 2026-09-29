@@ -98,6 +98,10 @@ struct SessionTimeline: Equatable {
         var cursor: Date?
         var open: [(name: String, detail: String, start: Date)] = []
         var nextID = 0
+        /// The prompt of a turn parked on a question to the user: their
+        /// answer picks the work up again as a turn of its own — the time
+        /// they took (a night, sometimes) is theirs, not the agent's.
+        var askedPrompt: String?
 
         func segment(_ kind: Kind, _ name: String, _ detail: String, _ a: Date, _ b: Date) {
             guard b > a else { return }
@@ -151,6 +155,7 @@ struct SessionTimeline: Equatable {
             switch item.kind {
             case .userText(let text):
                 closeTurn()
+                askedPrompt = nil
                 nextID += 1
                 let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
                 current = Turn(id: nextID, prompt: String(line.prefix(140)), start: ts, end: ts, segments: [])
@@ -158,17 +163,40 @@ struct SessionTimeline: Equatable {
             case .toolUse(let name, let summary, _):
                 advance(to: ts)
                 open.append((name, summary, ts))
+            case .question:
+                advance(to: ts)
+                if let prompt = current?.prompt {
+                    closeTurn()
+                    askedPrompt = prompt
+                }
             case .toolResult(let tool, _, _):
+                if current == nil, let prompt = askedPrompt {
+                    // The answer to the question: back to work.
+                    askedPrompt = nil
+                    nextID += 1
+                    current = Turn(id: nextID, prompt: prompt, start: ts, end: ts, segments: [])
+                    cursor = ts
+                    continue
+                }
                 guard current != nil else { continue }
-                // The oldest open call of that tool (results come back in order).
-                let i = open.firstIndex { $0.name == tool } ?? (open.isEmpty ? nil : 0)
+                // The oldest open call of that tool (results come back in
+                // order); an unnamed result takes the oldest of any.
+                let i = open.firstIndex { $0.name == tool } ?? (tool == "tool" && !open.isEmpty ? 0 : nil)
                 if let i {
                     let o = open.remove(at: i)
                     segment(Kind.of(tool: o.name), o.name, o.detail, o.start, max(ts, o.start))
                 }
                 if cursor == nil || ts > cursor! { cursor = ts }
                 if let cur = current, ts > cur.end { current?.end = ts }
-            case .assistantText, .thinking, .question, .todo:
+            case .assistantText, .thinking, .todo:
+                if current == nil, let prompt = askedPrompt {
+                    // Answered without a result we saw: resume here.
+                    askedPrompt = nil
+                    nextID += 1
+                    current = Turn(id: nextID, prompt: prompt, start: ts, end: ts, segments: [])
+                    cursor = ts
+                    continue
+                }
                 advance(to: ts)
             }
         }
