@@ -3177,3 +3177,14 @@
 "Queued — the agent reads it next" = "Queued — the agent reads it next";
 "Queued — %@ reads it next" = "Queued — %@ reads it next";
 "Don't send it" = "Don't send it";
+"Chart" = "Chart";
+"Video" = "Video";
+"Open in its own window" = "Open in its own window";
+"Play video" = "Play video";
+"Not an image or a video this app can show." = "Not an image or a video this app can show.";
+"This window can't read files from that machine." = "This window can't read files from that machine.";
+"Couldn't read %@." = "Couldn't read %@.";
+"That image couldn't be decoded." = "That image couldn't be decoded.";
+"Couldn't prepare the video." = "Couldn't prepare the video.";
+"The chart couldn't be drawn: %@" = "The chart couldn't be drawn: %@";
+"Open in its own window (inline, ⌥-scroll zooms the chart)" = "Open in its own window (inline, ⌥-scroll zooms the chart)";

@@ -3142,3 +3142,14 @@
 "Queued — the agent reads it next" = "En attente — l’agent le lira ensuite";
 "Queued — %@ reads it next" = "En attente — %@ le lira ensuite";
 "Don't send it" = "Ne pas l’envoyer";
+"Chart" = "Graphique";
+"Video" = "Vidéo";
+"Open in its own window" = "Ouvrir dans sa propre fenêtre";
+"Play video" = "Lire la vidéo";
+"Not an image or a video this app can show." = "Ni une image ni une vidéo que cette app peut afficher.";
+"This window can't read files from that machine." = "Cette fenêtre ne peut pas lire les fichiers de cette machine.";
+"Couldn't read %@." = "Impossible de lire %@.";
+"That image couldn't be decoded." = "Impossible de décoder cette image.";
+"Couldn't prepare the video." = "Impossible de préparer la vidéo.";
+"The chart couldn't be drawn: %@" = "Le graphique n’a pas pu être dessiné : %@";
+"Open in its own window (inline, ⌥-scroll zooms the chart)" = "Ouvrir dans sa propre fenêtre (dans le fil, ⌥-défilement zoome le graphique)";

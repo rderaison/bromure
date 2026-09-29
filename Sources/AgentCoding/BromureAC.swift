@@ -154,6 +154,15 @@ struct BromureAC: ParsableCommand {
                 ?? "flowchart LR\n    A[start] --> B[(store)]\n    A --> C[end]"
             MermaidFence<EmptyView>.renderSnapshot(source: source, dark: args.contains("--dark"), to: out)
         }
+        // A display-MCP chart card, rendered offline and snapshotted.
+        //   bromure-ac __shot-chart [out.png] [spec.json] [--dark]
+        if filtered.first == "__shot-chart" {
+            let args = Array(filtered.dropFirst()).filter { !$0.hasPrefix("--") }
+            let out = args.first ?? "/tmp/bromure-chart.png"
+            let spec = (args.count > 1 ? (try? String(contentsOfFile: args[1], encoding: .utf8)) : nil)
+                ?? #"{"mark":{"type":"bar","tooltip":true},"data":{"values":[{"k":"a","v":3},{"k":"b","v":7},{"k":"c","v":5}]},"encoding":{"x":{"field":"k","type":"nominal"},"y":{"field":"v","type":"quantitative"}}}"#
+            DisplayCard.renderChartSnapshot(spec: spec, dark: filtered.contains("--dark"), to: out)
+        }
         // End-to-end sibling: markdown (with a ```mermaid fence) through the real
         // transcript theme, captured as composited window pixels.
         //   bromure-ac __shot-transcript-md [out.png] [markdown-file]

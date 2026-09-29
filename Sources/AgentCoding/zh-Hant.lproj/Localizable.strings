@@ -3145,3 +3145,14 @@
 "Queued — the agent reads it next" = "佇列中 — 代理程式接下來會讀取";
 "Queued — %@ reads it next" = "佇列中 — %@ 接下來會讀取";
 "Don't send it" = "不要傳送";
+"Chart" = "圖表";
+"Video" = "影片";
+"Open in its own window" = "在獨立視窗中打開";
+"Play video" = "播放影片";
+"Not an image or a video this app can show." = "不是此 App 可以顯示的影像或影片。";
+"This window can't read files from that machine." = "此視窗無法讀取那台機器上的檔案。";
+"Couldn't read %@." = "無法讀取 %@。";
+"That image couldn't be decoded." = "無法解碼該影像。";
+"Couldn't prepare the video." = "無法準備影片。";
+"The chart couldn't be drawn: %@" = "無法繪製圖表：%@";
+"Open in its own window (inline, ⌥-scroll zooms the chart)" = "在獨立視窗中打開（在聊天中按住 ⌥ 捲動可縮放圖表）";
