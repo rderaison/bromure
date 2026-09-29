@@ -35,7 +35,12 @@ extension FatForward {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.accept(lfd, $0, &len) }
             }
             if cfd < 0 { if errno == EINTR { continue }; break }   // lfd closed → stop
-            if let allow, !allow(peerIPv4(peer)) { Darwin.close(cfd); continue }
+            if let allow, !allow(peerIPv4(peer)) {
+                // Always in the log: a browser VM turned away here shows up in
+                // the page as ERR_PROXY_CONNECTION_FAILED with no other trace.
+                NSLog("[bromure-ac] socks: refused %@ (not a fat-client browser VM)", peerIPv4(peer))
+                Darwin.close(cfd); continue
+            }
             Thread.detachNewThread { handleSocks(cfd, host: host) }
         }
     }

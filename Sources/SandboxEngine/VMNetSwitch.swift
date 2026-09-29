@@ -237,6 +237,21 @@ public final class VMNetSwitch: @unchecked Sendable {
         return VmnetSubnet(gateway: gatewayIP, mask: subnetMask, poolEnd: dhcpPoolEnd)
     }
 
+    /// Bring the shared interface up now (idempotent), for a caller that must
+    /// know the real gateway before its first VM boots. The fat client's
+    /// browser writes it into the VM's PAC: a subnet guessed from the pin was
+    /// wrong whenever the pin didn't hold (the switch already up on another
+    /// subnet, or the host already on the pinned one).
+    @discardableResult
+    public func startIfNeeded() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if started { return true }
+        guard startVmnetLocked() else { return false }
+        started = true
+        return true
+    }
+
     // MARK: - Port lifecycle
 
     /// Attach a new VM to the switch.

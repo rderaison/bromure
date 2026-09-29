@@ -187,6 +187,10 @@ final class SSHDialer: @unchecked Sendable {
 
     private let lock = NSLock()
     private var connections: [String: SSHConnection] = [:]
+    /// One build at a time per lane: a burst of dials to a lane with no live
+    /// connection (a browser opening 30 sockets) waits for the first build
+    /// and shares it, instead of each running its own SSH handshake.
+    private var buildLocks: [String: NSLock] = [:]
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
 
     /// Key by endpoint, not host id: a peer host's resolved loopback endpoint
@@ -201,6 +205,17 @@ final class SSHDialer: @unchecked Sendable {
     /// accept-new semantics: pin on first contact, refuse a changed key.
     func ensureConnection(host: RemoteHost, strict: Bool = false, lane: String = "") throws -> SSHConnection {
         let key = poolKey(host, lane: lane)
+        lock.lock()
+        if let c = connections[key], c.isAlive {
+            lock.unlock()
+            return c
+        }
+        let buildLock = buildLocks[key] ?? NSLock()
+        buildLocks[key] = buildLock
+        lock.unlock()
+        buildLock.lock()
+        defer { buildLock.unlock() }
+        // Another dial may have built it while we waited.
         lock.lock()
         if let c = connections[key], c.isAlive {
             lock.unlock()
