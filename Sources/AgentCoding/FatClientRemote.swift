@@ -363,8 +363,13 @@ enum RemoteTransport {
         ensureClientKey()
         let host = resolved(rawHost)
         guard host.sshDestination != nil else { return nil }
+        // Forwards (the browser pane's SOCKS, the VPN's flows) get their own
+        // pooled connection ("fwd" lane), like terminals: a burst of page
+        // loads, or one backed-up stream, must never stall the mirror poll and
+        // control requests riding the control connection — nor the reverse.
         return SSHDialer.shared.dial(host: host,
-                                     verb: "\(FatClient.forwardVerbPrefix)\(ip) \(port)")
+                                     verb: "\(FatClient.forwardVerbPrefix)\(ip) \(port)",
+                                     lane: Self.forwardLane)
     }
 
     /// Open a `forward-udp <ip>` channel: a multiplexed byte stream carrying
@@ -375,8 +380,12 @@ enum RemoteTransport {
         let host = resolved(rawHost)
         guard host.sshDestination != nil else { return nil }
         return SSHDialer.shared.dial(host: host,
-                                     verb: "\(FatClient.forwardUDPVerbPrefix)\(ip)")
+                                     verb: "\(FatClient.forwardUDPVerbPrefix)\(ip)",
+                                     lane: Self.forwardLane)
     }
+
+    /// The pooled SSH connection guest forwards ride (see `forwardDial`).
+    static let forwardLane = "fwd"
 
     /// Open a `browser-mcp <vm>` channel: a raw byte stream carrying the remote
     /// workspace agent's line-delimited JSON-RPC, which the fat client answers

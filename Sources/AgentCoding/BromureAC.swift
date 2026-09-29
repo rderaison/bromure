@@ -253,6 +253,25 @@ struct BromureAC: ParsableCommand {
                                                  storageContext: nil, onSave: { _, _ in }, onCancel: {})
                                   .frame(width: 900, height: 1080))
                 size = NSSize(width: 900, height: 1080)
+            case "remote-access-off", "remote-access-on":
+                // Remote Access window, offline: stand-in status and account.
+                let on = which == "remote-access-on"
+                let st: [String: Any] = ["enabled": on, "running": on, "port": 2222, "bindAddress": "0.0.0.0",
+                                         "passwordAuth": false, "pubkeyAuth": true,
+                                         "fingerprint": "SHA256:q3Vx8k2mN0pZtY6rL1eH9cWfA4uJ7sDbG5nKiO2xRyE",
+                                         "connect": "ssh -p 2222 sonya@192.168.1.42",
+                                         "authorizedKeys": on ? [["fingerprint": "SHA256:7FhQ2mXcV9pLk3Rz…aY0w", "comment": "bromure-account: Sonya's MacBook Air"]] : []]
+                view = AnyView(RemoteAccessSettingsView(status: { st }, apply: { _ in st }, addKey: { _ in st },
+                                                        removeKey: { _ in st }, demoAccount: on ? "Pothos & Co." : nil, demoRender: true))
+                size = NSSize(width: 560, height: 760)
+            case "connect-picker":
+                // Connect to Remote Bromure, offline: one stand-in bromure.io server.
+                let m = RemoteConnectModel(onConnected: { _ in })
+                m.demoAccount = "Pothos & Co."
+                let json = #"[{"id":"d-studio-7f2c","name":"Mac Studio","capability":"server","revoked":false,"online":true,"lastSeenAt":null,"self":false,"sshUsername":"sonya"}]"#
+                m.demoServers = (try? JSONDecoder().decode([DeviceInfo].self, from: Data(json.utf8))) ?? []
+                view = AnyView(RemoteConnectView(model: m, onClose: {}))
+                size = NSSize(width: 560, height: 520)
             case "machinemenu":
                 view = AnyView(HStack(spacing: 8) {
                     Spacer()
@@ -1309,13 +1328,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         debugRenderWindow(unifiedWindow, to: path)
     }
 
-    func debugRenderWindow(_ win: NSWindow?, to path: String) -> [String: Any] {
+    func debugRenderWindow(_ win: NSWindow?, to path: String, contentOnly: Bool = false) -> [String: Any] {
         guard let win, let contentView = win.contentView else {
             return ["error": "no such window"]
         }
         // Render the whole window frame view (incl. titlebar + toolbar), not just
-        // the content area, so the toolbar controls are captured too.
-        let content = contentView.superview ?? contentView
+        // the content area, so the toolbar controls are captured too. A popover's
+        // frame is a material that doesn't draw offscreen: content only there.
+        let content = contentOnly ? contentView : (contentView.superview ?? contentView)
         func frameDict(_ v: NSView) -> [String: Any] {
             ["x": Int(v.frame.minX), "y": Int(v.frame.minY),
              "w": Int(v.frame.width), "h": Int(v.frame.height)]
@@ -1665,8 +1685,47 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         w.workspacesDidChange()
         // A pane came or went: the selected session's tab may have appeared
         // (boot landed) or the workspace gone to sleep.
-        agentSessionStore.reconcile(entries: w.listModel.localEntries)
+        agentSessionStore.reconcile(entries: sessionEntries(for: w.listModel))
         w.sessionStageDidChange()
+    }
+
+    /// Entries for running workspaces with no window here (a server's
+    /// headless VMs), kept across refreshes (stable tab ids).
+    private var headlessEntryCache: [Profile.ID: SessionListModel.VMEntry] = [:]
+
+    /// The workspaces the session store binds against: the windowed ones,
+    /// plus every running workspace WITHOUT a window, from the roster the
+    /// host keeps for it anyway (also published on the model, so a
+    /// session there reads as live). Windowed-only, a headless workspace
+    /// (a server's VM started with no window) never reconciled: sessions
+    /// launched in it stayed "launching" with their agent up in a tab, the
+    /// launch timed out, their bucket read "asleep", and every wake — a
+    /// room's Switchboard on each visit — opened another copy.
+    func sessionEntries(for model: SessionListModel) -> [SessionListModel.VMEntry] {
+        let shown = Set(model.entries.map(\.id))
+        var headless: [SessionListModel.VMEntry] = []
+        for (id, session) in runningSessions
+        where !shown.contains(id) && session.kubeClusterID == nil && !session.tabs.isEmpty {
+            let entry = headlessEntryCache[id] ?? SessionListModel.VMEntry(
+                id: id, name: session.profile.name, accentHex: session.profile.color.hexInUI,
+                model: TabsModel())
+            headlessEntryCache[id] = entry
+            let ids = Dictionary(entry.model.tabs.map { ($0.index, $0.id) }, uniquingKeysWith: { a, _ in a })
+            entry.model.tabs = session.tabs.map {
+                TabsModel.Tab(label: $0.label, index: $0.index, containerID: $0.containerID,
+                              cwd: $0.cwd, worktreeBranch: $0.worktreeBranch,
+                              parentBranch: $0.parentBranch, rootRepo: $0.rootRepo,
+                              display: $0.display, repoRoot: $0.repoRoot,
+                              id: ids[$0.index] ?? UUID())
+            }
+            entry.model.rosterLive = true   // only ever the guest's own roster
+            headless.append(entry)
+        }
+        headlessEntryCache = headlessEntryCache.filter { k, _ in headless.contains { $0.id == k } }
+        if model.headlessEntries.map(\.id) != headless.map(\.id) { model.headlessEntries = headless }
+        // Attached machines' entries aren't this host's to bind (they keep
+        // their own sessions): the VMs only.
+        return model.localEntries + headless
     }
 
     /// Coarse run state for a profile, for the source-list badge: a live VM is
@@ -3834,6 +3893,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     w.dismissInfrastructureSheet()
                     if which == "newcluster" { w.showNewKubeCluster() } else { w.showNewRegistry() }
                     window = w.attachedSheet ?? w
+                case "popover":
+                    // The visible popover's own window (e.g. a Models source popover).
+                    window = NSApp.windows.first { $0.isVisible && String(describing: type(of: $0)).contains("Popover") }
+                case let w where w.hasPrefix("cluster:") || w.hasPrefix("registry:"):
+                    // A cluster's / registry's dashboard as the stage ("cluster:<name>").
+                    let name = String(w.drop(while: { $0 != ":" }).dropFirst())
+                    let kube = self.kubeClusterStore
+                    let win = self.ensureUnifiedWindow()
+                    win.dismissInfrastructureSheet()
+                    win.expandMachines()
+                    if w.hasPrefix("cluster:") {
+                        guard let c = kube.clusters.first(where: { $0.name == name }) else { return ["error": "unknown cluster"] }
+                        win.showKubeDashboard(c.id)
+                    } else {
+                        guard let r = kube.registries.first(where: { $0.name == name }) else { return ["error": "unknown registry"] }
+                        win.showRegistryDashboard(r.id)
+                    }
+                    window = win
                 case let w where w.hasPrefix("rewind:"):
                     // The Rewind-home sheet for a workspace ("rewind:<name or id>").
                     guard let profile = self.profileByNameOrID(String(w.dropFirst(7)))
@@ -3844,7 +3921,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     window = win.attachedSheet ?? win
                 default:       window = self.unifiedWindow
                 }
-                return self.debugRenderWindow(window, to: path)
+                return self.debugRenderWindow(window, to: path, contentOnly: which == "popover")
             }
         }
         // Drive the settings editor over the control socket (doc-screenshot
@@ -4011,6 +4088,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard let id = self.unifiedWindow?.selectedID,
                           let pane = self.pane(for: id), pane.debugSendComposer()
                     else { return ["error": "no beautified composer on stage"] }
+                    return ["ok": true]
+                case "queue-state":
+                    // The chat's queued messages (sent while the agent was busy).
+                    guard let id = self.unifiedWindow?.selectedID, let m = self.pane(for: id)?.beautifiedModel
+                    else { return ["error": "no beautified view on stage"] }
+                    return ["working": m.working, "composer": m.composerText,
+                            "queued": m.queued.map { ["text": $0.text, "held": $0.held, "editable": $0.editable] }]
+                case "queue-edit":
+                    // Edit (or with `delete`, drop) the queued message at `index`.
+                    guard let id = self.unifiedWindow?.selectedID, let m = self.pane(for: id)?.beautifiedModel,
+                          let i = params["index"] as? Int, m.queued.indices.contains(i)
+                    else { return ["error": "no such queued message"] }
+                    if params["delete"] as? Bool == true { m.deleteQueued(m.queued[i].id) } else { m.editQueued(m.queued[i].id) }
                     return ["ok": true]
                 case "signin":
                     // Press the sign-in card's button on the selected session.
@@ -5368,6 +5458,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return ["ok": true, "engaged": engaged]
     }
 
+    /// Change one field of the SAVED profile. The running session's copy
+    /// carries the global-model overlay and whatever was staged at boot;
+    /// saving it whole wrote those back and undid any settings edit made
+    /// since (a home-size change among them).
+    @MainActor private func saveField(of id: Profile.ID, _ change: (inout Profile) -> Void) {
+        guard var saved = profiles.first(where: { $0.id == id }) else { return }
+        change(&saved)
+        try? store.save(saved)
+        if let i = profiles.firstIndex(where: { $0.id == id }) { profiles[i] = saved }
+    }
+
     /// `vm routing cloud|local` — set the per-profile backend
     /// routing and push it live to the MITM engine (vLLM.md §4.2).
     @MainActor private func automationSetRouting(idOrName: String, mode: String) -> [String: Any] {
@@ -5380,7 +5481,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var profile = session.profile
         profile.modelRouting = routing
         session.profile = profile
-        try? store.save(profile)
+        saveField(of: id) { $0.modelRouting = routing }
         if let engine = mitmEngine { applyRouting(engine, for: profile) }
         return ["ok": true, "routing": routing.rawValue]
     }
@@ -5400,7 +5501,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         profile.activeModelID = resolved?.id ?? modelID
         session.profile = profile
-        try? store.save(profile)
+        saveField(of: id) { $0.activeModelID = resolved?.id ?? modelID }
         if let engine = mitmEngine { applyRouting(engine, for: profile) }
         // Re-point the sentinel + make the engine serve the new model. The guest
         // keeps its env (ANTHROPIC_MODEL = bromure-local), so the switch takes
@@ -7117,7 +7218,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                     promptInjection: p.promptInjection.isActive,
                                     pii: p.pii.isActive)
                 }
-            }))
+            },
+            // Doc/video captures: open on the event log instead of the Overview.
+            startOnTimeline: ProcessInfo.processInfo.environment["BROMURE_DEBUG_TIMELINE_TAB"] == "timeline"))
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         securityTimelineWindow = win
@@ -11021,16 +11124,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @MainActor private func resolveFatClientForward(ip: String, port: Int,
                                                     completion: @escaping @Sendable (Int32) -> Void) {
-        guard let session = runningSessions.values.first(where: { $0.lastIP == ip }),
+        // A VM's own address: its agent dials its own loopback. Any other
+        // address on the VM network (a MetalLB / VM-scoped LoadBalancer IP,
+        // owned by ARP or an extra address on a node): relayed through a VM
+        // that can reach it, which dials the address itself.
+        let owner = runningSessions.values.first(where: { $0.lastIP == ip })
+        guard let session = owner ?? relayVM(forVMNetIP: ip),
               let dev = session.sandbox.socketDevice else {
-            FatClientLog.log("forward-resolver: no running VM at \(ip)")
+            FatClientLog.log("forward-resolver: no running VM at or reaching \(ip)")
             completion(-1); return
         }
+        let header = owner != nil ? "\(port)\n" : "\(ip):\(port)\n"
         dev.connect(toPort: 5010) { result in
             switch result {
             case .success(let conn):
                 let vfd = conn.fileDescriptor
-                let header = "\(port)\n"
                 let sent = header.withCString { Darwin.write(vfd, $0, strlen($0)) }
                 guard sent > 0 else { FatClientLog.log("forward-resolver: header write failed"); completion(-1); return }
                 var sp: [Int32] = [0, 0]
@@ -11045,13 +11153,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     FatForward.splice(dupFD, peer)
                     _ = hold
                 }
-                FatClientLog.log("forward-resolver: \(ip):\(port) -> vsock relay ok")
+                FatClientLog.log("forward-resolver: \(ip):\(port) -> vsock relay ok\(owner == nil ? " (via \(session.profile.name))" : "")")
                 completion(sp[0])
             case .failure(let err):
                 FatClientLog.log("forward-resolver: vsock 5010 connect failed: \(err)")
                 completion(-1)
             }
         }
+    }
+
+    /// The VM that relays to an address on the VM network no VM owns: a
+    /// node of the Kubernetes cluster whose LoadBalancer range holds it
+    /// (kube-proxy there answers for MetalLB and VM-scoped Services), else
+    /// any cluster node, else any running VM — each reaches the whole
+    /// subnet, which the host process can't dial itself.
+    @MainActor private func relayVM(forVMNetIP ip: String) -> RunningSession? {
+        guard let v = VMNetSwitch.parseIPv4(ip),
+              VMNetSwitch.shared.subnet?.containsGuest(ip) == true else { return nil }
+        let live = runningSessions.values.filter { $0.sandbox.socketDevice != nil && $0.lastIP != nil }
+        let nodes = live.filter { $0.kubeClusterID != nil }
+        for cluster in kubeClusterStore.clusters {
+            guard let r = cluster.metallbRange else { continue }
+            let ends = r.split(separator: "-").compactMap { VMNetSwitch.parseIPv4(String($0)) }
+            guard ends.count == 2, (ends[0]...ends[1]).contains(v) else { continue }
+            if let n = nodes.first(where: { $0.kubeClusterID == cluster.id }) { return n }
+        }
+        return nodes.first ?? live.first
     }
 
     @MainActor func installFatClientUDPForwardResolver() {
@@ -11069,15 +11196,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// ("UDP\n" header). One vsock relay carries all UDP to the guest, framed.
     @MainActor private func resolveFatClientForwardUDP(ip: String,
                                                        completion: @escaping @Sendable (Int32) -> Void) {
-        guard let session = runningSessions.values.first(where: { $0.lastIP == ip }),
+        let owner = runningSessions.values.first(where: { $0.lastIP == ip })
+        guard let session = owner ?? relayVM(forVMNetIP: ip),
               let dev = session.sandbox.socketDevice else {
-            FatClientLog.log("udp-forward-resolver: no running VM at \(ip)"); completion(-1); return
+            FatClientLog.log("udp-forward-resolver: no running VM at or reaching \(ip)"); completion(-1); return
         }
+        // Relayed (see the TCP resolver): the guest sends to `ip` itself.
+        let header = owner != nil ? "UDP\n" : "UDP \(ip)\n"
         dev.connect(toPort: 5010) { result in
             switch result {
             case .success(let conn):
                 let vfd = conn.fileDescriptor
-                let sent = "UDP\n".withCString { Darwin.write(vfd, $0, strlen($0)) }
+                let sent = header.withCString { Darwin.write(vfd, $0, strlen($0)) }
                 guard sent > 0 else { FatClientLog.log("udp-forward-resolver: header write failed"); completion(-1); return }
                 var sp: [Int32] = [0, 0]
                 guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0 else { completion(-1); return }

@@ -329,8 +329,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// browser (asleep, it has no toolbar globe to close one with).
     private var liveSessionOnStage: AgentSession? {
         guard let sid = selectedSessionID, !listModel.newSessionSelected,
-              let s = acDelegate?.sessionRecord(sid),
-              pane(s.profileID) != nil,
+              let s = acDelegate?.sessionRecord(sid) else { return nil }
+        // Demo fixture (doc/video captures): its live sessions have no VM.
+        if DemoMode.isLive(s.id) { return s }
+        guard pane(s.profileID) != nil,
               SessionHome.liveTabPosition(for: s, in: listModel) != nil else { return nil }
         return s
     }
@@ -1157,7 +1159,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             browserPaneHost.isHidden = false
             // Boots/resumes id and suspends (never tears down) the
             // previously shown one — it stays alive on its own pane state.
-            showBrowser(for: id)
+            // The demo fixture has no VM to boot a browser in.
+            if !DemoMode.isOn { showBrowser(for: id) }
         } else if let prev = shownBrowser {
             // Pane collapsed for the selected workspace: hide the shown
             // browser. Arm teardown ONLY when the user explicitly closed
@@ -1810,7 +1813,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if listModel.sessionsFirst, filePaneOpen {
             setFilePaneOpen(false, animated: false)
         }
-        delegate.agentSessionStore.reconcile(entries: listModel.localEntries)
+        delegate.agentSessionStore.reconcile(entries: delegate.sessionEntries(for: listModel))
         if let s = SessionHome.initialSession(in: delegate.homeSessionStore, model: listModel,
                                               remembered: rememberedSessionID) {
             selectSession(s.id)
@@ -1827,8 +1830,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         sessionReconcileTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let delegate = self.acDelegate, self.listModel.sessionsFirst else { return }
-                delegate.agentSessionStore.reconcile(entries: self.listModel.localEntries)
-                delegate.agentSessionEngine.probeLiveness(entries: self.listModel.localEntries)
+                let entries = delegate.sessionEntries(for: self.listModel)
+                delegate.agentSessionStore.reconcile(entries: entries)
+                delegate.agentSessionEngine.probeLiveness(entries: entries)
                 self.sessionStageDidChange()
             }
         }
@@ -1978,7 +1982,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// store hasn't seen it yet. Falls back to the plain tab.
     func selectSession(profileID: Profile.ID, windowIndex: Int) {
         guard let delegate = acDelegate else { return }
-        delegate.agentSessionStore.reconcile(entries: listModel.localEntries)
+        delegate.agentSessionStore.reconcile(entries: delegate.sessionEntries(for: listModel))
         if let s = delegate.sessionRecord(profileID: profileID, windowIndex: windowIndex) {
             selectSession(s.id)
         } else if let entry = listModel.entries.first(where: { $0.id == profileID }),

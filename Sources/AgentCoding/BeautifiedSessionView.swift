@@ -358,6 +358,53 @@ struct WorkingGate {
     }
 }
 
+/// A message sent while the agent was busy (see `queued`).
+struct QueuedMessage: Identifiable, Equatable {
+    let id = UUID()
+    var text: String
+    let queuedAt = Date()
+    /// Bromure holds it: the agent's queue can't be edited, so it's typed in
+    /// when the turn ends. Otherwise it sits in the agent's own queue.
+    var held: Bool
+    /// The agent's own queue can give it back (Edit); a held one always can.
+    var editable: Bool
+    /// User turns in the transcript when it was queued.
+    var baseline: Int
+    /// Where the transcript file ended when it was queued: its delivery is
+    /// looked for in what was written after.
+    var path: String?
+    var offset: Int = 0
+}
+
+/// What each agent does with a message submitted while it's busy, measured
+/// on each TUI (claude 2.1, codex 0.153, kimi 0.41, grok 1.0, omp 18.1):
+/// - claude: queues it and takes it in at the next tool boundary (steer);
+///   ↑ on an empty input pulls ALL queued messages back into the box.
+/// - omp: steers it in almost at once; Alt+↑ restores all queued ones.
+/// - codex: steers it in after the next tool call (seconds); an Enter-steer
+///   can't be recalled.
+/// - kimi, grok: queue it as a follow-up for after the turn, recallable only
+///   one at a time (kimi) or through a selection mode (grok) — the same
+///   timing as holding it here, which is fully editable, so they're held.
+enum AgentQueueSupport {
+    enum Mode: Equatable {
+        /// Into the agent's own queue at once. `recall`: the key (tmux name)
+        /// that pulls its whole queue back into the input box; nil = it can't.
+        case native(recall: String?)
+        /// Held by Bromure, typed in when the agent is idle.
+        case held
+    }
+
+    static func mode(for agent: String?) -> Mode {
+        switch agent {
+        case "claude": return .native(recall: "Up")
+        case "omp":    return .native(recall: "M-Up")
+        case "codex":  return .native(recall: nil)
+        default:       return .held
+        }
+    }
+}
+
 /// Drives one beautified view: polls its provider for the live transcript and
 /// relays composer input. `@MainActor` — it only touches provider calls (main-
 /// actor) and SwiftUI state.
@@ -418,6 +465,12 @@ final class BeautifiedSessionModel: ObservableObject {
     /// When the current working spell began — drives the elapsed time on the
     /// cue, so a long turn reads as intentional and a hung one shows its age.
     @Published var workingSince: Date?
+    /// Messages sent while the agent was busy, not yet in the transcript.
+    /// The TUI queues them itself (they only land in the transcript when the
+    /// turn gets to them), so the plain echo aged out and they vanished.
+    @Published var queued: [QueuedMessage] = []
+    /// Since when the agent has been idle (nil while working).
+    private var idleSince: Date?
 
     /// Dropped image bytes keyed by their (deterministic) guest path, so the
     /// view can render a thumbnail wherever that path appears in the transcript
@@ -688,6 +741,124 @@ final class BeautifiedSessionModel: ObservableObject {
         localRevision &+= 1
     }
 
+    // MARK: Queued messages
+
+    /// User turns in the transcript so far — a queued message is looked for
+    /// only among the turns after it was queued (an earlier identical one
+    /// isn't it).
+    private var userTurnCount: Int {
+        parsedItems.reduce(0) { n, it in if case .userText = it.kind { return n + 1 }; return n }
+    }
+
+    /// Drop queued messages the transcript now carries; deliver held ones
+    /// once the agent is idle.
+    private func reconcileQueued() {
+        let now = Date()
+        if working { idleSince = nil } else if idleSince == nil { idleSince = now }
+        guard !queued.isEmpty else { return }
+        let turns: [String] = parsedItems.compactMap {
+            if case .userText(let t) = $0.kind { return t }
+            return nil
+        }
+        let before = queued
+        queued.removeAll { q in
+            guard !q.held else { return false }
+            // A TUI may merge several queued messages into one turn.
+            if turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) }) { return true }
+            // Or take it in as something other than a user turn (Claude's
+            // mid-turn `queued_command`): any record written since it was
+            // queued that carries the text — bar Claude's own queue log.
+            if deliveredInRaw(q) { return true }
+            // Idle a while and still not in the transcript: the agent never
+            // took it (cleared, interrupted) — stop showing it.
+            if let idle = idleSince, now.timeIntervalSince(idle) > 20,
+               now.timeIntervalSince(q.queuedAt) > 20 { return true }
+            return false
+        }
+        if queued != before { localRevision &+= 1 }
+        // Held here: the turn ended — type them in now, as one message.
+        if let idle = idleSince, now.timeIntervalSince(idle) > 1.5, !sending,
+           queued.contains(where: \.held) {
+            let held = queued.filter(\.held)
+            queued.removeAll(where: \.held)
+            deliver(held.map(\.text).joined(separator: "\n\n"))
+        }
+    }
+
+    private func deliveredInRaw(_ q: QueuedMessage) -> Bool {
+        guard let path = q.path, path == currentPath, let buf = buffers[path],
+              let needle = Self.jsonFragment(q.text) else { return false }
+        let from = max(0, min(buf.data.count, q.offset - buf.base))
+        let tail = buf.data[buf.data.startIndex + from ..< buf.data.endIndex]
+        for line in tail.split(separator: UInt8(ascii: "\n")) where line.count >= needle.count {
+            guard line.range(of: needle) != nil else { continue }
+            if line.range(of: Data("\"queue-operation\"".utf8)) != nil { continue }
+            return true
+        }
+        return false
+    }
+
+    /// `text` as it appears inside a JSON string (no slash escaping, as the
+    /// agents write it).
+    private static func jsonFragment(_ text: String) -> Data? {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.withoutEscapingSlashes]
+        guard let d = try? enc.encode(text), d.count >= 2 else { return nil }
+        return d.subdata(in: 1 ..< d.count - 1)
+    }
+
+    private func deliver(_ text: String) {
+        gate.userSent()
+        setWorking(true)
+        sending = true
+        appendOptimistic(.userText(text))
+        Task { [weak self] in
+            guard let self else { return }
+            await self.provider.send(text)
+            self.sending = false
+            await self.poll()
+        }
+    }
+
+    /// Take a queued message back into the composer to change it. One the
+    /// agent itself holds is pulled out of its queue through its TUI (which
+    /// recalls ALL of its queued messages at once), so they all come back.
+    func editQueued(_ id: UUID) {
+        guard let q = queued.first(where: { $0.id == id }) else { return }
+        guard q.editable else { return }
+        var back: [QueuedMessage] = [q]
+        if !q.held, case .native(let recall?) = AgentQueueSupport.mode(for: agentKind) {
+            // The TUI hands back its whole queue: take all of ours with it,
+            // then empty the input box (one line per C-u, and the recall
+            // joins them with blank lines).
+            back = queued.filter { !$0.held }
+            let lines = back.reduce(0) { $0 + $1.text.split(separator: "\n", omittingEmptySubsequences: false).count + 1 }
+            let keys = [[recall]] + Array(repeating: ["C-u"], count: lines + 1)
+            Task { [weak self] in await self?.runKeys(keys) }
+        }
+        let ids = Set(back.map(\.id))
+        queued.removeAll { ids.contains($0.id) }
+        let text = back.map(\.text).joined(separator: "\n\n")
+        composerText = composerText.isEmpty ? text : text + "\n\n" + composerText
+        localRevision &+= 1
+    }
+
+    /// Drop a queued message. Only one Bromure holds can be dropped alone.
+    func deleteQueued(_ id: UUID) {
+        guard let q = queued.first(where: { $0.id == id }), q.held else { return }
+        queued.removeAll { $0.id == id }
+        localRevision &+= 1
+    }
+
+    /// Keystrokes into the agent's tab, one `tmux send-keys` per step.
+    private func runKeys(_ steps: [[String]]) async {
+        guard let idx = provider.activeTabIndex() else { return }
+        for keys in steps {
+            _ = await provider.execGuest("tmux send-keys -t bromure:\(idx) \(keys.joined(separator: " "))", timeout: 10)
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+    }
+
     /// Drop pending echoes the real transcript now contains (matched by text),
     /// or that have aged out (the agent never recorded them).
     private func reconcilePending() {
@@ -776,7 +947,9 @@ final class BeautifiedSessionModel: ObservableObject {
         // every 0.4–1.2 s — five chats in a room re-laid out their text
         // continuously for nothing.
         guard let fetch = await provider.fetchTranscript(known: known, mode: .tail, agent: agentKind) else {
-            setWorking(isWorking); if loading { loading = false }; return
+            setWorking(isWorking); if loading { loading = false }
+            reconcileQueued()
+            return
         }
         if loading { loading = false }
         ingest(fetch)
@@ -804,6 +977,7 @@ final class BeautifiedSessionModel: ObservableObject {
         reconcilePending()
         rebuild()
         setWorking(provider.isWorking() || seedHolds())
+        reconcileQueued()
     }
 
     /// Bank one read into the per-file history: append when it continues
@@ -1163,6 +1337,14 @@ final class BeautifiedSessionModel: ObservableObject {
         // ever cleared it, so the chat sat on a phantom "Thinking…" while the
         // TUI was really waiting on the user inside a menu (the reported
         // desync). Only a real message marks the agent as working.
+        // Busy: this message waits its turn — in the agent's own queue, or
+        // (an agent whose queue can't be edited) held here until it's idle.
+        let queuing = working && !isCommand
+        let mode = AgentQueueSupport.mode(for: agentKind)
+        let native = queuing && mode != .held
+        let editable = !native || mode != .native(recall: nil)
+        let queuedPath = currentPath
+        let queuedOffset = currentPath.flatMap { buffers[$0]?.end } ?? 0
         if !isCommand { setWorking(true) }
         sending = true
 
@@ -1190,6 +1372,15 @@ final class BeautifiedSessionModel: ObservableObject {
             // transcript never carries it as plain text (Claude Code writes
             // a tagged record the parser drops), so an echo would sit there
             // until it aged out.
+            if queuing {
+                if !prefixed.isEmpty { _ = await self.provider.stage(prefixed) }
+                self.queued.append(QueuedMessage(text: text, held: !native, editable: editable,
+                                                 baseline: self.userTurnCount,
+                                                 path: queuedPath, offset: queuedOffset))
+                if native { await self.provider.send(text) }
+                self.sending = false
+                return
+            }
             if !isCommand { self.appendOptimistic(.userText(text)) }
             if !prefixed.isEmpty { _ = await self.provider.stage(prefixed) }
             let before = isCommand ? await self.provider.captureScreen() : nil
@@ -1847,6 +2038,12 @@ struct BeautifiedSessionView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             Divider().opacity(0.5)
+            if !model.queued.isEmpty {
+                QueuedMessagesStrip(queued: model.queued, agent: model.agentDisplayName,
+                                    accent: model.accent,
+                                    onEdit: { model.editQueued($0) },
+                                    onDelete: { model.deleteQueued($0) })
+            }
             if !model.pendingAttachments.isEmpty {
                 PendingAttachmentChips(files: model.pendingAttachments,
                                        onRemove: { model.removeAttachment(at: $0) })
@@ -3463,5 +3660,60 @@ private struct MessageChrome<Content: View>: View {
                 }
             }
             .onHover { inside in withAnimation(.easeOut(duration: 0.12)) { hovering = inside } }
+    }
+}
+
+
+/// Messages waiting for the agent, above the composer: what the agent will
+/// read next (or, held by Bromure, once it's done), each one editable.
+struct QueuedMessagesStrip: View {
+    let queued: [QueuedMessage]
+    let agent: String
+    let accent: Color
+    let onEdit: (UUID) -> Void
+    let onDelete: (UUID) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(queued) { q in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: q.held ? "clock" : "text.line.last.and.arrowtriangle.forward")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(accent)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(q.text)
+                            .font(.system(size: 12))
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                        Text(q.held
+                             ? (agent.isEmpty
+                                ? NSLocalizedString("Queued — sent when the agent is done", comment: "queued message")
+                                : String(format: NSLocalizedString("Queued — sent when %@ is done", comment: "queued message"), agent))
+                             : (agent.isEmpty
+                                ? NSLocalizedString("Queued — the agent reads it next", comment: "queued message")
+                                : String(format: NSLocalizedString("Queued — %@ reads it next", comment: "queued message"), agent)))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 4)
+                    if q.editable {
+                        Button(NSLocalizedString("Edit", comment: "queued message")) { onEdit(q.id) }
+                            .buttonStyle(.link)
+                            .font(.system(size: 11))
+                    }
+                    if q.held {
+                        Button { onDelete(q.id) } label: {
+                            Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help(NSLocalizedString("Don't send it", comment: "queued message"))
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(accent.opacity(0.06))
     }
 }

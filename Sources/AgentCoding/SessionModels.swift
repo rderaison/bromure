@@ -354,6 +354,15 @@ final class SessionListModel {
 
     /// Running, attached panes — carry live tab models.
     var entries: [VMEntry] = []
+    /// Running workspaces with no window here (a server's headless VMs),
+    /// from their live roster: the sessions in them bind and read as live
+    /// like anyone's, but they have no sidebar tabs or pane to select.
+    var headlessEntries: [VMEntry] = []
+
+    /// A workspace's tabs for session bookkeeping — windowed or headless.
+    func sessionEntry(_ id: Profile.ID) -> VMEntry? {
+        entries.first { $0.id == id } ?? headlessEntries.first { $0.id == id }
+    }
     /// Every profile, in display order — the source list's top level.
     var profileRows: [ProfileRow] = []
     var selectedID: Profile.ID?

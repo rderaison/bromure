@@ -3171,4 +3171,9 @@
 "Time the agent spent working: %d turns, the longest %@" = "Time the agent spent working: %d turns, the longest %@";
 "Erasing and restoring storage is done on the server Mac." = "Erasing and restoring storage is done on the server Mac.";
 "Home folder size" = "Home folder size";
-"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use.";
+"From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.";
+"Queued — sent when the agent is done" = "Queued — sent when the agent is done";
+"Queued — sent when %@ is done" = "Queued — sent when %@ is done";
+"Queued — the agent reads it next" = "Queued — the agent reads it next";
+"Queued — %@ reads it next" = "Queued — %@ reads it next";
+"Don't send it" = "Don't send it";

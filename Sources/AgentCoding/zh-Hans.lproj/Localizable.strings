@@ -3136,4 +3136,9 @@
 "Time the agent spent working: %d turns, the longest %@" = "代理工作时间：%d 轮，最长 %@";
 "Erasing and restoring storage is done on the server Mac." = "存储的清除和恢复需在服务器 Mac 上进行。";
 "Home folder size" = "主文件夹大小";
-"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "更大的主文件夹将在工作区下次启动时生效；不能缩小。磁盘映像只占用其文件实际使用的空间。";
+"From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "从 %d GB（当前大小——主文件夹不能缩小）到 1024 GB。更大的主文件夹将在工作区下次启动时生效。磁盘映像只占用其文件实际使用的空间。";
+"Queued — sent when the agent is done" = "排队中 — 代理完成后发送";
+"Queued — sent when %@ is done" = "排队中 — %@ 完成后发送";
+"Queued — the agent reads it next" = "排队中 — 代理接下来会读取";
+"Queued — %@ reads it next" = "排队中 — %@ 接下来会读取";
+"Don't send it" = "不发送";

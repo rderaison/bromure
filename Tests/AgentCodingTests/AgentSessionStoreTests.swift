@@ -189,6 +189,30 @@ struct AgentSessionStoreTests {
         return s
     }
 
+    @Test("a session in a workspace with no window here binds and reads as live, not asleep")
+    func headlessWorkspaceSessionIsLive() {
+        let store = tempStore()
+        let ws = UUID()
+        let sb = launching(ws, "HVAC", cwd: "~/.bromure/rooms/hvac", baseline: 0)
+        store.upsert(sb)
+        let shell = TabsModel.Tab(label: "bash", index: 0, cwd: "/home/ubuntu")
+        let tab = TabsModel.Tab(label: "claude", index: 1, cwd: "/home/ubuntu/.bromure/rooms/hvac",
+                                display: "HVAC")
+        let headless = roster(ws, [shell, tab])
+        store.reconcile(entries: [headless])
+        #expect(store.session(sb.id)?.windowIndex == 1)
+        // No pane: the sidebar's entries don't carry it, the headless ones do.
+        let model = SessionListModel()
+        #expect(SessionHome.liveTab(for: store.session(sb.id)!, in: model) == nil)
+        model.headlessEntries = [headless]
+        model.profileRows = [SessionListModel.ProfileRow(id: ws, name: "Seclio", accentHex: "#000000",
+                                                         state: .running, compromised: false)]
+        #expect(SessionHome.rosterLive(for: ws, in: model))
+        #expect(SessionHome.liveTab(for: store.session(sb.id)!, in: model)?.index == 1)
+        // What woke a room's Switchboard into a second copy on every visit.
+        #expect(SessionHome.bucket(for: store.session(sb.id)!, in: model) != .asleep)
+    }
+
     @Test("two launches racing on one machine each bind their own tab",
           arguments: [false, true])
     func racingLaunchesDontSwapTabs(peerFirst: Bool) {

@@ -401,7 +401,10 @@ struct SessionHeaderView: View {
     var store: AgentSessionStore
     @Bindable var model: SessionListModel
     let actions: SessionStageActions
-    @State private var renaming = false
+    /// The session being renamed. The header is ONE view reused for every
+    /// session, so a draft keyed on "whatever is shown" followed a
+    /// selection change and Enter (or losing focus) renamed another session.
+    @State private var renamingID: UUID?
     @State private var draftTitle = ""
     @State private var worktreeSheet = false
     @State private var nicknameSheet = false
@@ -454,13 +457,17 @@ struct SessionHeaderView: View {
             VStack(spacing: 0) {
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
-                        if renaming {
+                        if renamingID == s.id {
                             TextField("", text: $draftTitle, onCommit: {
-                                actions.rename(s.id, draftTitle); renaming = false
+                                if let id = renamingID { actions.rename(id, draftTitle) }
+                                renamingID = nil
                             })
                             .textFieldStyle(.plain)
                             .font(.system(size: 16, weight: .semibold))
-                            .platformExitCommand { renaming = false }
+                            .platformExitCommand { renamingID = nil }
+                            // Another session on show: drop the draft, never
+                            // commit it anywhere.
+                            .onChange(of: model.selectedSessionID) { _, _ in renamingID = nil }
                         } else {
                             Text(s.title)
                                 .font(.system(size: 16, weight: .semibold))
@@ -468,7 +475,7 @@ struct SessionHeaderView: View {
                                 .truncationMode(.tail)
                                 .onTapGesture(count: 2) {
                                     guard !gone else { return }
-                                    draftTitle = s.title; renaming = true
+                                    draftTitle = s.title; renamingID = s.id
                                 }
                                 .help(gone ? "" : NSLocalizedString("Double-click to rename", comment: "session header"))
                                 .contextMenu { machineItems(s, gone: gone) }
@@ -618,7 +625,7 @@ struct SessionHeaderView: View {
                     Menu {
                         if !gone {
                             Button(NSLocalizedString("Rename…", comment: "session menu")) {
-                                draftTitle = s.title; renaming = true
+                                draftTitle = s.title; renamingID = s.id
                             }
                             Button(NSLocalizedString("Nickname…", comment: "session menu")) { nicknameSheet = true }
                             if s.isArchived {

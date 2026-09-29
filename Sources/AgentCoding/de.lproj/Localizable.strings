@@ -3136,4 +3136,9 @@
 "Time the agent spent working: %d turns, the longest %@" = "Arbeitszeit des Agenten: %d Durchgänge, der längste %@";
 "Erasing and restoring storage is done on the server Mac." = "Speicher löschen und wiederherstellen erfolgt auf dem Server-Mac.";
 "Home folder size" = "Größe des Home-Ordners";
-"A bigger home takes effect the next time the workspace starts; it can't shrink. The disk image only takes the space its files use." = "Ein größerer Home-Ordner wird beim nächsten Start des Workspace wirksam; verkleinern ist nicht möglich. Das Disk-Image belegt nur den Platz, den seine Dateien nutzen.";
+"From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "Von %d GB (die aktuelle Größe — ein Home-Ordner kann nicht schrumpfen) bis 1024 GB. Ein größerer Home-Ordner wird beim nächsten Start des Workspace wirksam. Das Disk-Image belegt nur den Platz, den seine Dateien nutzen.";
+"Queued — sent when the agent is done" = "Wartet — wird gesendet, wenn der Agent fertig ist";
+"Queued — sent when %@ is done" = "Wartet — wird gesendet, wenn %@ fertig ist";
+"Queued — the agent reads it next" = "Wartet — der Agent liest es als Nächstes";
+"Queued — %@ reads it next" = "Wartet — %@ liest es als Nächstes";
+"Don't send it" = "Nicht senden";

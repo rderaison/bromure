@@ -45,7 +45,15 @@ final class WorkspaceBrowserController {
 
     private let model: BrowserPaneModel
     private var pool: VMPool?
-    private var warm: VMPool.WarmVM?
+    private var warm: VMPool.WarmVM? {
+        didSet {
+            // Fat-client mode: the SOCKS forwarder admits this VM by its
+            // lease (see FatClient.BrowserPeers) while it's ours.
+            guard remoteProxy != nil, oldValue?.macAddress != warm?.macAddress else { return }
+            if let old = oldValue?.macAddress { FatClient.BrowserPeers.remove(old) }
+            if let new = warm?.macAddress { FatClient.BrowserPeers.add(new) }
+        }
+    }
     private var vmView: VZVirtualMachineView?
     /// Native-tabs bridge (vsock 5810) — the shared machinery that streams the
     /// guest's tab list/favicons and drives navigate/activate/close/back/…
@@ -210,6 +218,15 @@ final class WorkspaceBrowserController {
         model.imageInstall = nil
         model.placeholderStatus = NSLocalizedString("Booting browser…", comment: "")
 
+        // Fat client: bring the switch up with the pin first, so the PAC
+        // below names the gateway the VM will really have.
+        if remoteProxy != nil {
+            VMNetSwitch.shared.configure(ascendingSubnet: false, bridgePeers: true,
+                                         pinnedOctet: FatClient.browserSwitchOctet)
+            if !VMNetSwitch.shared.startIfNeeded() {
+                FatClientLog.log("browser: the VM switch didn't start — the PAC falls back to \(FatClient.browserSwitchGateway)")
+            }
+        }
         let config = browserConfig()
         // isolatePeers: false → the browser VM shares the workspace VMs' subnet
         // (VMNetSwitch.shared, peer bridging on) so the agent and the browser
@@ -297,9 +314,19 @@ final class WorkspaceBrowserController {
         // Fat-client mode: a PAC routes the remote workspace subnet through the
         // SOCKS forwarder (at the pinned gateway); DIRECT otherwise. Local mode
         // connects straight out (directConnection).
+        // The SOCKS host is the gateway of the switch the VM will really be
+        // on (started above). The pin to 192.168.127.x doesn't always hold —
+        // the switch is one per process and may already be up on another
+        // subnet, or the host may already use 192.168.127 — and a PAC naming
+        // an address nothing answers gives ERR_PROXY_CONNECTION_FAILED.
+        let proxyHost = VMNetSwitch.shared.subnet?.startAddressString ?? FatClient.browserSwitchGateway
+        if let rp = remoteProxy {
+            NSLog("[bromure-ac] browser PAC: %@ → SOCKS5 %@:%d (VM switch %@)", rp.subnetCIDR, proxyHost,
+                  rp.socksPort, VMNetSwitch.shared.subnet?.cidrString ?? "not up")
+        }
         let pacB64: String? = remoteProxy.flatMap { rp in
             FatClientPAC.script(routes: [.init(cidr: rp.subnetCIDR,
-                                               proxyHost: FatClient.browserSwitchGateway,
+                                               proxyHost: proxyHost,
                                                proxyPort: rp.socksPort)])
                 .flatMap { Data($0.utf8).base64EncodedString() }
         }
