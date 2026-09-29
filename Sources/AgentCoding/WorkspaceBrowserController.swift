@@ -45,7 +45,15 @@ final class WorkspaceBrowserController {
 
     private let model: BrowserPaneModel
     private var pool: VMPool?
-    private var warm: VMPool.WarmVM?
+    private var warm: VMPool.WarmVM? {
+        didSet {
+            // Fat-client mode: the SOCKS forwarder admits this VM by its
+            // lease (see FatClient.BrowserPeers) while it's ours.
+            guard remoteProxy != nil, oldValue?.macAddress != warm?.macAddress else { return }
+            if let old = oldValue?.macAddress { FatClient.BrowserPeers.remove(old) }
+            if let new = warm?.macAddress { FatClient.BrowserPeers.add(new) }
+        }
+    }
     private var vmView: VZVirtualMachineView?
     /// Native-tabs bridge (vsock 5810) — the shared machinery that streams the
     /// guest's tab list/favicons and drives navigate/activate/close/back/…
@@ -297,9 +305,15 @@ final class WorkspaceBrowserController {
         // Fat-client mode: a PAC routes the remote workspace subnet through the
         // SOCKS forwarder (at the pinned gateway); DIRECT otherwise. Local mode
         // connects straight out (directConnection).
+        // The SOCKS host is the gateway of the switch the VM will really be
+        // on. The pin to 192.168.127.x only holds when the switch isn't up
+        // yet: with any local VM already running (the switch is one per
+        // process), the browser VM lands on THAT subnet and 192.168.127.1
+        // leads nowhere — every remote page failed to load.
+        let proxyHost = VMNetSwitch.shared.subnet?.startAddressString ?? FatClient.browserSwitchGateway
         let pacB64: String? = remoteProxy.flatMap { rp in
             FatClientPAC.script(routes: [.init(cidr: rp.subnetCIDR,
-                                               proxyHost: FatClient.browserSwitchGateway,
+                                               proxyHost: proxyHost,
                                                proxyPort: rp.socksPort)])
                 .flatMap { Data($0.utf8).base64EncodedString() }
         }
