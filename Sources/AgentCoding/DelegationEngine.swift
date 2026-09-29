@@ -65,9 +65,12 @@ final class DelegationEngine {
     static let defaultWait: TimeInterval = 50
     static let waitCap: TimeInterval = 600
     /// Files a message may carry between machines: this many, this big
-    /// all together.
+    /// all together. They stream through the host a chunk at a time, so the
+    /// cap is about disk and patience, not memory: a 2 GB video travels.
     static let transferMaxFiles = 20
-    static let transferCap: Int64 = 64 * 1024 * 1024
+    static let transferCap: Int64 = 4 * 1024 * 1024 * 1024
+    /// Copying, tarring or unpacking that much on a guest disk.
+    static let bulkTimeout = 1800
     static let transferChunk = 6 * 1024 * 1024
     /// Where the host lands files on the recipient's machine.
     static let inboxBase = "/home/ubuntu/.bromure/inbox"
@@ -414,7 +417,7 @@ final class DelegationEngine {
             _ = try await delegate.guestExec(
                 profileID: from.profileID,
                 command: "tar -C \(Self.q((src as NSString).deletingLastPathComponent)) -czf \(Self.q(readPath)) \(Self.q(name))",
-                timeout: 180)
+                timeout: Self.bulkTimeout)
         }
         defer {
             if extract {
@@ -506,7 +509,7 @@ final class DelegationEngine {
             // The last chunk of a tarball: unpack it where it landed.
             _ = try await delegate.guestExec(
                 profileID: peer.profileID,
-                command: "tar -xzf \(Self.q(target)) -C \(Self.q(dest)) && rm -f \(Self.q(target))", timeout: 180)
+                command: "tar -xzf \(Self.q(target)) -C \(Self.q(dest)) && rm -f \(Self.q(target))", timeout: Self.bulkTimeout)
             let unpacked = dest + "/" + String(safe.dropLast(4))
             if !(pendingRemoteFiles[delegationID] ?? []).contains(unpacked) {
                 pendingRemoteFiles[delegationID, default: []].append(unpacked)
@@ -1004,7 +1007,7 @@ final class DelegationEngine {
             }
             if from.profileID == toProfile {
                 _ = try await delegate.guestExec(profileID: toProfile,
-                                                 command: "cp -a \(Self.q(src)) \(Self.q(target))", timeout: 120)
+                                                 command: "cp -a \(Self.q(src)) \(Self.q(target))", timeout: Self.bulkTimeout)
                 out.append(target)
                 continue
             }
@@ -1013,14 +1016,14 @@ final class DelegationEngine {
                 let parent = (src as NSString).deletingLastPathComponent
                 _ = try await delegate.guestExec(
                     profileID: from.profileID,
-                    command: "tar -C \(Self.q(parent)) -czf \(Self.q(tgz)) \(Self.q(name))", timeout: 180)
+                    command: "tar -C \(Self.q(parent)) -czf \(Self.q(tgz)) \(Self.q(name))", timeout: Self.bulkTimeout)
                 total += try await copyFile(from: from.profileID, path: tgz, to: toProfile, path: target + ".tgz",
                                             budgetLeft: Self.transferCap - total)
                 _ = try? await delegate.guestExec(profileID: from.profileID, command: "rm -f \(Self.q(tgz))", timeout: 10)
                 _ = try await delegate.guestExec(
                     profileID: toProfile,
                     command: "tar -xzf \(Self.q(target + ".tgz")) -C \(Self.q(dest)) && rm -f \(Self.q(target + ".tgz"))",
-                    timeout: 180)
+                    timeout: Self.bulkTimeout)
             } else {
                 total += try await copyFile(from: from.profileID, path: src, to: toProfile, path: target,
                                             budgetLeft: Self.transferCap - total)
@@ -1031,13 +1034,13 @@ final class DelegationEngine {
         return out
     }
 
-    /// One file, chunk by chunk through the host; the bytes moved.
+    /// One file, chunk by chunk through the host; the bytes moved. The next
+    /// chunk is read while this one is written, so a big file moves at
+    /// the slower of the two sides rather than their sum.
     private func copyFile(from srcProfile: UUID, path src: String, to dstProfile: UUID, path dst: String,
                           budgetLeft: Int64) async throws -> Int64 {
         guard let delegate else { throw DelegationRefusal("Files can't travel without the machines.") }
-        var offset: Int64 = 0
-        var first = true
-        while true {
+        func read(_ offset: Int64) async throws -> (b64: String, count: Int, size: Int64, eof: Bool) {
             let resp = try await delegate.guestFileOp(
                 profileID: srcProfile,
                 op: ["op": "read", "path": src, "offset": offset, "length": Self.transferChunk], timeout: 60)
@@ -1045,17 +1048,42 @@ final class DelegationEngine {
                 throw DelegationRefusal("Couldn't read \(src) on your machine.")
             }
             let size = (resp["size"] as? Int64) ?? Int64((resp["size"] as? Int) ?? 0)
-            guard size <= budgetLeft else {
-                throw DelegationRefusal("\(src) is \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) — up to \(ByteCountFormatter.string(fromByteCount: Self.transferCap, countStyle: .file)) travels per message.")
+            return (b64, data.count, size, (resp["eof"] as? Bool) == true || data.isEmpty)
+        }
+        var chunk = try await read(0)
+        // Refuse before moving a byte: too big for the message, or for
+        // the recipient's disk.
+        guard chunk.size <= budgetLeft else {
+            throw DelegationRefusal("\(src) is \(ByteCountFormatter.string(fromByteCount: chunk.size, countStyle: .file)) — up to \(ByteCountFormatter.string(fromByteCount: Self.transferCap, countStyle: .file)) travels per message.")
+        }
+        let dir = (dst as NSString).deletingLastPathComponent
+        if let free = Int64(((try? await delegate.guestExec(
+                profileID: dstProfile,
+                command: "df -PB1 \(Self.q(dir)) 2>/dev/null | awk 'NR==2{print $4}'", timeout: 15)) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)),
+           free < chunk.size + 64 * 1024 * 1024 {
+            throw DelegationRefusal("The recipient's machine has \(ByteCountFormatter.string(fromByteCount: free, countStyle: .file)) free — not enough for \(ByteCountFormatter.string(fromByteCount: chunk.size, countStyle: .file)).")
+        }
+        var offset: Int64 = 0
+        var first = true
+        while true {
+            let at = offset + Int64(chunk.count)
+            let next: Task<(b64: String, count: Int, size: Int64, eof: Bool), Error>? =
+                chunk.eof ? nil : Task { try await read(at) }
+            if first || chunk.count > 0 {
+                do {
+                    _ = try await delegate.guestFileOp(
+                        profileID: dstProfile,
+                        op: ["op": "write", "path": dst, "data": chunk.b64, "append": !first], timeout: 60)
+                } catch {
+                    next?.cancel()
+                    throw error
+                }
             }
-            if first || !data.isEmpty {
-                _ = try await delegate.guestFileOp(
-                    profileID: dstProfile,
-                    op: ["op": "write", "path": dst, "data": b64, "append": !first], timeout: 60)
-            }
-            offset += Int64(data.count)
+            offset = at
             first = false
-            if (resp["eof"] as? Bool) == true || data.isEmpty { break }
+            guard let next else { break }
+            chunk = try await next.value
         }
         return offset
     }
