@@ -11282,22 +11282,51 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 timeout: 10) {
             return out.split(whereSeparator: \.isNewline).map(String.init)
         }
+        // The Mac folders the machine mounts: in the guest they're ~/<name>
+        // symlinks into /mnt/bromure-share-N, which only exist while it
+        // runs — off, they're read straight from the Mac.
+        let shares = SessionDisk.sharedFolders(profile.folderPaths)
+        if let dir = Self.hostShareDirectory(guestPath: guestPath, shares: shares) {
+            return Self.hostFolders(in: dir)
+        }
         let home = "/home/ubuntu"
         guard guestPath == home || guestPath.hasPrefix(home + "/") else { return nil }
         let rel = guestPath == home ? "/" : String(guestPath.dropFirst(home.count))
+        var names: [String]?
         switch profile.homeModel {
         case .virtiofs:
             let dir = store.homeDirectory(for: profile).appendingPathComponent(String(rel.dropFirst()))
-            return Self.hostFolders(in: dir)
+            names = Self.hostFolders(in: dir)
         case .ext4:
             // Read-only; safe even if a VM has the disk attached — same
             // tolerance as the ext4 browser and the transcript read below.
             let img = store.homeImageURL(for: profile).path
-            guard FileManager.default.fileExists(atPath: img) else { return nil }
-            return await Task.detached(priority: .userInitiated) {
-                Self.ext4Folders(imagePath: img, path: rel)
-            }.value
+            if FileManager.default.fileExists(atPath: img) {
+                names = await Task.detached(priority: .userInitiated) {
+                    Self.ext4Folders(imagePath: img, path: rel)
+                }.value
+            }
         }
+        guard rel == "/", !shares.isEmpty else { return names }
+        // The home lists the shares too (a home never booted has none of
+        // their symlinks yet).
+        let all = Set(names ?? []).union(shares.map(\.mountName))
+        return all.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// The Mac folder behind a guest path inside a shared folder
+    /// (~/<name>/… or /mnt/bromure-share-N/…), nil for any other path.
+    nonisolated static func hostShareDirectory(guestPath: String,
+                                               shares: [SessionDisk.SharedFolder]) -> URL? {
+        for (i, share) in shares.enumerated() {
+            for root in ["/home/ubuntu/" + share.mountName, "/mnt/bromure-share-\(i + 1)"] {
+                if guestPath == root { return share.url }
+                if guestPath.hasPrefix(root + "/") {
+                    return share.url.appendingPathComponent(String(guestPath.dropFirst(root.count + 1)))
+                }
+            }
+        }
+        return nil
     }
 
     /// `listGuestFolders` for the fat client, which names the workspace
