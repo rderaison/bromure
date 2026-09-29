@@ -405,12 +405,17 @@ final class SwitchboardEngine {
         let head = pending.count == 1 ? pending[0].text
             : "\(pending.count) events, latest: \(newest.text)"
         let line = "\(Self.noticePrefix) \(head) — call next_events."
+        let before = noticed[c.id]
         noticed[c.id] = newest.seq
         lastNotice[c.id] = Date()
         Task {
-            _ = try? await delegate.guestExec(
+            // Held while a menu or dialog is open in its tab: owed again.
+            let out = (try? await delegate.guestExec(
                 profileID: c.profileID,
-                command: CodingTaskEngine.typeCommand(tabIndex: w, text: line), timeout: 15)
+                command: CodingTaskEngine.guardedTypeCommand(tabIndex: w, text: line), timeout: 20)) ?? ""
+            if out.contains(CodingTaskEngine.typeHeldMarker), self.noticed[c.id] == newest.seq {
+                self.noticed[c.id] = before
+            }
         }
     }
 
@@ -462,9 +467,7 @@ final class SwitchboardEngine {
         } else if let w = c.windowIndex, !c.hasEnded, c.agentAlive == true, !c.isLaunching, let delegate {
             // Typed even mid-turn: the agent queues it for its next turn.
             Task {
-                _ = try? await delegate.guestExec(profileID: c.profileID,
-                                                  command: CodingTaskEngine.typeCommand(tabIndex: w, text: line),
-                                                  timeout: 15)
+                _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: c.profileID, tabIndex: w, text: line)
             }
         } else if c.isLaunching {
             deliverAfterLaunch(id, line)
@@ -481,9 +484,7 @@ final class SwitchboardEngine {
                 guard let self, let c = self.sessions.session(id) else { return }
                 if let w = c.windowIndex, c.agentAlive == true, !c.isLaunching, let delegate = self.delegate {
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    _ = try? await delegate.guestExec(profileID: c.profileID,
-                                                      command: CodingTaskEngine.typeCommand(tabIndex: w, text: line),
-                                                      timeout: 15)
+                    _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: c.profileID, tabIndex: w, text: line)
                     return
                 }
             }
@@ -683,9 +684,8 @@ final class SwitchboardEngine {
         let live = s.windowIndex != nil && !s.hasEnded && s.agentAlive != false
             && (bucket(s).map { $0 != .asleep && $0 != .ended } ?? true)
         if live, let w = s.windowIndex {
-            _ = try await delegate.guestExec(
-                profileID: s.profileID,
-                command: CodingTaskEngine.typeCommand(tabIndex: w, text: line), timeout: 15)
+            let pid = s.profileID
+            Task { _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: pid, tabIndex: w, text: line) }
         } else {
             sessionEngine.resume(s.id, message: line, quietly: true)
         }

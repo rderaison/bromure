@@ -236,10 +236,9 @@ final class AgentSessionEngine {
                     // Alive: the conversation is simply back on stage. Only
                     // something the user actually said gets typed.
                     if let message {
-                        _ = try? await delegate.guestExec(
-                            profileID: s.profileID,
-                            command: CodingTaskEngine.typeCommand(tabIndex: w, text: message),
-                            timeout: 15)
+                        // Its own task: a dialog up in the tab can hold it a while.
+                        let pid = s.profileID
+                        Task { _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: pid, tabIndex: w, text: message) }
                     }
                 } else {
                     // The agent exited, its shell is still there: relaunch
@@ -347,9 +346,7 @@ final class AgentSessionEngine {
                 if await self.probeAlive(profileID: s.profileID, window: w) == true {
                     // A beat for the TUI to draw its prompt before the text lands.
                     try? await Task.sleep(nanoseconds: 2_500_000_000)
-                    _ = try? await delegate.guestExec(
-                        profileID: s.profileID,
-                        command: CodingTaskEngine.typeCommand(tabIndex: w, text: text), timeout: 15)
+                    _ = await CodingTaskEngine.typeWhenFree(delegate, profileID: s.profileID, tabIndex: w, text: text)
                     return
                 }
             }

@@ -1536,6 +1536,27 @@ final class CodingTaskEngine {
             + "tmux send-keys -t bromure:\(tabIndex) Enter"
     }
 
+    /// What `guardedTypeCommand` prints when it held off.
+    nonisolated static let typeHeldMarker = "BROMURE_TYPE_HELD"
+
+    /// `typeCommand` for text nobody watches arrive (a delegation or
+    /// Switchboard notice, a message for a session just brought back). An
+    /// Enter into an open menu or dialog picks its default — a permission
+    /// granted, an "auto mode" setup accepted — and a digit in the text can
+    /// pick a numbered option. So the tab is checked for one (the picker
+    /// footers `BeautifiedSessionModel.menuHints` knows, or a numbered "❯ 1."
+    /// row) before typing and again before Enter; with one up nothing more is
+    /// sent and `typeHeldMarker` is printed, for the caller to hold the text.
+    nonisolated static func guardedTypeCommand(tabIndex: Int, text: String) -> String {
+        let b64 = Data(text.utf8).base64EncodedString()
+        let t = "bromure:\(tabIndex)"
+        let menu = "tmux capture-pane -p -t \(t) 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
+            + "| grep -qE '↑/↓|↑↓|enter to select|enter to confirm|esc to cancel|esc to close|esc to exit|esc close|❯ *[0-9]+\\.'"
+        return "if \(menu); then echo \(typeHeldMarker); "
+            + "else echo \(b64) | base64 -d | xargs -0 tmux send-keys -t \(t) -l && sleep 1 && "
+            + "if \(menu); then echo \(typeHeldMarker); else tmux send-keys -t \(t) Enter; fi; fi"
+    }
+
     /// The guest command that tails a plan session's live agent transcript.
     /// The agent runs IN the task's configured directory, so the session
     /// store entry is derived from that path the way each tool encodes it;
@@ -2447,6 +2468,27 @@ final class CodingTaskEngine {
     }
 }
 
+
+extension CodingTaskEngine {
+    /// Type `text` into an agent's tab with `guardedTypeCommand`, trying
+    /// again every few seconds while a menu or dialog is open there, for up
+    /// to `patience`. True once it went in.
+    @MainActor
+    static func typeWhenFree(_ delegate: ACAppDelegate, profileID: UUID, tabIndex: Int, text: String,
+                             patience: TimeInterval = 600) async -> Bool {
+        let deadline = Date().addingTimeInterval(patience)
+        while true {
+            let out = (try? await delegate.guestExec(
+                profileID: profileID,
+                command: guardedTypeCommand(tabIndex: tabIndex, text: text), timeout: 20)) ?? ""
+            if !out.contains(typeHeldMarker) { return true }
+            BACDebug.log("type", "held text for tab \(tabIndex): a menu or dialog is open")
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+}
+
 #else
 /// iOS shim: the coding-board engine runs on the HOST, never the fat client.
 /// Only its pure guest-command builders are needed here (the file explorer
@@ -2458,6 +2500,27 @@ enum CodingTaskEngine {
         return "echo \(b64) | base64 -d | xargs -0 tmux send-keys "
             + "-t bromure:\(tabIndex) -l && sleep 1 && "
             + "tmux send-keys -t bromure:\(tabIndex) Enter"
+    }
+
+    /// What `guardedTypeCommand` prints when it held off.
+    nonisolated static let typeHeldMarker = "BROMURE_TYPE_HELD"
+
+    /// `typeCommand` for text nobody watches arrive (a delegation or
+    /// Switchboard notice, a message for a session just brought back). An
+    /// Enter into an open menu or dialog picks its default — a permission
+    /// granted, an "auto mode" setup accepted — and a digit in the text can
+    /// pick a numbered option. So the tab is checked for one (the picker
+    /// footers `BeautifiedSessionModel.menuHints` knows, or a numbered "❯ 1."
+    /// row) before typing and again before Enter; with one up nothing more is
+    /// sent and `typeHeldMarker` is printed, for the caller to hold the text.
+    nonisolated static func guardedTypeCommand(tabIndex: Int, text: String) -> String {
+        let b64 = Data(text.utf8).base64EncodedString()
+        let t = "bromure:\(tabIndex)"
+        let menu = "tmux capture-pane -p -t \(t) 2>/dev/null | tail -n 30 | tr '[:upper:]' '[:lower:]' "
+            + "| grep -qE '↑/↓|↑↓|enter to select|enter to confirm|esc to cancel|esc to close|esc to exit|esc close|❯ *[0-9]+\\.'"
+        return "if \(menu); then echo \(typeHeldMarker); "
+            + "else echo \(b64) | base64 -d | xargs -0 tmux send-keys -t \(t) -l && sleep 1 && "
+            + "if \(menu); then echo \(typeHeldMarker); else tmux send-keys -t \(t) Enter; fi; fi"
     }
 
     /// The guest command that tails a plan session's live agent transcript.
