@@ -63,6 +63,7 @@ SHARED = [
     # editor macOS shows for a remote profile.
     "ProfileViews.swift",
     "EnvFileImport.swift",
+    "ClaudeAutoMode.swift",           # autoMode.environment entries Profile.swift writes (pure Foundation)
     "Inference/ModelCatalog.swift",   # CatalogModel type (pure data)
     "Inference/ModelSettings.swift",  # provider/credential/Bedrock types the token plan routes on (pure data)
     "Mitm/OnePasswordCLI.swift",      # reference(in:) parsing; read() is mac-only
