@@ -85,7 +85,32 @@ final class DelegationMCPServer: MCPLineHandler {
         let t0 = Date()
         let result = await callToolTimed(name: name, args: args, hello: hello)
         BACDebug.log("delegation", "tool \(name) took=\(BACDebug.ms(t0))")
-        return result
+        return onCallersMachine(result, hello: hello)
+    }
+
+    /// Files land in the recipient's ~/.bromure/inbox, named for a Linux
+    /// guest (/home/ubuntu/…). An attached Mac's agent gets them under its
+    /// real home — the same mapping Bromure Native applies to what it types.
+    private func onCallersMachine(_ result: [String: Any], hello: String?) -> [String: Any] {
+        guard let me = me(hello), let home = engine()?.sessions.host(for: me.profileID)?.hostHome,
+              var content = result["content"] as? [[String: Any]] else { return result }
+        for i in content.indices {
+            if let t = content[i]["text"] as? String {
+                content[i]["text"] = Self.mapGuestHome(t, to: home)
+            }
+        }
+        var out = result
+        out["content"] = content
+        return out
+    }
+
+    /// `/home/ubuntu/…` paths in `text`, under `home` instead — plain, and
+    /// as JSON writes them (`\/home\/ubuntu\/…`: the results are JSON).
+    nonisolated static func mapGuestHome(_ text: String, to home: String) -> String {
+        let dir = home.hasSuffix("/") ? home : home + "/"
+        return text
+            .replacingOccurrences(of: "/home/ubuntu/", with: dir)
+            .replacingOccurrences(of: "\\/home\\/ubuntu\\/", with: dir.replacingOccurrences(of: "/", with: "\\/"))
     }
 
     private func callToolTimed(name: String, args: [String: Any], hello: String?) async -> [String: Any] {

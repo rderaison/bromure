@@ -354,6 +354,9 @@ final class ControlServer: @unchecked Sendable {
             "mounts": [],
             "tabs": tabs,
             "hostKind": "agent-host",
+            // What /home/ubuntu is here: the server names delivered files
+            // (the delegation inbox) under this for this Mac's agents.
+            "home": NSHomeDirectory(),
         ]
     }
 

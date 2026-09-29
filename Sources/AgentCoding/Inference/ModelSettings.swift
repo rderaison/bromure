@@ -362,6 +362,10 @@ public struct ModelSettings: Codable, Equatable, Sendable {
     /// Per-agent tier overrides. `agentTiers[.codex][.medium]` wins over
     /// `tiers[.medium]` for Codex only; an unset entry inherits the default.
     public var agentTiers: [ModelAgent: [ModelTier: ModelRef]]
+    /// The user's description of their environment — organization, repos,
+    /// domains, services — for the agents' safety checks (Claude's auto-mode
+    /// classifier). Global only: a workspace override never carries it.
+    public var agentEnvironment: String = ""
 
     public init(providers: [ProviderCredential] = [],
                 localServer: LocalServer? = nil,
@@ -379,7 +383,7 @@ public struct ModelSettings: Codable, Equatable, Sendable {
     // field existed, e.g. `agentTiers`) still loads — a missing key defaults
     // rather than throwing and wiping the user's saved settings.
     enum CodingKeys: String, CodingKey {
-        case providers, localServer, localRunModels, tiers, agentTiers
+        case providers, localServer, localRunModels, tiers, agentTiers, agentEnvironment
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -389,6 +393,7 @@ public struct ModelSettings: Codable, Equatable, Sendable {
         tiers = try c.decodeIfPresent([ModelTier: ModelRef].self, forKey: .tiers) ?? [:]
         agentTiers = try c.decodeIfPresent([ModelAgent: [ModelTier: ModelRef]].self,
                                            forKey: .agentTiers) ?? [:]
+        agentEnvironment = try c.decodeIfPresent(String.self, forKey: .agentEnvironment) ?? ""
     }
 
     // MARK: Lookups

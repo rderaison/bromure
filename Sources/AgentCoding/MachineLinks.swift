@@ -483,6 +483,8 @@ final class AttachedMachine {
     /// read a VM's (fed from the machine's /state like a fat client's mirror).
     let tabsModel = TabsModel()
     private(set) var accentHex = "#5E8BDE"
+    /// The Mac's home folder, as it reports it (an absolute path, else nil).
+    private(set) var home: String?
     private(set) var connected = false
     /// The machine's workspace entry from its last /state (the profile a
     /// local window builds for it).
@@ -557,6 +559,7 @@ final class AttachedMachine {
         }
         tabs = map
         workspace = ws
+        if let h = vm["home"] as? String, h.hasPrefix("/"), !h.contains("\n") { home = h }
         if let a = ws["accentHex"] as? String { accentHex = a }
         let roster = (vm["tabs"] as? [[String: Any]]) ?? []
         tabsModel.applyRoster(roster)
@@ -621,6 +624,7 @@ extension AttachedMachine: AgentHostLink {
     var agentHostID: UUID? { id }
     var hostName: String { name }
     var hostSessions: AgentSessionStore { sessionStore }
+    var hostHome: String? { home }
 
     func hostExec(_ command: String, timeout: Int) async throws -> String {
         guard let r = await call("POST", "/vms/\(id.uuidString)/exec",

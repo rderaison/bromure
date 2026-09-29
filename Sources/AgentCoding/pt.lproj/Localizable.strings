@@ -3182,3 +3182,13 @@
 "%@ — timeline" = "%@ — linha do tempo";
 "Room timeline: who worked when, and on what" = "Linha do tempo da sala: quem trabalhou quando, e em quê";
 "Time the agent spent working: %d turns, the longest %@ — click for where it went" = "Tempo de trabalho do agente: %d turnos, o mais longo %@ — clique para ver onde foi gasto";
+
+/* Installer: Local Network access (Sequoia) */
+"Bromure Needs Local Network Access" = "O Bromure precisa de acesso à rede local";
+"The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then." = "O instalador não conseguiu alcançar o Bromure neste Mac. No macOS Sequoia, permita o Bromure Agentic Coding em Ajustes do Sistema › Privacidade e Segurança › Rede Local.\n\nA instalação continua, baixando diretamente. Se a opção já estiver ativada, desative e ative de novo, ou reinicie o Mac — a rede de máquinas virtuais do Sequoia pode ficar travada até lá.";
+"Open Local Network Settings" = "Abrir ajustes de Rede Local";
+
+/* Models: your environment (auto mode) */
+"Your environment" = "Seu ambiente";
+"What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "O que as verificações de segurança dos seus agentes devem saber: sua organização, os repositórios, domínios e serviços em que você confia. Um por linha. O modo automático do Claude usa isso para distinguir o trabalho rotineiro de ações arriscadas.";
+"Applies to every workspace from its next launch." = "Vale para cada espaço de trabalho a partir da próxima inicialização.";

@@ -51,6 +51,40 @@ struct SessionTimelineTests {
         #expect(tl.turns[1].prompt == "go")
     }
 
+    @Test("a question to the user parks the turn: the night they took to answer isn't the agent's work")
+    func questionParksTheTurn() {
+        let q = TranscriptQuestion(question: "Which way?", header: "Way", multiSelect: false, options: [])
+        let items = [
+            item(1, .userText("do it"), 0),
+            item(2, .toolUse(name: "Bash", summary: "make", detail: "{}"), 10),
+            item(3, .toolResult(tool: "Bash", content: "", isError: false), 70),
+            item(4, .question(q), 100),
+            item(5, .question(q), 100),                        // a two-question round
+            item(6, .toolResult(tool: "AskUserQuestion", content: "A", isError: false), 100 + 10 * 3600),
+            item(7, .assistantText("on it"), 100 + 10 * 3600 + 5),
+            item(8, .toolUse(name: "Bash", summary: "test", detail: "{}"), 100 + 10 * 3600 + 6),
+            item(9, .toolResult(tool: "Bash", content: "", isError: false), 100 + 10 * 3600 + 66),
+        ]
+        let tl = SessionTimeline.build(items)
+        #expect(tl.turns.count == 2)
+        #expect(tl.turns.map(\.duration) == [100, 66])
+        #expect(tl.turns[1].prompt == "do it")
+        #expect(tl.busy == 166)
+        #expect(tl.longestTurn?.duration == 100)
+    }
+
+    @Test("a result for a tool with no open call doesn't close another tool's call")
+    func strayResultKeepsOtherCalls() {
+        let items = [
+            item(1, .userText("go"), 0),
+            item(2, .toolUse(name: "Bash", summary: "long", detail: "{}"), 1),
+            item(3, .toolResult(tool: "Monitor", content: "", isError: false), 5),
+            item(4, .toolResult(tool: "Bash", content: "", isError: false), 61),
+        ]
+        let tl = SessionTimeline.build(items)
+        #expect(tl.turns.first?.segments.first { $0.kind == .shell }?.duration == 60)
+    }
+
     @Test("calls running in parallel stack into lanes")
     func parallelLanes() {
         let items = [

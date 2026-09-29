@@ -156,6 +156,7 @@ final class DelegationRelayClient: @unchecked Sendable {
 extension RemoteHostController: AgentHostLink {
     var agentHostID: UUID? { isAgentHost ? listModel.profileRows.first?.id : nil }
     var hostSessions: AgentSessionStore { sessionStore }
+    var hostHome: String? { nil }
 
     func hostExec(_ command: String, timeout: Int) async throws -> String {
         guard let id = agentHostID else { throw ACAppDelegate.GuestExecError.connectionFailed }

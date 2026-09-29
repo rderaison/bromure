@@ -361,10 +361,12 @@ public final class SessionDisk {
         public let mountName: String  // basename used for ~ubuntu/<name>
     }
 
-    public var sharedFolders: [SharedFolder] {
+    public var sharedFolders: [SharedFolder] { Self.sharedFolders(profile.folderPaths) }
+
+    public static func sharedFolders(_ folderPaths: [String]) -> [SharedFolder] {
         var seen: Set<String> = []
         var result: [SharedFolder] = []
-        for path in profile.folderPaths.prefix(8) {
+        for path in folderPaths.prefix(8) {
             let url = URL(fileURLWithPath: path)
             var name = url.lastPathComponent
             if name.isEmpty { name = "share" }

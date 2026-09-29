@@ -42,6 +42,8 @@ public final class AlpinePackageProxy: @unchecked Sendable {
     /// this, so guard with a lock.
     private let contactedLock = NSLock()
     private var contactedHosts: [String: Int] = [:]
+    /// Guest connections accepted (under `contactedLock`).
+    private var acceptedCount = 0
 
     private func recordHost(_ host: String) {
         contactedLock.lock()
@@ -148,7 +150,9 @@ public final class AlpinePackageProxy: @unchecked Sendable {
 
         let url = URL(string: "http://\(Self.guestReachableHost):\(port)")!
         mirrorURL = url
-        Self.log("listening on 0.0.0.0:\(port); guest URL = \(url)")
+        // The guest URL is the caller's (`guestBase(host:)`, the switch's
+        // real gateway) — `url` above is only the NAT default.
+        Self.log("listening on 0.0.0.0:\(port)")
     }
 
     /// Tear the listener down. Safe to call from any thread; the cancel
@@ -163,8 +167,14 @@ public final class AlpinePackageProxy: @unchecked Sendable {
 
         contactedLock.lock()
         let snapshot = contactedHosts
+        let accepted = acceptedCount
         contactedLock.unlock()
-        guard !snapshot.isEmpty else { return }
+        guard !snapshot.isEmpty else {
+            // Nothing reached us at all: the Mac refused the guest's
+            // connections (Local Network privacy, a VPN/security agent).
+            if accepted == 0 { Self.log("no guest connection reached the proxy during this bake") }
+            return
+        }
         let lines = snapshot
             .sorted { $0.key < $1.key }
             .map { "  \($0.key)  (\($0.value) request\($0.value == 1 ? "" : "s"))" }
@@ -177,6 +187,9 @@ public final class AlpinePackageProxy: @unchecked Sendable {
     private func acceptOne() {
         let cfd = Darwin.accept(listenFD, nil, nil)
         guard cfd >= 0 else { return }
+        contactedLock.lock()
+        acceptedCount += 1
+        contactedLock.unlock()
         // Per-socket SIGPIPE suppression — a closed-client write
         // returns EPIPE without signalling the process.
         var yes: Int32 = 1

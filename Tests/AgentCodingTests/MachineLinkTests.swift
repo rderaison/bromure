@@ -209,4 +209,19 @@ struct MachineLinkTests {
         #expect(o?["roomID"] == nil)
         #expect(o?["role"] == nil)
     }
+
+    @Test("delegation results name a native Mac's inbox files under its real home")
+    func inboxOnNativeHome() throws {
+        let plain = "Files landed: /home/ubuntu/.bromure/inbox/ab12/report.pdf"
+        #expect(DelegationMCPServer.mapGuestHome(plain, to: "/Users/someone")
+                == "Files landed: /Users/someone/.bromure/inbox/ab12/report.pdf")
+        // As JSONSerialization writes it (slashes escaped), home with a trailing slash.
+        let data = try JSONSerialization.data(withJSONObject: ["files": ["/home/ubuntu/.bromure/inbox/ab12/a.png"]])
+        let json = String(decoding: data, as: UTF8.self)
+        let mapped = DelegationMCPServer.mapGuestHome(json, to: "/Users/someone/")
+        let back = try JSONSerialization.jsonObject(with: Data(mapped.utf8)) as? [String: [String]]
+        #expect(back?["files"] == ["/Users/someone/.bromure/inbox/ab12/a.png"])
+        // Nothing else is touched.
+        #expect(DelegationMCPServer.mapGuestHome("/home/ubuntuX/a /tmp/b", to: "/Users/x") == "/home/ubuntuX/a /tmp/b")
+    }
 }
