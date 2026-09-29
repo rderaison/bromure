@@ -20,6 +20,17 @@ struct DelegationTests {
         let profileID: UUID
     }
 
+    @Test("a chunk's size comes from its base64 length, without decoding it")
+    func decodedCount() {
+        for n in [0, 1, 2, 3, 4, 5, 6 * 1024 * 1024] {
+            let b64 = Data(repeating: 7, count: n).base64EncodedString()
+            #expect(DelegationEngine.decodedCount(b64) == n)
+        }
+        #expect(DelegationEngine.decodedCount("abc") == nil)
+        // 5 GB is past the cap the refusal quotes.
+        #expect(Int64(5) * 1024 * 1024 * 1024 > DelegationEngine.transferCap)
+    }
+
     private func fixture() -> Fixture {
         let tmp = FileManager.default.temporaryDirectory
         let sessions = AgentSessionStore(fileURL: tmp.appendingPathComponent("sessions-\(UUID().uuidString).json"))

@@ -56,6 +56,8 @@ final class DelegationEngine {
     /// machine: message id → local paths (the record's paths are the far
     /// host's).
     private var remoteLanded: [UUID: [String]] = [:]
+    /// Sessions a notice is being typed into right now.
+    private var typingNotice: Set<UUID> = []
     private var landing: Set<UUID> = []
 
     /// A child may delegate in turn, this deep.
@@ -411,6 +413,9 @@ final class DelegationEngine {
         var sendName = name
         var extract = false
         if probe == "dir" {
+            if let size = await folderBytes(from.profileID, src), size > Self.transferCap {
+                throw refuseFolder(raw, size)
+            }
             readPath = "/tmp/bromure-xfer-\(DelegationNotice.shortID(UUID())).tgz"
             sendName = name + ".tgz"
             extract = true
@@ -1012,6 +1017,9 @@ final class DelegationEngine {
                 continue
             }
             if probe == "dir" {
+                if let size = await folderBytes(from.profileID, src), size > Self.transferCap - total {
+                    throw refuseFolder(raw, size)
+                }
                 let tgz = "/tmp/bromure-xfer-\(DelegationNotice.shortID(UUID())).tgz"
                 let parent = (src as NSString).deletingLastPathComponent
                 _ = try await delegate.guestExec(
@@ -1044,11 +1052,13 @@ final class DelegationEngine {
             let resp = try await delegate.guestFileOp(
                 profileID: srcProfile,
                 op: ["op": "read", "path": src, "offset": offset, "length": Self.transferChunk], timeout: 60)
-            guard let b64 = resp["data"] as? String, let data = Data(base64Encoded: b64) else {
+            // Counted from the encoding: decoding megabytes just to count
+            // them is main-actor time wasted, chunk after chunk.
+            guard let b64 = resp["data"] as? String, let count = Self.decodedCount(b64) else {
                 throw DelegationRefusal("Couldn't read \(src) on your machine.")
             }
             let size = (resp["size"] as? Int64) ?? Int64((resp["size"] as? Int) ?? 0)
-            return (b64, data.count, size, (resp["eof"] as? Bool) == true || data.isEmpty)
+            return (b64, count, size, (resp["eof"] as? Bool) == true || count == 0)
         }
         var chunk = try await read(0)
         // Refuse before moving a byte: too big for the message, or for
@@ -1086,6 +1096,26 @@ final class DelegationEngine {
             chunk = try await next.value
         }
         return offset
+    }
+
+    /// Bytes a padded base64 string decodes to; nil when it isn't one.
+    static func decodedCount(_ b64: String) -> Int? {
+        let n = b64.utf8.count
+        guard n % 4 == 0 else { return nil }
+        let pad = b64.utf8.suffix(2).filter { $0 == UInt8(ascii: "=") }.count
+        return n / 4 * 3 - pad
+    }
+
+    /// A folder's size in bytes on a machine, before tarring it (nil: unknown).
+    private func folderBytes(_ profile: UUID, _ path: String) async -> Int64? {
+        guard let delegate else { return nil }
+        let out = (try? await delegate.guestExec(
+            profileID: profile, command: "du -sb \(Self.q(path)) 2>/dev/null | cut -f1", timeout: 120)) ?? ""
+        return Int64(out.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func refuseFolder(_ raw: String, _ size: Int64) -> DelegationRefusal {
+        DelegationRefusal("\(raw) is \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) — up to \(ByteCountFormatter.string(fromByteCount: Self.transferCap, countStyle: .file)) travels per message.")
     }
 
     /// A path as the sender means it: absolute as is, "~" its home, else
@@ -1187,13 +1217,21 @@ final class DelegationEngine {
         let canType = status == nil || status == .done
             || (status == .working && waited > Self.holdWhileWorking)
             || (status == .needsInput && waited > Self.holdWhileNeedsInput)
-        guard canType else { return }
-        markNoticed()
+        guard canType, !typingNotice.contains(sessionID) else { return }
+        typingNotice.insert(sessionID)
         Task {
             let t0 = Date()
-            _ = try? await delegate.guestExec(
+            // Guarded: an Enter into a menu or dialog open in the tab would
+            // answer it. Held, the notice stays owed and a later tick retries.
+            let out = (try? await delegate.guestExec(
                 profileID: s.profileID,
-                command: CodingTaskEngine.typeCommand(tabIndex: w, text: line), timeout: 15)
+                command: CodingTaskEngine.guardedTypeCommand(tabIndex: w, text: line), timeout: 20)) ?? ""
+            typingNotice.remove(sessionID)
+            if out.contains(CodingTaskEngine.typeHeldMarker) {
+                BACDebug.log("delegation", "held notice for “\(s.title)”: a menu or dialog is open in its tab")
+                return
+            }
+            markNoticed()
             BACDebug.log("delegation", "typed notice into “\(s.title)” took=\(BACDebug.ms(t0))")
         }
     }
