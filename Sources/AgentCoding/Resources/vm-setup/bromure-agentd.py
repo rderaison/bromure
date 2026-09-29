@@ -4432,6 +4432,8 @@ def _approve_claude_api_key(suffix):
 # Claude Code permissions.allow rules merged into settings.json (mirrors
 # Profile.swift's claudeAlwaysAllowed).
 _CLAUDE_ALWAYS_ALLOWED = ["mcp__delegation", "mcp__display"]
+# Ends every autoMode.environment entry Bromure writes (ClaudeAutoMode.tag).
+_AUTOMODE_TAG = "[managed by Bromure]"
 
 
 def _seed_claude_settings():
@@ -4520,6 +4522,19 @@ def _seed_claude_settings():
             allow.append(rule)
     perms["allow"] = allow
     settings["permissions"] = perms
+    # Auto mode's classifier: what this VM is (the host's ClaudeAutoMode) —
+    # Bromure's entries (tagged) replaced, the user's own kept; a list the
+    # user never wrote starts from the built-in "$defaults".
+    managed = spec.get("autoModeEnvironment")
+    if isinstance(managed, list):
+        auto = settings.get("autoMode")
+        auto = auto if isinstance(auto, dict) else {}
+        envl = auto.get("environment")
+        envl = list(envl) if isinstance(envl, list) else ["$defaults"]
+        envl = [e for e in envl
+                if not (isinstance(e, str) and e.endswith(_AUTOMODE_TAG))]
+        auto["environment"] = envl + [e for e in managed if isinstance(e, str)]
+        settings["autoMode"] = auto
     env = settings.get("env")
     env = env if isinstance(env, dict) else {}
     if env.get("CLAUDE_CODE_DISABLE_MOUSE_CLICKS") == "1":

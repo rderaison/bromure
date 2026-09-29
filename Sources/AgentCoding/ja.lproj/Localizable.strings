@@ -3187,3 +3187,8 @@
 "Bromure Needs Local Network Access" = "Bromure にはローカルネットワークへのアクセスが必要です";
 "The installer couldn't reach Bromure on this Mac. On macOS Sequoia, allow Bromure Agentic Coding in System Settings › Privacy & Security › Local Network.\n\nThe install carries on, downloading directly. If the switch is already on, turn it off and on again, or restart your Mac — Sequoia's virtual-machine networking can get stuck until then." = "インストーラがこの Mac 上の Bromure に接続できませんでした。macOS Sequoia では、システム設定 › プライバシーとセキュリティ › ローカルネットワーク で Bromure Agentic Coding を許可してください。\n\nインストールは直接ダウンロードして続行します。すでにオンになっている場合は、一度オフにしてからオンに戻すか、Mac を再起動してください。Sequoia の仮想マシンのネットワークは、それまで停止したままになることがあります。";
 "Open Local Network Settings" = "ローカルネットワーク設定を開く";
+
+/* Models: your environment (auto mode) */
+"Your environment" = "あなたの環境";
+"What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "エージェントの安全チェックが知っておくべきこと：組織、信頼するリポジトリ、ドメイン、サービス。1 行に 1 つ。Claude の自動モードは、これを使って日常的な作業と危険な操作を見分けます。";
+"Applies to every workspace from its next launch." = "各ワークスペースの次回起動から適用されます。";

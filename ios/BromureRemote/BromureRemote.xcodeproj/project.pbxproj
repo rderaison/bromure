@@ -35,6 +35,7 @@
 		78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */; };
 		B58C6697BB7653D0D9519480 /* AutomationRunWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */; };
 		C1A736E1727425CB30914E1E /* BACDebug.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */; };
+		C9A36DB880ABDBEB22D05A0B /* ClaudeAutoMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */; };
 		B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */; };
 		31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */; };
 		269D8003F7F7851DBCFBBF57 /* CodingTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */; };
@@ -177,6 +178,7 @@
 		C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunArchive.swift"; path = "Sources/BromureRemote/_shared/AutomationRunArchive.swift"; sourceTree = "<group>"; };
 		0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunWindow.swift"; path = "Sources/BromureRemote/_shared/AutomationRunWindow.swift"; sourceTree = "<group>"; };
 		5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BACDebug.swift"; path = "Sources/BromureRemote/_shared/BACDebug.swift"; sourceTree = "<group>"; };
+		000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeAutoMode.swift"; path = "Sources/BromureRemote/_shared/ClaudeAutoMode.swift"; sourceTree = "<group>"; };
 		A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeTranscriptView.swift"; path = "Sources/BromureRemote/_shared/ClaudeTranscriptView.swift"; sourceTree = "<group>"; };
 		543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingKanbanView.swift"; path = "Sources/BromureRemote/_shared/CodingKanbanView.swift"; sourceTree = "<group>"; };
 		395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingTasks.swift"; path = "Sources/BromureRemote/_shared/CodingTasks.swift"; sourceTree = "<group>"; };
@@ -343,6 +345,7 @@
 				C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */,
 				0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */,
 				5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */,
+				000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */,
 				A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */,
 				543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */,
 				395F3E2F9ED24B7E615C2DC2 /* CodingTasks.swift */,
@@ -563,6 +566,7 @@
 				78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */,
 				B58C6697BB7653D0D9519480 /* AutomationRunWindow.swift in Sources */,
 				C1A736E1727425CB30914E1E /* BACDebug.swift in Sources */,
+				C9A36DB880ABDBEB22D05A0B /* ClaudeAutoMode.swift in Sources */,
 				B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */,
 				31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */,
 				269D8003F7F7851DBCFBBF57 /* CodingTasks.swift in Sources */,

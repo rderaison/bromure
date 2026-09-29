@@ -179,7 +179,7 @@ struct SessionFailureTests {
         #expect(TerminalScan.classify(fullscreenUpsell) == .prompt(p!))
     }
 
-    @Test("AskUserQuestion and permission pickers are not generic picker prompts")
+    @Test("AskUserQuestion pickers are not generic picker prompts; permission prompts are cards the user answers")
     func genericPickerExclusions() {
         // AskUserQuestion's own card answers these ("Enter to select" footer).
         let question = """
@@ -189,7 +189,8 @@ struct SessionFailureTests {
          Enter to select · Esc to cancel
         """
         #expect(TerminalPrompt.detect(inScreen: question) == nil)
-        // A tool-permission prompt is never decided from a card.
+        // A tool-permission prompt: surfaced so the chat isn't stuck behind
+        // it — the user picks, the card only relays.
         let permission = """
          Bash command: rm -rf build
          Do you want to proceed?
@@ -198,7 +199,37 @@ struct SessionFailureTests {
            3. No
          Enter to confirm · Esc to cancel
         """
-        #expect(TerminalPrompt.detect(inScreen: permission) == nil)
+        let p = TerminalPrompt.detect(inScreen: permission)
+        #expect(p?.kind == .picker)
+        #expect(p?.title == "Do you want to proceed?")
+        #expect(p?.detail == "Bash command: rm -rf build")
+        #expect(p?.options.map(\.label) == ["Yes", "Yes, and don't ask again for rm commands", "No"])
+        #expect(p?.selectedOption == 1)
+    }
+
+    @Test("auto mode paused by its classifier (boxed dialog) becomes a card")
+    func autoModePause() {
+        let pause = """
+         ● Reading the workspace's credentials…
+         ╭──────────────────────────────────────────────────────────────╮
+         │ Auto mode classifier requires confirmation for this command. │
+         │ 3 consecutive actions were blocked. Please review the        │
+         │ transcript before continuing.                                │
+         │                                                              │
+         │ Latest blocked action: [Credential Exploration]              │
+         │   cat ~/.bromure/api_key.env                                 │
+         │                                                              │
+         │ Do you want to proceed?                                      │
+         │ ❯ 1. Yes                                                     │
+         │   2. No, and tell Claude what to do differently (esc)        │
+         ╰──────────────────────────────────────────────────────────────╯
+        """
+        let p = TerminalPrompt.detect(inScreen: pause)
+        #expect(p?.kind == .picker)
+        #expect(p?.title == "Do you want to proceed?")
+        #expect(p?.options.map(\.label) == ["Yes", "No, and tell Claude what to do differently (esc)"])
+        #expect(p?.detail.contains("Latest blocked action: [Credential Exploration]") == true)
+        #expect(p?.keys(picking: 2) == ["Down", "Enter"])
     }
 
     // Verbatim `/login` method menu from a real `claude` run.

@@ -57,6 +57,8 @@ struct ModelsSettingsView: View {
     /// The pane's own "Models" heading. Off when the host already titles the
     /// screen (the onboarding wizard's step heading).
     var showsTitle: Bool = true
+    /// The global pane's "Your environment" box (not a workspace's layer).
+    var showsEnvironment: Bool = false
 
     /// A source in the left column.
     enum Source: Hashable, Identifiable {
@@ -155,6 +157,7 @@ struct ModelsSettingsView: View {
                 sourcesColumn.frame(width: 210)
                 agentsColumn.frame(maxWidth: .infinity, alignment: .top)
             }
+            if showsEnvironment { environmentSection }
             Spacer(minLength: 0)
         }
         .padding(18)
@@ -184,6 +187,39 @@ struct ModelsSettingsView: View {
             }
         } message: {
             Text("The id exactly as the backend names it (e.g. claude-opus-5, glm-4.6, qwen3-coder).")
+        }
+    }
+
+    // MARK: Your environment
+
+    /// What the agents' safety checks should know about the user's world —
+    /// written into every workspace's Claude auto-mode settings (see
+    /// ClaudeAutoMode), one entry per line.
+    private var environmentSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Your environment").font(.headline)
+            Text("What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextEditor(text: Binding(get: { settings.agentEnvironment },
+                                     set: { v in mutate { $0.agentEnvironment = v } }))
+                .font(.system(size: 12, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .frame(height: 92)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.platformTextBackground))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
+                .overlay(alignment: .topLeading) {
+                    if settings.agentEnvironment.isEmpty {
+                        Text(verbatim: "Organization: Acme Corp, software development\nSource control: github.com/acme\nTrusted internal domains: *.acme.internal")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 11).padding(.vertical, 6)
+                            .allowsHitTesting(false)
+                    }
+                }
+            Text("Applies to every workspace from its next launch.")
+                .font(.caption).foregroundStyle(.tertiary)
         }
     }
 
@@ -1145,7 +1181,8 @@ struct GlobalModelsSettingsView: View {
             settings: Binding(get: { store.settings },
                               set: { store.settings = $0; store.save() }),
             subscription: subscription,
-            showsTitle: showsTitle)
+            showsTitle: showsTitle,
+            showsEnvironment: showsTitle)
     }
 }
 

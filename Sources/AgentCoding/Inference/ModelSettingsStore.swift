@@ -15,14 +15,21 @@ import Combine
 public final class ModelSettingsStore: ObservableObject {
     public static let shared = ModelSettingsStore()
 
-    @Published public var settings: ModelSettings
+    @Published public var settings: ModelSettings {
+        didSet { if publishesEnvironment { ClaudeAutoMode.userText = settings.agentEnvironment } }
+    }
 
     private let url: URL
+    /// The app's own store (not a test's): its environment text is what
+    /// staging writes into the workspaces.
+    private let publishesEnvironment: Bool
 
     init(url: URL? = nil) {
         let resolved = url ?? Self.defaultURL
         self.url = resolved
+        self.publishesEnvironment = url == nil
         self.settings = Self.load(resolved) ?? ModelSettings()
+        if url == nil { ClaudeAutoMode.userText = settings.agentEnvironment }
         // One-time: clear the native-provider model pre-fills older builds
         // wrote on sign-in (never used at launch — see
         // `dropNativeCloudAgentRefs`), so the pane shows "<agent> default"

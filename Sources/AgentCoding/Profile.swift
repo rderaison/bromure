@@ -4174,6 +4174,12 @@ public final class ProfileStore {
             }
             perms["allow"] = allow
             settings["permissions"] = perms
+            // Auto mode's classifier: what this VM is (see ClaudeAutoMode) —
+            // Bromure's entries replaced, the user's own kept.
+            var autoMode = settings["autoMode"] as? [String: Any] ?? [:]
+            autoMode["environment"] = ClaudeAutoMode.merged(
+                autoMode["environment"], managed: ClaudeAutoMode.environment(userText: ClaudeAutoMode.userText))
+            settings["autoMode"] = autoMode
             // We used to seed CLAUDE_CODE_DISABLE_MOUSE_CLICKS=1 because the
             // framebuffer kitty and Claude Code's fullscreen-TUI mouse capture
             // fought over click-drag selection. tmux now owns the mouse (the
@@ -4648,6 +4654,9 @@ public final class ProfileStore {
             // Claude Code stores approvals as the key's last 20 characters.
             spec["approvedApiKeySuffix"] = String(key.suffix(20))
         }
+        // What auto mode's classifier should know about this VM (and the
+        // user's own environment): merged into autoMode.environment.
+        spec["autoModeEnvironment"] = ClaudeAutoMode.environment(userText: ClaudeAutoMode.userText)
         if profile.bedrockEnabled {
             var env: [String: String] = ["CLAUDE_CODE_USE_BEDROCK": "1"]
             if let bedrockBearerFake { env["AWS_BEARER_TOKEN_BEDROCK"] = bedrockBearerFake }

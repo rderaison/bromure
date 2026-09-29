@@ -2805,6 +2805,33 @@ struct TerminalPrompt: Equatable {
                                   trustKeys: claudePicker ? ["Down", "Enter"] : ["Enter"])
         }
 
+        // A permission prompt: a tool call waiting for approval, or auto mode
+        // paused after its classifier blocked actions in a row ("Auto mode
+        // classifier requires confirmation…"). Hidden, it left the chat
+        // sitting stuck with nothing to click. The card shows what's asked and
+        // relays the user's pick — it never answers on its own.
+        let permissionNeedles = ["do you want to proceed", "requires confirmation",
+                                 "don't ask again", "do you want to make this edit",
+                                 "do you want to create", "do you want to allow"]
+        if let mark = trimmed.lastIndex(where: { l in permissionNeedles.contains { l.lowercased().contains($0) } }) {
+            // Options at or below the question — never a numbered list
+            // further up the transcript.
+            let from = trimmed[..<mark].lastIndex(where: { $0.isEmpty || Self.boxRule($0) }) ?? max(0, mark - 12)
+            let optionLines = trimmed.enumerated().filter { $0.offset > from && loginOption($0.element) != nil }
+            let options = optionLines.compactMap { loginOption($0.element) }
+            if options.count >= 2, options.map(\.index) == Array(1...options.count),
+               let first = optionLines.first {
+                let selected = optionLines.first { unboxed($0.element).hasPrefix("❯") }
+                    .flatMap { loginOption($0.element)?.index }
+                let title = pickerTitle(trimmed, before: first.offset)
+                let context = trimmed[max(0, first.offset - 10)..<first.offset]
+                    .map(unboxed)
+                    .filter { !$0.isEmpty && $0 != title && $0.contains(where: \.isLetter) }
+                return TerminalPrompt(kind: .picker, detail: context.joined(separator: "\n"),
+                                      title: title, options: options, selectedOption: selected)
+            }
+        }
+
         // Any other modal picker — a numbered list under a title with a
         // picker footer ("Try the new fullscreen renderer?" → 1. Yes, try it
         // / 2. Not now). Surfaced generically so nothing ever blocks the
@@ -2831,6 +2858,16 @@ struct TerminalPrompt: Equatable {
 
     /// The dialog's title: the nearest question above the options, else the
     /// nearest line of prose — never a bullet, box art, or the footer.
+    /// A line without the dialog box drawn around it ("│ ❯ 1. Yes   │").
+    private static func unboxed(_ line: String) -> String {
+        line.trimmingCharacters(in: CharacterSet(charactersIn: " │┃|"))
+    }
+
+    /// A box's top or bottom edge, or a rule across the screen.
+    private static func boxRule(_ line: String) -> Bool {
+        !line.isEmpty && line.allSatisfy { "─━═╭╮╰╯┌┐└┘ ".contains($0) }
+    }
+
     private static func pickerTitle(_ lines: [String], before end: Int) -> String {
         let above = lines[0..<end].suffix(12).reversed()
         func prose(_ l: String) -> String? {
@@ -2847,7 +2884,7 @@ struct TerminalPrompt: Equatable {
     /// "❯ 1. Claude account with subscription · Pro, Max…" → (1, "Claude account
     /// with subscription"). The part after " · " is a tagline we drop.
     private static func loginOption(_ line: String) -> LoginOption? {
-        let s = line.drop(while: { $0 == "❯" || $0 == " " })
+        let s = unboxed(line).drop(while: { $0 == "❯" || $0 == " " })
         guard let dot = s.firstIndex(of: "."),
               let n = Int(s[s.startIndex..<dot]), (1...9).contains(n) else { return nil }
         var label = s[s.index(after: dot)...].trimmingCharacters(in: .whitespaces)
@@ -3134,6 +3171,14 @@ private struct PromptCard: View {
     /// labels (/model) overflowed a narrow room cell, and each truncation
     /// re-invalidated the lazy transcript's layout — a main-thread livelock.
     @ViewBuilder private var pickerBody: some View {
+        if !prompt.detail.isEmpty {
+            // What's being asked about: the command, the blocked action.
+            Text(prompt.detail)
+                .font(.system(size: 11.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(8).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
         ForEach(prompt.options) { option in
             let highlighted = option.index == (prompt.selectedOption ?? prompt.options.first?.index)
             Button { onPick(option.index) } label: {

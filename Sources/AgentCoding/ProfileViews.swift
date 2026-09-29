@@ -1102,7 +1102,8 @@ struct ProfileEditorView: View {
         case .globalStore:
             GlobalModelsSettingsView(subscription: modelsSubscriptionHooks)
         case .remoteGlobal:
-            ModelsSettingsView(settings: $remoteGlobalDraft, subscription: modelsSubscriptionHooks)
+            ModelsSettingsView(settings: $remoteGlobalDraft, subscription: modelsSubscriptionHooks,
+                               showsEnvironment: true)
         case .workspace(let global):
             WorkspaceModelsSettingsView(override: $draft.modelOverride,
                                         globalSettings: global,

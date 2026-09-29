@@ -9265,7 +9265,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return ["ok": false, "error": "Invalid model settings document"]
         }
         let store = ModelSettingsStore.shared
-        let merged = incoming.restoringSecrets(from: store.settings)
+        var merged = incoming.restoringSecrets(from: store.settings)
+        // A client older than the environment field sends none: keep ours
+        // rather than blank it.
+        if doc["agentEnvironment"] == nil { merged.agentEnvironment = store.settings.agentEnvironment }
         store.update { $0 = merged }
         return ["ok": true]
     }
