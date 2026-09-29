@@ -21,6 +21,25 @@ struct ProfileModelOverlayTests {
         #expect(out.apiKey == "global-ant")
     }
 
+    @Test("omp on any of its own providers: switched there with its key and model",
+          arguments: [ModelProvider.zai, .openai, .xai])
+    func ompOnItsOwnProviders(_ prov: ModelProvider) {
+        var s = ModelSettings()
+        s.providers = [ProviderCredential(provider: prov, apiKey: "k-\(prov.rawValue)")]
+        s.agentTiers[.omp] = [.medium: ModelRef(source: .provider(prov), modelID: "m-\(prov.rawValue)")]
+        // A workspace whose omp was left on its default (Anthropic).
+        let p = Profile(name: "t", tool: .omp, authMode: .token, apiKey: nil)
+        let out = p.overlaidWithGlobalModels(s)
+        #expect(out.ompProvider == prov.ompProvider)
+        #expect(out.authMode == .token)
+        #expect(out.apiKey == "k-\(prov.rawValue)")
+        #expect(out.ompModel == "m-\(prov.rawValue)")
+        // The Models pane offers it to omp ("No configured provider can
+        // power omp" with a z.ai key).
+        #expect(prov.canRoute(.omp, native: ModelAgent.omp.defaultNativeProvider))
+        #expect(p.agentsReadyToStart(s).contains(.omp))
+    }
+
     @Test("Subscription provider → subscription auth, no key") func subscription() {
         var s = ModelSettings()
         s.providers = [ProviderCredential(provider: .anthropic, useSubscription: true)]
