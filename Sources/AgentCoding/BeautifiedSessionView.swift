@@ -731,6 +731,10 @@ final class BeautifiedSessionModel: ObservableObject {
     }
 
     private func rebuild() {
+        // Where this session's time went (the flamegraph, the room timeline).
+        if let sid = currentSession?()?.id {
+            SessionTimelineStore.shared.update(sid, items: parsedItems)
+        }
         let combined = parsedItems + pending.map(\.item)
         guard combined != items else { return }
         items = combined

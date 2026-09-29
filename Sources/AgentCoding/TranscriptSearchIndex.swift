@@ -26,6 +26,8 @@ final class TranscriptSearchIndex {
         /// before the next one — the time the agent spent working. Kept per
         /// turn (not just summed) for a timeline of where the time went.
         var turns: [Turn] = []
+        /// Turns with their tool calls and model time (the flamegraph).
+        var timeline = SessionTimeline(turns: [])
         var modified: Date
     }
 
@@ -112,7 +114,7 @@ final class TranscriptSearchIndex {
         return Entry(text: parts.joined(separator: "\n\n"),
                      lastReply: String(oneLine.prefix(160)),
                      tokens: tokens(in: data), model: model(in: data),
-                     turns: turns, modified: modified)
+                     turns: turns, timeline: SessionTimeline.build(items), modified: modified)
     }
 
     /// The last model the agent logged: Claude's per-message `"model"`,
@@ -142,6 +144,10 @@ final class TranscriptSearchIndex {
     }
 
     func model(_ id: UUID) -> String? { entries[id]?.model.map(Self.prettyModel) }
+
+    func timeline(_ id: UUID) -> SessionTimeline? {
+        entries[id].flatMap { $0.timeline.turns.isEmpty ? nil : $0.timeline }
+    }
 
     /// Time the agent spent working in a session, turn by turn.
     func turns(_ id: UUID) -> [Turn] { entries[id]?.turns ?? [] }
