@@ -710,6 +710,7 @@ public final class UbuntuImageManager {
         defer { proxy.stop() }
         let alpineRepoBase = proxy.guestBase(host: guestGatewayHost)?.absoluteString
             ?? "http://dl-cdn.alpinelinux.org"
+        FileHandle.standardError.write(Data("[bake] guest proxy URL = \(alpineRepoBase)\n".utf8))
 
         // Build (or refresh) the shimmed initrd so the MTU clamp runs
         // BEFORE Alpine's /init does its modloop / apkovl / APKINDEX
