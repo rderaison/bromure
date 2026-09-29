@@ -5116,6 +5116,12 @@ final class RemoteHostWindow: NSWindow {
             return ["ok": true, "paneOpen": controller.listModel.browserPaneOpen,
                     "shownBrowser": shownBrowser?.uuidString ?? "",
                     "browserWidth": Double(browserWidthConstraint.constant)]
+        case "browser-navigate":
+            // Load `url` in the workspace's browser pane (must be open).
+            guard let id = resolveID(), let c = browserControllers[id],
+                  let url = p["url"] as? String else { return ["error": "browser not open"] }
+            c.navigate(url)
+            return ["ok": true]
         case "toggle-browser":
             guard let id = resolveID() else { return ["error": "workspace not found"] }
             let open = p["open"] as? Bool ?? !browserOpen.contains(id)
