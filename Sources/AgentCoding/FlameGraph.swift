@@ -91,6 +91,50 @@ private struct StatTile: View {
 }
 
 /// The share of time per kind: one proportional bar plus a legend.
+/// Left-to-right rows that wrap at the offered width, and never ask for
+/// more width than they're offered.
+struct LegendFlow: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 4
+
+    private func rows(_ subviews: Subviews, width: CGFloat) -> [[(Int, CGSize)]] {
+        var rows: [[(Int, CGSize)]] = [[]]
+        var x: CGFloat = 0
+        for (i, v) in subviews.enumerated() {
+            let size = v.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > width {
+                rows.append([])
+                x = 0
+            }
+            rows[rows.count - 1].append((i, size))
+            x += size.width + spacing
+        }
+        return rows
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        let rs = rows(subviews, width: width)
+        let height = rs.reduce(0) { $0 + ($1.map(\.1.height).max() ?? 0) }
+            + lineSpacing * CGFloat(max(rs.count - 1, 0))
+        let widest = rs.map { r in r.reduce(0) { $0 + $1.1.width } + spacing * CGFloat(max(r.count - 1, 0)) }.max() ?? 0
+        return CGSize(width: proposal.width.map { min($0, widest) } ?? widest, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(subviews, width: bounds.width) {
+            var x = bounds.minX
+            let h = row.map(\.1.height).max() ?? 0
+            for (i, size) in row {
+                subviews[i].place(at: CGPoint(x: x, y: y + (h - size.height) / 2), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += h + lineSpacing
+        }
+    }
+}
+
 struct TimelineBreakdown: View {
     let totals: [(kind: SessionTimeline.Kind, time: TimeInterval)]
     @State private var shown = false
@@ -110,7 +154,9 @@ struct TimelineBreakdown: View {
             }
             .frame(height: 9)
             .clipShape(Capsule())
-            HStack(spacing: 14) {
+            // Wraps: eight fixed-size entries in one row outgrew the
+            // popover, which then centred (and clipped) everything.
+            LegendFlow(spacing: 14, lineSpacing: 6) {
                 ForEach(totals, id: \.kind) { t in
                     HStack(spacing: 5) {
                         Image(systemName: t.kind.symbol).font(.system(size: 10, weight: .semibold))
@@ -122,7 +168,6 @@ struct TimelineBreakdown: View {
                     .font(.system(size: 11))
                     .fixedSize()
                 }
-                Spacer(minLength: 0)
             }
         }
         .onAppear { withAnimation(.spring(response: 0.7, dampingFraction: 0.85).delay(0.15)) { shown = true } }
@@ -562,9 +607,11 @@ extension FlameGraphView {
                     RoomTimelineView.Lane(id: UUID(), title: $0.title, tool: .claude,
                                           timeline: SessionTimeline.build(AgentTranscript.parse($0.data, agent: agent)))
                 }))
+            // BROMURE_SHOT_WIDTH: a narrower surface (the popover, a small window).
+            let w = CGFloat(Double(ProcessInfo.processInfo.environment["BROMURE_SHOT_WIDTH"] ?? "") ?? 1000)
             let host = NSHostingView(rootView: content.padding(14)
-                .frame(width: 1000, height: 460).background(Color(nsColor: .windowBackgroundColor)))
-            host.frame = NSRect(x: 0, y: 0, width: 1000, height: 460)
+                .frame(width: w, height: 460).background(Color(nsColor: .windowBackgroundColor)))
+            host.frame = NSRect(x: 0, y: 0, width: w, height: 460)
             let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.contentView = host
