@@ -317,7 +317,7 @@ final class SessionPane {
         }
     }
     private var mountedBeautifiedHost: NSHostingView<BeautifiedSessionView>?
-    private var beautifiedModel: BeautifiedSessionModel?
+    private(set) var beautifiedModel: BeautifiedSessionModel?
     /// tmux window indices known to host a coding agent regardless of what
     /// their title says yet — a task's worktree tab is an agent tab by
     /// construction, but its OSC title only names the agent once the agent
