@@ -3882,6 +3882,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                           let pane = self.pane(for: id), pane.debugSendComposer()
                     else { return ["error": "no beautified composer on stage"] }
                     return ["ok": true]
+                case "queue-state":
+                    // The chat's queued messages (sent while the agent was busy).
+                    guard let id = self.unifiedWindow?.selectedID, let m = self.pane(for: id)?.beautifiedModel
+                    else { return ["error": "no beautified view on stage"] }
+                    return ["working": m.working, "composer": m.composerText,
+                            "queued": m.queued.map { ["text": $0.text, "held": $0.held, "editable": $0.editable] }]
+                case "queue-edit":
+                    // Edit (or with `delete`, drop) the queued message at `index`.
+                    guard let id = self.unifiedWindow?.selectedID, let m = self.pane(for: id)?.beautifiedModel,
+                          let i = params["index"] as? Int, m.queued.indices.contains(i)
+                    else { return ["error": "no such queued message"] }
+                    if params["delete"] as? Bool == true { m.deleteQueued(m.queued[i].id) } else { m.editQueued(m.queued[i].id) }
+                    return ["ok": true]
                 case "signin":
                     // Press the sign-in card's button on the selected session.
                     guard let id = self.unifiedWindow?.selectedID, let pane = self.pane(for: id)

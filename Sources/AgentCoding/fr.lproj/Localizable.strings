@@ -3137,3 +3137,8 @@
 "Erasing and restoring storage is done on the server Mac." = "L’effacement et la restauration du stockage se font sur le Mac serveur.";
 "Home folder size" = "Taille du dossier personnel";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "De %d Go (sa taille actuelle — un dossier personnel ne peut pas rétrécir) à 1024 Go. Un dossier plus grand prend effet au prochain démarrage de l’espace de travail. L’image disque n’occupe que la place utilisée par ses fichiers.";
+"Queued — sent when the agent is done" = "En attente — envoyé quand l’agent aura fini";
+"Queued — sent when %@ is done" = "En attente — envoyé quand %@ aura fini";
+"Queued — the agent reads it next" = "En attente — l’agent le lira ensuite";
+"Queued — %@ reads it next" = "En attente — %@ le lira ensuite";
+"Don't send it" = "Ne pas l’envoyer";
