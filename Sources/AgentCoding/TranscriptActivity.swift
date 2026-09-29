@@ -26,7 +26,11 @@ enum TranscriptRow: Identifiable {
 
     static func isActivity(_ item: TranscriptItem) -> Bool {
         switch item.kind {
-        case .toolUse, .toolResult, .thinking: return true
+        // Something the agent SHOWS the user (display MCP) is content, not
+        // activity: folded into "3 commands · …" it would never be seen.
+        case .toolUse(let name, _, let detail):
+            return DisplayRequest.parse(name: name, detail: detail) == nil
+        case .toolResult, .thinking: return true
         default: return false
         }
     }

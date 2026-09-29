@@ -81,7 +81,8 @@ SHARED = [
     "AutomationRunArchive.swift",
     "ClaudeTranscriptView.swift",
     "TranscriptActivity.swift",
-    "MermaidFence.swift",  # ```mermaid fences; web view is #if AppKit/UIKit, iOS has no bundle → code-fence fallback
+    "MermaidFence.swift",
+    "DisplayCards.swift",  # display-MCP cards (show_media / show_chart); vega bundled via gen-ios-project.py  # ```mermaid fences; web view is #if AppKit/UIKit, iOS has no bundle → code-fence fallback
     "PushCrypto.swift",  # HPKE seal/open — shared by the Mac sender + iOS NSE
     "ConversationView.swift",
     "VMDashboard.swift",

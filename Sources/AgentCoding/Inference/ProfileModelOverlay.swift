@@ -69,12 +69,23 @@ public extension Profile {
         var gateway: (base: String?, models: [String: String])?
 
         // Resolve one agent: set its auth (+ return its local model id, if local).
-        func applyAgent(tool: Tool, ompProvider: OmpProvider?, ompBaseURL: String?,
+        func applyAgent(tool: Tool, ompProvider: inout OmpProvider?, ompBaseURL: inout String?,
+                        ompModel: inout String?,
                         authMode: inout AuthMode, apiKey: inout String?) -> String? {
             let agent = ModelAgent.from(tool)
             let ref = settings.ref(for: agent, tier: .medium)
                 ?? settings.ref(for: agent, tier: .large)
                 ?? settings.ref(for: agent, tier: .small)
+            // omp assigned one of its own providers (z.ai, OpenAI, xAI,
+            // Anthropic, a custom server): switch it there natively, on the
+            // model chosen — its auth then comes from that provider's key
+            // below, like any agent on its own provider.
+            if tool == .omp, let ref, case .provider(let prov) = ref.source,
+               let op = prov.ompProvider, let cred = settings.credential(prov), cred.isUsable {
+                ompProvider = op
+                if op == .custom, let base = cred.baseURL, !base.isEmpty { ompBaseURL = base }
+                if !ref.modelID.isEmpty { ompModel = ref.modelID }
+            }
             if let ref, ref.isLocal {
                 authMode = .local
                 anyLocal = true
@@ -159,17 +170,21 @@ public extension Profile {
             return nil
         }
 
-        let primaryLocalModel = applyAgent(tool: p.tool, ompProvider: p.ompProvider,
-                                           ompBaseURL: p.ompBaseURL,
+        let primaryLocalModel = applyAgent(tool: p.tool, ompProvider: &p.ompProvider,
+                                           ompBaseURL: &p.ompBaseURL, ompModel: &p.ompModel,
                                            authMode: &p.authMode, apiKey: &p.apiKey)
         for i in p.additionalTools.indices {
             let tool = p.additionalTools[i].tool
-            let ompProvider = p.additionalTools[i].ompProvider
-            let ompBaseURL = p.additionalTools[i].ompBaseURL
+            var ompProvider = p.additionalTools[i].ompProvider
+            var ompBaseURL = p.additionalTools[i].ompBaseURL
+            var ompModel = p.additionalTools[i].ompModel
             var mode = p.additionalTools[i].authMode
             var key = p.additionalTools[i].apiKey
-            let lid = applyAgent(tool: tool, ompProvider: ompProvider, ompBaseURL: ompBaseURL,
-                                 authMode: &mode, apiKey: &key)
+            let lid = applyAgent(tool: tool, ompProvider: &ompProvider, ompBaseURL: &ompBaseURL,
+                                 ompModel: &ompModel, authMode: &mode, apiKey: &key)
+            p.additionalTools[i].ompProvider = ompProvider
+            p.additionalTools[i].ompBaseURL = ompBaseURL
+            p.additionalTools[i].ompModel = ompModel
             p.additionalTools[i].authMode = mode
             p.additionalTools[i].apiKey = key
             if let lid { p.additionalTools[i].localModelID = lid }

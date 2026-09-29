@@ -3798,7 +3798,8 @@ public final class ProfileStore {
     /// settings.json (bromure-agentd.py's `_CLAUDE_ALWAYS_ALLOWED` mirrors it
     /// for the guest-side rewrite). The whole `delegation` server: it only
     /// reaches the host, which enforces the per-workspace reach policy.
-    static let claudeAlwaysAllowed = ["mcp__delegation"]
+    /// And `display`: showing the user a picture or a chart touches nothing.
+    static let claudeAlwaysAllowed = ["mcp__delegation", "mcp__display"]
 
     public func prepareHomeDirectory(for profile: Profile,
                                      terminalDefaults: TerminalAppDefaults,
@@ -4878,7 +4879,7 @@ public final class ProfileStore {
         touch "$HOME/.grok/config.toml"
         if sed '/# >>> bromure-permission/,/# <<< bromure-permission/d' "$HOME/.grok/config.toml" > "$HOME/.grok/config.toml.tmp.$$" 2>/dev/null \\
            && ! grep -q '^\\[permission\\]' "$HOME/.grok/config.toml.tmp.$$"; then
-            printf '%s\\n' '# >>> bromure-permission' '[permission]' 'allow = ["MCPTool(delegation__*)"]' '# <<< bromure-permission' >> "$HOME/.grok/config.toml.tmp.$$"
+            printf '%s\\n' '# >>> bromure-permission' '[permission]' 'allow = ["MCPTool(delegation__*)", "MCPTool(display__*)"]' '# <<< bromure-permission' >> "$HOME/.grok/config.toml.tmp.$$"
             mv -f "$HOME/.grok/config.toml.tmp.$$" "$HOME/.grok/config.toml"
         else
             rm -f "$HOME/.grok/config.toml.tmp.$$"

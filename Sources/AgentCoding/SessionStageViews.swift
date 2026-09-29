@@ -407,6 +407,10 @@ struct SessionHeaderView: View {
     @State private var renamingID: UUID?
     @State private var draftTitle = ""
     @State private var worktreeSheet = false
+    #if os(macOS)
+    /// The session whose flamegraph popover is open (the stopwatch).
+    @State private var flameFor: UUID?
+    #endif
     @State private var nicknameSheet = false
 
     private var session: AgentSession? { model.selectedSessionID.flatMap { store.session($0) } }
@@ -569,17 +573,48 @@ struct SessionHeaderView: View {
                                 .help(url)
                             }
                             #if os(macOS)
+                            // Time spent working: the chat's live timeline
+                            // (any surface), else this Mac's transcript index.
+                            let timeline = SessionTimelineStore.shared.timeline(s.id)
                             let turns = TranscriptSearchIndex.shared.turns(s.id)
-                            if !turns.isEmpty {
-                                let busy = turns.reduce(0) { $0 + $1.duration }
-                                let longest = turns.map(\.duration).max() ?? 0
+                            let count = timeline?.turns.count ?? turns.count
+                            if count > 0 {
+                                let busy = timeline?.busy ?? turns.reduce(0) { $0 + $1.duration }
+                                let longest = timeline?.turns.map(\.duration).max() ?? turns.map(\.duration).max() ?? 0
                                 metaDot
-                                HStack(spacing: 4) {
-                                    Image(systemName: "stopwatch").font(.system(size: 10.5))
-                                    Text(TranscriptSearchIndex.duration(busy)).monospacedDigit()
+                                Button { if timeline != nil { flameFor = s.id } } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "stopwatch").font(.system(size: 10.5))
+                                        Text(TranscriptSearchIndex.duration(busy)).monospacedDigit()
+                                    }
+                                    .contentShape(Rectangle())
                                 }
-                                .help(String(format: NSLocalizedString("Time the agent spent working: %d turns, the longest %@", comment: "session header"),
-                                             turns.count, TranscriptSearchIndex.duration(longest)))
+                                .buttonStyle(.plain)
+                                .help(String(format: NSLocalizedString("Time the agent spent working: %d turns, the longest %@ — click for where it went", comment: "session header"),
+                                             count, TranscriptSearchIndex.duration(longest)))
+                                .popover(isPresented: Binding(get: { flameFor == s.id },
+                                                              set: { if !$0 { flameFor = nil } })) {
+                                    if let tl = SessionTimelineStore.shared.timeline(s.id) {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            HStack {
+                                                Text(s.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                                                Spacer()
+                                                Button {
+                                                    flameFor = nil
+                                                    let sid = s.id
+                                                    TimelineWindows.open(title: s.title, SessionFlameWindow(sessionID: sid))
+                                                } label: {
+                                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                                }
+                                                .buttonStyle(.plain)
+                                                .help(NSLocalizedString("Open in its own window", comment: "display card"))
+                                            }
+                                            FlameGraphView(timeline: tl)
+                                        }
+                                        .padding(14)
+                                        .frame(width: 940, height: 520)
+                                    }
+                                }
                             }
                             if let t = TranscriptSearchIndex.shared.tokens(s.id) {
                                 metaDot

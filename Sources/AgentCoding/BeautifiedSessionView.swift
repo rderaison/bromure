@@ -596,6 +596,11 @@ final class BeautifiedSessionModel: ObservableObject {
 
     private let provider: BeautifiedTranscriptProvider
     private var pollTask: Task<Void, Never>?
+    /// How a display card (an agent's show_media) reads its file: the same
+    /// guest file ops as the rest of the chat — local, or over the tunnel.
+    lazy var displayFileReader = DisplayFileReader.chunked { [weak self] op in
+        await self?.provider.guestFileOp(op)
+    }
     /// Ids for optimistic (locally-added) items — descend from Int.max so they
     /// never collide with the parser's ascending ids.
     private var nextOptimisticID = Int.max
@@ -726,6 +731,10 @@ final class BeautifiedSessionModel: ObservableObject {
     }
 
     private func rebuild() {
+        // Where this session's time went (the flamegraph, the room timeline).
+        if let sid = currentSession?()?.id {
+            SessionTimelineStore.shared.update(sid, items: parsedItems)
+        }
         let combined = parsedItems + pending.map(\.item)
         guard combined != items else { return }
         items = combined
@@ -2189,6 +2198,9 @@ struct BeautifiedSessionView: View {
                                 TurnChangesView(changes: c).id(row.id)
                             }
                         }
+                        // A picture or chart the agent shows (display MCP)
+                        // reads its file off the agent's machine.
+                        .environment(\.displayFileReader, model.displayFileReader)
                         if !live.isEmpty {
                             let questions = live.compactMap {
                                 if case .question(let q) = $0.kind { q } else { nil }

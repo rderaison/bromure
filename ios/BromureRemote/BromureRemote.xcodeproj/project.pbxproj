@@ -41,6 +41,7 @@
 		9812CE45C9409E65735954A9 /* ConsolePresence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5174CD6006782AF31EFAF494 /* ConsolePresence.swift */; };
 		F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */; };
 		B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDCC7578E83999395F752CAF /* ConversationView.swift */; };
+		43636D2E8824B12B1EA42A4A /* DisplayCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = A306DC4F346D7C5344F297CD /* DisplayCards.swift */; };
 		483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */; };
 		04F22AD5C1F56A6E6B665FA8 /* EnvFileImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBF986DA0C0FF0C09DA9D07 /* EnvFileImport.swift */; };
 		3D95969D8811463BD706F10D /* FDGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 719DA06B4EB5A3927DCBEC96 /* FDGuard.swift */; };
@@ -107,6 +108,7 @@
 		6552B0D662751610674CFBF1 /* VMDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B2E7296B414B300A8BD7D8 /* VMDashboard.swift */; };
 		A96EA517F1904A78B727B1F7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2C9329E02D38A226363A4698 /* Assets.xcassets */; };
 		2007EF1792C302D48BBE3E57 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 8CCEC8DF327861B1EBC5BBD8 /* Settings.bundle */; };
+		6EFCC6C3277065A920978FC9 /* vega in Resources */ = {isa = PBXBuildFile; fileRef = 29FEEC94B6CDB692735A30BD /* vega */; };
 		68DFD3ABDADB8A288385EC2E /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = D5AF54E5DA7A08CFA7C70124 /* Localizable.strings */; };
 		06A0A4CD90FBF9FC054FB0D3 /* Crypto */ = {isa = PBXBuildFile; productRef = 8ABC8E0C7D2DBE6AA0A1B70D /* Crypto */; };
 		5DC33D49C50A56509B91FD8B /* NIOCore */ = {isa = PBXBuildFile; productRef = AE2F455E8323D50164A75332 /* NIOCore */; };
@@ -181,6 +183,7 @@
 		5174CD6006782AF31EFAF494 /* ConsolePresence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConsolePresence.swift"; path = "Sources/BromureRemote/_shared/ConsolePresence.swift"; sourceTree = "<group>"; };
 		A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ControlClient.swift"; path = "Sources/BromureRemote/_shared/ControlClient.swift"; sourceTree = "<group>"; };
 		EDCC7578E83999395F752CAF /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ConversationView.swift"; path = "Sources/BromureRemote/_shared/ConversationView.swift"; sourceTree = "<group>"; };
+		A306DC4F346D7C5344F297CD /* DisplayCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DisplayCards.swift"; path = "Sources/BromureRemote/_shared/DisplayCards.swift"; sourceTree = "<group>"; };
 		7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DockerDashboard.swift"; path = "Sources/BromureRemote/_shared/DockerDashboard.swift"; sourceTree = "<group>"; };
 		FBBF986DA0C0FF0C09DA9D07 /* EnvFileImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "EnvFileImport.swift"; path = "Sources/BromureRemote/_shared/EnvFileImport.swift"; sourceTree = "<group>"; };
 		719DA06B4EB5A3927DCBEC96 /* FDGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FDGuard.swift"; path = "Sources/BromureRemote/_shared/FDGuard.swift"; sourceTree = "<group>"; };
@@ -248,6 +251,7 @@
 		F53560B8D470A293B70C0526 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "App/Info.plist"; sourceTree = "<group>"; };
 		2C9329E02D38A226363A4698 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "App/Assets.xcassets"; sourceTree = "<group>"; };
 		8CCEC8DF327861B1EBC5BBD8 /* Settings.bundle */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.plug-in"; path = "App/Settings.bundle"; sourceTree = "<group>"; };
+		29FEEC94B6CDB692735A30BD /* vega */ = {isa = PBXFileReference; lastKnownFileType = folder; name = vega; path = "../../Sources/AgentCoding/Resources/vega"; sourceTree = "<group>"; };
 		72E186EEDAE46F10C8DF5491 /* de */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = de; path = "../../Sources/AgentCoding/de.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		0800778BD695A0523AD96FEF /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = "../../Sources/AgentCoding/en.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		AECD68DD7C42454D5ED975CA /* es */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = es; path = "../../Sources/AgentCoding/es.lproj/Localizable.strings"; sourceTree = "<group>"; };
@@ -345,6 +349,7 @@
 				5174CD6006782AF31EFAF494 /* ConsolePresence.swift */,
 				A6C007D30FAFCF0D0BC92F95 /* ControlClient.swift */,
 				EDCC7578E83999395F752CAF /* ConversationView.swift */,
+				A306DC4F346D7C5344F297CD /* DisplayCards.swift */,
 				7F5C168AF324F90BBE3E1483 /* DockerDashboard.swift */,
 				FBBF986DA0C0FF0C09DA9D07 /* EnvFileImport.swift */,
 				719DA06B4EB5A3927DCBEC96 /* FDGuard.swift */,
@@ -420,6 +425,7 @@
 				2C9329E02D38A226363A4698 /* Assets.xcassets */,
 				8CCEC8DF327861B1EBC5BBD8 /* Settings.bundle */,
 				D5AF54E5DA7A08CFA7C70124 /* Localizable.strings */,
+				29FEEC94B6CDB692735A30BD /* vega */,
 			);
 			name = App;
 			sourceTree = "<group>";
@@ -517,6 +523,7 @@
 				A96EA517F1904A78B727B1F7 /* Assets.xcassets in Resources */,
 				2007EF1792C302D48BBE3E57 /* Settings.bundle in Resources */,
 				68DFD3ABDADB8A288385EC2E /* Localizable.strings in Resources */,
+				6EFCC6C3277065A920978FC9 /* vega in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -562,6 +569,7 @@
 				9812CE45C9409E65735954A9 /* ConsolePresence.swift in Sources */,
 				F38E2E91AC4B5EE138219F87 /* ControlClient.swift in Sources */,
 				B878DE1A106F71E141BE1166 /* ConversationView.swift in Sources */,
+				43636D2E8824B12B1EA42A4A /* DisplayCards.swift in Sources */,
 				483F3923B49D06C70AC5D72C /* DockerDashboard.swift in Sources */,
 				04F22AD5C1F56A6E6B665FA8 /* EnvFileImport.swift in Sources */,
 				3D95969D8811463BD706F10D /* FDGuard.swift in Sources */,

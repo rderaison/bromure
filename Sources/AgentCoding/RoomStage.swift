@@ -549,6 +549,21 @@ struct RoomStageView: View {
             }
             Spacer()
             if controller.zoomedID == nil, !controller.members.isEmpty { layoutPicker }
+            // Where the room's time went: one lane per session.
+            Button {
+                let c = controller
+                TimelineWindows.open(title: String(format: NSLocalizedString("%@ — timeline", comment: "room timeline window"),
+                                                   c.room?.name ?? ""),
+                                     RoomTimelineWindow(controller: c))
+            } label: {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(6)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(NSLocalizedString("Room timeline: who worked when, and on what", comment: "room stage"))
             roomMenu
             Button(action: controller.onNewSession) {
                 // The label when it fits, else just the "+" — never wrapped.
@@ -1522,3 +1537,18 @@ private struct RoomTargetPicker: View {
     }
 }
 #endif
+
+
+/// The room timeline window: one lane per member, from the chats' live
+/// timelines (the Switchboard too).
+struct RoomTimelineWindow: View {
+    let controller: RoomStageController
+    var body: some View {
+        let store = SessionTimelineStore.shared
+        let sessions = controller.allMembers + [controller.switchboard].compactMap { $0 }
+        RoomTimelineView(lanes: sessions.map {
+            RoomTimelineView.Lane(id: $0.id, title: $0.title, tool: $0.tool,
+                                  timeline: store.timeline($0.id) ?? SessionTimeline(turns: []))
+        })
+    }
+}

@@ -154,6 +154,31 @@ struct BromureAC: ParsableCommand {
                 ?? "flowchart LR\n    A[start] --> B[(store)]\n    A --> C[end]"
             MermaidFence<EmptyView>.renderSnapshot(source: source, dark: args.contains("--dark"), to: out)
         }
+        // A session's flamegraph from a real transcript.
+        //   bromure-ac __shot-flame <out.png> <transcript.jsonl> [agent]
+        if filtered.first == "__shot-flame" {
+            let args = Array(filtered.dropFirst())
+            guard args.count >= 2, let data = args[1] == "--room" ? Data() : FileManager.default.contents(atPath: args[1]) else {
+                print("usage: __shot-flame <out.png> <transcript.jsonl> [agent]"); Darwin.exit(2)
+            }
+            if args[1] == "--room" {
+                let files = args.dropFirst(2).compactMap { f in
+                    FileManager.default.contents(atPath: f).map { ((f as NSString).lastPathComponent, $0) }
+                }
+                FlameGraphView.renderSnapshot(transcript: Data(), agent: "claude", to: args[0],
+                                              room: files.map { (title: $0.0, data: $0.1) })
+            }
+            FlameGraphView.renderSnapshot(transcript: data, agent: args.count > 2 ? args[2] : nil, to: args[0])
+        }
+        // A display-MCP chart card, rendered offline and snapshotted.
+        //   bromure-ac __shot-chart [out.png] [spec.json] [--dark]
+        if filtered.first == "__shot-chart" {
+            let args = Array(filtered.dropFirst()).filter { !$0.hasPrefix("--") }
+            let out = args.first ?? "/tmp/bromure-chart.png"
+            let spec = (args.count > 1 ? (try? String(contentsOfFile: args[1], encoding: .utf8)) : nil)
+                ?? #"{"mark":{"type":"bar","tooltip":true},"data":{"values":[{"k":"a","v":3},{"k":"b","v":7},{"k":"c","v":5}]},"encoding":{"x":{"field":"k","type":"nominal"},"y":{"field":"v","type":"quantitative"}}}"#
+            DisplayCard.renderChartSnapshot(spec: spec, dark: filtered.contains("--dark"), to: out)
+        }
         // End-to-end sibling: markdown (with a ```mermaid fence) through the real
         // transcript theme, captured as composited window pixels.
         //   bromure-ac __shot-transcript-md [out.png] [markdown-file]

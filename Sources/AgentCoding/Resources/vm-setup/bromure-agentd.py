@@ -2515,6 +2515,8 @@ def _delegation_mcp_setup(tool, workdir):
     (after it, so a task tab keeps both), git-excluded. Nothing to
     announce: the shim reads its own tmux window."""
     _project_mcp_add(tool, workdir, "bromure-delegation", _DELEGATION_MCP_SHIM)
+    # And the display MCP (show the user a picture or a chart), same reason.
+    _project_mcp_add(tool, workdir, "display", "/mnt/bromure-meta/bromure-display-mcp.py")
 
 
 _SWITCHBOARD_MCP_SHIM = "/mnt/bromure-meta/bromure-switchboard-mcp.py"
@@ -4429,7 +4431,7 @@ def _approve_claude_api_key(suffix):
 
 # Claude Code permissions.allow rules merged into settings.json (mirrors
 # Profile.swift's claudeAlwaysAllowed).
-_CLAUDE_ALWAYS_ALLOWED = ["mcp__delegation"]
+_CLAUDE_ALWAYS_ALLOWED = ["mcp__delegation", "mcp__display"]
 
 
 def _seed_claude_settings():

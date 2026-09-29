@@ -49,6 +49,20 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         }
     }
 
+    /// The omp provider that is this one: omp reaches Anthropic, OpenAI,
+    /// xAI and z.ai natively with their API keys, and any OpenAI-compatible
+    /// server as `custom` (its base URL). nil = not one of omp's.
+    public var ompProvider: Profile.OmpProvider? {
+        switch self {
+        case .anthropic: return .anthropic
+        case .openai:    return .openai
+        case .xai:       return .xai
+        case .zai:       return .zai
+        case .custom:    return .custom
+        case .moonshot, .bedrock, .openrouter: return nil
+        }
+    }
+
     /// Claude Code's direct gateway route: OpenRouter serves the Anthropic
     /// Messages API at `/api/v1/messages` and z.ai at
     /// `/api/anthropic/v1/messages`, so Claude points ANTHROPIC_BASE_URL there
@@ -74,6 +88,11 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
     /// OpenAI-compatible base (the external-engine route).
     public func canRoute(_ agent: ModelAgent, native: ModelProvider) -> Bool {
         if self == native || self == .bedrock { return true }
+        // omp speaks to every provider it has built in, each with its own
+        // key — switching it is a setting, not a route (the launch overlay
+        // switches it). Judging it by its default provider alone made a
+        // z.ai key "unable to power omp".
+        if agent == .omp, ompProvider != nil { return true }
         return agent == .claude ? anthropicGatewayBase != nil : openAICompatibleBase != nil
     }
 
