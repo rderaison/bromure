@@ -161,8 +161,36 @@ final class SwitchboardEngine {
         sessions.sessions.first { $0.isSwitchboard && $0.roomID == room && !$0.isDeleted }
     }
 
-    /// This host's sessions plus its attached machines'.
-    private var allSessions: [AgentSession] { delegate?.allSessionRecords ?? sessions.sessions }
+    /// This host's sessions plus its attached machines' — the Switchboard
+    /// reaches a room's native members like any other.
+    var allSessions: [AgentSession] { delegate?.allSessionRecords ?? sessions.sessions }
+
+    /// A session by id, here or on an attached machine.
+    func record(_ id: UUID) -> AgentSession? { delegate?.sessionRecord(id) ?? sessions.session(id) }
+
+    /// A command in the session's machine: its VM, or the attached Mac.
+    private func exec(_ s: AgentSession, _ command: String, timeout: Int) async throws -> String {
+        guard let delegate else { throw ActError.refused("No host.") }
+        if let m = delegate.machine(forSession: s.id) { return try await m.hostExec(command, timeout: timeout) }
+        return try await delegate.guestExec(profileID: s.profileID, command: command, timeout: timeout)
+    }
+
+    /// Resume (with a message) or archive, on this host's engine or the
+    /// session's machine.
+    func resume(_ s: AgentSession, message: String?) {
+        if let m = delegate?.machine(forSession: s.id) {
+            var body: [String: Any] = [:]
+            if let message { body["message"] = message }
+            m.hostSessionCommand(s.id, "resume", body)
+            return
+        }
+        sessionEngine.resume(s.id, message: message, quietly: true)
+    }
+
+    func archive(_ s: AgentSession) {
+        if let m = delegate?.machine(forSession: s.id) { m.hostSessionCommand(s.id, "archive", [:]); return }
+        sessionEngine.archive(s.id)
+    }
 
     /// Every Switchboard there is — the global one and the rooms'.
     var allSwitchboards: [AgentSession] {
@@ -327,7 +355,7 @@ final class SwitchboardEngine {
     private func concerns(_ e: SwitchboardEvent, _ me: AgentSession) -> Bool {
         if let room = e.roomID { return me.roomID == room }
         guard me.roomID != nil else { return true }
-        guard let sid = e.sessionID, let s = sessions.session(sid) else { return false }
+        guard let sid = e.sessionID, let s = record(sid) else { return false }
         return inScope(s, of: me)
     }
 
@@ -351,7 +379,7 @@ final class SwitchboardEngine {
         case 402: why = "refused it for billing (out of credit?)"
         default:  why = "denied it access (forbidden — wrong key or plan?)"
         }
-        let working = sessions.sessions.filter {
+        let working = allSessions.filter {
             $0.profileID == profileID && !$0.isDeleted && !$0.isArchived
                 && (bucket($0) == .working || $0.isLaunching)
         }
@@ -512,7 +540,7 @@ final class SwitchboardEngine {
     func handles() -> [UUID: String] {
         var out: [UUID: String] = [:]
         var taken: Set<String> = []
-        let list = sessions.sessions.filter { !$0.isSwitchboard && !$0.isDeleted }
+        let list = allSessions.filter { !$0.isSwitchboard && !$0.isDeleted }
             .sorted { $0.createdAt < $1.createdAt }
         for s in list {
             if let n = s.nickname, !n.isEmpty { out[s.id] = n; taken.insert(n.lowercased()) }
@@ -547,7 +575,7 @@ final class SwitchboardEngine {
     func resolve(_ key: String) -> AgentSession? {
         let k = key.trimmingCharacters(in: .whitespaces)
         let bare = k.hasPrefix("@") ? String(k.dropFirst()) : k
-        let candidates = sessions.sessions.filter { !$0.isSwitchboard && !$0.isDeleted }
+        let candidates = allSessions.filter { !$0.isSwitchboard && !$0.isDeleted }
         if let id = UUID(uuidString: bare), let s = candidates.first(where: { $0.id == id }) { return s }
         let hs = handles()
         if let s = candidates.first(where: { hs[$0.id]?.lowercased() == bare.lowercased() }) { return s }
@@ -560,7 +588,7 @@ final class SwitchboardEngine {
     }
 
     func workspaceName(_ id: UUID) -> String {
-        profiles().first { $0.id == id }?.name ?? ""
+        profiles().first { $0.id == id }?.name ?? delegate?.attachedMachines[id]?.name ?? ""
     }
 
     func markTouched(_ id: UUID) { touched.insert(id) }
@@ -583,11 +611,11 @@ final class SwitchboardEngine {
     /// The last lines on the session's screen — what a permission prompt or
     /// a TUI dialog looks like, which no transcript records.
     func screen(_ s: AgentSession, lines: Int = 40) async -> String? {
-        guard let w = s.windowIndex, !s.hasEnded, let delegate else { return nil }
-        let out = try? await delegate.guestExec(
-            profileID: s.profileID,
+        guard let w = s.windowIndex, !s.hasEnded else { return nil }
+        let out = try? await exec(
+            s,
             // awk drops the blank rows under the last line of output.
-            command: "tmux capture-pane -p -J -t bromure:\(w) 2>/dev/null "
+            "tmux capture-pane -p -J -t bromure:\(w) 2>/dev/null "
                 + "| awk 'NF{n=NR} {l[NR]=$0} END{for(i=1;i<=n;i++)print l[i]}' | tail -n \(lines)",
             timeout: 10)
         return out?.trimmingCharacters(in: .newlines)
@@ -679,19 +707,15 @@ final class SwitchboardEngine {
         if trimmed.contains("\n") || trimmed.count > 400 {
             let dir = "/home/ubuntu/.bromure/inbox/switchboard-\(Int(Date().timeIntervalSince1970))"
             let b64 = Data(trimmed.utf8).base64EncodedString()
-            _ = try await delegate.guestExec(
-                profileID: s.profileID,
-                command: "mkdir -p \(dir) && echo \(b64) | base64 -d > \(dir)/message.md", timeout: 20)
+            _ = try await exec(s, "mkdir -p \(dir) && echo \(b64) | base64 -d > \(dir)/message.md", timeout: 20)
             line = "A message from the user (relayed by the Switchboard) is in \(dir)/message.md — read it and act on it."
         }
         let live = s.windowIndex != nil && !s.hasEnded && s.agentAlive != false
             && (bucket(s).map { $0 != .asleep && $0 != .ended } ?? true)
         if live, let w = s.windowIndex {
-            _ = try await delegate.guestExec(
-                profileID: s.profileID,
-                command: CodingTaskEngine.typeCommand(tabIndex: w, text: line), timeout: 15)
+            _ = try await exec(s, CodingTaskEngine.typeCommand(tabIndex: w, text: line), timeout: 15)
         } else {
-            sessionEngine.resume(s.id, message: line, quietly: true)
+            resume(s, message: line)
         }
     }
 
@@ -703,7 +727,7 @@ final class SwitchboardEngine {
     ]
 
     func press(_ s: AgentSession, _ keys: [String]) async throws {
-        guard let delegate, let w = s.windowIndex, !s.hasEnded else {
+        guard let w = s.windowIndex, !s.hasEnded else {
             throw ActError.refused("That session has no live tab to type into.")
         }
         let bad = keys.filter { !Self.allowedKeys.contains($0) }
@@ -712,7 +736,7 @@ final class SwitchboardEngine {
         }
         markTouched(s.id)
         let cmd = keys.map { "tmux send-keys -t bromure:\(w) \($0)" }.joined(separator: " && sleep 0.15 && ")
-        _ = try await delegate.guestExec(profileID: s.profileID, command: cmd, timeout: 15)
+        _ = try await exec(s, cmd, timeout: 15)
     }
 
     // MARK: Provenance

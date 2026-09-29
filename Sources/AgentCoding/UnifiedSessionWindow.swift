@@ -1898,7 +1898,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onStart: { [weak self] req in
                 guard let self, let delegate = self.acDelegate else { return }
                 if let machine = delegate.attachedMachines[req.profileID] {
-                    self.startOnMachine(machine, req)
+                    self.startOnMachine(machine, req, room: room)
                     return
                 }
                 var req = req
@@ -2132,7 +2132,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     /// A new session on an attached machine: started there, selected once
     /// the machine lists it (its next poll).
-    private func startOnMachine(_ machine: AttachedMachine, _ req: AgentSessionEngine.NewSessionRequest) {
+    private func startOnMachine(_ machine: AttachedMachine, _ req: AgentSessionEngine.NewSessionRequest,
+                                room: UUID? = nil) {
         var body: [String: Any] = ["profile": machine.id.uuidString, "tool": req.tool.rawValue, "cwd": req.cwd]
         if let c = req.cloneURL, !c.isEmpty { body["cloneURL"] = c }
         if let m = req.openingMessage, !m.isEmpty { body["message"] = m }
@@ -2143,6 +2144,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                   let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60),
                   let id = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
                 NSSound.beep()
+                return
+            }
+            // Started from a room ("Add to Room"): into it, and back to its grid.
+            if let room, let delegate = self?.acDelegate, delegate.agentRoomStore.room(room) != nil {
+                delegate.assignMachineRoom(id, room)
+                self?.showRoom(room)
                 return
             }
             for _ in 0..<40 where machine.sessionStore.session(id) == nil {

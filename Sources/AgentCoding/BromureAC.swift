@@ -2055,6 +2055,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         MachineLinkHub.shared.storeURL = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BromureAC/machines.json")
+        // A session a remote client starts on a machine straight into a room
+        // ("Add to Room"): the room is recorded here.
+        MachineLinkHub.shared.onSessionStarted = { [weak self] sid, body in
+            let room = (body["room"] as? String).flatMap(UUID.init(uuidString:))
+            DispatchQueue.main.async { self?.assignMachineRoom(sid, room) }
+        }
         admissionsObserver = NotificationCenter.default.addObserver(
             forName: MachineLinkHub.admissionsChanged, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshSidebar() }
@@ -7565,6 +7571,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         agentSessionStore.mutate(sid) { $0.roomID = room }
+    }
+
+    /// A session just started on an attached machine, into `room` (the
+    /// room's "Add to Room"): recorded here at once — the machine's mirror
+    /// may not list the session yet; the next poll stamps it.
+    func assignMachineRoom(_ sid: UUID, _ room: UUID?) {
+        guard let room, agentRoomStore.room(room) != nil else { return }
+        machineSessionRooms[sid] = room
+        saveMachineSessionRooms()
+        for m in attachedMachines.values where m.sessionStore.session(sid) != nil {
+            m.sessionStore.mutate(sid) { $0.roomID = room }
+        }
+        refreshHomeSessions()
+        ACAutomationServer.noteMutation()
     }
 
     /// archive / unarchive / delete, on this host's engine or the machine's.

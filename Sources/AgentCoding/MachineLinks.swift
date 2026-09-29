@@ -36,6 +36,9 @@ final class MachineLinkHub: @unchecked Sendable {
     /// from the SSH grant of an agent host's key) — only that device may
     /// park links for it or detach it, after a restart too.
     private var admissions: [UUID: Admission] = [:]
+    /// A client started a session on a machine through the proxy: its id
+    /// and the request (a `room` in it is this host's to record).
+    var onSessionStarted: ((UUID, [String: Any]) -> Void)?
     /// What the pollers last read from each machine, for /state.
     private var fragments: [UUID: Fragment] = [:]
 
@@ -296,6 +299,7 @@ final class MachineLinkHub: @unchecked Sendable {
             let r = request(id, method, path, body: body, timeout: 60)
             if let sid = (r?.json["id"] as? String)?.uppercased() {
                 cond.lock(); fragments[id]?.sessionIDs.insert(sid); cond.unlock()
+                if let u = UUID(uuidString: sid) { onSessionStarted?(u, body) }
             }
             let out = (try? JSONSerialization.data(withJSONObject: r?.json ?? ["error": "That machine isn't connected right now"])) ?? Data()
             let status = r?.status ?? 502
