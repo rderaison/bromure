@@ -963,6 +963,10 @@ private struct TranscriptReaderView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         TranscriptRowsView(items: answeredItems)
+                            // A picture the agent shows (display MCP) is read off its machine.
+                            .environment(\.displayFileReader, DisplayFileReader.chunked { op in
+                                try? await controller.guestFileOp(profileID, op: op)
+                            })
                         // The question the agent is asking RIGHT NOW gets the
                         // interactive card — pick the options here and Submit
                         // sends the picker's key sequence into the session, the

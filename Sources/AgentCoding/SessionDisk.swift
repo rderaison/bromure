@@ -980,6 +980,15 @@ public final class SessionDisk {
             // vsock 5830. Shipped from the AC resource bundle (no image bake);
             // falls back to the reconnecting stdio↔vsock shim if the resource
             // is somehow missing.
+            // The display MCP (show the user a picture/video/chart in the
+            // chat): a plain stdio server run in the guest, no host bridge —
+            // the chat renders its calls straight from the transcript.
+            let displayMCPDest = tmp.appendingPathComponent("bromure-display-mcp.py")
+            try? fm.removeItem(at: displayMCPDest)
+            if let src = acResourceBundle.url(forResource: "vm-setup/bromure-display-mcp",
+                                              withExtension: "py") {
+                try fm.copyItem(at: src, to: displayMCPDest)
+            }
             let browserMCPDest = tmp.appendingPathComponent("bromure-browser-mcp.py")
             try? fm.removeItem(at: browserMCPDest)
             if let src = acResourceBundle.url(forResource: "vm-setup/bromure-browser-mcp",
@@ -1306,6 +1315,12 @@ public final class SessionDisk {
             .replacingOccurrences(of: "bromure-task-mcp", with: "bromure-infra-mcp")
             .replacingOccurrences(of: "task-board MCP", with: "infrastructure MCP")
     }
+    /// The display MCP: show_media / show_chart, rendered by the chat from
+    /// the transcript. `alwaysLoad` like delegation — two small tools.
+    static let displayMCPGuestPath = "/mnt/bromure-meta/bromure-display-mcp.py"
+    static var displayMCPClaudeEntry: [String: Any] {
+        ["command": "python3", "args": [displayMCPGuestPath], "alwaysLoad": true]
+    }
     /// The delegation MCP (DelegationMCPServer): an agent hands work to
     /// another agent's session and hears back. Every agent tab gets it.
     public static let delegationMCPVsockPort: UInt32 = 5835
@@ -1608,6 +1623,7 @@ public final class SessionDisk {
             "automations": automationMCPClaudeEntry,
             "infrastructure": kubeMCPClaudeEntry,
             "delegation": delegationMCPClaudeEntry,
+            "display": displayMCPClaudeEntry,
         ]
         for server in servers {
             // Raw JSON mode: parse and use as-is (allows OAuth blocks,
@@ -1731,6 +1747,11 @@ public final class SessionDisk {
     [[permission.rules]]
     decision = "allow"
     pattern = "mcp__delegation__*"
+
+    # Showing the user a picture or a chart needs no approval either.
+    [[permission.rules]]
+    decision = "allow"
+    pattern = "mcp__display__*"
 
     """
 
@@ -1917,6 +1938,11 @@ public final class SessionDisk {
             "command = \"python3\"",
             "args = [\(tomlQuote(delegationMCPShimGuestPath))]",
             // Agent-to-agent traffic never waits on an approval prompt.
+            "default_tools_approval_mode = \"approve\"",
+            "",
+            "[mcp_servers.display]",
+            "command = \"python3\"",
+            "args = [\(tomlQuote(displayMCPGuestPath))]",
             "default_tools_approval_mode = \"approve\"",
         ]
         for server in servers {

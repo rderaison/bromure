@@ -3142,3 +3142,14 @@
 "Queued — the agent reads it next" = "待機中 — エージェントが次に読みます";
 "Queued — %@ reads it next" = "待機中 — %@ が次に読みます";
 "Don't send it" = "送信しない";
+"Chart" = "グラフ";
+"Video" = "ビデオ";
+"Open in its own window" = "別ウインドウで開く";
+"Play video" = "ビデオを再生";
+"Not an image or a video this app can show." = "このアプリで表示できる画像やビデオではありません。";
+"This window can't read files from that machine." = "このウインドウからはそのマシンのファイルを読めません。";
+"Couldn't read %@." = "%@ を読み込めませんでした。";
+"That image couldn't be decoded." = "画像をデコードできませんでした。";
+"Couldn't prepare the video." = "ビデオを準備できませんでした。";
+"The chart couldn't be drawn: %@" = "グラフを描画できませんでした：%@";
+"Open in its own window (inline, ⌥-scroll zooms the chart)" = "別ウインドウで開く（チャット内では ⌥ + スクロールでグラフを拡大）";

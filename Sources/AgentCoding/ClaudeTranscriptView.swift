@@ -1860,7 +1860,10 @@ struct ToolCallCard: View {
 
     var body: some View {
         let n = name.lowercased()
-        if isTodo(n) {
+        if let display = DisplayRequest.parse(name: name, detail: detail) {
+            // The display MCP: show it, not the call.
+            DisplayCard(request: display)
+        } else if isTodo(n) {
             TodoCard(input: input, intent: summary)
         } else if let (content, path) = writeParts(n) {
             FileWriteCard(tool: name, path: path, content: content)
@@ -2777,7 +2780,7 @@ private struct FileCard: View {
     }
 }
 
-private struct RawJSONBlock: View {
+struct RawJSONBlock: View {
     let text: String
     init(_ t: String) { text = t }
     var body: some View {

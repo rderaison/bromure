@@ -3144,3 +3144,14 @@
 "Queued — the agent reads it next" = "En cola — el agente lo leerá a continuación";
 "Queued — %@ reads it next" = "En cola — %@ lo leerá a continuación";
 "Don't send it" = "No enviarlo";
+"Chart" = "Gráfico";
+"Video" = "Vídeo";
+"Open in its own window" = "Abrir en su propia ventana";
+"Play video" = "Reproducir vídeo";
+"Not an image or a video this app can show." = "No es una imagen ni un vídeo que esta app pueda mostrar.";
+"This window can't read files from that machine." = "Esta ventana no puede leer archivos de esa máquina.";
+"Couldn't read %@." = "No se pudo leer %@.";
+"That image couldn't be decoded." = "No se pudo decodificar la imagen.";
+"Couldn't prepare the video." = "No se pudo preparar el vídeo.";
+"The chart couldn't be drawn: %@" = "No se pudo dibujar el gráfico: %@";
+"Open in its own window (inline, ⌥-scroll zooms the chart)" = "Abrir en su propia ventana (en el chat, ⌥+desplazar hace zoom en el gráfico)";
