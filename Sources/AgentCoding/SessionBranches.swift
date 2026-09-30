@@ -342,10 +342,10 @@ extension AgentSessionEngine {
 extension AgentSessionEngine {
 
     /// The session's changes against `base`, read live from its machine.
-    func fetchReview(_ id: UUID, base: TaskReviewData.Base, focusFile: String? = nil) async -> TaskReviewData? {
+    func fetchReview(_ id: UUID, base: TaskReviewData.Base, focusFiles: [String] = []) async -> TaskReviewData? {
         guard let s = store.session(id), let delegate else { return nil }
         let cmd = TaskReviewData.sessionCommand(dir: ScheduledAutomationEngine.guestPath(s.cwd), base: base,
-                                                focusFile: focusFile)
+                                                focusFiles: focusFiles)
         guard let out = try? await delegate.guestExec(profileID: s.profileID, command: cmd, timeout: 30)
         else { return nil }
         return TaskReviewData.parse(out)

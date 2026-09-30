@@ -30,7 +30,7 @@ struct ReviewSource {
     /// The diff at `base`. The second argument: a file the review is about
     /// (a turn's edit) — its git checkout is diffed, which may not be the
     /// session's folder (a worktree the agent edits in).
-    var fetch: (TaskReviewData.Base, String?) async -> TaskReviewData?
+    var fetch: (TaskReviewData.Base, [String]) async -> TaskReviewData?
     var addComment: (_ text: String, _ file: String?, _ line: Int?) -> Void
     var removeComment: (UUID) -> Void
     var setViewed: (_ path: String, _ fingerprint: String?) -> Void
@@ -65,9 +65,11 @@ final class ReviewWindowHost {
 
     /// `files`: a turn's edited paths (absolute or relative) — the window
     /// opens on just those, with a way to see everything.
-    func open(_ id: UUID, title: String, files: [String]? = nil, source: () -> ReviewSource) {
+    func open(_ id: UUID, title: String, files: [String]? = nil, since: Date? = nil,
+              source: () -> ReviewSource) {
         let f = focus[id] ?? ReviewFocus()
         f.files = files
+        f.since = since
         f.generation += 1
         focus[id] = f
         if let win = windows[id] { win.makeKeyAndOrderFront(nil); return }
@@ -107,7 +109,7 @@ final class ReviewWindowHost {
 final class SessionReviewWindowManager {
     struct Context {
         var session: (UUID) -> AgentSession?
-        var fetch: (UUID, TaskReviewData.Base, String?) async -> TaskReviewData?
+        var fetch: (UUID, TaskReviewData.Base, [String]) async -> TaskReviewData?
         var addComment: (_ id: UUID, _ text: String, _ file: String?, _ line: Int?) -> Void
         var removeComment: (_ id: UUID, _ commentID: UUID) -> Void
         var setViewed: (_ id: UUID, _ path: String, _ fingerprint: String?) -> Void
@@ -124,10 +126,10 @@ final class SessionReviewWindowManager {
 
     func window(for id: UUID) -> NSWindow? { host.window(for: id) }
 
-    func open(sessionID id: UUID, files: [String]? = nil) {
+    func open(sessionID id: UUID, files: [String]? = nil, since: Date? = nil) {
         guard let s = context.session(id) else { return }
         let c = context
-        host.open(id, title: s.title, files: files) {
+        host.open(id, title: s.title, files: files, since: since) {
             ReviewSource(
                 title: { c.session(id)?.title ?? "" },
                 place: {
@@ -175,6 +177,9 @@ final class SessionReviewWindowManager {
 @Observable
 final class ReviewFocus {
     var files: [String]?
+    /// When the turn began (a "Changed N files" click): the review starts on
+    /// "This turn" — everything since, committed or not.
+    var since: Date?
     var generation = 0
     /// Bumped when the window comes back to the front.
     var refresh = 0
@@ -210,7 +215,13 @@ struct ReviewView: View {
         }
         .background(Color.platformWindowBackground)
         .task(id: focus.generation) {
-            if !baseChosen { base = source.defaultBase() }
+            // A turn's changes: since the turn began, committed or not — the
+            // agent may well have committed them already. A new click re-aims.
+            if let t = focus.since, !baseChosen || { if case .since = base { return true } else { return false } }() {
+                base = .since(t)
+            } else if !baseChosen {
+                base = source.defaultBase()
+            }
             showAll = focus.files == nil
             await load()
         }
@@ -226,8 +237,7 @@ struct ReviewView: View {
     private func load(quiet: Bool = false) async {
         if !quiet { loading = true; loadFailed = false }
         // A turn's files: review the checkout they were edited in.
-        let focusFile = focus.files?.first { $0.hasPrefix("/") }
-        let fetched = await source.fetch(base, focusFile)
+        let fetched = await source.fetch(base, focus.files ?? [])
         loading = false
         if let fetched { data = fetched; loadFailed = false }
         else if !quiet { data = nil; loadFailed = true }
@@ -304,7 +314,9 @@ struct ReviewView: View {
     }
 
     private var basePicker: some View {
-        let options = source.bases()
+        let options = (focus.since.map { [(TaskReviewData.Base.since($0),
+                                           NSLocalizedString("This turn", comment: "review base"))] } ?? [])
+            + source.bases()
         return Picker("", selection: Binding(get: { base }, set: { v in
             base = v; baseChosen = true
             Task { await load() }
@@ -555,6 +567,7 @@ struct ReviewView: View {
         case .uncommitted: return NSLocalizedString("Nothing uncommitted: the agent may have committed its work.", comment: "review")
         case .branch(let p): return String(format: NSLocalizedString("The branch has nothing %@ doesn't have.", comment: "review"), p)
         case .lastCommit: return NSLocalizedString("The last commit changed nothing that can be shown.", comment: "review")
+        case .since: return NSLocalizedString("Nothing has changed since this turn began.", comment: "review")
         }
     }
 

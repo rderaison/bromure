@@ -3205,3 +3205,6 @@
 
 /* Chat: cached history shown while the latest loads */
 "Catching up…" = "正在同步最新內容…";
+
+/* Review: this turn */
+"Nothing has changed since this turn began." = "本輪開始後沒有任何變更。";

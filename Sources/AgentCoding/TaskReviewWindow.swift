@@ -24,6 +24,10 @@ struct TaskReviewData: Equatable, Sendable {
         case branch(String)
         /// The last commit alone.
         case lastCommit
+        /// Everything since this moment — from the last commit before it,
+        /// committed or not: a turn's changes even after the agent committed
+        /// (and merged) them.
+        case since(Date)
     }
 
     /// The short commit the diff is against ("" when unknown).
@@ -31,18 +35,21 @@ struct TaskReviewData: Equatable, Sendable {
 
     /// The review of a session's folder against `base`. New files the agent
     /// hasn't added to git yet are shown too (up to 40, under 200 KB each).
-    /// `focusFile`: an absolute path the review is about — the git checkout
-    /// holding it is diffed instead of `dir` (an agent working in a
-    /// worktree of the session's folder edits files `dir`'s diff never
-    /// shows); `dir` when it isn't in one.
-    static func sessionCommand(dir: String, base: Base, focusFile: String? = nil) -> String {
+    /// `focusFiles`: the absolute paths the review is about (a turn's
+    /// edits) — the git checkout holding the first of them that is in one is
+    /// diffed instead of `dir` (an agent working in a worktree of the
+    /// session's folder edits files `dir`'s diff never shows; a memory note
+    /// outside any repo must not decide); `dir` when none is.
+    static func sessionCommand(dir: String, base: Base, focusFiles: [String] = []) -> String {
         func q(_ s: String) -> String {
             "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
         }
+        let parents = focusFiles.filter { $0.hasPrefix("/") }.prefix(12)
+            .map { ($0 as NSString).deletingLastPathComponent }
         let enter: String
-        if let f = focusFile, f.hasPrefix("/") {
-            let parent = (f as NSString).deletingLastPathComponent
-            enter = "d=$(git -C \(q(parent)) rev-parse --show-toplevel 2>/dev/null); "
+        if !parents.isEmpty {
+            enter = "d=; for p in \(parents.map(q).joined(separator: " ")); do "
+                + "d=$(git -C \"$p\" rev-parse --show-toplevel 2>/dev/null) && [ -n \"$d\" ] && break; d=; done; "
                 + "[ -n \"$d\" ] || d=\(q(dir)); cd \"$d\" || exit 1"
         } else {
             enter = "cd \(q(dir)) || exit 1"
@@ -53,6 +60,10 @@ struct TaskReviewData: Equatable, Sendable {
         case .uncommitted: setBase = "b=HEAD"
         case .branch(let p): setBase = "b=$(git merge-base \(q(p)) HEAD 2>/dev/null || echo \(q(p)))"
         case .lastCommit: setBase = "b=HEAD~1"; withWorktree = false
+        case .since(let t):
+            // The empty tree when the repo is younger than the moment.
+            setBase = "b=$(git rev-list -1 --before=@\(Int(t.timeIntervalSince1970)) HEAD 2>/dev/null); "
+                + "[ -n \"$b\" ] || b=4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         }
         let diff = withWorktree
             ? "{ git diff \"$b\" -- 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null | head -n 40 "
