@@ -435,7 +435,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 || host == "x.ai" || host.hasSuffix(".x.ai")
             let kimiHost = KimiRegion.isSubscriptionHost(host)
             if codexHost || grokHost || kimiHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
-                let codexBogus = Self.codexSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
+                let codexBogus = Self.isCodexStandIn(bearer, profileID: profileID)
                 let grokBogus = Self.grokSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
                 let kimiBogus = Self.kimiSubscriptionProvider?()?.0.profileForBogusKey(bearer) != nil
                 if codexBogus || grokBogus || kimiBogus {
@@ -612,10 +612,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         var codexSubStaleAccess: String? = nil
         if !insecure,
            host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") || host == "api.openai.com",
-           let provider = Self.codexSubscriptionProvider, let (store, refresher) = provider(),
+           let provider = Self.codexSubscriptionProvider, let (_, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),
-           store.profileForBogusKey(bearer) != nil {
+           Self.isCodexStandIn(bearer, profileID: profileID) {
             do {
                 let access = try await refresher.accessToken(for: profileID)
                 swap.modified = Self.replaceAuthorizationBearer(rawRequest: swap.modified, token: access)
@@ -723,6 +723,46 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     ])
                     FileHandle.standardError.write(Data(
                         "[mitm] Kimi stand-in refresh for \(profileID.uuidString.prefix(8)) failed host-side: \(error)\n".utf8))
+                }
+                try tls.write(reply)
+                return
+            }
+        }
+
+        // 5e'. Codex stand-in refresh. Codex refreshes when OpenAI turns its
+        //     token down (a 401) — which a stand-in the proxy didn't swap
+        //     used to cause — and a stand-in refresh token sent on to OpenAI
+        //     came back "Your access token could not be refreshed. Please
+        //     log out and sign in again." Answered here instead, like Kimi's:
+        //     the host refreshes the real login and Codex gets fresh stand-ins.
+        if !insecure, bodyFile == nil, reqMethod.uppercased() == "POST",
+           host == "auth.openai.com", reqPath.hasPrefix("/oauth/token"),
+           let provider = Self.codexSubscriptionProvider, let (store, refresher) = provider(),
+           store.record(for: profileID) != nil,
+           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)) {
+            let body = swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let form = "?" + String(decoding: body, as: UTF8.self)
+            let grant = (json?["grant_type"] as? String) ?? Self.urlQueryParam("grant_type", inPath: form)
+            let sent = (json?["refresh_token"] as? String) ?? Self.urlQueryParam("refresh_token", inPath: form)
+            if grant == "refresh_token", let sent, SubscriptionFakeMint.isCodexRefreshFake(sent) {
+                let reply: Data
+                do {
+                    _ = try await refresher.accessToken(for: profileID)
+                    guard let fresh = store.record(for: profileID),
+                          let standIn = CodexStandIn.mint(fresh, profileID: profileID)
+                    else { throw CodexSubscriptionError.noCredential }
+                    store.registerBogusKey(standIn.access, for: profileID)
+                    reply = SignInCapture.response(status: 200, reason: "OK", json: CodexStandIn.refreshAnswer(standIn))
+                    FileHandle.standardError.write(Data(
+                        "[mitm] answered Codex stand-in refresh for \(profileID.uuidString.prefix(8)) (host refreshed the real credential)\n".utf8))
+                } catch {
+                    reply = SignInCapture.response(status: 401, reason: "Unauthorized", json: [
+                        "error": "invalid_grant",
+                        "error_description": "Bromure could not refresh the Codex subscription on the host: \(error)",
+                    ])
+                    FileHandle.standardError.write(Data(
+                        "[mitm] Codex stand-in refresh for \(profileID.uuidString.prefix(8)) failed host-side: \(error)\n".utf8))
                 }
                 try tls.write(reply)
                 return
@@ -2518,6 +2558,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Extract a query-string parameter from a request path
     /// (`/?query=SELECT+1&database=x` → "SELECT 1"). Percent- and
     /// `+`-decoded. nil if the path has no query string or no such key.
+    /// A Codex stand-in for this workspace: one the host registered, or one
+    /// it minted any time (its Bromure-marked signature) for a workspace that
+    /// has a Codex login — the registry is in memory, and a machine that
+    /// outlives an app restart (or a host-side refresh) still holds an older
+    /// stand-in. Only ever resolved to THIS connection's workspace's login.
+    static func isCodexStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        guard let (store, _) = codexSubscriptionProvider?() else { return false }
+        if store.profileForBogusKey(bearer) != nil { return true }
+        return SubscriptionFakeMint.isJWTFake(bearer) && store.record(for: profileID) != nil
+    }
+
     static func urlQueryParam(_ name: String, inPath path: String) -> String? {
         guard let q = path.firstIndex(of: "?") else { return nil }
         let query = path[path.index(after: q)...]
