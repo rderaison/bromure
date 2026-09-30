@@ -3189,8 +3189,6 @@
 "Open Local Network Settings" = "打开本地网络设置";
 
 /* Models: your environment (auto mode) */
-"Your environment" = "你的环境";
-"What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "代理的安全检查需要了解的信息：你的组织，以及你信任的仓库、域名和服务。每行一条。Claude 的自动模式据此区分日常工作和有风险的操作。";
 "Applies to every workspace from its next launch." = "从每个工作区下次启动时生效。";
 
 /* Chat: scratch terminal (/term) */
@@ -3205,3 +3203,8 @@
 
 /* Review: this turn */
 "Nothing has changed since this turn began." = "本轮开始后没有任何更改。";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "描述你的环境";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "代理的安全检查需要了解的信息：你的组织、你的服务器及其用途、你信任的仓库和域名、哪些内容可以安全更改。每行一条。Claude 的自动模式据此区分日常工作和有风险的操作。";
+"Variables" = "变量";
