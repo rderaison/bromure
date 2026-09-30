@@ -2178,6 +2178,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             e.traceStore.onConversationActivity = { [weak self] pid in
                 self?.noteAgentActivity(pid)
             }
+            // A model WebSocket streaming (Codex's whole session is one).
+            HTTPMitmConnection.liveActivity = { pid in
+                DispatchQueue.main.async { [weak self] in self?.noteAgentActivity(pid) }
+            }
             e.traceStore.onConversationResult = { [weak self] pid, host, status in
                 self?.switchboardEngine.noteAPIResult(profileID: pid, host: host, status: status)
             }
