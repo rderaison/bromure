@@ -2361,6 +2361,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             e.traceStore.onConversationActivity = { [weak self] pid in
                 self?.noteAgentActivity(pid)
             }
+            // A model WebSocket streaming (Codex's whole session is one).
+            HTTPMitmConnection.liveActivity = { pid in
+                DispatchQueue.main.async { [weak self] in self?.noteAgentActivity(pid) }
+            }
             e.traceStore.onConversationResult = { [weak self] pid, host, status in
                 self?.switchboardEngine.noteAPIResult(profileID: pid, host: host, status: status)
             }
@@ -14604,9 +14608,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// of calling `profile.makeTokenPlan` directly at session-launch sites.
     private func sessionTokenPlan(for profile: Profile, salt: Data) -> SessionTokenPlan {
         let available = mitmEngine?.claudeSubscriptionStore.hasCredential(for: profile.id) ?? false
-        let plan = profile.makeTokenPlan(salt: salt, claudeSubscriptionAvailable: available)
+        var plan = profile.makeTokenPlan(salt: salt, claudeSubscriptionAvailable: available)
         if let bogus = plan.claudeSubscriptionBogusKey {
             mitmEngine?.claudeSubscriptionStore.registerBogusKey(bogus, for: profile.id)
+            // Account features on: an OAuth stand-in instead of the API key.
+            if ClaudeStandIn.isEnabled {
+                plan.claudeOAuthStandIn = ClaudeStandIn.credentialsJSON(ClaudeStandIn.mint(profileID: profile.id))
+            }
         }
         return plan
     }
@@ -14649,23 +14657,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return out?.contains("ok") == true
     }
 
+    /// Claude with account features, into a RUNNING machine: its OAuth
+    /// stand-in (`~/.claude/.credentials.json`), written at boot otherwise.
+    @discardableResult
+    func pushClaudeStandIn(profileID: UUID) async -> Bool {
+        guard ClaudeStandIn.isEnabled,
+              mitmEngine?.claudeSubscriptionStore.hasCredential(for: profileID) == true else { return false }
+        let b64 = ClaudeStandIn.credentialsJSON(ClaudeStandIn.mint(profileID: profileID)).base64EncodedString()
+        let out = try? await guestExec(
+            profileID: profileID,
+            command: "mkdir -p ~/.claude && chmod 700 ~/.claude && umask 077 && echo \(b64) | base64 -d > ~/.claude/.credentials.json.tmp "
+                + "&& mv -f ~/.claude/.credentials.json.tmp ~/.claude/.credentials.json && echo ok",
+            timeout: 15)
+        return out?.contains("ok") == true
+    }
+
     /// The stand-in `~/.codex/auth.json` for a workspace's Codex login — the
     /// bogus tokens registered with the proxy — or nil when there's no login.
     func codexStandInAuth(for profileID: UUID) -> Data? {
         guard let engine = mitmEngine,
               let real = engine.codexSubscriptionStore.record(for: profileID) else { return nil }
-        let saltA = Data("codex-bogus-access:\(profileID)".utf8)
-        let saltR = Data("codex-bogus-refresh:\(profileID)".utf8)
-        let saltI = Data("codex-bogus-id:\(profileID)".utf8)
-        guard let bogusAccess = SubscriptionFakeMint.mintNoRefreshJWTFake(
-                realJWT: real.accessToken, salt: saltA),
-              let bogusID = SubscriptionFakeMint.mintNoRefreshJWTFake(
-                realJWT: real.idToken, salt: saltI) else {
+        guard let standIn = CodexStandIn.mint(real, profileID: profileID) else {
             FileHandle.standardError.write(Data(
                 "[codex-sub] seed skipped — stored tokens aren't JWT-shaped\n".utf8))
             return nil
         }
-        let bogusRefresh = SubscriptionFakeMint.mintCodexRefreshFake(real: real.refreshToken, salt: saltR)
+        let bogusAccess = standIn.access, bogusID = standIn.id, bogusRefresh = standIn.refresh
         engine.codexSubscriptionStore.registerBogusKey(bogusAccess, for: profileID)
 
         var tokens: [String: Any] = [
