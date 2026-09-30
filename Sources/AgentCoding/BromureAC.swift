@@ -208,6 +208,15 @@ struct BromureAC: ParsableCommand {
             let view: AnyView
             var size = NSSize(width: 900, height: 620)
             switch which {
+            case "slash":
+                // The "/" palette with Bromure's /term on top of the agent's.
+                size = NSSize(width: 620, height: 330)
+                let cmds = [BeautifiedSessionModel.termCommand]
+                    + SlashCommandCatalog.builtIn(for: "claude").prefix(5)
+                view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
+                    SlashCommandPalette(commands: Array(cmds), agentName: "Claude Code", highlighted: 0,
+                                        onPick: { _ in }, onHover: { _ in })
+                        .padding(20) })
             case "environment":
                 // Preferences → Environment: the description (its example
                 // showing), then the variables.
