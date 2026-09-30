@@ -4,6 +4,7 @@ import AppKit
 //   __hook <state>     Claude Code's status hook (see ClaudeHooks)
 //   __find <args>      GNU find's -printf subset, for the `find` shim (FindCommand)
 //   __mcp-delegation   the agents' delegation MCP server (see DelegationHub)
+//   __agents           the Manage Agents window alone (no services started)
 //   __remote-menu      what a plain SSH login gets: a terminal on the agents
 //   claude [args…]     start Claude here as a hosted session and attach
 //                      (also as `bromure-claude`, a link to this binary)
@@ -33,6 +34,14 @@ if args.count >= 2 {
         let argv: [UnsafeMutablePointer<CChar>?] = [strdup("/bin/sh"), strdup("-c"), strdup(attach), nil]
         execv("/bin/sh", argv)
         exit(127)
+    case "__agents":
+        MainActor.assumeIsolated {
+            let app = NSApplication.shared
+            AgentsWindowController.standalone = true
+            AgentsWindowController.shared.show()
+            app.run()
+        }
+        exit(0)
     case "claude":
         exit(Launcher.runClaude(args: Array(args.dropFirst(2))))
     default:

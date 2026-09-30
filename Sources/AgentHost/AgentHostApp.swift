@@ -62,6 +62,7 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.updateIcon() } }
             }
         }
+        AgentsWindowController.shared.showIntroIfNeeded()
         AgentHostLog.log("Bromure Sidecar up (tmux \(Tmux.binary), ssh port \(port))")
     }
 
@@ -158,6 +159,9 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let new = NSMenuItem(title: "New Claude Session…", action: #selector(newSession), keyEquivalent: "n")
         new.target = self
         menu.addItem(new)
+        let agents = NSMenuItem(title: "Manage Agents…", action: #selector(manageAgents), keyEquivalent: "")
+        agents.target = self
+        menu.addItem(agents)
         let install = NSMenuItem(title: "Install “bromure-claude” Command", action: #selector(installCommand), keyEquivalent: "")
         install.target = self
         install.toolTip = "Links ~/.local/bin/bromure-claude: run it in any folder to start Claude there as a hosted session."
@@ -220,6 +224,10 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.async { Self.openTerminal(window: s.window) }
             }
         }
+    }
+
+    @objc private func manageAgents() {
+        AgentsWindowController.shared.show()
     }
 
     @objc private func installCommand() {

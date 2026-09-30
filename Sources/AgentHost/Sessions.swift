@@ -280,6 +280,10 @@ final class SessionEngine: @unchecked Sendable {
     /// Start an agent in a new window; its session id and window index.
     func start(_ req: StartRequest) -> Result<(id: UUID, window: Int), HostError> {
         guard Self.tools.contains(req.tool) else { return .failure(.bad("unknown agent \(req.tool)")) }
+        if AgentInstaller.isKnownMissing(req.tool) {
+            let name = AgentSpec.spec(req.tool)?.name ?? req.tool
+            return .failure(.bad("\(name) isn't installed on this Mac. Install it from Manage Agents… in the Bromure Sidecar menu."))
+        }
         let dir = Self.expand(req.cwd)
         var isDir: ObjCBool = false
         let clone = req.cloneURL.flatMap { $0.isEmpty ? nil : $0 }

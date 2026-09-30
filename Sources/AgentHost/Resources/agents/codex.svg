@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <title>Codex tab template icon</title>
+  <g stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M92 74 L42 128 L92 182"/>
+    <path d="M164 74 L214 128 L164 182"/>
+    <path d="M150 60 L106 196"/>
+  </g>
+</svg>

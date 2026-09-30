@@ -115,6 +115,8 @@ let package = Package(
             ],
             path: "Sources/AgentHost",
             exclude: ["Info.plist", "AgentHost.entitlements"],
+            // The agents' logos for Manage Agents (the same art Bromure AC draws).
+            resources: [.copy("Resources/agents")],
             swiftSettings: [.define("AGENT_HOST")],
             linkerSettings: [
                 .linkedFramework("AppKit"),
