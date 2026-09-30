@@ -14270,22 +14270,51 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// host-side virtiofs home (legacy model); ext4-model launches pass the
     /// home-seed `files/` staging dir instead (the guest agent copies it in).
     func seedCodexAuthFile(for profile: Profile, homeRoot: URL? = nil) {
+        guard profile.allToolSpecs.contains(where: { $0.tool == .codex && $0.authMode == .subscription }),
+              let data = codexStandInAuth(for: profile.id) else { return }
+        let dir = (homeRoot ?? store.homeDirectory(for: profile))
+            .appendingPathComponent(".codex", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("auth.json")
+        try? data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
+    }
+
+    /// A signed-in Codex, straight into a RUNNING machine: the stand-in
+    /// `~/.codex/auth.json` is otherwise written only at boot, so a session
+    /// relaunched after its sign-in started on the stale (or missing) file
+    /// and Codex asked to log out and sign in again. Returns whether it wrote.
+    @discardableResult
+    func pushCodexAuth(profileID: UUID) async -> Bool {
+        guard let data = codexStandInAuth(for: profileID) else { return false }
+        let b64 = data.base64EncodedString()
+        let out = try? await guestExec(
+            profileID: profileID,
+            command: "mkdir -p ~/.codex && umask 077 && echo \(b64) | base64 -d > ~/.codex/auth.json.tmp "
+                + "&& mv -f ~/.codex/auth.json.tmp ~/.codex/auth.json && echo ok",
+            timeout: 15)
+        return out?.contains("ok") == true
+    }
+
+    /// The stand-in `~/.codex/auth.json` for a workspace's Codex login — the
+    /// bogus tokens registered with the proxy — or nil when there's no login.
+    func codexStandInAuth(for profileID: UUID) -> Data? {
         guard let engine = mitmEngine,
-              profile.allToolSpecs.contains(where: { $0.tool == .codex && $0.authMode == .subscription }),
-              let real = engine.codexSubscriptionStore.record(for: profile.id) else { return }
-        let saltA = Data("codex-bogus-access:\(profile.id)".utf8)
-        let saltR = Data("codex-bogus-refresh:\(profile.id)".utf8)
-        let saltI = Data("codex-bogus-id:\(profile.id)".utf8)
+              let real = engine.codexSubscriptionStore.record(for: profileID) else { return nil }
+        let saltA = Data("codex-bogus-access:\(profileID)".utf8)
+        let saltR = Data("codex-bogus-refresh:\(profileID)".utf8)
+        let saltI = Data("codex-bogus-id:\(profileID)".utf8)
         guard let bogusAccess = SubscriptionFakeMint.mintNoRefreshJWTFake(
                 realJWT: real.accessToken, salt: saltA),
               let bogusID = SubscriptionFakeMint.mintNoRefreshJWTFake(
                 realJWT: real.idToken, salt: saltI) else {
             FileHandle.standardError.write(Data(
                 "[codex-sub] seed skipped — stored tokens aren't JWT-shaped\n".utf8))
-            return
+            return nil
         }
         let bogusRefresh = SubscriptionFakeMint.mintCodexRefreshFake(real: real.refreshToken, salt: saltR)
-        engine.codexSubscriptionStore.registerBogusKey(bogusAccess, for: profile.id)
+        engine.codexSubscriptionStore.registerBogusKey(bogusAccess, for: profileID)
 
         var tokens: [String: Any] = [
             "id_token": bogusID, "access_token": bogusAccess, "refresh_token": bogusRefresh,
@@ -14298,15 +14327,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "tokens": tokens,
             "last_refresh": ISO8601DateFormatter().string(from: Date()),
         ]
-        let dir = (homeRoot ?? store.homeDirectory(for: profile))
-            .appendingPathComponent(".codex", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("auth.json")
-        if let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted]) {
-            try? data.write(to: url, options: .atomic)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
-        }
+        return try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted])
     }
 
     /// Grok subscription mode: write a bogus `~/.grok/auth.json` into the

@@ -207,6 +207,38 @@ struct SessionFailureTests {
         #expect(p?.selectedOption == 1)
     }
 
+    @Test("Codex's command approval becomes a card")
+    func codexApproval() {
+        let screen = """
+          Would you like to run the following command?
+
+          Reason: fetch the release notes
+
+          $ curl -sL https://example.com/notes
+
+        › 1. Yes, proceed (y)
+          2. Yes, and don't ask again for this command (a)
+          3. No, and tell Codex what to do differently (esc)
+
+          Press enter to confirm or esc to cancel
+        """
+        let p = TerminalPrompt.detect(inScreen: screen, agent: "codex")
+        #expect(p?.kind == .picker)
+        #expect(p?.title == "Would you like to run the following command?")
+        #expect(p?.options.count == 3)
+        #expect(p?.options.first?.label == "Yes, proceed (y)")
+        #expect(p?.selectedOption == 1)
+        #expect(p?.detail.contains("$ curl -sL https://example.com/notes") == true)
+    }
+
+    @Test("Codex starts on its own: no approvals, no sandbox of its own inside the VM")
+    @MainActor
+    func codexAutonomy() {
+        let s = AgentSession(profileID: UUID(), tool: .codex, title: "t")
+        #expect(AgentSessionEngine.roleFlags(for: s).contains("--dangerously-bypass-approvals-and-sandbox"))
+        #expect(AgentSessionEngine.roleFlags(for: AgentSession(profileID: UUID(), tool: .claude, title: "t")).isEmpty)
+    }
+
     @Test("auto mode paused by its classifier (boxed dialog) becomes a card")
     func autoModePause() {
         let pause = """

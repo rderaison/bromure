@@ -177,8 +177,10 @@ extension AgentSessionEngine {
             }
         }
         guard store.session(s.id) != nil else { return }
-        let resume = ([s.tool.rawValue] + Self.resumeFlags(for: s, sharedFolder: sharesFolder(s)).split(separator: " ").map(String.init))
-            .joined(separator: " ")
+        let words: [String] = [s.tool.rawValue,
+                               Self.resumeFlags(for: s, sharedFolder: sharesFolder(s)),
+                               Self.roleFlags(for: s)]
+        let resume = words.filter { !$0.isEmpty }.joined(separator: " ")
         let cmd = "source ~/.bashrc >/dev/null 2>&1; clear; " + resume
         _ = try? await delegate.guestExec(
             profileID: pid, command: CodingTaskEngine.typeCommand(tabIndex: w, text: cmd), timeout: 15)
