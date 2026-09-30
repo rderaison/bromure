@@ -31,8 +31,7 @@ if backend == 'angle':
     print('ANGLE libraries:', candidates, flush=True)
     if not candidates: sys.exit(1)
     egl = c.CDLL(candidates[0]); gl = c.CDLL(os.path.join(os.path.dirname(candidates[0]), 'libGLESv2.so'))
-    for library in (egl, gl):
-        subprocess.run(['nm', '-D', library._name], check=False)
+    EGL_PROC = None
     for library in (egl, gl):
         for symbol in ('eglGetProcAddress', 'EGL_GetProcAddress', 'ANGLEGetProcAddress', 'GetProcAddress'):
             try:
@@ -40,6 +39,10 @@ if backend == 'angle':
                 if proc(b'eglGetDisplay'):
                     EGL_PROC = proc
             except AttributeError: pass
+    if EGL_PROC is None:
+        print(json.dumps({'backend': 'angle', 'standaloneLibrary': False,
+                          'note': 'Bundled shared libraries are stubs; use browser CDP acceptance.'}), flush=True)
+        sys.exit()
     address = EGL_PROC(b'eglGetPlatformDisplayEXT')
     get_display = c.CFUNCTYPE(p, u, p, c.POINTER(i))(address)
     display = get_display(0x3202, None, (i * 3)(0x3203, 0x320e, 0x3038))

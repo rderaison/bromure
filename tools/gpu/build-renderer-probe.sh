@@ -33,7 +33,7 @@ checkout() {
     [[ $(git -C "$directory" rev-parse HEAD) == "$revision" ]] || {
         echo "Wrong source revision in $directory; use a fresh build directory" >&2; exit 1;
     }
-    if [[ "$directory" != "$epoxy" && "$directory" != "$angle" ]]; then
+    if [[ "$directory" != "$epoxy" && "$directory" != "$angle" && "$directory" != "$virgl" ]]; then
         git -C "$directory" diff --quiet
         git -C "$directory" diff --cached --quiet
     fi
@@ -57,6 +57,14 @@ fi
 git -C "$angle" diff --cached --quiet
 git -C "$angle" -c core.abbrev=8 diff -- Source/ThirdParty/ANGLE/src/common/system_utils.cpp | cmp - "$script_dir/angle-dylib.patch"
 git -C "$angle" diff --quiet -- . ':!Source/ThirdParty/ANGLE/src/common/system_utils.cpp'
+
+if ! git -C "$virgl" apply --reverse --check "$script_dir/virgl-gles-msaa.patch" 2>/dev/null; then
+    git -C "$virgl" apply --check "$script_dir/virgl-gles-msaa.patch"
+    git -C "$virgl" apply "$script_dir/virgl-gles-msaa.patch"
+fi
+git -C "$virgl" diff --cached --quiet
+git -C "$virgl" -c core.abbrev=8 diff -- src/vrend/vrend_formats.c src/vrend/vrend_renderer.c src/vrend/vrend_renderer.h | cmp - "$script_dir/virgl-gles-msaa.patch"
+git -C "$virgl" diff --quiet -- . ':!src/vrend/vrend_formats.c' ':!src/vrend/vrend_renderer.c' ':!src/vrend/vrend_renderer.h'
 
 if [[ ! -x "$tool_env/bin/python3" ]]; then xcrun python3 -m venv "$tool_env"; fi
 if ! "$tool_env/bin/python3" -c 'import pkg_resources; pkg_resources.require(["meson==1.11.2", "ninja==1.13.2", "Mako==1.3.12", "MarkupSafe==3.0.3", "packaging==26.3", "PyYAML==6.0.3"])' 2>/dev/null; then

@@ -120,6 +120,39 @@ class WorkerTests(unittest.TestCase):
                          [0x1100] * 8 + [0x1205, 0x1205, 0x1100, 0x1205])
         self.assertEqual(replies[7][24:], pixels[:4])
 
+    def test_bgrx_top_origin_2d_upload(self):
+        # Linux framebuffer uploads use opaque BGRX with top-left origin. Metal
+        # still stores four bytes; treating it as 24-bit RGB breaks GLES upload.
+        pixels = bytes([0, 0, 255, 255]) * (64 * 64)
+        replies = self.exchange([
+            command(0x101, struct.pack("<4I", 9, 2, 64, 64)),
+            command(0xffff0010, struct.pack("<IQI", 9, len(pixels), 0)),
+            command(0xffff0011, struct.pack("<IQI", 9, 0, len(pixels)) + pixels),
+            command(0x105, struct.pack("<4IQII", 0, 0, 64, 64, 0, 9, 0), flags=1, fence=42),
+            command(0xffff0002, struct.pack("<II", 9, 0)),
+        ])
+        self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies], [0x1100] * 5)
+
+    def test_real_multisample_clear_and_resolve(self):
+        # Clear a real four-sample renderbuffer, resolve on GPU into a native
+        # scanout texture, and verify the resolved red pixel.
+        words = [1 | (8 << 8) | (5 << 16), 11, 9, 1, 0, 0,
+                 5 | (3 << 16), 1, 0, 11,
+                 7 | (8 << 16), 4, 0x3f800000, 0, 0, 0x3f800000, 0, 0, 0,
+                 16 | (21 << 16), 15, 0, 0, 10, 0, 1, 0, 0, 0, 64, 64, 1,
+                 9, 0, 1, 0, 0, 0, 64, 64, 1]
+        stream = struct.pack("<" + "I" * len(words), *words)
+        replies = self.exchange([
+            command(0x204, struct.pack("<12I", 9, 2, 1, 2, 64, 64, 1, 1, 0, 4, 0, 0)),
+            command(0x204, struct.pack("<12I", 10, 2, 1, 2 | (1 << 18), 64, 64, 1, 1, 0, 0, 0, 0)),
+            command(0x200, bytes(72), context=7),
+            command(0x202, struct.pack("<II", 9, 0), context=7),
+            command(0x202, struct.pack("<II", 10, 0), context=7),
+            command(0x207, struct.pack("<II", len(stream), 0) + stream, context=7, flags=1, fence=42),
+            command(0xffff0002, struct.pack("<II", 10, 0)),
+        ])
+        self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies], [0x1100] * 7)
+
     def test_cross_context_buffer_upload_and_readback(self):
         # Resources belong to VirGL's resource context, not the startup probe.
         # Independent guest contexts must access the same underlying GL buffer.

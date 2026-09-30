@@ -710,7 +710,7 @@ public final class VMPool {
         var extraChromeFlags = UserDefaults.standard.string(forKey: "vm.extraChromeFlags") ?? ""
         if warm.graphicsSession?.backendName == "virgl" {
             // The Metal renderer exposes GLES; Chromium's desktop GL path needs a core profile.
-            extraChromeFlags = "--use-angle=gles --use-cmd-decoder=validating --disable-es3-gl-context " + extraChromeFlags
+            extraChromeFlags = "--use-angle=gles " + extraChromeFlags
         }
         // Software display compositing. The guest has no GPU: virtio-gpu
         // offers no 3D, so "GPU acceleration" runs Chromium's GL compositor

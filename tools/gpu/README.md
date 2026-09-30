@@ -1,5 +1,27 @@
 # macOS custom Virtio feasibility probe
 
+## Actual browser rendering result
+
+The signed Bromure preview now boots the real Linux browser VM with the sandboxed
+renderer and presents its native Metal frames through XPC and IOSurface. Chromium
+reports ANGLE/Mesa/virgl with GPU compositing enabled. The strict guest check
+creates WebGL2 with four-sample antialiasing, clears red, and verifies an exact
+RGBA readback with no GL error. Eleven worker tests cover the real MSAA
+clear/resolve, cross-context resource sharing, opaque top-origin framebuffer
+uploads, and malformed/bounded requests.
+
+The pinned VirGL patch implements GLES 3.0 multisample renderbuffers and fixes
+opaque Metal storage accounting. Multisample texture sampling is unsupported;
+Mesa uses the same protocol capability bit for both resource kinds. This
+experimental backend has not established complete desktop GL conformance.
+
+Run the actual browser check with a built, signed preview and a verified image:
+
+```sh
+bromure gpu-browser --storage-dir /path/to/image --seconds 35 \
+  --guest-probe tools/gpu/guest-browser-check.py --require-gpu-check
+```
+
 ## Hardware video decode result
 
 The packaged sandboxed helper supports `--video-check`. It creates twelve

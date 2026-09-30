@@ -11,10 +11,14 @@ struct GPUBrowser: ParsableCommand {
     @Option(name: .long) var storageDir: String
     @Option(name: .long) var seconds: Int = 120
     @Option(name: .long) var guestProbe: String?
+    @Flag(name: .long) var requireGPUCheck = false
     @Option(name: .long) var url: String = "chrome://gpu"
 
     func validate() throws {
         guard (1...3600).contains(seconds) else { throw ValidationError("Invalid duration") }
+        if requireGPUCheck && (guestProbe == nil || seconds < 30) {
+            throw ValidationError("GPU acceptance requires a guest probe and at least 30 seconds")
+        }
     }
 
     func run() throws {
@@ -45,6 +49,10 @@ struct GPUBrowser: ParsableCommand {
         let session = BrowserSession(warmVM: warm, config: config)
         session.show()
         NSApplication.shared.activate(ignoringOtherApps: true)
+        let acceptanceTask: Task<Bool, Never>? = requireGPUCheck ? Task {
+            await warm.serialWaiter.probe(for: "BROMURE_GPU_ACCEPTANCE_PASS", timeout: 30)
+        } : nil
+        defer { acceptanceTask?.cancel() }
         let diagnosticTask = Task { @MainActor in
             do { try await Task.sleep(for: .seconds(12)) } catch { return }
             guard warm.vm.state == .running else { return }
@@ -66,9 +74,12 @@ struct GPUBrowser: ParsableCommand {
             NSApplication.shared.updateWindows()
             try await Task.sleep(for: .milliseconds(2))
         }
-        print("[GPU browser] Frames delivered: \(warm.graphicsSession?.deliveredFrameCount ?? 0)")
+        let frames = warm.graphicsSession?.deliveredFrameCount ?? 0
+        let accepted = await acceptanceTask?.value ?? true
+        print("[GPU browser] Frames delivered: \(frames)")
         await pool.retire(warm)
         await pool.shutdown()
         withExtendedLifetime(session) {}
+        guard frames > 0, accepted else { throw ValidationError("Browser GPU acceptance failed") }
     }
 }

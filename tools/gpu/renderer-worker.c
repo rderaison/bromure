@@ -1,6 +1,8 @@
 // Bounded VirGL renderer worker. Receives immutable bytes, never guest pointers.
 #include <virglrenderer.h>
 #include <virgl_hw.h>
+#include <epoxy/gl.h>
+#include <os/log.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -175,12 +177,20 @@ int run_renderer_worker(int output_fd)
                 !args.depth || args.depth > 256 || !args.array_size || args.array_size > 256 ||
                 args.last_level > 13 || args.nr_samples > 8 || args.flags & ~1u ||
                 (uint64_t)args.width * args.height * args.depth * args.array_size > 16777216) break;
-            // Conservative budget: sixteen bytes per texel, doubled for mip
-            // levels, multiplied by samples. Reject rather than overcommit.
-            uint64_t budget = (uint64_t)args.width * args.height * args.depth * args.array_size *
-                (args.target == 0 ? 1 : 32) *
-                (args.nr_samples ? args.nr_samples : 1);
-            if (budget > 268435456 || total_resource_bytes + budget > 536870912) {
+            // Account common browser formats by storage size. A worst-case
+            // fallback bounds other formats; only mipmapped resources double.
+            uint32_t texel_bytes = 32;
+            if ((args.format >= 1 && args.format <= 8) ||
+                (args.format >= 99 && args.format <= 104) ||
+                args.format == VIRGL_FORMAT_R8G8B8A8_UNORM || args.format == VIRGL_FORMAT_A8B8G8R8_UNORM)
+                texel_bytes = 4;
+            else if (args.format == VIRGL_FORMAT_R8_UNORM) texel_bytes = 1;
+            else if (args.format == VIRGL_FORMAT_R8G8_UNORM) texel_bytes = 2;
+            uint64_t budget = args.target == 0 ? args.width :
+                (uint64_t)args.width * args.height * args.depth * args.array_size * texel_bytes *
+                (args.last_level ? 2 : 1) * (args.nr_samples ? args.nr_samples : 1);
+            if (budget < 65536) budget = 65536;
+            if (budget > 268435456 || total_resource_bytes + budget > 1073741824) {
                 result = 0x1201; break;
             }
             if (virgl_renderer_resource_create(&args, NULL, 0)) { result = 0x1200; break; }
@@ -357,6 +367,11 @@ reply:
         if (result == 0x1100 && (flags & 1u)) {
             if (++fence_token == 0) ++fence_token;
             if (!wait_for_gpu(fence_token, context)) return 1;
+        }
+        GLenum command_error = glGetError();
+        if (command_error) {
+            os_log_error(OS_LOG_DEFAULT, "GPU command GL error type=%u ctx=%u error=%x", type, context, command_error);
+            if (result >= 0x1100 && result < 0x1200) result = 0x1200;
         }
         store32(response, result);
         store32(prefix, response_length);

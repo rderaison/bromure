@@ -154,6 +154,12 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
                             }
                         })
                         if get32(response, at: 0) >= 0x1200 {
+                            if get32(snapshot, at: 0) == 0x204 {
+                                print("[GPU] Resource fields: \(stride(from: 24, to: 72, by: 4).map { get32(snapshot, at: $0) })")
+                            }
+                            if get32(snapshot, at: 0) == 0x206 {
+                                print("[GPU] Transfer fields: \(stride(from: 24, to: 72, by: 4).map { get32(snapshot, at: $0) })")
+                            }
                             print("[GPU] Rejected command type=\(get32(snapshot, at: 0)) context=\(get32(snapshot, at: 16)) bytes=\(snapshot.count) firstWord=\(snapshot.count >= 36 ? get32(snapshot, at: 32) : 0) response=\(get32(response, at: 0))")
                         }
                     } catch {

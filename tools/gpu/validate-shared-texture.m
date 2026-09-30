@@ -121,6 +121,7 @@ int probe_shared_texture(void *native_texture)
             const uint8_t *pixel = IOSurfaceGetBaseAddress(imported);
             // Inspect only one pixel to validate the probe's red clear survived sharing.
             success = pixel && pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 255 && pixel[3] == 255;
+            if (!success && pixel) fprintf(stderr, "Native pixel mismatch: BGRA=%u,%u,%u,%u\n", pixel[0], pixel[1], pixel[2], pixel[3]);
             IOSurfaceUnlock(imported, kIOSurfaceLockReadOnly, NULL);
         } else { success = 0; }
         if (success) puts("NATIVE TEXTURE: Metal GPU blit to IOSurface; Mach-port import and red pixel verified");
