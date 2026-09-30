@@ -78,6 +78,38 @@ struct SessionFailureTests {
         #expect(d.contains("exited with status") || d.contains("no model configured"))
     }
 
+    @Test("Codex's trust dialog, however it's worded, is answered from its own options")
+    func codexTrustDialogIsAnswerable() {
+        let screen = """
+          > You are running Codex in /Users/me/Devel/bromure
+
+            Since this folder is version controlled, you may wish to allow Codex to work in this folder without asking for approval.
+
+          › 1. Yes, allow Codex to work in this folder without asking for approval
+            2. No, ask me to approve edits and commands
+
+            Press enter to continue
+        """
+        let p = TerminalPrompt.detect(inScreen: screen, agent: "codex")
+        #expect(p?.kind == .picker)
+        #expect(p?.options.map(\.index) == [1, 2])
+        #expect(p?.options.first?.label.hasPrefix("Yes, allow Codex") == true)
+        #expect(p?.detail == "/Users/me/Devel/bromure")
+        #expect(p?.selectedOption == 1)
+        #expect(p?.keys(picking: 1) == ["Enter"])
+        // The older "Do you trust the contents…" wording too.
+        let older = """
+          You are in /home/ubuntu/proj
+          Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.
+          › 1. Yes, continue
+            2. No, quit
+          Press enter to continue
+        """
+        let q = TerminalPrompt.detect(inScreen: older, agent: "codex")
+        #expect(q?.kind == .picker)
+        #expect(q?.options.map(\.label) == ["Yes, continue", "No, quit"])
+    }
+
     @Test("Kimi's real trust dialog IS a trust prompt, answerable inline with Enter")
     func kimiTrustDialogIsAnswerable() throws {
         // Real capture (kimi 2.0.2) of the interactive dialog.
