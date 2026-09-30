@@ -8,19 +8,6 @@ import Foundation
 // server-to-client messages are not inspected.
 
 extension OpenShellPolicy {
-    /// MCP revisions OpenShell knows.
-    static let knownMCPVersions: Set<String> = ["2025-03-26", "2025-06-18", "2025-11-25"]
-
-    /// Client-to-server MCP methods ("every MCP method" for
-    /// `mcp.allow_all_known_mcp_methods`).
-    static let knownMCPMethods: Set<String> = [
-        "initialize", "ping", "tools/list", "tools/call", "resources/list", "resources/read",
-        "resources/templates/list", "resources/subscribe", "resources/unsubscribe", "prompts/list",
-        "prompts/get", "completion/complete", "logging/setLevel", "notifications/initialized",
-        "notifications/cancelled", "notifications/progress", "notifications/roots/list_changed",
-        "tasks/get", "tasks/list", "tasks/cancel", "tasks/result",
-    ]
-
     /// A JSON-RPC message the client sent.
     struct RPCMessage {
         var method: String?
@@ -51,7 +38,7 @@ extension OpenShellPolicy {
         guard let pattern else { return true }
         if pattern == "*" { return true }
         if pattern.contains("*") || pattern.contains("?") || pattern.contains("[") {
-            return Glob.match(pattern, method, separator: "/", caseInsensitive: false)
+            return RegoGlob.match(pattern, delimiters: [], method)
         }
         return pattern == method
     }
@@ -59,66 +46,22 @@ extension OpenShellPolicy {
     static func toolMatches(_ globs: [String]?, _ tool: String?) -> Bool {
         guard let globs else { return true }
         guard let tool else { return false }
-        return globs.contains { Glob.match($0, tool, separator: ".", caseInsensitive: false) }
+        return globs.contains { RegoGlob.match($0, delimiters: [], tool) }
     }
 
     static let strictToolName = try! NSRegularExpression(pattern: "^[A-Za-z0-9_.-]{1,128}$")
 
-    func evaluateMCP(_ r: L7Request, _ ep: Endpoint) -> EndpointVerdict {
-        // Streamable HTTP: GET opens the server stream, DELETE ends the
-        // session — no client message to inspect.
-        if ["GET", "DELETE", "HEAD", "OPTIONS"].contains(r.method), (r.body ?? Data()).isEmpty { return .allow }
-        guard let body = r.body, !body.isEmpty else { return .deny("MCP request has no body") }
-        guard r.bodyComplete, body.count <= ep.mcp.maxBody else {
-            return .deny("MCP request body exceeds the \(ep.mcp.maxBody)-byte inspection limit")
-        }
-        guard let messages = Self.rpcMessages(body) else { return .deny("MCP request is not valid JSON-RPC") }
-
-        // Revision: from the header, except on a lone `initialize` (it negotiates).
-        let isInitialize = messages.count == 1 && messages[0].method == "initialize"
-        if !isInitialize {
-            let v = r.headers["mcp-protocol-version"] ?? "2025-03-26"
-            guard Self.knownMCPVersions.contains(v) else { return .deny("unsupported MCP-Protocol-Version \(v)") }
-            guard ep.mcp.versions.contains(v) else { return .deny("MCP revision \(v) is not allowed on this endpoint") }
-        }
-
-        let toolRules = ep.rpcRules.filter { $0.tool != nil }
-        for msg in messages {
-            if msg.isResponse { continue }                       // answers to server requests
-            let m = msg.method!
-            if m == "tools/call", ep.mcp.strictToolNames {
-                guard let t = msg.toolName, Self.strictToolName.firstMatch(
-                    in: t, range: NSRange(t.startIndex..., in: t)) != nil else {
-                    return .deny("tools/call with an invalid tool name")
-                }
-            }
-            if ep.rpcDenyRules.contains(where: { Self.rpcMethodMatches($0.method, m) && Self.toolMatches($0.tool, msg.toolName) }) {
-                return .deny("MCP \(m)\(msg.toolName.map { " \($0)" } ?? "") blocked by deny rule")
-            }
-            let allowed: Bool
-            if ep.mcp.allowAllKnown {
-                allowed = Self.knownMCPMethods.contains(m)
-                    && (m != "tools/call" || toolRules.isEmpty
-                        || toolRules.contains { Self.toolMatches($0.tool, msg.toolName) })
-            } else {
-                allowed = ep.rpcRules.contains { Self.rpcMethodMatches($0.method, m) && Self.toolMatches($0.tool, msg.toolName) }
-            }
-            if !allowed {
-                return .notPermitted("MCP \(m)\(msg.toolName.map { " \($0)" } ?? "") not permitted by policy")
-            }
-        }
-        return .allow
-    }
-
     func evaluateJSONRPC(_ r: L7Request, _ ep: Endpoint) -> EndpointVerdict {
-        guard let body = r.body, !body.isEmpty else { return .deny("JSON-RPC request has no body") }
+        // rego: JSON-RPC rules (allow and deny) apply to POST only.
+        guard r.method == "POST" else { return .notPermitted(nil) }
+        guard let body = r.body, !body.isEmpty else { return .hardDeny("JSON-RPC request has no body") }
         guard r.bodyComplete, body.count <= ep.jsonRPCMaxBody else {
-            return .deny("JSON-RPC request body exceeds the \(ep.jsonRPCMaxBody)-byte inspection limit")
+            return .hardDeny("JSON-RPC request body exceeds the \(ep.jsonRPCMaxBody)-byte inspection limit")
         }
-        guard let messages = Self.rpcMessages(body) else { return .deny("request is not valid JSON-RPC") }
+        guard let messages = Self.rpcMessages(body) else { return .hardDeny("request is not valid JSON-RPC") }
         for msg in messages {
             guard let m = msg.method else {
-                return .deny("JSON-RPC response frames are not permitted from client to server")
+                return .hardDeny("JSON-RPC response frames are not permitted from client to server")
             }
             if ep.rpcDenyRules.contains(where: { Self.rpcMethodMatches($0.method, m) }) {
                 return .deny("JSON-RPC \(m) blocked by deny rule")
@@ -132,95 +75,192 @@ extension OpenShellPolicy {
 
     // MARK: GraphQL
 
+    /// One classified operation (l7/graphql.rs `GraphqlOperationInfo`).
+    struct GraphQLRequestOp {
+        var op: GraphQLOperation            // type "" for a hash/id-only persisted query
+        var persisted = false
+        var hash: String?
+        var id: String?
+        var needsRegistry: Bool { persisted && op.type.isEmpty }
+        var registryKey: String? { hash ?? id }
+    }
+
+    /// Classify a GraphQL HTTP request as OpenShell does: GET from unique
+    /// query parameters, POST from a JSON envelope (or non-empty batch), any
+    /// other method refused; one operation per envelope, chosen by
+    /// `operationName` (required when the document has several).
+    static func classifyGraphQL(_ r: L7Request, maxBody: Int) -> Result<[GraphQLRequestOp], GraphQLDocument.ParseError> {
+        func fail(_ m: String) -> Result<[GraphQLRequestOp], GraphQLDocument.ParseError> { .failure(.init(message: m)) }
+        if let enc = r.headers["content-encoding"]?.trimmingCharacters(in: .whitespaces).lowercased(),
+           !enc.isEmpty, enc != "identity" { return fail("GraphQL request content-encoding \"\(enc)\" is not supported") }
+        if (r.headers["content-type"] ?? "").trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("multipart/") {
+            return fail("GraphQL multipart requests are not supported")
+        }
+        if !r.bodyComplete || (r.body?.count ?? 0) > maxBody {
+            return fail("GraphQL request body exceeds \(maxBody) byte inspection limit")
+        }
+        func envelope(query: String?, name: String?, extensions: Any?, id: String?) -> Result<GraphQLRequestOp, GraphQLDocument.ParseError> {
+            graphQLEnvelope(query: query, name: name, extensions: extensions, id: id)
+        }
+        switch r.method {
+        case "GET":
+            func unique(_ k: String) -> Result<String?, GraphQLDocument.ParseError> {
+                guard let vs = r.query[k] else { return .success(nil) }
+                guard vs.count <= 1 else { return .failure(.init(message: "GraphQL GET parameter \"\(k)\" must not appear more than once")) }
+                return .success(vs.first.flatMap { $0.isEmpty ? nil : $0 })
+            }
+            do {
+                let q = try unique("query").get(), name = try unique("operationName").get()
+                let ext = try unique("extensions").get().flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) }
+                var id: (String, String)?
+                for k in ["id", "documentId", "queryId"] {
+                    guard let v = try unique(k).get() else { continue }
+                    if let (prev, _) = id {
+                        return fail("GraphQL GET persisted-query id parameters \"\(prev)\" and \"\(k)\" must not be combined")
+                    }
+                    id = (k, v)
+                }
+                return envelope(query: q, name: name, extensions: ext, id: id?.1).map { [$0] }
+            } catch let e as GraphQLDocument.ParseError { return .failure(e) } catch { return fail("GraphQL GET rejected") }
+        case "POST":
+            guard let body = r.body, !body.isEmpty else { return fail("GraphQL POST body is empty") }
+            guard let value = try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed]) else {
+                return fail("GraphQL request body is not valid JSON")
+            }
+            let items: [Any]
+            if let a = value as? [Any] {
+                guard !a.isEmpty else { return fail("GraphQL batch request is empty") }
+                items = a
+            } else if value is [String: Any] {
+                items = [value]
+            } else {
+                return fail("GraphQL JSON envelope must be an object or array")
+            }
+            var out: [GraphQLRequestOp] = []
+            for item in items {
+                guard let o = item as? [String: Any] else { return fail("GraphQL batch item must be an object") }
+                let id = (o["id"] ?? o["documentId"] ?? o["queryId"]) as? String
+                switch envelope(query: o["query"] as? String, name: o["operationName"] as? String,
+                                extensions: o["extensions"], id: id) {
+                case .success(let op): out.append(op)
+                case .failure(let e): return .failure(e)
+                }
+            }
+            return .success(out)
+        default:
+            return fail("unsupported GraphQL HTTP method \(r.method)")
+        }
+    }
+
+    /// One GraphQL request envelope (`classify_envelope`): the operation its
+    /// document selects (by `operationName` when there are several), or a
+    /// persisted-query reference.
+    static func graphQLEnvelope(query: String?, name: String?, extensions: Any?, id: String?) -> Result<GraphQLRequestOp, GraphQLDocument.ParseError> {
+            let hash = persistedHash(extensions).flatMap { $0.isEmpty ? nil : $0 }
+            if let q = query, !q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                do {
+                    let ops = try GraphQLDocument.operations(in: q)
+                    let selected: GraphQLOperation
+                    if let name, !name.isEmpty {
+                        guard let hit = ops.first(where: { $0.name == name }) else {
+                            return .failure(.init(message: "GraphQL operationName \"\(name)\" was not found"))
+                        }
+                        selected = hit
+                    } else if ops.count == 1 {
+                        selected = ops[0]
+                    } else {
+                        return .failure(.init(message: "GraphQL document has multiple operations but no operationName"))
+                    }
+                    return .success(GraphQLRequestOp(op: selected, persisted: hash != nil || id != nil, hash: hash, id: id))
+                } catch let e as GraphQLDocument.ParseError {
+                    return .failure(.init(message: "GraphQL document parse error: \(e.message)"))
+                } catch {
+                    return .failure(.init(message: "GraphQL document parse error"))
+                }
+            }
+            if hash != nil || id != nil {
+                return .success(GraphQLRequestOp(op: GraphQLOperation(type: "", name: name, fields: []),
+                                                 persisted: true, hash: hash, id: id))
+            }
+            return .failure(.init(message: "GraphQL request has no query document or persisted query identifier"))
+        }
+
+    /// A POST batch item / GraphQL-over-WebSocket payload (`classify_json_envelope`).
+    static func classifyGraphQLEnvelope(_ o: [String: Any]) -> Result<GraphQLRequestOp, GraphQLDocument.ParseError> {
+        graphQLEnvelope(query: o["query"] as? String, name: o["operationName"] as? String,
+                        extensions: o["extensions"], id: (o["id"] ?? o["documentId"] ?? o["queryId"]) as? String)
+    }
+
+    /// A GraphQL endpoint is authoritative: the request is allowed only when
+    /// every operation is allowed, and otherwise denied (never merely "not
+    /// permitted", so a broader REST rule can't let it through).
     func evaluateGraphQL(_ r: L7Request, _ ep: Endpoint) -> EndpointVerdict {
-        if !r.bodyComplete || (r.body?.count ?? 0) > ep.graphqlMaxBody {
-            return .deny("GraphQL request body exceeds the \(ep.graphqlMaxBody)-byte inspection limit")
+        let ops: [GraphQLRequestOp]
+        switch Self.classifyGraphQL(r, maxBody: ep.graphqlMaxBody) {
+        case .failure(let e): return .deny("GraphQL request rejected: \(e.message)")
+        case .success(let o): ops = o
         }
-        // Collect (query text?, persisted hash?) per request in a (batched) call.
-        var requests: [(query: String?, hash: String?)] = []
-        if r.method == "GET" {
-            let q = r.query["query"]?.first
-            requests.append((q, Self.persistedHash(r.query["extensions"]?.first.flatMap {
-                try? JSONSerialization.jsonObject(with: Data($0.utf8)) })))
-        } else if let body = r.body, !body.isEmpty {
-            if (r.headers["content-type"] ?? "").lowercased().hasPrefix("application/graphql") {
-                requests.append((String(decoding: body, as: UTF8.self), nil))
-            } else {
-                guard let obj = try? JSONSerialization.jsonObject(with: body) else {
-                    return .deny("GraphQL request rejected: body is not JSON")
-                }
-                let list = (obj as? [Any]) ?? [obj]
-                for item in list {
-                    guard let d = item as? [String: Any] else { return .deny("GraphQL request rejected: malformed batch") }
-                    let hash = Self.persistedHash(d["extensions"])
-                        ?? (d["id"] as? String) ?? (d["documentId"] as? String)
-                    requests.append((d["query"] as? String, hash))
-                }
-            }
-        }
-        guard !requests.isEmpty else { return .deny("GraphQL request has no operation") }
+        return evaluateGraphQLOps(ops, ep)
+    }
 
-        var ops: [GraphQLOperation] = []
-        for req in requests {
-            if let q = req.query, !q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                do { ops += try GraphQLDocument.operations(in: q) }
-                catch { return .deny("GraphQL request rejected: \(error)") }
-            } else if let h = req.hash {
-                guard ep.persistedQueriesAllowRegistered, let op = ep.graphqlRegistry[h] else {
-                    return .deny("GraphQL persisted query is not registered")
-                }
-                ops.append(op)
-            } else {
-                return .deny("GraphQL request rejected: no query")
+    /// Rego's GraphQL judgement of classified operations on one endpoint.
+    func evaluateGraphQLOps(_ ops: [GraphQLRequestOp], _ ep: Endpoint) -> EndpointVerdict {
+        guard !ops.isEmpty else { return .deny("GraphQL request has no operation") }
+        var effective: [GraphQLOperation] = []
+        for o in ops {
+            guard o.needsRegistry else { effective.append(o.op); continue }
+            guard ep.persistedQueriesAllowRegistered, let key = o.registryKey, let reg = ep.graphqlRegistry[key] else {
+                return .deny("GraphQL persisted query is not registered")
             }
+            effective.append(reg)
         }
-
+        for op in effective where ep.gqlDenyRules.contains(where: { Self.gqlDenyMatches($0, op) }) {
+            return .deny("GraphQL operation blocked by endpoint policy")
+        }
         let allow = graphqlAllowMatchers(ep)
-        for op in ops {
-            if ep.gqlDenyRules.contains(where: { Self.gqlDenyMatches($0, op) }) {
-                return .deny("GraphQL operation blocked by endpoint policy")
-            }
-        }
-        for op in ops where !allow.contains(where: { Self.gqlAllowMatches($0, op) }) {
-            return .notPermitted("GraphQL \(op.type)\(op.name.map { " \($0)" } ?? "") not permitted by policy")
+        for op in effective where !allow.contains(where: { Self.gqlAllowMatches($0, op) }) {
+            return .deny("GraphQL \(op.type)\(op.name.map { " \($0)" } ?? "") not permitted by policy")
         }
         return .allow
     }
 
     private func graphqlAllowMatchers(_ ep: Endpoint) -> [GraphQLMatcher] {
         guard let access = ep.access else { return ep.gqlRules }
-        let types: [String]
         switch access {
-        case .readOnly:  types = ["query"]
-        case .readWrite: types = ["query", "mutation"]
-        case .full:      types = ["query", "mutation", "subscription"]
+        case .readOnly:  return [GraphQLMatcher(operationType: "query", operationName: nil, fields: nil)]
+        case .readWrite: return ["query", "mutation"].map { GraphQLMatcher(operationType: $0, operationName: nil, fields: nil) }
+        case .full:      return [GraphQLMatcher(operationType: "*", operationName: nil, fields: nil)]
         }
-        return types.map { GraphQLMatcher(operationType: $0, operationName: nil, fields: nil) }
     }
 
     static func persistedHash(_ extensions: Any?) -> String? {
         ((extensions as? [String: Any])?["persistedQuery"] as? [String: Any])?["sha256Hash"] as? String
     }
 
+    /// rego `graphql_operation_name_matches`: an anonymous operation's name is "".
     static func gqlNameMatches(_ glob: String?, _ name: String?) -> Bool {
-        guard let glob else { return true }
-        guard let name else { return false }
-        return Glob.match(glob, name, separator: nil, caseInsensitive: false)
+        guard let glob, !glob.isEmpty else { return true }
+        return RegoGlob.match(glob, delimiters: [], name ?? "")
     }
 
-    /// Allow: type + name match, and EVERY top-level field matches a glob.
+    static func gqlTypeMatches(_ expected: String, _ actual: String) -> Bool {
+        expected == "*" || (!expected.isEmpty && expected.lowercased() == actual.lowercased())
+    }
+
+    /// Allow: type + name match, and EVERY top-level field matches a glob
+    /// (a rule with `fields` never matches an operation without fields).
     static func gqlAllowMatches(_ m: GraphQLMatcher, _ op: GraphQLOperation) -> Bool {
-        guard m.operationType == op.type, gqlNameMatches(m.operationName, op.name) else { return false }
-        guard let fields = m.fields else { return true }
-        return op.fields.allSatisfy { f in fields.contains { Glob.match($0, f, separator: nil, caseInsensitive: false) } }
+        guard gqlTypeMatches(m.operationType, op.type), gqlNameMatches(m.operationName, op.name) else { return false }
+        guard let fields = m.fields, !fields.isEmpty else { return true }
+        return !op.fields.isEmpty && op.fields.allSatisfy { f in fields.contains { RegoGlob.match($0, delimiters: [], f) } }
     }
 
     /// Deny: type + name match, and ONE top-level field matches (no `fields`
     /// = every matching operation).
     static func gqlDenyMatches(_ m: GraphQLMatcher, _ op: GraphQLOperation) -> Bool {
-        guard m.operationType == op.type, gqlNameMatches(m.operationName, op.name) else { return false }
-        guard let fields = m.fields else { return true }
-        return op.fields.contains { f in fields.contains { Glob.match($0, f, separator: nil, caseInsensitive: false) } }
+        guard gqlTypeMatches(m.operationType, op.type), gqlNameMatches(m.operationName, op.name) else { return false }
+        guard let fields = m.fields, !fields.isEmpty else { return true }
+        return op.fields.contains { f in fields.contains { RegoGlob.match($0, delimiters: [], f) } }
     }
 }
 
@@ -375,6 +415,9 @@ enum GraphQLDocument {
         }
         guard !ops.isEmpty else { throw ParseError(message: "document has no operation") }
 
+        // As OpenShell collects root fields: unknown fragments contribute
+        // nothing, and each fragment is expanded at most once per operation.
+        var visited = Set<String>()
         func flatten(_ sels: [Selection], _ seen: Set<String>) throws -> [String] {
             var out: [String] = []
             for s in sels {
@@ -382,14 +425,16 @@ enum GraphQLDocument {
                 case .field(let f): out.append(f)
                 case .inline(let inner): out += try flatten(inner, seen)
                 case .spread(let n):
-                    guard let frag = fragments[n] else { throw ParseError(message: "unknown fragment \(n)") }
-                    guard !seen.contains(n) else { throw ParseError(message: "fragment cycle at \(n)") }
-                    out += try flatten(frag, seen.union([n]))
+                    guard visited.insert(n).inserted, let frag = fragments[n] else { continue }
+                    out += try flatten(frag, seen)
                 }
             }
             return out
         }
-        return try ops.map { .init(type: $0.type, name: $0.name, fields: try flatten($0.selections, [])) }
+        return try ops.map { op in
+            visited = []
+            return .init(type: op.type, name: op.name, fields: Array(Set(try flatten(op.selections, []))).sorted())
+        }
     }
 
     indirect enum Selection { case field(String), spread(String), inline([Selection]) }

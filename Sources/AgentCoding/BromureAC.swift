@@ -3090,6 +3090,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             wireOpenShellAdvisor(engine)
             AgentWatchdog.shared.modeProvider = { OpenShellAdvisorModeCache.shared.watchdogMode(for: $0) }
+            // The kernel sentry's liveness clock only runs while the VM does
+            // (a paused, quarantined or suspended VM sends nothing).
+            let running = KernelSentryRunState()
+            KernelSentryService.shared.vmRunningProvider = { running.isRunning($0) }
+            KernelSentryService.shared.pinDirectory = { [weak self] in self?.store.profileDirectory(for: $0) }
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    running.set(Set(self.runningSessions.compactMap { pid, s in
+                        s.sandbox.vm?.state == .running ? pid : nil
+                    }))
+                }
+            }
             AgentWatchdog.shared.onTrip = { [weak self] pid, mode, signals in
                 Task { @MainActor [weak self] in self?.handleWatchdogTrip(pid, mode: mode, signals: signals) }
             }
@@ -4344,6 +4357,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ?? ["error": "unavailable"]
         }
         server.onDescribeProfile = { [weak self] key in self?.automationProfileDescribe(key) }
+        server.onProfilePolicyRevisions = { [weak self] key, method, sub, body in
+            guard let dir = DispatchQueue.main.sync(execute: { () -> URL? in
+                guard let self, let p = self.profileByNameOrID(key) else { return nil }
+                return self.store.profileDirectory(for: p)
+            }) else { return (404, ["error": "Profile not found"]) }
+            return Self.policyRevisionsRoute(directory: dir, method: method, sub: sub)
+        }
+        server.onProfileProposals = { [weak self] key, method, sub, body in
+            guard let pid = DispatchQueue.main.sync(execute: { self?.profileByNameOrID(key)?.id }) else {
+                return (404, ["error": "Profile not found"])
+            }
+            return Self.advisorProposalsRoute(profileID: pid, method: method, sub: sub, body: body)
+        }
         server.onExportProfile = { [weak self] key in self?.automationProfileExport(key) }
         server.onCreateProfile = { [weak self] doc in
             self?.automationUpsertProfile(idOrName: nil, doc: doc) ?? ["ok": false, "error": "unavailable"]
@@ -5284,6 +5310,78 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// Curated, secret-free view of a profile's settings for `profiles describe`.
+    /// Control-socket route for a workspace's OpenShell policy revisions:
+    ///   GET /profiles/{id}/policy/revisions        → every revision (no text)
+    ///   GET /profiles/{id}/policy/revisions/{n}    → one revision, with its policy
+    nonisolated static func policyRevisionsRoute(directory: URL, method: String, sub: [String])
+        -> (status: Int, body: [String: Any]) {
+        guard method == "GET", sub.count >= 2, sub[1] == "revisions" else {
+            return (405, ["error": "Use GET /policy/revisions[/{version}]"])
+        }
+        let iso = ISO8601DateFormatter()
+        let all = PolicyHistory.shared.revisions(in: directory)
+        func describe(_ r: PolicyHistory.Revision, withPolicy: Bool) -> [String: Any] {
+            var d: [String: Any] = ["version": r.version, "hash": r.hash,
+                                    "saved_at": iso.string(from: r.savedAt), "source": r.source]
+            if withPolicy { d["policy"] = r.policy }
+            return d
+        }
+        if sub.count == 3 {
+            guard let n = Int(sub[2]), let r = all.first(where: { $0.version == n }) else {
+                return (404, ["error": "No revision \(sub[2])"])
+            }
+            return (200, describe(r, withPolicy: true))
+        }
+        return (200, ["current": all.last?.version as Any, "revisions": all.reversed().map { describe($0, withPolicy: false) }])
+    }
+
+    /// Control-socket route for the OpenShell advisor's proposals — the
+    /// same approve / reject the policy editor offers:
+    ///   GET  /profiles/{id}/proposals                       → every proposal
+    ///   POST /profiles/{id}/proposals/{proposal}/approve
+    ///   POST /profiles/{id}/proposals/{proposal}/reject     {"reason": "…"}
+    /// Runs on the automation server's thread.
+    nonisolated static func advisorProposalsRoute(profileID: UUID, method: String, sub: [String],
+                                                  body: [String: Any], advisor: OpenShellAdvisor = .shared)
+        -> (status: Int, body: [String: Any]) {
+        func describe(_ p: OpenShellAdvisor.Proposal) -> [String: Any] {
+            var d: [String: Any] = [
+                "id": p.id, "status": p.status.rawValue, "source": p.source, "intent": p.intent,
+                "host": p.host, "port": Int(p.port), "rule_name": p.rule.name,
+                "binaries": p.rule.binaries, "findings": p.findings, "auto": p.auto,
+                "created_at": ISO8601DateFormatter().string(from: p.createdAt),
+            ]
+            if let r = p.rejectionReason { d["rejection_reason"] = r }
+            if let e = p.applicationError { d["application_error"] = e }
+            return d
+        }
+        switch (method, sub.count) {
+        case ("GET", 1):
+            return (200, ["proposals": advisor.proposals(for: profileID).map(describe)])
+        case ("POST", 3) where sub[2] == "approve" || sub[2] == "reject":
+            let id = sub[1]
+            guard let current = advisor.proposals(for: profileID).first(where: { $0.id == id }) else {
+                return (404, ["error": "No proposal \(id)"])
+            }
+            guard current.status == .pending else {
+                return (409, ["error": "Proposal \(id) is already \(current.status.rawValue)", "proposal": describe(current)])
+            }
+            if sub[2] == "reject" {
+                advisor.reject(id: id, profileID: profileID, reason: (body["reason"] as? String) ?? "")
+            } else {
+                let done = DispatchSemaphore(value: 0)
+                Task.detached { await advisor.approve(id: id, profileID: profileID); done.signal() }
+                if done.wait(timeout: .now() + 30) == .timedOut {
+                    return (504, ["error": "Approving \(id) timed out"])
+                }
+            }
+            let after = advisor.proposals(for: profileID).first { $0.id == id }
+            return (200, ["ok": true, "proposal": after.map(describe) ?? [:]])
+        default:
+            return (405, ["error": "Use GET /proposals or POST /proposals/{id}/approve|reject"])
+        }
+    }
+
     @MainActor private func automationProfileDescribe(_ key: String) -> [String: Any]? {
         guard let p = profileByNameOrID(key) else { return nil }
         let iso = ISO8601DateFormatter()
@@ -8810,7 +8908,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// that was running when the VM was suspended can reattach.
     @MainActor
     func attachIdentityBridge(profile: Profile, socketDevice: VZVirtioSocketDevice, restoring: Bool) {
-        guard profile.effectiveStrictSandbox else { return }
+        // The attestor also carries the guest sandbox's status, so it runs
+        // whenever OpenShell's filesystem / process sections or the kernel
+        // sentry are in play, not only under strict sandbox.
+        let spec = OpenShellSandboxSpec(policyYAML: profile.networkPolicy, workdirs: [],
+                                        strictSandbox: profile.effectiveStrictSandbox,
+                                        sentry: profile.effectiveKernelSentry.rawValue)
+        if !restoring { GuestSandboxStatusStore.shared.reset(profileID: profile.id) }
+        KernelSentryService.shared.attach(profile: profile, socketDevice: socketDevice, restoring: restoring)
+        guard profile.effectiveStrictSandbox || spec.isActive else { return }
         let secret = store.profileDirectory(for: profile).appendingPathComponent("attestor.secret")
         if !restoring { try? FileManager.default.removeItem(at: secret) }
         BinaryIdentityService.shared.attach(profileID: profile.id, socketDevice: socketDevice, secretFile: secret)
@@ -8839,7 +8945,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                        !result.passed {
                         return "outside the organization boundary — \(result.summary)"
                     }
-                    try self.persistEditedProfile(&updated, editing: existing, generateSSH: false)
+                    try self.persistEditedProfile(&updated, editing: existing, generateSSH: false, policySource: "advisor")
                 } catch {
                     return "\(error)"
                 }
@@ -8874,7 +8980,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// the sidebar. Throws on disk/keychain failure.
     @MainActor
     func persistEditedProfile(_ profile: inout Profile, editing: Profile?,
-                              generateSSH: Bool) throws {
+                              generateSSH: Bool, policySource: String = "user") throws {
         // Belt-and-braces: trim every secret before persisting. Pasted tokens
         // routinely come with trailing whitespace; embedding either in an HTTP
         // header value at swap time would corrupt the request and trigger a
@@ -8890,6 +8996,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         try store.save(profile)
+        // The OpenShell policy's revision history (identical saves keep the
+        // current version).
+        if profile.usesOpenShellPolicy || !(PolicyHistory.shared.revisions(in: store.profileDirectory(for: profile)).isEmpty) {
+            PolicyHistory.shared.record(policy: profile.networkPolicy, source: policySource,
+                                        in: store.profileDirectory(for: profile))
+        }
         // Write the managed home with FAKE credentials, not reals. The editor
         // save previously called prepareHomeDirectory with NO token plan, so
         // its git / gh / glab / docker writers fell back to the real secret —
@@ -9123,7 +9235,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         var toSave = profile
         do {
-            try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH)
+            try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH, policySource: "api")
         } catch {
             return ["ok": false, "error": error.localizedDescription]
         }
@@ -9293,12 +9405,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case terminalAppearance
         case gitIdentity
         case strictSandbox
+        case guestSandbox
     }
 
     private func restartLabel(for change: RestartChange) -> String {
         switch change {
         case .strictSandbox:
             return NSLocalizedString("Strict sandbox", comment: "restart-required change")
+        case .guestSandbox:
+            return NSLocalizedString("Filesystem / process sandbox or kernel sentry", comment: "restart-required change")
         case .memory:
             return NSLocalizedString("VM memory", comment: "")
         case .networking:
@@ -9355,6 +9470,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         if old.folderPaths != new.folderPaths { changes.append(.sharedFolders) }
         if old.effectiveStrictSandbox != new.effectiveStrictSandbox { changes.append(.strictSandbox) }
+        if old.effectiveKernelSentry != new.effectiveKernelSentry
+            || OpenShellSandboxSpec.sectionsFingerprint(yaml: old.networkPolicy)
+                != OpenShellSandboxSpec.sectionsFingerprint(yaml: new.networkPolicy) {
+            changes.append(.guestSandbox)
+        }
         // Note: a plain API-key change is NOT here — it's applied live
         // (api_key.env + swap map). Only switching the tool itself or its
         // auth mode needs a restart, since that re-runs the agent
@@ -12968,6 +13088,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         shellBridges[profile.id]?.stop()
         shellBridges.removeValue(forKey: profile.id)
         BinaryIdentityService.shared.detach(profileID: profile.id, socketDevice: nil)
+        KernelSentryService.shared.detach(profileID: profile.id, socketDevice: nil)
+        GuestSandboxStatusStore.shared.reset(profileID: profile.id)
         OpenShellAdvisor.shared.reset(profileID: profile.id)
         AgentWatchdog.shared.reset(profileID: profile.id)
         UnmanagedCredentialGuard.shared.reset(profileID: profile.id)

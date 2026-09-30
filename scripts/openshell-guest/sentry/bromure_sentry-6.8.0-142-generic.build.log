@@ -1,0 +1,8 @@
+make: Entering directory '/usr/src/linux-headers-6.8.0-142-generic'
+  CC [M]  /tmp/bromure-sentry-build/build/bromure_sentry.o
+  MODPOST /tmp/bromure-sentry-build/build/Module.symvers
+  CC [M]  /tmp/bromure-sentry-build/build/bromure_sentry.mod.o
+  LD [M]  /tmp/bromure-sentry-build/build/bromure_sentry.ko
+  BTF [M] /tmp/bromure-sentry-build/build/bromure_sentry.ko
+Skipping BTF generation for /tmp/bromure-sentry-build/build/bromure_sentry.ko due to unavailability of vmlinux
+make: Leaving directory '/usr/src/linux-headers-6.8.0-142-generic'

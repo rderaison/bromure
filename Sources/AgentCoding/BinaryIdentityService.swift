@@ -23,8 +23,8 @@ public final class BinaryIdentityService: @unchecked Sendable {
 
     private let lock = NSLock()
     private var bridges: [UUID: AttestorBridge] = [:]
-    /// (profile, exe path) → first-seen sha256.
-    private var pinnedHashes: [UUID: [String: String]] = [:]
+    /// Per profile: exe path → first-seen sha256 (OpenShell's TOFU rules).
+    private var pinnedHashes: [UUID: OpenShellPolicy.BinaryPinStore] = [:]
     /// L4 decisions in flight / made, keyed by flow, for the switch gate.
     private var gateResults: [GateKey: (EgressPolicy.Verdict?, Date)] = [:]
 
@@ -60,8 +60,27 @@ public final class BinaryIdentityService: @unchecked Sendable {
     /// The attested identity of the guest socket `sport → dst:dport`, or nil.
     public func identity(profileID: UUID, sport: UInt16, dst: String, dport: UInt16) async
         -> OpenShellPolicy.BinaryIdentity? {
+        // A strict revocation that didn't fully land leaves the agent a path
+        // to root, so the attestor's answers can't be trusted: no identity,
+        // and binary-scoped rules fail closed.
+        if GuestSandboxStatusStore.shared.status(for: profileID)?.strictApplied == false {
+            BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
+                "action": .string("deny"), "layer": .string("identity"), "host": .string(dst), "port": .int(Int(dport)),
+                "reason": .string("the strict sandbox didn't fully apply in the VM, so binary identity can't be trusted")])
+            return nil
+        }
         let req: [String: Any] = ["op": "who", "sport": Int(sport), "dst": dst, "dport": Int(dport)]
         lock.lock(); let bridge = bridges[profileID]; lock.unlock()
+        // Early in a boot the guest's attestor may not have connected yet;
+        // wait briefly for it rather than failing binary rules closed on a
+        // connection that raced it. (An attestor that never comes up still
+        // fails closed after the wait.)
+        if queryOverride == nil, let bridge, !bridge.isConnected,
+           Date().timeIntervalSince(bridge.attachedAt) < 60 {
+            for _ in 0..<40 where !bridge.isConnected {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
         let answer: [String: Any]?
         if let queryOverride { answer = await queryOverride(profileID, req) }
         else { answer = await bridge?.query(req) }
@@ -70,27 +89,25 @@ public final class BinaryIdentityService: @unchecked Sendable {
               let exe = reply["exe"] as? String, let sha = reply["sha256"] as? String else {
             return nil
         }
-        let ancestors = (reply["ancestors"] as? [[String: Any]] ?? []).compactMap { a -> OpenShellPolicy.BinaryIdentity.Link? in
-            guard let e = a["exe"] as? String, let h = a["sha256"] as? String else { return nil }
-            return .init(exe: e, sha256: h)
-        }
-        let identity = OpenShellPolicy.BinaryIdentity(exe: exe, sha256: sha, ancestors: ancestors)
-        // Trust on first use: every executable in the chain keeps its first hash.
-        var changed: String?
+        let rawAncestors = reply["ancestors"] as? [[String: Any]] ?? []
+        // OpenShell refuses an identity with a missing digest or a relative
+        // path anywhere in the chain — so do we, rather than dropping links.
+        let links: [(exe: String, sha256: String?)] = [(exe, sha)]
+            + rawAncestors.map { ($0["exe"] as? String ?? "", $0["sha256"] as? String) }
         lock.lock()
-        var pins = pinnedHashes[profileID] ?? [:]
-        for link in [OpenShellPolicy.BinaryIdentity.Link(exe: exe, sha256: sha)] + ancestors {
-            if let known = pins[link.exe], known != link.sha256 { changed = link.exe; break }
-            pins[link.exe] = pins[link.exe] ?? link.sha256
-        }
-        if changed == nil { pinnedHashes[profileID] = pins }
+        var store = pinnedHashes[profileID] ?? OpenShellPolicy.BinaryPinStore()
+        let refusal = store.verifyOrPin(links)
+        if refusal == nil { pinnedHashes[profileID] = store }
         lock.unlock()
-        if let changed {
+        if let refusal {
             BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
                 "action": .string("deny"), "layer": .string("identity"), "host": .string(dst), "port": .int(Int(dport)),
-                "reason": .string("\(changed) changed since it was first seen this session (hash mismatch)")])
+                "reason": .string(refusal)])
             return nil
         }
+        let identity = OpenShellPolicy.BinaryIdentity(
+            exe: exe, sha256: sha,
+            ancestors: links.dropFirst().map { .init(exe: $0.exe, sha256: $0.sha256 ?? "") })
         return identity
     }
 
@@ -134,6 +151,8 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
     private var listener: VZVirtioSocketListener?
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return fd >= 0 }
+    /// When this bridge started listening (the VM's boot, for a fresh start).
+    let attachedAt = Date()
 
     init(profileID: UUID, secretFile: URL) {
         self.profileID = profileID
@@ -202,8 +221,13 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
         tv = timeval(tv_sec: 0, tv_usec: 0)
         setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         while let line = reader.next() {
-            guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-                  let id = obj["id"] as? Int else { continue }
+            guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+            // Unsolicited guest reports (no id): the sandbox launcher's status.
+            if obj["id"] == nil, let event = obj["event"] as? String {
+                if event == "sandbox_status" { GuestSandboxStatusStore.shared.update(profileID: profileID, report: obj) }
+                continue
+            }
+            guard let id = obj["id"] as? Int else { continue }
             lock.lock(); let w = waiters.removeValue(forKey: id); lock.unlock()
             w?.resume(returning: obj)
         }
@@ -275,5 +299,127 @@ private struct LineReader {
             buffer.append(contentsOf: chunk[0..<n])
             if buffer.count > 4 * 1024 * 1024 { return nil }
         }
+    }
+}
+
+// MARK: - Guest sandbox status
+
+/// What the guest's root launcher reported about OpenShell's
+/// filesystem_policy / landlock / process enforcement (on the attestor
+/// channel, `{"event":"sandbox_status",…}`), per workspace. A change is
+/// recorded on the Security Timeline (and so in OCSF), and a sandbox that
+/// failed or degraded is a watchdog signal.
+public final class GuestSandboxStatusStore: @unchecked Sendable {
+    public static let shared = GuestSandboxStatusStore()
+
+    public struct Status: Equatable, Sendable {
+        public var filesystem: String          // enforced / degraded / failed / off
+        public var degradedReason: String?
+        public var landlockABI: Int?
+        public var seccomp: String?
+        public var runAsUser: String?
+        public var runAsUID: Int?
+        public var sentry: String?             // running / unavailable / off
+        /// Why the sentry is unavailable (kernel mismatch, no headers, …).
+        public var sentryReason: String?
+        /// The strict revocation: true = every privilege path removed,
+        /// false = attempted but not fully applied, nil = not a strict boot.
+        public var strictApplied: Bool?
+        public var additionsReadWrite: [String]
+        public var additionsReadOnly: [String]
+        /// Guest-side caveats (e.g. the run_as uid can't write a workdir).
+        public var warnings: [String]
+        /// The supervisor restarted the sandboxed session server this many
+        /// times (kill-server, last window closed, …).
+        public var serverRestarts: Int
+        public var receivedAt: Date
+    }
+
+    private let lock = NSLock()
+    private var statuses: [UUID: Status] = [:]
+    /// Fired on every change (UI refresh).
+    public var onChange: (@Sendable (UUID) -> Void)?
+
+    public func status(for profileID: UUID) -> Status? {
+        lock.lock(); defer { lock.unlock() }
+        return statuses[profileID]
+    }
+
+    public func reset(profileID: UUID) {
+        lock.lock(); statuses[profileID] = nil; lock.unlock()
+        onChange?(profileID)
+    }
+
+    func update(profileID: UUID, report r: [String: Any], now: Date = Date()) {
+        // The guest hasn't assembled its sandbox yet: nothing to record, and
+        // nothing to cross-check (an early "off" would read as an impostor).
+        if r["filesystem"] as? String == "pending" { return }
+        let runAs = r["run_as"] as? [String: Any]
+        let additions = r["additions"] as? [String: Any]
+        let st = Status(
+            filesystem: r["filesystem"] as? String ?? "off",
+            degradedReason: r["degraded_reason"] as? String,
+            landlockABI: r["landlock_abi"] as? Int,
+            seccomp: r["seccomp"] as? String,
+            runAsUser: runAs?["user"] as? String,
+            runAsUID: runAs?["uid"] as? Int,
+            sentry: r["sentry"] as? String,
+            sentryReason: r["sentry_reason"] as? String,
+            strictApplied: r["strict_applied"] as? Bool,
+            additionsReadWrite: additions?["read_write"] as? [String] ?? [],
+            additionsReadOnly: additions?["read_only"] as? [String] ?? [],
+            warnings: r["warnings"] as? [String] ?? [],
+            serverRestarts: r["server_restarts"] as? Int ?? 0,
+            receivedAt: now)
+        lock.lock()
+        let previous = statuses[profileID]
+        statuses[profileID] = st
+        lock.unlock()
+        KernelSentryService.shared.crossCheck(profileID: profileID, guestSentry: st.sentry,
+                                              digest: r["sentry_digest"] as? String)
+        // Restarts of the sandboxed session server: a burst means something
+        // keeps killing it (the first step of trying to get an unsandboxed
+        // replacement) — a watchdog signal.
+        let restartDelta = st.serverRestarts - (previous?.serverRestarts ?? 0)
+        if restartDelta >= 3 {
+            BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "sentry.alarm", eventData: [
+                "kind": .string("tampering"), "weight": .int(10),
+                "reason": .string("the sandboxed session server was restarted \(restartDelta) times"),
+            ])
+        }
+        var comparable = st; comparable.receivedAt = previous?.receivedAt ?? now
+        guard previous != comparable else { return }
+        // Into the app log too (tee'd to bromure-ac.log): when a sandboxed
+        // workspace has no session, the guest's own explanation is here.
+        let tag = profileID.uuidString.prefix(8)
+        var line = "[sandbox] \(tag) filesystem=\(st.filesystem) seccomp=\(st.seccomp ?? "-") run_as=\(st.runAsUser ?? "-") sentry=\(st.sentry ?? "-")"
+        if let v = st.strictApplied { line += " strict_applied=\(v)" }
+        if let v = st.degradedReason { line += " reason=\(v)" }
+        // Which guest code produced this (short script hashes), so a run can't
+        // be mistaken for one of a different delivery.
+        if let build = r["build"] as? [String: Any], !build.isEmpty {
+            line += " build=" + build.keys.sorted().map { "\($0):\(build[$0].map { "\($0)" } ?? "?")" }.joined(separator: ",")
+        }
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+        for w in st.warnings where !(previous?.warnings.contains(w) ?? false) {
+            FileHandle.standardError.write(Data("[sandbox] \(tag) warning: \(w)\n".utf8))
+        }
+        var data: [String: AnyJSON] = [
+            "filesystem": .string(st.filesystem),
+            "action": .string(st.filesystem == "failed" || st.filesystem == "degraded" ? "degraded"
+                              : st.filesystem == "off" ? "off" : "enforced"),
+        ]
+        if let v = st.degradedReason { data["reason"] = .string(v) }
+        if let v = st.landlockABI { data["landlock_abi"] = .int(v) }
+        if let v = st.seccomp { data["seccomp"] = .string(v) }
+        if let v = st.runAsUser { data["run_as"] = .string(v) }
+        if let v = st.sentry { data["sentry"] = .string(v) }
+        if let v = st.sentryReason { data["sentry_reason"] = .string(v) }
+        if let v = st.strictApplied { data["strict_applied"] = .bool(v) }
+        if !st.additionsReadWrite.isEmpty { data["additions_rw"] = .array(st.additionsReadWrite.map { .string($0) }) }
+        if !st.additionsReadOnly.isEmpty { data["additions_ro"] = .array(st.additionsReadOnly.map { .string($0) }) }
+        if !st.warnings.isEmpty { data["warnings"] = .array(st.warnings.map { .string($0) }) }
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "sandbox.status", eventData: data)
+        onChange?(profileID)
     }
 }

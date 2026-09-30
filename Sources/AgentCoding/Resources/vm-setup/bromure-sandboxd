@@ -1,0 +1,2567 @@
+#!/usr/bin/env python3
+"""bromure-sandboxd — the root launcher that owns the sandboxed tmux server.
+
+This is Bromure's answer to OpenShell's supervisor/workload split, and to the
+design question in §1 of the contract: *who applies the sandbox, and to what?*
+
+The shape of the problem. `bromure-agentd.py` runs as `ubuntu` under systemd and
+starts one tmux server; every agent and every user shell lives in a pane of that
+server. agentd cannot setuid, so it cannot apply `run_as_user` to anything, and
+it cannot open Landlock path fds for a mode-700 directory. Worse, a sandbox
+applied by agentd to itself would cover agentd — including the vsock channels
+and the host bridges, which must stay outside.
+
+So the boundary is the tmux server, and something with root has to put it there:
+
+    agentd (ubuntu, unsandboxed)
+      └── sudo bromure-sandboxd            <- root, this program
+            ├── reads /mnt/bromure-meta/openshell-sandbox.json
+            ├── opens Landlock path fds  AS ROOT  (OpenShell phase 1)
+            ├── setsid()                          (own session; see below)
+            ├── drop_privileges()                 (OpenShell's order, verbatim)
+            ├── no_new_privs + restrict_self + child filter + main filter
+            └── exec tmux -S … new-session -d     (server inherits all of it)
+
+Everything the agent can ever reach is a descendant of that tmux server, so
+everything the agent can ever reach is inside the ruleset. agentd stays outside
+it, which is what lets it keep talking to the host.
+
+Why the tmux server and not each pane: a per-pane sandbox would be applied by
+the tmux server, which would then be *outside* it — and the tmux server is
+reachable from every pane through its own control socket. The server is the
+narrowest boundary that has nothing trusted inside it.
+
+Why `setsid()`: the sandboxed tree shares a uid with agentd by default (see
+DESIGN.md on virtiofs), so OpenShell's child self-protection filter is what
+stops the workload attacking its supervisor. That filter's blanket denial of
+`kill(0, …)` and `kill(<negative>, …)` would break job control in every
+interactive pane, so it is narrowed to the supervisor's TGID and PGID and
+`kill(-1)`. `setsid()` is what makes the narrowing sound: the sandbox gets its
+own session, so the only process groups it can name are its own.
+
+Exit codes: 0 applied (or deliberately skipped), 1 refused because a
+hard_requirement could not be met, 2 misconfiguration. The status written to
+STATUS_PATH is authoritative either way — attestd reads it and tells the host.
+"""
+
+import contextlib
+import errno
+import grp
+import json
+import os
+import pwd
+import signal
+import socket
+import struct
+import subprocess
+import threading
+import sys
+import time
+import warnings
+
+# Python 3.12 warns on every `os.fork()` from a multi-threaded process. Every
+# fork here is deliberate -- the confinement path exists to fork -- and all of
+# them are serialized through `_FORK_LOCK` for exactly the reason the warning
+# names. Left on, it puts a two-line DeprecationWarning in the journal for each
+# `exec` request, which is noise the host has to filter and a user has to ignore.
+warnings.filterwarnings("ignore", category=DeprecationWarning,
+                        message=r".*fork\(\) may lead to deadlocks.*")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bromure_idmap as idmap  # noqa: E402
+import bromure_openshell as osh  # noqa: E402
+
+# Overridable so tests/test_sandbox.sh can drive a full launch against a
+# throwaway tree instead of the real, read-only meta share.
+META = os.environ.get("BROMURE_META", "/mnt/bromure-meta")
+SPEC_PATH = os.path.join(META, "openshell-sandbox.json")
+RUN_DIR = os.environ.get("BROMURE_RUN_DIR", "/run/bromure-sandbox")
+STATUS_PATH = os.path.join(RUN_DIR, "status.json")
+STRICT_DONE = os.environ.get("BROMURE_STRICT_DONE", "/run/bromure-strict.done")
+WORKSPACE_USER = os.environ.get("BROMURE_WORKSPACE_USER", "ubuntu")
+TMUX_SESSION = "bromure"
+
+
+def log(message):
+    sys.stderr.write("[sandboxd] %s\n" % message)
+    sys.stderr.flush()
+
+
+# ---------------------------------------------------------------------------
+# Bromure's additions layer
+# ---------------------------------------------------------------------------
+#
+# The equivalent of the network policy's `_provider_*` rules: paths the workload
+# cannot function without *in this VM specifically*, which the user never asked
+# for and must be shown. Deliberately tiny. It is NOT a place to put /usr, /bin
+# or /lib — a policy that forgets those is a policy that is wrong, and silently
+# repairing it would mean the user's stated policy is not the one being
+# enforced. If an agent CLI turns out to need something that a valid OpenShell
+# policy wouldn't list, that is a finding to report, not a path to add here.
+
+ADDITIONS_READ_WRITE = [
+    # Where the sandboxed tmux server creates its socket. Without this the
+    # server cannot bind and there is no session at all. Note the workload is
+    # granted write here by Landlock AND by the `bromure-tmux` group; the group
+    # is what keeps agentd out, and Landlock is what keeps the sandbox in.
+    (os.path.join(RUN_DIR, "server"), "the sandboxed tmux server's socket directory"),
+    # Pty allocation for panes. Bromure's pane model is ptys; OpenShell's
+    # workload model is a single command and never needs these.
+    ("/dev/ptmx", "pty allocation for panes"),
+    ("/dev/pts", "pty slaves for panes"),
+    # Login records. Every new pane is a login shell, so tmux calls the
+    # `utempter` helper, and without this Landlock denies it and the journal
+    # gains `utempter: pututline: Permission denied` on every pane — plus `who`
+    # and `w` come back empty. A single FILE, not a directory, so this grants
+    # nothing else under /run (ctl.sock in particular stays out of reach).
+    #
+    # Inert under the strict sandbox, and worth knowing why: `utempter` is
+    # setgid `utmp`, and `no_new_privs` makes execve ignore the setgid bit, so
+    # the helper runs with the workload's own gid and cannot write /run/utmp
+    # whatever Landlock says. Under strict that message is expected and
+    # harmless. This addition is what fixes it in the Landlock-only mode, where
+    # there is no nnp.
+    ("/run/utmp", "login records for who(1)/w(1); our panes are login shells"),
+    # The other half of the same mechanism. `utempter` writes BOTH /run/utmp and
+    # /var/log/wtmp for every pane, so granting only the first left one
+    # `sandbox_denied` per pane, forever -- recurring noise from Bromure's own
+    # session plumbing, which is exactly what makes a real denial hard to see.
+    # Inert under the strict sandbox for the reason below.
+    ("/var/log/wtmp", "the login-record log utempter writes alongside /run/utmp"),
+    # bash opens /dev/tty to look for a controlling terminal -- on every
+    # `sh -c`, not only interactive ones. A policy that does not list it
+    # therefore produces one `sandbox_denied` per `vm exec`, forever, which is
+    # noise on a timer and tells nobody anything: the shell is probing, not the
+    # agent. Same justification as /dev/ptmx and /dev/pts: Bromure's workload is
+    # panes, OpenShell's is one command.
+    ("/dev/tty", "the controlling terminal bash probes for on every shell"),
+]
+
+# A docker config directory the AGENT cannot write.
+#
+# agentd's docker status loops run outside the sandbox (see `_sys_capture` in
+# bromure-agentd.py), which means an agent-written ~/.docker/config.json would be
+# read by an unconfined process -- `credsStore`, `credHelpers` and
+# `cliPluginsExtraDirs` are all exec vectors. The subcommands actually used are
+# builtins that consult none of them, so this is defence in depth; it costs a
+# root-owned empty directory, and the supervisor is the only thing here that is
+# root.
+DOCKER_CONFIG_DIR = os.path.join(RUN_DIR, "agentd-docker-config")
+
+ADDITIONS_READ_ONLY = [
+    # The host's read-only meta share: proxy.env, api_key.env, the MCP shims and
+    # the agent stubs agentd runs in panes all live here.
+    (META, "host meta share (read-only)"),
+]
+
+
+# ---------------------------------------------------------------------------
+# DNS, and OpenShell's baseline
+# ---------------------------------------------------------------------------
+
+def resolver_additions():
+    """The read-only paths a resolver needs. Returns [(path, why)].
+
+    **DNS was dead in every sandboxed workspace and nothing said so.** On this
+    image `/etc/resolv.conf` is a symlink to
+    `/run/systemd/resolve/stub-resolv.conf`, and Landlock checks the RESOLVED
+    path -- so a policy granting `/etc` does not grant the file `/etc/resolv.conf`
+    points at. Every hostname lookup then failed with
+    `Temporary failure in name resolution`, which reads as a network-policy
+    denial rather than a filesystem one. OpenShell never meets this because its
+    containers have a real `/etc/resolv.conf`.
+
+    **Unconditional**, because the alternative is a feature that silently does
+    not work: without it every hostname-based network rule is unusable, and the
+    symptom points at the wrong layer. It is also pure Bromure plumbing -- the
+    guest runs systemd-resolved, which is an implementation detail of our image
+    and not something a user's policy should have to know.
+
+    **The DIRECTORY, not the file, and that is not laziness.** Measured: grant the
+    file and the first time systemd-resolved rewrites it -- which it does by
+    atomic rename, on any DHCP renewal or link change -- the path points at a new
+    inode that no rule covers, and DNS dies mid-session. Granting the file passes
+    every test written at boot and fails hours later. `PathBeneath` on the
+    directory covers replacements.
+
+    What that directory also contains is `io.systemd.Resolve`, a world-writable
+    varlink socket -- and granting it read-only gives away nothing, because
+    Landlock at this ABI does not mediate connecting to a unix socket at all
+    (that is ABI 6 scoping). The workload could already reach it.
+
+    **`/etc/hosts` and `/etc/nsswitch.conf` are added too, and the reason is
+    robustness rather than necessity -- measured both ways.** Round 13 concluded
+    they were unnecessary because `getaddrinfo` resolved a real DNS name with no
+    `/etc` granted at all, which was true and was the wrong test. The case that
+    matters is a name that exists *only* in `/etc/hosts`: `policy.local`, the
+    advisor, which the host maps to a TEST-NET-1 address it intercepts.
+
+    That name also resolves with no `/etc` granted -- measured -- but only because
+    **systemd-resolved reads `/etc/hosts` itself, as root, outside the sandbox**,
+    and answers the stub query at 127.0.0.53. So resolution works today by way of
+    a daemon, not by way of the policy. Two reasons to grant the files anyway:
+
+    * without a readable `nsswitch.conf`, glibc falls back to its built-in
+      `dns [!UNAVAIL=return] files`, which puts **DNS ahead of the hosts file**
+      and returns on NXDOMAIN without ever consulting `files`. On any image whose
+      resolver is not systemd-resolved, a hosts-only name then silently does not
+      resolve. Granting the file restores Ubuntu's `files dns` order, which is
+      also the order the mapping is meant to have;
+    * two world-readable configuration files with no secrets in them is about the
+      cheapest robustness available, and the failure they guard against is silent.
+
+    So this is a deliberate, named widening of two files -- not `/etc` -- with the
+    measurement recorded so nobody has to re-derive why.
+    """
+    out = []
+    link = "/etc/resolv.conf"
+    try:
+        target = os.path.realpath(link)
+    except OSError:
+        return out
+    if not os.path.exists(target):
+        return out
+    parent = os.path.dirname(target)
+    if os.path.abspath(parent) not in ("/etc", "/", ""):
+        out.append((parent, "DNS resolver configuration (%s resolves here; the "
+                            "directory rather than the file, so a resolver "
+                            "rewrite cannot break name resolution mid-session)"
+                            % link))
+    elif os.path.isfile(target):
+        # A real file in /etc. Granted by name so a policy without /etc still
+        # resolves; a rewrite-by-rename would still break it, but nothing here
+        # rewrites /etc/resolv.conf on this image.
+        out.append((target, "DNS resolver configuration"))
+    # Name resolution, as distinct from the resolver's own configuration: the
+    # hosts file the advisor mapping lives in, and the switch file that decides
+    # it is consulted before DNS. `agentd` writes /etc/hosts with `tee`, which
+    # truncates in place, so this file-level rule is not invalidated by the
+    # advisor task the way a rename would invalidate it.
+    for path in ("/etc/hosts", "/etc/nsswitch.conf"):
+        if os.path.isfile(path):
+            out.append((path, "name resolution (%s)" % os.path.basename(path)))
+    return out
+
+
+# OpenShell's own baseline enrichment, from its `landlock.rs`: when the policy has
+# at least one network rule it adds these, read-only and read-write respectively,
+# for the paths that exist and are not already listed. Its own e2e test
+# `hard_requirement_accepts_enriched_device_path` depends on it -- a policy listing
+# neither `/dev/urandom` nor `/tmp` whose workload reads `/dev/urandom`.
+#
+# DESIGN.md previously recorded a decision NOT to have a baseline, on the grounds
+# that a policy should be honoured verbatim. That was the right instinct and the
+# wrong call: this is not Bromure inventing a baseline, it is OpenShell's
+# documented behaviour, and diverging from it makes policies that work upstream
+# fail here. Parity wins. It stays keyed off the same condition, with the same
+# paths, so there is one rule to remember rather than two.
+OPENSHELL_BASELINE_READ_ONLY = ("/usr", "/lib", "/etc", "/app", "/var/log",
+                                "/proc", "/dev/urandom")
+OPENSHELL_BASELINE_READ_WRITE = ("/tmp", "/dev/null")
+
+
+def network_rule_count(spec):
+    """How many network rules the policy has, or None when the host did not say.
+
+    `None` and `0` are different and the difference matters: with 0 there is no
+    baseline, with `None` we cannot tell, and silently treating the second as the
+    first is how a workspace would lose the baseline without anyone noticing. So
+    the caller warns on `None` rather than guessing.
+    """
+    for key in ("network_policies", "network_rules", "network"):
+        if key not in spec:
+            continue
+        value = spec[key]
+        if value is None:
+            return 0
+        if isinstance(value, bool):
+            return 1 if value else 0
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, (list, tuple)):
+            return len(value)
+        if isinstance(value, dict):
+            # Either a rule container or a single rule; both mean "at least one"
+            # when non-empty.
+            rules = value.get("rules")
+            if isinstance(rules, (list, tuple)):
+                return len(rules)
+            return 1 if value else 0
+    return None
+
+
+def openshell_baseline_additions(spec, policy, workdirs, status):
+    """OpenShell's enrichment. Returns (read_only, read_write), each [(path, why)]."""
+    if not policy.filesystem.present:
+        return [], []
+    count = network_rule_count(spec)
+    if count is None:
+        status["warnings"].append(
+            "cannot apply OpenShell's baseline enrichment: the spec carries no "
+            "network rules, so whether the policy has any is unknown. Stage "
+            "`network_policies` in openshell-sandbox.json (a list; an empty list "
+            "means none) and this resolves itself.")
+        return [], []
+    if count < 1:
+        return [], []
+    already = set()
+    for path in (list(policy.filesystem.read_only)
+                 + list(policy.filesystem.read_write)
+                 + (list(workdirs) if policy.filesystem.include_workdir else [])):
+        if isinstance(path, str) and path:
+            already.add(os.path.abspath(path))
+    why = "OpenShell baseline (policy has network rules)"
+    read_only, read_write = [], []
+    for group, table in ((read_only, OPENSHELL_BASELINE_READ_ONLY),
+                         (read_write, OPENSHELL_BASELINE_READ_WRITE)):
+        for path in table:
+            if path in already or not os.path.exists(path):
+                continue
+            group.append((path, why))
+    return read_only, read_write
+
+
+# Additions whose path is not known until the policy is read: the run_as user's
+# home, the resolver directory, and OpenShell's baseline enrichment. Kept apart
+# from the constant tables, but rendered by the same mechanism so the host shows
+# every addition with a reason and there is no second code path to forget.
+#
+# `{path: (why, "ro" | "rw")}`, reset per launch.
+DYNAMIC_ADDITIONS = {}
+
+
+def note_addition(path, why, mode):
+    DYNAMIC_ADDITIONS[path] = (why, mode)
+
+
+def additions_for_report(applied_paths):
+    """The additions actually applied, in the shape the host renders."""
+    read_write = [path for path, _ in ADDITIONS_READ_WRITE
+                  if path in applied_paths]
+    read_only = [path for path, _ in ADDITIONS_READ_ONLY
+                 if path in applied_paths]
+    why = {path: reason for path, reason
+           in list(ADDITIONS_READ_WRITE) + list(ADDITIONS_READ_ONLY)
+           if path in applied_paths}
+    for path, (reason, mode) in DYNAMIC_ADDITIONS.items():
+        if path not in applied_paths:
+            continue
+        target = read_write if mode == "rw" else read_only
+        if path not in target:
+            target.append(path)
+        why[path] = reason
+    return {"read_write": read_write, "read_only": read_only, "why": why}
+
+
+# ---------------------------------------------------------------------------
+# Spec
+# ---------------------------------------------------------------------------
+
+def load_spec():
+    with open(SPEC_PATH) as handle:
+        spec = json.load(handle)
+    if not isinstance(spec, dict):
+        raise osh.PolicyError("openshell-sandbox.json is not an object")
+    version = spec.get("version", 1)
+    if version != 1:
+        raise osh.PolicyError("unsupported spec version %r" % (version,))
+    return spec
+
+
+def resolve_workdirs(spec):
+    """What `include_workdir` covers.
+
+    The host stages `workdirs`, which is the better source of truth: it knows
+    which project folders this workspace has and where they were mounted. The
+    guest can only guess from the share slots, so that is the fallback, not the
+    primary. Non-existent entries are dropped here rather than in the Landlock
+    layer so the reason is reportable.
+    """
+    workdirs = [w for w in (spec.get("workdirs") or []) if isinstance(w, str)]
+    if workdirs:
+        return [w for w in workdirs if os.path.isdir(w)]
+    # Fallback: the share slots agentd symlinks into the home directory.
+    found = []
+    try:
+        with open(os.path.join(META, "shares.txt")) as handle:
+            for line in handle.read().splitlines():
+                parts = line.split(" ", 1)
+                if len(parts) == 2 and parts[0]:
+                    slot = "/mnt/bromure-share-%s" % parts[0]
+                    if os.path.isdir(slot):
+                        found.append(slot)
+    except OSError:
+        pass
+    return found
+
+
+# ---------------------------------------------------------------------------
+# run_as_user
+# ---------------------------------------------------------------------------
+
+def ensure_user(name):
+    """Create the sandbox user if the policy names one that doesn't exist.
+
+    OpenShell errors on an unknown user; its images bake a `sandbox` account.
+    Bromure's image has only `ubuntu`, so a policy saying `run_as_user: sandbox`
+    would fail on every workspace. Creating it is the difference between "the
+    feature works" and "the feature errors", and a fresh system account with no
+    shell and no password grants nothing on its own.
+
+    The caller still has to decide whether that uid can reach the workdirs —
+    see `check_workdir_access`, and DESIGN.md on virtiofs.
+    """
+    if name is None or osh._is_numeric(name):
+        return
+    try:
+        pwd.getpwnam(name)
+        return
+    except KeyError:
+        pass
+    log("creating sandbox user %r (absent from this image)" % name)
+    # A real shell, not nologin: Bromure's workload is interactive panes, and
+    # tmux resolves `default-shell` from the running uid's passwd entry when
+    # $SHELL is unset. `--no-create-home` stays -- the home is the supervisor's
+    # to create, see `ensure_run_as_home` -- and the account still has no
+    # password, so nothing can log in as it.
+    subprocess.run(
+        ["useradd", "--system", "--no-create-home", "--shell", "/bin/bash",
+         "--user-group", name],
+        check=True, capture_output=True)
+
+
+def fstype_of(path):
+    """The filesystem type of the mount `path` lives on, or None."""
+    target = os.path.abspath(path)
+    best, fstype = -1, None
+    try:
+        with open("/proc/self/mountinfo") as handle:
+            for line in handle:
+                fields = line.split()
+                try:
+                    mount_point = fields[4]
+                    separator = fields.index("-")
+                    candidate = fields[separator + 1]
+                except (IndexError, ValueError):
+                    continue
+                mount_point = mount_point.replace("\\040", " ")
+                if (target == mount_point or
+                        target.startswith(mount_point.rstrip("/") + "/")):
+                    if len(mount_point) > best:
+                        best, fstype = len(mount_point), candidate
+    except OSError:
+        return None
+    return fstype
+
+
+# Filesystems whose file ownership comes from the macOS host rather than from
+# this guest's passwd file. Nothing here can be chowned, and nothing here can be
+# idmapped either -- see `ensure_run_as_home` and DESIGN.md §1.9.
+HOST_BACKED_FSTYPES = ("virtiofs", "fuse", "fuseblk", "9p", "nfs", "nfs4")
+
+
+def ensure_run_as_home(uid, gid, user, owner_uid):
+    """A home of the run_as user's own. The FALLBACK. Returns (path, problem).
+
+    The normal home for a distinct `run_as_user` is the workspace user's home seen
+    through an idmapped mount -- see `build_plan`, and DESIGN.md §1.12 for why
+    function decides that. This is what happens when the remap is impossible,
+    which on an image whose `/home/ubuntu` is virtiofs it is.
+
+    It is still needed, because the alternative is worse. `ensure_user` creates the
+    account with `--no-create-home`, which leaves `pw_dir` naming a `/home/<user>`
+    that does not exist; the supervisor then fell back to the first workdir, and
+    both consequences were bad:
+
+      * the workdir on a real workspace is a virtiofs share owned by the macOS
+        user, so the workload's `chdir` into its own HOME could fail outright --
+        which is precisely how `run_as_user: sandbox` turned every command into a
+        silent exit 127, and how the tmux server's `-c <home>` failed the same
+        way, leaving the workspace with no session at all;
+      * and pointing HOME at the project folder drops the agent's dotfiles,
+        history and caches into the user's repository.
+
+    So the run_as user gets `/home/<user>` on the guest's own disk, created here
+    because the supervisor is the only thing that is root at the right moment.
+    Persistent, which is what makes it a home: the agent's config survives a
+    reboot exactly as the workspace user's does. Ownership and mode are
+    re-asserted on every start, so a policy that changes `run_as_user` later does
+    not leave a home owned by the previous uid.
+
+    **This is why it is not an idmapped `/home/ubuntu` instead.** Idmapping
+    cannot do this job on the shipped kernel: virtiofs does not set
+    `FS_ALLOW_IDMAP`, so `mount_setattr(MOUNT_ATTR_IDMAP)` returns EINVAL for
+    every host-backed mount, measured on 6.8. An idmapped home is not a design
+    we rejected; it is one the kernel refuses.
+    """
+    candidate = None
+    try:
+        candidate = pwd.getpwuid(uid).pw_dir or None
+    except KeyError:
+        pass
+    # Refuse a pw_dir that is useless or that belongs to somebody else: a
+    # `run_as_user` whose passwd entry happens to name /home/ubuntu must not be
+    # handed the workspace user's home, and /nonexistent is Debian's placeholder
+    # for system accounts.
+    owner_home = None
+    try:
+        owner_home = os.path.realpath(pwd.getpwuid(owner_uid).pw_dir)
+    except KeyError:
+        pass
+    if (not candidate or candidate in ("/", "/nonexistent", "/dev/null")
+            or (owner_home and os.path.realpath(candidate) == owner_home)):
+        candidate = "/home/%s" % (user if not user.isdigit() else "run-as-%s" % user)
+
+    parent = os.path.dirname(candidate) or "/"
+    fstype = fstype_of(parent if not os.path.isdir(candidate) else candidate)
+    if fstype in HOST_BACKED_FSTYPES:
+        return None, ("cannot give uid %d a home at %s: %s is %s, whose file "
+                      "ownership comes from the host and cannot be changed from "
+                      "the guest" % (uid, candidate, parent, fstype))
+    try:
+        os.makedirs(candidate, exist_ok=True)
+        os.chown(candidate, uid, gid)
+        # 0700: a home, not a shared directory. agentd never reads it; the host
+        # never sees it; and the workspace user has no business in the sandbox
+        # user's dotfiles any more than the reverse.
+        os.chmod(candidate, 0o700)
+    except OSError as exc:
+        return None, ("cannot create a home for uid %d at %s: %s"
+                      % (uid, candidate, exc))
+    return candidate, None
+
+
+def check_workdir_access(uid, gid, workdirs):
+    """Can this uid actually WRITE the project folders? Measured, not inferred.
+
+    The first version reasoned from the mode bits, and on the one filesystem that
+    matters it reasoned wrongly. Bromure's project folders are virtiofs shares,
+    and virtiofs as mounted here does not enforce the guest's DAC in the guest:
+    the lookup reports the host's ids, and the operation is carried out by the
+    daemon on the host side. Measured on this kernel -- a share that `stat`s as
+    `uid 1000 mode 0755` is nonetheless created in, and written to, by uid 999.
+
+    So the mode-bit version produced a prominent, confident, false warning on
+    precisely the configuration the whole `run_as_user` feature exists for, and
+    would have sent whoever read it looking for a permission problem that was not
+    there. There is no way to get this right by inference: the only honest check
+    is to become the uid and try.
+
+    Returns the paths that really are unwritable, each with the reason.
+    """
+    unreachable = []
+    for path in workdirs:
+        problem = _probe_write_as(uid, gid, path)
+        if problem:
+            unreachable.append("%s (%s)" % (path, problem))
+    return unreachable
+
+
+def _probe_write_as(uid, gid, path):
+    """Create and remove a file in `path` as `uid`. Returns a reason, or None.
+
+    Forked, because the probe has to really be that uid and this process must
+    stay root. The name is unique per probe and removed by the child; a child
+    that dies in between leaves one empty file, which is a better failure than
+    guessing.
+    """
+    if not os.path.isdir(path):
+        return "not a directory"
+    probe = os.path.join(path, ".bromure-write-probe-%d" % os.getpid())
+    read_fd, write_fd = os.pipe()
+    with _FORK_LOCK:
+        pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            os.setgroups([gid])
+            os.setresgid(gid, gid, gid)
+            os.setresuid(uid, uid, uid)
+            fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+            os.unlink(probe)
+        except OSError as exc:
+            _diag_send(write_fd, "%s: %s" % (
+                errno.errorcode.get(exc.errno, str(exc.errno)),
+                exc.strerror or exc))
+            os._exit(1)
+        except BaseException as exc:  # noqa: BLE001
+            _diag_send(write_fd, str(exc))
+            os._exit(1)
+        os._exit(0)
+    os.close(write_fd)
+    try:
+        with os.fdopen(read_fd, "rb") as handle:
+            message = handle.read().decode("utf-8", "replace").strip()
+        os.waitpid(pid, 0)
+    except OSError:
+        message = "the write probe could not be run"
+    if message:
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+        return message
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Status
+# ---------------------------------------------------------------------------
+
+def write_status(status):
+    os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+    tmp = STATUS_PATH + ".tmp"
+    with open(tmp, "w") as handle:
+        json.dump(status, handle, sort_keys=True)
+    os.chmod(tmp, 0o644)
+    os.rename(tmp, STATUS_PATH)
+
+
+def build_marker():
+    """Short hashes of the guest scripts actually running. For `status.json`.
+
+    This exists because a whole round was spent on a blocker whose symptoms were
+    consistent with the fix not being deployed, and neither side could tell from
+    the status line which code the workspace was running. The supervisor is in the
+    right place to answer it: it is started by agentd from the meta share, so it
+    can hash itself, its modules, and the agentd source beside it.
+
+    Cheap -- four small files, once per start -- and it turns "is the fix in?" from
+    an exchange of guesses into a field in the log.
+    """
+    import hashlib
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = {}
+    # Every guest file whose content can change what a workspace does. attestd
+    # and the status builder were missing, and round 17 changed both -- so the
+    # host could not have told from the status line whether that round was
+    # deployed, which is the exact question this field exists to answer.
+    for label, path in (("sandboxd", os.path.abspath(__file__)),
+                        ("openshell", os.path.join(here, "bromure_openshell.py")),
+                        ("idmap", os.path.join(here, "bromure_idmap.py")),
+                        ("status", os.path.join(here, "bromure_sandbox_status.py")),
+                        ("sentryd", os.path.join(here, "bromure-sentryd")),
+                        ("strict", os.path.join(here, "bromure-strict.py")),
+                        ("attestd", os.path.join(META, "bromure-attestd.py")),
+                        ("agentd", os.path.join(META, "bromure-agentd.py"))):
+        try:
+            with open(path, "rb") as handle:
+                out[label] = hashlib.sha256(handle.read()).hexdigest()[:12]
+        except OSError:
+            out[label] = None
+    return out
+
+
+def base_status():
+    return {
+        "event": "sandbox_status",
+        "landlock_abi": None,
+        "filesystem": osh.LandlockOutcome.OFF,
+        "degraded_reason": None,
+        "run_as": None,
+        "seccomp": "off",
+        "additions": {"read_write": [], "read_only": [], "why": {}},
+        "sentry": "off",
+        "sentry_reason": None,
+        "sentry_digest": None,
+        "warnings": [],
+    }
+
+
+
+
+# ---------------------------------------------------------------------------
+# Where the socket lives, and why nothing outside the sandbox can create one
+# ---------------------------------------------------------------------------
+#
+# This is the part that makes the boundary real rather than a convention, and it
+# took two wrong answers to get to.
+#
+# The threat: the agent, inside the sandbox, runs `tmux kill-server` — it is its
+# own server, nothing stops it — while leaving a detached process alive. The next
+# time anything OUTSIDE the sandbox runs a tmux command against that socket, the
+# tmux client starts a server itself (many commands carry CMD_STARTSERVER, not
+# just `new-session`). That server is unsandboxed, and the surviving process can
+# `send-keys` into its panes. Landlock at ABI 4 does not scope unix-socket
+# connects, so nothing blocks the last step. Full escape.
+#
+# What does NOT work:
+#
+#   * **Permissions on the socket directory.** In the default configuration
+#     agentd and the workload share uid 1000 — that is what keeps the virtiofs
+#     workdirs writable. Any mode that lets the server bind also lets agentd
+#     bind; any mode that stops agentd stops the server. There is no DAC answer
+#     while the uids are equal.
+#   * **A private mount namespace with a tmpfs for the socket**, exposing it to
+#     agentd with a bind mount out of `/proc/<pid>/root`. The kernel refuses:
+#     `do_loopback` calls `check_mnt`, which requires the source mount to be in
+#     the caller's own namespace. Measured, not guessed.
+#
+# What does work: a **supplementary group** the sandboxed server has and agentd
+# does not. The uids stay equal; the group list does not.
+#
+#   /run/bromure-sandbox/            root:root          0755
+#       nothing but root creates entries here. `ctl.sock` lives here.
+#   /run/bromure-sandbox/server/     root:bromure-tmux  0771
+#       group rwx  -> the sandboxed server can create its socket
+#       other  --x -> agentd can traverse to the socket but create nothing
+#   /run/bromure-sandbox/server/tmux.sock
+#       created by the server, mode 0600, owned by the workload uid, so agentd
+#       (same uid) can connect to it.
+#
+# Measured consequences, all four in tests/test_sandbox.sh:
+#   * agentd connects to the server fine;
+#   * agentd trying to start a server at that path fails with
+#     "error creating … (Permission denied)";
+#   * after `kill-server`, agentd cannot even resurrect one there — it cannot
+#     unlink the stale socket, so it gets EADDRINUSE;
+#   * a sandboxed process CAN create another server in `server/`, but that
+#     server is inside the sandbox too, so it buys nothing.
+#
+# `bromure-tmux` is a system group with **no members in /etc/group**. The only
+# way to hold it is for this supervisor, as root, to grant it explicitly to the
+# child it is about to confine (`drop_privileges(extra_groups=…)`).
+
+SERVER_GROUP = "bromure-tmux"
+SERVER_DIR = os.path.join(RUN_DIR, "server")
+SERVER_SOCKET = os.path.join(SERVER_DIR, "tmux.sock")
+CONTROL_SOCKET = os.path.join(RUN_DIR, "ctl.sock")
+
+# Rate limit on server starts: at most this many in this window, and nothing
+# else. A well-behaved workspace asks once per boot; a burst means either
+# something is killing the server repeatedly or something is looking for a race
+# to win, and either way the host wants to know.
+#
+# There is deliberately NO minimum interval between starts. An earlier version
+# had one, and it refused a perfectly ordinary sequence — server ends, user
+# reattaches immediately — which to the user looks like a broken workspace and
+# to the host looks like a sandbox failure. A count over a window bounds the
+# damage just as well without ever refusing a first legitimate retry.
+START_BURST_WINDOW = 60.0
+START_BURST_MAX = 5
+
+
+def ensure_server_group():
+    """The group that separates 'may create the server socket' from 'may connect'."""
+    try:
+        return grp.getgrnam(SERVER_GROUP).gr_gid
+    except KeyError:
+        pass
+    subprocess.run(["groupadd", "--system", SERVER_GROUP],
+                   check=True, capture_output=True)
+    return grp.getgrnam(SERVER_GROUP).gr_gid
+
+
+def prepare_directories(group_gid):
+    """Lay out the two directories, idempotently and by explicit mode.
+
+    `os.makedirs(mode=…)` is subject to umask; chmod is not, and getting 0771
+    wrong here silently reopens the escape, so both are set explicitly.
+    """
+    os.makedirs(RUN_DIR, exist_ok=True)
+    os.chown(RUN_DIR, 0, 0)
+    os.chmod(RUN_DIR, 0o755)
+    os.makedirs(SERVER_DIR, exist_ok=True)
+    os.chown(SERVER_DIR, 0, group_gid)
+    os.chmod(SERVER_DIR, 0o771)
+    # root:root 0755 with a root-owned empty config: agentd (uid 1000) reads it,
+    # and nothing running as the workspace user can put a credential helper in
+    # it. See DOCKER_CONFIG_DIR.
+    os.makedirs(DOCKER_CONFIG_DIR, exist_ok=True)
+    os.chown(DOCKER_CONFIG_DIR, 0, 0)
+    os.chmod(DOCKER_CONFIG_DIR, 0o755)
+    config = os.path.join(DOCKER_CONFIG_DIR, "config.json")
+    if not os.path.exists(config):
+        with open(config, "w") as handle:
+            handle.write("{}\n")
+        os.chown(config, 0, 0)
+        os.chmod(config, 0o644)
+
+
+def verify_directories(group_gid):
+    """Refuse to run if the layout is not what the escape analysis assumed."""
+    problems = []
+    run = os.stat(RUN_DIR)
+    if run.st_uid != 0 or (run.st_mode & 0o777) != 0o755:
+        problems.append("%s is uid %d mode %o, expected 0 0755"
+                        % (RUN_DIR, run.st_uid, run.st_mode & 0o777))
+    srv = os.stat(SERVER_DIR)
+    if srv.st_uid != 0 or srv.st_gid != group_gid or (srv.st_mode & 0o777) != 0o771:
+        problems.append("%s is uid %d gid %d mode %o, expected 0 %d 0771"
+                        % (SERVER_DIR, srv.st_uid, srv.st_gid,
+                           srv.st_mode & 0o777, group_gid))
+    members = grp.getgrgid(group_gid).gr_mem
+    if members:
+        # A member in /etc/group would hold the group without this supervisor
+        # granting it -- including agentd, if someone added the workspace user.
+        problems.append("group %s has members in /etc/group (%s); the whole "
+                        "separation depends on it having none"
+                        % (SERVER_GROUP, ", ".join(members)))
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# Starting one sandboxed server
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Saying why a confined child failed
+# ---------------------------------------------------------------------------
+#
+# Everything between `fork` and `execvpe` runs in a process with no stderr the
+# caller reads, no logger, and -- after `confine_self` -- no right to open a file
+# to write one. Both fork sites used to end in `except BaseException:
+# os._exit(127)`, and the price of that came due in the first
+# `run_as_user: sandbox` end-to-end run on the real image: every `vm exec`
+# answered 127 instantly with no output, and nothing on either side of the
+# delegation could tell a Landlock denial from a missing home from a failed
+# privilege drop. Hours went into guessing at it.
+#
+# So each step names itself, the message carries the operation, the path and the
+# errno, and it travels to the parent over a pipe. The write end is CLOEXEC, which
+# makes the protocol free of ambiguity: bytes mean the child failed before
+# `execvpe`, EOF means it reached it.
+
+
+class StageError(Exception):
+    """A failure inside a forked, confined child, named well enough to act on."""
+
+    def __init__(self, stage, cause, path=None):
+        self.stage = stage
+        self.cause = cause
+        self.path = path
+        Exception.__init__(self, str(self))
+
+    def __str__(self):
+        where = " %s" % self.path if self.path else ""
+        if isinstance(self.cause, OSError) and self.cause.errno is not None:
+            name = errno.errorcode.get(self.cause.errno, str(self.cause.errno))
+            return "%s%s: %s (%s)" % (self.stage, where,
+                                      self.cause.strerror or self.cause, name)
+        return "%s%s: %s: %s" % (self.stage, where,
+                                 type(self.cause).__name__, self.cause)
+
+
+@contextlib.contextmanager
+def stage(what, path=None):
+    """Label one step of a confined child's setup, so its failure has a name."""
+    try:
+        yield
+    except StageError:
+        raise
+    except BaseException as exc:  # noqa: BLE001 -- including SystemExit
+        raise StageError(what, exc, path)
+
+
+def _diag_pipe():
+    """(read, write) for a child's failure message. Both ends are CLOEXEC."""
+    return os.pipe()
+
+
+def _diag_send(write_fd, message):
+    try:
+        os.write(write_fd, message.encode("utf-8", "replace")[:2048])
+    except OSError:
+        pass
+
+
+def _diag_collect(read_fd, pid, timeout=30.0):
+    """The child's failure message, or None when it reached `execvpe`.
+
+    EOF with nothing written is success. A child that neither writes nor execs
+    within the timeout is itself the failure, and is reported as one rather than
+    left to hang the control connection.
+    """
+    import select
+    collected = b""
+    deadline = time.time() + timeout
+    try:
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                return ("the confined child neither started nor reported a "
+                        "failure within %.0fs" % timeout)
+            ready, _, _ = select.select([read_fd], [], [], min(remaining, 1.0))
+            if not ready:
+                continue
+            chunk = os.read(read_fd, 2048)
+            if not chunk:
+                break
+            collected += chunk
+    except OSError as exc:
+        return "reading the child's diagnostic pipe: %s" % exc
+    finally:
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+    text = collected.decode("utf-8", "replace").strip()
+    return text or None
+
+
+class Plan(object):
+    """Everything resolved once, so each server start is cheap and identical."""
+
+    def __init__(self, policy, workdirs, apply_seccomp, uid, gid, user, home,
+                 owner_uid, owner_gid, needs_idmap, idmap_targets, group_gid,
+                 extra_read_only, extra_read_write, addition_paths,
+                 sandbox_cgroup=None, groups=()):
+        self.policy = policy
+        self.workdirs = workdirs
+        self.apply_seccomp = apply_seccomp
+        self.uid = uid
+        self.gid = gid
+        self.user = user
+        self.home = home
+        self.owner_uid = owner_uid
+        self.owner_gid = owner_gid
+        self.needs_idmap = needs_idmap
+        self.idmap_targets = idmap_targets
+        self.group_gid = group_gid
+        self.extra_read_only = extra_read_only
+        self.extra_read_write = extra_read_write
+        self.addition_paths = addition_paths
+        self.sandbox_cgroup = sandbox_cgroup
+        self.groups = tuple(groups)
+
+
+def confine_self(plan, prepared, outcome, supervisor_tgid):
+    """Everything that turns the calling (already forked) process into a member
+    of the sandboxed tree. Shared by the tmux server and by `exec` requests, so
+    the two can never drift apart -- a command run on agentd's behalf is confined
+    by exactly the code that confines the server.
+
+    TWO MODES, and getting this wrong was a shipping blocker found in the first
+    end-to-end run on the real image:
+
+    * **process layer ON** (strict sandbox): OpenShell's order, verbatim --
+      harden, drop privileges, then `no_new_privs` + `restrict_self` + the three
+      filters. nnp is wanted here; `sudo` is already gone.
+
+    * **process layer OFF** (no `process` section and no strict sandbox --
+      including the very common "sentry only" workspace): apply **nothing**
+      beyond Landlock, and apply that *as root* so nnp is not needed. The first
+      version called `osh.enforce` with `child_hardening=False`, which still set
+      nnp and still installed the main seccomp filter -- so merely switching the
+      kernel sentry on gave every pane `NoNewPrivs: 1`, `Seccomp: 2` and a dead
+      `sudo`, while status.json truthfully reported `seccomp: off`. §1.7 promises
+      the opposite. A workspace that asked for none of this must be
+      indistinguishable from a pre-sandbox one.
+
+    Returns a note about idmapping, for the caller to report.
+    """
+    # Before anything else, and while still root: the cgroup file is root-owned,
+    # so the workload cannot move itself back out afterwards.
+    with stage("joining the sandbox cgroup", plan.sandbox_cgroup):
+        join_sandbox_cgroup(plan.sandbox_cgroup)
+    idmap_note = ""
+    if plan.needs_idmap and plan.idmap_targets:
+        # Before the privilege drop and before any filter: this needs root,
+        # CAP_SYS_ADMIN and the mount syscalls, all of which are gone below.
+        try:
+            idmap.unshare_mount_namespace()
+            remapped, problems = idmap.apply(
+                plan.idmap_targets, owner_uid=plan.owner_uid,
+                sandbox_uid=plan.uid, owner_gid=plan.owner_gid,
+                sandbox_gid=plan.gid)
+            idmap_note = json.dumps({"remapped": remapped, "problems": problems})
+        except idmap.IdmapError as exc:
+            idmap_note = json.dumps({"remapped": [], "problems": [str(exc)]})
+    if plan.apply_seccomp:
+        with stage("hardening the child process"):
+            osh.harden_child_process()
+        with stage("dropping to uid %d gid %d" % (plan.uid, plan.gid)):
+            osh.drop_privileges(plan.policy, default_user=WORKSPACE_USER,
+                                default_group=None,
+                                extra_groups=(plan.group_gid,))
+        # The pid the child filter protects, resolved HERE because agentd's pid
+        # is not stable: it is `Restart=always`, and the strict sandbox's
+        # two-incarnation boot guarantees the incarnation that started this
+        # supervisor is gone. `os.getpgid` on that dead pid raises ESRCH, and
+        # before this section existed that took the whole exec down as a bare
+        # exit 127 -- so every command in a restarted workspace failed with no
+        # way to tell why. The filter still has to be installed, so a pid that
+        # cannot be resolved degrades to this supervisor's own: alive, nonzero,
+        # and losing only a narrowing rule for a process the workload's uid
+        # could not signal anyway.
+        tgid, pgid = supervisor_tgid, None
+        if tgid:
+            try:
+                pgid = os.getpgid(tgid)
+            except OSError:
+                tgid, pgid = None, None
+        if not tgid:
+            tgid = os.getppid() or os.getpid()
+        with stage("installing the Landlock ruleset and seccomp filters"):
+            osh.enforce(prepared, outcome, supervisor_tgid=tgid,
+                        supervisor_pgid=pgid,
+                        child_hardening=True, allow_inet=True)
+    else:
+        # Landlock while still root -- no nnp, no filters, bounding set intact.
+        # `plan.groups` was resolved in the parent precisely so nothing here
+        # needs NSS after the ruleset is in force.
+        with stage("installing the Landlock ruleset"):
+            osh.enforce_landlock_privileged(prepared, outcome)
+        with stage("dropping to uid %d gid %d" % (plan.uid, plan.gid)):
+            osh.drop_to_user(plan.uid, plan.gid, plan.groups)
+    return idmap_note
+
+
+def start_server(plan, supervisor_tgid):
+    """Start the tmux server inside the sandbox. Returns (outcome, report).
+
+    The Landlock ruleset is rebuilt per start rather than reused: `restrict_self`
+    consumes the ruleset fd, and the path fds were opened by a process that has
+    since forked. Rebuilding is cheap and keeps each start independent.
+    """
+    # A stale socket from a killed server has to go, or tmux reports
+    # EADDRINUSE. Only root can remove it -- which is the same fact that stops
+    # agentd resurrecting a server there.
+    for stale in (SERVER_SOCKET, SERVER_SOCKET + ".lock"):
+        try:
+            os.unlink(stale)
+        except OSError:
+            pass
+
+    prepared, outcome = osh.prepare(
+        plan.policy, workdir=plan.workdirs, path_open_mode=osh.PRIVILEGED,
+        extra_read_only=plan.extra_read_only,
+        extra_read_write=plan.extra_read_write)
+
+    read_fd, write_fd = os.pipe()
+    with _FORK_LOCK:
+        pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        idmap_note = ""
+        try:
+            with stage("setsid"):
+                os.setsid()
+            idmap_note = confine_self(plan, prepared, outcome, supervisor_tgid)
+            os.environ["HOME"] = plan.home
+            os.environ["USER"] = plan.user
+            os.environ["LOGNAME"] = plan.user
+            # tmux picks `default-shell` from $SHELL at startup and falls back
+            # to the *running* uid's passwd shell. A `run_as_user` created as a
+            # system account has /usr/sbin/nologin there, so every pane printed
+            # "This account is currently not available" and exited, the session
+            # died with the last pane, and the server exited with the session --
+            # which the supervisor reported as a server that started. Pinning it
+            # here makes the pane's shell a property of the sandbox rather than
+            # of whatever env the root script happened to have.
+            os.environ["SHELL"] = "/bin/bash"
+            # Deliberately NOT setting TMUX_TMPDIR. tmux exports $TMUX into
+            # every pane, and a bare `tmux` inside a session reads the socket
+            # path from there -- so panes find this server without a tmpdir, and
+            # without a tmpdir there is no second, guessable socket location for
+            # anything to bind.
+            os.environ.pop("TMUX_TMPDIR", None)
+            # `chdir` into the home is the first thing that touches the
+            # workload's own uid against real permissions, and the first thing
+            # that failed when the home did not exist. Naming the path here is
+            # what turns "exit 127" into "the home is not reachable".
+            with stage("chdir", plan.home):
+                os.chdir(plan.home)
+            os.write(write_fd, ("ok " + idmap_note).encode()[:4096])
+            os.close(write_fd)
+            with stage("exec tmux", plan.home):
+                os.execvp("tmux", ["tmux", "-S", SERVER_SOCKET, "new-session",
+                                   "-d", "-s", TMUX_SESSION, "-c", plan.home])
+        except BaseException as exc:  # noqa: BLE001 -- must reach the parent
+            try:
+                os.write(write_fd, ("err %s" % exc).encode()[:1024])
+                os.close(write_fd)
+            except OSError:
+                pass
+            os._exit(1)
+        os._exit(127)
+
+    os.close(write_fd)
+    if prepared:
+        prepared.close()
+    with os.fdopen(read_fd, "rb") as handle:
+        note = handle.read()
+    os.waitpid(pid, 0)
+
+    report = {"ok": note.startswith(b"ok"), "idmap": None, "error": None,
+              "socket_problem": None}
+    if not report["ok"]:
+        report["error"] = (note.decode("utf-8", "replace")
+                           or "sandbox child died silently")
+        return outcome, report
+    if len(note) > 3:
+        try:
+            report["idmap"] = json.loads(note[3:].decode())
+        except ValueError:
+            pass
+    if not _wait_for_socket(SERVER_SOCKET, timeout=10.0):
+        report["ok"] = False
+        why = describe_reachability(plan.uid, plan.gid, SERVER_DIR)
+        report["error"] = ("tmux server socket did not appear within 10s"
+                           + ("; %s" % why if why else ""))
+        return outcome, report
+    report["socket_problem"] = grant_socket_access(plan)
+    return outcome, report
+
+
+def policy_grants_write(policy, workdirs, path):
+    """Does the ruleset let the workload WRITE at `path`? Returns (bool, reason).
+
+    Landlock is additive and path-based: a grant on a directory covers everything
+    beneath it. So this asks whether `path` is at or under any `read_write` entry,
+    including the `include_workdir` ones.
+
+    It exists because the home has to be somewhere the ruleset allows, and nothing
+    was checking that. Choosing the workspace user's home as HOME when the policy
+    does not grant it reproduces the original bug in a new shape: a home the
+    workload cannot enter, and a pane that dies without saying why. Measured in the
+    boot test, where the policy granted a different home entirely and every read
+    of the seeded configuration came back EACCES.
+    """
+    if not policy.filesystem.present:
+        # No filesystem policy means no ruleset at all, so DAC is the only thing
+        # in the way and this question does not arise.
+        return True, None
+    target = os.path.realpath(path)
+    granted = list(policy.filesystem.read_write)
+    if policy.filesystem.include_workdir:
+        granted += list(workdirs or [])
+    for entry in granted:
+        if not isinstance(entry, str) or not entry:
+            continue
+        base = os.path.realpath(entry)
+        if target == base or target.startswith(base.rstrip("/") + "/"):
+            return True, None
+    return False, ("the filesystem policy does not grant write access at or above "
+                   "%s" % target)
+
+
+def can_idmap(path, owner_uid, sandbox_uid, owner_gid, sandbox_gid):
+    """Would remapping `path` succeed? Returns (True, None) or (False, reason).
+
+    Asked in a forked child with its own mount namespace, using the SAME code the
+    real remap uses, so the answer cannot disagree with what happens later. The
+    child's namespace goes away with it, so this leaves nothing behind.
+
+    The supervisor needs the answer BEFORE it decides what HOME is: the workload's
+    home is the workspace user's home seen through an idmapped mount, and that is
+    only a home if the remap works. On an image where `/home/ubuntu` is virtiofs it
+    cannot -- virtiofs does not set `FS_ALLOW_IDMAP` on this kernel -- and the
+    fallback has to be chosen here rather than discovered by a pane that cannot
+    write its own home.
+    """
+    read_fd, write_fd = os.pipe()
+    with _FORK_LOCK:
+        pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            idmap.unshare_mount_namespace()
+            remapped, problems = idmap.apply([path], owner_uid=owner_uid,
+                                             sandbox_uid=sandbox_uid,
+                                             owner_gid=owner_gid,
+                                             sandbox_gid=sandbox_gid)
+            if not remapped:
+                _diag_send(write_fd, "; ".join(problems) or "not remapped")
+                os._exit(1)
+        except BaseException as exc:  # noqa: BLE001
+            _diag_send(write_fd, str(exc))
+            os._exit(1)
+        os._exit(0)
+    os.close(write_fd)
+    try:
+        with os.fdopen(read_fd, "rb") as handle:
+            message = handle.read().decode("utf-8", "replace").strip()
+        _, status = os.waitpid(pid, 0)
+    except OSError as exc:
+        return False, "could not probe the idmap: %s" % exc
+    if message:
+        return False, message
+    return os.waitstatus_to_exitcode(status) == 0, None
+
+
+def describe_reachability(uid, gid, path):
+    """Why `uid` cannot reach `path`, walking it component by component. None if it can.
+
+    This exists because "tmux server socket did not appear within 10s" is a
+    useless thing to tell somebody. The first `run_as_user: sandbox` boot test
+    failed exactly that way, and the cause was three directories up: the run
+    directory's parent was mode 0700 and owned by another uid, so the workload
+    could not traverse to the socket directory at all and tmux answered EACCES
+    where it expected ENOENT. Ten seconds of silence, then a timeout naming the
+    wrong thing.
+
+    Landlock grants do not help here and are not meant to: a ruleset can only
+    narrow what DAC already allows.
+    """
+    parts = os.path.abspath(path).split("/")
+    read_fd, write_fd = os.pipe()
+    with _FORK_LOCK:
+        pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            os.setgroups([gid])
+            os.setresgid(gid, gid, gid)
+            os.setresuid(uid, uid, uid)
+            walked = "/"
+            for part in parts[1:]:
+                walked = os.path.join(walked, part)
+                if not os.access(walked, os.X_OK):
+                    _diag_send(write_fd,
+                               "uid %d cannot traverse %s" % (uid, walked))
+                    os._exit(1)
+            if not os.access(path, os.W_OK):
+                _diag_send(write_fd, "uid %d cannot write %s" % (uid, path))
+                os._exit(1)
+        except BaseException as exc:  # noqa: BLE001
+            _diag_send(write_fd, "probing %s: %s" % (path, exc))
+            os._exit(1)
+        os._exit(0)
+    os.close(write_fd)
+    try:
+        with os.fdopen(read_fd, "rb") as handle:
+            message = handle.read().decode("utf-8", "replace").strip()
+        os.waitpid(pid, 0)
+    except OSError:
+        return None
+    return message or None
+
+
+def grant_socket_access(plan):
+    """Make the server's socket reachable by the workspace user. Returns a problem.
+
+    tmux creates its socket 0600, owned by whoever runs the server. While the
+    workload ran as the workspace user that was exactly right: agentd shares the
+    uid, so it could connect, and nothing else could.
+
+    The moment a policy says `run_as_user: sandbox` the server's uid stops being
+    agentd's, and 0600 locks agentd out of the workspace's only session. The
+    symptom is not an error anywhere -- agentd's `has-session` probe simply fails
+    with EACCES, so it believes there is no session, asks for one, is told one is
+    already running, and never sends `session_ready`. The host then sees a
+    workspace that is "enforced, runs as sandbox, sentry running" and has no
+    session, forever, with nothing in any log to say why. That is what the first
+    `run_as_user: sandbox` end-to-end run looked like.
+
+    So the supervisor -- root, and the only thing here that can -- gives the
+    socket the workspace user's group and mode 0660.
+
+    The trust set does not widen. Before: one uid, the workspace user, which was
+    also the workload. After: the workload's uid, plus the workspace user's
+    primary group, whose only member is the workspace user. What this does NOT
+    touch is the directory, which stays 0771 root:bromure-tmux -- so agentd still
+    cannot create a server socket of its own beside this one, which is the fact
+    the whole separation rests on.
+    """
+    try:
+        os.chown(SERVER_SOCKET, plan.uid, plan.owner_gid)
+        os.chmod(SERVER_SOCKET, 0o660)
+    except OSError as exc:
+        return ("cannot make %s reachable by the workspace user: %s"
+                % (SERVER_SOCKET, exc))
+    # And verify, rather than assume the chown did what it was for: this is the
+    # single permission the session depends on.
+    try:
+        info = os.stat(SERVER_SOCKET)
+    except OSError as exc:
+        return "cannot stat %s: %s" % (SERVER_SOCKET, exc)
+    reachable = (info.st_uid == plan.owner_uid
+                 or (info.st_gid == plan.owner_gid and info.st_mode & 0o060)
+                 or info.st_mode & 0o006)
+    if not reachable:
+        return ("%s is uid %d gid %d mode %o, which the workspace user "
+                "(uid %d gid %d) cannot connect to -- there will be no session"
+                % (SERVER_SOCKET, info.st_uid, info.st_gid,
+                   info.st_mode & 0o777, plan.owner_uid, plan.owner_gid))
+    return None
+
+
+def server_pid():
+    """The running server's pid, from tmux itself. None when there is none."""
+    try:
+        out = subprocess.run(["tmux", "-S", SERVER_SOCKET, "display-message",
+                              "-p", "#{pid}"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = out.stdout.strip()
+    return int(text) if out.returncode == 0 and text.isdigit() else None
+
+
+# ---------------------------------------------------------------------------
+# Running a command on agentd's behalf, inside the sandbox
+# ---------------------------------------------------------------------------
+#
+# The confused-deputy problem this closes, and it is a family rather than a bug:
+# agentd is unconfined and runs uid 1000, and it executes things the agent
+# controls through files.
+#
+#   * `_run_interactive` execs `bash -lc` / `bash -li`, which sources
+#     ~/.bash_profile, ~/.profile and ~/.bashrc. Whenever the policy makes the
+#     home writable -- and OpenShell's own example policy does exactly that --
+#     the agent appends a line and the next host attach runs it OUTSIDE the
+#     sandbox. Those files also set PATH, so `~/.local/bin/tmux` shadows tmux.
+#   * agentd runs `git -C <workdir>` about twenty times (status, worktree add,
+#     rev-parse, branch -D...). A repository the agent controls can set
+#     `core.fsmonitor`, `core.hooksPath`, `core.sshCommand`, `diff.external`,
+#     smudge/clean filters and credential helpers -- every one an exec vector,
+#     run unconfined.
+#
+# The fix is not to enumerate the vectors; it is to stop agentd executing
+# workspace content at all. An `exec` request runs argv as a member of the
+# sandboxed tree, confined by `confine_self` -- the SAME function that confines
+# the tmux server, so the two can never drift.
+#
+# Descriptors travel over SCM_RIGHTS. agentd keeps its own ends (pipes for a
+# captured command, a pty master for an interactive one); the child gets only
+# what agentd sent, dup2'd onto 0/1/2.
+
+MAX_EXEC_ARGV = 256
+MAX_EXEC_ENV = 256
+
+# Every fork that leads to `confine_self` is serialized through this.
+#
+# The supervisor is multi-threaded (a thread per control connection), and the
+# confinement path calls into NSS -- `pwd.getpwnam`, `os.initgroups` -- inside
+# the forked child. glibc's NSS takes locks, and a child forked while ANOTHER
+# thread held one inherits it held by a thread that no longer exists, which
+# deadlocks before `execve` ever runs. Holding this lock across the fork means
+# no other thread can be inside that code when the snapshot is taken.
+#
+# The child inherits the lock held by itself, which is harmless: it execs.
+_FORK_LOCK = threading.Lock()
+
+
+def _sanitize_env(plan, requested):
+    """The child's environment. Built here, not accepted wholesale.
+
+    A caller-supplied env is data from agentd, which is trusted -- but LD_PRELOAD
+    and friends in a passed-through env would defeat the point of running the
+    command confined at all, and a caller that forgets to scrub is a caller that
+    silently reopens the hole.
+    """
+    env = {
+        "HOME": plan.home,
+        "USER": plan.user,
+        "LOGNAME": plan.user,
+        "SHELL": "/bin/bash",
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
+    blocked = ("LD_", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS",
+               "PYTHONSTARTUP", "PERL5OPT", "GIT_CONFIG", "IFS")
+    for key, value in (requested or {}).items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        if any(key.startswith(prefix) for prefix in blocked):
+            continue
+        env[key] = value
+    return env
+
+
+def exec_in_sandbox(plan, supervisor_tgid, argv, cwd, env, fds, pty):
+    """Fork, confine, exec. Returns (pid, error)."""
+    if not argv or not isinstance(argv, list) or len(argv) > MAX_EXEC_ARGV:
+        return None, "argv must be a non-empty list of at most %d strings" % MAX_EXEC_ARGV
+    if not all(isinstance(a, str) for a in argv):
+        return None, "argv must contain only strings"
+    if env is not None and len(env) > MAX_EXEC_ENV:
+        return None, "too many environment entries"
+
+    prepared, outcome = osh.prepare(
+        plan.policy, workdir=plan.workdirs, path_open_mode=osh.PRIVILEGED,
+        extra_read_only=plan.extra_read_only,
+        extra_read_write=plan.extra_read_write)
+
+    child_env = _sanitize_env(plan, env)
+    target_cwd = cwd if (isinstance(cwd, str) and os.path.isdir(cwd)) else plan.home
+
+    diag_read, diag_write = _diag_pipe()
+    with _FORK_LOCK:
+        pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(diag_read)
+        except OSError:
+            pass
+        try:
+            with stage("setsid"):
+                os.setsid()
+            if pty and fds:
+                # The caller passed a pty slave; make it this session's
+                # controlling terminal so job control works in the shell.
+                try:
+                    import fcntl
+                    import termios
+                    fcntl.ioctl(fds[0], termios.TIOCSCTTY, 0)
+                except Exception:
+                    pass
+            for index in range(3):
+                source = fds[index] if index < len(fds) else (
+                    fds[0] if fds else None)
+                if source is not None:
+                    os.dup2(source, index)
+            for fd in fds:
+                if fd > 2:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            confine_self(plan, prepared, outcome, supervisor_tgid)
+            with stage("chdir", target_cwd):
+                os.chdir(target_cwd)
+            # Under Landlock a denial here is EACCES on the *binary*, which
+            # looks nothing like a shell's own "command not found" even though
+            # both used to surface as 127.
+            with stage("exec %s" % argv[0], target_cwd):
+                os.execvpe(argv[0], argv, child_env)
+        except BaseException as exc:  # noqa: BLE001 -- must reach the parent
+            _diag_send(diag_write, str(exc))
+            os._exit(127)
+        os._exit(127)
+
+    try:
+        os.close(diag_write)
+    except OSError:
+        pass
+    if prepared:
+        prepared.close()
+    # Blocks only until the child execs (EOF on a CLOEXEC pipe) or reports, both
+    # of which take milliseconds. A command that runs for an hour is already past
+    # this point.
+    failure = _diag_collect(diag_read, pid)
+    if failure is not None:
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        return None, failure
+    return pid, None
+
+
+# ---------------------------------------------------------------------------
+# The control socket
+# ---------------------------------------------------------------------------
+#
+# agentd cannot start a server itself -- by construction, see above -- so it asks
+# here. The supervisor is the only thing that ever starts one, which is what
+# makes "every server is sandboxed" a structural property instead of a promise.
+#
+# The peer is checked with SO_PEERCRED: the kernel reports the credentials, so
+# nothing the peer says about itself is trusted. The uid must be the workspace
+# user's, and when agentd's pid is known it must be that pid or one of its
+# descendants -- a sandboxed process shares the uid, so uid alone is not enough.
+
+# Identifying agentd, per connection rather than once.
+#
+# The first version pinned agentd's pid at supervisor start. Two problems, and
+# the first is an availability bug worse than the thing the check was for:
+#
+#   * agentd is `Restart=always`. Kill it -- which a sandboxed process CAN do in
+#     Landlock-only mode, and could do even under seccomp until `tkill` was
+#     denied outright -- and systemd brings it back with a NEW pid. Every
+#     subsequent legitimate request would then be refused, and the workspace
+#     would stay broken until the VM restarted.
+#   * pid reuse eventually lets a sandboxed descendant hold the old pid.
+#
+# So the predicate is now "is this peer part of the sandboxed tree?", answered
+# from the cgroup, which a process cannot change for itself without write access
+# to a root-owned cgroup file. The supervisor puts every confined child into a
+# cgroup of its own; a peer in that cgroup is inside the sandbox, and anything
+# else that got as far as this socket is agentd or one of its children, because
+# the socket's directory is root-owned 0755 and the socket itself is
+# root:<workspace group> 0660.
+#
+# Worth being clear about what this check IS and IS NOT. It is not what makes
+# the sandbox sound: `exec` confines unconditionally, so a sandboxed process
+# asking for one gains nothing. It is there so the sandbox cannot drive the
+# supervisor's rate limiter or make it spawn work. That is why the fallback,
+# when cgroups are unavailable, is uid-only plus a warning rather than refusing
+# everything.
+
+SANDBOX_CGROUP_NAME = "bromure-sandbox"
+SENTRY_STATUS_PATH = os.path.join(RUN_DIR, "sentry.json")
+SENTRY_PHASE_PATH = "/sys/module/bromure_sentry/parameters/phase"
+SENTRY_CGROUP_PATH = "/sys/module/bromure_sentry/parameters/sandbox_cgroup"
+
+
+def mark_sentry_session():
+    """Tell the sentry the VM has finished assembling itself.
+
+    Everything before this is Bromure's own root helpers — the sentry loader
+    raising lockdown, udev and dockerd loading signed modules, systemd and PAM
+    changing credentials, and under strict the revocation's own bind mounts —
+    and the host treats it as informational. Once agentd has a session, agent
+    code is possible and the same activity means something different.
+
+    NOT called when the server starts. In the strict flow the root script starts
+    this supervisor BEFORE the revocation, so flipping on server start labelled
+    the revocation's own `mount` events as session activity — Bromure's setup
+    reported as if the agent had done it. agentd calls `session_ready` instead,
+    from its post-revocation incarnation, once it actually has a session.
+
+    The parameter is one-way in the module: a write that would move the phase
+    backwards is refused. Nothing here can put it back, and neither can root.
+    """
+    try:
+        with open(SENTRY_PHASE_PATH, "w") as handle:
+            handle.write("1\n")
+    except OSError:
+        # No sentry loaded, or it could not be told. Not fatal: the stream is
+        # still correct, just conservatively labelled.
+        pass
+
+
+def mark_sentry_cgroup(relative_path):
+    """Tell the sentry which cgroup the sandboxed tree lives in.
+
+    A cgroup v2 id is the inode number of its directory, so this needs no new
+    interface. With it, every event says whether its task was inside the agent's
+    confined tree — which under strict is what separates an escalation
+    (impossible there, because of no_new_privs) from one of Bromure's own
+    helpers doing something ordinary.
+    """
+    if not relative_path:
+        return
+    try:
+        path = os.path.join("/sys/fs/cgroup", relative_path.lstrip("/"))
+        with open(SENTRY_CGROUP_PATH, "w") as handle:
+            handle.write("%d\n" % os.stat(path).st_ino)
+    except OSError:
+        pass
+
+
+def own_cgroup_path():
+    """This process's cgroup v2 path, as it appears in /proc/self/cgroup."""
+    try:
+        with open("/proc/self/cgroup") as handle:
+            for line in handle:
+                parts = line.strip().split(":", 2)
+                if len(parts) == 3 and parts[0] == "0":
+                    return parts[2]
+    except OSError:
+        pass
+    return None
+
+
+def prepare_sandbox_cgroup():
+    """A cgroup for the sandboxed tree. Returns its path, or None.
+
+    No controllers are enabled in it, so cgroup v2's "no internal processes"
+    rule does not apply to the parent and the supervisor can keep living there.
+    """
+    own = own_cgroup_path()
+    if not own:
+        return None
+    path = os.path.join("/sys/fs/cgroup", own.lstrip("/"), SANDBOX_CGROUP_NAME)
+    try:
+        os.makedirs(path, exist_ok=True)
+        # Prove it is usable before relying on it.
+        with open(os.path.join(path, "cgroup.procs")) as handle:
+            handle.read()
+    except OSError as exc:
+        log("no cgroup for the sandboxed tree (%s); peer identity falls back "
+            "to uid only" % exc)
+        return None
+    return os.path.join(own.rstrip("/"), SANDBOX_CGROUP_NAME)
+
+
+def join_sandbox_cgroup(relative_path):
+    """Move the calling process into the sandbox cgroup. Called in the child,
+    while it is still root -- the cgroup files are root-owned, which is exactly
+    what stops the workload moving itself back out."""
+    if not relative_path:
+        return
+    try:
+        with open(os.path.join("/sys/fs/cgroup", relative_path.lstrip("/"),
+                               "cgroup.procs"), "w") as handle:
+            handle.write("0\n")
+    except OSError:
+        pass
+
+
+def peer_cgroup_path(pid):
+    try:
+        with open("/proc/%d/cgroup" % pid) as handle:
+            for line in handle:
+                parts = line.strip().split(":", 2)
+                if len(parts) == 3 and parts[0] == "0":
+                    return parts[2]
+    except OSError:
+        pass
+    return None
+
+
+def peer_credentials(conn):
+    raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                          struct.calcsize("3i"))
+    pid, uid, gid = struct.unpack("3i", raw)
+    return pid, uid, gid
+
+
+def is_descendant_of(pid, ancestor):
+    seen = 0
+    while pid > 1 and seen < 32:
+        if pid == ancestor:
+            return True
+        try:
+            with open("/proc/%d/status" % pid) as handle:
+                for line in handle:
+                    if line.startswith("PPid:"):
+                        pid = int(line.split()[1])
+                        break
+                else:
+                    return False
+        except (OSError, ValueError):
+            return False
+        seen += 1
+    return pid == ancestor
+
+
+class Supervisor(object):
+    def __init__(self, plan, status, agentd_pid):
+        self.plan = plan
+        self.status = status
+        self.agentd_pid = agentd_pid
+        self.starts = 0            # supervisor-performed starts, total
+        self.start_times = []
+        self.last_start = 0.0
+        # A session exists only once agentd says so. The supervisor starting a
+        # server is NOT the same thing, and conflating the two is how a workspace
+        # reported itself healthy while having nothing the user could type into.
+        self.session_ready = False
+        self.first_server_at = None
+        self.session_warned = False
+
+    def live_agentd_pid(self):
+        """agentd's pid NOW, not the one this supervisor started with.
+
+        The supervisor outlives agentd by design: it is started once, by the
+        first incarnation's root script, and that incarnation then exits 75 so
+        systemd can restart it without sudo. Caching the pid therefore meant
+        every later confinement named a process that no longer existed.
+        """
+        fresh = _agentd_pid()
+        if fresh and os.path.isdir("/proc/%d" % fresh):
+            self.agentd_pid = fresh
+        elif self.agentd_pid and not os.path.isdir("/proc/%d" % self.agentd_pid):
+            self.agentd_pid = None
+        return self.agentd_pid
+
+    # -- status ----------------------------------------------------------
+    def _sentry_snapshot(self):
+        """The sentry's own view, from the file bromure-sentryd writes.
+
+        The supervisor and the loader run independently and settle at different
+        times -- the loader's rebuild fallback can take minutes. The first
+        version published `sentry: off` once at startup and never looked again,
+        so a workspace whose sentry genuinely could not load reported "nobody
+        asked for it". The host reasonably read that as silence from a sentry
+        that should have connected, and tripped a tampering alarm on what was
+        really a kernel mismatch. A false alarm in the first minute is how people
+        learn to ignore the real ones.
+        """
+        try:
+            with open(SENTRY_STATUS_PATH) as handle:
+                value = json.load(handle)
+            if not isinstance(value, dict):
+                return None
+            return value
+        except (OSError, ValueError):
+            return None
+
+    def publish(self, outcome=None, report=None):
+        if outcome is not None:
+            self.status["filesystem"] = outcome.state
+            self.status["landlock_abi"] = outcome.abi
+            self.status["degraded_reason"] = outcome.reason
+        if report and report.get("idmap") is not None:
+            self.status["idmap"] = report["idmap"]
+            # Factual, and nothing more. The previous text ended "...and may not
+            # be able to write them", which contradicted this project's own
+            # measurement: virtiofs does not enforce the guest's DAC, so a share
+            # it reports as uid 1000 mode 0755 is written to by uid 999 anyway.
+            # Guessing there produced a confident, prominent, wrong warning on the
+            # configuration the feature exists for. Whether the workload can write
+            # is MEASURED by `check_workdir_access`, which forks and tries, and is
+            # reported by `run_as.workdirs_writable` and its own warning.
+            for problem in report["idmap"]["problems"]:
+                note = "idmap: %s" % problem
+                if note not in self.status["warnings"]:
+                    self.status["warnings"].append(note)
+            if report["idmap"]["remapped"]:
+                note = ("idmap: %s presented to uid %d as its own"
+                        % (", ".join(report["idmap"]["remapped"]), self.plan.uid))
+                if note not in self.status["warnings"]:
+                    self.status["warnings"].append(note)
+        if report and report.get("error"):
+            self.status["server_error"] = report["error"]
+        if report and report.get("socket_problem"):
+            note = report["socket_problem"]
+            if note not in self.status["warnings"]:
+                self.status["warnings"].append(note)
+        sentry = self._sentry_snapshot()
+        if sentry is not None:
+            self.status["sentry"] = sentry.get("sentry", "off")
+            self.status["sentry_reason"] = sentry.get("reason")
+            self.status["sentry_digest"] = (
+                sentry.get("digest") if sentry.get("sentry") == "running" else None)
+            self.status["lockdown"] = sentry.get("lockdown")
+        self.status["build"] = self.status.get("build") or build_marker()
+        self.status["server_pid"] = server_pid()
+        self.status["session_ready"] = self.session_ready
+        diagnosis = self.session_diagnosis()
+        if diagnosis and diagnosis not in self.status["warnings"]:
+            self.status["warnings"].append(diagnosis)
+            log("SESSION: %s" % diagnosis)
+        # Counts supervisor-performed starts AFTER the first, so a quiet
+        # workspace reports 0 and any non-zero value means something ended the
+        # server and something asked for a new one.
+        self.status["server_restarts"] = max(0, self.starts - 1)
+        write_status(self.status)
+
+    # -- why there is no session ----------------------------------------
+    #
+    # SESSION_READY_GRACE is generous on purpose. agentd's post-revocation
+    # incarnation has to come up, attach and create a session, and under the
+    # strict sandbox that is behind a whole root script. Warning early would make
+    # the warning the normal case, which is how a diagnostic becomes noise.
+    # Overridable so a test can assert the diagnosis without waiting a minute for
+    # it. Every other timing hook here is overridable for the same reason, and a
+    # diagnostic nobody can test is one that rots.
+    SESSION_READY_GRACE = float(os.environ.get("BROMURE_SESSION_GRACE", "60"))
+
+    def session_diagnosis(self):
+        """Why agentd has not reported a session. None when it has, or too soon.
+
+        The failure this exists for produced no error anywhere: with
+        `run_as_user: sandbox`, tmux's 0600 socket belonged to the workload's uid
+        and agentd -- a different uid -- got EACCES from every `has-session`
+        probe. So agentd believed there was no session, the supervisor knew there
+        was a server, both were right, and the host saw a fully enforced
+        workspace that never produced a shell. Nobody was in a position to say
+        the word "permission".
+
+        `grant_socket_access` now makes that specific case impossible. This is
+        what reports it if it happens anyway, and reports the OTHER reasons too,
+        because "no session" has more than one cause and the host should not have
+        to guess which.
+        """
+        if self.session_ready or self.first_server_at is None:
+            return None
+        if time.time() - self.first_server_at < self.SESSION_READY_GRACE:
+            return None
+        if server_pid() is None:
+            return ("no session: the sandboxed tmux server is not running"
+                    + (" (%s)" % self.status["server_error"]
+                       if self.status.get("server_error") else ""))
+        parts = []
+        try:
+            info = os.stat(SERVER_SOCKET)
+            owner_gid = self.plan.owner_gid
+            reachable = (info.st_uid == self.plan.owner_uid
+                         or (info.st_gid == owner_gid and info.st_mode & 0o060)
+                         or info.st_mode & 0o006)
+            if not reachable:
+                parts.append(
+                    "the workspace user (uid %d gid %d) cannot connect to %s, "
+                    "which is uid %d gid %d mode %o"
+                    % (self.plan.owner_uid, owner_gid, SERVER_SOCKET,
+                       info.st_uid, info.st_gid, info.st_mode & 0o777))
+        except OSError as exc:
+            parts.append("%s: %s" % (SERVER_SOCKET, exc))
+        if self.plan.uid != self.plan.owner_uid:
+            parts.append(
+                "the workload runs as uid %d with home %s; if that home or a "
+                "workdir is not reachable by that uid, every pane and every "
+                "command fails before it starts"
+                % (self.plan.uid, self.plan.home))
+        return ("no session %.0fs after the server started: %s"
+                % (time.time() - self.first_server_at,
+                   "; ".join(parts) if parts else
+                   "the server is running and its socket is reachable, so "
+                   "agentd has not asked for one -- check the agentd journal"))
+
+    # -- starting --------------------------------------------------------
+    def may_start(self):
+        now = time.time()
+        self.start_times = [t for t in self.start_times
+                            if now - t < START_BURST_WINDOW]
+        if len(self.start_times) >= START_BURST_MAX:
+            return False, ("more than %d starts in %.0fs"
+                           % (START_BURST_MAX, START_BURST_WINDOW))
+        return True, None
+
+    def start(self, reason):
+        # "Is one already running" comes FIRST. Asking for a server that exists
+        # is not a start and must never be refused by the rate limiter -- an
+        # earlier version checked the limiter first and turned a no-op request
+        # into a failure.
+        if server_pid() is not None:
+            return True, None
+        allowed, why = self.may_start()
+        if not allowed:
+            log("refusing to start the server (%s): %s" % (reason, why))
+            return False, why
+        self.last_start = time.time()
+        self.start_times.append(self.last_start)
+        outcome, report = start_server(self.plan, self.live_agentd_pid())
+        self.starts += 1
+        self.publish(outcome, report)
+        if report["ok"]:
+            if self.first_server_at is None:
+                self.first_server_at = time.time()
+            log("server started (%s): pid=%s starts=%d"
+                % (reason, self.status.get("server_pid"), self.starts))
+        else:
+            log("server start FAILED (%s): %s" % (reason, report["error"]))
+        return report["ok"], report.get("error")
+
+    # -- watching the things that change under us ------------------------
+    def watch_state(self):
+        """Republish whenever the sentry's answer or the server's liveness changes.
+
+        Two independent things settle after the supervisor has already published
+        once, and neither tells us:
+
+        * **sentry.json.** The loader runs separately and its rebuild fallback can
+          take minutes, so sequencing the two daemons would stall the session
+          behind it. Polling is correct whenever the answer arrives.
+        * **the tmux server.** It exits when the user closes their last window or
+          the agent runs `kill-server`. Without this the published `server_pid`
+          went stale, and because it is part of attestd's change fingerprint, the
+          host would not learn the session had ended until something else moved.
+
+        A stat and a socket probe per second, against being wrong for minutes.
+        """
+        last_sentry = None
+        last_pid = self.status.get("server_pid")
+        while True:
+            try:
+                stamp = os.stat(SENTRY_STATUS_PATH).st_mtime_ns
+            except OSError:
+                stamp = None
+            pid = server_pid()
+            # The session diagnosis is time-based, so it has to be asked for even
+            # when nothing else changed -- otherwise the one workspace that most
+            # needs it (nothing happening, no session, no explanation) is the one
+            # workspace that never republishes.
+            due = (not self.session_warned and not self.session_ready
+                   and self.first_server_at is not None
+                   and time.time() - self.first_server_at
+                   >= self.SESSION_READY_GRACE)
+            if stamp != last_sentry or pid != last_pid or due:
+                last_sentry, last_pid = stamp, pid
+                if due:
+                    self.session_warned = True
+                try:
+                    self.publish()
+                except OSError as exc:
+                    log("republish: %s" % exc)
+            time.sleep(1.0)
+
+    # -- the control socket ---------------------------------------------
+    def serve_control(self):
+        try:
+            os.unlink(CONTROL_SOCKET)
+        except OSError:
+            pass
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(CONTROL_SOCKET)
+        # Mode on the socket itself is belt to the braces of the root-owned
+        # 0755 parent: only the workspace user's processes get this far, and
+        # SO_PEERCRED decides which of them is agentd.
+        #
+        # `owner_gid`, the WORKSPACE user's group -- not `plan.gid`, which is the
+        # workload's. Those are the same number in every configuration except the
+        # one that matters: a policy naming `run_as_user: sandbox` gave this
+        # socket group 991, and agentd -- gid 1000, and the only legitimate
+        # client there is -- got EACCES from `connect`. `_sandbox_exec` then
+        # returned None and `_ws_run` turned that into exit 127 with no output,
+        # so on the first such workspace EVERY host command answered 127
+        # instantly, including `/bin/echo hi`, while status.json (written by root,
+        # needing no socket) went on reporting a fully enforced sandbox.
+        #
+        # Nothing inside the sandbox needs this socket, so naming the workspace
+        # group is also strictly tighter than what it replaces.
+        os.chmod(CONTROL_SOCKET, 0o660)
+        os.chown(CONTROL_SOCKET, 0, self.plan.owner_gid)
+        listener.listen(8)
+        threading.Thread(target=self.watch_state, daemon=True).start()
+        log("control socket ready at %s" % CONTROL_SOCKET)
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError as exc:
+                log("accept: %s" % exc)
+                time.sleep(0.5)
+                continue
+            # A thread per connection: `exec` blocks for the lifetime of the
+            # command, and an interactive shell lasts as long as the session.
+            thread = threading.Thread(target=self._serve_one, args=(conn,),
+                                      daemon=True)
+            thread.start()
+
+    def _serve_one(self, conn):
+        try:
+            self.handle_control(conn)
+        except Exception as exc:  # noqa: BLE001 -- one bad peer is not fatal
+            log("control request: %r" % (exc,))
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def handle_control(self, conn):
+        conn.settimeout(5.0)
+        pid, uid, _gid = peer_credentials(conn)
+        if uid != self.plan.owner_uid:
+            self._deny(conn, "peer uid %d is not the workspace user" % uid, pid)
+            return
+        if self.plan.sandbox_cgroup:
+            # A sandboxed process shares the uid, so uid alone proves nothing.
+            # Its cgroup does: only root can move a process out of it.
+            peer_cgroup = peer_cgroup_path(pid)
+            if peer_cgroup and peer_cgroup.rstrip("/") == \
+                    self.plan.sandbox_cgroup.rstrip("/"):
+                self._deny(conn, "peer pid %d is inside the sandboxed tree" % pid,
+                           pid)
+                return
+        else:
+            # No cgroup available: fall back to the parent chain, against
+            # agentd's CURRENT pid -- the one at supervisor startup is reliably
+            # dead by the second incarnation, which would have denied every
+            # legitimate request.
+            live = self.live_agentd_pid()
+            if live and not is_descendant_of(pid, live):
+                self._deny(conn, "peer pid %d is not agentd (%d) or a descendant"
+                           % (pid, live), pid)
+                return
+        # recv_fds, not recv: an `exec` request carries its descriptors with it.
+        data, fds, _flags, _addr = socket.recv_fds(conn, 65536, 3)
+        try:
+            request = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            for fd in fds:
+                os.close(fd)
+            conn.sendall(b'{"ok":false,"reason":"malformed request"}\n')
+            return
+        op = request.get("op")
+        if op == "start":
+            ok, why = self.start("requested by pid %d" % pid)
+            conn.sendall((json.dumps({
+                "ok": bool(ok), "reason": why,
+                "socket": SERVER_SOCKET,
+                "server_pid": self.status.get("server_pid"),
+            }) + "\n").encode())
+        elif op == "exec":
+            self.handle_exec(conn, request, fds)
+            return
+        elif op == "session_ready":
+            # agentd's post-revocation incarnation has a session, so agent code
+            # is now possible. This is what flips the sentry out of its boot
+            # phase -- not the server starting, which under strict happens
+            # before the revocation and so labelled the revocation's own mounts
+            # as session activity.
+            mark_sentry_session()
+            self.session_ready = True
+            self.publish()
+            conn.sendall((json.dumps({"ok": True}) + "\n").encode())
+        elif op == "poweroff":
+            self.handle_poweroff(conn)
+        elif op == "status":
+            # Refresh through publish() so a caller asking for status gets the
+            # same, fully merged picture the status file has -- including the
+            # sentry's own state, which settles later than the supervisor's.
+            self.publish()
+            conn.sendall((json.dumps({"ok": True, "status": self.status}) + "\n").encode())
+        else:
+            conn.sendall(b'{"ok":false,"reason":"unknown op"}\n')
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def handle_exec(self, conn, request, fds):
+        """Run one command inside the sandbox and report its exit status.
+
+        Blocking, which is why `serve_control` gives every connection its own
+        thread: an interactive shell here lasts as long as the user's session,
+        and a single-threaded supervisor would stop answering anything else.
+        """
+        pid, error = exec_in_sandbox(
+            self.plan, self.live_agentd_pid(),
+            request.get("argv"), request.get("cwd"), request.get("env"),
+            fds, bool(request.get("pty")))
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if pid is None:
+            conn.sendall((json.dumps({"ok": False, "reason": error}) + "\n").encode())
+            return
+        # The caller may go away (host detach, agentd restart). Closing its end
+        # is how we hear about it, so watch for that too and kill the child
+        # rather than leaking it.
+        conn.settimeout(0.5)
+        status = None
+        while status is None:
+            try:
+                done, code = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if done == pid:
+                status = code
+                break
+            try:
+                if conn.recv(1, socket.MSG_PEEK) == b"":
+                    os.kill(-pid, signal.SIGHUP)
+                    os.kill(-pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                    return
+            except socket.timeout:
+                pass
+            except OSError:
+                pass
+        exit_code = (os.WEXITSTATUS(status) if status is not None
+                     and os.WIFEXITED(status)
+                     else (128 + os.WTERMSIG(status)
+                           if status is not None and os.WIFSIGNALED(status)
+                           else 127))
+        try:
+            conn.sendall((json.dumps({"ok": True, "exit": exit_code}) + "\n").encode())
+        except OSError:
+            pass
+
+    def handle_poweroff(self, conn):
+        """Power the VM off on agentd's behalf.
+
+        Not new authority: before the strict sandbox existed, agentd did this
+        itself with `sudo poweroff`, and `session_monitor_service` still tries
+        that first. Under strict there is no sudo left, so that call fails
+        silently and the workspace stays up after the user closes their last
+        window — which then lets a restarted agentd ask for a fresh session and
+        resurrect a workspace the user had finished with. Observed in the
+        end-to-end run as an apparent "auto-restart"; the supervisor never
+        restarted anything.
+        """
+        if os.environ.get("BROMURE_SANDBOXD_NO_POWEROFF"):
+            # Tests need to prove the op is reachable and correctly gated
+            # without ending the machine they run on.
+            conn.sendall((json.dumps({"ok": True, "dry_run": True}) + "\n").encode())
+            return
+        log("poweroff requested by agentd")
+        try:
+            conn.sendall((json.dumps({"ok": True}) + "\n").encode())
+        except OSError:
+            pass
+        subprocess.run(["systemctl", "poweroff"], capture_output=True, timeout=30)
+
+    def _deny(self, conn, reason, pid):
+        log("DENIED control request: %s" % reason)
+        note = "control request denied: %s" % reason
+        if note not in self.status["warnings"]:
+            self.status["warnings"].append(note)
+            self.publish()
+        try:
+            conn.sendall((json.dumps({"ok": False, "reason": reason}) + "\n").encode())
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+def _stay_up_reporting(status):
+    """A fatal misconfiguration must not leave a DEAD unit behind.
+
+    Exiting non-zero under `Restart=always` makes systemd restart, fail, and
+    within five attempts hit the start limit — after which the unit is gone for
+    the rest of the boot. agentd then waits its full timeout for a control socket
+    that will never appear, and the host is told nothing about why. Measured
+    exactly that way: `bromure-sandboxd.service: start-limit-hit`.
+    
+    So instead: publish the reason, open the control socket anyway, and answer
+    `status` requests with it. agentd finds the socket immediately, learns there
+    is no server and why, and refuses to start an unsandboxed session — which is
+    the correct outcome, arrived at in a second rather than a timeout.
+    """
+    log("staying up to report the failure rather than exiting")
+    try:
+        os.makedirs(RUN_DIR, exist_ok=True)
+        os.chmod(RUN_DIR, 0o755)
+        try:
+            os.unlink(CONTROL_SOCKET)
+        except OSError:
+            pass
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(CONTROL_SOCKET)
+        # Same permissions as the working path: agentd's group, not the world.
+        # A failure reason is not a secret, but an inconsistent mode here is the
+        # kind of thing that gets copied into a path where it does matter.
+        try:
+            os.chown(CONTROL_SOCKET, 0, pwd.getpwnam(WORKSPACE_USER).pw_gid)
+        except (KeyError, OSError):
+            pass
+        os.chmod(CONTROL_SOCKET, 0o660)
+        listener.listen(8)
+    except OSError as exc:
+        log("cannot even open the control socket: %s" % exc)
+        return 2
+    reply = (json.dumps({"ok": False, "reason": status.get("degraded_reason"),
+                         "status": status}) + "\n").encode()
+    while True:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            time.sleep(0.5)
+            continue
+        try:
+            conn.settimeout(5.0)
+            conn.recv(4096)
+            conn.sendall(reply)
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+SECCOMP_ACTIONS_LOGGED = "/proc/sys/kernel/seccomp/actions_logged"
+
+
+def ensure_seccomp_logging(status):
+    """Make sure a refused syscall is one the kernel will tell us about.
+
+    The seccomp filters ask for `SECCOMP_FILTER_FLAG_LOG`, but the kernel only
+    calls `audit_seccomp` -- which is the sentry's probe point, and the only trace
+    a refused syscall leaves anywhere -- when the action is ALSO listed in
+    `actions_logged`. Both halves are required and only one of them is ours.
+
+    Measured as already correct on this image (`errno` is in the default set), so
+    this is a guard against an image change rather than a fix. It is written only
+    when something is missing, because a sysctl written on every boot is a line in
+    every audit log for no reason.
+    """
+    wanted = {"errno", "kill_thread", "kill_process", "trap"}
+    try:
+        with open(SECCOMP_ACTIONS_LOGGED) as handle:
+            current = set(handle.read().split())
+    except OSError as exc:
+        status["warnings"].append(
+            "cannot read %s (%s): a seccomp denial may leave no trace"
+            % (SECCOMP_ACTIONS_LOGGED, exc))
+        return
+    available = wanted & _seccomp_actions_available()
+    if available <= current:
+        return
+    merged = sorted(current | available)
+    try:
+        with open(SECCOMP_ACTIONS_LOGGED, "w") as handle:
+            handle.write(" ".join(merged))
+        log("seccomp actions_logged: %s" % " ".join(merged))
+    except OSError as exc:
+        status["warnings"].append(
+            "cannot enable seccomp logging for %s (%s): those denials will be "
+            "invisible to the sentry"
+            % (", ".join(sorted(available - current)), exc))
+
+
+def _seccomp_actions_available():
+    try:
+        with open("/proc/sys/kernel/seccomp/actions_avail") as handle:
+            return set(handle.read().split())
+    except OSError:
+        return set()
+
+
+def build_plan(spec, policy, status, group_gid, sandbox_cgroup=None):
+    """Resolve everything once. Returns (Plan, exit_code); one of them is None."""
+    workdirs = resolve_workdirs(spec)
+
+    # `no_new_privs` is irreversible and disables every setuid binary in the
+    # tree, `sudo` included. A workspace without the strict sandbox still grants
+    # the agent user sudo, and silently breaking it would be worse than not
+    # applying the filters. So the process/seccomp layer requires the strict
+    # sandbox; Landlock, which touches no credentials, does not.
+    strict_applied = os.path.exists(STRICT_DONE)
+    strict_requested = bool(spec.get("strict_sandbox"))
+    apply_seccomp = (policy.process.present or strict_applied) and \
+                    (strict_applied or strict_requested)
+    if apply_seccomp:
+        ensure_seccomp_logging(status)
+    if policy.process.present and not (strict_applied or strict_requested):
+        status["warnings"].append(
+            "process policy present without strict_sandbox: seccomp and "
+            "no_new_privs not applied (they would disable sudo, which this "
+            "workspace still grants). Landlock is unaffected.")
+
+    run_as_user = policy.process.run_as_user if policy.process.present else None
+    run_as_group = policy.process.run_as_group if policy.process.present else None
+    try:
+        ensure_user(run_as_user)
+        if run_as_group and not osh._is_numeric(run_as_group):
+            try:
+                grp.getgrnam(run_as_group)
+            except KeyError:
+                subprocess.run(["groupadd", "--system", run_as_group],
+                               check=True, capture_output=True)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        status["degraded_reason"] = "cannot provision run_as identity: %s" % exc
+        write_status(status)
+        return None, _stay_up_reporting(status)
+
+    try:
+        owner = pwd.getpwnam(WORKSPACE_USER)
+        owner_uid, owner_gid = owner.pw_uid, owner.pw_gid
+    except KeyError:
+        owner_uid, owner_gid = 1000, 1000
+
+    uid, gid = owner_uid, owner_gid
+    try:
+        if run_as_user or run_as_group:
+            record = osh._resolve_user(run_as_user) if run_as_user else None
+            if run_as_user:
+                uid = record.pw_uid if record else int(run_as_user)
+            if run_as_group:
+                group = osh._resolve_group(run_as_group)
+                gid = group.gr_gid if group else int(run_as_group)
+            elif record:
+                gid = record.pw_gid
+    except (osh.PolicyError, KeyError, ValueError) as exc:
+        status["degraded_reason"] = "cannot resolve run_as identity: %s" % exc
+        write_status(status)
+        return None, _stay_up_reporting(status)
+
+    needs_idmap = uid != owner_uid
+    run_as_name = (pwd.getpwuid(uid).pw_name if osh._passwd_has(uid) else str(uid))
+    unreachable = check_workdir_access(uid, gid, workdirs)
+    if unreachable:
+        # A measured failure, so it is worth saying plainly: the agent will start
+        # and then be unable to save a file. Reported whether or not an idmap is
+        # going to be attempted -- the earlier version suppressed it whenever
+        # `needs_idmap` was true, on the assumption the remap would fix it, and a
+        # virtiofs share cannot be remapped on this kernel at all.
+        status["warnings"].append(
+            "run_as uid %d cannot write %s -- the agent will start and then fail "
+            "to save files there" % (uid, ", ".join(unreachable)))
+
+    # The home.
+    #
+    # For a distinct run_as user this is the WORKSPACE user's home, seen through an
+    # idmapped mount -- not a home of its own. The reason is function, and it
+    # decides the question: Bromure seeds the agent's whole configuration into
+    # /home/ubuntu (`~/.claude`, `settings.json`, the `.bashrc` hooks,
+    # `.gitconfig`, the agent stubs). A workload with `HOME=/home/sandbox` sees
+    # none of it and starts unconfigured, which is a worse workspace than the DAC
+    # separation would be worth -- and on a single-tenant workspace VM that
+    # separation buys little anyway, since without `run_as_user` the agent runs AS
+    # ubuntu and owns all of it. See DESIGN.md §1.12 for what `run_as_user`
+    # therefore does and does not mean.
+    #
+    # But it is only a home if the remap works, and on an image whose /home/ubuntu
+    # is virtiofs it cannot. So the remap is PROBED here, with the same code that
+    # will perform it, and a home of the run_as user's own on guest storage is the
+    # fallback -- chosen here rather than discovered by a pane that cannot write.
+    home, run_as_home, home_via = None, None, "passwd entry"
+    if needs_idmap:
+        owner_home = None
+        try:
+            owner_home = pwd.getpwuid(owner_uid).pw_dir
+        except KeyError:
+            pass
+        if owner_home and os.path.isdir(owner_home):
+            # TWO conditions, and the second is as easy to forget as it is to
+            # diagnose: the mount has to be remappable, and the RULESET has to
+            # grant it. A home the policy does not cover is a home the workload
+            # cannot enter, whatever its ownership says.
+            usable, why = policy_grants_write(policy, workdirs, owner_home)
+            if usable:
+                usable, why = can_idmap(owner_home, owner_uid, uid,
+                                        owner_gid, gid)
+            if usable:
+                home = owner_home
+                home_via = "idmapped workspace home"
+            else:
+                status["warnings"].append(
+                    "%s cannot be idmapped (%s), so the workload cannot use it as "
+                    "a home and will not see the seeded agent configuration"
+                    % (owner_home, why))
+        if not home:
+            home, home_problem = ensure_run_as_home(uid, gid, run_as_name,
+                                                    owner_uid)
+            if home_problem:
+                status["warnings"].append(home_problem)
+            else:
+                run_as_home = home
+                home_via = "supervisor-created fallback"
+    if not home:
+        home = pwd.getpwuid(uid).pw_dir if osh._passwd_has(uid) else "/"
+        if not os.path.isdir(home):
+            home = workdirs[0] if workdirs else "/"
+
+    extra_read_only, extra_read_write, addition_paths = [], [], []
+    DYNAMIC_ADDITIONS.clear()
+    if policy.filesystem.present:
+        for path, _ in ADDITIONS_READ_WRITE:
+            if os.path.exists(path):
+                extra_read_write.append(path)
+                addition_paths.append(path)
+        for path, _ in ADDITIONS_READ_ONLY:
+            if os.path.exists(path):
+                extra_read_only.append(path)
+                addition_paths.append(path)
+        # DNS. Unconditional, and first, because a workspace whose name
+        # resolution is broken looks like a network-policy problem and is the
+        # hardest kind of bug to attribute.
+        for path, why in resolver_additions():
+            if path not in extra_read_only:
+                extra_read_only.append(path)
+                addition_paths.append(path)
+                note_addition(path, why, "ro")
+        # OpenShell's own baseline enrichment, on OpenShell's own condition.
+        base_ro, base_rw = openshell_baseline_additions(
+            spec, policy, workdirs, status)
+        for path, why in base_ro:
+            if path not in extra_read_only:
+                extra_read_only.append(path)
+                addition_paths.append(path)
+                note_addition(path, why, "ro")
+        for path, why in base_rw:
+            if path not in extra_read_write:
+                extra_read_write.append(path)
+                addition_paths.append(path)
+                note_addition(path, why, "rw")
+        if run_as_home:
+            # Bromure plumbing, not something the user's policy has to know
+            # about: the workload needs SOME writable home, the supervisor is
+            # what provides it, and so the supervisor is what grants it. A
+            # workspace whose policy names `run_as_user` therefore needs no
+            # change to its `filesystem_policy` at all.
+            extra_read_write.append(run_as_home)
+            addition_paths.append(run_as_home)
+            note_addition(run_as_home,
+                          "fallback home for run_as_user %s, created by the "
+                          "supervisor because the workspace user's home could "
+                          "not be idmapped" % run_as_name, "rw")
+
+    # Resolved HERE, in the parent, so the no-process-layer path can drop
+    # privileges after `restrict_self` without touching NSS.
+    groups = set([gid, group_gid])
+    if osh._passwd_has(uid):
+        try:
+            groups.update(os.getgrouplist(pwd.getpwuid(uid).pw_name, gid))
+        except OSError:
+            pass
+
+    status["run_as"] = {
+        "uid": uid, "gid": gid, "user": run_as_name, "home": home,
+        # MEASURED by fork-and-try, not inferred from the mode bits. True means
+        # the workload really can create a file in every workdir, whatever the
+        # ownership `stat` reports -- which for a virtiofs share disagrees.
+        "workdirs_writable": not unreachable,
+        "workdirs_unwritable": unreachable,
+        # How the home was arrived at, so the host can say it without the guest
+        # having to put an informational line in `warnings` -- which the host
+        # weights, and which would then fire on every run_as workspace.
+        "home_via": home_via,
+    }
+    status["seccomp"] = "enforced" if apply_seccomp else "off"
+    status["tmux_socket"] = SERVER_SOCKET
+    status["control_socket"] = CONTROL_SOCKET
+    status["sandbox_cgroup"] = sandbox_cgroup
+    status["additions"] = additions_for_report(addition_paths)
+
+    return Plan(policy, workdirs, apply_seccomp, uid, gid,
+                status["run_as"]["user"], home, owner_uid, owner_gid,
+                needs_idmap, idmap_targets_for(workdirs, owner_uid), group_gid,
+                extra_read_only, extra_read_write, addition_paths,
+                sandbox_cgroup, sorted(groups)), None
+
+
+def main():
+    if os.geteuid() != 0:
+        log("must run as root")
+        return 2
+    if not os.path.exists(SPEC_PATH):
+        log("no %s; nothing to do" % SPEC_PATH)
+        return 0
+
+    status = base_status()
+    try:
+        spec = load_spec()
+    except (OSError, ValueError, osh.PolicyError) as exc:
+        log("unreadable spec: %s" % exc)
+        status["filesystem"] = osh.LandlockOutcome.FAILED
+        status["degraded_reason"] = "unreadable spec: %s" % exc
+        write_status(status)
+        return _stay_up_reporting(status)
+
+    try:
+        group_gid = ensure_server_group()
+        prepare_directories(group_gid)
+    except (subprocess.CalledProcessError, OSError, KeyError) as exc:
+        log("cannot prepare the socket layout: %s" % exc)
+        status["filesystem"] = osh.LandlockOutcome.FAILED
+        status["degraded_reason"] = "cannot prepare the socket layout: %s" % exc
+        write_status(status)
+        return _stay_up_reporting(status)
+
+    layout_problems = verify_directories(group_gid)
+    if layout_problems:
+        # The escape analysis at the top of this section depends on the layout.
+        # If it is not what we think, refusing is the only safe answer: a
+        # workspace with no session beats one whose sandbox can be stepped out of.
+        for problem in layout_problems:
+            log("LAYOUT: %s" % problem)
+        status["filesystem"] = osh.LandlockOutcome.FAILED
+        status["degraded_reason"] = ("socket directory layout is unsafe: %s"
+                                    % "; ".join(layout_problems))
+        write_status(status)
+        return _stay_up_reporting(status)
+
+    policy = osh.SandboxPolicy.from_json(spec)
+    sandbox_cgroup = prepare_sandbox_cgroup()
+    plan, code = build_plan(spec, policy, status, group_gid, sandbox_cgroup)
+    if plan is None:
+        return code
+
+    # Touch every NSS lookup the confinement path will make, here, before any
+    # thread exists. glibc caches the resolver state; the forked child then has
+    # nothing cold to initialize while holding a lock it cannot release.
+    for warm in (lambda: pwd.getpwuid(plan.uid),
+                 lambda: pwd.getpwnam(WORKSPACE_USER),
+                 lambda: grp.getgrgid(plan.gid),
+                 lambda: grp.getgrnam(SERVER_GROUP)):
+        try:
+            warm()
+        except KeyError:
+            pass
+
+    mark_sentry_cgroup(sandbox_cgroup)
+
+    agentd_pid = _agentd_pid()
+    supervisor = Supervisor(plan, status, agentd_pid)
+
+    ok, why = supervisor.start("initial")
+    if not ok:
+        # A hard_requirement that cannot be met surfaces as a PolicyError from
+        # osh.prepare inside start_server; anything else lands here. Either way
+        # the status says so and agentd refuses to start an unsandboxed session.
+        log("initial start failed: %s" % why)
+        supervisor.publish()
+        if not os.environ.get("BROMURE_SANDBOXD_ONESHOT"):
+            # Stay up anyway: agentd may ask again once the host fixes the
+            # policy and re-stages the spec, and exiting would have systemd
+            # restart-loop us instead.
+            supervisor.serve_control()
+        return 1
+
+    if os.environ.get("BROMURE_SANDBOXD_ONESHOT"):
+        # Test mode: start the server, publish, and exit rather than serving the
+        # control socket forever.
+        return 0
+
+    supervisor.serve_control()
+    return 0
+
+def idmap_targets_for(workdirs, owner_uid):
+    """The mounts a distinct `run_as_user` needs remapped.
+
+    The workspace home and the share slots, because those are the virtiofs
+    mounts whose ownership comes from the host. Anything else in the policy is
+    ordinary guest storage that the guest's own permissions already govern.
+    """
+    targets = []
+    try:
+        home = pwd.getpwuid(owner_uid).pw_dir
+        if os.path.isdir(home):
+            targets.append(home)
+    except KeyError:
+        pass
+    for index in range(1, 9):
+        slot = "/mnt/bromure-share-%d" % index
+        if os.path.isdir(slot):
+            targets.append(slot)
+    for path in workdirs:
+        if path not in targets and os.path.ismount(path):
+            targets.append(path)
+    return targets
+
+
+def _agentd_pid():
+    """The supervisor the child filter protects.
+
+    agentd is this program's grandparent through sudo, but reading it from the
+    process tree is fragile. `/run/bromure-agentd.pid` is written by agentd; the
+    parent chain is the fallback.
+    """
+    override = os.environ.get("BROMURE_AGENTD_PID")
+    if override:
+        # Tests need this deterministic; the parent-chain walk below is a
+        # heuristic and a test that depends on a heuristic tests the heuristic.
+        try:
+            return int(override)
+        except ValueError:
+            pass
+    try:
+        with open("/run/bromure-agentd.pid") as handle:
+            pid = int(handle.read().strip())
+        if os.path.isdir("/proc/%d" % pid):
+            return pid
+    except (OSError, ValueError):
+        pass
+    pid = os.getppid()
+    for _ in range(4):
+        try:
+            with open("/proc/%d/status" % pid) as handle:
+                parent = 0
+                name = ""
+                for line in handle:
+                    if line.startswith("PPid:"):
+                        parent = int(line.split()[1])
+                    elif line.startswith("Name:"):
+                        name = line.split(None, 1)[1].strip()
+            if name.startswith("python") and parent > 1:
+                return pid
+            pid = parent
+        except (OSError, ValueError):
+            break
+    return os.getppid()
+
+
+def _wait_for_socket(path, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(path):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 -- never leave the host without status
+        log("fatal: %r" % (exc,))
+        try:
+            failed = base_status()
+            failed["filesystem"] = osh.LandlockOutcome.FAILED
+            failed["degraded_reason"] = "sandboxd crashed: %r" % (exc,)
+            write_status(failed)
+        except OSError:
+            pass
+        raise

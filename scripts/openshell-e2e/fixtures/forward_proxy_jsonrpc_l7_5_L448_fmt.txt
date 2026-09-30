@@ -1,0 +1,29 @@
+
+import json
+import urllib.error
+import urllib.request
+
+HOST = "__HOST__"
+PORT = __PORT__
+
+def post_jsonrpc(body):
+    encoded = json.dumps(body).encode()
+    request = urllib.request.Request(
+        f"http://{HOST}:{PORT}/rpc",
+        data=encoded,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            response.read()
+            return response.status
+    except urllib.error.HTTPError as error:
+        error.read()
+        return error.code
+
+results = {
+    "forward_unknown_method_audited": post_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "unknown/method"}),
+    "forward_response_frame_hard_denied": post_jsonrpc({"jsonrpc": "2.0", "id": 1, "result": {}}),
+}
+print(json.dumps(results, sort_keys=True))

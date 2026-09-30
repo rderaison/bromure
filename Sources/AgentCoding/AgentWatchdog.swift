@@ -93,6 +93,19 @@ public final class AgentWatchdog: @unchecked Sendable {
         case "credential.exfiltration":
             add(profileID, Signal(time: now, weight: 10, kind: "exfiltration",
                                   detail: "credential → \(s("observed_host") ?? "?")"))
+        case "sentry.event", "sentry.alarm":
+            // Kernel sentry: tampering attempts weigh enough to trip alone.
+            var weight = 0
+            if case .int(let w)? = eventData["weight"] { weight = w }
+            if weight > 0 {
+                let kind = s("category") ?? s("kind") ?? "sentry"
+                add(profileID, Signal(time: now, weight: weight, kind: kind == "tampering" ? "tampering" : kind,
+                                      detail: s("reason") ?? [s("kind"), s("path") ?? s("exe")].compactMap { $0 }.joined(separator: " ")))
+            }
+        case "sandbox.status":
+            if s("filesystem") == "failed" {
+                add(profileID, Signal(time: now, weight: 5, kind: "sandbox_degraded", detail: s("reason") ?? "filesystem sandbox failed"))
+            }
         case "prompt_injection.detection":
             add(profileID, Signal(time: now, weight: 4, kind: "prompt_injection", detail: s("source") ?? "detected"))
         default:

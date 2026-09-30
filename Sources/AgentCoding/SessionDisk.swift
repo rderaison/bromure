@@ -417,7 +417,7 @@ public final class SessionDisk {
 
     private func guestProxyPort(coldBoot: Bool) -> Int {
         if coldBoot {
-            try? String(Self.guestProxyPort).write(to: guestProxyPortURL, atomically: true, encoding: .utf8)
+            try? String(Self.guestProxyPort).writeIfChanged(to: guestProxyPortURL)
             return Self.guestProxyPort
         }
         if let raw = try? String(contentsOf: guestProxyPortURL, encoding: .utf8),
@@ -437,8 +437,7 @@ public final class SessionDisk {
         }
         // The daemon reads the port from here; proxy.env below points at it.
         let proxyPort = guestProxyPort(coldBoot: !forRestore)
-        try String(proxyPort).write(to: tmp.appendingPathComponent("proxy_port"),
-                                    atomically: true, encoding: .utf8)
+        try String(proxyPort).writeIfChanged(to: tmp.appendingPathComponent("proxy_port"))
 
         // api_key.env — sourced by .bashrc inside the guest. Exports
         // the env var for every enabled tool in token mode. The values
@@ -541,18 +540,13 @@ public final class SessionDisk {
         lines.append("export BROMURE_AC_TOOL=\(profile.tool.rawValue)")
         lines.append("export BROMURE_AC_AUTH=\(profile.authMode.rawValue)")
         if registrationMode { lines.append("export BROMURE_AC_REGISTER=1") }
-        try lines.joined(separator: "\n").appending("\n").write(
-            to: tmp.appendingPathComponent("api_key.env"),
-            atomically: true, encoding: .utf8
-        )
+        try lines.joined(separator: "\n").appending("\n").writeIfChanged(to: tmp.appendingPathComponent("api_key.env"))
 
         // MITM assets (if configured): CA cert + bridge script +
         // proxy.env. The xinitrc / bashrc snippets in Profile reach
         // into the meta share to pick these up at boot.
         if let assets = mitmAssets {
-            try assets.caCertificatePEM.write(
-                to: tmp.appendingPathComponent("bromure-ca.pem"),
-                atomically: true, encoding: .utf8)
+            try assets.caCertificatePEM.writeIfChanged(to: tmp.appendingPathComponent("bromure-ca.pem"))
             // Copy bridge.py from the SPM resource bundle into the meta
             // share so the guest sees it under a stable path. We
             // explicitly remove any prior copy first because on
@@ -615,19 +609,72 @@ public final class SessionDisk {
                         [.posixPermissions: NSNumber(value: 0o755)],
                         ofItemAtPath: adDest.path)
                 }
-                // Strict sandbox: the root attestor ships beside agentd, and
-                // the marker tells agentd to start it and drop root paths.
-                let attestSrc = adURL.deletingLastPathComponent().appendingPathComponent("bromure-attestd.py")
-                let attestDest = tmp.appendingPathComponent("bromure-attestd.py")
-                if let data = try? Data(contentsOf: attestSrc), (try? Data(contentsOf: attestDest)) != data {
-                    try data.write(to: attestDest, options: .atomic)
-                    try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: attestDest.path)
+                // Strict sandbox: the root attestor and the (runtime-only)
+                // privilege revocation ship beside agentd, and the marker
+                // tells agentd to start the one and apply the other.
+                for name in ["bromure-attestd.py", "bromure-strict.py"] {
+                    let src = adURL.deletingLastPathComponent().appendingPathComponent(name)
+                    let dest = tmp.appendingPathComponent(name)
+                    if let data = try? Data(contentsOf: src), (try? Data(contentsOf: dest)) != data {
+                        try data.write(to: dest, options: .atomic)
+                        try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: dest.path)
+                    }
                 }
                 let marker = tmp.appendingPathComponent("strict-sandbox")
                 if profile.effectiveStrictSandbox {
-                    try Data("1\n".utf8).write(to: marker, options: .atomic)
+                    try "1\n".writeIfChanged(to: marker)
                 } else {
                     try? fm.removeItem(at: marker)
+                }
+                // OpenShell filesystem_policy / landlock / process + the
+                // kernel sentry: the guest's root launcher applies them before
+                // any agent code runs. Absent → behave exactly as before.
+                let spec = OpenShellSandboxSpec(
+                    policyYAML: profile.networkPolicy,
+                    workdirs: sharedFolders.map { "/home/ubuntu/\($0.mountName)" },
+                    strictSandbox: profile.effectiveStrictSandbox,
+                    sentry: profile.effectiveKernelSentry.rawValue)
+                let specDest = tmp.appendingPathComponent(OpenShellSandboxSpec.fileName)
+                // `policy.local` (the OpenShell policy advisor) serves every
+                // workspace whose firewall is an OpenShell policy, with or
+                // without sandbox sections: the guest maps the name whenever
+                // this file is present.
+                let advisorDest = tmp.appendingPathComponent("advisor.json")
+                if profile.usesOpenShellPolicy {
+                    try #"{"host":"policy.local","address":"\#(EgressPolicy.advisorAddressString)"}"#
+                        .appending("\n").writeIfChanged(to: advisorDest)
+                } else {
+                    try? fm.removeItem(at: advisorDest)
+                }
+                // The guest side: the root launcher + supervisor, the kernel
+                // sentry loader, their Python modules, and the prebuilt sentry
+                // module (+ its source for an on-guest rebuild when the guest
+                // kernel differs). Staged only with an active spec.
+                let setupDir = adURL.deletingLastPathComponent()
+                let guestFiles = ["bromure-sandboxd", "bromure-sentryd", "bromure_openshell.py",
+                                  "bromure_idmap.py", "bromure_sandbox_status.py"]
+                let sentryDest = tmp.appendingPathComponent("sentry")
+                if spec.isActive {
+                    for name in guestFiles {
+                        let src = setupDir.appendingPathComponent(name)
+                        let dst = tmp.appendingPathComponent(name)
+                        guard let data = try? Data(contentsOf: src) else { continue }
+                        if (try? Data(contentsOf: dst)) != data {
+                            try data.write(to: dst, options: .atomic)
+                            try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: dst.path)
+                        }
+                    }
+                    let sentrySrc = setupDir.appendingPathComponent("sentry-dist")
+                    if fm.fileExists(atPath: sentrySrc.path) {
+                        try? fm.removeItem(at: sentryDest)
+                        try fm.copyItem(at: sentrySrc, to: sentryDest)
+                    }
+                    let data = spec.jsonData()
+                    if (try? Data(contentsOf: specDest)) != data { try data.write(to: specDest, options: .atomic) }
+                } else {
+                    try? fm.removeItem(at: specDest)
+                    for name in guestFiles { try? fm.removeItem(at: tmp.appendingPathComponent(name)) }
+                    try? fm.removeItem(at: sentryDest)
                 }
             }
 
@@ -721,21 +768,28 @@ public final class SessionDisk {
             // tracing + guardrails. (Previously this dropped the env too, which
             // made "disable transparent interception" silently kill the proxy +
             // token swap entirely.)
-            // Strict sandbox is the exception: a connection through the local
-            // proxy bridge can't be attributed to the executable behind it, so
-            // everything goes through transparent interception instead.
-            if !profile.effectiveStrictSandbox {
+            // Two exceptions, where everything goes through transparent
+            // interception and the workload sees no proxy variables at all
+            // (NO_PROXY included — it means nothing without the others):
+            // - the strict sandbox: a connection through the local proxy
+            //   bridge can't be attributed to the executable behind it;
+            // - an OpenShell policy with transparent interception on: OpenShell
+            //   sandboxes have no proxy environment (its no_proxy e2e test
+            //   asserts it), and the transparent path enforces the same rules.
+            let cooperativeProxy = !profile.effectiveStrictSandbox
+                && !(profile.usesOpenShellPolicy && !profile.effectiveDisableTransparentProxy)
+            if cooperativeProxy {
+                let noProxy = (["localhost", "127.0.0.1", "::1"] + extraNoProxy).joined(separator: ",")
                 proxyLines += [
                     "export http_proxy=http://127.0.0.1:\(proxyPort)",
                     "export https_proxy=http://127.0.0.1:\(proxyPort)",
                     "export HTTP_PROXY=http://127.0.0.1:\(proxyPort)",
                     "export HTTPS_PROXY=http://127.0.0.1:\(proxyPort)",
+                    "export NO_PROXY=\(noProxy)",
+                    "export no_proxy=\(noProxy)",
                 ]
             }
-            let noProxy = (["localhost", "127.0.0.1", "::1"] + extraNoProxy).joined(separator: ",")
             proxyLines += [
-                "export NO_PROXY=\(noProxy)",
-                "export no_proxy=\(noProxy)",
                 "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/bromure-ca.pem",
                 "export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
                 "export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
@@ -765,9 +819,7 @@ public final class SessionDisk {
             }
             // The registries dockerd may talk plain HTTP to (guest agent →
             // /etc/docker/daemon.json). Always written so a removal lands too.
-            try (extraInsecureRegistries.joined(separator: "\n") + "\n").write(
-                to: tmp.appendingPathComponent("docker-registries.txt"),
-                atomically: true, encoding: .utf8)
+            try (extraInsecureRegistries.joined(separator: "\n") + "\n").writeIfChanged(to: tmp.appendingPathComponent("docker-registries.txt"))
 
             // Local inference (Path 1, vLLM.md §3.3). For each tool the user
             // set to "Local model", pin it at the on-host engine via the
@@ -812,9 +864,7 @@ public final class SessionDisk {
                 proxyLines.append("export \(name)=\(shellQuote(env.value))")
             }
 
-            try proxyLines.joined(separator: "\n").appending("\n").write(
-                to: tmp.appendingPathComponent("proxy.env"),
-                atomically: true, encoding: .utf8)
+            try proxyLines.joined(separator: "\n").appending("\n").writeIfChanged(to: tmp.appendingPathComponent("proxy.env"))
         }
 
         // ssh keys (if any) — copied into ~/.ssh by the init script.
@@ -830,10 +880,7 @@ public final class SessionDisk {
         // welcome.txt — printed at first session login. Includes setup
         // hints based on auth mode.
         let welcome = makeWelcomeMessage()
-        try welcome.write(
-            to: tmp.appendingPathComponent("welcome.txt"),
-            atomically: true, encoding: .utf8
-        )
+        try welcome.writeIfChanged(to: tmp.appendingPathComponent("welcome.txt"))
 
         // shares.txt — one share per line: "<slot-index> <basename>".
         // Read by xinitrc to symlink /mnt/bromure-share-N → ~/<basename>.
@@ -853,19 +900,14 @@ public final class SessionDisk {
         // xinitrc via `sudo hostname` + /etc/hosts patch. Hostname
         // limits: lowercase a-z 0-9 hyphen, no leading/trailing
         // hyphens, capped at 32 chars (well under POSIX 64).
-        try Self.sanitizeHostname(profile.name).appending("\n").write(
-            to: tmp.appendingPathComponent("hostname.txt"),
-            atomically: true, encoding: .utf8)
+        try Self.sanitizeHostname(profile.name).appending("\n").writeIfChanged(to: tmp.appendingPathComponent("hostname.txt"))
 
         // tz — host's current TimeZone identifier (e.g. "Europe/Paris").
         // xinitrc passes it to timedatectl so date/log timestamps inside
         // the VM match what the user sees on macOS. Re-read each session
         // so DST transitions and travel are reflected without rebuilds.
         let tzID = TimeZone.current.identifier
-        try "\(tzID)\n".write(
-            to: tmp.appendingPathComponent("tz"),
-            atomically: true, encoding: .utf8
-        )
+        try "\(tzID)\n".writeIfChanged(to: tmp.appendingPathComponent("tz"))
 
         // mtu — clamp for the VM's primary NIC. Default 1280 covers most
         // VPNs (WireGuard ~1420, IKEv2 ~1400) plus the corp-network paths
@@ -873,10 +915,7 @@ public final class SessionDisk {
         // 6-in-4 tunnels). Override via:
         //   defaults write io.bromure.agentic-coding vm.mtu -int <value>
         let mtu = VMConfig.resolvedNICMTU(default: 1280)
-        try "\(mtu)\n".write(
-            to: tmp.appendingPathComponent("mtu"),
-            atomically: true, encoding: .utf8
-        )
+        try "\(mtu)\n".writeIfChanged(to: tmp.appendingPathComponent("mtu"))
 
         // natural_scroll — host's macOS preference. xinitrc applies
         // via `xinput set-prop "libinput Natural Scrolling Enabled"`
@@ -884,10 +923,7 @@ public final class SessionDisk {
         // direction inside the terminal (libinput defaults to OFF
         // regardless of the host).
         let natural = VMConfig.detectNaturalScrolling() ? "1" : "0"
-        try "\(natural)\n".write(
-            to: tmp.appendingPathComponent("natural_scroll"),
-            atomically: true, encoding: .utf8
-        )
+        try "\(natural)\n".writeIfChanged(to: tmp.appendingPathComponent("natural_scroll"))
 
         // key_repeat — macOS InitialKeyRepeat + KeyRepeat translated to
         // X11's `xset r rate <delay-ms> <rate-Hz>` format. Profile-
@@ -899,10 +935,7 @@ public final class SessionDisk {
         let kr = VMConfig.detectKeyRepeat(
             delayMsOverride: profile.keyRepeatDelayMs,
             rateHzOverride: profile.keyRepeatRateHz)
-        try "\(kr.delayMs) \(kr.rateHz)\n".write(
-            to: tmp.appendingPathComponent("key_repeat"),
-            atomically: true, encoding: .utf8
-        )
+        try "\(kr.delayMs) \(kr.rateHz)\n".writeIfChanged(to: tmp.appendingPathComponent("key_repeat"))
 
         // MCP servers — write agent-specific config files so Claude Code
         // or Codex discovers them on launch. Claude Code uses JSON
@@ -926,14 +959,10 @@ public final class SessionDisk {
             }
 
             // Claude Code format (browser + user servers).
-            try Self.claudeCodeMCPConfig(servers: enabledMCP, fakes: mcpFakes).write(
-                to: mcpDir.appendingPathComponent("claude.json"),
-                atomically: true, encoding: .utf8)
+            try Self.claudeCodeMCPConfig(servers: enabledMCP, fakes: mcpFakes).writeIfChanged(to: mcpDir.appendingPathComponent("claude.json"))
 
             // Codex format.
-            try Self.codexMCPConfig(servers: enabledMCP, fakes: mcpFakes).write(
-                to: mcpDir.appendingPathComponent("codex.toml"),
-                atomically: true, encoding: .utf8)
+            try Self.codexMCPConfig(servers: enabledMCP, fakes: mcpFakes).writeIfChanged(to: mcpDir.appendingPathComponent("codex.toml"))
 
             // Browser MCP server (runs in this workspace VM). Drives CDP-heavy
             // tools directly over VM↔VM TCP (host out of the CDP path — see the
@@ -947,8 +976,7 @@ public final class SessionDisk {
                                               withExtension: "py") {
                 try fm.copyItem(at: src, to: browserMCPDest)
             } else {
-                try Self.browserMCPShimScript.write(
-                    to: browserMCPDest, atomically: true, encoding: .utf8)
+                try Self.browserMCPShimScript.writeIfChanged(to: browserMCPDest)
             }
         }
 
@@ -2130,3 +2158,16 @@ private func shellQuote(_ s: String) -> String {
 // pointer args) and causes a function-type-mismatch build failure.
 // `Sources/SandboxEngine/EphemeralDisk.swift` already uses the
 // auto-import successfully; this file follows the same path.
+
+extension String {
+    /// Write a meta-share file only when its content changed. The guest reads
+    /// these over virtiofs while they're re-staged on every profile save; an
+    /// unconditional atomic replace (temp file + rename) opens a window where
+    /// a guest lookup of the name fails with ENOENT (seen as a command
+    /// failing to source proxy.env right after a live policy update).
+    func writeIfChanged(to url: URL) throws {
+        let data = Data(utf8)
+        if (try? Data(contentsOf: url)) == data { return }
+        try data.write(to: url, options: .atomic)
+    }
+}

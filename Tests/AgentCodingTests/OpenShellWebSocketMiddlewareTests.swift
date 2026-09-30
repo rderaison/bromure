@@ -1,3 +1,4 @@
+import Compression
 import Foundation
 import Testing
 import SandboxEngine
@@ -17,32 +18,118 @@ struct OpenShellWebSocketMiddlewareTests {
         return Data(f)
     }
 
-    @Test("The gate forwards binary / control frames and cuts at the first text frame")
-    func gate() {
-        let g = WSClientTextGate()
-        let ping = frame(opcode: 0x9, "hi")
-        let bin = frame(opcode: 0x2, String(repeating: "b", count: 300))
-        let text = frame(opcode: 0x1, "secret")
-        var stream = ping + bin + text
-        stream.append(frame(opcode: 0x2, "after"))
-        // Feed in awkward 7-byte slices: headers and payloads straddle chunks.
-        var forwarded = Data()
-        var stopped = false
+    /// Feed `stream` in awkward 7-byte slices (headers and payloads straddle chunks).
+    private func run(_ inspector: OpenShellWebSocket.ClientStream, _ stream: Data) -> (Data, Bool) {
+        var forwarded = Data(), stopped = false
         var i = stream.startIndex
         while i < stream.endIndex, !stopped {
             let end = min(i + 7, stream.endIndex)
-            let (fwd, stop) = g.filter(stream.subdata(in: i..<end))
-            forwarded.append(fwd)
-            stopped = stop
-            i = end
+            let (fwd, stop) = inspector.feed(stream.subdata(in: i..<end))
+            forwarded.append(fwd); stopped = stop; i = end
         }
-        #expect(stopped)
-        #expect(forwarded.count <= ping.count + bin.count)
-        #expect(forwarded.prefix(ping.count + bin.count - 7) == (ping + bin).prefix(ping.count + bin.count - 7))
-        #expect(forwarded.range(of: Data("secret".utf8)) == nil)
+        return (forwarded, stopped)
     }
 
-    @Test("WebSocket presets and WEBSOCKET_TEXT rules decide client text per upgrade path")
+    @Test("The inspector forwards binary / control frames, judges each text message, cuts at a denied one")
+    func inspector() {
+        let ping = frame(opcode: 0x9, "hi")
+        let bin = frame(opcode: 0x2, String(repeating: "b", count: 300))
+        let ok = frame(opcode: 0x1, "hello")
+        // A fragmented text message with a ping between its fragments.
+        let frag = frame(opcode: 0x1, "sec", fin: false) + frame(opcode: 0x9, "p") + frame(opcode: 0x0, "ret")
+        let i = OpenShellWebSocket.ClientStream(compression: false) { $0 == "secret" ? .deny("nope") : .allow }
+        let (forwarded, stopped) = run(i, ping + bin + ok + frag + frame(opcode: 0x2, "after"))
+        #expect(stopped)
+        #expect(i.closeReason == "nope")
+        #expect(forwarded.starts(with: ping + bin + ok))
+        #expect(forwarded.range(of: frame(opcode: 0x1, "sec", fin: false)) == nil)   // held, never forwarded
+    }
+
+    @Test("Protocol violations end the session: unmasked frames, fragmented control, stray continuation")
+    func protocolViolations() {
+        let unmasked = Data([0x81, 0x02]) + Data("hi".utf8)
+        for bad in [unmasked, frame(opcode: 0x9, "x", fin: false), frame(opcode: 0x0, "x"), frame(opcode: 0x3, "x")] {
+            let i = OpenShellWebSocket.ClientStream(compression: false) { _ in .allow }
+            #expect(run(i, bad).1)
+        }
+    }
+
+    @Test("A compressed text message is inflated before it's judged")
+    func compressed() throws {
+        let text = Data("please inflate me please inflate me".utf8)
+        var raw = Data(count: 512)
+        let n = raw.withUnsafeMutableBytes { dst in text.withUnsafeBytes { src in
+            compression_encode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, 512,
+                                      src.bindMemory(to: UInt8.self).baseAddress!, text.count, nil, COMPRESSION_ZLIB) } }
+        let deflated = raw.prefix(n)
+        // A masked text frame with RSV1 set.
+        let mask: [UInt8] = [9, 8, 7, 6]
+        var f = Data([0xC1, 0x80 | UInt8(deflated.count)]) + Data(mask)
+        f += Data(deflated.enumerated().map { $0.element ^ mask[$0.offset % 4] })
+        var seen: String?
+        let i = OpenShellWebSocket.ClientStream(compression: true) { seen = $0; return .allow }
+        let (fwd, stop) = run(i, f)
+        #expect(!stop)
+        #expect(fwd == f)
+        #expect(seen == String(data: text, encoding: .utf8))
+        // Without negotiated compression, RSV1 is a protocol error.
+        #expect(run(OpenShellWebSocket.ClientStream(compression: false) { _ in .allow }, f).1)
+    }
+
+    @Test("A middleware rewrite is re-judged and forwarded as a fresh uncompressed frame")
+    func middlewareRewrite() {
+        let msg = frame(opcode: 0x1, #"{"k":"sk-abcdefghijklmnop1234"}"#)
+        var judged: [String] = []
+        let i = OpenShellWebSocket.ClientStream(compression: false, decide: { judged.append($0); return .allow },
+            transform: { t in
+                guard let (d, _) = OpenShellPolicy.regexRedact(Data(t.utf8)) else { return .unchanged }
+                return .replaced(String(decoding: d, as: UTF8.self))
+            })
+        let (fwd, stop) = run(i, msg)
+        #expect(!stop)
+        #expect(judged == [#"{"k":"sk-abcdefghijklmnop1234"}"#, #"{"k":"[REDACTED]"}"#])
+        // Unmask what was forwarded.
+        let b = [UInt8](fwd)
+        #expect(b[0] == 0x81)                                   // FIN text, no RSV1
+        let key = Array(b[2..<6])                               // short frame: 2-byte header + mask
+        let text = String(decoding: b[6...].enumerated().map { $0.element ^ key[$0.offset & 3] }, as: UTF8.self)
+        #expect(text == #"{"k":"[REDACTED]"}"#)
+    }
+
+    @Test("A failing middleware: fail-open forwards unchanged, fail-closed ends the session")
+    func middlewareFailure() {
+        let msg = frame(opcode: 0x1, "hello")
+        let open = OpenShellWebSocket.ClientStream(compression: false, decide: { _ in .allow },
+                                                   transform: { _ in .failed("boom", failOpen: true) })
+        #expect(run(open, msg) == (msg, false))
+        let closed = OpenShellWebSocket.ClientStream(compression: false, decide: { _ in .allow },
+                                                     transform: { _ in .failed("boom", failOpen: false) })
+        #expect(run(closed, msg).1)
+        #expect(closed.closeReason == "middleware_failed: boom")
+    }
+
+    @Test("openshell/regex as a chain entry: capacity and UTF-8 are middleware failures")
+    func regexMiddlewareOutcomes() {
+        #expect(OpenShellPolicy.regexMiddleware(Data("no secrets".utf8)) == .unchanged)
+        #expect(OpenShellPolicy.regexMiddleware(Data([0xff, 0xfe])) == .failed("openshell/regex requires UTF-8 request bodies"))
+        #expect(OpenShellPolicy.regexMiddleware(Data(count: 256 * 1024 + 1)) == .failed("request_body_over_capacity"))
+        if case .rewritten(let d, let n) = OpenShellPolicy.regexMiddleware(Data("a sk-abcdefghijklmnopq b sk-0123456789abcdefXY".utf8)) {
+            #expect(n == 2)
+            #expect(String(decoding: d, as: UTF8.self) == "a [REDACTED] b [REDACTED]")
+        } else { Issue.record("expected a rewrite") }
+    }
+
+    @Test("permessage-deflate: only offered without client context takeover")
+    func extensionOffer() throws {
+        let r = OpenShellWebSocket.rewrittenExtensionOffer
+        #expect(try r(["permessage-deflate; client_max_window_bits"]).get() == nil)
+        #expect(try r(["permessage-deflate; client_no_context_takeover"]).get() == "permessage-deflate; client_no_context_takeover")
+        #expect(try r(["x-foo, permessage-deflate; client_no_context_takeover; server_no_context_takeover"]).get()
+                == "permessage-deflate; client_no_context_takeover; server_no_context_takeover")
+        #expect(throws: OpenShellHTTP.Rejection.self) { try r(["permessage-deflate; ;"]).get() }
+    }
+
+    @Test("WebSocket presets and WEBSOCKET_TEXT rules decide each client text message")
     func textDecision() throws {
         let p = try OpenShellPolicy.parse("""
         version: 1
@@ -61,16 +148,13 @@ struct OpenShellWebSocketMiddlewareTests {
           plain:
             endpoints: [{ host: rest.example.com, port: 443, protocol: rest, access: full }]
         """)
+        let d = { (h: String, t: String) in p.websocketMessageDecision(host: h, port: 443, target: t, text: "{}") }
         #expect(p.evaluateRequest(host: "ro.example.com", port: 443, method: "GET", target: "/ws") == .allow)
-        if case .allow? = p.websocketTextDecision(host: "ro.example.com", port: 443, target: "/ws") {
-            Issue.record("read-only must not allow client text")
-        }
-        #expect(p.websocketTextDecision(host: "rw.example.com", port: 443, target: "/ws") == .allow)
-        #expect(p.websocketTextDecision(host: "rules.example.com", port: 443, target: "/v1/realtime") == .allow)
-        if case .allow? = p.websocketTextDecision(host: "rules.example.com", port: 443, target: "/v1/other") {
-            Issue.record("text outside the WEBSOCKET_TEXT path must be blocked")
-        }
-        #expect(p.websocketTextDecision(host: "rest.example.com", port: 443, target: "/x") == nil)
+        if case .allow = d("ro.example.com", "/ws") { Issue.record("read-only must not allow client text") }
+        #expect(d("rw.example.com", "/ws") == .allow)
+        #expect(d("rules.example.com", "/v1/realtime") == .allow)
+        if case .allow = d("rules.example.com", "/v1/other") { Issue.record("text outside the WEBSOCKET_TEXT path must be blocked") }
+        #expect(d("rest.example.com", "/x") == .allow)        // not a WebSocket route: not inspected
     }
 
     @Test("openshell/regex redacts sk- tokens but keeps Bromure placeholders")

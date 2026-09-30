@@ -1,0 +1,38 @@
+
+import json
+import urllib.error
+import urllib.request
+# Direct client connections pass through the sandbox's transparent interception.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+def post(request_id, method, params, version):
+    params = dict(params)
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if method != "initialize":
+        headers["MCP-Protocol-Version"] = version
+    if version == "2026-07-28":
+        params["_meta"] = {
+            "io.modelcontextprotocol/protocolVersion": version,
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "openshell-e2e", "version": "1"},
+        }
+        headers["Mcp-Method"] = method
+        if method == "tools/call":
+            headers["Mcp-Name"] = params["name"]
+    message = {"jsonrpc": "2.0", "method": method, "params": params}
+    if request_id is not None:
+        message["id"] = request_id
+    request = urllib.request.Request(
+        f"http://{HOST}:{PORT}/mcp",
+        data=json.dumps(message).encode(),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with opener.open(request, timeout=15) as response:
+            return response.status, response.headers.get_content_type(), response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.headers.get_content_type(), error.read()

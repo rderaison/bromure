@@ -189,4 +189,31 @@ struct OpenShellAdvisorTests {
         #expect(obj["status"] as? String == "approved")
         #expect(obj["policy_reloaded"] as? Bool == true)
     }
+
+    @Test("Control-socket route: list, reject with a reason, approve; decided proposals are final")
+    func controlRoute() throws {
+        let (a, pid, box) = advisor(mode: .review)
+        let r1 = a.submit(profileID: pid, body: proposal("docs_a", host: "a.example.org"))
+        let r2 = a.submit(profileID: pid, body: proposal("docs_b", host: "b.example.org"))
+        let id1 = try #require((r1["accepted_chunk_ids"] as? [String])?.first)
+        let id2 = try #require((r2["accepted_chunk_ids"] as? [String])?.first)
+        let route = { (m: String, sub: [String], body: [String: Any]) in
+            ACAppDelegate.advisorProposalsRoute(profileID: pid, method: m, sub: sub, body: body, advisor: a)
+        }
+        let (s0, list) = route("GET", ["proposals"], [:])
+        #expect(s0 == 200 && (list["proposals"] as? [[String: Any]])?.count == 2)
+
+        let (s1, rej) = route("POST", ["proposals", id1, "reject"], ["reason": "too broad"])
+        #expect(s1 == 200)
+        #expect((rej["proposal"] as? [String: Any])?["rejection_reason"] as? String == "too broad")
+        #expect(a.proposal(id: id1, profileID: pid)?.status == .rejected)
+
+        let (s2, _) = route("POST", ["proposals", id2, "approve"], [:])
+        #expect(s2 == 200)
+        #expect(a.proposal(id: id2, profileID: pid)?.status == .approved)
+        #expect(box.policy.contains("b.example.org"))
+
+        #expect(route("POST", ["proposals", id1, "approve"], [:]).status == 409)   // already rejected
+        #expect(route("POST", ["proposals", "nope", "reject"], [:]).status == 404)
+    }
 }

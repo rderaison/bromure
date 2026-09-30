@@ -252,6 +252,30 @@ public final class SecurityTimeline {
         }
     }
 
+    /// arm64 numbers of the syscalls the guest's process layer can block
+    /// (mirrors `_SYSCALLS_AARCH64` in bromure_openshell.py); the sentry
+    /// reports a seccomp denial by number.
+    nonisolated static let arm64Syscalls: [Int: String] = [
+        277: "seccomp", 198: "socket", 279: "memfd_create", 117: "ptrace", 280: "bpf",
+        270: "process_vm_readv", 271: "process_vm_writev", 438: "pidfd_getfd",
+        424: "pidfd_send_signal", 425: "io_uring_setup", 426: "io_uring_enter",
+        427: "io_uring_register", 40: "mount", 430: "fsopen", 431: "fsconfig",
+        432: "fsmount", 433: "fspick", 429: "move_mount", 428: "open_tree",
+        268: "setns", 39: "umount2", 41: "pivot_root", 282: "userfaultfd",
+        241: "perf_event_open", 281: "execveat", 97: "unshare", 220: "clone",
+        435: "clone3", 434: "pidfd_open", 272: "kcmp", 440: "process_madvise",
+        448: "process_mrelease", 51: "chroot", 91: "capset", 146: "setuid",
+        144: "setgid", 145: "setreuid", 143: "setregid", 147: "setresuid",
+        149: "setresgid", 151: "setfsuid", 152: "setfsgid", 159: "setgroups",
+        161: "sethostname", 162: "setdomainname", 140: "setpriority",
+        30: "ioprio_set", 129: "kill", 130: "tkill", 131: "tgkill",
+        138: "rt_sigqueueinfo", 240: "rt_tgsigqueueinfo", 261: "prlimit64",
+        122: "sched_setaffinity", 274: "sched_setattr", 118: "sched_setparam",
+        119: "sched_setscheduler", 436: "close_range", 25: "fcntl", 29: "ioctl",
+        105: "init_module", 273: "finit_module", 106: "delete_module",
+        104: "kexec_load", 294: "kexec_file_load",
+    ]
+
     // MARK: - Mapping
 
     nonisolated private static func str(_ d: [String: AnyJSON], _ k: String) -> String? {
@@ -281,6 +305,97 @@ public final class SecurityTimeline {
             return row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
                        "\(fake) → \(host)",
                        String(format: NSLocalizedString("swapped in %@", comment: "Security Timeline decision"), real), .info)
+
+        case "sandbox.status":
+            let fs = str(d, "filesystem") ?? "off"
+            let strictFailed: Bool = { if case .bool(false)? = d["strict_applied"] { return true }; return false }()
+            let bad = fs == "failed" || fs == "degraded" || strictFailed
+            var parts = [String(format: NSLocalizedString("filesystem %@", comment: "guest sandbox condition"), fs)]
+            if let u = str(d, "run_as") { parts.append(String(format: NSLocalizedString("runs as %@", comment: "guest sandbox condition"), u)) }
+            if let sc = str(d, "seccomp") { parts.append("seccomp \(sc)") }
+            if let se = str(d, "sentry") {
+                var part = String(format: NSLocalizedString("sentry %@", comment: "guest sandbox condition"), se)
+                if se == "unavailable", let why = str(d, "sentry_reason") { part += " (\(why))" }
+                parts.append(part)
+            }
+            let off = fs == "off"
+            return row(NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
+                       parts.joined(separator: " · "),
+                       strictFailed ? NSLocalizedString("strict sandbox not applied — no session will start", comment: "Security Timeline decision")
+                       : bad ? (str(d, "reason") ?? NSLocalizedString("not enforced", comment: "Security Timeline decision"))
+                           : off ? NSLocalizedString("no filesystem policy", comment: "Security Timeline decision")
+                                 : NSLocalizedString("enforced", comment: "Security Timeline decision"),
+                       bad ? .blocked : off ? .info : .allowed)
+
+        case "sentry.state":
+            let up = str(d, "state") == "connected"
+            return row(NSLocalizedString("Kernel sentry", comment: "Security Timeline engine"),
+                       [str(d, "kernel"), str(d, "module")].compactMap { $0 }.joined(separator: " · "),
+                       up ? NSLocalizedString("connected", comment: "Security Timeline decision")
+                          : NSLocalizedString("disconnected", comment: "Security Timeline decision"),
+                       up ? .allowed : .info)
+
+        case "sentry.event" where str(d, "category") == "sandbox_denial":
+            // One refused action inside the guest sandbox: who tried what.
+            let kind = str(d, "kind") ?? "sandbox_denied"
+            // seccomp_denied carries the executable in `path`.
+            let who = str(d, "exe") ?? (kind == "seccomp_denied" ? str(d, "path") : nil) ?? str(d, "comm") ?? "?"
+            let pid = int(d, "pid").map { " (pid \($0))" } ?? ""
+            let times: String
+            if case .bool(true)? = d["repeat"] {
+                // Folded repeats of a denial already shown.
+                let procs = int(d, "processes") ?? 1
+                times = procs > 1
+                    ? String(format: NSLocalizedString(" — ×%d more in the last minute, from %d processes", comment: "guest sandbox repeated denial"), int(d, "count") ?? 0, procs)
+                    : String(format: NSLocalizedString(" — ×%d more in the last minute", comment: "guest sandbox repeated denial"), int(d, "count") ?? 0)
+            } else {
+                times = (int(d, "count") ?? 1) > 1 ? " ×\(int(d, "count")!)" : ""
+            }
+            let what: String
+            if kind == "seccomp_denied" {
+                let name = str(d, "syscall_name")
+                    ?? int(d, "syscall").map { Self.arm64Syscalls[$0] ?? "#\($0)" }
+                    ?? str(d, "syscall") ?? str(d, "detail") ?? "?"
+                what = String(format: NSLocalizedString("syscall %@", comment: "guest sandbox denial"), name)
+            } else {
+                let op = str(d, "op") ?? (kind == "file_open_denied" ? "open" : "access")
+                what = "\(op) \(str(d, "path") ?? "?")"
+            }
+            return row(NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
+                       "\(who)\(pid) — \(what)\(times)",
+                       NSLocalizedString("denied", comment: "Security Timeline decision"), .blocked)
+
+        case "sandbox.activity":
+            let allowed = int(d, "allowed_file_ops") ?? 0
+            let denied = int(d, "denied_file_ops") ?? 0
+            let syscalls = int(d, "denied_syscalls") ?? 0
+            return row(NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
+                       String(format: NSLocalizedString("since boot: %d file operations allowed, %d denied, %d syscalls denied",
+                                                        comment: "guest sandbox tallies"), allowed, denied, syscalls),
+                       NSLocalizedString("activity", comment: "Security Timeline decision"),
+                       denied + syscalls > 0 ? .blocked : .allowed)
+
+        case "sentry.alarm" where str(d, "kind") == "sandbox_probing":
+            return row(NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
+                       str(d, "reason") ?? "",
+                       NSLocalizedString("probing its limits", comment: "Security Timeline decision"), .blocked)
+
+        case "sentry.event":
+            let kind = str(d, "kind") ?? "event"
+            let subject = str(d, "path") ?? str(d, "exe") ?? str(d, "target") ?? str(d, "detail") ?? ""
+            let pid = int(d, "pid").map { " (pid \($0))" } ?? ""
+            return row(NSLocalizedString("Kernel sentry", comment: "Security Timeline engine"),
+                       "\(kind)\(subject.isEmpty ? "" : ": \(subject)")\(pid)",
+                       str(d, "category") ?? "",
+                       kind == "landlock_denied" || kind == "file_open_denied" ? .blocked : .info)
+
+        case "sentry.alarm":
+            return row(NSLocalizedString("Kernel sentry", comment: "Security Timeline engine"),
+                       str(d, "reason") ?? "",
+                       str(d, "kind") == "tampering"
+                           ? NSLocalizedString("tampering suspected", comment: "Security Timeline decision")
+                           : NSLocalizedString("warning", comment: "Security Timeline decision"),
+                       str(d, "kind") == "tampering" ? .blocked : .info)
 
         case "watchdog.trip":
             var kinds: [String] = []

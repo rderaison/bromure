@@ -78,12 +78,13 @@ public final class OCSFExporter: @unchecked Sendable {
     /// OCSF classes used, with their category.
     enum Class: Int {
         case fileSystem = 1001, processActivity = 1007, detectionFinding = 2004,
-             networkActivity = 4001, httpActivity = 4002, apiActivity = 6003, base = 0
+             networkActivity = 4001, httpActivity = 4002, configStateChange = 5019, apiActivity = 6003, base = 0
         var category: (Int, String) {
             switch self {
             case .fileSystem, .processActivity: return (1, "System Activity")
             case .detectionFinding:             return (2, "Findings")
             case .networkActivity, .httpActivity: return (4, "Network Activity")
+            case .configStateChange:            return (5, "Discovery")
             case .apiActivity:                  return (6, "Application Activity")
             case .base:                         return (0, "Uncategorized")
             }
@@ -93,6 +94,7 @@ public final class OCSFExporter: @unchecked Sendable {
             case .fileSystem: return "File System Activity"
             case .processActivity: return "Process Activity"
             case .detectionFinding: return "Detection Finding"
+            case .configStateChange: return "Device Config State Change"
             case .networkActivity: return "Network Activity"
             case .httpActivity: return "HTTP Activity"
             case .apiActivity: return "API Activity"
@@ -238,6 +240,45 @@ public final class OCSFExporter: @unchecked Sendable {
             allowed = bypass
             severity = bypass ? .low : .medium
             message = "\(bypass ? "Insecure bypass" : "Untrusted certificate"): \(s("host") ?? "?")"
+
+        case "sandbox.status":
+            cls = .configStateChange
+            activity = (99, "Other")
+            let fs = s("filesystem") ?? "off"
+            severity = fs == "failed" ? .high : (fs == "degraded" ? .medium : .informational)
+            message = "Guest sandbox: filesystem \(fs)\(s("reason").map { " (\($0))" } ?? "")"
+                + (s("sentry").map { "; sentry \($0)" } ?? "") + (s("sentry_reason").map { " (\($0))" } ?? "")
+
+        case "sentry.state":
+            cls = .configStateChange
+            activity = (99, "Other")
+            severity = .informational
+            message = "Kernel sentry \(s("state") ?? "?")"
+
+        case "sentry.event":
+            let kind = s("kind") ?? "event"
+            if kind == "landlock_denied" || kind == "file_open_denied" {
+                cls = .fileSystem
+                activity = (99, "Other")
+                extra["file"] = ["path": s("path") ?? "", "name": (s("path") as NSString?)?.lastPathComponent ?? "",
+                                 "type_id": 0, "type": "Unknown"]
+                allowed = false
+                severity = .low
+                message = "Kernel denied \(s("access") ?? "open") of \(s("path") ?? "?")\(s("hook").map { " (\($0))" } ?? "")"
+            } else {
+                finding("kernel-sentry-\(kind)", "Kernel sentry: \(kind)", desc: s("exe") ?? s("path"))
+                severity = (i("weight") ?? 0) >= 10 ? .high : .medium
+                message = "Kernel sentry observed \(kind)"
+            }
+            if let pid = i("pid") { extra["process"] = ["pid": pid, "file": ["path": s("exe") ?? ""]] }
+
+        case "sentry.alarm":
+            let tamper = s("kind") == "tampering"
+            finding("kernel-sentry-\(s("kind") ?? "alarm")", tamper ? "Kernel sentry tampering suspected" : "Kernel sentry warning",
+                    desc: s("reason"))
+            severity = tamper ? .high : .low
+            extra["is_alert"] = tamper
+            message = s("reason") ?? "Kernel sentry alarm"
 
         case "watchdog.trip":
             let quarantine = s("action") == "quarantine"

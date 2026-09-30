@@ -82,15 +82,17 @@ struct OpenShellPolicyTests {
           - { path: /usr/bin/glab }
     """
 
-    @Test("Parses OpenShell's own fixture and reports unenforced sections")
+    @Test("Parses OpenShell's own fixture; the filesystem sections are enforced (no 'not applied' warning)")
     func upstreamFixture() throws {
         let p = try policy(Self.upstreamFixture)
         #expect(p.networkPolicies.map(\.key) == ["claude_code", "github_ssh_over_https", "gitlab"])
         #expect(p.networkPolicies[1].name == "github-ssh-over-https")
         #expect(p.networkPolicies[0].binaries == ["/usr/local/bin/claude", "/usr/bin/node"])
         #expect(p.warnings.contains { $0.hasPrefix("binaries:") })
-        #expect(p.warnings.contains { $0.hasPrefix("filesystem_policy:") })
-        #expect(p.warnings.contains { $0.hasPrefix("process:") })
+        // /dev/null writable and no read_only under read_write: no filesystem warnings.
+        #expect(!p.warnings.contains { $0.hasPrefix("filesystem_policy:") })
+        #expect(p.filesystem?.readWrite.contains("/dev/null") == true)
+        #expect(p.runAsUser == "sandbox")
         #expect(p.source == Self.upstreamFixture)
     }
 
@@ -182,12 +184,6 @@ struct OpenShellPolicyTests {
         """, "accepts no request fields")
         rejects("""
         version: 1
-        network_policies:
-          a:
-            endpoints: [{ port: 443, allowed_ips: ["169.254.169.254"] }]
-        """, "blocked range")
-        rejects("""
-        version: 1
         filesystem_policy:
           read_write: [/]
         """, "read_write cannot contain /")
@@ -203,7 +199,40 @@ struct OpenShellPolicyTests {
             endpoints: [{ host: example.com, port: 443, tls: skip }]
           b:
             endpoints: [{ host: example.com, port: 443 }]
-        """, "different tls")
+        """, "conflicting metadata: tls")
+    }
+
+    @Test("filesystem_policy warnings: read_only under a read_write parent; /dev/null not writable")
+    func filesystemWarnings() throws {
+        let p = try policy("""
+        version: 1
+        filesystem_policy:
+          read_only: [/usr, /home/me/project/secrets]
+          read_write: [/home/me/project/, /tmp]
+        """)
+        #expect(p.warnings.contains { $0.contains("/home/me/project/secrets is read_only but sits under the read_write path /home/me/project") })
+        #expect(p.warnings.contains { $0.contains("/dev/null must be in read_write") })
+        let ok = try policy("""
+        version: 1
+        filesystem_policy:
+          read_only: [/usr, /home/me/projectile]
+          read_write: [/home/me/project, /dev/null]
+        """)
+        #expect(!ok.warnings.contains { $0.hasPrefix("filesystem_policy:") })     // sibling, not a child
+    }
+
+    @Test("An always-blocked allowed_ips entry loads (with a warning) and refuses the route's connections")
+    func blockedAllowedIPs() throws {
+        let p = try OpenShellPolicy.parse("""
+        version: 1
+        network_policies:
+          a:
+            endpoints: [{ port: 443, allowed_ips: ["169.254.169.254"] }]
+        """)
+        #expect(p.warnings.contains { $0.contains("blocked range") })
+        let plan = p.destinationPlan(host: "169.254.169.254", port: 443)
+        guard case .failure(let d) = plan else { Issue.record("expected an invalid-allowed_ips denial"); return }
+        #expect(d.reason.contains("always-blocked range"))
     }
 
     // MARK: Connection layer
@@ -496,5 +525,36 @@ struct OpenShellPolicyTests {
         #expect(eff.source == "version: 1\n")
         #expect(eff.evaluateConnect(hostnames: ["api.anthropic.com"], ip: nil, port: 443)
                 == .allow(rule: "_provider_claude", inspect: false, tlsSkip: false))
+    }
+
+    @Test("Connect-time refusal: only a hostname endpoint on the port defers the verdict to SNI / Host")
+    func connectTimeRefusal() throws {
+        let p = try policy("""
+        version: 1
+        network_policies:
+          web:
+            endpoints:
+              - { host: api.example.com, port: 443 }
+              - { host: 10.1.2.3, port: 80, allowed_ips: ["10.0.0.0/8"] }
+        """)
+        #expect(p.hostnameEndpointCovers(port: 443))
+        #expect(!p.hostnameEndpointCovers(port: 80))      // IP-literal endpoint only
+        #expect(!p.hostnameEndpointCovers(port: 8080))    // nothing on this port
+        #expect(try !policy("version: 1\nnetwork_policies: {}\n").hostnameEndpointCovers(port: 80))
+    }
+
+    @Test("Inspected ports: L7 endpoints on any port, never native tcp or tls: skip")
+    func inspectedPorts() throws {
+        let p = try policy("""
+        version: 1
+        network_policies:
+          l7:
+            endpoints:
+              - { host: api.example.com, port: 8443, protocol: rest, access: read-only }
+              - { host: db.example.com, port: 5432, protocol: tcp }
+              - { host: raw.example.com, port: 9000, tls: skip }
+              - { host: plain.example.com, port: 7000 }
+        """)
+        #expect(p.inspectedPorts == [8443])
     }
 }

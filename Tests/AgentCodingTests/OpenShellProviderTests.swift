@@ -113,4 +113,51 @@ struct OpenShellProviderTests {
                           ManualToken(name: "bound", realValue: "y", hostFilters: ["a.com"])]
         #expect(p.unboundCredentialNames == ["anywhere"])
     }
+
+    @Test("OpenShell placeholders: env credentials become openshell:resolve:env:NAME, aliases get their own")
+    func placeholderPlan() {
+        var p = Profile(name: "t", tool: .claude, authMode: .token)
+        p.networkPolicy = "version: 1\nnetwork_policies: {}\n"
+        p.manualTokens = [ManualToken(name: "gh", realValue: "ghp_real", envVarName: "GITHUB_TOKEN",
+                                      hostFilters: ["github.com"], envVarAliases: ["GH_TOKEN"])]
+        let off = Dictionary(p.makeTokenPlan(salt: Data("s".utf8)).manualEnvExports, uniquingKeysWith: { a, _ in a })
+        #expect(off["GITHUB_TOKEN"]?.hasPrefix("openshell:") == false)
+        p.openShellCredentialPlaceholders = true
+        let plan = p.makeTokenPlan(salt: Data("s".utf8))
+        let on = Dictionary(plan.manualEnvExports, uniquingKeysWith: { a, _ in a })
+        #expect(on["GITHUB_TOKEN"] == "openshell:resolve:env:GITHUB_TOKEN")
+        #expect(on["GH_TOKEN"] == "openshell:resolve:env:GH_TOKEN")
+        #expect(plan.entries.filter { $0.realValue == "ghp_real" }.count == 2)
+        // Without an OpenShell policy the option does nothing.
+        p.networkPolicy = ""
+        #expect(Dictionary(p.makeTokenPlan(salt: Data("s".utf8)).manualEnvExports, uniquingKeysWith: { a, _ in a })["GITHUB_TOKEN"]?
+            .hasPrefix("openshell:") == false)
+    }
+
+    @Test("OpenShell placeholders resolve in headers on their host; in bodies only when the endpoint opts in")
+    func placeholderSwap() async {
+        let swapper = TokenSwapper(consent: ConsentBroker())
+        let pid = UUID()
+        let ph = "openshell:resolve:env:WS_TOKEN"
+        swapper.setMap(TokenMap(entries: [TokenMap.Entry(fake: ph, real: "sk-real-secret", host: "api.example.com")]), for: pid)
+        let req = Data("POST /v1 HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer \(ph)\r\nContent-Type: application/json\r\n\r\n{\"k\":\"\(ph)\"}".utf8)
+        let plain = await swapper.swap(rawRequest: req, host: "api.example.com", profileID: pid)
+        let text = String(decoding: plain.modified, as: UTF8.self)
+        #expect(text.contains("Bearer sk-real-secret") && text.contains("{\"k\":\"\(ph)\"}"))
+        let opted = await swapper.swap(rawRequest: req, host: "api.example.com", profileID: pid, placeholderBody: true)
+        #expect(String(decoding: opted.modified, as: UTF8.self).contains("{\"k\":\"sk-real-secret\"}"))
+        let elsewhere = await swapper.swap(rawRequest: req, host: "evil.example.com", profileID: pid, placeholderBody: true)
+        #expect(elsewhere.swaps.isEmpty)
+    }
+
+    @Test("An OpenShell placeholder left unresolved (unbound host or path) is detected; body only when resolved there")
+    func unresolvedPlaceholder() {
+        let known = ["openshell:resolve:env:A", "brm_fake_other"]
+        let hdr = Data("GET /other HTTP/1.1\r\nAuthorization: Bearer openshell:resolve:env:A\r\n\r\n".utf8)
+        #expect(HTTPMitmConnection.unresolvedPlaceholder(in: hdr, checkBody: false, known: known) == "openshell:resolve:env:A")
+        let body = Data("POST / HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"k\":\"openshell:resolve:env:A\"}".utf8)
+        #expect(HTTPMitmConnection.unresolvedPlaceholder(in: body, checkBody: false, known: known) == nil)   // not opted in: forwarded as is
+        #expect(HTTPMitmConnection.unresolvedPlaceholder(in: body, checkBody: true, known: known) != nil)
+        #expect(HTTPMitmConnection.unresolvedPlaceholder(in: hdr, checkBody: false, known: ["brm_fake_other"]) == nil)
+    }
 }

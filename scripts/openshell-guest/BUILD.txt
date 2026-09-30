@@ -1,0 +1,41 @@
+Round 22 guest tree.
+
+Hashes (sha256, first 12 hex) a workspace running THIS tree reports in
+`status.build`:
+
+    sandboxd   681719850197    bromure-sandboxd
+    openshell  63572143fc92    bromure_openshell.py
+    idmap      57eaaf0acd79    bromure_idmap.py
+    status     9a30b0071f69    bromure_sandbox_status.py
+    sentryd    7de9c11bf8c9    bromure-sentryd
+    strict     9a19675b9e36    bromure-strict.py
+    agentd     ce0b0340a004    patched/bromure-agentd.py
+    attestd    911a27f81159    patched/bromure-attestd.py
+
+`agentd` and `attestd` are reported from $META (where the host stages them);
+everything else from the directory bromure-sandboxd runs out of.
+
+Verify the scripts with:
+
+    for f in bromure-sandboxd bromure_openshell.py bromure_idmap.py \
+             bromure_sandbox_status.py bromure-sentryd bromure-strict.py \
+             patched/bromure-agentd.py patched/bromure-attestd.py; do
+        printf '%s  %s\n' "$(sha256sum "$f" | cut -c1-12)" "$f"
+    done
+
+Round 22 changes the KERNEL MODULE. Restage sentry-dist/:
+
+    6.8.0-139-generic  52f21c5ea5e384a95b78baddb1572475173a9f501f17b363d3b6be05624489a9
+    6.8.0-142-generic  1e3304add5a2a0e8605e69975a33eebed4ea650b924ed782deb56de79d9b1558
+
+Greps:
+
+    sentry/bromure_sentry.c:  new->user_ns == &init_user_ns   (the fix)
+    sentry/bromure_sentry.c:  BST_CAPS_IN_USERNS              (counted, not dropped)
+
+
+HOST DEPENDENCIES (unchanged)
+  * /mnt/bromure-meta/advisor.json, and `network_policies` in the spec.
+
+`differential/target/` is omitted: 59 MB of rebuildable cargo output. Rebuild with
+`(cd differential && cargo build --release)` before `tests/run_all.sh`.

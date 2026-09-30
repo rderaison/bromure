@@ -66,6 +66,7 @@ struct OpenShellPolicyEditor: View {
     @State private var importError: String?
     @State private var proposals: [OpenShellAdvisor.Proposal] = []
     @State private var rejectReasons: [String: String] = [:]
+    @State private var showHistory = false
     @State private var boundaryTick = 0
 
     /// A provider profile picked for import, waiting for its secrets.
@@ -103,13 +104,13 @@ struct OpenShellPolicyEditor: View {
                       systemImage: "checkmark.seal.fill")
                     .font(.caption).foregroundStyle(.green)
                 let unbound = p.networkPolicies.filter { $0.binaries.isEmpty }.map(\.key)
-                if draft.strictSandbox, !unbound.isEmpty {
+                if draft.effectiveStrictSandbox, !unbound.isEmpty {
                     Label("Binary identity is enforced, so rules without binaries allow nothing: " + unbound.joined(separator: ", "),
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption2).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                ForEach(p.warnings.filter { !(draft.strictSandbox && $0.hasPrefix("binaries:")) }, id: \.self) { w in
+                ForEach(p.warnings.filter { !(draft.effectiveStrictSandbox && $0.hasPrefix("binaries:")) }, id: \.self) { w in
                     Label(w, systemImage: "info.circle")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -128,10 +129,19 @@ struct OpenShellPolicyEditor: View {
             boundarySection
 
             strictSandboxSection
+            guestSandboxSection
 
             providersSection
 
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Use OpenShell credential placeholders", isOn: $draft.openShellCredentialPlaceholders)
+                Text("The agent sees `openshell:resolve:env:NAME` in its environment instead of Bromure's look-alike tokens, for the credentials this workspace passes as environment variables. The proxy swaps in the real value in request headers, and in request bodies or WebSocket messages only where an endpoint sets `request_body_credential_rewrite` or `websocket_credential_rewrite`. Each credential still works only on its own hosts. Some tools check a token's format and may reject a placeholder. Takes effect at the next VM start.")
+                    .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+
             advisorSection
+
+            historySection
 
             DisclosureGroup(isExpanded: $showProviders) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -203,14 +213,18 @@ struct OpenShellPolicyEditor: View {
     /// Binary identity: the strict sandbox that makes `binaries` enforceable.
     @ViewBuilder private var strictSandboxSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Toggle("Enforce binaries (strict sandbox)", isOn: $draft.strictSandbox)
-                .disabled(OpenShellGovernance.shared.managed?.requireStrictSandbox == true)
+            Toggle("Enforce binaries (strict sandbox)", isOn: Binding(
+                get: { draft.strictSandbox || draft.policyHasProcessSection },
+                set: { draft.strictSandbox = $0 }))
+                .disabled(OpenShellGovernance.shared.managed?.requireStrictSandbox == true || draft.policyHasProcessSection)
             if OpenShellGovernance.shared.managed?.requireStrictSandbox == true {
                 Text("Required by your organization.").font(.caption2.weight(.medium))
+            } else if draft.policyHasProcessSection {
+                Text("Required by the policy's process section.").font(.caption2.weight(.medium))
             }
             Text("Rules then apply only to the executables they list (or to processes those start), as reported for every connection by a root-owned attestor in the VM. To make that report trustworthy, agents get no path to root: no sudo, no Docker, and all traffic goes through transparent interception (the proxy environment variables are removed). Each executable's hash is pinned on first use; a changed binary is refused. Takes effect at the next VM start.")
                 .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if draft.strictSandbox {
+            if draft.effectiveStrictSandbox {
                 Text("Status: " + (BinaryIdentityService.shared.isAttestorConnected(draft.id)
                                    ? "attestor connected — binaries are enforced"
                                    : "attestor not connected — until it is, only Bromure's own rules apply"))
@@ -219,7 +233,133 @@ struct OpenShellPolicyEditor: View {
         }
     }
 
+    /// OpenShell's filesystem_policy / landlock / process, enforced in the
+    /// VM, and the kernel sentry that watches it from kernel space.
+    @ViewBuilder private var guestSandboxSection: some View {
+        let floor = OpenShellGovernance.shared.managed?.minKernelSentry.flatMap(KernelSentryMode.init(rawValue:)) ?? .off
+        let sections = OpenShellSandboxSpec(policyYAML: draft.networkPolicy, workdirs: [], strictSandbox: false, sentry: "off")
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Filesystem & process sandbox").font(.subheadline.weight(.semibold))
+            if sections.filesystemPolicy == nil && sections.process == nil {
+                Text("This policy has no filesystem_policy or process section, so the VM runs as usual. Add them to confine the agent to the paths you list (Landlock) and run it as a non-root user.")
+                    .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Button("Insert an OpenShell filesystem template") { insertFilesystemTemplate() }
+                    .font(.caption)
+            } else {
+                Text("Enforced inside the VM with Landlock, as OpenShell does: the agent can only read and write the paths the policy lists, and can't lift that, even as root. Only the few paths Bromure's own plumbing needs are added, and they're listed once the VM reports in. Takes effect at the next VM start.")
+                    .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if draft.effectiveStrictSandbox {
+                    Text("With the strict sandbox, the agent also runs without sudo, under OpenShell's seccomp filters, so it can't interfere with Bromure's own processes in the VM.")
+                        .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Without the strict sandbox the agent keeps sudo: files stay confined, but the agent could stop Bromure's own processes in the VM. Turn on the strict sandbox (or add a process section) for the full OpenShell sandbox.")
+                        .font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if let st = GuestSandboxStatusStore.shared.status(for: draft.id) {
+                Text("Status: filesystem \(st.filesystem)"
+                     + (st.degradedReason.map { " (\($0))" } ?? "")
+                     + (st.runAsUser.map { " · runs as \($0)" } ?? "")
+                     + (st.landlockABI.map { " · Landlock ABI \($0)" } ?? ""))
+                    .font(.caption2.weight(.medium))
+                if st.strictApplied == false {
+                    Text("⚠︎ The strict sandbox didn't fully apply in the VM, so no session will start and binary rules fail closed. See the warnings below; restarting the VM retries it.")
+                        .font(.caption2.weight(.medium)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                }
+                if st.sentry == "unavailable", draft.effectiveKernelSentry != .off {
+                    Text("⚠︎ Kernel sentry couldn't start" + (st.sentryReason.map { ": \($0)" } ?? "."))
+                        .font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(st.warnings, id: \.self) { w in
+                    Text("⚠︎ " + w).font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+                if !st.additionsReadWrite.isEmpty || !st.additionsReadOnly.isEmpty {
+                    Text("Added for Bromure: " + (st.additionsReadWrite.map { "\($0) (rw)" } + st.additionsReadOnly.map { "\($0) (ro)" })
+                        .joined(separator: ", "))
+                        .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Picker("Kernel sentry", selection: $draft.kernelSentry) {
+                Text("Off").tag(KernelSentryMode.off).disabled(floor.rank > KernelSentryMode.off.rank)
+                Text("Best effort").tag(KernelSentryMode.bestEffort).disabled(floor.rank > KernelSentryMode.bestEffort.rank)
+                Text("Required").tag(KernelSentryMode.hard)
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 420)
+            if draft.effectiveKernelSentry == .off, sections.filesystemPolicy != nil || sections.process != nil {
+                Text("Turn the kernel sentry on to see each denied file operation and blocked system call on the Security Timeline, and to be alerted when an agent keeps probing the sandbox's limits.")
+                    .font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+            if floor != .off {
+                Text("Your organization requires at least “\(floor == .hard ? "Required" : "Best effort")”.").font(.caption2.weight(.medium))
+            }
+            Text("Streams security events (process launches, privilege changes, module and BPF loads, sandbox denials) from the VM's kernel to Bromure, outside anything the agent can stop; after it starts, the kernel is locked so not even root in the VM can load code to interfere. Silence or a gap in the stream is treated as tampering by the watchdog. “Required” won't start agent sessions without it. Takes effect at the next VM start.")
+                .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if draft.effectiveKernelSentry != .off, let snap = KernelSentryService.shared.snapshot(draft.id) {
+                Text("Sentry: " + (snap.connected ? "connected" + (snap.kernel.map { " · kernel \($0)" } ?? "") : "not connected")
+                     + (snap.dropped > 0 ? " · \(snap.dropped) event(s) dropped under load" : ""))
+                    .font(.caption2.weight(.medium))
+            }
+        }
+    }
+
+    /// Append an OpenShell-style filesystem / landlock / process block (the
+    /// shape OpenShell's own default policy uses) for the user to edit.
+    private func insertFilesystemTemplate() {
+        let template = """
+
+        # Filesystem sandbox (OpenShell): the paths OpenShell's own example
+        # policies use, with the workload home (/sandbox there) at
+        # /home/ubuntu. The agent may read the system and write only its
+        # home, its project folders (include_workdir) and /tmp.
+        filesystem_policy:
+          include_workdir: true
+          read_only: [/bin, /usr, /lib, /proc, /dev/urandom, /etc, /var/log]
+          read_write: [/home/ubuntu, /tmp, /dev/null]
+        landlock:
+          compatibility: best_effort
+
+        """
+        var text = draft.networkPolicy
+        if !text.hasSuffix("\n") { text += "\n" }
+        draft.networkPolicy = text + template
+    }
+
     /// The policy advisor: mode, and the proposals waiting for a decision.
+    /// Saved versions of this policy (identical saves keep the version).
+    /// Restore loads one into the editor; saving it records a new version.
+    @ViewBuilder private var historySection: some View {
+        let revisions = PolicyHistory.shared.revisions(in: ProfileStore().profileDirectory(for: draft)).reversed()
+        DisclosureGroup(isExpanded: $showHistory) {
+            if revisions.isEmpty {
+                Text("No saved versions yet. Each save that changes the policy is kept here.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(revisions), id: \.version) { r in
+                        HStack(spacing: 8) {
+                            Text("v\(r.version)").font(.caption.monospacedDigit().weight(.semibold))
+                            Text(r.savedAt.formatted(date: .abbreviated, time: .shortened)).font(.caption2)
+                            Text(r.source).font(.caption2).foregroundStyle(.secondary)
+                            Text(String(r.hash.prefix(12))).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                            Spacer()
+                            if r.policy == draft.networkPolicy {
+                                Text("current").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+                            } else {
+                                Button("Restore") { draft.networkPolicy = r.policy }
+                                    .font(.caption).buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text("Revision history" + (revisions.first.map { " · v\($0.version)" } ?? ""))
+                .font(.subheadline.weight(.semibold))
+        }
+    }
+
     @ViewBuilder private var advisorSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Policy advisor").font(.subheadline.weight(.semibold))

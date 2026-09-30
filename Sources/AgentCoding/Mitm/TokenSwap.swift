@@ -205,7 +205,10 @@ public final class TokenSwapper: @unchecked Sendable {
     /// Async because entries flagged for user approval await the
     /// consent broker before substitution; the proxy hot path holds
     /// the connection until the user (or a live grant) decides.
-    public func swap(rawRequest: Data, host: String, profileID: UUID) async -> SwapResult {
+    static let openShellPlaceholderPrefix = "openshell:resolve:env:"
+
+    public func swap(rawRequest: Data, host: String, profileID: UUID,
+                     placeholderBody: Bool = false) async -> SwapResult {
         // Read the map through a non-async helper so NSLock never sits
         // across an `await` (Swift 6 forbids it).
         let map = snapshotMap(for: profileID)
@@ -252,7 +255,11 @@ public final class TokenSwapper: @unchecked Sendable {
             // (refresh tokens, etc.). Cheap pre-check on raw bytes so
             // we don't run the consent broker for non-matching entries.
             let fakeData = Data(entry.fake.utf8)
-            let inBody: Bool = entry.body
+            // OpenShell credential placeholders are resolved in a body only
+            // where the policy endpoint opts in (`request_body_credential_rewrite`).
+            let bodySweep = entry.body
+                || (placeholderBody && entry.fake.hasPrefix(Self.openShellPlaceholderPrefix))
+            let inBody: Bool = bodySweep
                 ? (newBody.range(of: fakeData) != nil)
                 : false
             guard inHeader || inBody else { continue }

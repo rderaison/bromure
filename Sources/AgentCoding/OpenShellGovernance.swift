@@ -29,6 +29,9 @@ public final class OpenShellGovernance: @unchecked Sendable {
         public var defaultPolicyYAML: String?
         public var requireStrictCredentials: Bool = false
         public var requireStrictSandbox: Bool = false
+        /// Minimum kernel sentry requirement for every workspace
+        /// (`best_effort` / `hard`); nil = none.
+        public var minKernelSentry: String?
         /// Highest advisor mode workspaces may use (`off` / `review` / `auto`).
         public var maxAdvisorMode: String?
         public var updatedAt: String?
@@ -210,9 +213,10 @@ enum OpenShellManagedPolicySync {
         m.requireStrictCredentials = o["require_strict_credentials"] as? Bool ?? false
         m.requireStrictSandbox = o["require_strict_sandbox"] as? Bool ?? false
         m.maxAdvisorMode = text("max_advisor_mode")
+        m.minKernelSentry = text("min_kernel_sentry")
         m.updatedAt = text("updated_at")
         let empty = m.boundaryYAML == nil && m.defaultPolicyYAML == nil && !m.requireStrictCredentials
-            && !m.requireStrictSandbox && m.maxAdvisorMode == nil
+            && !m.requireStrictSandbox && m.maxAdvisorMode == nil && m.minKernelSentry == nil
         return empty ? nil : m
     }
 }

@@ -59,9 +59,6 @@ extension OpenShellPolicy {
                     throw r.err(c, "landlock.compatibility", "must be best_effort or hard_requirement")
                 }
                 landlockHard = s == "hard_requirement"
-                if s == "hard_requirement" {
-                    r.warn("landlock: not applicable — the workspace VM is the isolation boundary")
-                }
             }
         }
         if let p = top["process"] { runAs = try r.process(p) }
@@ -79,7 +76,9 @@ extension OpenShellPolicy {
         var middlewares: [Middleware] = []
         if let mw = top["network_middlewares"], !r.isNull(mw) { middlewares = try r.middlewares(mw) }
 
-        try checkOverlaps(rules)
+        if let message = findAmbiguity(rules) {
+            throw ParseError(line: nil, path: "network_policies", message: "ambiguity validation failed: " + message)
+        }
         // A fail_closed middleware can't select a `tls: skip` endpoint: that
         // traffic is never decrypted, so it could never be checked.
         for mw in middlewares where !mw.failOpen {
@@ -101,30 +100,6 @@ extension OpenShellPolicy {
         return policy
     }
 
-    /// Endpoints that can match the same host + port must agree on `tls` and
-    /// `allowed_ips`; inspected ones also on protocol and enforcement. Checked
-    /// for identical hosts (wildcard overlap is left to OpenShell's prover).
-    private static func checkOverlaps(_ rules: [NetworkRule]) throws {
-        let all = rules.flatMap { r in r.endpoints.enumerated().map { (r.key, $0.offset, $0.element) } }
-        for (i, a) in all.enumerated() {
-            for b in all[(i + 1)...] {
-                guard let ha = a.2.host, ha == b.2.host,
-                      !Set(a.2.ports).isDisjoint(with: b.2.ports) else { continue }
-                // Endpoints narrowed to different paths never match the same request.
-                let samePath = (a.2.path ?? "") == (b.2.path ?? "")
-                let where_ = "network_policies.\(b.0).endpoints[\(b.1)]"
-                if a.2.tlsSkip != b.2.tlsSkip || a.2.allowedIPs != b.2.allowedIPs {
-                    throw ParseError(line: nil, path: where_,
-                                     message: "overlaps \(a.0).endpoints[\(a.1)] on \(ha) but sets different tls / allowed_ips")
-                }
-                if samePath, let la = a.2.l7, let lb = b.2.l7, la.inspects, lb.inspects,
-                   la != lb || a.2.enforcement != b.2.enforcement {
-                    throw ParseError(line: nil, path: where_,
-                                     message: "overlaps \(a.0).endpoints[\(a.1)] on \(ha) but sets a different protocol / enforcement")
-                }
-            }
-        }
-    }
 }
 
 // MARK: - Provider profiles
@@ -332,7 +307,21 @@ private struct Reader {
             }
         }
         guard count <= 256 else { throw err(n, "filesystem_policy", "at most 256 paths") }
-        warn("filesystem_policy: not applied — the workspace VM is the filesystem boundary; host folders are shared per workspace settings")
+        // Landlock rules add up: a read_write parent grants write to its whole
+        // subtree, so a read_only path beneath it protects nothing (OpenShell
+        // accepts this silently).
+        func trimmed(_ p: String) -> String { p.count > 1 && p.hasSuffix("/") ? String(p.dropLast()) : p }
+        for ro in lists["read_only"]! {
+            let r = trimmed(ro)
+            if let parent = lists["read_write"]!.map(trimmed).first(where: { $0 != r && (r.hasPrefix($0 == "/" ? "/" : $0 + "/")) }) {
+                warn("filesystem_policy: \(ro) is read_only but sits under the read_write path \(parent), which already allows writing it — it is NOT protected")
+            }
+        }
+        // The session's terminal server opens /dev/null for writing; without
+        // it no agent session starts.
+        if !lists["read_write"]!.contains(where: { ["/dev/null", "/dev", "/"].contains(trimmed($0)) }) {
+            warn("filesystem_policy: /dev/null must be in read_write, or agent sessions can't start in the VM")
+        }
         return .init(includeWorkdir: includeWorkdir, readOnly: lists["read_only"]!, readWrite: lists["read_write"]!)
     }
 
@@ -348,7 +337,6 @@ private struct Reader {
                 throw err(v, "process.\(key)", "must be 'sandbox' or a non-root numeric ID")
             }
         }
-        if !m.isEmpty { warn("process: not applied — agents run as the VM's unprivileged user") }
         return (out["run_as_user"], out["run_as_group"])
     }
 
@@ -454,21 +442,28 @@ private struct Reader {
         guard !ports.isEmpty else { throw err(n, "\(path).port", "set port or ports") }
 
         var allowedIPs: [OpenShellPolicy.IPv4Range] = []
-        var sawV6 = false
         if let a = m["allowed_ips"] {
+            // As OpenShell: bad entries don't stop the policy loading; the
+            // route's connections are refused ("invalid allowed_ips") by the
+            // destination check instead. Warn so the author sees it.
             for (i, s) in try strings(a, "\(path).allowed_ips").enumerated() {
                 let ip = "\(path).allowed_ips[\(i)]"
-                if s.contains(":") { sawV6 = true; continue }
-                guard let r = Self.parseIPv4Range(s) else { throw err(a, ip, "invalid IP address or CIDR '\(s)'") }
+                if s.contains(":") { continue }   // IPv6: honored by the destination check (raw entries)
+                guard let r = Self.parseIPv4Range(s) else {
+                    warn("\(ip): invalid IP address or CIDR '\(s)' — connections through this endpoint will be refused")
+                    continue
+                }
                 if OpenShellPolicy.blockedRanges.contains(where: { $0.overlaps(r) }) {
-                    throw err(a, ip, "overlaps a blocked range (loopback, link-local or unspecified)")
+                    warn("\(ip): '\(s)' overlaps a blocked range (loopback, link-local or unspecified) — connections through this endpoint will be refused")
+                    continue
                 }
                 allowedIPs.append(r)
             }
         }
-        if sawV6 { warn("allowed_ips: IPv6 entries are ignored — workspace VMs have no routable IPv6 egress") }
         if host == nil {
-            guard !allowedIPs.isEmpty || sawV6 else { throw err(n, "\(path).host", "set host or allowed_ips") }
+            guard m["allowed_ips"].map({ (try? strings($0, "")).map { !$0.isEmpty } ?? false }) ?? false else {
+                throw err(n, "\(path).host", "set host or allowed_ips")
+            }
         }
         if let h = host, EgressPolicy.parseIPv4(h) != nil, allowedIPs.isEmpty {
             // An IP-literal host is its own allowed address.
@@ -568,10 +563,34 @@ private struct Reader {
             case .graphql?:
                 let r = try graphqlMatcher(node, rp, isDeny: deny)
                 if deny { gqlDenies.append(r) } else { gqlRules.append(r) }
+            case .websocket? where graphQLRuleFields(node):
+                // GraphQL-over-WebSocket operation policy (l7/mod.rs).
+                let m = try mapping(node, rp, allowed: ["method", "path", "query", "command", "operation_type",
+                                                        "operation_name", "fields", "tool", "params"])
+                if m["method"] != nil || m["path"] != nil || m["query"] != nil {
+                    throw err(node, rp, "WebSocket GraphQL \(deny ? "deny" : "allow") rules must not combine method/path/query with operation_type/operation_name/fields")
+                }
+                let r = try graphqlMatcher(node, rp, isDeny: deny)
+                if deny { gqlDenies.append(r) } else { gqlRules.append(r) }
             default:
                 guard let r = try matcher(node, rp) else { return }
                 if deny { denies.append(r) } else { rules.append(r) }
             }
+        }
+        /// `has_graphql_rule_fields`: a non-empty operation_type /
+        /// operation_name, or a non-empty fields list.
+        func graphQLRuleFields(_ node: Node) -> Bool {
+            guard let map = node.mapping else { return false }
+            for (k, v) in map {
+                switch k.scalar?.string {
+                case "operation_type"?, "operation_name"?:
+                    if let sv = v.scalar?.string, !isNull(v), !sv.isEmpty { return true }
+                case "fields"?:
+                    if let seq = v.sequence, !seq.isEmpty { return true }
+                default: break
+                }
+            }
+            return false
         }
         for (i, rn) in ruleNodes.enumerated() {
             let rp = "\(path).rules[\(i)]"
@@ -582,18 +601,46 @@ private struct Reader {
         for (i, dn) in denyNodes.enumerated() {
             try collect(dn, "\(path).deny_rules[\(i)]", deny: true)
         }
-        if l7 == .mcp, !mcpAllowAll, rpcRules.contains(where: { $0.method == "tools/call" && $0.tool == nil }),
-           rpcRules.contains(where: { $0.tool != nil }) {
-            throw err(m["rules"], "\(path).rules", "a rule matching all of tools/call cannot be combined with tool-specific rules")
+        if l7 == .websocket, !gqlRules.isEmpty || !gqlDenies.isEmpty,
+           let i = rules.firstIndex(where: { $0.method.uppercased() == "WEBSOCKET_TEXT" }) {
+            throw err(m["rules"], "\(path).rules[\(i)].allow",
+                      "WebSocket endpoints with GraphQL operation policy must use operation_type/operation_name/fields rules for client messages instead of WEBSOCKET_TEXT")
+        }
+        // OpenShell l7/mod.rs: once any allow rule selects tools, a tool-less
+        // rule whose method matcher covers tools/call (allow or deny) would
+        // swallow every tool call — refused.
+        if l7 == .mcp, rpcRules.contains(where: { $0.tool != nil }) {
+            func coversToolsCall(_ r: OpenShellPolicy.RPCMatcher, allowSide: Bool) -> Bool {
+                guard r.tool == nil else { return false }
+                guard let method = r.method else { return allowSide && mcpAllowAll }
+                return method == "tools/call" || method == "*"
+                    || Glob.match(method, "tools/call", separator: nil, caseInsensitive: false)
+            }
+            if let i = rpcRules.firstIndex(where: { coversToolsCall($0, allowSide: true) }) {
+                throw err(ruleNodes[i], "\(path).rules[\(i)].allow",
+                          "method matcher allows every tool call and conflicts with MCP tool allow rules; add tool or params.name to narrow tools/call, or remove the tool allow rules")
+            }
+            if let i = rpcDenies.firstIndex(where: { coversToolsCall($0, allowSide: false) }) {
+                throw err(denyNodes[i], "\(path).deny_rules[\(i)]",
+                          "method matcher denies every tool call and conflicts with MCP tool allow rules; add tool or params.name to deny specific tools, or remove the tool allow rules")
+            }
         }
 
         // Protocol options.
         var jsonRPCMax = 65_536
         if let jr = m["json_rpc"], !isNull(jr) {
             let jm = try mapping(jr, "\(path).json_rpc", allowed: ["max_body_bytes"])
-            if let b = jm["max_body_bytes"] { jsonRPCMax = try int(b, "\(path).json_rpc.max_body_bytes") }
+            if let b = jm["max_body_bytes"] {
+                let v = try int(b, "\(path).json_rpc.max_body_bytes")
+                guard v >= 0 else { throw err(b, "\(path).json_rpc.max_body_bytes", "must be a non-negative integer") }
+                if v > 0 { jsonRPCMax = v }                // 0 = the default (OpenShell drops it)
+            }
         }
-        let graphqlMax = try m["graphql_max_body_bytes"].map { try int($0, "\(path).graphql_max_body_bytes") } ?? 65_536
+        let graphqlMax = try m["graphql_max_body_bytes"].map { n -> Int in
+            let v = try int(n, "\(path).graphql_max_body_bytes")
+            guard v > 0 else { throw err(n, "\(path).graphql_max_body_bytes", "graphql_max_body_bytes must be a positive integer") }
+            return v
+        } ?? 65_536
         var allowRegistered = false
         if let pq = try nonEmpty("persisted_queries") {
             guard ["deny", "allow_registered"].contains(pq) else {
@@ -616,10 +663,14 @@ private struct Reader {
                                        fields: try rm["fields"].map { try strings($0, "\(rp).fields") } ?? [])
             }
         }
-        for k in ["credential_binding", "request_body_credential_rewrite", "websocket_credential_rewrite",
-                  "allow_uninspected_credentials", "credential_signing", "signing_service", "signing_region"]
+        // `request_body_credential_rewrite` / `websocket_credential_rewrite`
+        // are honored for OpenShell credential placeholders (a workspace
+        // option); the rest describe OpenShell providers, which Bromure
+        // replaces with its own per-credential host scoping and signing.
+        for k in ["credential_binding", "allow_uninspected_credentials", "credential_signing",
+                  "signing_service", "signing_region"]
         where m[k] != nil && !isNull(m[k]!) {
-            warn("\(k): ignored — Bromure injects credentials from the workspace's own credential settings")
+            warn("\(k): ignored — Bromure binds each credential to its own hosts and signs AWS requests itself")
         }
         if m["credential_signing"] != nil, m["signing_service"] == nil {
             throw err(n, "\(path).signing_service", "required with credential_signing")
@@ -638,6 +689,21 @@ private struct Reader {
         ep.graphqlMaxBody = graphqlMax
         ep.persistedQueriesAllowRegistered = allowRegistered
         ep.graphqlRegistry = registry
+        var keys = OpenShellPolicy.AmbiguityKeys()
+        if let a = m["allowed_ips"] { keys.allowedIPsRaw = try strings(a, "\(path).allowed_ips") }
+        func flag(_ k: String) throws -> Bool { try m[k].map { isNull($0) ? false : try bool($0, "\(path).\(k)") } ?? false }
+        keys.websocketCredentialRewrite = try flag("websocket_credential_rewrite")
+        keys.requestBodyCredentialRewrite = try flag("request_body_credential_rewrite")
+        keys.credentialSigning = try nonEmpty("credential_signing") ?? ""
+        keys.signingService = try nonEmpty("signing_service") ?? ""
+        keys.signingRegion = try nonEmpty("signing_region") ?? ""
+        if let cb = m["credential_binding"], !isNull(cb) {
+            keys.hasCredentialBinding = true
+            if let prov = try mapping(cb, "\(path).credential_binding", allowed: ["provider"])["provider"] {
+                keys.credentialBindingProvider = try string(prov, "\(path).credential_binding.provider")
+            }
+        }
+        ep.ambiguity = keys
         return ep
     }
 
@@ -653,7 +719,11 @@ private struct Reader {
             }
             if !list.isEmpty { o.versions = list }
         }
-        if let b = m["max_body_bytes"] { o.maxBody = try int(b, "\(path).max_body_bytes") }
+        if let b = m["max_body_bytes"] {
+            let v = try int(b, "\(path).max_body_bytes")
+            guard v >= 0 else { throw err(b, "\(path).max_body_bytes", "must be a non-negative integer") }
+            if v > 0 { o.maxBody = v }                     // 0 = the default
+        }
         if let s = m["strict_tool_names"] { o.strictToolNames = try bool(s, "\(path).strict_tool_names") }
         if let a = m["allow_all_known_mcp_methods"] { o.allowAllKnown = try bool(a, "\(path).allow_all_known_mcp_methods") }
         return o

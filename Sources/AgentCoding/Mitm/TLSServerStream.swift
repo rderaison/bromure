@@ -263,7 +263,57 @@ final class TLSServerStream: MitmServerStream, @unchecked Sendable {
 /// upstreams that need no mTLS and chain to a system root — which excludes
 /// most k8s API servers, and so excluded `kubectl exec`.
 @available(macOS, deprecated: 10.15, message: "wraps SSLContext deliberately — Network.framework can't take a raw socket FD")
-final class TLSClientStream: @unchecked Sendable {
+/// The upstream side of a relayed connection (TLS, or cleartext for an
+/// `http://` / `ws://` upstream).
+protocol MitmClientStream: AnyObject {
+    func handshake() throws
+    func read(maxBytes: Int) throws -> Data
+    func write(_ data: Data) throws
+    func setNonBlocking()
+    func readNB(maxBytes: Int) throws -> StreamReadOutcome
+    func writeNB(_ data: Data) throws -> Int
+}
+
+/// A cleartext upstream (a `ws://` WebSocket on an inspected port).
+final class PlaintextClientStream: MitmClientStream, @unchecked Sendable {
+    private let fd: Int32
+    init(fd: Int32) { self.fd = fd }
+    func handshake() throws {}
+    func read(maxBytes: Int) throws -> Data {
+        var buf = [UInt8](repeating: 0, count: maxBytes)
+        while true {
+            let n = buf.withUnsafeMutableBytes { Darwin.recv(fd, $0.baseAddress, maxBytes, 0) }
+            if n > 0 { return Data(buf.prefix(n)) }
+            if n == 0 { return Data() }
+            if errno == EINTR { continue }
+            throw MitmError.tlsReadFailed(errno)
+        }
+    }
+    func write(_ data: Data) throws {
+        var off = 0
+        while off < data.count {
+            let n = data.withUnsafeBytes { Darwin.send(fd, $0.baseAddress! + off, data.count - off, 0) }
+            if n > 0 { off += n } else if n < 0 && errno == EINTR { continue } else { throw MitmError.tlsWriteFailed(errno) }
+        }
+    }
+    func setNonBlocking() { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
+    func readNB(maxBytes: Int) throws -> StreamReadOutcome {
+        var buf = [UInt8](repeating: 0, count: maxBytes)
+        let n = buf.withUnsafeMutableBytes { Darwin.recv(fd, $0.baseAddress, maxBytes, 0) }
+        if n > 0 { return .bytes(Data(buf.prefix(n))) }
+        if n == 0 { return .eof }
+        if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return .wouldBlock }
+        throw MitmError.tlsReadFailed(errno)
+    }
+    func writeNB(_ data: Data) throws -> Int {
+        let n = data.withUnsafeBytes { Darwin.send(fd, $0.baseAddress, data.count, 0) }
+        if n >= 0 { return n }
+        if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { return 0 }
+        throw MitmError.tlsWriteFailed(errno)
+    }
+}
+
+final class TLSClientStream: MitmClientStream, @unchecked Sendable {
     private let fd: Int32
     private let ctx: SSLContext
     private let peerName: String

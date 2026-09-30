@@ -740,9 +740,63 @@ public extension Profile {
             bogus = SessionTokenPlan.claudeSubscriptionBogusKey(salt: salt, profileID: id)
         }
 
+        // OpenShell credential placeholders: credentials the guest receives
+        // as an environment variable show up as `openshell:resolve:env:<VAR>`
+        // instead of a format-mimicking stand-in. The swap map pairs the
+        // placeholder with the real value exactly as it would a stand-in, so
+        // host scoping, consent and the leak alarm all apply unchanged.
+        if openShellCredentialPlaceholders && usesOpenShellPolicy {
+            var byFake: [String: SessionTokenPlan.Entry] = [:]
+            entries = entries.map { e in
+                guard let variable = SessionTokenPlan.placeholderVariable(for: e.purpose) else { return e }
+                let placeholder = SessionTokenPlan.placeholderPrefix + variable
+                let n = SessionTokenPlan.Entry(realValue: e.realValue, fakeValue: placeholder, purpose: e.purpose,
+                                               consentCredentialID: e.consentCredentialID,
+                                               consentDisplayName: e.consentDisplayName, pathScopes: e.pathScopes)
+                byFake[e.fakeValue] = n
+                return n
+            }
+            // Aliases get their own placeholder, bound to the same secret.
+            aliasExports = aliasExports.map { alias, fake in
+                guard let original = byFake[fake] else { return (alias, fake) }
+                let placeholder = SessionTokenPlan.placeholderPrefix + alias
+                entries.append(SessionTokenPlan.Entry(realValue: original.realValue, fakeValue: placeholder,
+                                                      purpose: original.purpose,
+                                                      consentCredentialID: original.consentCredentialID,
+                                                      consentDisplayName: original.consentDisplayName,
+                                                      pathScopes: original.pathScopes))
+                return (alias, placeholder)
+            }
+        }
+
         var plan = SessionTokenPlan(entries: entries, claudeSubscriptionBogusKey: bogus)
         plan.aliasExports = aliasExports
         return plan
+    }
+}
+
+extension SessionTokenPlan {
+    public static let placeholderPrefix = "openshell:resolve:env:"
+
+    /// The environment variable a credential reaches the guest through, for
+    /// the credentials that can carry an OpenShell placeholder. nil for the
+    /// ones wrapped in another format (git / registry Basic auth, subscription
+    /// JWTs, Twilio's Basic blob, omp's provider-dependent variable), which
+    /// keep Bromure's stand-ins.
+    static func placeholderVariable(for purpose: Purpose) -> String? {
+        switch purpose {
+        case .anthropicAPIKey: return "ANTHROPIC_API_KEY"
+        case .openaiAPIKey: return "OPENAI_API_KEY"
+        case .xaiAPIKey: return "XAI_API_KEY"
+        case .moonshotAPIKey: return "MOONSHOT_API_KEY"
+        case .bedrockAPIKey: return "AWS_BEARER_TOKEN_BEDROCK"
+        case .cloudAPIKey: return "ANTHROPIC_AUTH_TOKEN"
+        case .digitalOcean: return "DIGITALOCEAN_ACCESS_TOKEN"
+        case .linear: return "LINEAR_API_KEY"
+        case .manual(_, let variable, _): return variable.isEmpty ? nil : variable
+        case .mcpBearer(_, let variable, _): return variable.isEmpty ? nil : variable
+        default: return nil
+        }
     }
 }
 

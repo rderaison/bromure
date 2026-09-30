@@ -18,12 +18,14 @@ import Yams
 ///    control-plane-port blocks, REST inspection (presets, allow + deny rules,
 ///    query matchers, audit vs enforce, path canonicalization), and the
 ///    WebSocket upgrade request.
-///  - fail closed under `enforcement: enforce` (allowed + logged under audit):
-///    GraphQL / MCP / JSON-RPC request inspection, not yet implemented.
-///  - accepted, not enforced: `binaries` (the guest's user has root, so no
-///    in-guest process identity is trustworthy), `filesystem_policy` /
-///    `landlock` / `process` (the VM boundary replaces them), WebSocket client
-///    text frames, `network_middlewares`, credential rewrite / signing fields.
+///  - `binaries`: enforced under strict sandbox (root attestor), advisory
+///    otherwise.
+///  - `filesystem_policy` / `landlock` / `process`: enforced inside the VM by
+///    the guest's root launcher (Landlock, privilege drop, OpenShell's seccomp
+///    filters) from the staged `OpenShellSandboxSpec`; each only when present.
+///  - accepted, not enforced: credential rewrite / signing fields (Bromure
+///    injects credentials itself); external (non-built-in) middlewares run
+///    their `on_error` policy.
 public struct OpenShellPolicy: Sendable, Equatable {
 
     // MARK: Model
@@ -53,7 +55,7 @@ public struct OpenShellPolicy: Sendable, Equatable {
     public struct QueryMatcher: Sendable, Equatable {
         public var globs: [String]
         func matches(_ value: String) -> Bool {
-            globs.contains { Glob.match($0, value, separator: ".", caseInsensitive: false) }
+            globs.contains { RegoGlob.match($0, delimiters: [], value) }
         }
     }
 
@@ -101,6 +103,8 @@ public struct OpenShellPolicy: Sendable, Equatable {
         public var graphqlMaxBody: Int = 65_536
         public var persistedQueriesAllowRegistered: Bool = false
         public var graphqlRegistry: [String: GraphQLOperation] = [:]
+        /// Raw metadata OpenShell's ambiguity check compares.
+        public var ambiguity = AmbiguityKeys()
 
         public init(host: String?, ports: [UInt16], path: String?, allowedIPs: [IPv4Range],
                     l7: L7Protocol?, tlsSkip: Bool, enforcement: Enforcement, access: AccessPreset?,
@@ -115,12 +119,12 @@ public struct OpenShellPolicy: Sendable, Equatable {
         var isWildcard: Bool { host?.contains("*") ?? false }
 
         /// Host + port match (rego `endpoint_matches_request`).
-        func matches(host h: String?, port: UInt16) -> Bool {
+        public func matches(host h: String?, port: UInt16) -> Bool {
             guard ports.contains(port) else { return false }
-            guard let host else { return !allowedIPs.isEmpty }       // hostless
+            guard let host else { return !allowedIPs.isEmpty || !ambiguity.allowedIPsRaw.isEmpty }   // hostless
             guard let h else { return false }
             let lh = h.lowercased()
-            if host.contains("*") { return Glob.match(host, lh, separator: ".", caseInsensitive: true) }
+            if host.contains("*") { return RegoGlob.match(host.lowercased(), delimiters: ["."], lh) }
             return host == lh
         }
 
@@ -128,11 +132,12 @@ public struct OpenShellPolicy: Sendable, Equatable {
         /// everything; `/v1/**` also matches `/v1`; elsewhere `*` spans `/`).
         func selects(path p: String) -> Bool {
             guard let path, !path.isEmpty, path != "**", path != "/**" else { return true }
+            if path == p { return true }
             if path.hasSuffix("/**") {
-                // `/v1/**` matches `/v1` itself and everything below it.
+                // `/v1/**` matches `/v1` itself and everything below it; the
+                // prefix is literal (openshell-core endpoint_path.rs).
                 let base = String(path.dropLast(3))
-                return Glob.match(base, p, separator: nil, caseInsensitive: false)
-                    || Glob.match(base + "/*", p, separator: nil, caseInsensitive: false)
+                return p == base || (p.hasPrefix(base) && p.dropFirst(base.count).hasPrefix("/"))
             }
             return Glob.match(path, p, separator: nil, caseInsensitive: false)
         }
@@ -141,10 +146,10 @@ public struct OpenShellPolicy: Sendable, Equatable {
         /// expanded over every path.
         public var allowMatchers: [RequestMatcher] {
             if let access {
-                // WebSocket: read-only = the upgrade only; read-write / full also
-                // let the client send text messages.
-                let methods = l7 == .websocket
-                    ? (access == .readOnly ? ["GET"] : ["GET", "WEBSOCKET_TEXT"])
+                // l7/mod.rs `access_preset_rules`: WebSocket read-only = the
+                // upgrade only, read-write adds client text; `full` is `*`.
+                let methods = access == .full ? ["*"]
+                    : l7 == .websocket ? (access == .readOnly ? ["GET"] : ["GET", "WEBSOCKET_TEXT"])
                     : access.restMethods
                 return methods.map { RequestMatcher(method: $0, path: "**", query: [:]) }
             }
@@ -223,8 +228,8 @@ public struct OpenShellPolicy: Sendable, Equatable {
             guard let identity, !binaries.isEmpty else { return false }
             let chain = identity.chain
             return binaries.contains { b in
-                b.contains("*") || b.contains("?") || b.contains("[")
-                    ? chain.contains { Glob.match(b, $0, separator: "/", caseInsensitive: false) }
+                b.contains("*")
+                    ? chain.contains { RegoGlob.match(b, delimiters: ["/"], $0) }
                     : chain.contains(b)
             }
         }
@@ -239,8 +244,9 @@ public struct OpenShellPolicy: Sendable, Equatable {
     public var warnings: [String]
     /// `network_middlewares`, in run order.
     public var middlewares: [Middleware] = []
-    /// `filesystem_policy`, `process`, `landlock` — not applied by Bromure
-    /// (the VM is the boundary) but kept for boundary checks and export.
+    /// `filesystem_policy`, `process`, `landlock` — enforced in the guest from
+    /// the verbatim sections (`OpenShellSandboxSpec`); parsed here for
+    /// validation, warnings and boundary checks.
     public var filesystem: Filesystem?
     public var runAsUser: String?
     public var runAsGroup: String?
@@ -284,6 +290,25 @@ public struct OpenShellPolicy: Sendable, Equatable {
     /// fixed `sk-…` pattern replaced with `[REDACTED]` in UTF-8 bodies up to
     /// 256 KiB. Returns the rewritten text and the match count, or nil when
     /// nothing matched (or the body isn't eligible).
+    public enum MiddlewareOutcome: Equatable, Sendable {
+        case unchanged
+        case rewritten(Data, count: Int)
+        /// The middleware couldn't run; the entry's `on_error` decides.
+        case failed(String)
+    }
+
+    /// The built-in `openshell/regex` middleware as OpenShell's chain runs
+    /// it: a body over the 256 KiB binding capacity or not UTF-8 is a
+    /// middleware failure (`on_error` applies), otherwise every `sk-…`
+    /// token not kept by `keep` becomes `[REDACTED]`.
+    public static let regexMiddlewareCapacity = 256 * 1024
+    public static func regexMiddleware(_ body: Data, keep: (String) -> Bool = { _ in false }) -> MiddlewareOutcome {
+        guard body.count <= regexMiddlewareCapacity else { return .failed("request_body_over_capacity") }
+        guard String(data: body, encoding: .utf8) != nil else { return .failed("openshell/regex requires UTF-8 request bodies") }
+        guard let (out, n) = regexRedact(body, keep: keep) else { return .unchanged }
+        return .rewritten(out, count: n)
+    }
+
     public static func regexRedact(_ body: Data, keep: (String) -> Bool = { _ in false }) -> (Data, Int)? {
         guard body.count <= 256 * 1024, let text = String(data: body, encoding: .utf8) else { return nil }
         let re = try! NSRegularExpression(pattern: "sk-[A-Za-z0-9_-]{16,}")
@@ -343,9 +368,6 @@ public struct OpenShellPolicy: Sendable, Equatable {
             }
             return d
         }
-        if let ip, Self.blockedRanges.contains(where: { $0.contains(ip) }) {
-            return .deny(reason: "destination \(EgressPolicy.ipv4String(ip)) is always blocked")
-        }
         var lastReason = "no matching network policy for port \(port)"
         // Names first, then the bare address (IP-literal and hostless
         // `allowed_ips` endpoints match on it).
@@ -361,17 +383,11 @@ public struct OpenShellPolicy: Sendable, Equatable {
     }
 
     private func evaluateConnect(host: String?, ip: UInt32?, port: UInt16) -> ConnectDecision {
+        // Policy match (rego `allow_network`): host + port (binaries were
+        // scoped by the caller). Addresses play no part here…
         var matched: [(rule: String, ep: Endpoint)] = []
         for rule in networkPolicies {
             for ep in rule.endpoints where ep.matches(host: host, port: port) {
-                if !ep.allowedIPs.isEmpty {
-                    // allowed_ips must hold the actual destination; unknown ⇒ can't verify.
-                    guard let ip, ep.allowedIPs.contains(where: { $0.contains(ip) }) else { continue }
-                }
-                if Self.controlPlanePorts.contains(port), !ep.managed,
-                   !ep.isWildcard || !ep.allowedIPs.isEmpty {
-                    continue
-                }
                 matched.append((rule.key, ep))
             }
         }
@@ -379,15 +395,16 @@ public struct OpenShellPolicy: Sendable, Equatable {
         guard !matched.isEmpty else {
             return .deny(reason: "no network policy allows \(label):\(port)")
         }
-        if let ip, Self.privateRanges.contains(where: { $0.contains(ip) }) {
-            let ok = matched.contains { m in
-                (m.ep.host != nil && !m.ep.isWildcard)
-                    || m.ep.allowedIPs.contains(where: { $0.contains(ip) })
-            }
-            if !ok {
-                return .deny(reason: "\(label):\(port) resolves to private address "
-                             + "\(EgressPolicy.ipv4String(ip)); list it in allowed_ips")
-            }
+        // …they're validated afterwards against the route's address
+        // authorization (OpenShell's destination plan). Unknown address (the
+        // cooperative proxy, before it resolves): the proxy validates what it
+        // resolves before dialing. Bromure-managed provider endpoints are
+        // Bromure's own destinations and skip this.
+        if let ip, !matched.contains(where: { $0.ep.managed }) {
+            let target = host ?? EgressPolicy.ipv4String(ip)
+            let verdict = destinationPlan(host: target, port: port)
+                .flatMap { Self.validateDestination($0, host: target, port: port, resolved: [.v4(ip)]) }
+            if case .failure(let denial) = verdict { return .deny(reason: denial.reason) }
         }
         let rule = matched.map(\.rule).min() ?? matched[0].rule
         return .allow(rule: rule,
@@ -427,7 +444,12 @@ public struct OpenShellPolicy: Sendable, Equatable {
                 matching.append((rule.key, ep))
             }
         }
-        guard !matching.isEmpty else { return .allow }
+        // As OpenShell's relay routes it: once any endpoint on this host:port
+        // inspects requests, every request is canonicalized and routed to the
+        // most specific inspecting endpoint whose path selector matches — none
+        // is a denial. Without one, requests pass uninspected.
+        let routes = matching.filter { $0.ep.l7?.inspects ?? false }
+        guard !routes.isEmpty else { return .allow }
 
         let allowSlash = matching.contains { $0.ep.allowEncodedSlash && ($0.ep.l7?.inspects ?? false) }
         let canonical: (path: String, query: [String: [String]])
@@ -438,24 +460,48 @@ public struct OpenShellPolicy: Sendable, Equatable {
             return .violation(reason: "\(method) rejected: \(e.message)", rule: nil, enforced: true)
         }
 
-        let selected = matching.filter { $0.ep.selects(path: canonical.path) }
-        let inspected = selected.filter { $0.ep.l7?.inspects ?? false }
-        guard !inspected.isEmpty else { return .allow }
-
-        // Endpoints that can match the same request must agree on enforcement
-        // (validated); take the most specific selector's.
-        let primary = inspected.max { specificity($0.ep.path) < specificity($1.ep.path) }!
+        // Ties: OpenShell iterates policies in Rego's key order (sorted by
+        // name, endpoints in authored order) and `max_by_key` keeps the last.
+        let ordered = routes.enumerated().sorted {
+            ($0.element.rule.utf8.lexicographicallyPrecedes($1.element.rule.utf8))
+                || ($0.element.rule == $1.element.rule && $0.offset < $1.offset)
+        }.map(\.element)
+        guard let primary = ordered.filter({ $0.ep.selects(path: canonical.path) })
+            .reduce(nil as (rule: String, ep: Endpoint)?, { best, e in
+                guard let b = best else { return e }
+                return specificity(e.ep.path) >= specificity(b.ep.path) ? e : b
+            }) else {
+            return .violation(reason: "\(method.uppercased()) \(canonical.path): no L7 endpoint path matched request",
+                              rule: routes[0].rule, enforced: true)
+        }
+        if !primary.ep.allowEncodedSlash, allowSlash, canonical.path.contains("%2F") {
+            return .violation(reason: "\(method.uppercased()) rejected: encoded '/' is not allowed on this endpoint",
+                              rule: primary.rule, enforced: true)
+        }
+        // Rego re-matches endpoints by `path` with glob.match (rego
+        // `endpoint_path_matches_request`), which — unlike the route selector
+        // above — does not let `/v1/**` match `/v1` itself.
+        let inspected = matching.filter { m in
+            guard m.ep.l7?.inspects ?? false else { return false }
+            guard let p = m.ep.path, !p.isEmpty else { return true }
+            return Self.pathMatches(canonical.path, p)
+        }
         let enforced = primary.ep.enforcement == .enforce
         let request = L7Request(method: method.uppercased(), path: canonical.path, query: canonical.query,
                                 headers: headers, body: body, bodyComplete: bodyComplete)
 
+        if primary.ep.l7 == .mcp {
+            return evaluateMCPRequest(request, primary: primary, inspected: inspected, enforced: enforced)
+        }
+
         var firstDeny: (String, String)?
         var granted = false
         var reasons: [String] = []
-        for (rule, ep) in inspected {
+        for (rule, ep) in inspected where Self.sharesParse(ep, primary.ep) {
             switch evaluate(request, on: ep) {
             case .allow: granted = true
             case .deny(let why): if firstDeny == nil { firstDeny = (why, rule) }
+            case .hardDeny(let why): return .violation(reason: why, rule: rule, enforced: true)
             case .notPermitted(let why): if let why { reasons.append(why) }
             }
         }
@@ -465,24 +511,83 @@ public struct OpenShellPolicy: Sendable, Equatable {
                           rule: primary.rule, enforced: enforced)
     }
 
-    /// Whether the client may send text messages on a WebSocket upgraded at
-    /// `target` (`WEBSOCKET_TEXT` rules match the upgrade path, never message
-    /// content, so this is decided once per connection). nil when no
-    /// `protocol: websocket` endpoint covers the connection — nothing to gate.
-    public func websocketTextDecision(host: String, port: UInt16, target: String,
-                                      identity: BinaryIdentity? = nil,
-                                      enforceBinaries: Bool = false) -> RequestDecision? {
-        let ws = networkPolicies.filter { rule in
-            rule.applies(to: identity, enforce: enforceBinaries)
-                && rule.endpoints.contains { $0.l7 == .websocket && $0.matches(host: host, port: port) }
-        }.map { rule in
-            NetworkRule(key: rule.key, name: rule.name,
-                        endpoints: rule.endpoints.filter { $0.l7 == .websocket }, binaries: rule.binaries)
+    /// An MCP-routed request: transport inspection under the primary endpoint's
+    /// options, then every policy unit (a call, or the whole request) must be
+    /// allowed by some endpoint and denied by none.
+    private func evaluateMCPRequest(_ request: L7Request, primary: (rule: String, ep: Endpoint),
+                                    inspected: [(rule: String, ep: Endpoint)], enforced: Bool) -> RequestDecision {
+        let info: MCPInfo
+        switch mcpTransportInspect(request, primary.ep) {
+        case .failure(let rejection):
+            return .violation(reason: rejection.reason, rule: primary.rule, enforced: true)
+        case .success(let i): info = i
         }
-        guard !ws.isEmpty else { return nil }
-        var only = self
-        only.networkPolicies = ws
-        return only.evaluateRequest(host: host, port: port, method: "WEBSOCKET_TEXT", target: target)
+        for unit in Self.mcpUnits(info) {
+            let what = unit.call.map { "MCP \($0.method)\($0.tool.map { " \($0)" } ?? "")" }
+                ?? "\(request.method) \(request.path)"
+            var allowed = false
+            for (rule, ep) in inspected {
+                if ep.l7 == .mcp {
+                    if mcpDenies(unit, httpMethod: request.method, on: ep) {
+                        return .violation(reason: "\(what) blocked by deny rule", rule: rule, enforced: enforced)
+                    }
+                    if mcpAllows(unit, httpMethod: request.method, on: ep) { allowed = true }
+                } else if Self.sharesParse(ep, primary.ep) {
+                    switch evaluate(request, on: ep) {
+                    case .allow: allowed = true
+                    case .deny(let why): return .violation(reason: why, rule: rule, enforced: enforced)
+                    case .hardDeny(let why): return .violation(reason: why, rule: rule, enforced: true)
+                    case .notPermitted: break
+                    }
+                }
+            }
+            if !allowed {
+                return .violation(reason: "\(what) not permitted by policy", rule: primary.rule, enforced: enforced)
+            }
+        }
+        return .allow
+    }
+
+    /// OpenShell's route for a request on `host:port`: the most specific
+    /// inspecting endpoint whose path selector matches (ties: last in policy
+    /// name order), and every inspecting endpoint Rego then evaluates. nil
+    /// when no endpoint inspects, the target doesn't canonicalize, or no
+    /// selector matches.
+    struct Route {
+        let primary: Endpoint
+        let inspected: [Endpoint]
+        let path: String
+        let query: [String: [String]]
+    }
+
+    /// Whether a request to `target` routes to a `protocol: websocket` endpoint.
+    public func routesToWebSocket(host: String, port: UInt16, target: String) -> Bool {
+        routedEndpoint(host: host, port: port, target: target)?.primary.l7 == .websocket
+    }
+
+    func routedEndpoint(host: String, port: UInt16, target: String) -> Route? {
+        var matching: [(rule: String, ep: Endpoint)] = []
+        for rule in networkPolicies {
+            for ep in rule.endpoints where ep.matches(host: host, port: port) { matching.append((rule.key, ep)) }
+        }
+        let routes = matching.filter { $0.ep.l7?.inspects ?? false }
+        guard !routes.isEmpty else { return nil }
+        let allowSlash = routes.contains { $0.ep.allowEncodedSlash }
+        guard case .success(let c) = Self.canonicalize(target: target, allowEncodedSlash: allowSlash) else { return nil }
+        let ordered = routes.enumerated().sorted {
+            ($0.element.rule.utf8.lexicographicallyPrecedes($1.element.rule.utf8))
+                || ($0.element.rule == $1.element.rule && $0.offset < $1.offset)
+        }.map(\.element)
+        guard let primary = ordered.filter({ $0.ep.selects(path: c.path) })
+            .reduce(nil as (rule: String, ep: Endpoint)?, { best, e in
+                guard let b = best else { return e }
+                return specificity(e.ep.path) >= specificity(b.ep.path) ? e : b
+            }) else { return nil }
+        let inspected = routes.filter { m in
+            guard let p = m.ep.path, !p.isEmpty else { return true }
+            return Self.pathMatches(c.path, p)
+        }.map(\.ep)
+        return Route(primary: primary.ep, inspected: inspected, path: c.path, query: c.query)
     }
 
     /// One request as the L7 inspectors see it (canonicalized).
@@ -496,7 +601,10 @@ public struct OpenShellPolicy: Sendable, Equatable {
         var bodyComplete: Bool = true
     }
 
-    enum EndpointVerdict { case allow, deny(String), notPermitted(String?) }
+    /// `hardDeny`: the request isn't a valid message for the protocol at all
+    /// (a JSON-RPC response frame sent as a request, unparseable JSON…) —
+    /// refused even in audit mode, as OpenShell's relay does.
+    enum EndpointVerdict { case allow, deny(String), hardDeny(String), notPermitted(String?) }
 
     func evaluate(_ r: L7Request, on ep: Endpoint) -> EndpointVerdict {
         switch ep.l7 {
@@ -507,16 +615,35 @@ public struct OpenShellPolicy: Sendable, Equatable {
             }
             return ep.allowMatchers.contains(where: { Self.allowMatches($0, method: r.method, path: r.path, query: r.query) })
                 ? .allow : .notPermitted(nil)
-        case .mcp?:     return evaluateMCP(r, ep)
+        case .mcp?:
+            switch mcpTransportInspect(r, ep) {
+            case .failure(let rej): return .deny(rej.reason)
+            case .success(let info):
+                for u in Self.mcpUnits(info) {
+                    if mcpDenies(u, httpMethod: r.method, on: ep) { return .deny("MCP request blocked by deny rule") }
+                    if !mcpAllows(u, httpMethod: r.method, on: ep) { return .notPermitted(nil) }
+                }
+                return .allow
+            }
         case .jsonRPC?: return evaluateJSONRPC(r, ep)
         case .graphql?: return evaluateGraphQL(r, ep)
         case .tcp?, nil: return .notPermitted(nil)
         }
     }
 
+    /// OpenShell parses a body only for the routed endpoint's protocol; the
+    /// policy engine sees no JSON-RPC / GraphQL view otherwise, so such rules
+    /// on other endpoints neither allow nor deny. REST / WebSocket rules match
+    /// on method + path alone and always apply.
+    static func sharesParse(_ ep: Endpoint, _ primary: Endpoint) -> Bool {
+        switch ep.l7 {
+        case .graphql?, .jsonRPC?, .mcp?: return ep.l7 == primary.l7
+        default: return true
+        }
+    }
+
     private func specificity(_ path: String?) -> Int {
-        guard let path, path != "**", path != "/**" else { return 0 }
-        return path.filter { $0 != "*" }.count
+        (path ?? "").filter { $0 != "*" }.count
     }
 
     static func methodMatches(_ actual: String, _ expected: String) -> Bool {
@@ -527,7 +654,7 @@ public struct OpenShellPolicy: Sendable, Equatable {
     }
 
     static func pathMatches(_ path: String, _ pattern: String) -> Bool {
-        pattern == "**" || Glob.match(pattern, path, separator: "/", caseInsensitive: false)
+        pattern == "**" || RegoGlob.match(pattern, delimiters: ["/"], path)
     }
 
     /// Allow side: every configured key must be present and ALL its values match.
@@ -561,6 +688,21 @@ public struct OpenShellPolicy: Sendable, Equatable {
         return nil
     }
 
+    /// The request-target OpenShell forwards for `target` on an inspected
+    /// route: the canonical path plus the raw query, so the upstream serves
+    /// exactly the path the policy evaluated. nil when no endpoint on
+    /// `host:port` inspects requests (the target is forwarded untouched) or the
+    /// target doesn't canonicalize (`evaluateRequest` refuses those).
+    public func canonicalRequestTarget(host: String, port: UInt16, target: String) -> String? {
+        let routes = networkPolicies.flatMap(\.endpoints)
+            .filter { $0.matches(host: host, port: port) && ($0.l7?.inspects ?? false) }
+        guard !routes.isEmpty else { return nil }
+        let allowSlash = routes.contains(where: \.allowEncodedSlash)
+        guard case .success(let c) = Self.canonicalize(target: target, allowEncodedSlash: allowSlash) else { return nil }
+        let query = target.firstIndex(of: "?").map { String(target[$0...]) } ?? ""
+        return c.path + query
+    }
+
     /// Whether an endpoint `path` selector matches a canonical path.
     public static func pathSelector(_ selector: String, matches path: String) -> Bool {
         Endpoint(host: nil, ports: [], path: selector, allowedIPs: [], l7: nil, tlsSkip: false,
@@ -570,76 +712,145 @@ public struct OpenShellPolicy: Sendable, Equatable {
 
     public struct CanonicalizeError: Error, Equatable { public let message: String }
 
-    /// Canonicalize an origin-form request target the way OpenShell's L7 parser
-    /// does before evaluation: percent-decode, resolve dot segments, collapse
-    /// doubled slashes, strip `;params`, reject `%2F` (unless allowed), control
-    /// bytes, raw non-ASCII, fragments and escapes above the root.
+    /// Canonicalize a request target exactly as OpenShell's L7 boundary does
+    /// (port of openshell-supervisor-network `l7/path.rs`
+    /// `canonicalize_request_target`, default options, plus
+    /// `rest::parse_query_params`): reject control / non-ASCII bytes and
+    /// fragments; take the path of an absolute-form target; percent-decode
+    /// (`%2F` kept as an in-segment sentinel only when allowed); strip
+    /// `;params` before resolving dot segments; re-encode everything outside
+    /// RFC 3986 pchar with upper-case hex.
     static func canonicalize(target: String, allowEncodedSlash: Bool)
         -> Result<(path: String, query: [String: [String]]), CanonicalizeError> {
         func fail(_ m: String) -> Result<(path: String, query: [String: [String]]), CanonicalizeError> {
             .failure(CanonicalizeError(message: m))
         }
-        var t = target
-        // Absolute-form (forward proxy): keep the path part.
-        if let r = t.range(of: "://") {
-            let afterScheme = t[r.upperBound...]
-            t = afterScheme.firstIndex(of: "/").map { String(afterScheme[$0...]) } ?? "/"
+        for b in target.utf8 {
+            if b < 0x20 || b == 0x7F { return fail("request-target contains a null or control byte") }
+            if b >= 0x80 { return fail("request-target contains raw non-ASCII bytes; non-ASCII must be percent-encoded") }
         }
-        guard t.utf8.count <= 4096 else { return fail("request path too long") }
-        guard t.hasPrefix("/") else { return fail("request-target is not an origin-form path") }
-        if t.contains("#") { return fail("request-target contains a fragment") }
-        for b in t.utf8 {
-            if b < 0x20 || b == 0x7F { return fail("request-target contains a control byte") }
-            if b >= 0x80 { return fail("request-target contains raw non-ASCII bytes") }
-        }
-        var rawPath = t
-        var rawQuery = ""
-        if let q = t.firstIndex(of: "?") {
-            rawPath = String(t[..<q]); rawQuery = String(t[t.index(after: q)...])
+        if target.contains("#") { return fail("request-target contains a fragment") }
+        let pathPart: Substring, queryPart: Substring?
+        if let q = target.firstIndex(of: "?") {
+            pathPart = target[..<q]; queryPart = target[target.index(after: q)...]
+        } else {
+            pathPart = target[...]; queryPart = nil
         }
 
-        var out: [String] = []
-        for rawSeg in rawPath.split(separator: "/", omittingEmptySubsequences: true) {
-            var seg = String(rawSeg)
-            if let semi = seg.firstIndex(of: ";") { seg = String(seg[..<semi]) }
-            // Decode, keeping %2F as a literal marker (never a separator).
-            let upper = seg.replacingOccurrences(of: "%2f", with: "%2F")
-            if upper.contains("%2F") && !allowEncodedSlash {
-                return fail("request-target contains an encoded '/' (%2F)")
+        // Absolute-form (`scheme://authority/path`): its path, or `/`.
+        var rawPath = String(pathPart)
+        if let m = pathPart.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*://"#, options: .regularExpression) {
+            let rest = pathPart[m.upperBound...]
+            rawPath = rest.firstIndex(of: "/").map { String(rest[$0...]) } ?? "/"
+        }
+        if rawPath.isEmpty { rawPath = "/" }
+        guard rawPath.hasPrefix("/") else { return fail("request-target is not a valid origin-form path") }
+        guard rawPath.utf8.count <= 4096 else { return fail("request-target exceeds the configured maximum length") }
+
+        // Percent-decode; an allowed %2F becomes the in-segment sentinel 0x01.
+        let sentinel: UInt8 = 0x01
+        let raw = Array(rawPath.utf8)
+        var decoded: [UInt8] = []
+        decoded.reserveCapacity(raw.count)
+        var i = 0
+        while i < raw.count {
+            let b = raw[i]
+            if b == sentinel { return fail("request-target contains a null or control byte") }
+            guard b == UInt8(ascii: "%") else { decoded.append(b); i += 1; continue }
+            guard i + 2 < raw.count, let hi = hexNibble(raw[i + 1]), let lo = hexNibble(raw[i + 2]) else {
+                return fail("request-target contains an invalid percent-encoded sequence")
             }
-            var decodedParts: [String] = []
-            for part in upper.components(separatedBy: "%2F") {
-                guard let d = percentDecode(part) else { return fail("invalid percent-encoding") }
-                if d.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) {
-                    return fail("request-target contains a control byte")
+            let d = hi << 4 | lo
+            if d == UInt8(ascii: "/") {
+                guard allowEncodedSlash else {
+                    return fail("request-target contains an encoded '/' (%2F) which is not allowed on this endpoint")
                 }
-                decodedParts.append(d)
+                decoded.append(sentinel)
+            } else if d < 0x20 || d == 0x7F {
+                return fail("request-target contains a null or control byte")
+            } else {
+                decoded.append(d)
             }
-            let decoded = decodedParts.joined(separator: "%2F")
-            if decoded.isEmpty || decoded == "." { continue }
-            if decoded == ".." {
-                guard !out.isEmpty else { return fail("'..' escapes the path root") }
-                out.removeLast(); continue
-            }
-            out.append(decoded)
+            i += 3
         }
-        var path = "/" + out.joined(separator: "/")
-        if rawPath.count > 1, rawPath.hasSuffix("/"), path != "/" { path += "/" }
 
+        // Segments, `;params` stripped, dot segments resolved.
+        let segments = decoded.dropFirst().split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: false)
+            .map { seg -> [UInt8] in Array(seg.firstIndex(of: UInt8(ascii: ";")).map { seg[..<$0] } ?? seg) }
+        var stack: [[UInt8]] = []
+        let last = segments.count - 1
+        for (idx, seg) in segments.enumerated() {
+            if seg == Array("..".utf8) {
+                guard stack.popLast() != nil else { return fail("request-target's `..` segment would escape the path root") }
+                if idx == last { stack.append([]) }
+                continue
+            }
+            if seg == Array(".".utf8) {
+                if idx == last { stack.append([]) }
+                continue
+            }
+            if seg.isEmpty && idx != last { continue }
+            stack.append(seg)
+        }
+        for seg in stack {
+            for part in seg.split(separator: sentinel, omittingEmptySubsequences: false)
+            where Array(part) == Array("..".utf8) || Array(part) == Array(".".utf8) {
+                return fail("request-target still contains a `.`/`..` segment after canonicalization")
+            }
+        }
+
+        // Re-encode.
+        var path = "/"
+        let hex = Array("0123456789ABCDEF".utf8)
+        for (idx, seg) in stack.enumerated() {
+            if idx > 0 { path.append("/") }
+            for b in seg {
+                if b == sentinel { path.append("%2F") }
+                else if isPchar(b) { path.unicodeScalars.append(Unicode.Scalar(b)) }
+                else { path.append("%"); path.unicodeScalars.append(Unicode.Scalar(hex[Int(b >> 4)]))
+                       path.unicodeScalars.append(Unicode.Scalar(hex[Int(b & 0x0F)])) }
+            }
+        }
+
+        // Query (rest.rs `parse_query_params`): `+` is a space; bad escapes
+        // or non-UTF-8 fail the request.
         var query: [String: [String]] = [:]
-        for pair in rawQuery.split(separator: "&", omittingEmptySubsequences: true) {
-            let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            let k = percentDecode(String(kv[0]).replacingOccurrences(of: "+", with: " ")) ?? String(kv[0])
-            let v = kv.count > 1
-                ? (percentDecode(String(kv[1]).replacingOccurrences(of: "+", with: " ")) ?? String(kv[1])) : ""
+        for pair in (queryPart ?? "").split(separator: "&", omittingEmptySubsequences: true) {
+            let (rk, rv) = pair.firstIndex(of: "=").map { (pair[..<$0], pair[pair.index(after: $0)...]) } ?? (pair, "")
+            guard let k = decodeQueryComponent(rk), let v = decodeQueryComponent(rv) else {
+                return fail("Invalid percent-encoding in query component")
+            }
             query[k, default: []].append(v)
         }
         return .success((path, query))
     }
 
-    private static func percentDecode(_ s: String) -> String? {
-        guard s.contains("%") else { return s }
-        return s.removingPercentEncoding
+    private static func hexNibble(_ b: UInt8) -> UInt8? {
+        switch b {
+        case UInt8(ascii: "0")...UInt8(ascii: "9"): return b - UInt8(ascii: "0")
+        case UInt8(ascii: "a")...UInt8(ascii: "f"): return b - UInt8(ascii: "a") + 10
+        case UInt8(ascii: "A")...UInt8(ascii: "F"): return b - UInt8(ascii: "A") + 10
+        default: return nil
+        }
+    }
+
+    private static func isPchar(_ b: UInt8) -> Bool {
+        (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A)
+            || Array("-._~!$&'()*+,;=:@".utf8).contains(b)
+    }
+
+    private static func decodeQueryComponent(_ s: Substring) -> String? {
+        let bytes = Array(s.utf8)
+        var out: [UInt8] = []
+        var i = 0
+        while i < bytes.count {
+            let b = bytes[i]
+            if b == UInt8(ascii: "+") { out.append(0x20); i += 1; continue }
+            guard b == UInt8(ascii: "%") else { out.append(b); i += 1; continue }
+            guard i + 2 < bytes.count, let hi = hexNibble(bytes[i + 1]), let lo = hexNibble(bytes[i + 2]) else { return nil }
+            out.append(hi << 4 | lo); i += 3
+        }
+        return String(bytes: out, encoding: .utf8)
     }
 
     static func cidr(_ a: UInt32, _ b: UInt32, _ c: UInt32, _ d: UInt32, _ bits: UInt32) -> IPv4Range {

@@ -227,4 +227,32 @@ struct SecurityTimelinePersistenceTests {
         #expect(SupplyChainRegistry.debPackage(path: "/ubuntu/dists/noble/InRelease") == nil)
         #expect(SupplyChainRegistry.debPackage(path: "/downloads/tool.deb") == nil)   // not an archive pool
     }
+
+    @Test("Guest sandbox denials render as their own rows: who, what, how many")
+    func sandboxDenialRows() throws {
+        let pid = UUID()
+        let file = try #require(SecurityTimeline.map(profileID: pid, eventType: "sentry.event", eventData: [
+            // The sentry's wire shape: `comm`, no `exe`, for file denials.
+            "kind": .string("sandbox_denied"), "category": .string("sandbox_denial"), "op": .string("create"),
+            "path": .string("/etc/cron.d/x"), "comm": .string("python3"), "pid": .int(4242), "count": .int(3),
+            "hook": .string("security_path_mknod"), "errno": .int(-13),
+        ], now: Date()))
+        #expect(file.engine == "Guest sandbox" && file.kind == .blocked && file.decision == "denied")
+        #expect(file.condition == "python3 (pid 4242) — create /etc/cron.d/x ×3")
+        // seccomp: the syscall by number, the executable in `path`.
+        let sys = try #require(SecurityTimeline.map(profileID: pid, eventType: "sentry.event", eventData: [
+            "kind": .string("seccomp_denied"), "category": .string("sandbox_denial"), "syscall": .int(97),
+            "action": .string("errno"), "path": .string("/usr/bin/bash"), "comm": .string("bash"),
+        ], now: Date()))
+        #expect(sys.condition == "/usr/bin/bash — syscall unshare")
+        let odd = try #require(SecurityTimeline.map(profileID: pid, eventType: "sentry.event", eventData: [
+            "kind": .string("seccomp_denied"), "category": .string("sandbox_denial"), "syscall": .int(999),
+            "comm": .string("x"),
+        ], now: Date()))
+        #expect(odd.condition == "x — syscall #999")
+        let tally = try #require(SecurityTimeline.map(profileID: pid, eventType: "sandbox.activity", eventData: [
+            "allowed_file_ops": .int(1200), "denied_file_ops": .int(3), "denied_syscalls": .int(1),
+        ], now: Date()))
+        #expect(tally.condition.contains("1200 file operations allowed, 3 denied, 1 syscalls denied"))
+    }
 }

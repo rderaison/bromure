@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""bromure-sentryd — load the kernel sentry, then close the door behind it.
+
+Run once as root, before any agent code. It:
+
+  1. finds a module matching the running kernel (prebuilt from the meta share
+     first, DKMS-style local build second);
+  2. loads it with the facts the kernel won't give a module — boot_id, the
+     Landlock ABI — and the host's vsock coordinates;
+  3. reads back `sha256(secret)` so attestd can cross-check the hello the host
+     pins on 5841 against the digest it gets on 5840;
+  4. raises lockdown to `integrity`, which is what stops root from loading a
+     second module to undo any of this.
+
+Order 2-then-4 is mandatory and one-way. Under `integrity` the kernel demands a
+valid signature for every module, and ours is not signed by a key the kernel
+trusts, so a sentry that isn't loaded *before* lockdown is a sentry that cannot
+be loaded at all this boot.
+
+It never crash-loops and never blocks the workspace. Every failure path ends in
+a status of `unavailable` with a reason, which attestd forwards; `sentry.requirement`
+decides whether the host then refuses to start agent sessions, and that decision
+is the host's, not this program's.
+"""
+
+import errno
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bromure_openshell as osh  # noqa: E402
+
+META = os.environ.get("BROMURE_META", "/mnt/bromure-meta")
+SPEC_PATH = os.path.join(META, "openshell-sandbox.json")
+PREBUILT_DIR = os.path.join(META, "sentry")
+SOURCE_DIR = os.path.join(META, "sentry", "src")
+BUILD_DIR = "/run/bromure-sentry-build"
+RUN_DIR = os.environ.get("BROMURE_RUN_DIR", "/run/bromure-sandbox")
+STATUS_PATH = os.path.join(RUN_DIR, "sentry.json")
+MODULE_NAME = "bromure_sentry"
+DEFAULT_PORT = 5841
+# Overridable for the same reason agentd's and attestd's are: nothing inside a
+# guest can bind CID 2, so a hardcoded 2 makes the sentry's own boot path
+# untestable. attestd went sixteen rounds that way and shipped a startup bug
+# nobody could see. Unset in production.
+HOST_CID = int(os.environ.get("BROMURE_HOST_CID", "2"))
+LOCKDOWN_PATH = "/sys/kernel/security/lockdown"
+
+
+def log(message):
+    sys.stderr.write("[sentryd] %s\n" % message)
+    sys.stderr.flush()
+
+
+def write_status(state, reason=None, **extra):
+    status = {"sentry": state, "reason": reason}
+    status.update(extra)
+    os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+    tmp = STATUS_PATH + ".tmp"
+    with open(tmp, "w") as handle:
+        json.dump(status, handle, sort_keys=True)
+    os.chmod(tmp, 0o644)
+    os.rename(tmp, STATUS_PATH)
+    return status
+
+
+def kernel_release():
+    return os.uname().release
+
+
+# ---------------------------------------------------------------------------
+# Finding a module for THIS kernel
+# ---------------------------------------------------------------------------
+
+def prebuilt_module():
+    """The module built at Bromure release time for this kernel, if there is one.
+
+    `sentry/` holds a SET of `<kver>.ko` files and the host stages all of them,
+    so adding a new base image kernel is additive. Named by kernel release so a
+    guest that has apt-upgraded past every shipped kernel does not silently load
+    a module built for a different one — `vermagic` would reject it anyway, but
+    failing by name is a clearer failure.
+    """
+    candidate = os.path.join(PREBUILT_DIR, "%s-%s.ko" % (MODULE_NAME, kernel_release()))
+    return candidate if os.path.exists(candidate) else None
+
+
+def available_prebuilts():
+    """Which kernels DO have a prebuilt module, for the failure message.
+
+    "no prebuilt for 6.8.0-142-generic" is not actionable on its own; "...and
+    the ones staged are 6.8.0-139-generic" tells whoever reads it exactly what
+    went wrong and what to build. The first end-to-end run on the real image hit
+    precisely this — the image had moved to -142 while only -139 was shipped —
+    and the status said only that the headers were missing.
+    """
+    prefix = MODULE_NAME + "-"
+    try:
+        return sorted(name[len(prefix):-3] for name in os.listdir(PREBUILT_DIR)
+                      if name.startswith(prefix) and name.endswith(".ko"))
+    except OSError:
+        return []
+
+
+def vermagic_of(path):
+    try:
+        out = subprocess.run(["modinfo", "-F", "vermagic", path],
+                             capture_output=True, text=True, timeout=30)
+        return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def build_locally():
+    """Fallback for a guest whose kernel no longer matches the image.
+
+    This costs an apt install of the matching headers plus a compile, on the
+    user's clock. It is deliberately the fallback and not the default: making
+    every first boot pay for it, and fail without network, would be a bad trade.
+
+    Do not count on it. It runs apt through the workspace's egress policy and
+    without an `apt-get update`, so on most workspaces it fails with "has no
+    installation candidate" — which is what the first end-to-end run saw. The
+    real fix for a new image kernel is to build its `.ko` at release time
+    (`sentry/build.sh <kver>`); this path exists so a guest that upgrades its own
+    kernel mid-life has a chance, not as a substitute for that.
+    """
+    if not os.path.isdir(SOURCE_DIR):
+        return None, "no module source staged at %s" % SOURCE_DIR
+    headers = "/lib/modules/%s/build" % kernel_release()
+    if not os.path.isdir(headers):
+        log("installing linux-headers-%s" % kernel_release())
+        result = subprocess.run(
+            ["apt-get", "install", "-y", "-qq", "linux-headers-%s" % kernel_release()],
+            capture_output=True, text=True, timeout=900,
+            env=dict(os.environ, DEBIAN_FRONTEND="noninteractive"))
+        if result.returncode != 0 or not os.path.isdir(headers):
+            return None, ("kernel headers for %s unavailable: %s"
+                          % (kernel_release(), result.stderr.strip()[:200]))
+    shutil.rmtree(BUILD_DIR, ignore_errors=True)
+    shutil.copytree(SOURCE_DIR, BUILD_DIR)
+    result = subprocess.run(["make", "-C", BUILD_DIR, "KVER=%s" % kernel_release()],
+                            capture_output=True, text=True, timeout=900)
+    built = os.path.join(BUILD_DIR, "%s.ko" % MODULE_NAME)
+    if result.returncode != 0 or not os.path.exists(built):
+        return None, "module build failed: %s" % result.stderr.strip()[-300:]
+    return built, None
+
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+def already_loaded():
+    return os.path.isdir("/sys/module/%s" % MODULE_NAME)
+
+
+def boot_id():
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def load(path, cid, port):
+    availability = osh.probe_availability()
+    landlock_abi = availability.abi if availability.is_available else 0
+    argv = ["insmod", path,
+            "cid=%d" % cid,
+            "port=%d" % port,
+            "boot_id=%s" % boot_id(),
+            "landlock_abi=%d" % landlock_abi]
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        return False, result.stderr.strip() or "insmod failed"
+    return True, None
+
+
+def secret_digest():
+    path = "/sys/module/%s/parameters/secret_digest" % MODULE_NAME
+    try:
+        with open(path) as handle:
+            digest = handle.read().strip()
+        return digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Lockdown
+# ---------------------------------------------------------------------------
+
+def lockdown_state():
+    try:
+        with open(LOCKDOWN_PATH) as handle:
+            match = re.search(r"\[(\w+)\]", handle.read())
+        return match.group(1) if match else None
+    except OSError:
+        return None
+
+
+def raise_lockdown(level="integrity"):
+    """Raise lockdown. One-way for the life of the boot.
+
+    Measured on the shipped image (tests/test_lockdown.sh):
+
+    * `integrity` does NOT break virtiofs, the vsock channels, docker, k3s's
+      module autoload or iptables — the modules those pull in are in-tree and
+      Canonical-signed, and signed modules still load. It blocks loading
+      anything unsigned, writing kernel memory, perf, the debugfs kprobe switch,
+      and kexec.
+    * `confidentiality` additionally blocks `/proc/kcore` and root-registered
+      tracefs kprobes, at **no measured workload cost** — docker run, an nginx
+      pull with a published port, module autoload and virtiofs all still work.
+      What it costs is kernel tracing (bpftrace, perf on the kernel).
+
+    So `requirement: hard` raises to `confidentiality`: it closes the one real
+    residual, which is root reading the hello secret out of module memory
+    through kcore, and "no kernel tracing" is exactly what "hard" should mean.
+    Everything else gets `integrity`.
+    """
+    order = {"none": 0, "integrity": 1, "confidentiality": 2}
+    current = lockdown_state()
+    if current is None:
+        return False, "lockdown LSM not available"
+    if order.get(current, 0) >= order.get(level, 1):
+        return True, None
+    try:
+        with open(LOCKDOWN_PATH, "w") as handle:
+            handle.write(level)
+    except OSError as exc:
+        return False, "cannot raise lockdown to %s: %s" % (level, exc)
+    now = lockdown_state()
+    if order.get(now, 0) < order.get(level, 1):
+        return False, "lockdown is %r after the write, expected %s" % (now, level)
+    return True, None
+
+
+def main():
+    if os.geteuid() != 0:
+        log("must run as root")
+        return 2
+
+    spec = {}
+    try:
+        with open(SPEC_PATH) as handle:
+            spec = json.load(handle)
+    except (OSError, ValueError):
+        pass
+    sentry_spec = (spec.get("sentry") or {}) if isinstance(spec, dict) else {}
+    if not sentry_spec.get("enabled"):
+        write_status("off", "not enabled for this workspace")
+        return 0
+
+    port = int(sentry_spec.get("vsock_port") or DEFAULT_PORT)
+    cid = int(sentry_spec.get("cid") or HOST_CID)
+
+    if already_loaded():
+        digest = secret_digest()
+        log("already loaded")
+        write_status("running", None, digest=digest,
+                     lockdown=lockdown_state(), kernel=kernel_release())
+        return 0
+
+    path = prebuilt_module()
+    source = "prebuilt"
+    reason = None
+    if path:
+        magic = vermagic_of(path)
+        if magic and not magic.startswith(kernel_release()):
+            log("prebuilt module vermagic %r does not match %s; rebuilding"
+                % (magic, kernel_release()))
+            path = None
+    if not path:
+        # This kernel has no prebuilt module. Either the guest apt-upgraded its
+        # kernel, or the image moved and no .ko was built for it.
+        staged = available_prebuilts()
+        path, reason = build_locally()
+        source = "built-locally"
+        if not path:
+            reason = ("no prebuilt module for %s (staged: %s) and building one "
+                      "here failed: %s"
+                      % (kernel_release(),
+                         ", ".join(staged) if staged else "none", reason))
+
+    if not path:
+        log("no module available: %s" % reason)
+        write_status("unavailable", reason, kernel=kernel_release(),
+                     staged=available_prebuilts(), lockdown=lockdown_state())
+        return 0
+
+    ok, error = load(path, cid, port)
+    if not ok:
+        log("insmod failed: %s" % error)
+        write_status("unavailable", "insmod failed: %s" % error,
+                     kernel=kernel_release(), lockdown=lockdown_state(),
+                     source=source)
+        return 0
+
+    digest = secret_digest()
+    if digest is None:
+        # The module is in; we just cannot read its digest. The host loses the
+        # impostor cross-check but keeps the stream, so this is a warning and
+        # not a failure.
+        log("module loaded but secret_digest unreadable")
+
+    # `hard` closes the kcore secret read; `best_effort` keeps kernel tracing.
+    level = ("confidentiality"
+             if sentry_spec.get("requirement") == "hard" else "integrity")
+    # TEST ONLY, and it reports itself.
+    #
+    # Raising lockdown is one-way for the life of the boot, and `integrity`
+    # refuses to load an unsigned module -- so a test harness that lets the
+    # sentry raise it can run exactly once per VM and then cannot load the
+    # testable build again. That happened to this project's own development VM.
+    #
+    # Setting this does not widen anything an attacker could reach: sentryd runs
+    # as root from the root script, and anyone who can set its environment
+    # already owns the machine. What it must never do is take effect silently,
+    # so a workspace that used it says so in its status and in the journal.
+    if os.environ.get("BROMURE_SENTRY_NO_LOCKDOWN"):
+        locked, lock_error = False, ("lockdown NOT raised: BROMURE_SENTRY_NO_"
+                                     "LOCKDOWN is set (test override)")
+        log(lock_error)
+    else:
+        locked, lock_error = raise_lockdown(level)
+    if not locked:
+        log("lockdown: %s" % lock_error)
+
+    status = write_status(
+        "running", lock_error, digest=digest, source=source,
+        kernel=kernel_release(), lockdown=lockdown_state(),
+        lockdown_requested=level, port=port, cid=cid)
+    log("running (%s, lockdown=%s, digest=%s)"
+        % (source, status["lockdown"], (digest or "?")[:12]))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 — a crash must not crash-loop
+        log("fatal: %r" % (exc,))
+        try:
+            write_status("unavailable", "sentryd crashed: %r" % (exc,))
+        except OSError:
+            pass
+        sys.exit(0)

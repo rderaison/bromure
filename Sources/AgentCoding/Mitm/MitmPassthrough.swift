@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -59,6 +60,16 @@ enum MitmPassthrough {
     /// OpenShell `tls: skip` endpoint).
     static func splice(appFD: Int32, host: String, destPort: Int) {
         guard let upstream = connectRawTCP(ip: host, port: destPort, numericOnly: false) else {
+            close(appFD)
+            return
+        }
+        pumpBothWays(appFD: appFD, upstream: upstream)
+    }
+
+    /// Splice to addresses that already passed OpenShell's destination
+    /// checks (a `tls: skip` endpoint under an OpenShell policy).
+    static func splice(appFD: Int32, addresses: [OpenShellPolicy.IPAddress], destPort: Int) {
+        guard let upstream = try? UpstreamPinning.connect(addresses, port: destPort) else {
             close(appFD)
             return
         }

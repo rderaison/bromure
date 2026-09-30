@@ -148,4 +148,83 @@ struct RequestSpoolingTests {
         #expect(String(data: stream.written, encoding: .isoLatin1) == "HTTP/1.1 100 Continue\r\n\r\n")
         #expect(try bodyOf(r) == body)
     }
+
+    // MARK: - Framing hygiene (both modes)
+
+    private func read(_ raw: String, strict: Bool = false, extra: Data = Data()) throws -> (request: Data, bodyFile: URL?) {
+        try readRequestSpooling(via: ScriptedStream([Data(raw.utf8) + extra]), inlineCap: 8 * 1024 * 1024, strict: strict)
+    }
+
+    private func rejected(_ raw: String, _ fragment: String, extra: Data = Data()) {
+        do {
+            _ = try read(raw, strict: true, extra: extra)
+            Issue.record("accepted: \(raw.prefix(60))")
+        } catch MitmError.invalidRequest(let why) {
+            #expect(why.contains(fragment), "\(why)")
+        } catch {
+            Issue.record("unexpected error \(error)")
+        }
+    }
+
+    @Test("A pipelined request after a Content-Length body is not folded into it")
+    func pipelinedBytesStayOut() throws {
+        for strict in [false, true] {
+            let r = try read("POST /a HTTP/1.1\r\nhost: h\r\ncontent-length: 5\r\n\r\nhelloGET /b HTTP/1.1\r\nhost: h\r\n\r\n",
+                             strict: strict)
+            #expect(try bodyOf(r) == Data("hello".utf8))
+        }
+    }
+
+    @Test("Lenient: an invalid Content-Length means no body, and nothing past the header leaks in")
+    func lenientInvalidContentLength() throws {
+        let r = try read("POST /a HTTP/1.1\r\nhost: h\r\ncontent-length: 12abc\r\n\r\nsmuggled-bytes")
+        #expect(try bodyOf(r).isEmpty)
+    }
+
+    @Test("Chunk data not followed by CRLF is malformed in either mode")
+    func missingChunkCRLF() {
+        let raw = "POST /u HTTP/1.1\r\nhost: h\r\ntransfer-encoding: chunked\r\n\r\n3\r\nabcXY0\r\n\r\n"
+        #expect(throws: MitmError.self) { try read(raw) }
+        rejected(raw, "missing terminating CRLF")
+    }
+
+    // MARK: - OpenShell-strict framing (openshell-supervisor-network l7/rest.rs)
+
+    @Test("Strict: ambiguous or invalid framing is rejected")
+    func strictFraming() {
+        rejected("POST /a HTTP/1.1\r\nhost: h\r\ncontent-length: 3\r\ntransfer-encoding: chunked\r\n\r\n", "both Transfer-Encoding and Content-Length")
+        rejected("POST /a HTTP/1.1\r\nhost: h\r\ncontent-length: 3\r\ncontent-length: 4\r\n\r\nabcd", "differing values")
+        rejected("POST /a HTTP/1.1\r\nhost: h\r\ncontent-length: 12abc\r\n\r\n", "invalid Content-Length")
+        rejected("POST /a HTTP/1.1\r\nhost: h\r\ntransfer-encoding: gzip, chunked\r\n\r\n", "unsupported Transfer-Encoding")
+        rejected("POST /a HTTP/1.1\r\nhost: h\r\ntransfer-encoding: chunked,\r\n\r\n", "empty Transfer-Encoding")
+        rejected("POST /a HTTP/1.1\r\nhost: h\r\ncontent-length: 10\r\n\r\nshort", "ended before Content-Length")
+        rejected("POST /u HTTP/1.1\r\nhost: h\r\ntransfer-encoding: chunked\r\n\r\n5\r\nab", "ended inside a chunk")
+        rejected("POST /u HTTP/1.1\r\nhost: h\r\ntransfer-encoding: chunked\r\n\r\nzz\r\n", "Invalid chunk size")
+    }
+
+    @Test("Strict: malformed header blocks are rejected")
+    func strictHeaders() {
+        rejected("GET /a HTTP/1.1\nhost: h\r\n\r\n", "bare LF")
+        rejected("GET /a HTTP/2.0\r\nhost: h\r\n\r\n", "Unsupported HTTP version")
+        rejected("GET /a HTTP/1.1\r\n\r\n", "missing a Host header")
+        rejected("GET /a HTTP/1.1\r\nhost: a\r\nhost: b\r\n\r\n", "multiple Host headers")
+        rejected("GET /a HTTP/1.1\r\nhost: h\r\n folded: x\r\n\r\n", "continuation lines")
+        rejected("GET /a HTTP/1.1\r\nhost : h\r\n\r\n", "whitespace before ':'")
+        rejected("GET /a HTTP/1.1\r\nhost: h\r\nconnection: close, content-length\r\n\r\n", "nominates")
+        rejected("GET http://other.example/a HTTP/1.1\r\nhost: h\r\n\r\n", "does not match the Host header")
+        rejected("GET  /a HTTP/1.1\r\nhost: h\r\n\r\n", "exactly 'METHOD SP target SP")
+        rejected("GET /a HTTP/1.1\r\nhost: h\r\nx: " + String(repeating: "a", count: 17_000) + "\r\n\r\n", "exceed 16384")
+    }
+
+    @Test("Strict: well-formed requests read exactly as before")
+    func strictAcceptsGoodRequests() throws {
+        let body = Data("the quick brown fox".utf8)
+        let chunked = Data("POST /u HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n".utf8)
+            + chunkFraming(body, chunkSize: 4, extensions: true, trailer: true)
+        #expect(try bodyOf(readRequestSpooling(via: ScriptedStream([chunked]), inlineCap: 1 << 20, strict: true)) == body)
+        let fixed = try read("PUT /x HTTP/1.1\r\nHost: h:8443\r\nContent-Length: 5\r\n\r\nhello", strict: true)
+        #expect(try bodyOf(fixed) == Data("hello".utf8))
+        let http10 = try read("GET /x HTTP/1.0\r\n\r\n", strict: true)   // HTTP/1.0 needs no Host
+        #expect(try bodyOf(http10).isEmpty)
+    }
 }

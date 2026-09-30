@@ -1,0 +1,17 @@
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
+  read_write: [/sandbox, /tmp, /dev/null]
+landlock: { compatibility: best_effort }
+process: { run_as_user: sandbox, run_as_group: sandbox }
+network_policies:
+  native_database:
+    name: native_database
+    endpoints:
+      - host: @@HOST@@
+        ports: [@@PORTS_COMMA_SPACE@@]
+        protocol: tcp
+        allowed_ips: ["10.0.0.0/8", "172.0.0.0/8", "192.168.0.0/16"]
+    binaries:
+      - path: "/**"

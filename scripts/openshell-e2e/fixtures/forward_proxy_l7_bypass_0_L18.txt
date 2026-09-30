@@ -1,0 +1,15 @@
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{"ok":true}')
+    def do_DELETE(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{"ok":true}')
+    def log_message(self, format, *args):
+        pass
+
+HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()

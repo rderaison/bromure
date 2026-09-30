@@ -39,7 +39,10 @@ struct OpenShellL7ProtocolTests {
     func mcpTools() throws {
         let p = try policy(Self.mcpPolicy)
         let v = ["mcp-protocol-version": "2025-11-25"]
-        #expect(allowed(post(p, "mcp.example.com", "/mcp", #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)))
+        #expect(allowed(post(p, "mcp.example.com", "/mcp",
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#)))
+        // Typed params: an initialize without its required fields is refused.
+        #expect(!allowed(post(p, "mcp.example.com", "/mcp", #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)))
         #expect(allowed(post(p, "mcp.example.com", "/mcp",
             #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_issues"}}"#, headers: v)))
         #expect(!allowed(post(p, "mcp.example.com", "/mcp",
@@ -52,8 +55,10 @@ struct OpenShellL7ProtocolTests {
             #"[{"jsonrpc":"2.0","id":5,"method":"tools/list"},{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"send_email"}}]"#, headers: v)))
         // Client responses to server requests are not inspected.
         #expect(allowed(post(p, "mcp.example.com", "/mcp", #"{"jsonrpc":"2.0","id":9,"result":{}}"#, headers: v)))
-        // Opening the server stream carries no message.
-        #expect(allowed(post(p, "mcp.example.com", "/mcp", "", method: "GET")))
+        // Opening the server stream (GET accepting SSE) carries no message.
+        #expect(allowed(post(p, "mcp.example.com", "/mcp", "",
+            headers: v.merging(["accept": "text/event-stream"]) { a, _ in a }, method: "GET")))
+        #expect(!allowed(post(p, "mcp.example.com", "/mcp", "", headers: v, method: "GET")))
     }
 
     @Test("MCP: revision header is checked (absent = 2025-03-26)")
@@ -193,5 +198,24 @@ struct OpenShellL7ProtocolTests {
                                   headers: ["mcp-protocol-version": "2025-11-25"],
                                   body: Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.utf8), bodyComplete: false)
         #expect(!allowed(d))
+    }
+
+    @Test("JSON-RPC audit mode: unknown methods are audited, but a response frame is refused outright")
+    func jsonRPCAuditHardDeny() throws {
+        let p = try policy("""
+        version: 1
+        network_policies:
+          rpc:
+            endpoints:
+              - { host: rpc.example.com, port: 443, path: /rpc, protocol: json-rpc, rules: [{ allow: { method: initialize } }] }
+        """)
+        guard case .violation(_, _, let enforced) = post(p, "rpc.example.com", "/rpc", #"{"jsonrpc":"2.0","id":1,"method":"unknown/method"}"#) else {
+            Issue.record("expected an audited violation"); return
+        }
+        #expect(!enforced)
+        guard case .violation(_, _, let hard) = post(p, "rpc.example.com", "/rpc", #"{"jsonrpc":"2.0","id":1,"result":{}}"#) else {
+            Issue.record("expected a violation"); return
+        }
+        #expect(hard)
     }
 }

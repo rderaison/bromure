@@ -85,6 +85,18 @@ struct BinaryIdentityTests {
         #expect(await svc.identity(profileID: pid, sport: 1002, dst: "1.2.3.4", dport: 443) == nil)
     }
 
+    @Test("A strict revocation that didn't fully apply withholds every identity (binary rules fail closed)")
+    func strictNotApplied() async {
+        let svc = BinaryIdentityService()
+        let pid = UUID()
+        svc.queryOverride = { _, _ in ["ok": true, "exe": "/usr/bin/gh", "sha256": "aaa", "ancestors": []] }
+        defer { GuestSandboxStatusStore.shared.reset(profileID: pid) }
+        GuestSandboxStatusStore.shared.update(profileID: pid, report: ["event": "sandbox_status", "strict_applied": false])
+        #expect(await svc.identity(profileID: pid, sport: 1000, dst: "1.2.3.4", dport: 443) == nil)
+        GuestSandboxStatusStore.shared.update(profileID: pid, report: ["event": "sandbox_status", "strict_applied": true])
+        #expect(await svc.identity(profileID: pid, sport: 1001, dst: "1.2.3.4", dport: 443)?.exe == "/usr/bin/gh")
+    }
+
     @Test("The attestor channel pins the first secret and refuses impostors")
     func secretPinning() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("attest-\(UUID())")

@@ -127,7 +127,9 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     /// workspace. When set, `rules` / `defaultAction` are ignored: every
     /// connection verdict comes from it (default deny), and inspected requests
     /// are checked with `OpenShellPolicy.evaluateRequest` in the MiTM.
-    public var openShell: OpenShellPolicy?
+    public var openShell: OpenShellPolicy? {
+        didSet { inspectedPorts = openShell?.inspectedPorts ?? [] }
+    }
 
     /// OpenShell `binaries` are enforced: the workspace runs a strict sandbox
     /// whose root attestor reports each connection's executable. Rules then
@@ -144,6 +146,7 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
         self.defaultAction = .deny
         self.rules = []
         self.openShell = openShell
+        self.inspectedPorts = openShell.inspectedPorts
     }
 
     /// The all-allow policy — the non-breaking default for a profile with no
@@ -157,6 +160,30 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     /// OpenShell rules are keyed by hostname, which the SNI / Host header
     /// supplies authoritatively once the flow reaches the MiTM.
     public var defersToInterception: Bool { openShell != nil }
+
+    /// Where `policy.local` (the OpenShell policy advisor) lives inside a
+    /// workspace: the guest maps the name to this reserved TEST-NET-1 address,
+    /// the switch always diverts :80 to it into the interception layer, and
+    /// the MiTM answers it itself. Never routed anywhere.
+    public static let advisorAddress: UInt32 = (192 << 24) | (0 << 16) | (2 << 8) | 254
+    public static let advisorAddressString = "192.0.2.254"
+
+    /// TCP ports beyond 80/443 whose flows must reach the interception layer:
+    /// OpenShell applies its L7 rules (and middlewares) on any port, so every
+    /// port of an inspected endpoint is diverted. Plain L4 endpoints are left
+    /// on the native path (a server-speaks-first protocol would stall behind a
+    /// client-first peek).
+    /// (Cached: the switch reads it per packet.)
+    public private(set) var inspectedPorts: Set<UInt16> = []
+
+    /// Whether an address-level deny on this TCP port should be handed to the
+    /// interception layer, which re-decides with the TLS SNI / HTTP Host.
+    /// Only when some endpoint names a hostname on this port can that change
+    /// the verdict; otherwise the deny is final and the connect is refused at
+    /// the SYN, as OpenShell fails the connect instead of accepting it.
+    public func defersToInterception(port: UInt16) -> Bool {
+        openShell?.hostnameEndpointCovers(port: port) ?? false
+    }
 
     // MARK: - Evaluation
 
@@ -176,7 +203,11 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
         if let openShell {
             // OpenShell endpoints are TCP-only: any other transport is denied.
             guard proto != .udp else { return .deny }
-            switch openShell.evaluateConnect(hostnames: hostnames, ip: ip, port: port,
+            // A connection straight to an address (no hostname known for it)
+            // is a connection to that IP literal: an endpoint whose host is
+            // that literal matches, as in OpenShell.
+            let hosts = hostnames.isEmpty ? (ip.map { [Self.ipv4String($0)] } ?? []) : hostnames
+            switch openShell.evaluateConnect(hostnames: hosts, ip: ip, port: port,
                                              identity: identity, enforceBinaries: enforceBinaries) {
             case .deny: return .deny
             case .allow(_, let inspect, let tlsSkip):

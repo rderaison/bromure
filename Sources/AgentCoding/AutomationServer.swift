@@ -178,6 +178,14 @@ final class ACAutomationServer {
 
     // Profile management (CLI `profiles …`).
     var onDescribeProfile: ((_ idOrName: String) -> [String: Any]?)?
+    /// `/profiles/{id}/proposals[/{proposal}/approve|reject]`: the OpenShell
+    /// policy advisor's pending proposals. Called on the server thread.
+    var onProfileProposals: ((_ idOrName: String, _ method: String, _ sub: [String],
+                              _ body: [String: Any]) -> (status: Int, body: [String: Any]))?
+    /// `/profiles/{id}/policy/revisions[/{n}]`: the workspace's saved policy
+    /// versions. Called on the server thread.
+    var onProfilePolicyRevisions: ((_ idOrName: String, _ method: String, _ sub: [String],
+                                    _ body: [String: Any]) -> (status: Int, body: [String: Any]))?
     var onDeleteProfile: ((_ idOrName: String) -> [String: Any])?
     /// Full-fidelity Profile JSON (secrets blanked) for the `workspaces edit`
     /// round-trip + the TUI raw-JSON hatch. nil when the workspace is unknown.
@@ -1620,6 +1628,25 @@ final class ACAutomationServer {
         let noQuery = parts.first ?? path
         let query = parts.count > 1 ? parts[1] : ""
         let raw = String(noQuery.dropFirst("/profiles/".count))
+        // Sub-resources: /profiles/{id}/proposals…, /profiles/{id}/policy/revisions…
+        let segments = raw.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        if segments.count >= 2 {
+            let key = segments[0].removingPercentEncoding ?? segments[0]
+            let sub = segments.dropFirst().map { $0.removingPercentEncoding ?? $0 }
+            let handler: ((String, String, [String], [String: Any]) -> (status: Int, body: [String: Any]))?
+            switch sub.first {
+            case "proposals": handler = onProfileProposals
+            case "policy": handler = onProfilePolicyRevisions
+            default: handler = nil
+            }
+            guard let handler else {
+                sendResponse(fd: fd, status: 404, body: ["error": "Unknown profile resource"])
+                return
+            }
+            let (status, body) = handler(key, method, Array(sub), bodyJSON)
+            sendResponse(fd: fd, status: status, body: body)
+            return
+        }
         let id = raw.removingPercentEncoding ?? raw
         switch method {
         case "GET":

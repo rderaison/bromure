@@ -21,10 +21,52 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# NOT imported at module scope, and the reason is a blocker that took two rounds
+# to see.
+#
+# attestd's first job is to answer `who`: the host fails closed on every
+# binary-scoped network rule until it can, so a workspace without an attestor is
+# one where `curl` does not work and nothing says why. Building `sandbox_status`
+# is a *second* job, and the module that does it lives in the meta share beside
+# this file -- staged by the host, possibly later than this file, and not needed
+# at all by a workspace with no sandbox spec.
+#
+# Importing it up here made that a startup dependency: an ImportError exited the
+# process before it ever opened 5840, systemd restarted it a second later, and
+# the workspace ran with NO attestor until the file turned up. Observed as
+# "attestd connects ~80 s late on a spec-less strict boot", with twenty denied
+# connections in between.
+#
+# So: connect first, answer identity immediately, and report status when -- and
+# only when -- there is something to report it with.
+_status_module = None
+
+
+def sandbox_status_module():
+    """The status builder, or None. Retried on every call; never fatal."""
+    global _status_module
+    if _status_module is None:
+        try:
+            import bromure_sandbox_status
+            _status_module = bromure_sandbox_status
+        except Exception as exc:  # noqa: BLE001 -- staying connectable is the job
+            log("sandbox_status unavailable for now (%s); identity still served"
+                % exc)
+            return None
+    return _status_module
+
 VSOCK_PORT = 5840
-HOST_CID = 2
+# Overridable for the same reason agentd's is: nothing inside a guest can bind
+# CID 2, so without this hook attestd's startup -- the one path that decides
+# whether the host ever hears from this VM -- cannot be exercised by a test that
+# boots the real thing. It went untested for sixteen rounds because of it.
+# Unset in production.
+HOST_CID = int(os.environ.get("BROMURE_HOST_CID", "2"))
 READY_PATH = "/run/bromure-attestd.ready"
 MAX_ANCESTORS = 16
 
@@ -169,33 +211,96 @@ def who(sport, dst, dport):
     return {"ok": True, "exe": exe, "sha256": digest, "ancestors": ancestors, "pids": sorted(pids)}
 
 
+# The channel now has two writers -- replies to host requests, and unsolicited
+# sandbox_status lines -- so every write goes through one lock. Interleaved
+# JSON on a line-delimited channel would be a parse error on the host, which
+# would look exactly like a compromised guest.
+_SEND_LOCK = threading.Lock()
+
+
+def send_line(sock, obj):
+    with _SEND_LOCK:
+        sock.sendall((json.dumps(obj) + "\n").encode())
+
+
+def status_watcher(sock, stop):
+    """Push sandbox_status on connect, and again whenever it changes.
+
+    attestd is the right place for this: it already runs as root before any
+    agent code, and it already owns the one connection the host accepts, so
+    nothing the agent can run can forge or suppress what it says.
+
+    Polling rather than inotify, because the two status files are written by
+    other processes at boot and may not exist yet when this starts -- watching
+    a directory for creation, then the files for modification, is more moving
+    parts than reading two small files on a tmpfs once a second is worth.
+    """
+    last = None
+    while not stop.is_set():
+        try:
+            module = sandbox_status_module()
+            if module is None:
+                # No status to build yet. The connection is up and `who` is
+                # being served, which is the part the host cannot do without.
+                stop.wait(5.0)
+                continue
+            status = module.build()
+            mark = module.fingerprint(status)
+            if mark != last:
+                send_line(sock, status)
+                last = mark
+                log("sandbox_status: filesystem=%s seccomp=%s sentry=%s"
+                    % (status["filesystem"], status["seccomp"], status["sentry"]))
+        except OSError:
+            return          # the channel went away; the reconnect loop owns that
+        except Exception as e:
+            log("status watcher: %s" % e)
+        stop.wait(1.0)
+
+
 def serve(sock, secret):
     # The secret proves this is the attestor that connected first (before any
     # agent code ran): the host pins it and refuses a reconnect without it.
     sock.sendall((json.dumps({"hello": "attestd", "version": 1, "secret": secret}) + "\n").encode())
-    buf = b""
-    while True:
-        data = sock.recv(65536)
-        if not data:
-            return
-        buf += data
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            try:
-                req = json.loads(line)
-            except ValueError:
-                continue
-            reply = {"id": req.get("id")}
-            try:
-                if req.get("op") == "who":
-                    reply.update(who(int(req["sport"]), str(req["dst"]), int(req["dport"])))
-                elif req.get("op") == "ping":
-                    reply.update({"ok": True})
-                else:
-                    reply.update({"ok": False, "reason": "unknown op"})
-            except Exception as e:  # never die on one bad request
-                reply.update({"ok": False, "reason": "error: %s" % e})
-            sock.sendall((json.dumps(reply) + "\n").encode())
+    stop = threading.Event()
+    watcher = threading.Thread(target=status_watcher, args=(sock, stop), daemon=True)
+    watcher.start()
+    try:
+        buf = b""
+        while True:
+            data = sock.recv(65536)
+            if not data:
+                return
+            buf += data
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                try:
+                    req = json.loads(line)
+                except ValueError:
+                    continue
+                reply = {"id": req.get("id")}
+                try:
+                    if req.get("op") == "who":
+                        reply.update(who(int(req["sport"]), str(req["dst"]), int(req["dport"])))
+                    elif req.get("op") == "ping":
+                        reply.update({"ok": True})
+                    elif req.get("op") == "sandbox_status":
+                        # Explicit re-request, for a host that reconnected and
+                        # wants the current picture without waiting for a change.
+                        module = sandbox_status_module()
+                        if module is None:
+                            reply.update({"ok": False,
+                                          "reason": "sandbox status unavailable"})
+                        else:
+                            reply.update({"ok": True,
+                                          "status": module.build()})
+                    else:
+                        reply.update({"ok": False, "reason": "unknown op"})
+                except Exception as e:  # never die on one bad request
+                    reply.update({"ok": False, "reason": "error: %s" % e})
+                send_line(sock, reply)
+    finally:
+        stop.set()
 
 
 SECRET_PATH = "/run/bromure-attestd.secret"
@@ -219,13 +324,36 @@ def load_secret():
 
 
 def main():
+    """Connect, serve, reconnect. This loop must be impossible to fall out of.
+
+    attestd is the only channel the host accepts on 5840, and without it the host
+    fails closed on every binary-scoped network rule -- so a workspace whose
+    attestor is not running is one where `curl` silently does not work, for the
+    whole boot, with nothing saying why. That makes "never exits" a correctness
+    property, not tidiness.
+
+    Two ways it could exit, both now closed:
+
+    * `load_secret()` was called OUTSIDE the loop, so any OSError from it --
+      a full `/run`, a stale file with the wrong mode -- killed the process
+      before the loop began;
+    * the loop caught only `OSError`, so any other exception type escaped.
+
+    Either exit is then multiplied by systemd: `Restart=always` with the default
+    start limit means five exits in ten seconds leave the unit **failed and no
+    longer restarted**, which turns a transient into a dead attestor for the rest
+    of the boot. The unit now also carries `StartLimitIntervalSec=0` and is
+    `reset-failed` before start, so neither half can do that on its own.
+    """
     if os.geteuid() != 0:
         log("must run as root")
         sys.exit(1)
     announced = False
-    secret = load_secret()
+    secret = None
     while True:
         try:
+            if secret is None:
+                secret = load_secret()
             s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
             s.connect((HOST_CID, VSOCK_PORT))
             log("connected to host")
@@ -237,6 +365,8 @@ def main():
             log("host closed the channel")
         except OSError as e:
             log("connect: %s" % e)
+        except Exception as e:  # noqa: BLE001 -- staying up IS the job
+            log("unexpected (%s): %s -- retrying" % (type(e).__name__, e))
         # The host pins the first attestor's secret: reconnecting (after a
         # suspend / restore, say) works only for this process.
         time.sleep(1)

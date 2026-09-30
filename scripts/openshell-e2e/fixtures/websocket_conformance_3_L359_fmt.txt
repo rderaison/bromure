@@ -1,0 +1,92 @@
+
+import base64
+import json
+import os
+import socket
+import struct
+import time
+
+HOST = "__HOST__"
+PORT = __PORT__
+TOKEN_ENV = "WS_E2E_TOKEN"
+
+def recv_until(sock, marker):
+    data = b""
+    while marker not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def read_exact(sock, size):
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise EOFError("unexpected end of websocket frame")
+        data += chunk
+    return data
+
+def masked_text_frame(payload):
+    data = payload.encode("utf-8")
+    mask = os.urandom(4)
+    if len(data) < 126:
+        header = bytes([0x81, 0x80 | len(data)])
+    elif len(data) <= 0xFFFF:
+        header = bytes([0x81, 0x80 | 126]) + struct.pack("!H", len(data))
+    else:
+        header = bytes([0x81, 0x80 | 127]) + struct.pack("!Q", len(data))
+    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(data))
+    return header + mask + masked
+
+def read_frame(sock):
+    first, second = read_exact(sock, 2)
+    length = second & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", read_exact(sock, 2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", read_exact(sock, 8))[0]
+    mask = read_exact(sock, 4) if second & 0x80 else b""
+    payload = read_exact(sock, length)
+    if mask:
+        payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    return first, payload
+
+def transparent_socket_with_retry(host, port, timeout_seconds=20):
+    deadline = time.monotonic() + timeout_seconds
+    last_error = None
+    while time.monotonic() < deadline:
+        sock = None
+        try:
+            sock = socket.create_connection((host, port), timeout=5)
+            return sock
+        except OSError as error:
+            if sock is not None:
+                sock.close()
+            last_error = error
+            time.sleep(0.25)
+    raise last_error
+
+token = os.environ[TOKEN_ENV]
+payload = json.dumps({"authorization": "Bearer " + token}, sort_keys=True)
+key = base64.b64encode(os.urandom(16)).decode("ascii")
+with transparent_socket_with_retry(HOST, PORT) as sock:
+    request = (
+        "GET /ws HTTP/1.1\r\n"
+        f"Host: {HOST}:{PORT}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n"
+    )
+    sock.sendall(request.encode("ascii"))
+    response = recv_until(sock, b"\r\n\r\n").decode("iso-8859-1", "replace")
+    if not response.startswith("HTTP/1.1 101"):
+        raise RuntimeError(f"websocket upgrade failed: {response!r}")
+    sock.sendall(masked_text_frame(payload))
+    _, response_payload = read_frame(sock)
+    result = json.loads(response_payload.decode("utf-8"))
+results = {"transparent": result}
+print(json.dumps(results, sort_keys=True))

@@ -1590,6 +1590,19 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// the next VM start.
     public var strictSandbox: Bool = false
 
+    /// Kernel sentry: an in-kernel event stream (eBPF + a vsock bridge
+    /// module, lockdown raised after load) the host watches for tampering
+    /// and silence. `best_effort` runs without it when it can't load; `hard`
+    /// refuses to start agent sessions without it. Applies at the next VM
+    /// start.
+    public var kernelSentry: KernelSentryMode = .off
+    /// OpenShell credential placeholders: under an OpenShell policy, the
+    /// guest sees `openshell:resolve:env:<VAR>` instead of Bromure's
+    /// format-mimicking stand-ins for credentials delivered as environment
+    /// variables, resolved by the proxy with OpenShell's rules (headers
+    /// always; bodies / WebSocket text only where the endpoint opts in).
+    public var openShellCredentialPlaceholders: Bool = false
+
     /// Strict modes as actually applied: the workspace's own switches, or the
     /// organization's requirement (bromure.io managed policy).
     public var effectiveStrictCredentials: Bool {
@@ -1606,11 +1619,30 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         #endif
     }
 
+    /// The kernel sentry as applied: the workspace's own setting, raised to
+    /// the organization's minimum (bromure.io managed policy).
+    public var effectiveKernelSentry: KernelSentryMode {
+        #if os(macOS)
+        if let floor = OpenShellGovernance.shared.managed?.minKernelSentry.flatMap(KernelSentryMode.init(rawValue:)),
+           floor.rank > kernelSentry.rank { return floor }
+        #endif
+        return kernelSentry
+    }
+
     public var effectiveStrictSandbox: Bool {
         #if os(macOS)
         if OpenShellGovernance.shared.managed?.requireStrictSandbox == true { return true }
         #endif
-        return strictSandbox
+        return strictSandbox || policyHasProcessSection
+    }
+
+    /// An OpenShell `process` section needs the strict sandbox: its seccomp
+    /// filters and no_new_privs would otherwise be skipped (they'd break the
+    /// sudo a non-strict workspace grants), which silently fails open.
+    public var policyHasProcessSection: Bool {
+        networkPolicy.split(separator: "\n", omittingEmptySubsequences: true).contains { line in
+            line.hasPrefix("process:") && !line.hasPrefix("process: null") && !line.hasPrefix("process: ~")
+        }
     }
 
     /// Interception opt-out as actually applied: strict credential mode
@@ -2129,6 +2161,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case disableTransparentProxy
         case strictCredentials
         case strictSandbox
+        case kernelSentry
+        case openShellCredentialPlaceholders
         case disableExfiltrationAlerts
         case supplyChain
         case promptInjection
@@ -2259,6 +2293,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         disableTransparentProxy = try c.decodeIfPresent(Bool.self, forKey: .disableTransparentProxy) ?? false
         strictCredentials = try c.decodeIfPresent(Bool.self, forKey: .strictCredentials) ?? false
         strictSandbox = try c.decodeIfPresent(Bool.self, forKey: .strictSandbox) ?? false
+        kernelSentry = (try? c.decodeIfPresent(KernelSentryMode.self, forKey: .kernelSentry)) ?? .off
+        openShellCredentialPlaceholders = try c.decodeIfPresent(Bool.self, forKey: .openShellCredentialPlaceholders) ?? false
         disableExfiltrationAlerts = try c.decodeIfPresent(Bool.self, forKey: .disableExfiltrationAlerts) ?? false
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
         promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
@@ -2426,6 +2462,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         if strictSandbox {
             try c.encode(strictSandbox, forKey: .strictSandbox)
+        }
+        if openShellCredentialPlaceholders {
+            try c.encode(true, forKey: .openShellCredentialPlaceholders)
+        }
+        if kernelSentry != .off {
+            try c.encode(kernelSentry, forKey: .kernelSentry)
         }
         if disableExfiltrationAlerts {
             try c.encode(disableExfiltrationAlerts, forKey: .disableExfiltrationAlerts)
@@ -5835,6 +5877,21 @@ public extension Profile {
         case .linear:       return ["linear.app"]
         case .twilio:       return ["twilio.com"]
         case .managedSSHKey, .importedSSHKey: return []
+        }
+    }
+}
+
+/// A workspace's kernel sentry requirement (see `Profile.kernelSentry`).
+public enum KernelSentryMode: String, Codable, CaseIterable, Sendable {
+    case off
+    case bestEffort = "best_effort"
+    case hard
+
+    var rank: Int {
+        switch self {
+        case .off: return 0
+        case .bestEffort: return 1
+        case .hard: return 2
         }
     }
 }

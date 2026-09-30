@@ -500,12 +500,25 @@ public final class MitmEngine {
             // destination (the switch has no SNI for cleartext), apply the egress
             // policy, then MiTM as cleartext (or splice on passthrough / non-HTTP).
             let destAddr = EgressPolicy.parseIPv4Address(destIP)
-            if destPort == 80 {
+            // An OpenShell L7 endpoint on another port: the switch diverted it
+            // here, and cleartext HTTP on it gets the same treatment as :80.
+            var plainHTTP = destPort == 80
+            var tlsPeek: TLSClientHello.Result?
+            if !plainHTTP,
+               self.guardrailsConfig(for: profileID)?.egressPolicy?.inspectedPorts
+                   .contains(UInt16(truncatingIfNeeded: destPort)) == true {
+                let d = TLSClientHello.peek(fd: appFD)
+                if case .notTLS = d { plainHTTP = true } else { tlsPeek = d }
+            }
+            if plainHTTP {
                 let peeked = Self.peekHTTPHost(fd: appFD)
                 let host = peeked ?? destIP
                 let strict80 = self.guardrailsConfig(for: profileID)?.strictCredentials ?? false
                 var shouldSplice = !strict80 && PassthroughList.current().matches(host)
-                if let policy = self.guardrailsConfig(for: profileID)?.egressPolicy {
+                // `policy.local` on its reserved address: the advisor, answered
+                // by the proxy (no egress decision, never forwarded).
+                let advisor = destIP == EgressPolicy.advisorAddressString && host == OpenShellAdvisor.host
+                if !advisor, let policy = self.guardrailsConfig(for: profileID)?.egressPolicy {
                     // pf rules keep their name-only check here; OpenShell also
                     // needs the address (allowed_ips, private-range guard).
                     let os = policy.openShell != nil
@@ -533,7 +546,7 @@ public final class MitmEngine {
                 return
             }
 
-            let decision = TLSClientHello.peek(fd: appFD)
+            let decision = tlsPeek ?? TLSClientHello.peek(fd: appFD)
             // Strict credential mode inspects every flow: no passthrough list.
             let strict = self.guardrailsConfig(for: profileID)?.strictCredentials ?? false
             let passthrough = strict ? PassthroughList.none : PassthroughList.current()

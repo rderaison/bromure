@@ -1,0 +1,29 @@
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /bin
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /app
+    - /etc
+    - /var/log
+  read_write:
+    - /sandbox
+    - /tmp
+    - /dev/null
+
+landlock:
+  compatibility: best_effort
+
+network_policies:
+  rule_0:
+    name: rule_0
+    endpoints:
+      - host: @@HOST0@@
+        port: 443
+    binaries:
+      - path: "/**"

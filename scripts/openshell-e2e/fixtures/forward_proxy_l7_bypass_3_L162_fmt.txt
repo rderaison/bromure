@@ -1,0 +1,11 @@
+
+import urllib.request, urllib.error, json, sys
+url = "http://__HOST__:__PORT__/allowed"
+req = urllib.request.Request(url, data=b"test", method="POST")
+try:
+    resp = urllib.request.urlopen(req, timeout=15)
+    print(json.dumps({"status": resp.status, "error": None}))
+except urllib.error.HTTPError as e:
+    print(json.dumps({"status": e.code, "error": str(e)}))
+except Exception as e:
+    print(json.dumps({"status": -1, "error": str(e)}))

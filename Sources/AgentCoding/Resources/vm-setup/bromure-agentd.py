@@ -74,7 +74,12 @@ import threading
 import time
 import traceback
 
-HOST_CID = 2  # well-known CID for the macOS host under VZ
+# The well-known CID for the macOS host under VZ. Overridable ONLY so the
+# two-incarnation boot can be tested inside a guest: nothing can bind CID 2 from
+# in here, so without this hook the "does agentd actually open its shell
+# connection after the strict restart" question is untestable -- which is exactly
+# the question that went unanswered for a round. Unset in production.
+HOST_CID = int(os.environ.get("BROMURE_HOST_CID", "2"))
 
 # vsock ports (unchanged from the absorbed agents)
 SHELL_VSOCK_PORT = 5800
@@ -113,10 +118,586 @@ POOL_SIZE = 4
 MAX_REQUEST_SIZE = 10 * 1024 * 1024  # 10 MB
 
 # paths
-META = "/mnt/bromure-meta"
+# Overridable for the same reason as HOST_CID above: the two-incarnation boot is
+# only testable if a test can point agentd at a throwaway meta share. Unset in
+# production, where systemd supplies a fixed environment.
+META = os.environ.get("BROMURE_META", "/mnt/bromure-meta")
 OUTBOX = "/mnt/bromure-outbox"
 AGENTD_LOG = os.path.join(OUTBOX, "agentd.log")
 TMUX_S = "bromure"
+
+# --- OpenShell sandbox (filesystem_policy / landlock / process) ------------
+# The host stages this file whenever the workspace's OpenShell policy has any of
+# those sections, or the kernel sentry is on. Its absence is the only thing that
+# needs checking: with no file, every hook below returns immediately and the
+# workspace behaves exactly as it did before any of this existed.
+OPENSHELL_SPEC = os.path.join(META, "openshell-sandbox.json")
+SANDBOX_RUN_DIR = os.environ.get("BROMURE_RUN_DIR", "/run/bromure-sandbox")
+SANDBOX_STATUS = os.path.join(SANDBOX_RUN_DIR, "status.json")
+SANDBOX_CTL = os.path.join(SANDBOX_RUN_DIR, "ctl.sock")
+_SANDBOX = {}          # the applied status, or {} when there is no sandbox
+
+
+def openshell_requested():
+    return os.path.exists(OPENSHELL_SPEC)
+
+
+# A transient unit gets systemd's environment, not agentd's. In production that
+# is exactly right — nothing is overridden. But it also meant the two-incarnation
+# boot could not be tested, because the supervisor a test starts would read the
+# real meta share instead of the throwaway one. Propagating only the BROMURE_*
+# overrides that are actually set keeps production byte-identical.
+_OVERRIDE_ENV = ("BROMURE_META", "BROMURE_RUN_DIR", "BROMURE_STRICT_DONE",
+                 "BROMURE_WORKSPACE_USER", "BROMURE_AGENTD_PID",
+                 "BROMURE_SANDBOXD_NO_POWEROFF", "BROMURE_HOSTS_FILE",
+                 "BROMURE_HOST_CID", "BROMURE_SENTRY_PORT",
+                 "BROMURE_SENTRY_NO_LOCKDOWN")
+
+
+def _systemd_setenv_args():
+    return ["--setenv=%s=%s" % (name, os.environ[name])
+            for name in _OVERRIDE_ENV if name in os.environ]
+
+
+def _systemd_setenv():
+    return " ".join(shlex.quote(a) for a in _systemd_setenv_args())
+
+
+def _plain_setenv():
+    """The same overrides as `K=V`, for `env` rather than `systemd-run`.
+
+    `--setenv=K=V` is systemd-run's spelling and `env` does not understand it:
+    passing one to `env` makes it treat the whole thing as a command name and
+    fail. That is how the sentry silently never started in the boot test -- the
+    branch ran, `env` exited, and nothing said so because the whole script is
+    `>/dev/null 2>&1`.
+    """
+    return " ".join(shlex.quote(a) for a in _plain_setenv_args())
+
+
+def _plain_setenv_args():
+    return ["%s=%s" % (name, os.environ[name])
+            for name in _OVERRIDE_ENV if name in os.environ]
+
+
+def _load_sandbox_status():
+    global _SANDBOX
+    try:
+        with open(SANDBOX_STATUS) as f:
+            _SANDBOX = json.load(f)
+    except (OSError, ValueError):
+        _SANDBOX = {}
+    return _SANDBOX
+
+
+def _tmux_argv():
+    """How to reach the tmux server.
+
+    Under a sandbox the server lives on a socket in a directory agentd cannot
+    write (root:bromure-tmux 0771 — see bromure-sandboxd), so agentd can connect
+    but can never create a server there. Every tmux invocation in this file goes
+    through here, because a tmux CLIENT will happily start a server itself for
+    any command carrying CMD_STARTSERVER, and one such call against a dead
+    server would be an UNSANDBOXED server on the sandbox's own socket.
+    """
+    socket_path = _SANDBOX.get("tmux_socket")
+    return ["tmux", "-S", socket_path] if socket_path else ["tmux"]
+
+
+def _sandbox_ctl(op, timeout=20.0):
+    """Ask bromure-sandboxd to do something. Returns its reply, or None.
+
+    agentd structurally cannot start the tmux server itself; this is how it asks
+    the one process that can. The supervisor checks the peer with SO_PEERCRED,
+    so being agentd is proven by the kernel rather than asserted here.
+    """
+    try:
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.settimeout(timeout)
+        c.connect(SANDBOX_CTL)
+        c.sendall((json.dumps({"op": op}) + "\n").encode())
+        data = c.recv(65536)
+        c.close()
+        return json.loads(data.decode("utf-8").strip() or "{}")
+    except (OSError, ValueError) as e:
+        log("sandbox", "ctl %s: %s" % (op, e))
+        return None
+
+
+# Hardening for every `git` agentd runs, sandbox or not. A repository the agent
+# controls can turn almost any git invocation into an exec through its own
+# config: core.fsmonitor, core.hooksPath, core.sshCommand, diff.external,
+# smudge/clean filters, credential helpers. Under a sandbox those now run
+# confined (see _ws_run); these flags are the second line, and they are cheap
+# enough to apply unconditionally.
+_GIT_SAFE_FLAGS = [
+    "-c", "core.fsmonitor=",
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "protocol.file.allow=never",
+    "-c", "core.sshCommand=/bin/false",
+    "-c", "diff.external=",
+    "-c", "credential.helper=",
+]
+_GIT_SAFE_ENV = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ASKPASS": "/bin/false",
+    "GIT_ALLOW_PROTOCOL": "file",
+}
+
+
+class SandboxRoutingError(RuntimeError):
+    """`_ws_run` was asked for something it cannot route into the sandbox.
+
+    Raised, not logged. A log line is how this would be found out after an
+    incident; an exception is how the author of the call site finds out on the
+    first run of their own test. Anything that genuinely must run unconfined
+    says so explicitly through `_run_unconfined`, which is grep-able.
+    """
+
+
+def _run_unconfined(args, reason, **kwargs):
+    """Run a command OUTSIDE the sandbox, on purpose, with the reason recorded.
+
+    The only legitimate uses are commands whose input does not come from
+    workspace content. Every call is a decision someone has to be able to find,
+    so: named function, mandatory reason, logged once when a sandbox is active.
+    """
+    if _SANDBOX.get("control_socket"):
+        log("sandbox", "running unconfined by design (%s): %s"
+            % (reason, " ".join(args[:3])))
+    return subprocess.run(_harden_argv(args), **kwargs)
+
+
+# "The sandbox could not run this", as distinct from 127, "the command was not
+# found". A support log has to be able to tell those apart without guessing, and
+# for two rounds it could not: both were 127 with empty stdout and stderr.
+SANDBOX_REFUSED_EXIT = 126
+
+
+def _sandbox_reason(reply):
+    """Why the supervisor did not run it. Never empty, never None."""
+    if reply is None:
+        return ("no reply from the supervisor and no error to report -- see the "
+                "agentd journal")
+    return reply.get("reason") or "the supervisor refused without giving a reason"
+
+
+# CA trust for the SANDBOXED non-interactive exec path.
+#
+# `task_install_ca` delivers `_CA_TRUST_ENV` through `/etc/profile.d` and
+# `/etc/environment`, which covers login shells and PAM sessions -- so every pane
+# and every `bash -l` has it. A `vm exec` confined by the supervisor reads
+# **neither**: `_sanitize_env` builds the child's environment from a fixed set,
+# deliberately, so nothing leaks in. Until now the only thing that put the CA
+# paths there was the prelude sourcing `$META/proxy.env`.
+#
+# OpenShell-policy workspaces no longer get proxy env vars -- which is correct and
+# matches upstream -- and with proxy.env gone the CA paths went with it. The
+# system trust store still covers OpenSSL clients (`curl`, `git`), so the failure
+# is partial and therefore worse: **node** (its own bundle) and **python-requests**
+# (certifi) would fail certificate validation against the transparent MITM, in
+# non-interactive execs only, while the same command in a pane worked. That is the
+# shape of a bug nobody attributes correctly.
+#
+# So the CA paths are delivered explicitly, and independently of any proxy.
+_CA_TRUST_FOR_EXEC = None
+
+
+def _ca_trust_for_exec():
+    """The CA-trust vars whose files actually exist. Cached; never partial-nonsense.
+
+    A var pointing at a file that is not there is worse than an absent one:
+    `REQUESTS_CA_BUNDLE` naming a missing path makes requests raise rather than
+    fall back, so this filters on existence instead of asserting a layout.
+    """
+    global _CA_TRUST_FOR_EXEC
+    if _CA_TRUST_FOR_EXEC is None:
+        _CA_TRUST_FOR_EXEC = {
+            key: value for key, value in _CA_TRUST_ENV.items()
+            if os.path.exists(value)
+        }
+    return _CA_TRUST_FOR_EXEC
+
+
+def _harden_argv(args):
+    """Insert git's safety flags right after the `git` word."""
+    if args and os.path.basename(args[0]) == "git":
+        return [args[0], *_GIT_SAFE_FLAGS, *args[1:]]
+    return list(args)
+
+
+def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
+            check=False, **kwargs):
+    """Run a command that touches WORKSPACE CONTENT.
+
+    Without a sandbox this is `subprocess.run`, unchanged.
+
+    With one, it goes through bromure-sandboxd's `exec` op so the command runs
+    as a member of the sandboxed tree. That matters because agentd is
+    unconfined: every `git -C <workdir> …` here is a command whose behavior a
+    repository the agent controls can redirect (hooks, filters, fsmonitor), and
+    running those unconfined would make agentd a deputy for exactly the code the
+    sandbox exists to contain.
+
+    `capture_output`, `stdout` and `stderr` are supported. Anything else, when a
+    sandbox is active, **raises `SandboxRoutingError` and does not execute** —
+    fail closed. Two earlier versions of this got it wrong in the same
+    direction: the first fell back to unconfined silently, the second logged and
+    still ran. Both meant a future call site passing an ordinary keyword would
+    have run workspace content outside the ruleset, which is the exact failure
+    this function exists to prevent. Refusing is the only version where the
+    person who introduces the problem is the person who sees it.
+
+    Without a sandbox there is nothing to route, so every keyword passes through
+    to `subprocess.run` as before.
+    """
+    args = _harden_argv(args)
+    env = dict(kwargs.pop("env", None) or {})
+    stdout = kwargs.pop("stdout", None)
+    stderr = kwargs.pop("stderr", None)
+    if args and os.path.basename(args[0]) == "git":
+        env.update(_GIT_SAFE_ENV)
+    # The caller's own values win: this supplies a default, it does not override.
+    for key, value in _ca_trust_for_exec().items():
+        env.setdefault(key, value)
+
+    if kwargs and _SANDBOX.get("control_socket"):
+        raise SandboxRoutingError(
+            "cannot route %s into the sandbox: unsupported argument(s) %s. "
+            "Either add support in _ws_run, or -- if this command genuinely "
+            "must not be confined -- call _run_unconfined(args, reason=...)."
+            % (args[:2], ", ".join(sorted(kwargs))))
+    if not _SANDBOX.get("control_socket"):
+        run_env = dict(os.environ)
+        run_env.update(env)
+        return subprocess.run(args, capture_output=capture_output, text=text,
+                              timeout=timeout, cwd=cwd, check=check,
+                              stdout=stdout, stderr=stderr,
+                              env=run_env if env else None, **kwargs)
+
+    def _sink(requested, fallback_pipe):
+        """(child_fd, read_fd) for one output stream."""
+        if requested is None or requested is subprocess.PIPE or capture_output:
+            return fallback_pipe
+        if isinstance(requested, int):
+            return os.dup(requested), None
+        if hasattr(requested, "fileno"):
+            return os.dup(requested.fileno()), None
+        return fallback_pipe
+
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    out_child, out_read = _sink(stdout, (out_w, out_r))
+    err_child, err_read = _sink(stderr, (err_w, err_r))
+    if out_child is not out_w:
+        os.close(out_w)
+        os.close(out_r)
+    if err_child is not err_w:
+        os.close(err_w)
+        os.close(err_r)
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    try:
+        reply = _sandbox_exec(args, cwd=cwd, env=env,
+                              fds=[devnull, out_child, err_child],
+                              timeout=timeout)
+    finally:
+        for fd in (out_child, err_child, devnull):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    stdout = _drain(out_read) if out_read is not None else b""
+    stderr = _drain(err_read) if err_read is not None else b""
+    # A command the supervisor refused, or one whose confined child died before
+    # `execvpe`, produced a bare 127 with empty output. On the first
+    # `run_as_user: sandbox` workspace that made every command look like
+    # "command not found" when the real answer was a home the workload could not
+    # enter -- so the supervisor's reason now lands on the caller's stderr, which
+    # is where anyone debugging a failed command is already looking.
+    if reply is None or not reply.get("ok"):
+        # 126, not 127, and the difference is for whoever reads a support log at
+        # 2am: 127 is the command not being found, which is the caller's problem;
+        # 126 is "the sandbox could not run it", which is ours. They were the same
+        # number, with empty output, for two rounds of a shipping blocker.
+        code = SANDBOX_REFUSED_EXIT
+        reason = _sandbox_reason(reply)
+        detail = "bromure sandbox: cannot run %s: %s\n" % (args[0], reason)
+        log("sandbox", "exec refused (%d): %s: %s"
+            % (SANDBOX_REFUSED_EXIT, args[:2], reason))
+        stderr = stderr + detail.encode()
+    else:
+        code = int(reply.get("exit", 127))
+    if text:
+        stdout = stdout.decode("utf-8", "replace")
+        stderr = stderr.decode("utf-8", "replace")
+    result = subprocess.CompletedProcess(args, code, stdout, stderr)
+    if check and code != 0:
+        raise subprocess.CalledProcessError(code, args, stdout, stderr)
+    return result
+
+
+def _drain(fd):
+    chunks = []
+    try:
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return b"".join(chunks)
+
+
+class _SandboxPty(object):
+    """An interactive shell running inside the sandbox on a pty agentd owns.
+
+    agentd allocates the pty and keeps the master, exactly as `pty.fork` would
+    have left it; only the slave crosses to the supervisor, which makes it the
+    child's controlling terminal. So the bridging code below is unchanged and
+    the shell is confined.
+    """
+
+    def __init__(self, argv, slave_fd, cwd=None):
+        self.returncode = None
+        self._done = threading.Event()
+        duped = os.dup(slave_fd)
+
+        def _run():
+            try:
+                reply = _sandbox_exec(argv, cwd=cwd, env={"TERM": "xterm-256color"},
+                                      fds=[duped], pty=True)
+                if reply and reply.get("ok"):
+                    self.returncode = int(reply.get("exit", 127))
+                else:
+                    self.returncode = SANDBOX_REFUSED_EXIT
+                    reason = _sandbox_reason(reply)
+                    log("sandbox", "pty refused (%d): %s: %s"
+                        % (SANDBOX_REFUSED_EXIT, argv[:2], reason))
+                    # The pane is the only place the user is looking, so the
+                    # reason has to be visible THERE and not only in the journal.
+                    try:
+                        os.write(duped, ("\r\nbromure sandbox: this pane could "
+                                         "not start: %s\r\n" % reason).encode())
+                    except OSError:
+                        pass
+            finally:
+                try:
+                    os.close(duped)
+                except OSError:
+                    pass
+                self._done.set()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def poll(self):
+        return self.returncode if self._done.is_set() else None
+
+    def wait(self, timeout=None):
+        self._done.wait(timeout)
+        return self.returncode
+
+
+class _WsProcess(object):
+    """The little that agentd needs from a Popen for a long-running workspace
+    command: a pid for the log line and a wait(). The supervisor owns the real
+    process, so the pid here is its, not ours."""
+
+    def __init__(self, argv, cwd, env, stdout_fd):
+        self.pid = -1
+        self.returncode = None
+        self._done = threading.Event()
+        devnull = os.open(os.devnull, os.O_RDONLY)
+        out = stdout_fd if stdout_fd is not None else os.open(os.devnull, os.O_WRONLY)
+
+        def _run():
+            try:
+                reply = _sandbox_exec(argv, cwd=cwd, env=env,
+                                      fds=[devnull, out, out])
+                if reply and reply.get("ok"):
+                    self.returncode = int(reply.get("exit", 127))
+                else:
+                    self.returncode = SANDBOX_REFUSED_EXIT
+                    reason = _sandbox_reason(reply)
+                    log("sandbox", "popen refused (%d): %s: %s"
+                        % (SANDBOX_REFUSED_EXIT, argv[:2], reason))
+                    try:
+                        os.write(out, ("bromure sandbox: cannot run %s: %s\n"
+                                       % (argv[0], reason)).encode())
+                    except OSError:
+                        pass
+            finally:
+                for fd in (devnull, out):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                self._done.set()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def wait(self, timeout=None):
+        self._done.wait(timeout)
+        return self.returncode
+
+
+def _ws_popen(args, cwd=None, env=None, stdout=None, stderr=None, stdin=None):
+    """Popen for a long-running workspace command; sandboxed when there is one."""
+    args = _harden_argv(args)
+    env = dict(env or {})
+    for key, value in _ca_trust_for_exec().items():
+        env.setdefault(key, value)
+    if not _SANDBOX.get("control_socket"):
+        return subprocess.Popen(args, cwd=cwd, stdin=stdin, stdout=stdout,
+                                stderr=stderr,
+                                env=(dict(os.environ, **env) if env else None))
+    fd = None
+    if stdout is not None and hasattr(stdout, "fileno"):
+        try:
+            fd = os.dup(stdout.fileno())
+        except OSError:
+            fd = None
+    return _WsProcess(args, cwd, env, fd)
+
+
+def _sandbox_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
+    """Hand argv and its descriptors to the supervisor. Blocks until it exits."""
+    try:
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.settimeout(timeout if timeout else None)
+        c.connect(SANDBOX_CTL)
+        payload = json.dumps({"op": "exec", "argv": list(argv),
+                              "cwd": cwd, "env": env or {},
+                              "pty": bool(pty)}).encode()
+        socket.send_fds(c, [payload], list(fds))
+        data = b""
+        while b"\n" not in data:
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        c.close()
+        return json.loads(data.decode("utf-8").strip() or "{}")
+    except (OSError, ValueError) as e:
+        # The REASON travels, rather than being logged here and dropped. The one
+        # failure that cost two rounds was `connect()` returning EACCES on
+        # ctl.sock, and this line is where that errno used to die: the caller got
+        # `None`, turned it into exit 127 with empty output, and every command in
+        # the workspace looked like "command not found".
+        log("sandbox", "exec %s: %s" % (argv[:2], e))
+        return {"ok": False,
+                "reason": "no reply from the supervisor: %s (%s)"
+                          % (e, SANDBOX_CTL)}
+
+
+_SANDBOX_READY = threading.Event()
+
+
+def sandbox_gate(timeout=90.0):
+    """Block until the sandbox is in place, for anything that touches the
+    workspace. Returns (ok, reason).
+
+    Round 7 moved the shell service ahead of the session work so a hung sandbox
+    step could not cost the host its only way into the VM. That was right, and it
+    opened a window: on the second boot, `vm exec` answered at **uptime 4.4 s**,
+    before the root script had run — so host commands were served unconfined,
+    with sudo still present, and `bash -lc` sourced whatever the previous
+    session's agent had left in `~/.bashrc` (the home is persistent). The
+    confused deputy of DESIGN.md §1.5, through a timing window rather than a
+    missing route.
+
+    So the connection is still accepted immediately — health and status answer
+    at once, and the host can always see the VM — but anything that runs
+    workspace content waits here. If the sandbox never arrives, the caller is
+    told why and NEVER falls back to running it unconfined.
+
+    **It waits for what was actually requested, and nothing else.** The first
+    version waited unconditionally for a supervisor, which made a **strict-only**
+    workspace — `strict_sandbox: true`, no `filesystem_policy`, no `process`, no
+    sentry — permanently unusable: the host stages no `openshell-sandbox.json`,
+    so no supervisor runs (correctly), so `tmux_socket` never appears, so every
+    exec answered `rc 75, sandbox unavailable … (still starting)` forever. That
+    is the plain Phase-4 strict sandbox that predates all of this work, and it
+    was dead on every boot.
+
+    The two conditions are independent:
+
+    * **strict requested** → wait for the revocation, because before it this
+      process still has sudo and so would anything it execs;
+    * **a spec staged** → wait for the supervisor, because that is the only thing
+      that creates one. No spec, no supervisor, nothing to wait for — and the
+      commands then run exactly as they did before any of this existed:
+      unconfined by Landlock, under the revoked privileges.
+
+    Waiting for attestd is deliberately NOT a condition. It reports; it does not
+    confine. Gating execs on it would turn an observability outage into a
+    workspace outage, and `STRICT_DONE` plus `strict.json` already answer the
+    question attestd would only be relaying.
+    """
+    if not openshell_requested() and not strict_sandbox_requested():
+        return True, None
+    if _SANDBOX_READY.is_set():
+        return True, None
+
+    deadline = time.time() + timeout
+    strict_ok = supervisor_ok = False
+    while time.time() < deadline:
+        strict_ok = (not strict_sandbox_requested()) or strict_sandbox_applied()
+        supervisor_ok = (not openshell_requested()
+                         or bool(_SANDBOX.get("tmux_socket")
+                                 or _load_sandbox_status().get("tmux_socket")))
+        if strict_ok and supervisor_ok:
+            _SANDBOX_READY.set()
+            return True, None
+        if _STRICT_UNAPPLIED:
+            return False, "the strict sandbox could not be applied"
+        time.sleep(0.25)
+    # Name the half that is missing. "still starting" on its own sent a whole
+    # round looking at the wrong daemon.
+    waiting_for = []
+    if not strict_ok:
+        waiting_for.append("the strict revocation (%s)" % STRICT_DONE)
+    if not supervisor_ok:
+        waiting_for.append("the sandbox supervisor (%s)"
+                           % (_SANDBOX.get("degraded_reason")
+                              or _SANDBOX.get("server_error") or "no status yet"))
+    return False, ("the sandbox did not come up within %.0fs: still waiting for %s"
+                   % (timeout, " and ".join(waiting_for) or "an unknown condition"))
+
+
+def ensure_sandbox_server(reason="", timeout=20.0):
+    """Make sure a sandboxed tmux server exists, asking the supervisor if not.
+
+    Returns True when a server is available. Never creates one: under a sandbox
+    that is the supervisor's exclusive job, and agentd could not do it anyway.
+    """
+    if not openshell_requested():
+        return True
+    if not _SANDBOX.get("tmux_socket"):
+        _load_sandbox_status()
+    if not _SANDBOX.get("tmux_socket"):
+        return False
+    if _has_session():
+        return True
+    reply = _sandbox_ctl("start")
+    if reply is None or not reply.get("ok"):
+        log("sandbox", "supervisor would not start a server%s: %s"
+            % (" (%s)" % reason if reason else "",
+               (reply or {}).get("reason", "no reply")))
+        return False
+    _load_sandbox_status()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _has_session():
+            return True
+        time.sleep(0.2)
+    return False
 # New shells (the initial window + plain new-tab) open here. Without an
 # explicit -c, tmux windows inherit the server's start directory, which
 # under systemd is "/" — so pin it to the user's home.
@@ -375,6 +956,15 @@ def _view_attach_command(view, window, size_passive=False):
             pass
     # The bromure session normally exists (the boot terminal creates it); cover
     # the race/headless case so the view never lands on an error.
+    #
+    # Under a sandbox the `|| tmux new-session` fallback is REMOVED. This string
+    # runs in agentd's tree, OUTSIDE the sandbox, so that fallback was a way to
+    # create an unsandboxed server on the sandbox's own socket — an escape, not a
+    # convenience. agentd calls ensure_sandbox_server() before handing this to a
+    # pty, so by the time it runs the session exists; if it somehow does not,
+    # failing is the correct outcome.
+    if openshell_requested():
+        return "tmux has-session -t bromure 2>/dev/null || exit 1; " + tmux
     return (
         "tmux has-session -t bromure 2>/dev/null"
         " || tmux new-session -d -s bromure; " + tmux
@@ -385,6 +975,9 @@ def _run_interactive(vsock_sock, req):
     """Allocate a pty, run the command on it, and bridge it to the vsock."""
     cmd = req.get("cmd", "")
     if req.get("view"):
+        # A host attach is a legitimate reason to need a server. Ask the
+        # supervisor for one before building a command that assumes it exists.
+        ensure_sandbox_server("host attach")
         cmd = _view_attach_command(req["view"], req.get("window"),
                                    bool(req.get("sizePassive")))
     cols = int(req.get("cols", 80) or 80)
@@ -402,8 +995,8 @@ def _run_interactive(vsock_sock, req):
                 # NB: no `exec` prefix — it would replace the shell with the
                 # first word of a compound command (`a; b; c`) and drop the rest.
                 wrapped = (
-                    "if [ -r /mnt/bromure-meta/proxy.env ]; then "
-                    "set -a; . /mnt/bromure-meta/proxy.env; set +a; fi; " + cmd
+                    "if [ -r %s/proxy.env ]; then "
+                    "set -a; . %s/proxy.env; set +a; fi; " % (META, META) + cmd
                 )
                 os.execvp("/bin/bash", ["/bin/bash", "-lc", wrapped])
             else:
@@ -455,25 +1048,34 @@ def _run_interactive(vsock_sock, req):
                     elif ftype == FRAME_EOF:
                         break
     finally:
+        # Closing the master hangs up the pty, which is what ends the shell in
+        # both flavors. For the sandboxed one that also closes agentd's end of
+        # the control connection, and the supervisor reaps and kills its child
+        # on seeing that -- so there is no pid here to signal, and none to leak.
         try:
             os.close(master)
         except OSError:
             pass
         code = 0
-        try:
-            os.kill(pid, signal.SIGHUP)
-        except OSError:
-            pass
-        try:
-            _, status = os.waitpid(pid, 0)
-            if hasattr(os, "waitstatus_to_exitcode"):
-                code = os.waitstatus_to_exitcode(status)
-            elif os.WIFEXITED(status):
-                code = os.WEXITSTATUS(status)
-            else:
+        if proc is not None:
+            code = proc.wait(timeout=10.0)
+            if code is None:
                 code = -1
-        except OSError:
-            pass
+        else:
+            try:
+                os.kill(pid, signal.SIGHUP)
+            except OSError:
+                pass
+            try:
+                _, status = os.waitpid(pid, 0)
+                if hasattr(os, "waitstatus_to_exitcode"):
+                    code = os.waitstatus_to_exitcode(status)
+                elif os.WIFEXITED(status):
+                    code = os.WEXITSTATUS(status)
+                else:
+                    code = -1
+            except OSError:
+                pass
         try:
             _send_frame(vsock_sock, FRAME_EXIT, struct.pack(">i", code))
         except OSError:
@@ -632,6 +1234,28 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         workdir = req.get("workdir")
         version_exit = _version_mismatch(req)
 
+        # Anything that touches the workspace waits for the sandbox; see
+        # sandbox_gate(). A file op, an exec and an interactive session all do.
+        # Nothing here falls back to running unconfined.
+        if req.get("file") or req.get("interactive") or cmd:
+            if not _SANDBOX_READY.is_set() and not replenished:
+                # We are about to hold this connection for as long as the sandbox
+                # takes. The pool is small, so several execs at boot would drain
+                # it and starve roster and status traffic -- which is the channel
+                # the host uses to find out why the workspace is slow. Refill
+                # first, then block.
+                replenished = True
+                replenish_fn()
+            ready, why = sandbox_gate()
+            if not ready:
+                log("shell", "refusing a workspace request: %s" % why)
+                resp_data = json.dumps({
+                    "stdout": "", "stderr": "sandbox unavailable: %s" % why,
+                    "exit_code": 75,
+                }).encode("utf-8")
+                vsock_sock.sendall(struct.pack(">I", len(resp_data)) + resp_data)
+                return
+
         # Native file op (host file browser) — no shell involved.
         fileop = req.get("file")
         if isinstance(fileop, dict):
@@ -653,15 +1277,24 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
             _run_interactive(vsock_sock, req)
             return  # finally below closes the vsock
 
-        # Source /mnt/bromure-meta/proxy.env before running so the command sees
+        # Source $META/proxy.env before running so the command sees
         # HTTPS_PROXY + the per-language CA bundle paths. .bashrc only sources
         # proxy.env for interactive shells (the `case $- in *i*) return` guard);
         # the shell subprocess.run() spawns below is non-interactive, so without
         # this prefix curl / pip / npm bypass the MITM proxy entirely.
+        # `META`, not a hardcoded /mnt/bromure-meta. Everywhere else in this file
+        # the meta share is `META`; these preludes were the exception, and the
+        # exception mattered: under Landlock the ruleset grants the share at the
+        # path the supervisor was told about, so a prelude naming a different path
+        # is denied on `open` -- while `[ -r ]` still says yes, because Landlock
+        # (ABI 4) hooks file_open and not access(2). The result is every host exec
+        # failing inside the guard that was supposed to make it safe. Found by the
+        # first test that drove `vm exec` over vsock instead of calling _ws_run
+        # directly.
         env_prefix = (
-            "if [ -r /mnt/bromure-meta/proxy.env ]; then "
-            "set -a; . /mnt/bromure-meta/proxy.env; set +a; "
-            "fi; "
+            "if [ -r %(meta)s/proxy.env ]; then "
+            "set -a; . %(meta)s/proxy.env; set +a; "
+            "fi; " % {"meta": META}
         )
         argv = req.get("argv")
         if isinstance(argv, list) and len(argv) > 1:
@@ -688,15 +1321,28 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
             # transcript) can cut mid UTF-8 sequence; a strict decode threw
             # here and collapsed the WHOLE exec to exit -1, freezing every
             # host feature riding this channel for that poll.
-            result = subprocess.run(
-                runnable, shell=use_shell, capture_output=True, text=True,
-                errors="replace", timeout=timeout, cwd=workdir
+            # The host's non-interactive exec runs a command IN A WORKDIR, so
+            # it is workspace content by definition and must be confined when a
+            # sandbox is applied -- otherwise `vm exec` is a way to run anything
+            # the agent can write to, outside the ruleset.
+            result = _ws_run(
+                (["/bin/sh", "-c", runnable] if use_shell else runnable),
+                capture_output=True, text=True, timeout=timeout, cwd=workdir
             )
             response = {
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.returncode,
             }
+            # Additive, and only when there is something to say. This is the one
+            # channel that still works when the ATTESTOR is down -- and attestd
+            # is what sends `sandbox_status`, so a workspace with no attestor
+            # cannot report its own most important problem through the usual
+            # route. A host that ignores the key reads exactly the reply it read
+            # before.
+            notes = guest_warnings()
+            if notes:
+                response["warnings"] = notes
         except subprocess.TimeoutExpired:
             response = {
                 "stdout": "",
@@ -1598,19 +2244,156 @@ _REBOOT_SIGNALLED = threading.Event()
 _DEVNULL = subprocess.DEVNULL
 
 
-def _capture(args, timeout=None):
-    """Run args, return stdout (str). '' on any failure."""
+# Bromure's own housekeeping, run as agentd rather than as the workload.
+#
+# `_capture` routes everything through `_ws_run`, which is right for `git -C
+# <workdir>` and wrong for `df -kP /`. The status loops read the MACHINE, not the
+# workspace: disk, ports, docker, mounts, the default route. Running them inside
+# the sandbox produced a `sandbox_denied` every couple of seconds, forever --
+# 33 of the first 59 timeline rows after boot were Bromure asking itself how much
+# disk was left, and they fed the host's drift score. That noise is precisely
+# what hides an agent probing its walls, which is the thing the events exist for.
+#
+# The distinction is not "confined vs unconfined". It is **whose activity is
+# this**: the sentry tags every event with `sandboxed`, keyed on the cgroup, so a
+# housekeeping command that runs outside it is already distinguishable by the
+# host. Keeping them inside made Bromure's own polling indistinguishable from the
+# agent's -- same comm, same cgroup, same uid.
+#
+# The bar for using this: **the command's behaviour must not be influenceable by
+# workspace content.** Fixed argv, no path from a workdir, and no configuration
+# file the agent can write. `git`, `tmux`, anything under a workdir and anything
+# reading the home stays on `_ws_run`.
+_SYS_REASONS_LOGGED = set()
+
+# The last privileged `ss` output, keyed on the socket set with the process
+# column stripped. See ports_loop_service.
+_PORTS_CACHE = {}
+
+
+def _sys_env():
+    """Environment for housekeeping commands.
+
+    `DOCKER_CONFIG` is pinned at a root-owned directory when the supervisor made
+    one. `docker` reads `~/.docker/config.json`, which lives in the agent's home:
+    `credsStore`, `credHelpers` and `cliPluginsExtraDirs` are all exec vectors,
+    and running docker unconfined with an agent-written config would hand back
+    exactly the deputy problem `_ws_run` exists to close.
+
+    The subcommands actually used here -- `ps`, `stats`, `images`, `top`,
+    `volume ls/inspect` -- are builtins, and none of them consults a credential
+    helper or loads a CLI plugin, so this is defence in depth rather than the
+    load-bearing part. It costs one environment variable.
+    """
+    env = dict(os.environ)
+    pinned = os.path.join(SANDBOX_RUN_DIR, "agentd-docker-config")
+    if os.path.isdir(pinned):
+        env["DOCKER_CONFIG"] = pinned
+    return env
+
+
+def _sys_capture_docker(args, timeout=None):
+    """The docker status loops. See `_sys_env` for why DOCKER_CONFIG is pinned."""
+    return _sys_capture(args, "docker status", timeout=timeout)
+
+
+def _sys_capture(args, reason, timeout=None):
+    """Run one housekeeping command as agentd and return its stdout.
+
+    `reason` is mandatory and logged ONCE per reason, not per call: these run in
+    two-second loops, and a line each would be its own kind of noise.
+    """
+    if _SANDBOX.get("control_socket") and reason not in _SYS_REASONS_LOGGED:
+        _SYS_REASONS_LOGGED.add(reason)
+        log("sandbox", "housekeeping runs outside the sandbox (%s): %s"
+            % (reason, " ".join(args[:3])))
     try:
-        p = subprocess.run(args, capture_output=True, text=True,
-                           timeout=timeout)
+        p = subprocess.run(_harden_argv(args), capture_output=True, text=True,
+                           timeout=timeout, env=_sys_env())
         return p.stdout
     except Exception:
         return ""
 
 
+def _capture(args, timeout=None):
+    """Run args, return stdout (str). '' on any failure.
+
+    Goes through _ws_run, so every caller that reads from a workspace -- and
+    almost all of them run `git -C <workdir>` -- is confined under a sandbox
+    without each call site having to remember.
+    """
+    try:
+        return _ws_run(args, capture_output=True, text=True,
+                       timeout=timeout).stdout
+    except SandboxRoutingError:
+        raise          # a programming error; swallowing it hides the hole
+    except Exception:
+        return ""
+
+
+# Every tmux invocation is bounded. Without a sandbox agentd owns the server and
+# a blocked client is a bug we would see; WITH one it is talking to a socket owned
+# by another process, and a wedged server used to hang agentd's startup
+# indefinitely -- which is how a strict workspace came up with no shell
+# connection and no way to look at it.
+TMUX_TIMEOUT = 15.0
+
+
+# tmux refuses any client whose uid is not the SERVER's uid. The check is in the
+# server, on accept, against the peer credentials the kernel reports -- so it is
+# unaffected by the socket's ownership or its mode. Measured on tmux 3.4: a 0666
+# socket, chowned to the client's own uid, is still answered with
+# "access not allowed".
+#
+# While the workload ran as the workspace user this never came up, because agentd
+# and the server shared a uid. The first `run_as_user: sandbox` workspace was a
+# different machine: the supervisor started a perfectly good server as uid 999,
+# agentd could not speak to it at all, and the workspace had no session and no
+# error. Two details made that hard to see from either side:
+#
+#   * `has-session` prints "access not allowed" and exits **0**, so the probe
+#     that was meant to detect a missing session reported a healthy one;
+#   * nothing else agentd runs says the word "uid".
+#
+# So: when the server's uid is not ours, every tmux CLIENT command runs through
+# the supervisor's `exec` op, which is already the thing that runs commands as the
+# workload. And the refusal is detected explicitly, because a check that silently
+# reads as success is how this cost a shipping round.
+
+_TMUX_REFUSED = "access not allowed"
+
+
+def _tmux_uid_mismatch():
+    """True when the tmux server runs as a uid that is not ours."""
+    uid = (_SANDBOX.get("run_as") or {}).get("uid")
+    return isinstance(uid, int) and uid != os.getuid()
+
+
+def _tmux_client(args, timeout=None):
+    """One tmux client command, run as the server's uid when that is not ours."""
+    timeout = TMUX_TIMEOUT if timeout is None else timeout
+    if _tmux_uid_mismatch() and _SANDBOX.get("control_socket"):
+        return _ws_run(args, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+
+
+def _tmux_was_refused(result):
+    return bool(result is not None and result.stderr
+                and _TMUX_REFUSED in result.stderr)
+
+
 def _tmux(*args):
     try:
-        return subprocess.run(["tmux", *args], capture_output=True, text=True)
+        result = _tmux_client([*_tmux_argv(), *args])
+        if _tmux_was_refused(result):
+            log("tabs", "tmux %s refused by the server: %s"
+                % (args[0] if args else "?", result.stderr.strip()))
+            return subprocess.CompletedProcess(args, 1, "", result.stderr)
+        return result
+    except subprocess.TimeoutExpired:
+        log("tabs", "tmux %s timed out after %.0fs" % (args[0] if args else "?",
+                                                       TMUX_TIMEOUT))
+        return subprocess.CompletedProcess(args, 1, "", "")
     except OSError:
         # tmux binary missing / transient exec failure — behave like a failed
         # command so callers fall through to their has-session guard rather than
@@ -1620,8 +2403,14 @@ def _tmux(*args):
 
 def _tmux_ok(*args):
     try:
-        return subprocess.run(["tmux", *args], stdout=_DEVNULL,
-                             stderr=_DEVNULL).returncode == 0
+        # Not `stderr=_DEVNULL`: a refusal has to be READ, because tmux exits 0
+        # after printing it and `_has_session` is built on this.
+        result = _tmux_client([*_tmux_argv(), *args])
+        return result.returncode == 0 and not _tmux_was_refused(result)
+    except subprocess.TimeoutExpired:
+        log("tabs", "tmux %s timed out after %.0fs" % (args[0] if args else "?",
+                                                       TMUX_TIMEOUT))
+        return False
     except Exception:
         return False
 
@@ -1643,7 +2432,7 @@ def _new_window(command=None, cwd=None, env=None, background=False):
     agent status. Appending past the highest index keeps every existing window's
     index (identity) stable and hands the new window a fresh, never-cached index.
     It also puts the new terminal at the back, which is where users expect it."""
-    args = ["tmux", "new-window", "-a", "-P", "-F", "#{window_id}",
+    args = [*_tmux_argv(), "new-window", "-a", "-P", "-F", "#{window_id}",
             "-t", "%s:{end}" % TMUX_S]
     if background:
         args.append("-d")
@@ -1662,7 +2451,10 @@ def _new_window(command=None, cwd=None, env=None, background=False):
     if command is not None:
         args.append(command)
     try:
-        p = subprocess.run(args, capture_output=True, text=True)
+        p = _tmux_client(args, timeout=TMUX_TIMEOUT)
+        if _tmux_was_refused(p):
+            log("tabs", "new-window refused by the server: %s" % p.stderr.strip())
+            return ""
         return p.stdout.strip()
     except Exception:
         return ""
@@ -1670,8 +2462,7 @@ def _new_window(command=None, cwd=None, env=None, background=False):
 
 def _set_window_option(win, name, value):
     try:
-        subprocess.run(["tmux", "set-option", "-w", "-t", win, name, value],
-                       stdout=_DEVNULL, stderr=_DEVNULL)
+        _tmux_client([*_tmux_argv(), "set-option", "-w", "-t", win, name, value])
     except Exception:
         pass
 
@@ -1743,6 +2534,8 @@ def reboot_pending():
     # dbus already down (late shutdown): root systemctl falls back to systemd's
     # private socket, which answers until the very end.
     try:
+        if not _have_sudo():
+            return ""
         p = subprocess.run(["sudo", "-n", "systemctl", "list-jobs",
                            "--no-legend"], capture_output=True, text=True)
         if "reboot.target" in p.stdout:
@@ -1750,7 +2543,7 @@ def reboot_pending():
     except Exception:
         pass
     try:
-        rl = _capture(["runlevel"])
+        rl = _sys_capture(["runlevel"], "systemd runlevel")
         parts = rl.split()
         return len(parts) >= 2 and parts[1] == "6"
     except Exception:
@@ -1947,7 +2740,7 @@ def _restore_worktrees(repo_root, repo_name):
     except OSError:
         pass
     open_branches = set(
-        _capture(["tmux", "list-windows", "-t", TMUX_S, "-F",
+        _capture([*_tmux_argv(), "list-windows", "-t", TMUX_S, "-F",
                   "#{@worktree}"]).splitlines())
     for r_branch, r_parent, r_display, r_tool in rows:
         if not r_branch:
@@ -2584,7 +3377,7 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
     start = "HEAD"
     if base:
         # Start from another branch: it's also where the work goes back to.
-        if subprocess.run(["git", "-C", cwd, "rev-parse", "--verify", "--quiet",
+        if _ws_run(["git", "-C", cwd, "rev-parse", "--verify", "--quiet",
                            base + "^{commit}"], stdout=_DEVNULL,
                           stderr=_DEVNULL).returncode != 0:
             worktree_err("worktree: no branch or commit named %s" % base)
@@ -2603,16 +3396,14 @@ def _worktree_create(cwd, slug, display, tool, prompt_b64, yolo=False,
     branch = "wt/" + slug
     wt_dir = os.path.join(base, slug)
     n = 2
-    while (subprocess.run(
-            ["git", "-C", cwd, "show-ref", "--verify", "--quiet",
+    while (_ws_run(["git", "-C", cwd, "show-ref", "--verify", "--quiet",
              "refs/heads/" + branch], stdout=_DEVNULL,
             stderr=_DEVNULL).returncode == 0) or os.path.exists(wt_dir):
         branch = "wt/%s-%d" % (slug, n)
         wt_dir = os.path.join(base, "%s-%d" % (slug, n))
         n += 1
 
-    add = subprocess.run(
-        ["git", "-C", cwd, "worktree", "add", "-b", branch, wt_dir, start],
+    add = _ws_run(["git", "-C", cwd, "worktree", "add", "-b", branch, wt_dir, start],
         capture_output=True, text=True)
     if add.returncode != 0:
         worktree_err("worktree add failed: " + (add.stderr or add.stdout))
@@ -2871,10 +3662,12 @@ def _plan_claude_sdk_ready():
             except OSError:
                 pass
             shutil.copy(_PLAN_SDK_PKG, os.path.join(ddir, "package.json"))
-            p = subprocess.run(
+            # npm runs package scripts and reads .npmrc, both under an
+            # agent-writable home: confined when there is a sandbox.
+            p = _ws_run(
                 ["bash", "-c",
-                 "if [ -r /mnt/bromure-meta/proxy.env ]; then "
-                 "set -a; . /mnt/bromure-meta/proxy.env; set +a; fi; "
+                 "if [ -r %s/proxy.env ]; then "
+                 "set -a; . %s/proxy.env; set +a; fi; " % (META, META) +
                  "exec npm install --no-audit --no-fund"],
                 cwd=ddir, capture_output=True, text=True, timeout=180)
             if p.returncode != 0:
@@ -2927,9 +3720,11 @@ def _plan_stream(cwd, slug, display, tool, prompt_b64):
         # a bogus per-profile value the MITM proxy swaps on the wire, same
         # as the tmux launcher's env. Without it the SDK's claude sits at
         # "Not logged in". Then exec the driver; argv passes via "$@".
-        proc = subprocess.Popen(
+        # Runs in a workdir, so it is workspace content: confined when there
+        # is a sandbox, plain Popen otherwise.
+        proc = _ws_popen(
             ["bash", "-c",
-             "for f in /mnt/bromure-meta/proxy.env /mnt/bromure-meta/api_key.env; do "
+             "for f in %s/proxy.env %s/api_key.env; do " % (META, META) +
              'if [ -r "$f" ]; then set -a; . "$f"; set +a; fi; done; '
              'exec python3 "$@"', "plan-driver",
              _PLAN_DRIVER, tool, branch, cwd, prompt_b64],
@@ -3016,7 +3811,7 @@ def _automation_finish(branch):
     kept — it's the run's result — UNLESS the run produced nothing worth
     keeping (no commits beyond its parent and a clean working tree), in which
     case the worktree + branch are removed so no-op runs don't pile up."""
-    out = _capture(["tmux", "list-windows", "-t", TMUX_S, "-F",
+    out = _capture([*_tmux_argv(), "list-windows", "-t", TMUX_S, "-F",
                     "#{window_id}\t#{@worktree}\t#{@label}\t"
                     "#{pane_current_path}\t#{@parent_branch}\t#{@root_repo}"])
     win_id = tool = wt_dir = parent = root = ""
@@ -3276,11 +4071,11 @@ def _worktree_remove(root, branch):
         return
     wdir = _worktree_dir_for_branch(root, branch)
     if wdir and wdir != root:
-        subprocess.run(["git", "-C", root, "worktree", "remove", "--force",
+        _ws_run(["git", "-C", root, "worktree", "remove", "--force",
                         wdir], stdout=_DEVNULL, stderr=_DEVNULL)
-    subprocess.run(["git", "-C", root, "branch", "-D", branch],
+    _ws_run(["git", "-C", root, "branch", "-D", branch],
                    stdout=_DEVNULL, stderr=_DEVNULL)
-    subprocess.run(["git", "-C", root, "worktree", "prune"],
+    _ws_run(["git", "-C", root, "worktree", "prune"],
                    stdout=_DEVNULL, stderr=_DEVNULL)
     _wt_registry_del(os.path.basename(root), branch)
 
@@ -3294,15 +4089,14 @@ def _worktree_is_empty(root, branch, parent):
     if not wdir or not os.path.isdir(wdir):
         return False
     # Staged, modified, or untracked files → the run left work behind.
-    st = subprocess.run(["git", "-C", wdir, "status", "--porcelain"],
+    st = _ws_run(["git", "-C", wdir, "status", "--porcelain"],
                         capture_output=True, text=True)
     if st.returncode != 0 or st.stdout.strip():
         return False
     if not parent:
         return False
     # Commits on this branch that the parent doesn't have → keep the result.
-    cnt = subprocess.run(
-        ["git", "-C", wdir, "rev-list", "--count", "%s..%s" % (parent, branch)],
+    cnt = _ws_run(["git", "-C", wdir, "rev-list", "--count", "%s..%s" % (parent, branch)],
         capture_output=True, text=True)
     if cnt.returncode != 0:
         return False
@@ -3421,7 +4215,7 @@ def _foreground_script(tty):
         awk '$1 ~ /[+]/ {for(i=3;i<=NF;i++) if($i !~ /^-/){print $i; exit}}'
     """
     dev = tty[len("/dev/"):] if tty.startswith("/dev/") else tty
-    out = _capture(["ps", "-ww", "-t", dev, "-o", "stat=,args="])
+    out = _sys_capture(["ps", "-ww", "-t", dev, "-o", "stat=,args="], "pty process table")
     for line in out.splitlines():
         toks = line.split()
         if not toks:
@@ -3475,8 +4269,7 @@ def _git_toplevel(cwd):
     """`timeout 3 git -C cwd rev-parse --show-toplevel`, '' on failure/timeout.
     The 3s cap keeps a hung git on a virtiofs repo from stalling the roster."""
     try:
-        p = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+        p = _ws_run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=3)
         return p.stdout.strip()
     except Exception:
@@ -3628,7 +4421,7 @@ def vmstat_loop_service():
             pass
         diskused = "0"
         disktotal = "0"
-        dfout = _capture(["df", "-kP", "/"])
+        dfout = _sys_capture(["df", "-kP", "/"], "disk usage of the machine")
         rows = dfout.splitlines()
         if len(rows) >= 2:
             cells = rows[1].split()
@@ -3645,15 +4438,42 @@ def vmstat_loop_service():
 def ports_loop_service():
     """Listening sockets → ports.txt every 3s (`ss -tulnpH`, sudo if possible).
 
-    Mirrors `{ sudo -n ss -tulnpH || ss -tulnH; }`: the unprivileged snapshot
-    (no process names) is used only when the sudo variant actually fails."""
+    The unprivileged snapshot is taken every time; the privileged one only when
+    the socket set changes, because `sudo` is setuid root and a `cred_gain` every
+    three seconds is a security event on a timer."""
     while _RUNNING.is_set():
         try:
-            p = subprocess.run(["sudo", "-n", "ss", "-tulnpH"],
-                               capture_output=True, text=True)
-            out = p.stdout if p.returncode == 0 else _capture(["ss", "-tulnH"])
+            # Unprivileged FIRST, and the privileged one only when the set of
+            # sockets has actually changed.
+            #
+            # `ss -p` names the process behind a socket only for our own uid, so
+            # sudo is what fills in the system daemons -- 8 of 8 lines named
+            # rather than 2 of 8, measured. But this loop runs every three
+            # seconds and `sudo` is setuid root: the exec raises euid to 0 before
+            # any policy has a say, so the sentry reports a `cred_gain` every
+            # three seconds, forever, on every workspace. A security event that
+            # arrives on a timer is one the user learns to ignore, which is the
+            # worst thing an event stream can teach.
+            #
+            # The socket set is nearly always unchanged, so this keeps the full
+            # output and makes the privileged call rare instead of constant.
+            plain = _sys_capture(["ss", "-tulnpH"], "listening ports")
+            key = "\n".join(sorted(line.split("users:")[0].strip()
+                                   for line in plain.splitlines()
+                                   if line.strip()))
+            if key and key == _PORTS_CACHE.get("key") and _PORTS_CACHE.get("out"):
+                out = _PORTS_CACHE["out"]
+            elif _have_sudo():
+                p = subprocess.run(["sudo", "-n", "ss", "-tulnpH"],
+                                   capture_output=True, text=True,
+                                   env=_sys_env())
+                out = p.stdout if p.returncode == 0 else plain
+                _PORTS_CACHE.update(key=key, out=out)
+            else:
+                out = plain
+                _PORTS_CACHE.update(key=key, out=out)
         except Exception:
-            out = _capture(["ss", "-tulnH"])
+            out = _sys_capture(["ss", "-tulnH"], "listening ports")
         _atomic_publish(".ports.tmp", "ports.txt", out)
         time.sleep(3)
 
@@ -3663,15 +4483,15 @@ def docker_loop_service():
     tick = 0
     vol_sizes = {}   # name -> human size, from the slow `docker system df` probe
     while _RUNNING.is_set():
-        out = _capture(["docker", "ps", "-a", "--no-trunc",
+        out = _sys_capture_docker(["docker", "ps", "-a", "--no-trunc",
                         "--format", "{{json .}}"])
         _atomic_publish(".docker.tmp", "docker.txt", out)
         if os.path.exists(os.path.join(OUTBOX, ".docker-watch")):
-            s = _capture(["docker", "stats", "--no-stream",
+            s = _sys_capture_docker(["docker", "stats", "--no-stream",
                           "--format", "{{json .}}"])
             if s:
                 _atomic_publish(".docker-stats.tmp", "docker-stats.txt", s)
-            i = _capture(["docker", "images", "--format", "{{json .}}"])
+            i = _sys_capture_docker(["docker", "images", "--format", "{{json .}}"])
             if i:
                 _atomic_publish(".docker-images.tmp", "docker-images.txt", i)
             # binfmt_misc: which qemu interpreters are registered AND enabled.
@@ -3688,7 +4508,7 @@ def docker_loop_service():
                             b[1:] if b.startswith(" ") else b)
             # Per-running-container architecture: one "id<TAB>arch" line each.
             a = ""
-            for cid in _capture(["docker", "ps", "-q"]).split():
+            for cid in _sys_capture_docker(["docker", "ps", "-q"]).split():
                 img = _capture(
                     ["docker", "inspect", "--format", "{{.Image}}", cid]).strip()
                 ar = _capture(
@@ -3709,10 +4529,10 @@ def docker_loop_service():
                                  for d in df.get("Volumes") or []}
                 except ValueError:
                     vol_sizes = {}
-            names = _capture(["docker", "volume", "ls", "-q"]).split()
+            names = _sys_capture_docker(["docker", "volume", "ls", "-q"]).split()
             v = ""
             if names:
-                for line in _capture(["docker", "volume", "inspect",
+                for line in _sys_capture_docker(["docker", "volume", "inspect",
                                       "--format", "{{json .}}"]
                                      + names).splitlines():
                     try:
@@ -3732,7 +4552,7 @@ def docker_loop_service():
 def _docker_attach_label_loop(win, cid):
     """Label a docker-attach tab with the container's FOREGROUND process."""
     while _tmux_ok("list-panes", "-t", win):
-        out = _capture(["docker", "top", cid, "-eo", "stat,comm"])
+        out = _sys_capture_docker(["docker", "top", cid, "-eo", "stat,comm"])
         fg = ""
         for line in out.splitlines()[1:]:
             toks = line.split()
@@ -3783,18 +4603,24 @@ def _docker_binfmt(enable):
                               ".bromure-binfmt-enabled"), "w").close()
         except OSError:
             pass
-        p = subprocess.run(
+        p = _run_unconfined(
             ["docker", "run", "--privileged", "--rm", "tonistiigi/binfmt",
-             "--install", "all"], capture_output=True, text=True)
+             "--install", "all"],
+            reason="binfmt: a fixed image name, no workspace input, and "
+                   "--privileged cannot be confined anyway",
+            capture_output=True, text=True)
     else:
         try:
             os.unlink(os.path.join(os.path.expanduser("~"),
                                    ".bromure-binfmt-enabled"))
         except OSError:
             pass
-        p = subprocess.run(
+        p = _run_unconfined(
             ["docker", "run", "--privileged", "--rm", "tonistiigi/binfmt",
-             "--uninstall", "qemu-*"], capture_output=True, text=True)
+             "--uninstall", "qemu-*"],
+            reason="binfmt: a fixed image name, no workspace input, and "
+                   "--privileged cannot be confined anyway",
+            capture_output=True, text=True)
     if p.returncode != 0:
         docker_err(p.stderr)
 
@@ -3820,10 +4646,10 @@ _PROXY_ENV_LINES = (
 
 _ENV_EXTRACT_CMD = (
     "timeout 5 env -i PATH=/usr/bin:/bin bash -c "
-    "'[ -r /mnt/bromure-meta/api_key.env ] && "
-    ". /mnt/bromure-meta/api_key.env 2>/dev/null; env' 2>/dev/null "
+    "'[ -r %(meta)s/api_key.env ] && "
+    ". %(meta)s/api_key.env 2>/dev/null; env' 2>/dev/null "
     "| grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "
-    "| grep -vE '^(PATH|PWD|SHLVL|_|SHELL|HOME|HOSTNAME)='")
+    "| grep -vE '^(PATH|PWD|SHLVL|_|SHELL|HOME|HOSTNAME)='") % {"meta": META}
 
 
 def _docker_run(arg):
@@ -3885,9 +4711,10 @@ def _docker_run(arg):
             docker_err("failed to open interactive container")
     else:
         # Detached: if the image isn't local, pull it first + report progress.
-        if rimg != "-" and subprocess.run(
-                ["docker", "image", "inspect", rimg], stdout=_DEVNULL,
-                stderr=_DEVNULL).returncode != 0:
+        if rimg != "-" and _run_unconfined(
+                ["docker", "image", "inspect", rimg],
+                reason="docker image inspect: the image name comes from the host",
+                stdout=_DEVNULL, stderr=_DEVNULL).returncode != 0:
             docker_run_status("pulling", rimg, 0, 0)
             dl = 0
             tot = 0
@@ -3906,8 +4733,11 @@ def _docker_run(arg):
             except Exception:
                 pass
         docker_run_status("starting", rimg, 0, 0)
-        p = subprocess.run(["bash", "-c", full], stdout=_DEVNULL,
-                           stderr=subprocess.PIPE, text=True)
+        p = _run_unconfined(
+            ["bash", "-c", full],
+            reason="docker run: the command line comes from the host, not from "
+                   "workspace content, and docker is revoked under strict",
+            stdout=_DEVNULL, stderr=subprocess.PIPE, text=True)
         if p.returncode != 0:
             docker_err(p.stderr)
         docker_run_status_clear()
@@ -3934,6 +4764,7 @@ def _fields(arg, n):
 
 def _dispatch_command(action, arg):
     if action == "new-tab":
+        ensure_sandbox_server("new tab")
         _tmux_ok("new-window", "-t", TMUX_S, "-c", HOME)
     elif action == "select-tab":
         _tmux_ok("select-window", "-t", "%s:%s" % (TMUX_S, arg))
@@ -4029,7 +4860,10 @@ def _dispatch_command(action, arg):
             os.sync()
         except Exception:
             pass
-        subprocess.run(["sudo", "poweroff"])
+        if _have_sudo():
+            subprocess.run(["sudo", "poweroff"])
+        elif _SANDBOX.get("control_socket"):
+            _sandbox_ctl("poweroff", timeout=30.0)
     else:
         log("tabs", "unknown action '%s'" % action)
 
@@ -4072,8 +4906,28 @@ def command_loop_service():
 
 # ── session lifecycle ───────────────────────────────────────────────────────
 def create_session():
-    """Create the single tmux session the tabs live in (startup one-shot)."""
-    _tmux_ok("new-session", "-d", "-s", TMUX_S, "-c", HOME)
+    """Create the single tmux session the tabs live in (startup one-shot).
+
+    Under a sandbox agentd never creates it: bromure-sandboxd starts the server
+    inside the ruleset and is the only thing that can. agentd asks, waits, and
+    then only applies the options and key bindings. If no server appears, it
+    stops — an unsandboxed session would be worse than none.
+    """
+    if _STRICT_UNAPPLIED:
+        log("session", "strict sandbox requested but not applied; refusing to "
+                       "start an unconfined session")
+        return
+    if openshell_requested():
+        started = time.time()
+        if not ensure_sandbox_server("session startup"):
+            log("session", "gave up after %.0fs (%s); not starting a session"
+                % (time.time() - started,
+                   _SANDBOX.get("degraded_reason")
+                   or _SANDBOX.get("server_error") or "supervisor unavailable"))
+            return
+    else:
+        _tmux_ok("new-session", "-d", "-s", TMUX_S, "-c", HOME)
+
     # allow-passthrough follows the host's terminal-graphics opt-in
     # (default off): guest escapes must not reach the host surface raw —
     # kitty graphics = host-side decoding of untrusted bytes + UI spoofing.
@@ -4114,6 +4968,15 @@ def create_session():
         _tmux_ok("bind-key", "-T", table, "User0", "send-keys", "-X", "scroll-up")
         _tmux_ok("bind-key", "-T", table, "User1", "send-keys", "-X", "scroll-down")
 
+    # The session exists, so agent code is now possible. Tell the supervisor,
+    # which tells the sentry to leave its boot phase. Announced from HERE rather
+    # than when the server started: under strict the supervisor is started before
+    # the revocation, so the earlier moment labelled the revocation's own bind
+    # mounts as session activity.
+    if _SANDBOX.get("control_socket"):
+        _sandbox_ctl("session_ready", timeout=10.0)
+        _SANDBOX_READY.set()
+
 
 def session_monitor_service():
     """Watch the tmux session; when it dies (user closed the last window, or the
@@ -4131,7 +4994,17 @@ def session_monitor_service():
                 os.sync()
             except Exception:
                 pass
-            subprocess.run(["sudo", "poweroff"])
+            p = (subprocess.run(["sudo", "poweroff"], capture_output=True)
+                 if _have_sudo()
+                 else subprocess.CompletedProcess([], 1, b"", b""))
+            if p.returncode != 0 and _SANDBOX.get("control_socket"):
+                # Under the strict sandbox there is no sudo left, so the call
+                # above fails silently and the VM stays up after the user closed
+                # their last window. A restarted agentd would then ask for a
+                # fresh session and resurrect a workspace they had finished
+                # with. The supervisor still has root; ask it.
+                log("tabs", "sudo poweroff unavailable; asking the supervisor")
+                _sandbox_ctl("poweroff", timeout=30.0)
             _RUNNING.clear()
             return
         time.sleep(0.7)
@@ -4174,7 +5047,7 @@ def _home_mode():
 
 def _home_mounted_fstype():
     """Filesystem type of the TOP mount at /home/ubuntu ('' if none)."""
-    return _capture(["findmnt", "-n", "-o", "FSTYPE", HOME_MOUNT]).strip()
+    return _sys_capture(["findmnt", "-n", "-o", "FSTYPE", HOME_MOUNT], "home filesystem type").strip()
 
 
 def _find_home_device():
@@ -4183,7 +5056,7 @@ def _find_home_device():
     bylabel = "/dev/disk/by-label/" + HOME_LABEL
     if os.path.exists(bylabel):
         return os.path.realpath(bylabel)
-    out = _capture(["lsblk", "-J", "-b", "-o", "NAME,TYPE,FSTYPE,LABEL"])
+    out = _sys_capture(["lsblk", "-J", "-b", "-o", "NAME,TYPE,FSTYPE,LABEL"], "block devices")
     try:
         tree = json.loads(out).get("blockdevices") or []
     except ValueError:
@@ -4565,9 +5438,11 @@ def _fsck_home_if_needed(dev):
     stop. A clean boot skips e2fsck entirely. -y answers every repair
     prompt yes — there is no operator on a headless boot, and an
     unmountable home is strictly worse than an aggressive repair."""
-    if _capture(["findmnt", "-n", "-S", dev]).strip():
+    if _sys_capture(["findmnt", "-n", "-S", dev], "is this device mounted").strip():
         return  # device already mounted (crashed-boot retry) — never fsck live
-    sb = _capture(["sudo", "dumpe2fs", "-h", dev])
+    if not _have_sudo():
+        return
+    sb = _sys_capture(["sudo", "dumpe2fs", "-h", dev], "ext4 superblock of the home device")
     state = features = ""
     for line in sb.splitlines():
         if line.startswith("Filesystem state:"):
@@ -4598,7 +5473,7 @@ def task_home_setup():
     if not dev:
         log("home", "mode=%s but no home device found — home left as-is" % mode)
         return
-    if not _capture(["lsblk", "-no", "FSTYPE", dev]).strip():
+    if not _sys_capture(["lsblk", "-no", "FSTYPE", dev], "device filesystem type").strip():
         log("home", "formatting %s (ext4, label %s)" % (dev, HOME_LABEL))
         if _sudo(["mkfs.ext4", "-q", "-L", HOME_LABEL, dev]).returncode != 0:
             log("home", "mkfs.ext4 failed on %s" % dev)
@@ -4688,7 +5563,14 @@ DOCKER_PROXY_FRAGMENT = (
 
 
 def _sudo(args, **kw):
-    """subprocess.run(["sudo", *args]) with output silenced."""
+    """subprocess.run(["sudo", *args]) with output silenced.
+
+    Returns a failed CompletedProcess without execing anything once the strict
+    sandbox has taken sudo away. See `_have_sudo`: a failed sudo is not free, it
+    is a credential gain the sentry correctly reports.
+    """
+    if not _have_sudo():
+        return subprocess.CompletedProcess(args, 1, b"", b"")
     return subprocess.run(["sudo"] + list(args), stdout=_DEVNULL,
                           stderr=_DEVNULL, **kw)
 
@@ -4708,7 +5590,7 @@ def task_set_mtu():
     if not mtu:
         mtu = "1280"
     nic = ""
-    for line in _capture(["ip", "route", "show", "default"]).splitlines():
+    for line in _sys_capture(["ip", "route", "show", "default"], "default route").splitlines():
         if "default" in line:
             parts = line.split()
             if len(parts) >= 5:
@@ -4789,6 +5671,116 @@ def task_apply_hostname():
     _sudo(["hostname", want])
     _sudo_write("/etc/hostname", want + "\n")
     log("agentd", "hostname -> %s" % want)
+
+
+# The policy advisor's address, and why it is in /etc/hosts at all.
+#
+# `http://policy.local` used to be reachable only through the cooperative MITM
+# proxy: the guest had HTTP_PROXY set, the proxy recognised the host name, and
+# answered it. OpenShell-policy workspaces no longer get proxy env vars -- which
+# is deliberate, matches OpenShell (its own no_proxy test asserts they are
+# absent), and is what the strict sandbox already did -- so that route is gone.
+#
+# The host now intercepts transparently: it always diverts 192.0.2.254:80 into
+# the MITM, which answers `Host: policy.local` itself. TEST-NET-1 is reserved for
+# documentation and is never routed, so a workspace that somehow escapes the
+# diversion fails closed rather than reaching a stranger.
+#
+# All the guest has to do is make the name resolve. The address is read from the
+# spec when the host stages it, so the two sides cannot drift; the constants are
+# the fallback for a host that has not started staging it yet.
+ADVISOR_HOST_DEFAULT = "policy.local"
+ADVISOR_ADDRESS_DEFAULT = "192.0.2.254"
+
+# Only lines carrying this marker are ours to rewrite or remove. /etc/hosts is
+# how the machine resolves its own name; a clever rewrite that drops a line it
+# did not understand is a machine that cannot sudo.
+ADVISOR_HOSTS_MARKER = "# bromure-openshell-advisor"
+
+# Overridable for tests, and not optionally: an earlier test in this project
+# applied the strict revocation to the real /etc and took this machine's sudo
+# with it. A test that edits the real /etc/hosts is a test that can stop the
+# machine resolving its own name.
+HOSTS_FILE = os.environ.get("BROMURE_HOSTS_FILE", "/etc/hosts")
+
+
+# The host's explicit signal that this workspace has an advisor, independent of
+# whether it has a sandbox spec. A policy with nothing but network rules gets no
+# `openshell-sandbox.json` -- correctly, there is nothing for a supervisor to
+# enforce -- but it is still an OpenShell-policy workspace and the advisor still
+# serves it. Keying the mapping off the spec left exactly those workspaces unable
+# to reach `policy.local`.
+ADVISOR_CONFIG = os.path.join(META, "advisor.json")
+
+
+def _advisor_identity():
+    """(host, address, wanted) for the policy advisor.
+
+    `wanted` is the trigger and comes from EITHER source, which is deliberate:
+    `advisor.json` is the host's new explicit signal, and the spec's `advisor`
+    block is what an already-deployed host stages. The guest and the host ship
+    separately, so accepting both means neither ordering breaks a workspace that
+    works today. When the host has fully moved over, the spec block simply stops
+    appearing and nothing here needs to change.
+
+    `advisor.json` wins on the values when both are present: it is the more
+    specific statement.
+    """
+    host, address = ADVISOR_HOST_DEFAULT, ADVISOR_ADDRESS_DEFAULT
+    wanted = False
+    for source, key in ((ADVISOR_CONFIG, None), (OPENSHELL_SPEC, "advisor")):
+        try:
+            with open(source) as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        block = data if key is None else data.get(key)
+        if not isinstance(block, dict):
+            continue
+        wanted = True
+        if isinstance(block.get("host"), str) and block["host"].strip():
+            host = block["host"].strip()
+        if isinstance(block.get("address"), str) and block["address"].strip():
+            address = block["address"].strip()
+        break
+    return host, address, wanted
+
+
+def task_openshell_advisor_host():
+    """Make `policy.local` resolve. Idempotent, and run on every boot.
+
+    Ordering matters twice over:
+
+    * **after `task_apply_hostname`**, which rewrites /etc/hosts wholesale when
+      the hostname changes and would drop this line;
+    * **before the strict revocation**, because after it there is no sudo and
+      /etc is read-only to us.
+
+    It converges in both directions: the line is added when the host says this
+    workspace has an advisor -- `advisor.json`, or the spec's `advisor` block --
+    and removed when neither is there, so a workspace that stops using one does
+    not keep a stale mapping. That discipline is the lesson from the strict
+    revocation, which used to leave state on disk that outlived its cause.
+    """
+    host, address, wanted = _advisor_identity()
+    want = "%s\t%s\t%s\n" % (address, host, ADVISOR_HOSTS_MARKER)
+    try:
+        with open(HOSTS_FILE) as handle:
+            lines = handle.readlines()
+    except OSError as e:
+        log("agentd", "advisor host: cannot read %s: %s" % (HOSTS_FILE, e))
+        return
+    kept = [line for line in lines if ADVISOR_HOSTS_MARKER not in line]
+    desired = kept + ([want] if wanted else [])
+    if desired == lines:
+        return                      # already exactly right; touch nothing
+    # `sudo tee` truncates in place, so the inode survives -- which matters,
+    # because the sandbox's Landlock rule for /etc/hosts is keyed to it.
+    if _sudo_write(HOSTS_FILE, "".join(desired)):
+        log("agentd", "advisor host: %s -> %s" % (host, address)
+            if wanted else "advisor host: mapping removed")
+    else:
+        log("agentd", "advisor host: could not update /etc/hosts")
 
 
 def task_fix_systemd_unit():
@@ -5218,7 +6210,7 @@ def ip_reporter_service():
     """Every 5s write the primary IPv4 to the outbox (host surfaces it)."""
     ippath = os.path.join(OUTBOX, "ip.txt")
     while _RUNNING.is_set():
-        out = _capture(["hostname", "-I"])
+        out = _sys_capture(["hostname", "-I"], "the VM's address")
         ip = out.split()[0] if out.split() else ""
         if ip:
             try:
@@ -5247,7 +6239,7 @@ def _on_signal(signum, frame):
 # answers trustworthy to the host.
 # ---------------------------------------------------------------------------
 STRICT_MARKER = os.path.join(META, "strict-sandbox")
-STRICT_DONE = "/run/bromure-strict.done"
+STRICT_DONE = os.environ.get("BROMURE_STRICT_DONE", "/run/bromure-strict.done")
 
 
 def strict_sandbox_requested():
@@ -5258,33 +6250,294 @@ def strict_sandbox_applied():
     return os.path.exists(STRICT_DONE)
 
 
+_STRICT_UNAPPLIED = False    # requested, but we could not apply it
+
+
+_SUDO_STATE = {"known": False, "value": False}
+
+
+def _have_sudo(probe=False):
+    """Can this process still use sudo? Cached, and false forever under strict.
+
+    Every FAILED `sudo` is still a real privilege gain before its policy refuses:
+    the binary is setuid root, so the exec raises euid to 0 and only then does
+    sudo decide. `ports_loop_service` ran `sudo -n ss -tulnpH` every three
+    seconds, which on a strict workspace meant a `cred_gain` event roughly every
+    70 seconds from agentd itself — about twenty in five idle minutes, enough to
+    trip the host's watchdog on a workspace where nothing was happening.
+    
+    So once the strict sandbox has been applied the answer is no, without
+    execing anything to find out.
+    """
+    if strict_sandbox_applied():
+        return False
+    if _SUDO_STATE["known"] and not probe:
+        return _SUDO_STATE["value"]
+    try:
+        value = subprocess.run(["sudo", "-n", "true"], capture_output=True,
+                               timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        value = False
+    _SUDO_STATE.update(known=True, value=value)
+    return value
+
+
+# Set when the root script finished without the attestor becoming ready. The
+# host cannot be told through `sandbox_status` -- attestd is what sends that --
+# so this is what the shell channel reports instead.
+_ATTESTOR_FAILED = []
+
+
+def guest_warnings():
+    """Things the host should know that `sandbox_status` cannot carry.
+
+    Deliberately short: this rides on every exec reply, so anything that is not
+    worth repeating does not belong here.
+    """
+    notes = []
+    if _ATTESTOR_FAILED:
+        notes.append("the attestor did not start; binary-scoped network rules "
+                     "fail closed for this boot (see the agentd journal for "
+                     "ATTESTD-DIAG)")
+    if _STRICT_UNAPPLIED:
+        notes.append("the strict sandbox was requested and could not be applied")
+    return notes
+
+
 def task_strict_sandbox():
+    global _STRICT_UNAPPLIED
     if not strict_sandbox_requested() or strict_sandbox_applied():
         return
+    if not _have_sudo():
+        # Strict was asked for, its marker is absent, and there is no sudo to
+        # apply it with. Exiting 75 here is what turned one bad state into a
+        # permanent restart loop with no shell connection and no way in. Say so,
+        # keep running so the host can reach us, and refuse to start a session.
+        _STRICT_UNAPPLIED = True
+        log("strict", "cannot apply: no sudo and no strict marker. The "
+                      "workspace will start no session; the host can still "
+                      "reach agentd.")
+        return
     attestd = os.path.join(META, "bromure-attestd.py")
+    sentryd = os.path.join(META, "bromure-sentryd")
+    sandboxd = os.path.join(META, "bromure-sandboxd")
+    strictd = os.path.join(META, "bromure-strict.py")
+    # EVERY root helper starts here, BEFORE the revocation, because after it
+    # there is no sudo left to start anything with. That is not a nicety: the
+    # first version of this work started bromure-sandboxd from a task that runs
+    # on the post-revocation restart, so every strict workspace with an
+    # OpenShell policy got no session at all.
     script = r"""
 systemctl stop getty@tty1.service >/dev/null 2>&1
 systemctl mask --runtime getty@tty1.service >/dev/null 2>&1
 loginctl terminate-user ubuntu >/dev/null 2>&1
 rm -f /run/bromure-attestd.ready
 if [ -r %(attestd)s ]; then
-  systemd-run --unit=bromure-attestd --collect -p Restart=always -p RestartSec=1       /usr/bin/python3 %(attestd)s >/dev/null 2>&1
+  # reset-failed FIRST, and StartLimitIntervalSec=0, for exactly the reason
+  # spelled out at bromure-sandboxd below: `Restart=always` with systemd's
+  # default start limit means five exits in ten seconds leave the unit FAILED
+  # and its name blocked, so a transient early-boot problem becomes a workspace
+  # that never talks to the host for the rest of the boot. sandboxd got this
+  # treatment rounds ago; attestd did not, and it is the more important of the
+  # two -- without the attestor the host fails closed on every binary rule.
+  systemctl reset-failed bromure-attestd >/dev/null 2>&1
+  systemd-run --unit=bromure-attestd --collect -p Restart=always -p RestartSec=1 -p StartLimitIntervalSec=0 %(setenv)s /usr/bin/python3 %(attestd)s >/dev/null 2>&1
   for i in $(seq 1 100); do [ -f /run/bromure-attestd.ready ] && break; sleep 0.1; done
+  # If it did not come up, say WHY while we are still root -- after the
+  # revocation below there is no sudo left to ask systemd anything with, and
+  # "attestor NOT connected" on its own tells nobody what to do. This goes to
+  # stdout, which agentd captures and logs.
+  if [ ! -f /run/bromure-attestd.ready ]; then
+    echo "ATTESTD-DIAG unit=$(systemctl is-active bromure-attestd 2>&1) result=$(systemctl show -p Result --value bromure-attestd 2>&1) nrestarts=$(systemctl show -p NRestarts --value bromure-attestd 2>&1)"
+    journalctl -u bromure-attestd --no-pager -n 20 2>&1 | sed 's/^/ATTESTD-LOG /'
+  fi
+fi
+# The kernel sentry, then the sandbox supervisor. Both are root-only and both
+# must exist before the revocation; the sentry additionally has to load before
+# it raises lockdown, after which no unsigned module loads at all.
+if [ -r %(spec)s ] && [ -r %(sentryd)s ]; then
+  # `env %(setenv)s`, because `sudo` strips the environment and sentryd is run
+  # directly rather than through systemd-run. Without it the BROMURE_* overrides
+  # never reach it -- which is why the sentry's own boot path could not be
+  # exercised by a test, the same gap that hid attestd's startup bug.
+  env %(plainenv)s /usr/bin/python3 %(sentryd)s >/dev/null 2>&1
+fi
+if [ -r %(spec)s ] && [ -r %(sandboxd)s ]; then
+  # Clear any leftover failed unit first: a unit that hit systemd's start limit
+  # stays in the failed state and BLOCKS a fresh start with the same name, which
+  # turns one transient problem into a permanently sessionless workspace.
+  systemctl reset-failed bromure-sandboxd >/dev/null 2>&1
+  systemd-run --unit=bromure-sandboxd --collect -p Restart=on-failure -p RestartSec=1 -p StartLimitIntervalSec=0 %(setenv)s /usr/bin/python3 %(sandboxd)s >/dev/null 2>&1
+  for i in $(seq 1 200); do [ -S %(ctl)s ] && break; sleep 0.1; done
+fi
+# A unit whose only job is to tell the sentry that shutdown has begun, while
+# systemd is still stopping things. The reboot notifier in the module fires long
+# after userspace has finished unmounting, so without this the last rows in every
+# workspace's timeline are `mount: /` and `mount: /home/ubuntu` from pid 1's
+# umount helpers, judged as session activity.
+#
+# Conflicts=shutdown.target + Before=shutdown.target puts its ExecStop at the
+# front of the stop transaction. RemainAfterExit keeps it "active" so there is a
+# stop to run.
+if [ -r %(spec)s ]; then
+  cat > /run/systemd/system/bromure-shutdown-phase.service <<'UNIT'
+[Unit]
+Description=Tell the Bromure sentry that shutdown has begun
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/bin/sh -c 'echo 2 > /sys/module/bromure_sentry/parameters/phase 2>/dev/null || true'
+UNIT
+  systemctl daemon-reload >/dev/null 2>&1
+  systemctl start bromure-shutdown-phase.service >/dev/null 2>&1
 fi
 # Revoke regardless: without the attestor the host fails closed on binaries.
-for g in docker sudo lxd adm; do gpasswd -d ubuntu "$g" >/dev/null 2>&1; done
-rm -f /etc/sudoers.d/90-ubuntu
-printf 'ubuntu ALL=(ALL) !ALL
-' > /etc/sudoers.d/zz-bromure-strict
-chmod 0440 /etc/sudoers.d/zz-bromure-strict
+#
+# RUNTIME ONLY. This used to edit the disk -- rm the NOPASSWD drop-in, write a
+# denial, gpasswd the user out of docker/sudo/lxd/adm -- on a root filesystem
+# that PERSISTS across reboots, while its completion marker lived in /run, which
+# does not. So the second boot of a strict workspace found sudo already gone,
+# could not run this script at all, exited 75, and restart-looped forever with
+# the host seeing neither 5800 nor 5840. And turning strict off never gave the
+# user back sudo or docker, because nothing undid the edits.
+#
+# bromure-strict.py bind-mounts replacements from /run instead. The kernel drops
+# them at reboot, so every boot starts from the stock image state.
+/usr/bin/python3 %(strictd)s apply >/dev/null 2>&1
 touch %(done)s
 [ -f /run/bromure-attestd.ready ]
-""" % {"attestd": shlex.quote(attestd), "done": STRICT_DONE}
+""" % {"attestd": shlex.quote(attestd), "sentryd": shlex.quote(sentryd),
+       "sandboxd": shlex.quote(sandboxd), "spec": shlex.quote(OPENSHELL_SPEC),
+       "plainenv": _plain_setenv(),
+       "ctl": shlex.quote(SANDBOX_CTL), "setenv": _systemd_setenv(),
+       "strictd": shlex.quote(strictd), "done": STRICT_DONE}
     p = subprocess.run(["sudo", "-n", "sh", "-c", script], capture_output=True, text=True, timeout=60)
-    log("strict", "applied (attestor %s); restarting with reduced credentials"
-        % ("connected" if p.returncode == 0 else "NOT connected — binary rules fail closed"))
+    # The script just took sudo away. Anything in this incarnation that asks
+    # again must get the new answer, not the one cached before the revocation --
+    # otherwise agentd execs a sudo that can only fail, which is a real
+    # credential gain (see _have_sudo).
+    _SUDO_STATE.update(known=False, value=False)
+    if p.returncode == 0:
+        log("strict", "applied (attestor connected); restarting with reduced "
+                      "credentials")
+    else:
+        # The attestor is the ONLY channel for sandbox_status, so a workspace
+        # without one cannot report its own problem through the usual route --
+        # which is why the diagnosis is dragged out of the root script here and
+        # logged with a greppable prefix. Without the attestor the host fails
+        # closed on every binary-scoped network rule: `curl` simply does not
+        # work, all boot, and nothing else says why.
+        _ATTESTOR_FAILED.append(True)
+        log("strict", "ATTESTOR DID NOT START — binary network rules will fail "
+                      "closed for this whole boot")
+        for line in (p.stdout or "").splitlines():
+            if line.startswith("ATTESTD-"):
+                log("strict", line)
+        if not (p.stdout or "").strip():
+            log("strict", "and the root script captured no diagnosis "
+                          "(rc=%d, stderr=%s)" % (p.returncode,
+                                                  (p.stderr or "").strip()[:200]))
     # systemd (Restart=always) brings agentd back without the groups it had.
     os._exit(75)
+
+
+def task_openshell_root_helpers():
+    """Start every root helper, for a workspace WITHOUT the strict sandbox.
+
+    With strict, the root script in `task_strict_sandbox` does all of this
+    before revoking sudo — this task would have no sudo left to do it with. The
+    ORDER is the same in both places, and it matters:
+
+    1. **attestd**, first, because it owns the one connection the host accepts
+       on 5840 and is the ONLY channel for `sandbox_status`. It used to be
+       started only by `task_strict_sandbox`, so a workspace that merely
+       switched the kernel sentry on ran with no attestor at all: the host saw
+       no status, never ran its cross-check, and had no "Guest sandbox" row.
+       Its binary-identity answers are not trustworthy without strict — the
+       agent still has sudo — but the host only enforces binaries under strict,
+       and status is what it needs here.
+    2. **bromure-sentryd**, which must load the module before it raises
+       lockdown, after which no unsigned module loads at all.
+    3. **bromure-sandboxd**, which owns the tmux server.
+    """
+    if not openshell_requested() or strict_sandbox_requested():
+        return
+
+    attestd = os.path.join(META, "bromure-attestd.py")
+    if os.access(attestd, os.R_OK):
+        p = subprocess.run(
+            ["sudo", "-n", "systemd-run", "--unit=bromure-attestd", "--collect",
+             "-p", "Restart=always", "-p", "RestartSec=1",
+             "/usr/bin/python3", attestd],
+            capture_output=True, text=True, timeout=120)
+        log("attestd", "start exit=%d %s"
+            % (p.returncode, p.stderr.strip()[-160:]))
+    else:
+        log("attestd", "not staged; the host will receive no sandbox_status")
+
+    loader = os.path.join(META, "bromure-sentryd")
+    if os.access(loader, os.R_OK):
+        # `env` with the overrides, because `sudo` strips the environment and
+        # this is the non-strict twin of the root script's sentry branch. In
+        # production the list is empty and this is `sudo -n env python3 loader`.
+        p = subprocess.run(["sudo", "-n", "env", *_plain_setenv_args(),
+                            "/usr/bin/python3", loader],
+                           capture_output=True, text=True, timeout=900)
+        log("sentry", "loader exit=%d %s"
+            % (p.returncode, p.stderr.strip()[-200:]))
+
+    launcher = os.path.join(META, "bromure-sandboxd")
+    if os.access(launcher, os.R_OK) and not os.path.exists(SANDBOX_CTL):
+        # See the note in task_strict_sandbox: a failed unit blocks its own name.
+        subprocess.run(["sudo", "-n", "systemctl", "reset-failed",
+                        "bromure-sandboxd"], capture_output=True, timeout=30)
+        p = subprocess.run(
+            ["sudo", "-n", "systemd-run", "--unit=bromure-sandboxd", "--collect",
+             "-p", "Restart=on-failure", "-p", "RestartSec=1",
+             "-p", "StartLimitIntervalSec=0",
+             *_systemd_setenv_args(), "/usr/bin/python3", launcher],
+            capture_output=True, text=True, timeout=120)
+        if p.returncode != 0:
+            log("sandbox", "could not start the supervisor: %s"
+                % p.stderr.strip()[-200:])
+
+
+def task_openshell_sandbox():
+    """Make sure the sandbox supervisor is running, then adopt its status.
+
+    The supervisor is started elsewhere — by `task_strict_sandbox`'s root script
+    under strict, by `task_openshell_root_helpers` without it — in both cases
+    while sudo still exists. This function never needs sudo, which is why it can
+    run on every later agentd incarnation (upgrade, crash, the post-revocation
+    restart) and still work.
+    """
+    if not openshell_requested():
+        return
+    launcher = os.path.join(META, "bromure-sandboxd")
+    if not os.access(launcher, os.R_OK):
+        return
+
+    deadline = time.time() + 30.0
+    while time.time() < deadline:
+        if os.path.exists(SANDBOX_CTL):
+            break
+        time.sleep(0.2)
+
+    _load_sandbox_status()
+    if _STRICT_UNAPPLIED:
+        log("sandbox", "NOTE: the strict sandbox could not be applied; the "
+                       "status below describes a workspace with no session")
+    log("sandbox", "filesystem=%s seccomp=%s sentry_socket=%s server_pid=%s"
+        % (_SANDBOX.get("filesystem"), _SANDBOX.get("seccomp"),
+           _SANDBOX.get("tmux_socket"), _SANDBOX.get("server_pid")))
+    for warning in (_SANDBOX.get("warnings") or []):
+        log("sandbox", "warning: %s" % warning)
+    if not _SANDBOX:
+        log("sandbox", "supervisor published no status; no session will start")
 
 
 def _run_once(name, fn):
@@ -5316,6 +6569,9 @@ def main():
     # the first incarnation (and sudo is gone now): skip straight on.
     if not strict_sandbox_applied():
         _run_once("hostname", task_apply_hostname)
+        # After the hostname (which rewrites /etc/hosts wholesale) and well
+        # before the revocation (after which there is no sudo).
+        _run_once("advisor-host", task_openshell_advisor_host)
         _run_once("unit", task_fix_systemd_unit)
         _run_once("mtu", task_set_mtu)
         _run_once("ca", task_install_ca)
@@ -5327,9 +6583,32 @@ def main():
         _run_once("home", task_home_setup)
         _run_once("folder-shares", task_folder_shares)
         _run_once("agent-stubs", task_heal_agent_stubs)
+        # Only for workspaces without the strict sandbox; with strict, the root
+        # script below starts attestd, the sentry and the supervisor before
+        # revoking sudo, in that same order.
+        _run_once("openshell-helpers", task_openshell_root_helpers)
         # Last privileged step, before anything agent-facing starts. Exits
-        # the process when it applies (systemd restarts agentd).
+        # the process when it applies (systemd restarts agentd). Under an
+        # OpenShell policy its root script also starts bromure-sentryd and
+        # bromure-sandboxd, because nothing can start them afterwards.
         _run_once("strict", task_strict_sandbox)
+    # 2b. The host's control channel comes up BEFORE any session work.
+    #
+    # This ordering is a hard requirement, not a preference. Everything below is
+    # one-shot setup that talks to a supervisor, a tmux server or a control
+    # socket -- and anything that blocks there used to take the host's only way
+    # of seeing into the VM with it. The symptom is indistinguishable from a dead
+    # guest: "No shell connection", no journal (strict masks getty), and no exec
+    # path to debug through. It happened, on a strict workspace, and cost a
+    # round to find.
+    #
+    # With the shell service already up, a hung or slow session step is a
+    # workspace with no panes that the host can still reach and diagnose.
+    start_service("shell", shell_agent_service)
+
+    # Runs on every incarnation, including the post-revocation restart: it needs
+    # no sudo once the supervisor exists.
+    _run_once("sandbox", task_openshell_sandbox)
     _run_once("session", create_session)
 
     # One-shot background jobs (fire-and-forget, not supervised).
@@ -5338,7 +6617,6 @@ def main():
 
     # 3. Supervised services — each isolated so one crash never kills the process.
     services = [
-        ("shell", shell_agent_service),
         ("http-proxy", bridge_http_proxy_service),
         ("ssh-agent", bridge_ssh_agent_service),
         ("aws-creds", bridge_aws_creds_service),

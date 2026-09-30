@@ -328,6 +328,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         quarantinedPorts.remove(id)
         egressByteCounts[id] = nil
         attestedFlows = attestedFlows.filter { $0.key.portID != id }
+        policyGeneration[id] = nil
         egressSeen = egressSeen.filter { $0.key.portID != id }
         let intercept = interceptor
         if releaseLease {
@@ -983,6 +984,9 @@ public final class VMNetSwitch: @unchecked Sendable {
         defer { lock.unlock() }
         guard let id = portByHandle[ObjectIdentifier(handle)] else { return }
         portEgressPolicy[id] = policy
+        // Flows allowed for their executable were decided under the old
+        // policy: each is re-attested on its next packet (see handleEgress).
+        policyGeneration[id, default: 0] &+= 1
     }
 
     /// Quarantine a VM's port: drop every unicast IP frame it sends (see
@@ -1096,13 +1100,18 @@ public final class VMNetSwitch: @unchecked Sendable {
 
         let ep: EgressPolicy.Proto = proto == 6 ? .tcp : .udp
         var verdict = g.policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport) ?? .allow
+        // `policy.local` (the OpenShell advisor) is answered by the MiTM itself.
+        if proto == 6, dport == 80, dstIP == EgressPolicy.advisorAddress, g.policy?.openShell != nil,
+           g.interceptor != nil {
+            verdict = .allow
+        }
 
         // An OpenShell policy is keyed by hostname, which the snooped DNS cache
         // may not hold for this address (DoH, cached lookups, shared CDN IPs).
         // On an intercepted port the MiTM re-decides with the TLS SNI / Host
         // header — and fails closed on flows that carry neither — so hand the
         // flow over instead of dropping it here.
-        if verdict == .deny, proto == 6, g.policy?.defersToInterception == true,
+        if verdict == .deny, proto == 6, g.policy?.defersToInterception(port: dport) == true,
            g.interceptor != nil, g.interceptPorts.contains(dport) {
             verdict = .allow
         }
@@ -1116,14 +1125,18 @@ public final class VMNetSwitch: @unchecked Sendable {
            !(g.interceptor != nil && g.interceptPorts.contains(dport)) {
             let sport = Self.u16(buf, 14 + ihl)
             let key = AttestedFlow(portID: srcPortID, sport: sport, dstIP: dstIP, dport: dport)
-            if Self.isTCPSyn(buf, n) {
+            // A new connection, or one allowed under a policy that has since
+            // changed (a live update re-decides open streams too, as
+            // OpenShell's reload does), asks the attestor.
+            let standing = Self.isTCPSyn(buf, n) ? Attestation.unknown : attestation(key)
+            if Self.isTCPSyn(buf, n) || standing == .stale {
                 guard let gate = identityGate else { verdict = .deny; return dropDenied() }
                 switch gate(pid, sport, dstIP, dport, hostnames, policy) {
                 case nil:      return true                       // attestation in flight
                 case .deny?:   verdict = .deny
                 default:       verdict = .allow; rememberAttested(key)
                 }
-            } else if isAttested(key) {
+            } else if standing == .current {
                 verdict = .allow
             }
         }
@@ -1184,7 +1197,10 @@ public final class VMNetSwitch: @unchecked Sendable {
         let policy = portEgressPolicy[srcPortID]
         let interceptor = portInterceptDisabled.contains(srcPortID) ? nil : self.interceptor
         let inspected = pid != nil && (interceptor != nil || (policy?.isActive ?? false))
-        return (pid, policy, interceptor, interceptPorts, inspected)
+        // An OpenShell policy inspects its L7 endpoints on whatever port they
+        // use, not only 80/443.
+        let ports = interceptor == nil ? interceptPorts : interceptPorts.union(policy?.inspectedPorts ?? [])
+        return (pid, policy, interceptor, ports, inspected)
     }
 
     /// Fire the observer for a new flow, deduped per (port, dstIP, port, proto),
@@ -1226,22 +1242,31 @@ public final class VMNetSwitch: @unchecked Sendable {
                                          _ policy: EgressPolicy) -> EgressPolicy.Verdict?)?
 
     private struct AttestedFlow: Hashable { let portID: Int; let sport: UInt16; let dstIP: UInt32; let dport: UInt16 }
-    private var attestedFlows: [AttestedFlow: Date] = [:]
+    /// Flows allowed for their executable: when, and under which policy
+    /// generation of their port.
+    private var attestedFlows: [AttestedFlow: (at: Date, generation: UInt64)] = [:]
+    /// Bumped per port on every live policy change.
+    private var policyGeneration: [Int: UInt64] = [:]
 
     private func rememberAttested(_ k: AttestedFlow) {
         lock.lock(); defer { lock.unlock() }
-        attestedFlows[k] = Date()
+        attestedFlows[k] = (Date(), policyGeneration[k.portID] ?? 0)
         if attestedFlows.count > 8192 {                 // drop the stalest half
-            let cut = attestedFlows.values.sorted()[attestedFlows.count / 2]
-            attestedFlows = attestedFlows.filter { $0.value > cut }
+            let cut = attestedFlows.values.map(\.at).sorted()[attestedFlows.count / 2]
+            attestedFlows = attestedFlows.filter { $0.value.at > cut }
         }
     }
 
-    private func isAttested(_ k: AttestedFlow) -> Bool {
+    /// A flow's standing: allowed under the current policy, allowed under an
+    /// older one (must be re-attested before another packet passes), or unknown.
+    private enum Attestation { case current, stale, unknown }
+
+    private func attestation(_ k: AttestedFlow) -> Attestation {
         lock.lock(); defer { lock.unlock() }
-        guard attestedFlows[k] != nil else { return false }
-        attestedFlows[k] = Date()
-        return true
+        guard let entry = attestedFlows[k] else { return .unknown }
+        guard entry.generation == (policyGeneration[k.portID] ?? 0) else { return .stale }
+        attestedFlows[k] = (Date(), entry.generation)
+        return .current
     }
 
     private static func isTCPSyn(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {

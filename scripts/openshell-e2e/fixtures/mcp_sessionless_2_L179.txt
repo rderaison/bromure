@@ -1,0 +1,31 @@
+
+VERSION = "2026-07-28"
+
+status, content_type, body = post(1, "server/discover", {}, VERSION)
+assert status == 200, ("discovery", status, body)
+assert content_type == "application/json", content_type
+discovery = json.loads(body)
+assert discovery["id"] == 1, discovery
+assert discovery["result"]["supportedVersions"] == [VERSION], discovery
+
+status, _, body = post(2, "tools/call", {"name": "read_status", "arguments": {}}, VERSION)
+assert status == 200, ("allowed tool", status, body)
+tool = json.loads(body)
+assert tool["id"] == 2, tool
+assert tool["result"]["content"] == [{"type": "text", "text": "read_status"}], tool
+
+status, _, body = post(3, "tools/call", {"name": "read_details", "arguments": {}}, VERSION)
+assert status == 403, ("denied tool", status, body)
+
+status, content_type, body = post(4, "subscriptions/listen", {"notifications": {"toolsListChanged": True}}, VERSION)
+assert status == 200, ("subscription", status, body)
+assert content_type == "text/event-stream", (content_type, body)
+events = [json.loads(line[6:]) for line in body.decode().splitlines() if line.startswith("data: ")]
+assert len(events) == 3, events
+assert events[0]["method"] == "notifications/subscriptions/acknowledged", events
+assert events[0]["params"]["notifications"] == {"toolsListChanged": True}, events
+assert events[1]["method"] == "notifications/tools/list_changed", events
+assert events[1]["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"] == 4, events
+assert events[2]["id"] == 4 and events[2]["result"]["resultType"] == "complete", events
+
+print("MCP_SESSIONLESS_OK discovery=200 allowed_tool=200 denied_tool=403 subscription=200")
