@@ -939,19 +939,55 @@ final class BeautifiedSessionModel: ObservableObject {
         guard pollTask == nil else { return }
         // Shown again (a room, a click back): start from what was downloaded
         // last time; the first read then only asks for what's new.
+        var restored = false
         if buffers.isEmpty, let key = provider.historyCacheKey, let hit = Self.historyCache[key] {
             buffers[hit.path] = hit.buffer
             bufferOrder = [hit.path]
             currentPath = hit.path
             parseDirty = true
+            restored = true
         }
+        // The history on hand shows at once — over a tunnel the first poll
+        // (terminal scan, then the fetch) is seconds away — with a quiet
+        // "catching up" until that poll brings it current.
+        if restored || !parsedItems.isEmpty { catchingUp = true }
         pollTask = Task { [weak self] in
+            if restored { await self?.showCached() }
             while !Task.isCancelled {
                 await self?.poll()
+                if self?.catchingUp == true { self?.catchingUp = false }
                 let busy = self?.working ?? false
-                try? await Task.sleep(nanoseconds: busy ? 400_000_000 : 1_200_000_000)
+                let background = self?.background ?? false
+                try? await Task.sleep(nanoseconds: background ? 5_000_000_000 : busy ? 400_000_000 : 1_200_000_000)
             }
         }
+    }
+
+    /// The downloaded history, parsed and shown before any network round trip.
+    private func showCached() async {
+        let parsed = await parseCurrent()
+        guard !parsed.isEmpty else { return }
+        applyParsed(parsed)
+        rebuild()
+        if loading { loading = false }
+    }
+
+    /// Showing what's on hand while the first read of this showing lands.
+    @Published var catchingUp = false
+
+    /// Off stage but kept warm (the fat client keeps a few recent chats):
+    /// the transcript keeps streaming, slowly, so coming back is a render
+    /// rather than a download. No terminal scans meanwhile.
+    private(set) var background = false
+
+    func setBackground(_ on: Bool) {
+        guard background != on else { return }
+        background = on
+        guard !on else { return }
+        // Back on stage: read now, not at the end of a slow sleep.
+        pollTask?.cancel()
+        pollTask = nil
+        start()
     }
 
     func stop() {
@@ -999,8 +1035,9 @@ final class BeautifiedSessionModel: ObservableObject {
         let isWorking = provider.isWorking() || seedHolds()
         // Terminal-state scan FIRST and unconditionally: a trust/login prompt (or
         // an auth error) can be on screen before any transcript store exists, so
-        // it must not sit behind the transcript fetch's early return.
-        await scanTerminal()
+        // it must not sit behind the transcript fetch's early return. (Kept
+        // warm off stage: skipped — nobody sees its cards until it's back.)
+        if !background { await scanTerminal() }
         let known: TranscriptCursor? = currentPath.flatMap { p in buffers[p].map { (p, $0.end) } }
         // Published fields are written only when they change: every write
         // re-renders the whole chat (transcript included), and a poll runs
@@ -1819,6 +1856,10 @@ private struct DelegationPanelHost: View {
 private final class TailFollow {
     /// Follow the tail through layout drift.
     var sticky = true
+    /// The tail marker's last reported position (nil: unloaded by the lazy
+    /// stack). The watchdog reads it: a view stuck blank reports nothing
+    /// new, so the preference callback alone never gets to fix it.
+    var lastMarker: CGFloat?
     /// The user is scrolling this transcript: a wheel or drag over it
     /// just now (a wheel notch scrolls on for a few frames after it).
     var userScrolling: Bool {
@@ -1838,6 +1879,23 @@ private final class TailFollow {
             lastEvent = UserEvent(at: Date(), window: e.window, location: e.locationInWindow)
             return e
         }
+    }
+}
+
+/// "Catching up…" over a chat shown from its cached history.
+private struct CatchingUpPill: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.mini)
+            Text(NSLocalizedString("Catching up…", comment: "beautified: cached history shown, fetching the latest"))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(.regularMaterial))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+        .shadow(color: .black.opacity(0.10), radius: 6, y: 2)
     }
 }
 
@@ -2069,6 +2127,16 @@ struct BeautifiedSessionView: View {
                         .opacity(liveResizing ? 1 : 0)
                         .allowsHitTesting(false)
                 }
+                // Shown from what was on hand; the latest round is on its way.
+                .overlay(alignment: .top) {
+                    if model.catchingUp, !model.items.isEmpty {
+                        CatchingUpPill()
+                            .padding(.top, 8)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                            .allowsHitTesting(false)
+                    }
+                }
+                .animation(.easeOut(duration: 0.2), value: model.catchingUp)
                 .clipped()
                 .background {
                     GeometryReader { g in
@@ -2376,6 +2444,7 @@ struct BeautifiedSessionView: View {
                     model.debugGeometry["viewport"] = h
                 }
                 .onPreferenceChange(TailOffsetKey.self) { marker in
+                    tailFollow.lastMarker = marker
                     // Following the tail and the user didn't scroll: the
                     // tail moved because rows were measured — go again.
                     // (See `TailFollow`.)
@@ -2412,6 +2481,23 @@ struct BeautifiedSessionView: View {
                     // Snap back to the tail.
                     if viewportHeight > 0, contentHeight > viewportHeight, tailY < viewportHeight - 40 {
                         proxy.scrollTo(Self.tailID, anchor: .bottom)
+                    }
+                }
+                .task {
+                    // Watchdog: following the tail, yet the tail isn't on
+                    // screen (unloaded, or the offset drifted past it) and
+                    // nothing re-reports — the chat sat blank until the user
+                    // scrolled. Look again every beat; never while the user
+                    // scrolls, never once they've scrolled up to read.
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+                        let v = viewportHeight
+                        guard tailFollow.sticky, !tailFollow.userScrolling, v > 0, !liveResizing else { continue }
+                        let m = tailFollow.lastMarker
+                        if m == nil || m! > v + 2 || m! < v - 40 {
+                            model.debugGeometry["watchdog"] = (model.debugGeometry["watchdog"] ?? 0) + 1
+                            proxy.scrollTo(Self.tailID, anchor: .bottom)
+                        }
                     }
                 }
                 .onChange(of: model.commandOutput) { _, _ in scrollToTail(proxy) }

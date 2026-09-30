@@ -2619,6 +2619,9 @@ final class RemoteHostWindow: NSWindow {
             popOutWindows[id]?.close()   // willClose → reapPopOut retires the controller
         }
         controller.stop()
+        for (_, m) in warmChats { m.stop() }
+        warmChats.removeAll()
+        warmChatOrder.removeAll()
         gridView?.retireAll()
         for (_, c) in termControllers { c.retireAll() }
         termControllers.removeAll()
@@ -4109,9 +4112,10 @@ final class RemoteHostWindow: NSWindow {
     private lazy var sessionReviews = SessionReviewWindowManager(
         context: SessionReviewWindowManager.Context(
             session: { [weak self] id in self?.controller.sessionStore.session(id) },
-            fetch: { [weak self] id, base in
+            fetch: { [weak self] id, base, focus in
                 guard let self, let s = self.controller.sessionStore.session(id) else { return nil }
-                let cmd = TaskReviewData.sessionCommand(dir: SessionHome.guestPath(s.cwd), base: base)
+                let cmd = TaskReviewData.sessionCommand(dir: SessionHome.guestPath(s.cwd), base: base,
+                                                        focusFile: focus)
                 guard let out = try? await self.controller.guestExec(s.profileID, command: cmd, timeout: 30)
                 else { return nil }
                 return TaskReviewData.parse(out)
@@ -6271,11 +6275,21 @@ final class RemoteHostWindow: NSWindow {
         }
         unmountBeautified()
         mountedTermView?.removeFromSuperview(); mountedTermView = nil
-        let m = makeRemoteChatModel(id: id, window: idx)
+        // A chat shown lately is still warm (kept streaming off stage):
+        // reuse it — switching back is a render, not a download.
+        let key = "\(id.uuidString):\(idx)"
+        let m: BeautifiedSessionModel
+        if let warm = warmChats.removeValue(forKey: key) {
+            warmChatOrder.removeAll { $0 == key }
+            m = warm
+            m.setBackground(false)
+        } else {
+            m = makeRemoteChatModel(id: id, window: idx)
+            m.start()
+        }
         beautifiedModel = m
         beautifiedWorkspace = id
         beautifiedTabIndex = tabIndex
-        m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         // A long conversation's fitting height (thousands of points) must
         // never become the window's minimum.
@@ -6382,8 +6396,25 @@ final class RemoteHostWindow: NSWindow {
         return m
     }
 
+    /// Chats recently on stage, kept streaming in the background (see
+    /// `BeautifiedSessionModel.setBackground`), most recent last.
+    private var warmChats: [String: BeautifiedSessionModel] = [:]
+    private var warmChatOrder: [String] = []
+    private static let warmChatLimit = 4
+
     private func unmountBeautified() {
-        beautifiedModel?.stop()
+        if let m = beautifiedModel, let id = beautifiedWorkspace, let idx = beautifiedTabIndex {
+            let key = "\(id.uuidString):\(idx)"
+            m.setBackground(true)
+            warmChats[key] = m
+            warmChatOrder.removeAll { $0 == key }
+            warmChatOrder.append(key)
+            while warmChatOrder.count > Self.warmChatLimit {
+                warmChats.removeValue(forKey: warmChatOrder.removeFirst())?.stop()
+            }
+        } else {
+            beautifiedModel?.stop()
+        }
         beautifiedModel = nil
         beautifiedWorkspace = nil
         beautifiedTabIndex = nil

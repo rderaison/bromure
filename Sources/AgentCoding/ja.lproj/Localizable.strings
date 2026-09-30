@@ -3199,3 +3199,6 @@
 "Hide — the shell keeps running (⌃`)" = "隠す — シェルは動き続けます (⌃`)";
 "Close the terminal (ends the shell)" = "ターミナルを閉じる (シェルを終了)";
 "The terminal isn't available right now." = "ターミナルは現在使用できません。";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "最新の内容を取得中…";

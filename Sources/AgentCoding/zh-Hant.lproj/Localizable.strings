@@ -3202,3 +3202,6 @@
 "Hide — the shell keeps running (⌃`)" = "隱藏——shell 繼續執行 (⌃`)";
 "Close the terminal (ends the shell)" = "關閉終端機（結束 shell）";
 "The terminal isn't available right now." = "終端機暫時無法使用。";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "正在同步最新內容…";

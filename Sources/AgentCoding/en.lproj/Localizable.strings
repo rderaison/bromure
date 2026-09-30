@@ -3234,3 +3234,6 @@
 "Hide — the shell keeps running (⌃`)" = "Hide — the shell keeps running (⌃`)";
 "Close the terminal (ends the shell)" = "Close the terminal (ends the shell)";
 "The terminal isn't available right now." = "The terminal isn't available right now.";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "Catching up…";
