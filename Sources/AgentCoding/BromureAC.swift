@@ -5699,7 +5699,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// against the new network. Every Reboot goes through here.
     @MainActor func rebootMachine(_ id: Profile.ID, force: Bool, remoteInitiated: Bool) async -> [String: Any] {
         guard let session = runningSessions[id] else { return ["ok": false, "error": "VM not running"] }
-        let profile = session.profile
+        // Boot the workspace as SAVED, not the copy the running session was
+        // launched from: a reboot is how an edit that needs one (shared
+        // folders, memory…) takes effect, and relaunching the old copy left
+        // the folders as they were until a Shut Down + Start.
+        let profile = currentProfile(id) ?? session.profile
         let wasAttached = isAttached(id)
         session.sandbox.sessionDisk?.clearSavedState()   // cold-boot fresh, never resume
 
@@ -5728,6 +5732,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // /state uptime reset — this covers a browser open on the host itself.
         if up { unifiedWindow?.rebootBrowser(for: id) }
         return ["ok": up, "workspace": profile.name, "mode": force ? "hard" : "soft"]
+    }
+
+    /// A workspace as currently saved (the editor's last save), or nil.
+    func currentProfile(_ id: Profile.ID) -> Profile? {
+        profiles.first { $0.id == id }
     }
 
     /// Docker-style 12-char short id for a profile: the UUID's hex with dashes
@@ -13189,7 +13198,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Detached (window-less, e.g. a remote/TUI session): clean teardown +
             // fresh window-less boot. Take the queued remedy BEFORE the
             // teardown — handleSessionStopped clears the remedy queue.
-            let profile = runningSessions[profileID]?.profile
+            let profile = currentProfile(profileID) ?? runningSessions[profileID]?.profile
             let remedy = pendingBootRemedies.removeValue(forKey: profileID)
             handleSessionStopped(profileID: profileID)
             if let profile {
@@ -13580,7 +13589,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// disk + base image version are unchanged across a reboot.
     @MainActor
     private func relaunchVM(in win: SessionPane) {
-        let profile = win.profile
+        // As saved (see rebootMachine): the pane's copy can predate an edit.
+        let profile = currentProfile(win.profile.id) ?? win.profile
         // Cancel the outgoing sandbox's outbox poller explicitly. A
         // dropped Task keeps running in Swift — without this the old
         // poller would keep racing the new one on the same shared
