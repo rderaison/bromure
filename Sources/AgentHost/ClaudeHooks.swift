@@ -7,7 +7,7 @@ import Foundation
 /// AskUserQuestion dump a remote reader shows while the picker is up.
 enum ClaudeHooks {
     static func writeSettings() {
-        let exe = shellQuote(AgentHostPaths.executable)
+        let exe = shellQuote(AgentHostPaths.stableExecutable)
         func hook(_ state: String) -> [String: Any] {
             ["hooks": [["type": "command", "command": "\(exe) __hook \(state)"]]]
         }
@@ -36,13 +36,13 @@ enum ClaudeHooks {
         }
         // The delegation MCP: this binary, relaying to a connected Bromure AC.
         let mcp: [String: Any] = ["mcpServers": ["delegation": [
-            "command": AgentHostPaths.executable, "args": ["__mcp-delegation"], "alwaysLoad": true]]]
+            "command": AgentHostPaths.stableExecutable, "args": ["__mcp-delegation"], "alwaysLoad": true]]]
         if let data = try? JSONSerialization.data(withJSONObject: mcp, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: AgentHostPaths.claudeMCPConfig, options: .atomic)
         }
     }
 
-    /// `bromure-native __hook <state>`, run by Claude inside its tmux
+    /// `bromure-sidecar __hook <state>`, run by Claude inside its tmux
     /// pane: tag the window with the status and the transcript Claude
     /// reported on stdin, and pin the transcript where a fat client's chat
     /// view looks for it (`~/.bromure/transcript-<idx>.path`: the path, then

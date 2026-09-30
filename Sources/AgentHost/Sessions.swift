@@ -188,7 +188,7 @@ final class SessionEngine: @unchecked Sendable {
         sessions.removeAll { $0.deletedAt != nil && $0.windowIndex == nil }
 
         // Adopt agents running in windows nobody claims (started by hand in
-        // the `bromure` session, or by `bromure-native claude`).
+        // the `bromure` session, or by `bromure-sidecar claude`).
         for w in windows where w.sessionID.isEmpty {
             guard let tool = agents[w.index] else { continue }
             var s = HostSession(id: UUID(), profileID: hostID, tool: tool,

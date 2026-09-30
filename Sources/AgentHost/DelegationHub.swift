@@ -134,7 +134,7 @@ final class DelegationHub: @unchecked Sendable {
     }
 }
 
-/// `bromure-native __mcp-delegation`: the stdio MCP server Claude runs.
+/// `bromure-sidecar __mcp-delegation`: the stdio MCP server Claude runs.
 /// Pipes stdio to delegation.sock, announcing its tmux window first, and
 /// reconnects (announcing again) whenever the socket drops — the stream
 /// moves between the local fallback and a Bromure AC's relay that way,

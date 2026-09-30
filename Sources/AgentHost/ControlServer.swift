@@ -132,7 +132,7 @@ final class ControlServer: @unchecked Sendable {
 
         switch (req.method, path) {
         case ("GET", "/health"):
-            reply(200, ["status": "ok", "service": "bromure-native", "debugEnabled": false])
+            reply(200, ["status": "ok", "service": "bromure-sidecar", "debugEnabled": false])
 
         case ("GET", "/state"):
             reply(200, stateSnapshot())

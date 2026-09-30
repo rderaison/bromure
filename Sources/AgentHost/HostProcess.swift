@@ -104,16 +104,17 @@ enum HostEnvironment {
     /// (GNU's `etimes`, which the client's liveness probe asks for and BSD
     /// ps lacks). Rewritten at every launch: the app may have moved.
     static func writeShims() {
+        AgentHostPaths.linkStableExecutable()
         let tmux = """
         #!/bin/sh
-        # Bromure Native: our tmux server, on its own socket.
+        # Bromure Sidecar: our tmux server, on its own socket.
         exec \(shellQuote(Tmux.binary)) -L \(Tmux.socketName) -f \(shellQuote(AgentHostPaths.tmuxConf.path)) "$@"
 
         """
         // BSD ps prints etime as [[dd-]hh:]mm:ss; GNU's etimes is seconds.
         let ps = #"""
         #!/bin/bash
-        # Bromure Native: GNU ps's `etimes` (elapsed seconds) on BSD ps.
+        # Bromure Sidecar: GNU ps's `etimes` (elapsed seconds) on BSD ps.
         # And a terminal's processes (`-t TTY -o a=,b=`) oldest first: the
         # client takes the first non-shell foreground process as the tab's
         # agent, which holds on Linux (pids ascend) but not here — Claude
@@ -168,9 +169,9 @@ enum HostEnvironment {
         // date BSD reads.
         let find = #"""
         #!/bin/bash
-        # Bromure Native: GNU find's -printf and `-newermt @<epoch>` on macOS.
+        # Bromure Sidecar: GNU find's -printf and `-newermt @<epoch>` on macOS.
         for a in "$@"; do
-          [ "$a" = "-printf" ] && exec \#(shellQuote(AgentHostPaths.executable)) __find "$@"
+          [ "$a" = "-printf" ] && exec \#(shellQuote(AgentHostPaths.stableExecutable)) __find "$@"
         done
         args=(); conv=0
         for a in "$@"; do
@@ -187,7 +188,7 @@ enum HostEnvironment {
         // GNU stat's -c FORMAT (the review window asks for %s, the size).
         let stat = #"""
         #!/bin/bash
-        # Bromure Native: GNU stat's `-c FORMAT` on BSD stat.
+        # Bromure Sidecar: GNU stat's `-c FORMAT` on BSD stat.
         args=(); fmt=0
         for a in "$@"; do
           if [ $fmt = 1 ]; then args+=("-f" "${a//%s/%z}"); fmt=0; continue; fi

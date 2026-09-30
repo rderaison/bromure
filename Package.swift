@@ -100,13 +100,13 @@ let package = Package(
                 .linkedLibrary("c++"),
             ]
         ),
-        // Bromure Native (the agent host): a menu-bar app that runs agents (Claude Code) in
+        // Bromure Sidecar (the agent host): a menu-bar app that runs agents (Claude Code) in
         // tmux on a plain Mac — no VM — and serves a subset of bromure-ac's
         // control API over the same embedded SSH server, so a Bromure AC
         // window mirrors it as a remote machine ("This Mac"). Shares the SSH
         // server sources with bromure-ac through symlinks in Shared/.
         .executableTarget(
-            name: "bromure-native",
+            name: "bromure-sidecar",
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOCore", package: "swift-nio"),

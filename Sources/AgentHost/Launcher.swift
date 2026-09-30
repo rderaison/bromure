@@ -1,14 +1,14 @@
 import AppKit
 import Darwin
 
-/// `bromure-native claude [args…]` (or the `bromure-claude` link to it):
+/// `bromure-sidecar claude [args…]` (or the `bromure-claude` link to it):
 /// start Claude in the current folder as a hosted session and attach this
 /// terminal to it. Detaching, or closing the terminal, leaves the agent
 /// running — it stays reachable from Bromure AC and from the menu.
 enum Launcher {
     static func runClaude(args: [String]) -> Int32 {
         guard ensureAppRunning() else {
-            FileHandle.standardError.write(Data("bromure-claude: Bromure Native isn't running and couldn't be started.\n".utf8))
+            FileHandle.standardError.write(Data("bromure-claude: Bromure Sidecar isn't running and couldn't be started.\n".utf8))
             return 1
         }
         let body: [String: Any] = ["tool": "claude", "cwd": FileManager.default.currentDirectoryPath,

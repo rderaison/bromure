@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-/// `bromure-native __find …`: the GNU `find` subset client commands use with
+/// `bromure-sidecar __find …`: the GNU `find` subset client commands use with
 /// `-printf` (BSD find has none) — the file browser's `-printf '%y%f\0'`,
 /// the folder picker's `%f\n`, the task probe's `%T@\n`. One process: an
 /// opendir/readdir walk, fstatat per entry, one buffered write. The `find`

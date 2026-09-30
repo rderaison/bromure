@@ -3070,11 +3070,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let link = EnrollLink(parsing: url.absoluteString) else { continue }
             let state = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "state" })?.value
-            // A handoff Bromure Native on this Mac started (an older
+            // A handoff Bromure Sidecar on this Mac started (an older
             // bromure.io always hands back to bromure://): pass it on.
             let support = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support")
-            let pendingStates = ["BromureNative", "BromureAgentHost"].compactMap {
+            let pendingStates = ["BromureSidecar", "BromureNative", "BromureAgentHost"].compactMap {
                 try? String(contentsOf: support.appendingPathComponent("\($0)/pending-enroll-state"), encoding: .utf8)
             }
             if let state, pendingStates.contains(state),

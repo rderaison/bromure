@@ -416,7 +416,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         switch event {
         case let e as ChannelEvent where e == .inputClosed:
-            // The far end is done writing (a Bromure Native answering over a
+            // The far end is done writing (a Bromure Sidecar answering over a
             // machine link, say): pass the EOF on. Dropping it left the
             // control socket's reader waiting for a close that never came.
             ioQueue.async { [weak self] in

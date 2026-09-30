@@ -47,7 +47,7 @@ enum HostExec {
                                 env: HostEnvironment.forCommands(), cwd: NSHomeDirectory(), timeout: timeout)
         }
         if UserDefaults.standard.bool(forKey: "debugExec") {
-            // `defaults write io.bromure.native debugExec -bool YES`: every
+            // `defaults write io.bromure.sidecar debugExec -bool YES`: every
             // client command, how it ended, and the start of what it said.
             let cmd = (body["command"] as? String) ?? ((body["argv"] as? [String])?.joined(separator: " ") ?? "")
             AgentHostLog.log("exec[\(r.status)\(r.timedOut ? " timeout" : "")] \(cmd.prefix(400))\n"

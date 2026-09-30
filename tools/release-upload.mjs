@@ -25,7 +25,7 @@
  *   node tools/release-upload.mjs \
  *        --file .build/release/Bromure-2.6.0.zip \
  *        --version 2.6.0 \
- *        [--product bromure|bromure-ac|bromure-native] \
+ *        [--product bromure|bromure-ac|bromure-sidecar] \
  *        [--channel stable] \
  *        [--min-system-version 14.0] \
  *        [--notes-file release-notes-2.6.0.html]
@@ -33,9 +33,9 @@
  * --product selects the DO Spaces prefix and appcast endpoint:
  *   bromure     → releases/                + /api/v1/release
  *   bromure-ac  → releases-agentic-coding/ + /api/v1/release-agentic-coding
- *   bromure-native → releases-native/, no appcast (Bromure Native has no
+ *   bromure-sidecar → releases-sidecar/, no appcast (Bromure Sidecar has no
  *                 updater yet): the versioned DMG plus a stable
- *                 releases-native/BromureNative.dmg for the download link.
+ *                 releases-sidecar/BromureSidecar.dmg for the download link.
  *                 Needs no SPARKLE_PRIVATE_KEY or RELEASE_AUTH_TOKEN.
  */
 
@@ -73,7 +73,7 @@ function die(msg) {
 
 if (!values.file) die("--file is required");
 if (!values.version) die("--version is required");
-if (!values.product) die("--product is required (one of: bromure, bromure-ac, bromure-native)");
+if (!values.product) die("--product is required (one of: bromure, bromure-ac, bromure-sidecar)");
 if (!/^\d+\.\d+(\.\d+)?(-[A-Za-z0-9._-]+)?$/.test(values.version)) {
   die(`invalid version string: ${values.version}`);
 }
@@ -98,10 +98,10 @@ const PRODUCT_CONFIG = {
     spacesPrefix: "releases-agentic-coding",
     apiURL: process.env.RELEASE_API_URL || "https://bromure.io/api/v1/release-agentic-coding",
   },
-  "bromure-native": {
-    spacesPrefix: "releases-native",
+  "bromure-sidecar": {
+    spacesPrefix: "releases-sidecar",
     apiURL: null,                        // no appcast: upload only
-    latestKey: "releases-native/BromureNative.dmg",
+    latestKey: "releases-sidecar/BromureSidecar.dmg",
   },
 };
 if (!PRODUCT_CONFIG[PRODUCT]) {

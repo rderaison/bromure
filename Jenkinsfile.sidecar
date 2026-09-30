@@ -1,8 +1,8 @@
-// Bromure Native — the menu-bar app that attaches a plain Mac's agents to a
+// Bromure Sidecar — the menu-bar app that attaches a plain Mac's agents to a
 // Bromure AC (Sources/AgentHost). Builds, signs and notarises the DMG
-// (package.sh native); optionally uploads it to DO Spaces under
-// releases-native/ (no appcast: the app has no updater yet), where
-// https://dl.bromure.io/releases-native/BromureNative.dmg is the stable link.
+// (package.sh sidecar); optionally uploads it to DO Spaces under
+// releases-sidecar/ (no appcast: the app has no updater yet), where
+// https://dl.bromure.io/releases-sidecar/BromureSidecar.dmg is the stable link.
 pipeline {
     agent { label 'macosx-builder' }
 
@@ -10,7 +10,7 @@ pipeline {
         booleanParam(
             name: 'PUSH_RELEASE',
             defaultValue: false,
-            description: 'Upload the signed DMG to DigitalOcean Spaces (versioned, plus the stable BromureNative.dmg).'
+            description: 'Upload the signed DMG to DigitalOcean Spaces (versioned, plus the stable BromureSidecar.dmg).'
         )
     }
 
@@ -71,12 +71,12 @@ pipeline {
         stage('Resolve version') {
             steps {
                 script {
-                    env.NATIVE_VERSION = sh(
+                    env.SIDECAR_VERSION = sh(
                         script: '''/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
                                        Sources/AgentHost/Info.plist''',
                         returnStdout: true
                     ).trim()
-                    echo "Building Bromure Native ${env.NATIVE_VERSION}"
+                    echo "Building Bromure Sidecar ${env.SIDECAR_VERSION}"
                 }
             }
         }
@@ -92,10 +92,10 @@ pipeline {
                     // Same one-shot self-heal as Jenkinsfile.ac (a stale macro
                     // plugin in the shared .build after a dependency bump).
                     sh '''
-                        ./package.sh native || {
+                        ./package.sh sidecar || {
                             echo "=== package.sh failed — wiping .build and retrying once ==="
                             rm -rf .build
-                            ./package.sh native
+                            ./package.sh sidecar
                         }
                     '''
                 }
@@ -106,9 +106,9 @@ pipeline {
             steps {
                 sh '''
                     BUILD_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)
-                    cp "$BUILD_DIR/BromureNative.dmg" "${WORKSPACE}/BromureNative-${NATIVE_VERSION}.dmg"
+                    cp "$BUILD_DIR/BromureSidecar.dmg" "${WORKSPACE}/BromureSidecar-${SIDECAR_VERSION}.dmg"
                 '''
-                archiveArtifacts artifacts: "BromureNative-${NATIVE_VERSION}.dmg", fingerprint: true
+                archiveArtifacts artifacts: "BromureSidecar-${SIDECAR_VERSION}.dmg", fingerprint: true
             }
         }
 
@@ -127,9 +127,9 @@ pipeline {
                                         npx --yes @socketsecurity/cli npm install --silent; \
                                      fi)
                         node tools/release-upload.mjs \
-                            --product bromure-native \
-                            --file "${WORKSPACE}/BromureNative-${NATIVE_VERSION}.dmg" \
-                            --version "${NATIVE_VERSION}" \
+                            --product bromure-sidecar \
+                            --file "${WORKSPACE}/BromureSidecar-${SIDECAR_VERSION}.dmg" \
+                            --version "${SIDECAR_VERSION}" \
                             --min-system-version "14.0"
                     '''
                 }

@@ -90,7 +90,7 @@ final class DelegationMCPServer: MCPLineHandler {
 
     /// Files land in the recipient's ~/.bromure/inbox, named for a Linux
     /// guest (/home/ubuntu/…). An attached Mac's agent gets them under its
-    /// real home — the same mapping Bromure Native applies to what it types.
+    /// real home — the same mapping Bromure Sidecar applies to what it types.
     private func onCallersMachine(_ result: [String: Any], hello: String?) -> [String: Any] {
         guard let me = me(hello), let home = engine()?.sessions.host(for: me.profileID)?.hostHome,
               var content = result["content"] as? [[String: Any]] else { return result }

@@ -1,11 +1,11 @@
 import Foundation
 
-/// Everything Bromure Native keeps on disk, under
-/// ~/Library/Application Support/BromureNative/.
+/// Everything Bromure Sidecar keeps on disk, under
+/// ~/Library/Application Support/BromureSidecar/.
 enum AgentHostPaths {
     static let support: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("BromureNative", isDirectory: true)
+        return base.appendingPathComponent("BromureSidecar", isDirectory: true)
     }()
     /// The control API (owner-only); fat clients reach it over SSH.
     static var controlSocket: URL { support.appendingPathComponent("control.sock") }
@@ -24,15 +24,58 @@ enum AgentHostPaths {
     }
     static var logFile: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/BromureNative/bromure-native.log")
+            .appendingPathComponent("Library/Logs/BromureSidecar/bromure-sidecar.log")
     }
 
-    /// The executable itself — Claude's hooks call back into it (`__hook`).
+    /// The executable itself (where the app bundle is).
     static var executable: String {
         Bundle.main.executableURL?.resolvingSymlinksInPath().path ?? CommandLine.arguments[0]
     }
 
-    /// Before the rename to Bromure Native (pre-release builds): its folder
+    /// What agents call back into (their hooks, the delegation MCP, the
+    /// `find` shim, `bromure-claude`): a link in bin/, repointed at every
+    /// launch — an agent outlives the app, and a renamed or moved app must
+    /// not leave its hooks calling a path that's gone.
+    static var stableExecutable: String { binDir.appendingPathComponent("bromure-sidecar").path }
+
+    /// Point `stableExecutable` at this binary.
+    static func linkStableExecutable() {
+        let link = stableExecutable
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: link)) == executable { return }
+        try? FileManager.default.removeItem(atPath: link)
+        try? FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: executable)
+        // A `bromure-claude` installed before (the menu's Install command)
+        // named the binary itself: point it at the stable link instead.
+        let launcher = NSHomeDirectory() + "/.local/bin/bromure-claude"
+        if let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: launcher), dest != link {
+            try? FileManager.default.removeItem(atPath: launcher)
+            try? FileManager.default.createSymbolicLink(atPath: launcher, withDestinationPath: link)
+        }
+    }
+
+    /// Bromure Native → Bromure Sidecar: its folder (enrollment, keys,
+    /// sessions) and preferences move over once. The old folder is left as a
+    /// symlink — agents started before the rename name files in it.
+    static func migrateFromNative() {
+        let fm = FileManager.default
+        let old = support.deletingLastPathComponent().appendingPathComponent("BromureNative")
+        if !fm.fileExists(atPath: support.path),
+           (try? old.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false,
+           fm.fileExists(atPath: old.path),
+           (try? fm.moveItem(at: old, to: support)) != nil {
+            try? fm.createSymbolicLink(at: old, withDestinationURL: support)
+        }
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "migratedFromNative"),
+              let legacy = UserDefaults(suiteName: "io.bromure.native") else { return }
+        for key in ["sshPort", "passwordAuth", "attach.target", "machineName", "p2p.published",
+                    "migratedFromAgentHost", "debugExec"] {
+            if defaults.object(forKey: key) == nil, let v = legacy.object(forKey: key) { defaults.set(v, forKey: key) }
+        }
+        defaults.set(true, forKey: "migratedFromNative")
+    }
+
+    /// Bromure Agent Host → Bromure Native (pre-release builds): its folder
     /// and preferences move over once. The old folder is left as a symlink —
     /// agents started before the move still name files in it.
     static func migrateFromAgentHost() {

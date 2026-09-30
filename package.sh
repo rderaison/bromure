@@ -31,23 +31,23 @@ case "$TARGET" in
         DMG_NAME="BromureAgenticCoding.dmg"
         RESOURCE_BUNDLE_NAME="bromure_bromure-ac.bundle"
         ;;
-    native|agent-host)
-        # Bromure Native: the menu-bar app that attaches a plain Mac's agents
+    sidecar|native|agent-host)
+        # Bromure Sidecar: the menu-bar app that attaches a plain Mac's agents
         # to a Bromure AC (Sources/AgentHost). Bundles its own tmux.
-        TARGET="native"
-        PRODUCT_NAME="bromure-native"
-        APP_NAME="Bromure Native"
+        TARGET="sidecar"
+        PRODUCT_NAME="bromure-sidecar"
+        APP_NAME="Bromure Sidecar"
         SOURCE_DIR="$SCRIPT_DIR/Sources/AgentHost"
         ENTITLEMENTS="$SOURCE_DIR/AgentHost.entitlements"
         INFO_PLIST="$SOURCE_DIR/Info.plist"
         SDEF_FILE=""
-        ICON_FILE="$SCRIPT_DIR/Resources/BromureNativeIcon.icns"
-        ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureNative.icon"
-        DMG_NAME="BromureNative.dmg"
-        RESOURCE_BUNDLE_NAME="bromure_bromure-native.bundle"
+        ICON_FILE="$SCRIPT_DIR/Resources/BromureSidecarIcon.icns"
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureSidecar.icon"
+        DMG_NAME="BromureSidecar.dmg"
+        RESOURCE_BUNDLE_NAME="bromure_bromure-sidecar.bundle"
         ;;
     *)
-        echo "Usage: $0 [bromure|bromure-ac|native]" >&2
+        echo "Usage: $0 [bromure|bromure-ac|sidecar]" >&2
         exit 2
         ;;
 esac
@@ -65,7 +65,7 @@ esac
 #   APPLE_ID="jane@example.com" \
 #   TEAM_ID="ABC123XYZ" \
 #   APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
-#   ./package.sh [bromure|bromure-ac|native]
+#   ./package.sh [bromure|bromure-ac|sidecar]
 
 DEVELOPER_ID="${DEVELOPER_ID:-}"
 APPLE_ID="${APPLE_ID:-}"
@@ -81,7 +81,7 @@ if [ -z "$DEVELOPER_ID" ]; then
     echo "  APPLE_ID=\"you@example.com\" \\"
     echo "  TEAM_ID=\"ABC123XYZ\" \\"
     echo "  APP_PASSWORD=\"xxxx-xxxx-xxxx-xxxx\" \\"
-    echo "  ./package.sh [bromure|bromure-ac|native]"
+    echo "  ./package.sh [bromure|bromure-ac|sidecar]"
     echo ""
     echo "List available identities with:"
     echo "  security find-identity -v -p codesigning"
@@ -155,10 +155,10 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$PRODU
 
 # Embed provisioning profile (required for iCloud and other entitlements).
 # Per-product profile if present (e.g. bromure-ac.provisionprofile),
-# else fall back to the shared bromure.provisionprofile. Bromure Native has
+# else fall back to the shared bromure.provisionprofile. Bromure Sidecar has
 # no restricted entitlements (no keychain group, no virtualization): no
 # profile — another app's would only mismatch its bundle id.
-if [ "$TARGET" != "native" ]; then
+if [ "$TARGET" != "sidecar" ]; then
     PROVISION_PROFILE="$SCRIPT_DIR/$PRODUCT_NAME.provisionprofile"
     [ -f "$PROVISION_PROFILE" ] || PROVISION_PROFILE="$SCRIPT_DIR/bromure.provisionprofile"
     if [ ! -f "$PROVISION_PROFILE" ]; then
@@ -291,9 +291,9 @@ PLIST
     fi
 fi
 
-# Bromure Native: the tmux it runs agents in (tools/build-tmux.sh, pinned in
+# Bromure Sidecar: the tmux it runs agents in (tools/build-tmux.sh, pinned in
 # tools/tmux.version; libevent + utf8proc static, system ncurses).
-if [ "$TARGET" = "native" ]; then
+if [ "$TARGET" = "sidecar" ]; then
     if [ ! -x "$SCRIPT_DIR/vendor/tmux/bin/tmux" ]; then
         echo "vendor/tmux missing — running tools/build-tmux.sh…"
         "$SCRIPT_DIR/tools/build-tmux.sh"

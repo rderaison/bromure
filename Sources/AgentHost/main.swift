@@ -1,6 +1,6 @@
 import AppKit
 
-// Bromure Native. Subcommands (run from the same binary):
+// Bromure Sidecar. Subcommands (run from the same binary):
 //   __hook <state>     Claude Code's status hook (see ClaudeHooks)
 //   __find <args>      GNU find's -printf subset, for the `find` shim (FindCommand)
 //   __mcp-delegation   the agents' delegation MCP server (see DelegationHub)
@@ -9,6 +9,7 @@ import AppKit
 //                      (also as `bromure-claude`, a link to this binary)
 // No arguments: the menu-bar app.
 
+AgentHostPaths.migrateFromNative()
 AgentHostPaths.migrateFromAgentHost()
 
 let args = CommandLine.arguments

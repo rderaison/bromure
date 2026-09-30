@@ -28,20 +28,20 @@ case "$TARGET" in
         ICON_FILE="$SCRIPT_DIR/Resources/BromureACIcon.icns"
         ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureAC.icon"
         ;;
-    native|agent-host)
-        TARGET="native"
-        PRODUCT_NAME="bromure-native"
-        APP_NAME="Bromure Native"
+    sidecar|native|agent-host)
+        TARGET="sidecar"
+        PRODUCT_NAME="bromure-sidecar"
+        APP_NAME="Bromure Sidecar"
         SOURCE_DIR="$SCRIPT_DIR/Sources/AgentHost"
         ENTITLEMENTS="$SOURCE_DIR/AgentHost.entitlements"
         INFO_PLIST="$SOURCE_DIR/Info.plist"
         SDEF_FILE=""
-        RESOURCE_BUNDLE_NAME="bromure_bromure-native.bundle"
-        ICON_FILE="$SCRIPT_DIR/Resources/BromureNativeIcon.icns"
-        ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureNative.icon"
+        RESOURCE_BUNDLE_NAME="bromure_bromure-sidecar.bundle"
+        ICON_FILE="$SCRIPT_DIR/Resources/BromureSidecarIcon.icns"
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/BromureSidecar.icon"
         ;;
     *)
-        echo "Usage: $0 [bromure|bromure-ac|native]" >&2
+        echo "Usage: $0 [bromure|bromure-ac|sidecar]" >&2
         exit 2
         ;;
 esac
@@ -323,10 +323,10 @@ PLIST
     fi
 fi
 
-# Bromure Native: bundle the tmux it runs agents in (tools/build-tmux.sh builds
+# Bromure Sidecar: bundle the tmux it runs agents in (tools/build-tmux.sh builds
 # it from the pinned tools/tmux.version when missing). Signed on its own,
 # before the outer bundle.
-if [ "$TARGET" = "native" ]; then
+if [ "$TARGET" = "sidecar" ]; then
     if [ ! -x "$SCRIPT_DIR/vendor/tmux/bin/tmux" ]; then
         echo "vendor/tmux missing — running tools/build-tmux.sh…"
         "$SCRIPT_DIR/tools/build-tmux.sh"

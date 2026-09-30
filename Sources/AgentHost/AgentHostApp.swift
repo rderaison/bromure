@@ -47,7 +47,7 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Bromure Native")
+        statusItem.button?.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Bromure Sidecar")
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -62,7 +62,7 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.updateIcon() } }
             }
         }
-        AgentHostLog.log("Bromure Native up (tmux \(Tmux.binary), ssh port \(port))")
+        AgentHostLog.log("Bromure Sidecar up (tmux \(Tmux.binary), ssh port \(port))")
     }
 
     private func startSSH() {
@@ -84,14 +84,14 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             snap.agents[$0.index] != nil && ($0.status == "needsInput" || snap.prompting.contains($0.index))
         }
         let name = needsYou ? "exclamationmark.bubble" : "terminal"
-        statusItem.button?.image = NSImage(systemSymbolName: name, accessibilityDescription: "Bromure Native")
+        statusItem.button?.image = NSImage(systemSymbolName: name, accessibilityDescription: "Bromure Sidecar")
     }
 
     // MARK: Menu
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let header = NSMenuItem(title: "Bromure Native", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Bromure Sidecar", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
 
@@ -229,7 +229,7 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: link)
-            try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: AgentHostPaths.executable)
+            try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: AgentHostPaths.stableExecutable)
             alert.messageText = "Installed bromure-claude"
             alert.informativeText = "Run `bromure-claude` in any folder to start Claude there as a session Bromure AC can see. (\(link.path) — make sure ~/.local/bin is on your PATH.)"
         } catch {

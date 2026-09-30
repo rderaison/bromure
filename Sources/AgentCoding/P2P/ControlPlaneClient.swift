@@ -55,7 +55,7 @@ struct DeviceInfo: Decodable, Identifiable, Equatable {
     }
 
     var isServer: Bool { capability == "server" }
-    /// A Bromure Native Mac: it attaches itself to servers and serves no
+    /// A Bromure Sidecar Mac: it attaches itself to servers and serves no
     /// mirror — never a place to connect to.
     var isAgentHost: Bool { capability == "agent-host" }
     var displayName: String { name?.isEmpty == false ? name! : String(id.prefix(8)) }

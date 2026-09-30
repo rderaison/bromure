@@ -117,7 +117,7 @@ final class P2PAccount {
         guard let (client, bearer) = ControlPlaneClient.current() else { return }
         Task {
             guard let devices = try? await client.listDevices(bearer: bearer) else { return }
-            // Other Bromure Native Macs aren't servers: nothing to attach to.
+            // Other Bromure Sidecar Macs aren't servers: nothing to attach to.
             servers = devices.filter { !$0.isSelf && !$0.revoked && $0.online && !$0.isAgentHost }
         }
     }

@@ -55,7 +55,7 @@ final class FleetAdmissionPrompter {
                                        next.name)
         }
         alert.informativeText = NSLocalizedString(
-            "It's a Mac running Bromure Native: its agents run natively — not in a sandbox — as that Mac's user. Once allowed, it's listed beside your VMs, and its agents and the agents in your workspaces can message each other, hand each other work and exchange files.\n\nOnly allow a Mac you trust. You can remove it from the fleet at any time.",
+            "It's a Mac running Bromure Sidecar: its agents run natively — not in a sandbox — as that Mac's user. Once allowed, it's listed beside your VMs, and its agents and the agents in your workspaces can message each other, hand each other work and exchange files.\n\nOnly allow a Mac you trust. You can remove it from the fleet at any time.",
             comment: "fleet admission")
         alert.addButton(withTitle: NSLocalizedString("Allow", comment: "fleet admission"))
         alert.addButton(withTitle: NSLocalizedString("Block", comment: "fleet admission"))

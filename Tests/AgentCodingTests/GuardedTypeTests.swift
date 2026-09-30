@@ -11,6 +11,7 @@ struct GuardedTypeTests {
 
     private static func tmuxPath() -> String? {
         let candidates = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux",
+                          NSHomeDirectory() + "/Library/Application Support/BromureSidecar/bin/tmux",
                           NSHomeDirectory() + "/Library/Application Support/BromureNative/bin/tmux"]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
