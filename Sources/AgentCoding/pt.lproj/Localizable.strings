@@ -3189,8 +3189,6 @@
 "Open Local Network Settings" = "Abrir ajustes de Rede Local";
 
 /* Models: your environment (auto mode) */
-"Your environment" = "Seu ambiente";
-"What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "O que as verificações de segurança dos seus agentes devem saber: sua organização, os repositórios, domínios e serviços em que você confia. Um por linha. O modo automático do Claude usa isso para distinguir o trabalho rotineiro de ações arriscadas.";
 "Applies to every workspace from its next launch." = "Vale para cada espaço de trabalho a partir da próxima inicialização.";
 
 /* Chat: scratch terminal (/term) */
@@ -3205,3 +3203,8 @@
 
 /* Review: this turn */
 "Nothing has changed since this turn began." = "Nada mudou desde o início deste turno.";
+
+/* Preferences → Environment: describe your environment */
+"Describe your environment" = "Descreva seu ambiente";
+"What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "O que as verificações de segurança dos seus agentes devem saber do seu mundo: sua organização, seus servidores e para que servem, os repositórios e domínios em que você confia, o que é seguro alterar. Um fato por linha. O modo automático do Claude usa isso para distinguir o trabalho rotineiro de ações arriscadas.";
+"Variables" = "Variáveis";

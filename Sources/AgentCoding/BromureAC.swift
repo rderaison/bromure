@@ -130,7 +130,7 @@ struct BromureAC: ParsableCommand {
         // Hidden verification hook for the UX surfaces (command palette,
         // Security Overview, machine menu, grouped session list), rendered
         // with sample data — standalone, no servers or VMs.
-        //   bromure-ac __shot-ui <palette|overview|machinemenu|groups> [out.png] [--dark]
+        //   bromure-ac __shot-ui <palette|overview|machinemenu|groups|environment> [out.png] [--dark]
         if filtered.first == "__shot-ui" {
             let args = Array(filtered.dropFirst())
             let which = args.first ?? "palette"
@@ -208,6 +208,20 @@ struct BromureAC: ParsableCommand {
             let view: AnyView
             var size = NSSize(width: 900, height: 620)
             switch which {
+            case "environment":
+                // Preferences → Environment: the description (its example
+                // showing), then the variables.
+                size = NSSize(width: 680, height: 470)
+                view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
+                    VStack(alignment: .leading, spacing: 18) {
+                        AgentEnvironmentEditor(text: .constant(""))
+                        Divider()
+                        Text("Variables").font(.headline)
+                        Text("Plain `KEY=VALUE` pairs exported into every shell in the VM.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(22) })
             case "palette":
                 let items: [PaletteItem] = [
                     PaletteItem(section: .actions, title: "New Session", icon: "plus", shortcut: "⌘N") {},

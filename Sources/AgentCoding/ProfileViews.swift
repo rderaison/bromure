@@ -130,7 +130,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .fusion:          return "mount mac folders fusion"
         case .folders:         return "shared folder mount directory"
         case .credentials:     return "keys tokens secrets ssh aws github password vault 1password"
-        case .environment:     return "env variables dotenv shell"
+        case .environment:     return "env variables dotenv shell description auto mode safety servers staging production trusted"
         case .mcp:             return "tools servers mcp"
         case .tracing:         return "trace http log requests"
         case .guardrails:      return "firewall egress network block allow kubernetes aws docker github destructive"
@@ -1102,8 +1102,7 @@ struct ProfileEditorView: View {
         case .globalStore:
             GlobalModelsSettingsView(subscription: modelsSubscriptionHooks)
         case .remoteGlobal:
-            ModelsSettingsView(settings: $remoteGlobalDraft, subscription: modelsSubscriptionHooks,
-                               showsEnvironment: true)
+            ModelsSettingsView(settings: $remoteGlobalDraft, subscription: modelsSubscriptionHooks)
         case .workspace(let global):
             WorkspaceModelsSettingsView(override: $draft.modelOverride,
                                         globalSettings: global,
@@ -3711,7 +3710,28 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private var environmentSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            #if os(macOS)
+            // Preferences only (this Mac's, or a remote's): the global
+            // description every workspace's agents get.
+            switch resolvedModelsPane {
+            case .globalStore:
+                GlobalAgentEnvironmentEditor()
+                Divider()
+            case .remoteGlobal:
+                AgentEnvironmentEditor(text: $remoteGlobalDraft.agentEnvironment)
+                Divider()
+            case .workspace:
+                EmptyView()
+            }
+            #endif
+            environmentVariables
+        }
+    }
+
+    private var environmentVariables: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Text("Variables").font(.headline)
             Text("Plain `KEY=VALUE` pairs exported into every shell in the VM via `proxy.env` (sourced from `.bashrc`). No proxy substitution — values land on the VM verbatim, so don't put secrets here. Good for log levels, feature flags, build toggles.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
