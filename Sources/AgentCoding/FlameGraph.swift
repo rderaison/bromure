@@ -421,6 +421,8 @@ struct RoomTimelineView: View {
         var shortName: String { nickname.map { "@" + $0 } ?? title }
     }
     let lanes: [Lane]
+    /// Where the zoom starts (the offline render looks at an overflowing chart).
+    var initialZoom: Double = 1
     @State private var zoom: Double = 1
     @State private var hovered: Int?
     @State private var hoverText: String?
@@ -428,6 +430,8 @@ struct RoomTimelineView: View {
 
     private static let laneHeight: CGFloat = 26
     private static let labelWidth: CGFloat = 180
+    /// One session's row, label and track alike (they sit in two columns).
+    private static let rowHeight: CGFloat = 30
 
     /// Most sessions working at the same moment.
     private static func peak(_ lanes: [Lane]) -> Int {
@@ -475,7 +479,9 @@ struct RoomTimelineView: View {
                     }
                 }
                 GeometryReader { geo in
-                    ScrollView([.horizontal, .vertical]) {
+                    // Vertical here; the tracks scroll sideways on their own
+                    // inside `chart`, so the session labels stay put.
+                    ScrollView(.vertical) {
                         VStack(alignment: .leading, spacing: 0) {
                             chart(withTurns, width: max(geo.size.width - Self.labelWidth - 28, 200) * zoom)
                             Spacer(minLength: 0)
@@ -492,7 +498,10 @@ struct RoomTimelineView: View {
                 TimelineBreakdown(totals: all.totals)
             }
         }
-        .onAppear { withAnimation(.spring(response: 0.8, dampingFraction: 0.86)) { grown = true } }
+        .onAppear {
+            zoom = initialZoom
+            withAnimation(.spring(response: 0.8, dampingFraction: 0.86)) { grown = true }
+        }
     }
 
     private func chart(_ lanes: [Lane], width: CGFloat) -> some View {
@@ -502,67 +511,81 @@ struct RoomTimelineView: View {
         let scale = width / CGFloat(span)
         func x(_ d: Date) -> CGFloat { CGFloat(d.timeIntervalSince(start)) * scale }
 
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 0) {
+        return HStack(alignment: .top, spacing: 0) {
+            // The sessions, pinned: scrolling the tracks sideways leaves them
+            // where they are.
+            VStack(alignment: .leading, spacing: 6) {
                 Color.clear.frame(width: Self.labelWidth, height: 14)
-                ZStack(alignment: .topLeading) {
-                    ForEach(0..<6, id: \.self) { i in
-                        let t = start.addingTimeInterval(span * Double(i) / 5)
-                        Text((span > 20 * 3600 ? TimelineFormat.dayClock : TimelineFormat.clock).string(from: t))
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.tertiary)
-                            .offset(x: min(x(t), width - 44))
+                ForEach(lanes) { lane in
+                    laneLabel(lane)
+                        .frame(width: Self.labelWidth, height: Self.rowHeight, alignment: .leading)
+                }
+            }
+            ScrollView(.horizontal) {
+                VStack(alignment: .leading, spacing: 6) {
+                    ZStack(alignment: .topLeading) {
+                        ForEach(0..<6, id: \.self) { i in
+                            let t = start.addingTimeInterval(span * Double(i) / 5)
+                            Text((span > 20 * 3600 ? TimelineFormat.dayClock : TimelineFormat.clock).string(from: t))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                                .offset(x: min(x(t), width - 44))
+                        }
+                    }
+                    .frame(width: width, height: 14, alignment: .topLeading)
+                    ForEach(Array(lanes.enumerated()), id: \.element.id) { li, lane in
+                        ZStack(alignment: .topLeading) {
+                            RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.035))
+                                .frame(width: width, height: Self.laneHeight)
+                            ForEach(lane.timeline.turns) { t in
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(Color.accentColor.opacity(0.18))
+                                    .frame(width: max(CGFloat(t.duration) * scale, 2), height: Self.laneHeight)
+                                    .offset(x: x(t.start))
+                                ForEach(t.segments) { s in
+                                    FlameBar(label: "", gradient: s.kind.gradient, glow: s.kind.color,
+                                             width: max(CGFloat(s.duration) * scale, 1.5), height: Self.laneHeight - 8,
+                                             highlighted: hovered == s.id)
+                                        .offset(x: x(s.start), y: 4)
+                                        .onHover { on in
+                                            hovered = on ? s.id : (hovered == s.id ? nil : hovered)
+                                            hoverText = on ? "\(lane.shortName) · \(s.kind == .model ? s.kind.label : s.name)\(s.detail.isEmpty ? "" : " · \(s.detail)") — \(TimelineFormat.duration(s.duration)) · \(TimelineFormat.clock.string(from: s.start))" : nil
+                                        }
+                                }
+                            }
+                        }
+                        .frame(width: width, height: Self.laneHeight, alignment: .topLeading)
+                        .scaleEffect(x: grown ? 1 : 0.001, anchor: .leading)
+                        .animation(.spring(response: 0.8, dampingFraction: 0.86).delay(Double(li) * 0.06), value: grown)
+                        .frame(height: Self.rowHeight)
                     }
                 }
-                .frame(width: width, height: 14, alignment: .topLeading)
+                .padding(.trailing, 6)
             }
-            ForEach(Array(lanes.enumerated()), id: \.element.id) { li, lane in
-                HStack(spacing: 0) {
-                    HStack(spacing: 7) {
-                        AgentAvatar(tool: lane.tool, size: 18)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(lane.title).font(.system(size: 11.5, weight: .medium)).lineLimit(1).truncationMode(.tail)
-                            HStack(spacing: 4) {
-                                if let nick = lane.nickname {
-                                    Text("@" + nick)
-                                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                        .foregroundStyle(Color.accentColor)
-                                        .lineLimit(1).truncationMode(.tail)
-                                    Text("·").font(.system(size: 10)).foregroundStyle(.tertiary)
-                                }
-                                Text(TimelineFormat.duration(lane.timeline.busy)).font(.system(size: 10)).monospacedDigit()
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize()
-                            }
-                        }
+        }
+    }
+
+    /// A session's row label: avatar, title, @nickname · time worked.
+    private func laneLabel(_ lane: Lane) -> some View {
+        HStack(spacing: 7) {
+            AgentAvatar(tool: lane.tool, size: 18)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(lane.title).font(.system(size: 11.5, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                HStack(spacing: 4) {
+                    if let nick = lane.nickname {
+                        Text("@" + nick)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Color.accentColor)
+                            .lineLimit(1).truncationMode(.tail)
+                        Text("·").font(.system(size: 10)).foregroundStyle(.tertiary)
                     }
-                    .frame(width: Self.labelWidth, alignment: .leading)
-                    ZStack(alignment: .topLeading) {
-                        RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.035))
-                            .frame(width: width, height: Self.laneHeight)
-                        ForEach(lane.timeline.turns) { t in
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(Color.accentColor.opacity(0.18))
-                                .frame(width: max(CGFloat(t.duration) * scale, 2), height: Self.laneHeight)
-                                .offset(x: x(t.start))
-                            ForEach(t.segments) { s in
-                                FlameBar(label: "", gradient: s.kind.gradient, glow: s.kind.color,
-                                         width: max(CGFloat(s.duration) * scale, 1.5), height: Self.laneHeight - 8,
-                                         highlighted: hovered == s.id)
-                                    .offset(x: x(s.start), y: 4)
-                                    .onHover { on in
-                                        hovered = on ? s.id : (hovered == s.id ? nil : hovered)
-                                        hoverText = on ? "\(lane.shortName) · \(s.kind == .model ? s.kind.label : s.name)\(s.detail.isEmpty ? "" : " · \(s.detail)") — \(TimelineFormat.duration(s.duration)) · \(TimelineFormat.clock.string(from: s.start))" : nil
-                                    }
-                            }
-                        }
-                    }
-                    .frame(width: width, height: Self.laneHeight, alignment: .topLeading)
-                    .scaleEffect(x: grown ? 1 : 0.001, anchor: .leading)
-                    .animation(.spring(response: 0.8, dampingFraction: 0.86).delay(Double(li) * 0.06), value: grown)
+                    Text(TimelineFormat.duration(lane.timeline.busy)).font(.system(size: 10)).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
                 }
             }
         }
+        .padding(.trailing, 8)
     }
 }
 
@@ -622,7 +645,7 @@ extension FlameGraphView {
                                           timeline: SessionTimeline.build(AgentTranscript.parse($0.data, agent: agent)),
                                           // A stand-in nickname: the file's stem, as the room would show one.
                                           nickname: String((($0.title as NSString).deletingPathExtension).prefix(10)))
-                }))
+                }, initialZoom: Double(ProcessInfo.processInfo.environment["BROMURE_SHOT_ZOOM"] ?? "") ?? 1))
             // BROMURE_SHOT_WIDTH: a narrower surface (the popover, a small window).
             let w = CGFloat(Double(ProcessInfo.processInfo.environment["BROMURE_SHOT_WIDTH"] ?? "") ?? 1000)
             let host = NSHostingView(rootView: content.padding(14)
