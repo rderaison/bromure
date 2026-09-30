@@ -1,4 +1,4 @@
-// SDK feasibility probe only: does not boot a guest or enable acceleration.
+// SDK/guest-binding feasibility probe only: never enables acceleration.
 // Compile with SDK 27 while retaining the app's macOS 14 deployment target:
 // xcrun swiftc -target arm64-apple-macosx14.0 -module-cache-path /tmp/bromure-gpu-modules tools/gpu/validate-custom-virtio.swift -o /tmp/bromure-gpu-probe
 // codesign --force --sign - --entitlements tools/gpu/probe.entitlements /tmp/bromure-gpu-probe
@@ -6,7 +6,80 @@ import Foundation
 import Virtualization
 
 @available(macOS 27.0, *)
-final class ProbeDelegate: NSObject, VZCustomVirtioDeviceConfigurationDelegate {}
+final class ProbeDelegate: NSObject, VZCustomVirtioDeviceConfigurationDelegate, VZCustomVirtioDeviceDelegate {
+    func customVirtioConfiguration(_ configuration: VZCustomVirtioDeviceConfiguration,
+                                  didCreateDevice device: VZCustomVirtioDevice) {
+        device.delegate = self
+        print("DEVICE CREATED")
+    }
+
+    func customVirtioDeviceDidAcceptDriverOk(_ device: VZCustomVirtioDevice) {
+        print("DRIVER_OK: guest completed feature negotiation")
+        for index: UInt16 in [0, 1] {
+            if let queue = device.queue(at: index) {
+                print("QUEUE READY \(index): size \(queue.queueSize)")
+            }
+        }
+        // This address was checked against /proc/iomem on the probe VM.
+        // It is a probe constant, never a production guest-memory assumption.
+        if let mapping = device.guestMemoryMapping(atPhysicalAddress: 0x70000000, length: 4096),
+           mapping.length == 4096 {
+            // Read once into host-owned memory; do not print guest contents or
+            // retain the mapping across reset, stop, or reboot.
+            let snapshot = Data(bytes: mapping.mutableBytes, count: mapping.length)
+            print("RAM MAPPING: copied \(snapshot.count) bytes from probe RAM base")
+        } else { print("RAM MAPPING: unavailable at probe RAM base") }
+        print("INVALID MAPPING REJECTED: \(device.guestMemoryMapping(atPhysicalAddress: UInt64.max - 4095, length: 4096) == nil)")
+    }
+
+    func customVirtioDevice(_ device: VZCustomVirtioDevice,
+                           didReceiveNotificationFor queue: VZVirtioQueue) {
+        while let element = queue.nextElement() {
+            defer { element.returnToQueue() }
+            // A bounded immutable copy, never repeated reads of guest metadata.
+            let count = element.readBuffersAvailableByteCount
+            guard count >= 24, count <= 65536 else {
+                print("REJECT descriptor length \(count)")
+                continue
+            }
+            do {
+                let command = try element.readBytes(withExactLength: count)
+                let type = command.prefix(4).enumerated().reduce(UInt32(0)) {
+                    $0 | (UInt32($1.element) << ($1.offset * 8))
+                }
+                print("QUEUE \(queue.queueIndex) command 0x\(String(type, radix: 16)) bytes \(count)")
+                // This binding probe exposes no usable displays or 3D support.
+                // GET_DISPLAY_INFO returns sixteen disabled scanouts. All other
+                // control commands receive ERR_UNSPEC; cursor has no response.
+                guard queue.queueIndex == 0 else { continue }
+                var response = Data(command.prefix(24))
+                let responseType: UInt32 = type == 0x100 && count == 24 ? 0x1101 : 0x1200
+                for index in 0..<4 { response[index] = UInt8((responseType >> (index * 8)) & 255) }
+                response[4] &= 1 // Echo only the fence flag and its ID.
+                response[5] = 0; response[6] = 0; response[7] = 0
+                response[20] = 0; response[21] = 0; response[22] = 0; response[23] = 0
+                if responseType == 0x1101 { response.append(Data(repeating: 0, count: 384)) }
+                guard response.count <= element.writeBuffersAvailableByteCount else {
+                    print("REJECT response buffer too short")
+                    continue
+                }
+                try element.write(response)
+            } catch { print("QUEUE ERROR: \(error)") }
+        }
+    }
+
+    func customVirtioDeviceWillPause(_ device: VZCustomVirtioDevice) { print("DEVICE PAUSE") }
+    func customVirtioDeviceWillResume(_ device: VZCustomVirtioDevice) { print("DEVICE RESUME") }
+    func customVirtioDeviceWillReset(_ device: VZCustomVirtioDevice) { print("DEVICE RESET") }
+    func customVirtioDeviceWillStop(_ device: VZCustomVirtioDevice) { print("DEVICE STOP") }
+}
+
+// Retain both objects throughout an asynchronous boot probe.
+@available(macOS 27.0, *)
+enum BootLifetime {
+    static var vm: VZVirtualMachine?
+    static var delegate: ProbeDelegate?
+}
 
 @available(macOS 27.0, *)
 func probe() throws {
@@ -35,6 +108,60 @@ func probe() throws {
     config.cpuCount = 2
     config.memorySize = 512 * 1024 * 1024
     config.customVirtioDevices = [gpu]
+    if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--boot-image" {
+        let image = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+        let linux = VZLinuxBootLoader(kernelURL: image.appendingPathComponent("vmlinuz"))
+        linux.initialRamdiskURL = image.appendingPathComponent("initrd")
+        linux.commandLine = "console=hvc0 root=/dev/vda ro init=/bin/sh"
+        config.bootLoader = linux
+        config.memorySize = 2 * 1024 * 1024 * 1024
+        config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment:
+            try VZDiskImageStorageDeviceAttachment(url: image.appendingPathComponent("linux-base.img"), readOnly: true))]
+        let console = VZVirtioConsoleDeviceSerialPortConfiguration()
+        console.attachment = VZFileHandleSerialPortAttachment(
+            fileHandleForReading: .standardInput, fileHandleForWriting: .standardOutput)
+        config.serialPorts = [console]
+        config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+        try config.validate()
+        BootLifetime.delegate = delegate
+        let vm = VZVirtualMachine(configuration: config)
+        BootLifetime.vm = vm
+        vm.start { result in
+            switch result {
+            case .success:
+                print("VM STARTED: read-only disk, no networking, no graphics presentation")
+                for delay in [15.0, 30.0] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        vm.pause { result in
+                            switch result {
+                            case .success:
+                                print("VM PAUSED")
+                                vm.resume { result in
+                                    switch result {
+                                    case .success: print("VM RESUMED")
+                                    case .failure(let error):
+                                        fputs("RESUME FAILED: \(error)\n", stderr); exit(1)
+                                    }
+                                }
+                            case .failure(let error):
+                                fputs("PAUSE FAILED: \(error)\n", stderr); exit(1)
+                            }
+                        }
+                    }
+                }
+            case .failure(let error): fputs("BOOT FAILED: \(error)\n", stderr); exit(1)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
+            vm.stop { error in
+                if let error { fputs("STOP FAILED: \(error)\n", stderr) }
+                else { print("VM STOPPED") }
+                exit(error == nil ? 0 : 1)
+            }
+        }
+        RunLoop.main.run()
+        return
+    }
     try config.validate()
     print("PASS: custom Virtio GPU ID 16, PCI 03:00, two queues accepted by VZ configuration validation")
     print("NOT TESTED: guest binding, queues, capsets, mappings, rendering, scanout or lifecycle")
