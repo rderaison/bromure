@@ -1,0 +1,13 @@
+{
+  "date": "2026-09-30",
+  "host": "Apple M5 Pro, macOS 27.0.1",
+  "sandboxedHelper": true,
+  "codec": "H.264",
+  "decodedFrames": 12,
+  "requiresHardwareDecoder": true,
+  "usingHardwareAcceleratedVideoDecoder": true,
+  "outputFormat": "NV12",
+  "outputIOSurfaceBacked": true,
+  "fixturePixelYCbCr": [63, 102, 240],
+  "browserHardwareDecodingEnabled": false
+}

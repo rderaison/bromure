@@ -1,5 +1,17 @@
 # macOS custom Virtio feasibility probe
 
+## Hardware video decode result
+
+The packaged sandboxed helper supports `--video-check`. It creates twelve
+trusted H.264 samples with a hardware encoder and requires a hardware
+VideoToolbox decoder. All twelve frames decoded; the decoder's
+`UsingHardwareAcceleratedVideoDecoder` property was true. Output was two-plane
+NV12 backed by IOSurface, with fixture values Y=63, Cb=102, Cr=240, consistent
+with the encoded red input. Software fallback fails the check. This establishes
+the host decoder/surface path only; Chromium movie hardware decoding still
+requires the guest codec protocol and browser integration. Neither VirGL's
+current GL-only build nor Chromium flags enable this decoder automatically.
+
 ## Guest rendering bridge result
 
 The optional sandboxed worker now handles capsets, contexts, bounded resources,

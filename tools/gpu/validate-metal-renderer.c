@@ -19,6 +19,7 @@ extern int probe_shared_texture(void *native_texture);
 extern int probe_containment(const char *outside_file);
 extern int run_renderer_worker(int output_fd);
 extern void renderer_worker_fence(uint32_t fence);
+extern int probe_video_decoder(void);
 
 static virgl_renderer_gl_context create_context(void *cookie, int scanout,
                                                struct virgl_renderer_gl_ctx_param *param)
@@ -58,9 +59,10 @@ static void require(int success, const char *operation)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--video-check") == 0) return probe_video_decoder() ? 0 : 1;
     int worker = argc == 2 && strcmp(argv[1], "--worker") == 0;
     if (argc != 1 && !worker && !(argc == 3 && strcmp(argv[1], "--sandbox-check") == 0)) {
-        fputs("Usage: metal-probe [--worker | --sandbox-check outside-sentinel-file]\n", stderr);
+        fputs("Usage: metal-probe [--worker | --video-check | --sandbox-check outside-sentinel-file]\n", stderr);
         return 1;
     }
     int output_fd = -1;
