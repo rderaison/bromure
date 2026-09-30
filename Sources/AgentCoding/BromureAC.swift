@@ -7663,6 +7663,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         ACAutomationServer.noteMutation()
     }
 
+    /// A review action on an attached machine's session: sent to the Mac,
+    /// and applied to the mirror at once so the window doesn't wait a poll.
+    /// False when the session isn't on an attached machine.
+    func machineReview(_ id: UUID, _ body: [String: Any], _ mirror: (inout AgentSession) -> Void) -> Bool {
+        guard let m = machine(forSession: id) else { return false }
+        m.hostSessionCommand(id, "review", body)
+        m.sessionStore.mutate(id, mirror)
+        refreshHomeSessions()
+        return true
+    }
+
     /// archive / unarchive / delete, on this host's engine or the machine's.
     private func sessionAction(_ sid: UUID, _ action: String) {
         if let m = machine(forSession: sid) { m.hostSessionCommand(sid, action, [:]); return }
@@ -11834,12 +11845,51 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         context: SessionReviewWindowManager.Context(
             session: { [weak self] id in self?.sessionRecord(id) },
             fetch: { [weak self] id, base, focus in await self?.agentSessionEngine.fetchReview(id, base: base, focusFiles: focus) },
+            // A native session's record is its Mac's (the mirror here is
+            // rewritten every poll): the comments are kept there.
             addComment: { [weak self] id, text, file, line in
+                var body: [String: Any] = ["op": "add", "text": text]
+                if let file { body["file"] = file }
+                if let line { body["line"] = line }
+                if self?.machineReview(id, body, { s in
+                    let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !t.isEmpty { s.reviewComments = (s.reviewComments ?? []) + [ReviewComment(text: t, file: file, line: line)] }
+                }) == true { return }
                 self?.agentSessionEngine.addReviewComment(id, text: text, file: file, line: line)
             },
-            removeComment: { [weak self] id, cid in self?.agentSessionEngine.removeReviewComment(id, commentID: cid) },
-            setViewed: { [weak self] id, path, fp in self?.agentSessionEngine.setReviewViewed(id, path: path, fingerprint: fp) },
-            send: { [weak self] id in self?.agentSessionEngine.sendReview(id) },
+            removeComment: { [weak self] id, cid in
+                if self?.machineReview(id, ["op": "remove", "comment": cid.uuidString], { s in
+                    s.reviewComments?.removeAll { $0.id == cid }
+                }) == true { return }
+                self?.agentSessionEngine.removeReviewComment(id, commentID: cid)
+            },
+            setViewed: { [weak self] id, path, fp in
+                var body: [String: Any] = ["op": "viewed", "path": path]
+                if let fp { body["fingerprint"] = fp }
+                if self?.machineReview(id, body, { s in
+                    var v = s.reviewViewed ?? [:]
+                    v[path] = fp
+                    s.reviewViewed = v.isEmpty ? nil : v
+                }) == true { return }
+                self?.agentSessionEngine.setReviewViewed(id, path: path, fingerprint: fp)
+            },
+            send: { [weak self] id in
+                guard let self else { return }
+                if let m = self.machine(forSession: id) {
+                    let drafts = (m.sessionStore.session(id)?.reviewComments ?? []).filter { $0.sentAt == nil }
+                    guard !drafts.isEmpty else { return }
+                    _ = self.machineReview(id, ["op": "send"], { s in
+                        let now = Date(), ids = Set(drafts.map(\.id))
+                        s.reviewComments = s.reviewComments?.map { c in
+                            var c = c
+                            if ids.contains(c.id) { c.sentAt = now }
+                            return c
+                        }
+                    })
+                    return
+                }
+                self.agentSessionEngine.sendReview(id)
+            },
             actions: { [weak self] in self?.unifiedWindow?.stageActions ?? SessionStageActions() },
             accentHex: { [weak self] id in self?.profile(for: id)?.color.hexInUI ?? "#888888" },
             workspaceName: { [weak self] id in self?.profile(for: id)?.name ?? "" }))

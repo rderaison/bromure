@@ -224,4 +224,15 @@ struct MachineLinkTests {
         // Nothing else is touched.
         #expect(DelegationMCPServer.mapGuestHome("/home/ubuntuX/a /tmp/b", to: "/Users/x") == "/home/ubuntuX/a /tmp/b")
     }
+
+    @Test("review comments a native Mac keeps decode as this app's")
+    func nativeReviewComments() throws {
+        // As Bromure Native writes them in /state (iso8601, whole seconds).
+        let json = #"[{"createdAt":"2026-09-30T13:18:19Z","file":"a.txt","id":"9BE7B9DF-2BCF-4D43-88D5-03DB88768843","line":2,"text":"Rename this file","sentAt":"2026-09-30T13:19:00Z"},{"createdAt":"2026-09-30T13:18:20Z","id":"B0931836-17D0-48AE-BECF-59C02662FB8A","text":"Add a README"}]"#
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let comments = try dec.decode([ReviewComment].self, from: Data(json.utf8))
+        #expect(comments.count == 2)
+        #expect(comments[0].file == "a.txt" && comments[0].line == 2 && comments[0].sentAt != nil)
+        #expect(comments[1].file == nil && comments[1].sentAt == nil)
+    }
 }

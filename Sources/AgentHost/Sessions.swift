@@ -40,6 +40,11 @@ struct HostSession: Codable, Equatable {
     var branchInfo: BranchInfo?
     var branchMerge: BranchMerge?
     var folderMissing: Bool?
+    /// The review window's comments on this session's changes, and which
+    /// files were marked viewed (at which diff) — Bromure AC's shapes, kept
+    /// here because a server's copy of this record is rewritten from it.
+    var reviewComments: [ReviewComment]?
+    var reviewViewed: [String: String]?
     /// The transcript the agent's hook last reported (host-only).
     var transcriptPath: String?
 }
@@ -60,6 +65,16 @@ struct BranchMerge: Codable, Equatable {
     var phase: String
     var detail: String?
     var askedBy: UUID?
+}
+
+/// Bromure AC's ReviewComment, over the wire.
+struct ReviewComment: Codable, Equatable {
+    var id: UUID
+    var text: String
+    var file: String?
+    var line: Int?
+    var createdAt: Date
+    var sentAt: Date?
 }
 
 /// Owns the sessions and keeps them bound to tmux windows. A window we open
@@ -415,6 +430,48 @@ final class SessionEngine: @unchecked Sendable {
         case "branch-keep":
             // Nothing reopens branches at boot here: keeping is the default.
             return .success(["ok": true])
+        case "review":
+            // The review window's comments (Bromure AC's verbs): add / remove /
+            // viewed, and send — the drafts go to the agent as one message.
+            switch body["op"] as? String {
+            case "add":
+                let text = ((body["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return .failure(.bad("text required")) }
+                s.reviewComments = (s.reviewComments ?? []) + [ReviewComment(
+                    id: UUID(), text: text, file: body["file"] as? String, line: body["line"] as? Int,
+                    createdAt: Date(), sentAt: nil)]
+            case "remove":
+                guard let cid = (body["comment"] as? String).flatMap(UUID.init(uuidString:)) else {
+                    return .failure(.bad("comment required"))
+                }
+                s.reviewComments?.removeAll { $0.id == cid }
+                if s.reviewComments?.isEmpty == true { s.reviewComments = nil }
+            case "viewed":
+                guard let path = body["path"] as? String else { return .failure(.bad("path required")) }
+                var v = s.reviewViewed ?? [:]
+                v[path] = body["fingerprint"] as? String
+                s.reviewViewed = v.isEmpty ? nil : v
+            case "send":
+                let drafts = (s.reviewComments ?? []).filter { $0.sentAt == nil }
+                guard !drafts.isEmpty else { return .success(["ok": true, "sent": 0]) }
+                let now = Date(), ids = Set(drafts.map(\.id))
+                s.reviewComments = s.reviewComments?.map { c in
+                    var c = c
+                    if ids.contains(c.id) { c.sentAt = now }
+                    return c
+                }
+                let message = Self.reviewMessage(drafts)
+                let saved = s
+                queue.sync {
+                    if let i = sessions.firstIndex(where: { $0.id == id }) { sessions[i] = saved }
+                    saveLocked()
+                }
+                notify()
+                DispatchQueue.global().async { _ = self.command(id, "resume", ["message": message]) }
+                return .success(["ok": true, "sent": drafts.count])
+            default:
+                return .failure(.bad("op must be add, remove, viewed or send"))
+            }
         case "delegation-link":
             s.parentSessionID = (body["parentSessionID"] as? String).flatMap(UUID.init(uuidString:))
             s.delegationID = (body["delegationID"] as? String).flatMap(UUID.init(uuidString:))
@@ -618,6 +675,24 @@ final class SessionEngine: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Bromure AC's AgentSessionEngine.reviewMessage, word for word.
+    static func reviewMessage(_ comments: [ReviewComment]) -> String {
+        var lines = [comments.count == 1
+            ? "A review comment on your changes — address it, then reply briefly with what you changed:"
+            : "Review comments on your changes — address each one, then reply briefly with what you changed:"]
+        lines.append("")
+        for (i, c) in comments.enumerated() {
+            let at: String
+            switch (c.file, c.line) {
+            case let (f?, l?): at = "`\(f)` line \(l): "
+            case let (f?, nil): at = "`\(f)`: "
+            default: at = ""
+            }
+            lines.append("\(i + 1). \(at)\(c.text)")
+        }
+        return lines.joined(separator: "\n")
     }
 
     // MARK: Launch commands
