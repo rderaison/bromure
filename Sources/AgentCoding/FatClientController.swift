@@ -1214,6 +1214,16 @@ final class RemoteHostController {
         send("POST", "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
     }
 
+    /// A session action whose reply matters (a machine's sign-in state).
+    func sessionRequest(_ id: UUID, _ action: String, body: [String: Any]? = nil) async -> (status: Int, json: [String: Any])? {
+        let host = self.host
+        let path = "/agent-sessions/\(ControlClient.encodeSegment(id.uuidString))/\(action)"
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("POST", path, body: body ?? [:])
+        }.value
+        return resp.map { ($0.status, $0.json) }
+    }
+
     /// POST /agent-sessions/{id}/worktree — a new session in a git worktree
     /// off that session's folder. The new session's id, or nil.
     func startWorktreeSession(from id: UUID, name: String, tool: Profile.Tool,
@@ -6464,7 +6474,20 @@ final class RemoteHostWindow: NSWindow {
         // OAuth); this client opens the page and tunnels the callback — the
         // path the editor's Register button already uses — and the server
         // restarts the session's agent on the stand-in key.
-        if let w = tabIndex {
+        if let w = tabIndex, controller.isAgentHost || controller.agentHostWorkspaces.contains(id) {
+            // A native machine (Bromure Sidecar): the agent's own
+            // device-code login runs there; the card shows link and code.
+            let call: MachineSignIn.Call = { [weak self] action, body in
+                guard let self, let s = self.controller.sessionStore.session(profileID: id, windowIndex: w)
+                else { return nil }
+                return await self.controller.sessionRequest(s.id, action, body: body)
+            }
+            m.hostSignInMachine = controller.profile(for: id)?.name ?? controller.host.name
+            m.hostSignIn = { _, events in MachineSignIn.run(call, events: events) }
+            m.submitHostSignInCode = { code in Task { _ = await call("signin-code", ["code": code]) } }
+            m.cancelHostSignIn = { Task { _ = await call("signin-cancel", nil) } }
+            m.relaunchAfterSignIn = { Task { _ = await call("restart", nil) } }
+        } else if let w = tabIndex {
             m.hostSignIn = { [weak self] _, events in
                 guard let self,
                       let s = self.controller.sessionStore.session(profileID: id, windowIndex: w)

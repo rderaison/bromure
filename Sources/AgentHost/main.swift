@@ -4,6 +4,7 @@ import AppKit
 //   __hook <state>     Claude Code's status hook (see ClaudeHooks)
 //   __find <args>      GNU find's -printf subset, for the `find` shim (FindCommand)
 //   __mcp-delegation   the agents' delegation MCP server (see DelegationHub)
+//   __login <tool>     a headless sign-in's link and code, then cancel (a check)
 //   __agents           the Manage Agents window alone (no services started)
 //   __remote-menu      what a plain SSH login gets: a terminal on the agents
 //   claude [args…]     start Claude here as a hosted session and attach
@@ -34,6 +35,19 @@ if args.count >= 2 {
         let argv: [UnsafeMutablePointer<CChar>?] = [strdup("/bin/sh"), strdup("-c"), strdup(attach), nil]
         execv("/bin/sh", argv)
         exit(127)
+    case "__login" where args.count > 2:
+        _ = AgentLogin.shared.start(args[2])
+        for _ in 0..<60 {
+            let st = AgentLogin.shared.state(args[2])
+            if let phase = st["phase"] as? String, phase != "starting" {
+                print(String(decoding: (try? JSONSerialization.data(withJSONObject: st, options: [.prettyPrinted, .sortedKeys])) ?? Data(), as: UTF8.self))
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        AgentLogin.shared.cancel(args[2])
+        Thread.sleep(forTimeInterval: 0.5)
+        exit(0)
     case "__agents":
         MainActor.assumeIsolated {
             let app = NSApplication.shared

@@ -231,6 +231,10 @@ struct BromureAC: ParsableCommand {
                         Spacer(minLength: 0)
                     }
                     .padding(22) })
+            case "machine-signin":
+                size = NSSize(width: 640, height: 640)
+                view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
+                    MachineSignInPreview.cards.padding(24).frame(width: 640) })
             case "palette":
                 let items: [PaletteItem] = [
                     PaletteItem(section: .actions, title: "New Session", icon: "plus", shortcut: "⌘N") {},

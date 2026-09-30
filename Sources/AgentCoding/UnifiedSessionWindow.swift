@@ -2213,6 +2213,17 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             guard let self, let machine else { return nil }
             return self.machineTerminalController(machine).view(forWindow: w)
         }
+        // The agent's account sign-in runs on the machine itself (its own
+        // device-code login); the card shows the link and code.
+        let sid = s.id
+        let call: MachineSignIn.Call = { [weak machine] action, body in
+            await machine?.control("POST", "/agent-sessions/\(sid.uuidString)/\(action)", body ?? [:], timeout: 20)
+        }
+        m.hostSignInMachine = machine.name
+        m.hostSignIn = { _, events in MachineSignIn.run(call, events: events) }
+        m.submitHostSignInCode = { code in Task { _ = await call("signin-code", ["code": code]) } }
+        m.cancelHostSignIn = { Task { _ = await call("signin-cancel", nil) } }
+        m.relaunchAfterSignIn = { Task { _ = await call("restart", nil) } }
         return m
     }
 

@@ -595,6 +595,14 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Why the last host sign-in didn't land, shown in the card under the
     /// button until the next attempt.
     @Published var hostSignInError: String?
+    /// The attached machine (Bromure Sidecar) this tab runs on: its sign-in
+    /// happens there, unsandboxed — the card says so. nil for a VM.
+    var hostSignInMachine: String?
+    /// A machine sign-in's link and code, while it waits for the user.
+    @Published var hostSignInDevice: HostSignInDevice?
+    /// Claude's paste-back code, and giving up, for a machine sign-in.
+    var submitHostSignInCode: ((String) -> Void)?
+    var cancelHostSignIn: (() -> Void)?
 
     /// "Claude", "ChatGPT", "Grok", "Kimi" — the account, not the tool.
     var signInAccountName: String {
@@ -621,7 +629,11 @@ final class BeautifiedSessionModel: ObservableObject {
                 switch event {
                 case .status(let text):
                     self.hostSignInStatus = text
+                case .device(let d):
+                    self.hostSignInDevice = d
+                    self.hostSignInStatus = NSLocalizedString("Waiting for you to approve…", comment: "sign-in")
                 case .finished(let ok, let message):
+                    self.hostSignInDevice = nil
                     if ok {
                         self.hostSignInStatus = String(format: NSLocalizedString(
                             "Signed in. Starting %@ again…", comment: "sign-in"), self.agentDisplayName)
@@ -2397,7 +2409,12 @@ struct BeautifiedSessionView: View {
                                        hostSignInAvailable: model.hostSignIn != nil && model.signInProvider != nil,
                                        signInStatus: model.hostSignInStatus,
                                        signInError: model.hostSignInError,
+                                       machineName: model.hostSignInMachine,
+                                       agentName: model.agentDisplayName,
+                                       device: model.hostSignInDevice,
                                        onHostSignIn: { model.startHostSignIn() },
+                                       onSubmitSignInCode: model.submitHostSignInCode,
+                                       onCancelSignIn: model.cancelHostSignIn,
                                        onOpenProviderSettings: model.signInProvider == nil ? model.openProviderSettings : nil,
                                        onTrust: { model.trustFolder() },
                                        onPick: { model.answerPicker($0) },
@@ -3253,7 +3270,79 @@ struct InlineTerminalView: NSViewRepresentable {
 /// What a host-run sign-in reports to the card that started it.
 enum HostSignInEvent: Equatable {
     case status(String)
+    /// A headless sign-in on an attached machine: the page to open here and
+    /// the one-time code to enter there (or, for Claude, a code to paste back).
+    case device(HostSignInDevice)
     case finished(success: Bool, message: String?)
+}
+
+struct HostSignInDevice: Equatable {
+    var url: URL
+    var code: String?
+    var paste: Bool
+}
+
+/// A session's sign-in on a Bromure Sidecar machine: the agent's own
+/// device-code login runs there (AgentLogin), this side shows its link and
+/// code and waits for it to land. `call` POSTs one of the session's actions
+/// (signin, signin-state, …) and hands back the reply.
+enum MachineSignIn {
+    typealias Call = (_ action: String, _ body: [String: Any]?) async -> (status: Int, json: [String: Any])?
+
+    static func run(_ call: @escaping Call, events: @escaping (HostSignInEvent) -> Void) {
+        Task {
+            guard let first = await call("signin", nil) else {
+                events(.finished(success: false, message: NSLocalizedString(
+                    "The machine didn't answer. Check that Bromure Sidecar is running there.", comment: "sign-in")))
+                return
+            }
+            guard first.status == 200 else {
+                events(.finished(success: false, message: first.json["error"] as? String))
+                return
+            }
+            var shown: HostSignInDevice?
+            let deadline = Date().addingTimeInterval(31 * 60)
+            var state = first.json
+            var misses = 0
+            while Date() < deadline {
+                let phase = state["phase"] as? String ?? ""
+                switch phase {
+                case "done":
+                    events(.finished(success: true, message: nil))
+                    return
+                case "failed":
+                    events(.finished(success: false, message: state["message"] as? String))
+                    return
+                case "idle":
+                    events(.finished(success: false, message: NSLocalizedString(
+                        "The sign-in stopped on the machine. You can try again.", comment: "sign-in")))
+                    return
+                case "waiting":
+                    if let u = (state["url"] as? String).flatMap(URL.init(string:)) {
+                        let d = HostSignInDevice(url: u, code: state["code"] as? String,
+                                                 paste: state["needsPaste"] as? Bool ?? false)
+                        if d != shown { shown = d; events(.device(d)) }
+                    }
+                default:
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if let r = await call("signin-state", nil), r.status == 200 {
+                    state = r.json
+                    misses = 0
+                } else {
+                    misses += 1
+                    if misses >= 20 {
+                        events(.finished(success: false, message: NSLocalizedString(
+                            "Lost touch with the machine during the sign-in.", comment: "sign-in")))
+                        return
+                    }
+                }
+            }
+            _ = await call("signin-cancel", nil)
+            events(.finished(success: false, message: NSLocalizedString("The sign-in timed out.", comment: "sign-in")))
+        }
+    }
 }
 
 private struct FailureCard: View {
@@ -3305,6 +3394,27 @@ private struct FailureCard: View {
 /// the user never touches the terminal: Claude's folder-trust dialog gets a
 /// one-click "Trust & continue"; `/login` becomes method buttons → an "Open
 /// sign-in page" button → a paste-the-code field.
+/// `__shot-ui machine-signin`: a machine sign-in card in its three states.
+enum MachineSignInPreview {
+    @MainActor static var cards: some View {
+        let login = TerminalPrompt(kind: .login)
+        return VStack(alignment: .leading, spacing: 14) {
+            PromptCard(prompt: login, providerName: "ChatGPT", hostSignInAvailable: true,
+                       machineName: "macdev2-native", agentName: "Codex")
+            PromptCard(prompt: login, providerName: "ChatGPT", hostSignInAvailable: true,
+                       signInStatus: "Waiting for you to approve…", machineName: "macdev2-native", agentName: "Codex",
+                       device: HostSignInDevice(url: URL(string: "https://auth.openai.com/codex/device")!,
+                                                code: "6URM-HUYT1", paste: false),
+                       onCancelSignIn: {})
+            PromptCard(prompt: login, providerName: "Claude", hostSignInAvailable: true,
+                       signInStatus: "Waiting for you to approve…", machineName: "macdev2-native", agentName: "Claude Code",
+                       device: HostSignInDevice(url: URL(string: "https://claude.com/cai/oauth/authorize")!,
+                                                code: nil, paste: true),
+                       onSubmitSignInCode: { _ in }, onCancelSignIn: {})
+        }
+    }
+}
+
 private struct PromptCard: View {
     let prompt: TerminalPrompt
     /// "Claude", "ChatGPT"… — the account the sign-in is for.
@@ -3313,7 +3423,13 @@ private struct PromptCard: View {
     var hostSignInAvailable = false
     var signInStatus: String? = nil
     var signInError: String? = nil
+    /// Signing in on an attached machine (not sandboxed): its name.
+    var machineName: String? = nil
+    var agentName: String = ""
+    var device: HostSignInDevice? = nil
     var onHostSignIn: () -> Void = {}
+    var onSubmitSignInCode: ((String) -> Void)? = nil
+    var onCancelSignIn: (() -> Void)? = nil
     /// No account to sign into (Oh My Pi): the machine's provider settings.
     var onOpenProviderSettings: (() -> Void)? = nil
     var onTrust: () -> Void = {}
@@ -3442,6 +3558,8 @@ private struct PromptCard: View {
                 Label(NSLocalizedString("Machine settings…", comment: "login"), systemImage: "gearshape")
             }
             .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+        } else if hostSignInAvailable, let machineName {
+            machineLoginBody(machineName)
         } else if hostSignInAvailable {
             // The host signs in: a throwaway machine does the OAuth, the
             // credential is stored on this Mac, the agent gets a stand-in key.
@@ -3517,6 +3635,105 @@ private struct PromptCard: View {
             Text(NSLocalizedString("Starting sign-in…", comment: "login"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
+    }
+
+    /// A sign-in on an attached machine: the agent's own login runs there;
+    /// its credential stays there, outside any sandbox — said up front.
+    @ViewBuilder private func machineLoginBody(_ machine: String) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: "exclamationmark.shield.fill")
+                .font(.system(size: 12)).foregroundStyle(.yellow)
+            Text(String(format: NSLocalizedString(
+                "Not sandboxed. This signs %@ in on %@ itself, as if you ran its login in a terminal there. Your %@ credentials are stored on that Mac in the agent's own files: the agent — and anything else running as you on that Mac — can read and use them. Bromure never sees them, and can't swap or revoke them for you.",
+                comment: "machine sign-in disclaimer"), agentName.isEmpty ? providerName : agentName, machine, providerName))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.yellow.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color.yellow.opacity(0.35)))
+        if let device {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 8) {
+                    Text("1").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(.orange)
+                    Button { NSWorkspace.shared.open(device.url) } label: {
+                        Label(NSLocalizedString("Open sign-in page", comment: "login"),
+                              systemImage: "arrow.up.right.square.fill")
+                    }
+                    .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+                    Text(device.url.host ?? "")
+                        .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.tertiary)
+                }
+                if device.paste {
+                    HStack(spacing: 8) {
+                        Text("2").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(.orange)
+                        Text(NSLocalizedString("Approve access, then paste the code the page shows:", comment: "login"))
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 6) {
+                        TextField(NSLocalizedString("Paste code", comment: "login"), text: $code)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(maxWidth: 280)
+                            .onSubmit { submitSignInCode() }
+                        Button(NSLocalizedString("Submit", comment: "login")) { submitSignInCode() }
+                            .controlSize(.small)
+                            .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .padding(.leading, 18)
+                } else if let c = device.code {
+                    HStack(spacing: 8) {
+                        Text("2").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(.orange)
+                        Text(NSLocalizedString("Enter this code:", comment: "login"))
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text(c)
+                            .font(.system(size: 17, weight: .semibold, design: .monospaced))
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 8).padding(.vertical, 2)
+                            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(0.06)))
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(c, forType: .string)
+                        } label: { Image(systemName: "doc.on.doc") }
+                            .buttonStyle(.borderless).help(NSLocalizedString("Copy the code", comment: "login"))
+                    }
+                }
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text(signInStatus ?? "").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    if let onCancelSignIn {
+                        Button(NSLocalizedString("Cancel", comment: "login"), action: onCancelSignIn)
+                            .buttonStyle(.link).font(.system(size: 11))
+                    }
+                }
+            }
+            .padding(.top, 2)
+        } else if let signInStatus {
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.small)
+                Text(signInStatus).font(.system(size: 11.5)).foregroundStyle(.secondary)
+            }
+            .padding(.top, 2)
+        } else {
+            Button(action: onHostSignIn) {
+                Label(String(format: NSLocalizedString("Sign in to %@ on %@…", comment: "login"), providerName, machine),
+                      systemImage: "person.badge.key.fill")
+            }
+            .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+            if let signInError {
+                Text(signInError)
+                    .font(.system(size: 11)).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func submitSignInCode() {
+        let c = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !c.isEmpty else { return }
+        onSubmitSignInCode?(c)
+        code = ""
     }
 
     private func submit() {

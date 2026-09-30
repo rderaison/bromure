@@ -476,6 +476,31 @@ final class SessionEngine: @unchecked Sendable {
             default:
                 return .failure(.bad("op must be add, remove, viewed or send"))
             }
+        case "signin":
+            // The agent's account sign-in, headless (see AgentLogin).
+            return AgentLogin.shared.start(s.tool)
+        case "signin-state":
+            return .success(AgentLogin.shared.state(s.tool))
+        case "signin-code":
+            return AgentLogin.shared.submit(s.tool, code: body["code"] as? String ?? "")
+        case "signin-cancel":
+            AgentLogin.shared.cancel(s.tool)
+            return .success(AgentLogin.shared.state(s.tool))
+        case "restart":
+            // After a sign-in: the agent again, on the new credential — its
+            // own conversation when it had one, else its opening message.
+            if let live { Tmux.killWindow(live) }
+            let transcript = s.agentTranscriptID.flatMap { $0.isEmpty ? nil : $0 }
+            let inner = Self.launchCommand(tool: s.tool, message: transcript == nil ? s.openingMessage : nil,
+                                           resume: transcript, cloneURL: nil)
+            guard let idx = Tmux.newWindow(cwd: s.cwd, name: s.tool, command: Self.wrap(inner),
+                                           options: ["@display": s.title, "@bromure_session": s.id.uuidString])
+            else { return .failure(.failed("Couldn't open a tmux window")) }
+            s.windowIndex = idx
+            s.launchingSince = Date()
+            s.resumedAt = Date()
+            s.endedAt = nil
+            s.archivedAt = nil
         case "delegation-link":
             s.parentSessionID = (body["parentSessionID"] as? String).flatMap(UUID.init(uuidString:))
             s.delegationID = (body["delegationID"] as? String).flatMap(UUID.init(uuidString:))
@@ -714,7 +739,8 @@ final class SessionEngine: @unchecked Sendable {
                 + " " + shellQuote("--mcp-config=" + AgentHostPaths.claudeMCPConfig.path)
             if let resume { cmd += resume.isEmpty ? " --continue" : " --resume \(shellQuote(resume))" }
         case "codex":
-            cmd = resume == nil ? "codex" : (resume!.isEmpty ? "codex resume --last" : "codex resume \(shellQuote(resume!))")
+            cmd = "codex " + codexMCPFlags
+            if let resume { cmd += resume.isEmpty ? " resume --last" : " resume \(shellQuote(resume))" }
         default:
             cmd = tool
         }
@@ -725,6 +751,25 @@ final class SessionEngine: @unchecked Sendable {
             cmd = "git clone \(shellQuote(cloneURL)) && cd \(shellQuote(folder)) && \(cmd)"
         }
         return cmd
+    }
+
+    /// Codex's delegation MCP, as per-launch `-c` overrides (the user's
+    /// ~/.codex/config.toml is never touched). Codex hands MCP servers a
+    /// filtered environment: TMUX + TMUX_PANE must be allow-listed, or the
+    /// shim can't say which window it runs in and every call is refused.
+    static var codexMCPFlags: String {
+        func json(_ v: Any) -> String {
+            let d = (try? JSONSerialization.data(withJSONObject: v, options: [.fragmentsAllowed, .withoutEscapingSlashes])) ?? Data()
+            return String(decoding: d, as: UTF8.self)
+        }
+        let prefix = "mcp_servers.delegation."
+        return [
+            prefix + "command=" + json(AgentHostPaths.stableExecutable),
+            prefix + "args=" + json(["__mcp-delegation"]),
+            prefix + "env_vars=" + json(["TMUX", "TMUX_PANE"]),
+            // Agent-to-agent traffic never waits on an approval prompt.
+            prefix + "default_tools_approval_mode=" + json("approve"),
+        ].map { "-c " + shellQuote($0) }.joined(separator: " ")
     }
 
     /// Run `inner` under the user's interactive login shell (their PATH,
