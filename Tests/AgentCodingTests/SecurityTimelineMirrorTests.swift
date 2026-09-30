@@ -228,6 +228,19 @@ struct SecurityTimelinePersistenceTests {
         #expect(SupplyChainRegistry.debPackage(path: "/downloads/tool.deb") == nil)   // not an archive pool
     }
 
+    @Test("Sentry tampering events are red; low-weight context stays info")
+    func sentryTamperingRows() throws {
+        let pid = UUID()
+        let module = try #require(SecurityTimeline.map(profileID: pid, eventType: "sentry.event", eventData: [
+            "kind": .string("module_load"), "category": .string("tampering"), "weight": .int(10), "pid": .int(4757),
+        ], now: Date()))
+        #expect(module.kind == .blocked && module.condition == "module_load (pid 4757)")
+        let sudo = try #require(SecurityTimeline.map(profileID: pid, eventType: "sentry.event", eventData: [
+            "kind": .string("cred_gain"), "category": .string("privilege"), "weight": .int(0), "path": .string("/usr/bin/sudo"),
+        ], now: Date()))
+        #expect(sudo.kind == .info)
+    }
+
     @Test("Guest sandbox denials render as their own rows: who, what, how many")
     func sandboxDenialRows() throws {
         let pid = UUID()

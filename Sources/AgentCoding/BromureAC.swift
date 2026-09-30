@@ -3095,7 +3095,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let running = KernelSentryRunState()
             KernelSentryService.shared.vmRunningProvider = { running.isRunning($0) }
             KernelSentryService.shared.pinDirectory = { [weak self] in self?.store.profileDirectory(for: $0) }
-            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            // `.common` modes: the watchdog's quarantine alert is a modal, and
+            // a default-mode timer stops during it, so a VM it had just paused
+            // stayed "running" and its silent sentry was flagged as tampering.
+            let runTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     running.set(Set(self.runningSessions.compactMap { pid, s in
@@ -3103,6 +3106,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     }))
                 }
             }
+            RunLoop.main.add(runTimer, forMode: .common)
             AgentWatchdog.shared.onTrip = { [weak self] pid, mode, signals in
                 Task { @MainActor [weak self] in self?.handleWatchdogTrip(pid, mode: mode, signals: signals) }
             }
@@ -12804,7 +12808,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             case 1:
                 if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
             default:
-                sandbox.vm?.stop(completionHandler: { _ in })
+                // A forced stop (the guest is paused and untrusted, so no clean
+                // poweroff) fires no delegate callback: finish the teardown here,
+                // or the session stays listed as running with no VM behind it.
+                if let vm = sandbox.vm { await Self.forceStop(vm) }
+                handleSessionStopped(profileID: pid)
             }
         }
     }

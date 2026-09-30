@@ -387,7 +387,10 @@ public final class SecurityTimeline {
             return row(NSLocalizedString("Kernel sentry", comment: "Security Timeline engine"),
                        "\(kind)\(subject.isEmpty ? "" : ": \(subject)")\(pid)",
                        str(d, "category") ?? "",
-                       kind == "landlock_denied" || kind == "file_open_denied" ? .blocked : .info)
+                       // Anything weighted 10+ (tampering: an unsigned module, lowering
+                       // lockdown, kexec, …) is red; the rest is context.
+                       kind == "landlock_denied" || kind == "file_open_denied" || (int(d, "weight") ?? 0) >= 10
+                           ? .blocked : .info)
 
         case "sentry.alarm":
             return row(NSLocalizedString("Kernel sentry", comment: "Security Timeline engine"),
