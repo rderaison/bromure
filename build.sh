@@ -15,7 +15,7 @@ case "$TARGET" in
         SDEF_FILE="$SOURCE_DIR/Bromure.sdef"
         RESOURCE_BUNDLE_NAME="bromure_bromure.bundle"
         ICON_FILE="$SCRIPT_DIR/Resources/AppIcon.icns"
-        ICON_COMPOSER=""
+        ICON_COMPOSER="$SCRIPT_DIR/Resources/Bromure.icon"
         ;;
     bromure-ac)
         PRODUCT_NAME="bromure-ac"
