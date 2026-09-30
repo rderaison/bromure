@@ -114,6 +114,33 @@ enum HostEnvironment {
         let ps = #"""
         #!/bin/bash
         # Bromure Native: GNU ps's `etimes` (elapsed seconds) on BSD ps.
+        # And a terminal's processes (`-t TTY -o a=,b=`) oldest first: the
+        # client takes the first non-shell foreground process as the tab's
+        # agent, which holds on Linux (pids ascend) but not here — Claude
+        # keeps a `caffeinate` child in the foreground, and a wrapped pid
+        # listed it first, so a young helper passed for the agent.
+        tty=0; spec=""; nx=0
+        for a in "$@"; do
+          if [ $nx = 1 ]; then spec="$a"; nx=0; continue; fi
+          case "$a" in -t) tty=1 ;; -o) nx=1 ;; esac
+        done
+        if [ $tty = 1 ] && [ -n "$spec" ] && [[ "$spec" != *etime* ]] && [[ "$spec" =~ ^([a-z]+=,)*[a-z]+=$ ]]; then
+          args=(); nx=0
+          for a in "$@"; do
+            if [ $nx = 1 ]; then args+=("etime=,$a"); nx=0; continue; fi
+            [ "$a" = "-o" ] && nx=1
+            args+=("$a")
+          done
+          /bin/ps "${args[@]}" | awk '{
+            f = $1; d = 0
+            if (index(f, "-")) { split(f, a, "-"); d = a[1]; f = a[2] }
+            n = split(f, t, ":"); s = 0
+            for (j = 1; j <= n; j++) s = s * 60 + t[j]
+            sub(/^[ \t]*[^ \t]+[ \t]+/, "")
+            printf "%d\t%s\n", d * 86400 + s, $0
+          }' | sort -s -t "$(printf '\t')" -k1,1nr | cut -f2-
+          exit ${PIPESTATUS[0]}
+        fi
         case " $* " in *etimes*) ;; *) exec /bin/ps "$@" ;; esac
         args=()
         for a in "$@"; do args+=("${a//etimes/etime}"); done
