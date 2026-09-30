@@ -313,7 +313,7 @@ retry apt-get install -y -q --no-install-recommends \
     keyboard-configuration console-setup xkb-data \
     openbox xdotool \
     spice-vdagent \
-    libgl1-mesa-dri libegl1 libgles2 mesa-utils \
+    libgl1-mesa-dri libegl-mesa0 libglx-mesa0 libgbm1 libegl1 libgles2 mesa-utils \
     mesa-va-drivers libva2 libva-drm2 libva-x11-2 vainfo \
     fonts-dejavu-core fonts-freefont-ttf fonts-liberation fonts-noto-color-emoji \
     adwaita-icon-theme \
@@ -752,6 +752,7 @@ install_config   configs/Xwrapper.conf         /mnt/etc/X11/Xwrapper.config
 install_config   scripts/resize-watcher.sh  /mnt/usr/local/bin/resize-watcher.sh 755
 install_config   scripts/graphics-env.sh /mnt/usr/local/bin/graphics-env.sh 644
 install_config   scripts/graphics-diagnostics.py /mnt/usr/local/bin/graphics-diagnostics.py 755
+install_config   scripts/graphics-prerequisites.py /mnt/usr/local/bin/graphics-prerequisites.py 755
 mkdir -p /mnt/etc/bromure
 mkdir -p /mnt/opt/bromure/graphics-sources
 for asset in "$SCRIPT_DIR"/gpu/*; do
@@ -852,6 +853,15 @@ install_config scripts/trace-agent.py      /mnt/usr/local/bin/trace-agent.py    
 install_config scripts/resilient-launch.sh /mnt/usr/local/bin/resilient-launch.sh 755
 install_config scripts/download-guard.sh    /mnt/usr/local/bin/download-guard.sh    755
 install_config scripts/test-runner.sh      /mnt/usr/local/bin/test-runner.sh       755
+
+# Validate the installed GL stack without starting X or requiring a GPU in
+# the installer VM. A successful report is packaging evidence only.
+if ! chroot /mnt /usr/bin/python3 /usr/local/bin/graphics-prerequisites.py --require-ready \
+    > /mnt/etc/bromure/graphics-prerequisites.json; then
+    cat /mnt/etc/bromure/graphics-prerequisites.json
+    echo "SANDBOX_SETUP_FAILED: guest graphics prerequisites are incomplete"
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Credential bridge (passkeys + passwords)
