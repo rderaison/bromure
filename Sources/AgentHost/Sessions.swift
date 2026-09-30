@@ -763,13 +763,13 @@ final class SessionEngine: @unchecked Sendable {
             return String(decoding: d, as: UTF8.self)
         }
         let prefix = "mcp_servers.delegation."
-        return [
+        return ([
             prefix + "command=" + json(AgentHostPaths.stableExecutable),
             prefix + "args=" + json(["__mcp-delegation"]),
             prefix + "env_vars=" + json(["TMUX", "TMUX_PANE"]),
             // Agent-to-agent traffic never waits on an approval prompt.
             prefix + "default_tools_approval_mode=" + json("approve"),
-        ].map { "-c " + shellQuote($0) }.joined(separator: " ")
+        ] + CodexApprovals.current.overrides.map { $0.key + "=" + json($0.value) }).map { "-c " + shellQuote($0) }.joined(separator: " ")
     }
 
     /// Run `inner` under the user's interactive login shell (their PATH,
@@ -852,6 +852,41 @@ enum HostError: Error {
     var message: String {
         switch self {
         case .bad(let m), .notFound(let m), .failed(let m), .notSupported(let m): return m
+        }
+    }
+}
+
+/// How Codex asks before acting on this Mac — the user's choice in the
+/// Sidecar menu (Codex's own defaults unless they pick otherwise). Applied
+/// at each launch and resume as `-c` overrides; ~/.codex is never touched.
+enum CodexApprovals: String, CaseIterable {
+    /// Codex's defaults: it asks.
+    case ask
+    /// Never asks; Codex's sandbox still confines commands (writes in the
+    /// session's folder only, no network).
+    case sandboxed
+    /// Never asks, no sandbox: what --dangerously-bypass-approvals-and-sandbox does.
+    case unrestricted
+
+    static let key = "codex.approvals"
+
+    static var current: CodexApprovals {
+        UserDefaults.standard.string(forKey: key).flatMap(CodexApprovals.init(rawValue:)) ?? .ask
+    }
+
+    var overrides: [(key: String, value: String)] {
+        switch self {
+        case .ask: return []
+        case .sandboxed: return [("approval_policy", "never"), ("sandbox_mode", "workspace-write")]
+        case .unrestricted: return [("approval_policy", "never"), ("sandbox_mode", "danger-full-access")]
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .ask: return "Ask Before Acting (Codex Default)"
+        case .sandboxed: return "Never Ask, Keep Codex’s Sandbox"
+        case .unrestricted: return "Never Ask, No Sandbox"
         }
     }
 }

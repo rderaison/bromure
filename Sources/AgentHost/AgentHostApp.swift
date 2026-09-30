@@ -180,6 +180,19 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pw.state = passwordAuth ? .on : .off
         pw.toolTip = "Lets a device that isn't one of your bromure.io devices sign in with your Mac account's password."
         menu.addItem(pw)
+        let approvals = NSMenuItem(title: "Codex Approvals", action: nil, keyEquivalent: "")
+        let approvalsMenu = NSMenu()
+        for mode in CodexApprovals.allCases {
+            let item = NSMenuItem(title: mode.title, action: #selector(setCodexApprovals(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = CodexApprovals.current == mode ? .on : .off
+            approvalsMenu.addItem(item)
+        }
+        approvalsMenu.addItem(.separator())
+        approvalsMenu.addItem(disabled("Applies to Codex sessions started or resumed from now on"))
+        approvals.submenu = approvalsMenu
+        menu.addItem(approvals)
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin(_:)), keyEquivalent: "")
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -352,6 +365,23 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue else { return }
         AgentHostLog.log("url: \(s.prefix(40))…")
         P2PAccount.shared.complete(s)
+    }
+
+    @objc private func setCodexApprovals(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let mode = CodexApprovals(rawValue: raw),
+              mode != CodexApprovals.current else { return }
+        if mode == .unrestricted {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Let Codex run anything without asking?"
+            alert.informativeText = "Codex will run commands on this Mac as you, with no confirmation and without Codex’s sandbox — nothing like a Bromure VM stands between the agent and your files, keys and accounts. A prompt injection in anything it reads could act with your full access."
+            alert.addButton(withTitle: "Never Ask, No Sandbox")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        UserDefaults.standard.set(mode.rawValue, forKey: CodexApprovals.key)
+        AgentHostLog.log("codex: approvals set to \(mode.rawValue)")
     }
 
     @objc private func togglePassword(_ sender: NSMenuItem) {
