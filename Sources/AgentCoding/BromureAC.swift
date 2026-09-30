@@ -170,6 +170,13 @@ struct BromureAC: ParsableCommand {
             }
             FlameGraphView.renderSnapshot(transcript: data, agent: args.count > 2 ? args[2] : nil, to: args[0])
         }
+        // The chat's /term drawer, offline (a stand-in for the live surface).
+        //   bromure-ac __shot-term [out.png] [--dark]
+        if filtered.first == "__shot-term" {
+            let args = Array(filtered.dropFirst()).filter { !$0.hasPrefix("--") }
+            ScratchTerminalDrawer.renderSnapshot(to: args.first ?? "/tmp/bromure-term.png",
+                                                 dark: filtered.contains("--dark"))
+        }
         // A display-MCP chart card, rendered offline and snapshotted.
         //   bromure-ac __shot-chart [out.png] [spec.json] [--dark]
         if filtered.first == "__shot-chart" {

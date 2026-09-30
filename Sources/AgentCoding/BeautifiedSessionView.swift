@@ -508,6 +508,57 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The agent's slash commands for the "/" palette: built-ins at once,
     /// the user's own (custom commands, skills) once read from the guest.
     @Published var slashCommands: [SlashCommand] = []
+
+    // MARK: Scratch terminal (/term)
+
+    /// This session's scratch terminal — a shell of its own in the session's
+    /// folder, on the same machine — created on first use (nil: this chat
+    /// can't have one). Hiding it keeps it running.
+    var scratchTerminal: (() -> NSView?)?
+    /// The guest tmux session behind it (to end it for good).
+    var scratchSessionName: String?
+    /// The drawer is up.
+    @Published var terminalShown = false
+    /// A shell is running for it (shown or hidden).
+    @Published var terminalAlive = false
+    var canOpenTerminal: Bool { scratchTerminal != nil }
+
+    /// What the "/" palette lists: Bromure's own commands, then the agent's.
+    var paletteSlashCommands: [SlashCommand] {
+        (canOpenTerminal ? [Self.termCommand] : []) + slashCommands
+    }
+    static let termCommand = SlashCommand(
+        name: "term",
+        description: NSLocalizedString("Open a terminal here, in this session's folder", comment: "slash palette"),
+        source: .bromure, tag: "Bromure")
+    static func isTerminalCommand(_ text: String) -> Bool {
+        ["/term", "/terminal"].contains(text.lowercased())
+    }
+
+    func showTerminal() {
+        guard canOpenTerminal else { return }
+        terminalAlive = true
+        terminalShown = true
+    }
+
+    func hideTerminal() { terminalShown = false }
+
+    func toggleTerminal() { terminalShown ? hideTerminal() : showTerminal() }
+
+    /// End the shell: its tmux session goes, the surface follows.
+    func closeTerminal() {
+        terminalShown = false
+        terminalAlive = false
+        guard let name = scratchSessionName else { return }
+        let q = "'" + name.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        Task { [provider] in _ = await provider.execGuest("tmux kill-session -t \(q) 2>/dev/null; true", timeout: 10) }
+    }
+
+    /// The shell ended on its own (`exit`): fold the drawer away.
+    func scratchTerminalEnded() {
+        terminalShown = false
+        terminalAlive = false
+    }
     @Published var agentDisplayName: String = ""
     /// Every transcript read is handed here too (the session's local copy,
     /// readable once the machine sleeps).
@@ -1331,6 +1382,12 @@ final class BeautifiedSessionModel: ObservableObject {
         let raw = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         let atts = pendingAttachments
         guard !raw.isEmpty || !atts.isEmpty, !sending else { return }
+        // /term is Bromure's, not the agent's: the terminal drawer opens.
+        if atts.isEmpty, Self.isTerminalCommand(raw), canOpenTerminal {
+            composerText = ""
+            showTerminal()
+            return
+        }
         // A slash command: the TUI answers on screen, not in the transcript.
         let isCommand = raw.hasPrefix("/") && atts.isEmpty && !raw.contains("\n")
         dismissCommandOutput()
@@ -1852,6 +1909,9 @@ struct BeautifiedSessionView: View {
     /// Keeps the tail on show through layout drift until the user scrolls
     /// (a reference: flipping it must not re-render the view).
     @State private var tailFollow = TailFollow()
+    /// ⌃` → this chat's terminal drawer, when the keys are inside this chat.
+    @State private var terminalHotkey = ChatTerminalHotkey()
+    @State private var chatHeight: CGFloat = 0
     private static let scrollSpace = "beautified-scroll"
 
     /// What's typed after a leading "/" — the palette shows for it until a
@@ -1878,8 +1938,8 @@ struct BeautifiedSessionView: View {
     private var mentionMode: Bool { paletteQuery == nil && mentionQuery != nil }
     private var paletteCommands: [SlashCommand] {
         if mentionMode { return mentionMatches }
-        guard let q = paletteQuery, !model.slashCommands.isEmpty else { return [] }
-        return SlashCommandCatalog.matches(q, in: model.slashCommands)
+        guard let q = paletteQuery, !model.paletteSlashCommands.isEmpty else { return [] }
+        return SlashCommandCatalog.matches(q, in: model.paletteSlashCommands)
     }
     private var paletteVisible: Bool { !paletteCommands.isEmpty }
     private var paletteCurrent: SlashCommand? {
@@ -1945,7 +2005,28 @@ struct BeautifiedSessionView: View {
             if parts != .transcript { composerParts }
         }
         .animation(.easeOut(duration: 0.15), value: paletteVisible)
+        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: model.terminalShown)
         .onChange(of: paletteQuery) { _, _ in paletteIndex = 0 }
+        .background {
+            GeometryReader { g in
+                Color.clear
+                    .onAppear { chatHeight = g.size.height }
+                    .onChange(of: g.size.height) { _, h in chatHeight = h }
+            }
+        }
+        .background(ChatFrameAnchor(box: terminalHotkey.anchor))
+        .onAppear {
+            guard parts != .composer else { return }
+            terminalHotkey.install { [weak model] in
+                guard let model, model.canOpenTerminal else { return false }
+                if model.terminalShown { hideTerminalAndRefocus() } else { model.showTerminal() }
+                return true
+            }
+        }
+        .onDisappear { terminalHotkey.remove() }
+        .onChange(of: model.terminalShown) { _, shown in
+            if !shown { terminalHotkey.focusComposer() }
+        }
         // A chat surface, not a terminal: opaque so it never picks up the
         // window's terminal-translucency (which reads as a gray scrim here).
         // The canvas tone — the composer card is the white thing on it.
@@ -2023,6 +2104,17 @@ struct BeautifiedSessionView: View {
             // which change with every mirror push — only the panel should
             // re-render then, not the whole transcript above it.
             if delegations { DelegationPanelHost(model: model) }
+            // /term: a shell in this session's folder, right above the composer.
+            if model.terminalShown {
+                ScratchTerminalDrawer(model: model,
+                                      maxHeight: max(160, chatHeight * 0.72),
+                                      onHide: { hideTerminalAndRefocus() })
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+    }
+
+    private func hideTerminalAndRefocus() {
+        model.hideTerminal()
     }
 
     @ViewBuilder
@@ -3003,7 +3095,7 @@ private struct CommandCard: View {
 /// of an interactive command. The surface is the same one the Linux view
 /// mounts — one tmux client, re-parented — and goes back to being unmounted
 /// when the card folds.
-private struct InlineTerminalView: NSViewRepresentable {
+struct InlineTerminalView: NSViewRepresentable {
     let terminal: NSView
 
     func makeNSView(context: Context) -> NSView {

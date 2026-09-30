@@ -253,6 +253,15 @@ struct VMAttachWindow: ParsableCommand {
     @Option(name: .long, help: "Peer attach: remote login user.")
     var remoteUser: String?
 
+    // A scratch terminal (the chat's /term): a tmux session of its own —
+    // never a tab of `bromure`, so no roster, sidebar or session sees it —
+    // created in `--cwd-b64` (base64: any path survives the shell words)
+    // and kept alive across detaches until it is killed or exited.
+    @Option(name: .long, help: "Scratch terminal: guest tmux session name.")
+    var scratch: String?
+    @Option(name: .long, help: "Scratch terminal: starting folder, base64.")
+    var cwdB64: String?
+
     func run() throws {
         // Wipe the host login banner ("Last login: … on ttysNNN") that ghostty's
         // login shell prints before it execs us. While the VM is still booting
@@ -298,6 +307,19 @@ struct VMAttachWindow: ParsableCommand {
         return RemoteTransport.client(hostID: hostID, interactive: true)
     }
 
+    /// The guest command behind a scratch terminal: attach to (or create)
+    /// its own tmux session in `cwd` — the home when the folder is gone.
+    /// The wheel scrolls its history (mouse on: its one client is ours);
+    /// status off, the chat draws the chrome.
+    static func scratchCommand(session: String, cwd: String) -> String {
+        func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let name = String(session.filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(48))
+        let dir = cwd == "~" ? "$HOME" : (cwd.hasPrefix("~/") ? "$HOME/" + q(String(cwd.dropFirst(2))) : q(cwd))
+        return "d=\(dir); [ -d \"$d\" ] || d=\"$HOME\"; "
+            + "exec tmux new-session -A -s \(q(name)) -c \"$d\" \\; set-option status off \\; "
+            + "set-option mouse on \\; set-option -s set-clipboard on"
+    }
+
     private func attachLoop(client: ControlClient) throws {
 
         // Stay patient through VM boot instead of exiting: a fresh workspace
@@ -324,9 +346,17 @@ struct VMAttachWindow: ParsableCommand {
                     // surface the user is actively working in, so a background
                     // side (native window vs fat client) can't resize the
                     // shared tmux window out from under the active one.
-                    try InteractiveExec.run(client: client, vm: vmID,
-                                            view: view ?? UUID().uuidString, window: windowIndex,
-                                            guiConsent: true, sizePassive: true)
+                    if let scratch {
+                        let cwd = cwdB64.flatMap { Data(base64Encoded: $0) }
+                            .map { String(decoding: $0, as: UTF8.self) } ?? "~"
+                        try InteractiveExec.run(client: client, vm: vmID,
+                                                command: Self.scratchCommand(session: scratch, cwd: cwd),
+                                                guiConsent: true)
+                    } else {
+                        try InteractiveExec.run(client: client, vm: vmID,
+                                                view: view ?? UUID().uuidString, window: windowIndex,
+                                                guiConsent: true, sizePassive: true)
+                    }
                     // A real attach runs until the tmux client exits. If it
                     // returned almost immediately AND we're still early in
                     // boot, the session probably wasn't ready — retry rather

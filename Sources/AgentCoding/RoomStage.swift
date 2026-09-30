@@ -205,11 +205,21 @@ final class RoomStageController {
 
     var room: AgentRoom? { backend.roomStore.room(roomID) }
 
+    /// Refreshes the focused / zoomed member has been missing from the room.
+    @ObservationIgnored private var missingFocus = 0
+    @ObservationIgnored private var missingZoom = 0
+    private static let missingRefreshesToMove = 3
+
     var members: [AgentSession] {
         guard let room else { return [] }
         let all = RoomTally.members(room, in: backend.roomSessions).sorted { $0.createdAt < $1.createdAt }
         guard hideEnded else { return all }
-        return all.filter { SessionHome.bucket(for: $0, in: listModel) != .ended }
+        // The focused and zoomed members stay put even when they read ended —
+        // a flicker (a restart, a tab missing from one snapshot) must not
+        // pull the chat the user is typing in out of the grid.
+        return all.filter {
+            $0.id == focusedID || $0.id == zoomedID || SessionHome.bucket(for: $0, in: listModel) != .ended
+        }
     }
 
     /// Every member, ended ones included (the room-wide actions).
@@ -282,10 +292,17 @@ final class RoomStageController {
             models[id] = m
             modelKeys[id] = key
         }
-        if focusedID == nil || !members.contains(where: { $0.id == focusedID }) {
+        // Focus and zoom move only once their member has really left the
+        // room (deleted, archived, moved out) — for a few refreshes running,
+        // not one snapshot's absence.
+        let present = Set(allMembers.map(\.id))
+        if let f = focusedID, !present.contains(f) { missingFocus += 1 } else { missingFocus = 0 }
+        if focusedID == nil || missingFocus >= Self.missingRefreshesToMove {
+            missingFocus = 0
             focus(members.first?.id)
         }
-        if let z = zoomedID, !members.contains(where: { $0.id == z }) { zoomedID = nil }
+        if let z = zoomedID, !present.contains(z) { missingZoom += 1 } else { missingZoom = 0 }
+        if missingZoom >= Self.missingRefreshesToMove { missingZoom = 0; zoomedID = nil }
         page = min(page, max(0, pages.count - 1))
         // A member that went live will have more to show when it stops again.
         for id in models.keys where resting[id] != nil { resting[id] = nil }

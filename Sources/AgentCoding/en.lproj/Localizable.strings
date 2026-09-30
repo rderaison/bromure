@@ -3227,3 +3227,10 @@
 "Your environment" = "Your environment";
 "What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions.";
 "Applies to every workspace from its next launch." = "Applies to every workspace from its next launch.";
+
+/* Chat: scratch terminal (/term) */
+"Open a terminal here, in this session's folder" = "Open a terminal here, in this session's folder";
+"Drag to resize" = "Drag to resize";
+"Hide — the shell keeps running (⌃`)" = "Hide — the shell keeps running (⌃`)";
+"Close the terminal (ends the shell)" = "Close the terminal (ends the shell)";
+"The terminal isn't available right now." = "The terminal isn't available right now.";
