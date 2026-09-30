@@ -19,7 +19,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>1.0.1</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -32,24 +32,20 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>1.0.0</string>
-	<!-- Sparkle: Bromure AC's scheme on its own channel. The feed serves
-	     downloads under releases-sidecar/; same SUPublicEDKey (one signing
-	     key on the build host). Sparkle compares CFBundleVersion, so it is
-	     kept equal to CFBundleShortVersionString. -->
-	<key>SUFeedURL</key>
-	<string>https://bromure.io/api/v1/release-sidecar</string>
-	<key>SUPublicEDKey</key>
-	<string>G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8=</string>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
-	<key>SUScheduledCheckInterval</key>
-	<integer>86400</integer>
+	<string>1.0.1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://bromure.io/api/v1/release-sidecar</string>
+	<key>SUPublicEDKey</key>
+	<string>G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>
