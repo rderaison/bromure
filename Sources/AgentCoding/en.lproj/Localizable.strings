@@ -3237,3 +3237,6 @@
 
 /* Chat: cached history shown while the latest loads */
 "Catching up…" = "Catching up…";
+
+/* Review: this turn */
+"Nothing has changed since this turn began." = "Nothing has changed since this turn began.";

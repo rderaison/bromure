@@ -104,9 +104,13 @@ struct TurnChanges: Equatable {
     var files: [String] = []
     var added = 0
     var removed = 0
+    /// When the turn began: its review diffs from the last commit before it,
+    /// so the changes show even once the agent has committed them.
+    var since: Date?
 
     static func of(_ items: [TranscriptItem]) -> TurnChanges? {
         var c = TurnChanges()
+        c.since = items.compactMap(\.timestamp).min()
         for item in items {
             guard case .toolUse(let name, _, let detail) = item.kind,
                   ActivitySummary.category(name) == .edit else { continue }
@@ -194,8 +198,11 @@ struct TurnChangesView: View {
             // The turn's files, and whose they are: the key window opens that
             // session's review on them (in a room too, where no single session
             // is selected).
+            var info: [String: Any] = [:]
+            if let sessionID { info["session"] = sessionID }
+            if let since = changes.since { info["since"] = since }
             NotificationCenter.default.post(name: .bromureShowChanges, object: changes.files,
-                                            userInfo: sessionID.map { ["session": $0] })
+                                            userInfo: info)
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "doc.badge.gearshape")

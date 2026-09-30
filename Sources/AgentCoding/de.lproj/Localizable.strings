@@ -3202,3 +3202,6 @@
 
 /* Chat: cached history shown while the latest loads */
 "Catching up…" = "Wird aktualisiert…";
+
+/* Review: this turn */
+"Nothing has changed since this turn began." = "Seit Beginn dieses Zugs hat sich nichts geändert.";

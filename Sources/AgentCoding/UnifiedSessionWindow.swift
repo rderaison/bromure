@@ -899,11 +899,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] note in
             let files = note.object as? [String]
             let from = note.userInfo?["session"] as? UUID
+            let since = note.userInfo?["since"] as? Date
             MainActor.assumeIsolated {
                 guard let self, self.isKeyWindow else { return }
                 if let id = from ?? self.selectedSessionID, let delegate = self.acDelegate,
                    let s = delegate.sessionRecord(id), SessionHome.hasFolder(s) {
-                    delegate.sessionReviews.open(sessionID: id, files: files)
+                    delegate.sessionReviews.open(sessionID: id, files: files, since: since)
                 } else {
                     self.setFilePaneOpen(true, animated: true)
                 }

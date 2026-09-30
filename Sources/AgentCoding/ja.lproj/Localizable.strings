@@ -3202,3 +3202,6 @@
 
 /* Chat: cached history shown while the latest loads */
 "Catching up…" = "最新の内容を取得中…";
+
+/* Review: this turn */
+"Nothing has changed since this turn began." = "このターンの開始以降、変更はありません。";
