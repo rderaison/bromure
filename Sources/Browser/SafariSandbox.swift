@@ -41,6 +41,10 @@ struct Bromure: ParsableCommand {
             if arg.hasPrefix("-Apple") { skipNext = true; continue }
             filtered.append(arg)
         }
+        // Offscreen window renders for the user manual (hidden verb).
+        if filtered.first == "__shot-ui" {
+            ManualShots.run(Array(filtered.dropFirst()))
+        }
         Self.main(filtered)
     }
 }
@@ -297,6 +301,15 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         // Like Safari: launching the app opens a browser window. The
         // engine check kicks the pool; until it's warm the setup window
         // shows progress and the window opens from the pool-ready hook.
+        if let kind = ProcessInfo.processInfo.environment["BROMURE_DEBUG_SETUP_UI"],
+           state.applySetupPreview(kind) {
+            if let look = ProcessInfo.processInfo.environment["BROMURE_DEBUG_SETUP_APPEARANCE"] {
+                NSApp.appearance = NSAppearance(named: look == "dark" ? .darkAqua : .aqua)
+            }
+            showSetupWindow()
+            snapshotSetupWindowIfRequested()
+            return
+        }
         state.checkState()
         pendingLaunch = .startup
         if state.poolReady {
@@ -793,14 +806,21 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
 
         let hostingView = NSHostingView(rootView: MainView(state: state))
+        // Full-size content: MainView lays itself out under the titlebar,
+        // so don't let the hosting view inset it (or size the window for)
+        // the titlebar's safe area.
+        hostingView.safeAreaRegions = []
         let window = NSWindow(
             contentRect: .zero,
-            styleMask: [.titled, .closable, .miniaturizable],
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.contentView = hostingView
         window.title = "Bromure"
+        // The brand rail runs up under the traffic lights; MainView pads
+        // its content clear of them.
+        window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
         window.center()
@@ -809,6 +829,19 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         window.isReleasedWhenClosed = false
         window.delegate = self
         self.setupWindow = window
+    }
+
+    /// `BROMURE_DEBUG_SETUP_SHOT=<path.png>` (with BROMURE_DEBUG_SETUP_UI)
+    /// writes the setup window's content to a PNG once it has settled.
+    private func snapshotSetupWindowIfRequested() {
+        guard let path = ProcessInfo.processInfo.environment["BROMURE_DEBUG_SETUP_SHOT"] else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let view = self?.setupWindow?.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: path))
+        }
     }
 
     private func hideSetupWindow() {

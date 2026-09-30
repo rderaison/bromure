@@ -16,6 +16,7 @@ struct WarpEULAView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal)
             }
             .padding(.top, 24)
@@ -39,6 +40,7 @@ struct WarpEULAView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal)
 
                 HStack(spacing: 12) {

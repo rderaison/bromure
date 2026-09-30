@@ -1,0 +1,96 @@
+---
+title: "Camera & Effects"
+description: "Sharing your Mac's webcam, microphone, and speaker with the isolated browser, choosing devices and quality, and the camera effects: city and time, name badge, logo, and face swap, set per profile or live during a call."
+order: 10
+---
+
+# Camera & Effects
+
+The browser in a Bromure window has no camera or microphone of its own. When you allow it, Bromure passes your Mac's camera and microphone through to the VM, so video calls and voice input work as in any browser — and it can overlay effects on the video before the website ever sees it: your city and local time, a name badge, a logo, or a replacement face. This chapter covers device sharing and every effect.
+
+## Sharing the camera and microphone
+
+Camera and microphone sharing are off by default. Turn them on in the profile's [Media](07-profile-settings/media.mdx) settings:
+
+| Setting | Description |
+|---|---|
+| **Share Webcam** | Lets websites in this browser use your Mac's camera. Default: off. When on, shows a live preview, the **Camera** pop-up menu, the **Quality** menu, and the **Effects…** button. |
+| **Camera** | Which camera to share. **Default** uses the Mac's default camera. |
+| **Quality** | **Low (640×480)**, **Medium (1280×720)**, or **High (1920×1080)**. Only the qualities your camera supports are listed. Default: **High (1920×1080)**. |
+| **Share Microphone** | Lets websites in this browser use your Mac's microphone. Default: off. When on, shows the **Microphone** and **Speaker** pop-up menus and a live input level. |
+| **Speaker** | Which output device plays the browser's sound. **Default** uses the Mac's current output. Shown on its own when neither webcam nor microphone is shared. |
+
+With **Share Webcam** off, the browser in the VM has no camera device at all. With both off, WebRTC is also locked down so pages can't discover your local network addresses through it.
+
+The first time a window shares the camera or microphone, macOS asks whether Bromure may use it. Allow it in the prompt, or later in **System Settings › Privacy & Security › Camera** (or **Microphone**).
+
+> **Note:** When a profile chooses a specific microphone or speaker, Bromure switches the Mac's system-wide default input or output to that device when the window opens, because the VM uses the system defaults.
+
+### When the camera is actually on
+
+Turning on **Share Webcam** doesn't turn your camera on. The Mac's camera starts only when a web page in the browser starts using it, and stops when the page stops. While it runs:
+
+- The tab using it shows a small red dot on its favicon (tooltip **This tab is using the camera**, **…the microphone**, or **…the camera and microphone**).
+- A **Camera Effects** button (sparkles) appears in the window's titlebar.
+- The Mac's green camera light is on, as for any app.
+
+Websites still ask for permission inside the browser, as usual.
+
+## Camera effects
+
+Effects are drawn onto the video on your Mac, before the frames are sent to the VM. The website receives the video with the effects already in it, exactly as the people on your call see it.
+
+There are two places to set them:
+
+- **Per profile**: in [Media](07-profile-settings/media.mdx), click **Effects…** under **Share Webcam**. The effects you set here are saved with the profile (when you click **Save** in the settings window) and apply to every window of the profile. A small blue dot next to **Effects…** means at least one effect is set.
+- **Live, during a call**: click the **Camera Effects** button in the titlebar while a page is using the camera. The **Camera Effects** window opens and floats above other windows. Every change applies to the video immediately. Changes made here last for that window only; they are not saved to the profile.
+
+Both open the same editor. At the top are two live previews: **What you see** (mirrored, like a mirror) and **What they see** (as the other side receives it). Below them are the four effects. In both places, **Done** and **Cancel** simply close the editor; the changes you made are already in place.
+
+### City & Time
+
+"Shows a city name and its current local time in the top-left corner."
+
+- **City name** — the text to show, displayed in capitals.
+- **Time zone** — choose **Select…** and one of 20 cities (New York, Los Angeles, Chicago, London, Paris, Berlin, Tokyo, Shanghai, Dubai, Sydney, Mumbai, São Paulo, Toronto, Singapore, Hong Kong, Seoul, Moscow, Istanbul, Mexico City, Johannesburg), each shown with its time-zone abbreviation. The clock shows that zone's current time in 24-hour format and keeps ticking during the call.
+
+Leave **City name** empty to turn the effect off.
+
+### Name Badge
+
+"Your name and title appear in the bottom-right corner, like a TV news anchor."
+
+- **Display name** — shown in white on a red band.
+- **Job title** — shown below it, in black on white.
+
+Leave both empty to turn the badge off.
+
+> **Tip:** Use a generic badge ("Support team", "Guest") when you don't want to show your real name to a site you don't trust.
+
+### Logo
+
+"An image displayed in the top-right corner of the video."
+
+Click **Choose Image…** and pick a PNG, JPEG, HEIC, SVG, or other image file up to 10 MB. Tall images are scaled down to 256 pixels high. Once a logo is set, **Replace…** picks another and **Remove** takes it off.
+
+### Face Swap
+
+"Replace your face with another in the video feed. A red banner will indicate the effect is active."
+
+Face swap detects your face in each frame and replaces it with the face from a photo you choose, on your Mac, in real time.
+
+1. Turn on **Enable Face Swap**.
+2. The first time, Bromure asks **Download Face Swap Models?** — "Face swap requires two AI models (~500 MB total). They will be downloaded from Hugging Face and stored locally." Click **Download**. A progress bar reads **Downloading face swap models…**; when it finishes, **Enable Face Swap** turns on.
+3. Click **Choose Face…** and pick a clear, front-facing photo of a face (PNG, JPEG, or HEIC, up to 50 MB and 4096 × 4096 pixels). **Replace…** and **Remove** change or clear it later.
+
+While face swap is active, a red banner across the bottom of the video reads "User's real face anonymized by Bromure.io", so the people you talk to know the face isn't yours. The banner can't be turned off, and the name badge moves up to stay above it. In the editor's previews the banner scrolls, and the settings window's camera preview shows **Face Swap Active**.
+
+The models are stored in `~/Library/Application Support/Bromure/Models/` and are shared by all profiles. Face swap runs entirely on your Mac; neither the photo nor your video is sent anywhere except to the website you're on, as part of your call.
+
+If an image can't be used, an **Image Error** alert explains why (too large, unsupported format, and so on).
+
+## Related chapters
+
+- [Media](07-profile-settings/media.mdx) — the per-profile audio, webcam, and microphone settings.
+- [The Browser Window](05-browser-window.mdx) — the titlebar buttons and the red media dot on tabs.
+- [Privacy & Security](12-privacy-security.mdx) — what Bromure shares with the VM and with the network.

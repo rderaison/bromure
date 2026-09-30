@@ -1,0 +1,188 @@
+---
+title: "Appendix"
+description: "Reference tables: keyboard shortcuts, where Bromure keeps its files and secrets, the host-guest vsock ports, the network endpoints Bromure contacts, and the defaults keys behind its settings."
+order: 17
+---
+
+# Appendix — Shortcuts, Files, Ports & Defaults
+
+This appendix collects the concrete facts scattered through the rest of the manual into reference tables: keyboard shortcuts, on-disk locations, vsock ports, network endpoints, and defaults keys. Everything here applies to Bromure 5.0.0 (bundle ID `io.bromure.app`, executable `Bromure.app/Contents/MacOS/bromure`). For how the pieces fit together, see [Concepts & Architecture](04-concepts.mdx).
+
+Placeholders used below: `<UUID>` is a profile's identifier and `<id>` a window's session identifier.
+
+## Keyboard shortcuts
+
+### Menu shortcuts
+
+| Shortcut | Menu item |
+|---|---|
+| ⌘, | **Bromure › Settings...** |
+| ⌘H | **Bromure › Hide Bromure** |
+| ⌥⌘H | **Bromure › Hide Others** |
+| ⌘Q | **Bromure › Quit Bromure** |
+| ⌘N | **File › New Window** — another window of the front window's profile (for a persistent profile, which can have only one window, this brings its window forward) |
+| ⇧⌘N | **File › New Private Window** — a window in the Private Browsing profile |
+| ⌘O | **File › Open Trace…** — open a saved session recording |
+| ⌘P | **File › Print…** — when the profile allows printing |
+| ⌘W | **File › Close Window** (with native tabs, ⌘W closes the current tab; see below) |
+| ⌘Z / ⇧⌘Z | **Edit › Undo** / **Redo** |
+| ⌘X / ⌘C / ⌘V | **Edit › Cut** / **Copy** / **Paste** |
+| ⌘A | **Edit › Select All** |
+| ⌥⌘B | **Bookmarks › Open Bookmarks Manager** |
+| ⇧⌘B | **Bookmarks › Toggle Bookmarks Bar** |
+| ⌘D | **Bookmarks › Bookmark This Tab** |
+| ⌘Y | **History › Show Full History** |
+| ⌘M | **Window › Minimize** |
+
+The **Bookmarks** and **History** menus work only in windows with **Native Tabs** on.
+
+### In a browser window (native tabs)
+
+| Shortcut | Action |
+|---|---|
+| ⌘T | New tab, with the address field selected |
+| ⌘W | Close the current tab; on the last tab, close the window |
+| ⌘L | Select the address field |
+| ⌘R | Reload |
+| ⌘[ / ⌘] | Back / forward |
+| ⇧⌘[ / ⇧⌘] | Previous / next tab (wraps around) |
+| ⌘1 – ⌘8 | Go to the 1st–8th tab |
+| ⌘9 | Go to the last tab |
+| ⇧⌘H | Open the browser's history page |
+| ⌘F / ⌘G / ⇧⌘G | Find in page, find next, find previous (handled by the browser) |
+| ⌘= / ⌘+ / ⌘- / ⌘0 | Zoom in / zoom in / zoom out / actual size (handled by the browser) |
+| ⌃⌘F | Enter or leave full screen |
+
+Other ⌘ shortcuts are offered to the menu bar first. ⌘Tab and ⌘Space keep working as usual. With **Use Command as Control** on (the default, in [Settings › Input](08-app-settings/input.mdx)), the ⌘ shortcuts you type reach the browser as the Ctrl shortcuts Linux expects. See [The Browser Window](05-browser-window.mdx) for details.
+
+## File and folder locations
+
+| Path | Contents |
+|---|---|
+| `/Applications/Bromure.app` | The app |
+| `/Applications/Bromure.app/Contents/MacOS/bromure` | The app's executable, also the command-line tool |
+| `~/Library/Application Support/Bromure/` | Bromure's support folder |
+| `…/Bromure/linux-base.img` | The base image's disk |
+| `…/Bromure/vmlinuz`, `…/Bromure/initrd` | The base image's kernel and initial RAM disk |
+| `…/Bromure/image-version` | The installed base image's version |
+| `…/Bromure/image-state.json` | Which prebuilt image was installed and which recommended packages have been applied |
+| `…/Bromure/browser-img-catalog.json` | Cached copy of the image catalog |
+| `…/Bromure/*.partial` | Temporary files of an install in progress (or interrupted) |
+| `…/Bromure/profiles/<UUID>/image/profile.img` | A persistent profile's data disk (1 GB, sparse) |
+| `…/Bromure/profiles/<UUID>/profile.json` | A profile's settings, when iCloud Drive isn't available |
+| `…/Bromure/managed/installs/` | Enrollment records, one `install-<id>.json` per organization |
+| `…/Bromure/managed/profiles/<UUID>/` | Managed profiles: `profile.json`, the signed `manifest.json`, assets and certificates |
+| `…/Bromure/extensions/` | Downloaded browser extensions |
+| `…/Bromure/Models/` | Face-swap models, once downloaded |
+| `~/Library/Mobile Documents/iCloud~io~bromure~app/Documents/profiles/<UUID>/profile.json` | Profile settings synced through iCloud Drive |
+| `$TMPDIR/bromure/session-<id>.img` | The APFS clone a window's VM runs on; deleted when the window closes |
+| `$TMPDIR/bromure/session-…/` | Files received in a window's file drawer; deleted when the window closes |
+| `~/Library/Preferences/io.bromure.app.plist` | App settings (UserDefaults domain `io.bromure.app`) |
+
+`$TMPDIR` is your per-user temporary folder (run `echo $TMPDIR` in Terminal to see it).
+
+### Keychain items
+
+| Keychain service | Contents |
+|---|---|
+| `com.bromure.profile-key` | Encryption keys of profiles with **Encrypt Browsing Data** on |
+| `io.bromure.app.vpn` | WireGuard and OpenVPN configurations, IKEv2 and OpenVPN passwords, IKEv2 shared secrets and certificates, proxy passwords |
+| `io.bromure.app.managed-install` | Enrollment credentials |
+| `io.bromure.app.managed-mtls` | Private keys of managed profiles' client certificates |
+
+## Vsock ports
+
+Each host–guest service listens on its own vsock port. **View › VM Services** shows the state of the main ones for every open window; see [Concepts & Architecture](04-concepts.mdx#hostguest-services).
+
+| Port | Service |
+|---|---|
+| 5000 | Config agent (profile configuration when a window opens) |
+| 5006 | Keyboard Layout |
+| 5007 | CJK Input and trackpad gestures |
+| 5100 | File Transfer |
+| 5200 | CDP Automation |
+| 5201 | Credentials (macOS passkeys and passwords) |
+| 5300 | Link Sender |
+| 5320 | Client-certificate renewal for managed profiles |
+| 5400 | Webcam |
+| 5600 | File Picker |
+| 5700 | WARP VPN |
+| 5701 | WireGuard VPN |
+| 5702 | IKEv2 VPN |
+| 5703 | Network Refresh |
+| 5704 | OpenVPN |
+| 5810 | Native Tab Bar |
+| 5820 | Precision trackpad scrolling |
+| 5900 | HTTP Trace (session recording) |
+| 5950 | Phishing Analysis |
+
+The shared clipboard doesn't use vsock; it uses a virtual SPICE agent port attached only when **Shared Clipboard** is on.
+
+## Network endpoints
+
+For firewall and proxy administrators, these are the addresses Bromure itself contacts from your Mac. Browsing traffic from the guests goes wherever the pages you visit go.
+
+| Endpoint | Purpose | When |
+|---|---|---|
+| `https://dl.bromure.io/browser-images/` | Image catalog and prebuilt base-image downloads | Setup, image updates, and at launch to check for new recommended packages |
+| `https://dl-cdn.alpinelinux.org` | Build tools for the local build | Only when the image is built locally |
+| `https://bromure.io/api/v1/release` | App update checks (Sparkle) | Daily, and on **Check for Updates…** |
+| `https://bromure.io/api` | AI phishing analysis (changeable in [Settings › Network](08-app-settings/network.mdx)); enterprise enrollment and profile sync | Only with **AI Phishing Detection** on; only when enrolled |
+| `https://analytics.bromure.io/ingest` | Session recordings your organization enforces on a managed profile | Only for managed profiles with enforced recording |
+| `https://www.virustotal.com/api/v3` | Download scanning | Only with **Scan Downloads with VirusTotal** on |
+| `https://huggingface.co` | Face-swap models | Only when you choose to download them |
+| `https://clients2.google.com/service/update2/crx` | Chrome Web Store extension downloads | Only when you add an extension |
+
+The automation server, when you turn it on, listens on `127.0.0.1:9222` by default.
+
+## Defaults keys
+
+App settings are stored in the UserDefaults domain `io.bromure.app`. You can read one with `defaults read io.bromure.app <key>` and change one with `defaults write io.bromure.app <key> …` while Bromure is closed. Prefer the Settings window for everything it offers.
+
+### Keys behind the Settings window
+
+| Key | Setting | Values and default |
+|---|---|---|
+| `links.defaultProfileID` | **General › Default Profile for Links** | A profile UUID; empty = **Ask Every Time** (default) |
+| `vm.memoryGB` | **Hardware › Memory** | 1, 2, 3, 4, 8 or 16 (GB). When not set, Bromure uses 2 GB on Macs with less than 18 GB of memory, 3 GB below 36 GB, and 4 GB otherwise |
+| `vm.cpuCount` | **Hardware › CPU Cores** | 0 = **Automatic** (default), or a number of cores |
+| `vm.energyMode` | **Hardware › Energy Mode** | `highPower`, `automatic` (default), `lowPower` |
+| `vm.extraKernelOptions` | **Hardware › Kernel Boot Options** | Default `arm64.nosme` |
+| `vm.keyboardLayout` | **Input › Keyboard Layout** | A Linux keyboard layout name such as `us`; detected from your Mac when not set. Changing it rebuilds the image |
+| `vm.naturalScrolling` | **Input › Natural Scrolling** | `true`/`false`; detected from your Mac when not set. Changing it rebuilds the image |
+| `vm.swapCmdCtrl` | **Input › Use Command as Control** | Default `true` |
+| `vm.displayScale` | **Display › Scale Factor** | `1` or `2`; detected from your display when not set |
+| `vm.appearance` | **Display › Appearance** | `system` (default), `light`, `dark` |
+| `vm.networkMode` | **Network › Connection Mode** | `nat` (default) or `bridged` |
+| `vm.bridgedInterface` | **Network › Network Interface** | An interface name such as `en0`; empty by default |
+| `vm.dnsServers` | **Network › DNS Servers** | Comma-separated IPv4 addresses; empty = default DNS |
+| `phishingAnalysis.serverURL` | **Network › Phishing Analysis Server** | Default `https://bromure.io/api` |
+| `automation.enabled` | **Automation › Enable Automation** | Default `false` |
+| `automation.port` | **Automation › API Port** | Default `9222` |
+| `automation.bindAddress` | **Automation › Bind Address** | `127.0.0.1` (default) or `0.0.0.0` |
+
+### Other keys
+
+| Key | Purpose | Values and default |
+|---|---|---|
+| `imageRefresh.neverAsk` | Set by **Never ask me again** on the monthly image-refresh prompt | Default `false` |
+| `imageRefresh.lastPromptAt` | When the monthly image-refresh prompt last appeared | A date |
+| `phishingConsentAccepted` | Whether you accepted the **AI Phishing Detection** consent | Default `false` |
+| `warpEULAAccepted` | Whether you accepted the **Cloudflare WARP Terms of Service** | Default `false` |
+| `managed.serverURL` | Enrollment server used when no server is given | Default `https://bromure.io/api` |
+| `vm.mtu` | Network MTU of the guests' network card | Default `1280`; allowed range 576–9000 |
+| `vm.precisionScroll` | Precise trackpad scrolling | Default `true`; set to `false` to fall back to wheel-style scrolling |
+
+For example, to reset the monthly image-refresh prompt after choosing **Never ask me again**:
+
+```bash
+defaults delete io.bromure.app imageRefresh.neverAsk
+```
+
+## Related chapters
+
+- [Installation & First Run](02-installation.mdx) — storage locations and uninstalling.
+- [Concepts & Architecture](04-concepts.mdx) — what these files and ports are for.
+- [App Settings](08-app-settings/index.mdx) — the Settings window.
+- [Automation](14-automation.mdx) — the command-line tool, the HTTP API, MCP and AppleScript.
+- [Troubleshooting](15-troubleshooting.mdx) — using the VM Services window and fixing common problems.
