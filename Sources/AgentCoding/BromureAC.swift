@@ -11481,7 +11481,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private(set) lazy var sessionReviews = SessionReviewWindowManager(
         context: SessionReviewWindowManager.Context(
             session: { [weak self] id in self?.agentSessionStore.session(id) },
-            fetch: { [weak self] id, base in await self?.agentSessionEngine.fetchReview(id, base: base) },
+            fetch: { [weak self] id, base, focus in await self?.agentSessionEngine.fetchReview(id, base: base, focusFile: focus) },
             addComment: { [weak self] id, text, file, line in
                 self?.agentSessionEngine.addReviewComment(id, text: text, file: file, line: line)
             },

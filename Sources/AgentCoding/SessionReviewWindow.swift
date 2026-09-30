@@ -27,7 +27,10 @@ struct ReviewSource {
     /// path → fingerprint of the diff seen.
     var viewed: () -> [String: String]
     var plan: () -> String? = { nil }
-    var fetch: (TaskReviewData.Base) async -> TaskReviewData?
+    /// The diff at `base`. The second argument: a file the review is about
+    /// (a turn's edit) — its git checkout is diffed, which may not be the
+    /// session's folder (a worktree the agent edits in).
+    var fetch: (TaskReviewData.Base, String?) async -> TaskReviewData?
     var addComment: (_ text: String, _ file: String?, _ line: Int?) -> Void
     var removeComment: (UUID) -> Void
     var setViewed: (_ path: String, _ fingerprint: String?) -> Void
@@ -104,7 +107,7 @@ final class ReviewWindowHost {
 final class SessionReviewWindowManager {
     struct Context {
         var session: (UUID) -> AgentSession?
-        var fetch: (UUID, TaskReviewData.Base) async -> TaskReviewData?
+        var fetch: (UUID, TaskReviewData.Base, String?) async -> TaskReviewData?
         var addComment: (_ id: UUID, _ text: String, _ file: String?, _ line: Int?) -> Void
         var removeComment: (_ id: UUID, _ commentID: UUID) -> Void
         var setViewed: (_ id: UUID, _ path: String, _ fingerprint: String?) -> Void
@@ -145,7 +148,7 @@ final class SessionReviewWindowManager {
                 },
                 comments: { c.session(id)?.reviewComments ?? [] },
                 viewed: { c.session(id)?.reviewViewed ?? [:] },
-                fetch: { base in await c.fetch(id, base) },
+                fetch: { base, focus in await c.fetch(id, base, focus) },
                 addComment: { text, file, line in c.addComment(id, text, file, line) },
                 removeComment: { c.removeComment(id, $0) },
                 setViewed: { c.setViewed(id, $0, $1) },
@@ -222,7 +225,9 @@ struct ReviewView: View {
 
     private func load(quiet: Bool = false) async {
         if !quiet { loading = true; loadFailed = false }
-        let fetched = await source.fetch(base)
+        // A turn's files: review the checkout they were edited in.
+        let focusFile = focus.files?.first { $0.hasPrefix("/") }
+        let fetched = await source.fetch(base, focusFile)
         loading = false
         if let fetched { data = fetched; loadFailed = false }
         else if !quiet { data = nil; loadFailed = true }
