@@ -1,4 +1,4 @@
-Round 22 guest tree.
+Round 24 guest tree.
 
 Hashes (sha256, first 12 hex) a workspace running THIS tree reports in
 `status.build`:
@@ -6,8 +6,8 @@ Hashes (sha256, first 12 hex) a workspace running THIS tree reports in
     sandboxd   681719850197    bromure-sandboxd
     openshell  63572143fc92    bromure_openshell.py
     idmap      57eaaf0acd79    bromure_idmap.py
-    status     9a30b0071f69    bromure_sandbox_status.py
-    sentryd    7de9c11bf8c9    bromure-sentryd
+    status     24cc2e74d12a    bromure_sandbox_status.py
+    sentryd    289d9b8bc6fc    bromure-sentryd
     strict     9a19675b9e36    bromure-strict.py
     agentd     ce0b0340a004    patched/bromure-agentd.py
     attestd    911a27f81159    patched/bromure-attestd.py
@@ -23,15 +23,22 @@ Verify the scripts with:
         printf '%s  %s\n' "$(sha256sum "$f" | cut -c1-12)" "$f"
     done
 
-Round 22 changes the KERNEL MODULE. Restage sentry-dist/:
+Round 23: the modules are no longer in this tree. sentry-dist/*.ko are gone
+from git (CI builds them, the host fetches and stages them); sentry-dist/src/
+stays for the guest rebuild fallback. The module SOURCE is unchanged from
+round 22.
 
-    6.8.0-139-generic  52f21c5ea5e384a95b78baddb1572475173a9f501f17b363d3b6be05624489a9
-    6.8.0-142-generic  1e3304add5a2a0e8605e69975a33eebed4ea650b924ed782deb56de79d9b1558
+sourceHash over Makefile + bromure_sentry.c + bromure_sentry.h, as
+`name\n<len>\n<bytes>` sorted by name:
+
+    a7557baec4b6da68eb29e7d3c0bcc3adab387d9ac479f23bc1e54c9a8bdce1b0
 
 Greps:
 
-    sentry/bromure_sentry.c:  new->user_ns == &init_user_ns   (the fix)
-    sentry/bromure_sentry.c:  BST_CAPS_IN_USERNS              (counted, not dropped)
+    bromure_sandbox_status.py:  def installed_kernels
+    bromure-sentryd:            def host_unavailable_marker   (round 24)
+    bromure-sentryd:            def wait_for_host_module
+    bromure-sentryd:            --await-module
 
 
 HOST DEPENDENCIES (unchanged)

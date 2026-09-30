@@ -1,0 +1,190 @@
+// Jenkinsfile.sentry — build the kernel sentry module for every Ubuntu 24.04
+// kernel and publish it to https://dl.bromure.io/sentry/ (bucket bromure-dl).
+//
+// Why a CDN and a daily job: the sentry is an out-of-tree kernel module, and a
+// module loads only into the exact kernel it was built for. Ubuntu ships a new
+// kernel ABI (6.8.0-NNN) every few weeks, a workspace can `apt upgrade` into
+// one at any time, and new base images pick them up. Bundling modules in the
+// app would always lag. Instead this job builds every kernel the archive
+// offers, the app downloads the ones a workspace needs, and the guest waits a
+// few seconds for the host to fetch a module it hasn't seen yet.
+//
+// Modules are published per module SOURCE (sourceHash, see
+// scripts/openshell-guest/sentry/source-hash.sh): the app only loads a module
+// built from the source it ships. Each run builds for this checkout's source
+// and for the source of the last RELEASES release tags, so shipped app
+// versions keep getting modules for new kernels too.
+//
+// Everything runs in containers on kube-builder-a (arm64 Docker-in-Docker, so
+// no bind mounts: inputs go in via `docker build`, results out via `docker cp`).
+//   1. Build container (scripts/openshell-guest/sentry/Dockerfile, ubuntu:24.04)
+//      per source: fetch that source's published catalog, build every missing
+//      kernel with build.sh --verify (two builds must be byte-identical).
+//   2. Publish container (node): sign the merged catalog with the Sparkle key,
+//      upload modules then catalog, smoke-test from the CDN.
+// Publishing is additive; nothing is ever deleted.
+pipeline {
+    agent { label 'kube-builder-a' }
+
+    triggers {
+        // Daily: new kernel ABIs reach users through `apt upgrade` and new base
+        // images; the module should already be on the CDN when they do.
+        cron('H 4 * * *')
+    }
+
+    options {
+        // Each kernel is a headers install + two builds (~2–4 min); MAX_BUILDS
+        // caps a run, and a first run over the whole archive spreads over days.
+        timeout(time: 3, unit: 'HOURS')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '60'))
+    }
+
+    parameters {
+        booleanParam(name: 'DRY_RUN', defaultValue: false,
+            description: 'Build and sign, but upload nothing.')
+        string(name: 'RELEASES', defaultValue: '3',
+            description: 'Also build for the module source of the last N agentic-coding-v* release tags.')
+        string(name: 'MAX_BUILDS', defaultValue: '12',
+            description: 'Most kernels to build per source per run (newest first).')
+        string(name: 'FORCE_KERNELS', defaultValue: '',
+            description: 'Space-separated kernels to rebuild even if published, e.g. 6.8.0-142-generic.')
+        string(name: 'KERNEL_PATTERN', defaultValue: '^linux-headers-6\\.8\\.0-[0-9]+-generic$',
+            description: 'ERE over linux-headers package names to build for.')
+    }
+
+    environment {
+        DO_SPACES_ENDPOINT    = 'https://nyc3.digitaloceanspaces.com'
+        DO_SPACES_REGION      = 'nyc3'
+        DO_SPACES_BUCKET      = 'bromure-dl'
+        DO_SPACES_PUBLIC_BASE = 'https://dl.bromure.io'
+        SENTRY_DIR            = 'scripts/openshell-guest/sentry'
+    }
+
+    stages {
+        stage('Pick sources') {
+            steps {
+                sh '''
+                    set -eu
+                    git fetch --tags --force --quiet origin || true
+                    rm -rf sentry-ci && mkdir -p sentry-ci
+                    : > sentry-ci/sources
+                    add_source() {   # ref label
+                        ctx="sentry-ci/ctx-$2"
+                        mkdir -p "$ctx"
+                        for f in Makefile bromure_sentry.c bromure_sentry.h; do
+                            git show "$1:$SENTRY_DIR/$f" > "$ctx/$f" 2>/dev/null || { rm -rf "$ctx"; return 0; }
+                        done
+                        # Always this checkout's scripts; only the module source varies.
+                        for f in Dockerfile build.sh ci-build.sh source-hash.sh; do cp "$SENTRY_DIR/$f" "$ctx/"; done
+                        h=$(sh "$SENTRY_DIR/source-hash.sh" "$ctx")
+                        if grep -q " $h$" sentry-ci/sources; then rm -rf "$ctx"; return 0; fi
+                        epoch=$(git log -1 --format=%ct "$1" -- "$SENTRY_DIR")
+                        echo "$2 $epoch $h" >> sentry-ci/sources
+                        echo "source $2 ($1) → $h"
+                    }
+                    add_source HEAD head
+                    n=0
+                    for t in $(git tag -l 'agentic-coding-v*' --sort=-v:refname); do
+                        [ "$n" -ge "$RELEASES" ] && break
+                        n=$((n + 1))
+                        add_source "$t" "$(printf '%s' "$t" | tr -c 'A-Za-z0-9.' '-')"
+                    done
+                    cat sentry-ci/sources
+                '''
+            }
+        }
+
+        stage('Build modules') {
+            steps {
+                sh '''
+                    set -eu
+                    while read -r label epoch hash; do
+                        echo "=== building for source $label ($hash) ==="
+                        docker rm -f "sentry-$label" 2>/dev/null || true
+                        docker build --pull --platform linux/arm64 -q \
+                            -t "bromure-sentry-builder:$label" "sentry-ci/ctx-$label"
+                        # A failed kernel is recorded in manifest.json, not fatal;
+                        # only an infrastructure failure stops the run.
+                        docker run --platform linux/arm64 --name "sentry-$label" \
+                            -e SOURCE_DATE_EPOCH="$epoch" -e PUBLIC_BASE="$DO_SPACES_PUBLIC_BASE" \
+                            -e MAX_BUILDS="$MAX_BUILDS" -e FORCE_KERNELS="$FORCE_KERNELS" \
+                            -e KERNEL_PATTERN="$KERNEL_PATTERN" \
+                            "bromure-sentry-builder:$label"
+                        docker cp "sentry-$label:/out" "sentry-ci/out-$label"
+                        docker rm "sentry-$label"
+                    done < sentry-ci/sources
+                '''
+            }
+        }
+
+        stage('Publish') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'DO_SPACES_KEY',       variable: 'DO_SPACES_KEY'),
+                    string(credentialsId: 'DO_SPACES_SECRET',    variable: 'DO_SPACES_SECRET'),
+                    // Same ed25519 key that signs Sparkle updates and the image
+                    // catalogs; the app verifies against SUPublicEDKey.
+                    string(credentialsId: 'SPARKLE_PRIVATE_KEY', variable: 'SPARKLE_PRIVATE_KEY')
+                ]) {
+                    sh '''
+                        set -eu
+                        # The publisher image: node + the release tools (socket.dev-
+                        # wrapped install, like the other pipelines) + this run's outputs.
+                        rm -rf sentry-ci/pub && mkdir -p sentry-ci/pub/tools sentry-ci/pub/scripts
+                        cp tools/package.json tools/package-lock.json tools/spaces-put.mjs \
+                           tools/make-sentry-catalog.mjs sentry-ci/pub/tools/
+                        cp scripts/publish-sentry-modules.sh sentry-ci/pub/scripts/
+                        cp -R sentry-ci/out-* sentry-ci/pub/
+                        cat > sentry-ci/pub/Dockerfile <<'EOF'
+FROM node:22-bookworm-slim
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates \\
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /work
+COPY tools/package.json tools/package-lock.json tools/
+RUN cd tools && (npx --yes @socketsecurity/cli npm ci --silent \\
+                 || npx --yes @socketsecurity/cli npm install --silent)
+COPY . .
+EOF
+                        docker build -q -t bromure-sentry-publisher sentry-ci/pub
+                        while read -r label epoch hash; do
+                            docker run --rm \
+                                -e DO_SPACES_KEY -e DO_SPACES_SECRET -e SPARKLE_PRIVATE_KEY \
+                                -e DO_SPACES_ENDPOINT -e DO_SPACES_REGION -e DO_SPACES_BUCKET \
+                                -e DO_SPACES_PUBLIC_BASE -e DRY_RUN="$DRY_RUN" \
+                                bromure-sentry-publisher ./scripts/publish-sentry-modules.sh "out-$label"
+                        done < sentry-ci/sources
+                    '''
+                }
+            }
+        }
+
+        stage('Report') {
+            steps {
+                script {
+                    // Kernels that failed to build don't stop the publish of the
+                    // rest, but they mark the run UNSTABLE so someone looks.
+                    def failed = sh(returnStdout: true, script: '''
+                        cat sentry-ci/out-*/manifest.json 2>/dev/null \
+                          | grep -o '"failed": \\[[^]]*\\]' | grep -v '\\[\\]' || true
+                    ''').trim()
+                    if (failed) {
+                        echo "Kernels that failed to build: ${failed}"
+                        currentBuild.result = 'UNSTABLE'
+                    }
+                }
+                archiveArtifacts artifacts: 'sentry-ci/out-*/manifest.json, sentry-ci/out-*/catalog.json, sentry-ci/out-*/modules/*.txt',
+                                 allowEmptyArchive: true
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                for c in $(docker ps -aq --filter name=sentry-); do docker rm -f "$c"; done 2>/dev/null || true
+                docker image ls -q 'bromure-sentry-*' | xargs -r docker rmi -f 2>/dev/null || true
+            '''
+        }
+    }
+}

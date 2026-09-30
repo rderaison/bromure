@@ -339,6 +339,10 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
     private var statuses: [UUID: Status] = [:]
     /// Fired on every change (UI refresh).
     public var onChange: (@Sendable (UUID) -> Void)?
+    /// The kernels the guest reports (running first, then every installed
+    /// one) and whether its sentry is waiting for a module: the host fetches
+    /// and stages them (SentryModuleStore).
+    public var onKernels: (@Sendable (UUID, [String], Bool) -> Void)?
 
     public func status(for profileID: UUID) -> Status? {
         lock.lock(); defer { lock.unlock() }
@@ -351,6 +355,11 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
     }
 
     func update(profileID: UUID, report r: [String: Any], now: Date = Date()) {
+        // Kernels first, even while the sandbox is still `pending`: the sentry
+        // loads before the sandbox is assembled, and may be waiting for the
+        // host to fetch its module.
+        let kernels = [r["sentry_kernel"] as? String].compactMap { $0 } + (r["installed_kernels"] as? [String] ?? [])
+        if !kernels.isEmpty { onKernels?(profileID, kernels, r["sentry"] as? String == "waiting") }
         // The guest hasn't assembled its sandbox yet: nothing to record, and
         // nothing to cross-check (an early "off" would read as an impostor).
         if r["filesystem"] as? String == "pending" { return }

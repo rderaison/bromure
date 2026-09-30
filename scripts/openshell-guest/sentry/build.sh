@@ -63,8 +63,16 @@ else
 fi
 
 # Pin everything the kernel build would otherwise take from the environment.
-SOURCE_DATE_EPOCH=$(git -C "$HERE" log -1 --format=%ct -- . 2>/dev/null \
-    || stat -c %Y "$HERE/bromure_sentry.c")
+#
+# An externally set SOURCE_DATE_EPOCH wins. CI builds in a container with no git
+# history, so `git log` there returns nothing and the fallback would be the
+# checkout's mtime -- which differs per machine and makes the build
+# unreproducible exactly where reproducibility is being claimed. The caller knows
+# the right value (the commit it is building); this must not overrule it.
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    SOURCE_DATE_EPOCH=$(git -C "$HERE" log -1 --format=%ct -- . 2>/dev/null \
+        || stat -c %Y "$HERE/bromure_sentry.c")
+fi
 export SOURCE_DATE_EPOCH
 export KBUILD_BUILD_TIMESTAMP="@$SOURCE_DATE_EPOCH"
 export KBUILD_BUILD_USER=bromure

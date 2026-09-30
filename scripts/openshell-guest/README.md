@@ -35,7 +35,9 @@ vm-setup/
     bromure_sentry.c/.h        the module
     Makefile
     build.sh                   reproducible release build; refuses to ship a testable build
-  sentry-dist/                 BUILT OUTPUT — stage this as <meta-share>/sentry/
+  sentry-dist/src/             module source, staged for the rebuild fallback
+                               (the .ko files are built by CI and fetched by the
+                               host now, not bundled — see DESIGN.md §4.7)
     bromure_sentry-6.8.0-139-generic.ko           one .ko PER IMAGE KERNEL
     bromure_sentry-6.8.0-139-generic.txt          kernel, vermagic, headers pkg, compiler, sha256
     bromure_sentry-6.8.0-139-generic.build.log

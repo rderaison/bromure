@@ -142,19 +142,49 @@ that would need `lsm=…,bpf` and therefore an image bump.
 
 ## Module distribution
 
-`sentry-dist/` holds one prebuilt `bromure_sentry-<kver>.ko` per supported image kernel, each
-with a `.txt` recording the headers package version, compiler and sha256 (builds are
-reproducible). The host stages the whole set; the guest picks a module by exact file name
-(`$(uname -r)`), and a missing one is reported as `sentry: unavailable` with the reason.
+Modules are **not** in the app or in git. `Jenkinsfile.sentry` builds one per Ubuntu kernel
+and publishes it to the CDN; the app downloads the ones its workspaces need.
 
-**Every new base image must get its module built before it's published**, or the sentry is
-unavailable on it. Inside a VM of the image being released (or any Ubuntu arm64 machine with
-that kernel's headers), run `scripts/openshell-guest/sentry/build.sh`. It writes
-`bromure_sentry-$(uname -r).ko` plus its `.txt` and a build log, and refuses to produce a test
-build. Copy them into `Sources/AgentCoding/Resources/vm-setup/sentry-dist/` **alongside** the
-existing modules, never replacing them, so rolling back to the previous image still finds its
-module. An on-guest DKMS build is a last resort that usually fails (it runs apt through the
-workspace's egress policy).
+- **Identity.** A module is published per module *source*: `sourceHash` = sha256 over
+  `Makefile`, `bromure_sentry.c`, `bromure_sentry.h` (sorted, each `name\n<len>\n<bytes>`),
+  computed by `scripts/openshell-guest/sentry/source-hash.sh` and
+  `SentryModuleStore.sourceHash(of:)`. The app only loads modules built from the source it
+  ships (`vm-setup/sentry-dist/src`).
+- **CDN layout** (bucket `bromure-dl`, `https://dl.bromure.io`):
+  `sentry/<sourceHash>/catalog.json` (60 s TTL) and immutable
+  `sentry/<sourceHash>/<kernel>/bromure_sentry-<kernel>-<sha12>.ko` (+ `.txt` build record).
+  Publishing is additive; nothing is deleted.
+- **Catalog trust.** Signed with the Sparkle ed25519 key (the one behind `SUPublicEDKey`),
+  domain-separated by the payload's first line `bromure-sentry-modules-v1`; the signature
+  covers every module's kernel, path, sha256 and size (`tools/make-sentry-catalog.mjs` and
+  `SentryModuleCatalog.signingPayload` build identical bytes). The app refuses unsigned or
+  foreign-key catalogs, older ones than it has cached, paths outside the source's prefix, and
+  any module whose bytes don't match; cached modules are re-hashed before every staging.
+  `BROMURE_SENTRY_CATALOG_BASE` points it at a test server (unsigned accepted there, like
+  `BROMURE_IMAGE_CATALOG_BASE`).
+- **CI** (`Jenkinsfile.sentry`, daily, kube-builder-a): for this checkout's source and the last
+  `RELEASES` `agentic-coding-v*` tags' sources, a `ubuntu:24.04` arm64 container
+  (`scripts/openshell-guest/sentry/Dockerfile` + `ci-build.sh`) lists the archive's
+  `linux-headers-6.8.0-*-generic`, skips kernels already in that source's catalog, and builds
+  the rest with `build.sh --verify` (two builds must be byte-identical; the container
+  reproduced the hand-built 6.8.0-142 module exactly). A node container
+  (`scripts/publish-sentry-modules.sh`) signs the merged catalog, uploads modules then the
+  catalog, and verifies both from the CDN. Failed kernels mark the run UNSTABLE.
+- **App.** The guest reports `sentry_kernel` and `installed_kernels` (kernels with a
+  `modules.dep`) in `sandbox_status`; the host remembers them per workspace
+  (`sentry-modules/kernels.json`), prefetches them at launch, and stages the cached module of
+  every known kernel into `$META/sentry/` before boot. A kernel it hasn't seen (first boot, or
+  an `apt upgrade`) is fetched while the guest waits (sentry `waiting`; inline for `hard`,
+  in the background otherwise) and dropped into the running meta share atomically. When none
+  is coming (not built yet, offline), the host writes
+  `bromure_sentry-<kernel>.unavailable` with its reason; otherwise the guest gives up after
+  45 s. Either way the sentry ends `unavailable` with that reason: a warning, never tampering.
+- **Measured** (hard requirement, 6.8.0-142): known kernel, shell in 4 s; unknown kernel
+  fetched on demand, 6 s; no module published, clean `unavailable` naming the host's reason,
+  4 s. A host that never answers (offline, older app) costs the full 45 s in hard mode.
+
+A local build inside the guest remains the last resort and usually fails (it runs apt
+through the workspace's egress policy).
 
 ## Reconnect proof
 

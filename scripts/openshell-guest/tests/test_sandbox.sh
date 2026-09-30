@@ -2094,5 +2094,260 @@ else:
 PY
 [ $? -eq 0 ] || fails=$((fails + 1))
 
+# --------------------------------------------------------------------------
+say "24. the sentry asks the host for a module it does not have"
+# The modules are no longer bundled: CI builds one per kernel ABI and the host
+# stages the ones a workspace needs. It cannot know the kernel of a workspace it
+# has never booted, nor one that just apt-upgraded -- so the guest reports what
+# it has, says `waiting`, and the host fetches on seeing that.
+#
+# These run HERE rather than in the sentry suite because none of them loads a
+# module: they are about the status the host reads and the polling around it, and
+# this VM's lockdown forbids loading anyway.
+SENTRY_W=$WORK/sentry-wait
+mkdir -p "$SENTRY_W/meta/sentry" "$SENTRY_W/meta/sentry/src" "$SENTRY_W/run"
+printf '{"version":1,"sentry":{"enabled":true}}' \
+    > "$SENTRY_W/meta/openshell-sandbox.json"
+
+# --- installed_kernels, with two kernels present ---------------------------
+python3 - <<PY
+import os, sys, tempfile
+mod = tempfile.mkdtemp(); boot = tempfile.mkdtemp()
+# Two real kernels, and one that is ONLY a headers tree -- which is not a
+# hypothetical: /lib/modules/6.8.0-142-generic on this very machine contains
+# nothing but a 'build' symlink, because the headers package is installed for a
+# kernel that is not. A naive glob would report a phantom and have the host build
+# a module nothing can load.
+for k, real in (("6.8.0-139-generic", True), ("6.8.0-142-generic", True),
+                ("6.8.0-150-generic", False)):
+    os.makedirs(os.path.join(mod, k))
+    if real:
+        open(os.path.join(mod, k, "modules.dep"), "w").close()
+        open(os.path.join(boot, "vmlinuz-" + k), "w").close()
+    else:
+        os.makedirs(os.path.join(mod, k, "build"))
+os.environ["BROMURE_MODULES_DIR"] = mod
+os.environ["BROMURE_BOOT_DIR"] = boot
+sys.path.insert(0, "$ROOT")
+import bromure_sandbox_status as s
+got = s.installed_kernels()
+fails = 0
+if got == ["6.8.0-139-generic", "6.8.0-142-generic"]:
+    print("  ok   installed_kernels reports both real kernels, sorted")
+else:
+    print("  FAIL installed_kernels = %r" % got); fails = 1
+if "6.8.0-150-generic" not in got:
+    print("  ok   and excludes a headers-only tree (no modules.dep)")
+else:
+    print("  FAIL a headers-only tree was reported as an installed kernel"); fails = 1
+out = s.build("/nonexistent", "/nonexistent", "/nonexistent",
+              "$SENTRY_W/meta/openshell-sandbox.json")
+if out.get("sentry_kernel") == os.uname().release:
+    print("  ok   sentry_kernel is the running release (%s)" % out["sentry_kernel"])
+else:
+    print("  FAIL sentry_kernel = %r" % out.get("sentry_kernel")); fails = 1
+# Reported even with the sentry OFF: a workspace that switches it on tomorrow
+# should already have had its module prefetched.
+off = s.build("/nonexistent", "/nonexistent", "/nonexistent", "/nonexistent")
+if off.get("installed_kernels") and off.get("sentry_kernel"):
+    print("  ok   and both are reported with no spec and the sentry off")
+else:
+    print("  FAIL kernels are not reported when the sentry is off"); fails = 1
+if "waiting" in s.VALID_SENTRY:
+    print("  ok   'waiting' is a valid sentry state, so it is not coerced to off")
+else:
+    print("  FAIL 'waiting' would be coerced away, deadlocking host and guest")
+    fails = 1
+sys.exit(fails)
+PY
+rc=$?; [ $rc -eq 0 ] || { fails=$((fails + 1)); printf "  FAIL the block above exited %s\n" "$rc"; }
+
+# --- best_effort: the session must NOT be held up --------------------------
+# 45s is a long time to have no session, and long enough to trip the host's
+# boot-phase budget. So best_effort hands the wait to a transient unit and
+# returns at once; only `requirement: hard` waits inline, because a workspace
+# that demanded the sentry must not get a window with nothing watching.
+START=$(date +%s)
+sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
+    BROMURE_SENTRY_WAIT_S=20 BROMURE_SENTRY_NO_LOCKDOWN=1 \
+    /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/bg.log" 2>&1
+ELAPSED=$(( $(date +%s) - START ))
+if [ "$ELAPSED" -le 3 ]; then
+    ok "best_effort returns in ${ELAPSED}s, so the session is not held up"
+else
+    bad "best_effort blocked for ${ELAPSED}s; the boot budget would notice"
+fi
+STATE=$(sudo python3 -c "
+import json; print(json.load(open('$SENTRY_W/run/sentry.json'))['sentry'])" 2>/dev/null)
+check "and leaves the status at 'waiting', which is what the host acts on" \
+    "$STATE" "waiting"
+REASON=$(sudo python3 -c "
+import json; print(json.load(open('$SENTRY_W/run/sentry.json'))['reason'] or '')" 2>/dev/null)
+case "$REASON" in
+    *"asking the host"*) ok "with a reason that says what it is waiting for" ;;
+    *) bad "the waiting reason is unhelpful: $REASON" ;;
+esac
+KERNELS=$(sudo python3 -c "
+import json; d=json.load(open('$SENTRY_W/run/sentry.json'))
+print(','.join(d.get('installed_kernels') or []))" 2>/dev/null)
+if [ -n "$KERNELS" ]; then
+    ok "and carries installed_kernels ($KERNELS), so the host knows what to fetch"
+else
+    bad "the waiting status does not say which kernels this guest has"
+fi
+sudo systemctl stop bromure-sentry-await 2>/dev/null
+sudo systemctl reset-failed bromure-sentry-await 2>/dev/null
+
+# --- requirement: hard -- the wait is INLINE, and it finds a late delivery --
+rm -rf "$SENTRY_W/run"; mkdir -p "$SENTRY_W/run"
+printf '{"version":1,"sentry":{"enabled":true,"requirement":"hard"}}' \
+    > "$SENTRY_W/meta/openshell-sandbox.json"
+KO="$SENTRY_W/meta/sentry/bromure_sentry-$(uname -r).ko"
+( sleep 3
+  cp "$ROOT/sentry/bromure_sentry.ko" "$KO.tmp" 2>/dev/null && mv "$KO.tmp" "$KO" ) &
+DROPPER=$!
+START=$(date +%s)
+sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
+    BROMURE_SENTRY_WAIT_S=20 BROMURE_SENTRY_NO_LOCKDOWN=1 \
+    /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/wait.log" 2>&1
+ELAPSED=$(( $(date +%s) - START ))
+wait $DROPPER 2>/dev/null
+if grep -q "the host delivered a module" "$SENTRY_W/wait.log"; then
+    ok "requirement: hard waits inline and picks up a late delivery (${ELAPSED}s)"
+else
+    bad "the inline wait missed the delivered module: $(tail -3 "$SENTRY_W/wait.log" | tr '\n' ' ')"
+fi
+# The load itself cannot be asserted here: this VM is at lockdown integrity and
+# refuses unsigned modules, so insmod fails whatever the module is. What matters
+# for THIS test is that the file was found and handed to the loader.
+if grep -qE "insmod failed|already loaded|running" "$SENTRY_W/wait.log"; then
+    ok "and handed it to the loader (the load itself needs a fresh VM)"
+fi
+rm -f "$KO"
+printf '{"version":1,"sentry":{"enabled":true}}' \
+    > "$SENTRY_W/meta/openshell-sandbox.json"
+
+# --- the host says "none is coming" ----------------------------------------
+# The 45s timeout is for a host that says NOTHING. When the host knows -- and it
+# usually knows within a few seconds -- it drops a marker and the guest must stop
+# at once. Measured live before this existed: the host knew in 5s and a hard-mode
+# guest still waited the full 45, so the shell took 50s.
+sentry_state() {
+    sudo python3 -c "
+import json; print(json.load(open('$SENTRY_W/run/sentry.json'))['sentry'])" 2>/dev/null
+}
+sentry_reason() {
+    sudo python3 -c "
+import json; print(json.load(open('$SENTRY_W/run/sentry.json'))['reason'] or '')" 2>/dev/null
+}
+rm -rf "$SENTRY_W/run" "$SENTRY_W/meta/sentry"
+mkdir -p "$SENTRY_W/run" "$SENTRY_W/meta/sentry"
+printf '{"version":1,"sentry":{"enabled":true,"requirement":"hard"}}' \
+    > "$SENTRY_W/meta/openshell-sandbox.json"
+MARKER="$SENTRY_W/meta/sentry/bromure_sentry-$(uname -r).unavailable"
+( sleep 2; printf 'no module published for %s yet\n' "$(uname -r)" > "$MARKER" ) &
+DROPPER=$!
+START=$(date +%s)
+sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
+    BROMURE_SENTRY_WAIT_S=45 BROMURE_SENTRY_NO_LOCKDOWN=1 \
+    /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/marker.log" 2>&1
+ELAPSED=$(( $(date +%s) - START ))
+wait $DROPPER 2>/dev/null
+# 45s budget, marker at +2s, then a local build attempt (which fails fast here
+# because this kernel's headers ARE installed but the build is what it is). The
+# claim under test is that the WAIT ended on the marker, not that the whole run
+# was quick.
+if grep -q "the host says none is coming after" "$SENTRY_W/marker.log"; then
+    WAITED=$(sed -n 's/.*none is coming after \([0-9.]*\)s.*/\1/p' \
+        "$SENTRY_W/marker.log" | head -1)
+    if [ -n "$WAITED" ] && [ "${WAITED%%.*}" -le 4 ]; then
+        ok "the marker ends the wait in ${WAITED}s, not 45 (total run ${ELAPSED}s)"
+    else
+        bad "the marker was seen but only after ${WAITED}s"
+    fi
+else
+    bad "the marker did not end the wait: $(tail -3 "$SENTRY_W/marker.log" | tr '\n' ' ')"
+fi
+REASON=$(sentry_reason)
+case "$REASON" in
+    *"the host says: no module published for"*)
+        ok "and the host's own words reach the status: $(printf '%s' "$REASON" | head -c 80)" ;;
+    *) bad "the host's reason did not reach the status: $REASON" ;;
+esac
+check "and the state is unavailable" "$(sentry_state)" "unavailable"
+
+# --- a marker AND a module: the module wins --------------------------------
+# A host that wrote "none is coming" and then found one must not be taken at its
+# earlier word. The .ko is checked first on every pass for exactly this.
+rm -rf "$SENTRY_W/run"; mkdir -p "$SENTRY_W/run"
+printf 'no module published yet\n' > "$MARKER"
+cp "$ROOT/sentry/bromure_sentry.ko" \
+   "$SENTRY_W/meta/sentry/bromure_sentry-$(uname -r).ko" 2>/dev/null
+sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
+    BROMURE_SENTRY_WAIT_S=10 BROMURE_SENTRY_NO_LOCKDOWN=1 \
+    /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/both.log" 2>&1
+if grep -qE "insmod failed|already loaded|running \(prebuilt" "$SENTRY_W/both.log"; then
+    ok "a staged module beats a stale 'none is coming' marker"
+else
+    bad "the marker masked a module that was there: $(tail -3 "$SENTRY_W/both.log" | tr '\n' ' ')"
+fi
+if grep -q "none is coming" "$SENTRY_W/both.log"; then
+    bad "it consulted the marker even though the module was present"
+else
+    ok "and the marker was never consulted, because the .ko is checked first"
+fi
+rm -f "$MARKER" "$SENTRY_W/meta/sentry/bromure_sentry-$(uname -r).ko"
+printf '{"version":1,"sentry":{"enabled":true}}' \
+    > "$SENTRY_W/meta/openshell-sandbox.json"
+
+# --- the timeout, inline (requirement: hard) --------------------------------
+rm -rf "$SENTRY_W/run" "$SENTRY_W/meta/sentry"
+mkdir -p "$SENTRY_W/run" "$SENTRY_W/meta/sentry"
+printf '{"version":1,"sentry":{"enabled":true,"requirement":"hard"}}' \
+    > "$SENTRY_W/meta/openshell-sandbox.json"
+START=$(date +%s)
+sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
+    BROMURE_SENTRY_WAIT_S=3 BROMURE_SENTRY_NO_LOCKDOWN=1 \
+    /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/timeout.log" 2>&1
+ELAPSED=$(( $(date +%s) - START ))
+check "a timeout ends as unavailable, not waiting" "$(sentry_state)" "unavailable"
+REASON=$(sentry_reason)
+case "$REASON" in
+    *"did not answer within"*)
+        ok "and a SILENT host is described as silent, not as a refusal: $(printf '%s' "$REASON" | head -c 76)" ;;
+    *) bad "the timeout reason does not distinguish a silent host: $REASON" ;;
+esac
+if [ "$ELAPSED" -le 120 ]; then
+    ok "and the wait was bounded (${ELAPSED}s, budget 3s + a local build attempt)"
+else
+    bad "the wait was not bounded: ${ELAPSED}s"
+fi
+
+# --- the timeout, in the background unit -----------------------------------
+# The common path: best_effort hands the wait off, so the VERDICT is written by
+# the unit rather than by the process the root script called. A `waiting` status
+# that is never resolved would leave the host fetching forever.
+rm -rf "$SENTRY_W/run" "$SENTRY_W/meta/sentry"
+mkdir -p "$SENTRY_W/run" "$SENTRY_W/meta/sentry"
+printf '{"version":1,"sentry":{"enabled":true}}' \
+    > "$SENTRY_W/meta/openshell-sandbox.json"
+sudo systemctl reset-failed bromure-sentry-await 2>/dev/null
+sudo env BROMURE_META="$SENTRY_W/meta" BROMURE_RUN_DIR="$SENTRY_W/run" \
+    BROMURE_SENTRY_WAIT_S=3 BROMURE_SENTRY_NO_LOCKDOWN=1 \
+    /usr/bin/python3 "$ROOT/bromure-sentryd" > "$SENTRY_W/bgtimeout.log" 2>&1
+waited=0
+while [ "$waited" -lt 90 ]; do
+    [ "$(sentry_state)" != "waiting" ] && break
+    sleep 2; waited=$((waited + 2))
+done
+if [ "$(sentry_state)" = "unavailable" ]; then
+    ok "the background unit resolves 'waiting' to unavailable too (${waited}s)"
+else
+    bad "the background wait left the status at '$(sentry_state)' after ${waited}s"
+    sudo journalctl -u bromure-sentry-await --no-pager -n 8 2>/dev/null | sed 's/^/       /'
+fi
+sudo systemctl reset-failed bromure-sentry-await 2>/dev/null
+sudo rm -rf "$SENTRY_W"
+
 printf '\n%s\n' "$([ "$fails" -eq 0 ] && echo "ALL SANDBOX TESTS PASSED" || echo "$fails CHECK(S) FAILED")"
 exit $((fails > 0))

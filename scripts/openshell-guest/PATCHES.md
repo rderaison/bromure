@@ -245,7 +245,7 @@ and that is your call, not mine.
 | `bromure-sandboxd` | meta share | no |
 | `bromure-sentryd` | meta share | no |
 | `bromure-strict.py` | meta share | no |
-| `sentry-dist/bromure_sentry-<kver>.ko` | meta share | no |
+| `sentry-dist/bromure_sentry-<kver>.ko` | meta share, **fetched by the host from CI** | no |
 | `sentry-dist/src/` (module source, for the rebuild fallback) | meta share | no |
 | `patched/bromure-agentd.py` | meta share | no |
 | `patched/bromure-attestd.py` | meta share | no |

@@ -3095,6 +3095,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let running = KernelSentryRunState()
             KernelSentryService.shared.vmRunningProvider = { running.isRunning($0) }
             KernelSentryService.shared.pinDirectory = { [weak self] in self?.store.profileDirectory(for: $0) }
+            wireSentryModules()
             // `.common` modes: the watchdog's quarantine alert is a modal, and
             // a default-mode timer stops during it, so a VM it had just paused
             // stayed "running" and its silent sentry was flagged as tampering.
@@ -12763,6 +12764,51 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// The agent watchdog tripped. Quarantine mode: cut the VM off the network
     /// at the switch first (immediate — before any UI), pause it, then ask.
+    @MainActor
+    /// Kernel sentry modules come from the CDN. The guest reports its kernels
+    /// (running + installed); the host caches their modules and drops them
+    /// into the running VM's meta share, where a guest waiting at boot picks
+    /// them up. Known kernels of sentry workspaces are prefetched at launch,
+    /// so a normal boot never waits.
+    func wireSentryModules() {
+        guard let setupDir = agentdURL?.deletingLastPathComponent(),
+              let hash = SentryModuleStore.shippedSourceHash(setupDir: setupDir) else { return }
+        let store = SentryModuleStore.shared
+        GuestSandboxStatusStore.shared.onKernels = { [weak self] pid, kernels, waiting in
+            // Status reports repeat; act on a new kernel set or a waiting guest
+            // (boot staging already covers every kernel known before the boot).
+            guard store.record(kernels: kernels, for: pid) || waiting else { return }
+            Task { @MainActor [weak self] in
+                let meta = self?.runningSessions[pid]?.sandbox.sessionDisk?.metadataDirectory
+                Task.detached {
+                    var failures: [String: String] = [:]
+                    for kernel in kernels {
+                        if let why = await store.ensure(kernel: kernel, hash: hash) {
+                            failures[kernel] = why
+                            if waiting || kernel == kernels.first {
+                                SentryModuleStore.log("\(pid.uuidString.prefix(8)): \(kernel): \(why)")
+                            }
+                        }
+                    }
+                    // Only a workspace whose spec is active has a sentry dir.
+                    guard let dir = meta?.appendingPathComponent("sentry", isDirectory: true),
+                          FileManager.default.fileExists(atPath: dir.path) else { return }
+                    // A guest waiting for a module none will come for stops
+                    // waiting at once, with the host's reason.
+                    store.markUnavailable(failures, in: dir)
+                    let staged = store.stage(kernels: kernels, hash: hash, into: dir)
+                    SentryModuleStore.log("\(pid.uuidString.prefix(8)): staged \(staged) into the running VM\(waiting ? " (the guest is waiting)" : "")")
+                }
+            }
+        }
+        let prefetch = profiles.filter { $0.effectiveKernelSentry != .off }
+            .map { store.knownKernels(for: $0.id) }.flatMap { $0 }
+        Task.detached {
+            await store.refreshCatalog(hash)
+            for kernel in Set(prefetch) { _ = await store.ensure(kernel: kernel, hash: hash) }
+        }
+    }
+
     @MainActor
     func handleWatchdogTrip(_ pid: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) {
         guard mode == .quarantine, let session = runningSessions[pid] else { return }

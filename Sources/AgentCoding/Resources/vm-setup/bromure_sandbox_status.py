@@ -13,6 +13,7 @@ state, never an exception.
 
 import json
 import os
+import time
 
 RUN_DIR = "/run/bromure-sandbox"
 SANDBOX_STATUS = os.path.join(RUN_DIR, "status.json")
@@ -35,7 +36,12 @@ SPEC_PATH = os.path.join(os.environ.get("BROMURE_META", "/mnt/bromure-meta"),
 # So: a spec that asks for something whose producer has not yet answered is
 # `pending`, which the host treats as unknown — no row, no cross-check.
 VALID_FILESYSTEM = ("enforced", "degraded", "failed", "off", "pending")
-VALID_SENTRY = ("running", "unavailable", "off", "pending")
+# `waiting` is the sentry asking the HOST for a module it does not have. It is
+# not a failure and not `pending`: `pending` means a producer has not spoken yet,
+# `waiting` means it has spoken and is blocked on the other side of the channel.
+# The host acts on it -- seeing `waiting` is what makes it fetch and stage the
+# module -- so coercing it to `off` would deadlock the two sides.
+VALID_SENTRY = ("running", "unavailable", "off", "pending", "waiting")
 
 
 def _read(path):
@@ -75,6 +81,59 @@ def _section(spec, name):
         return {}
     value = spec.get(name)
     return value if isinstance(value, dict) else {}
+
+
+# Which kernels this guest has, so the host can prefetch a module for a kernel it
+# has never seen this workspace boot.
+#
+# The host cannot know the kernel of a workspace it has not booted, nor one that
+# just `apt upgrade`d -- and the module it needs is built per kernel ABI. So the
+# guest reports both what it is running and what is installed, and it does so
+# whenever the spec is active, sentry on or off: a workspace with the sentry
+# switched off today may switch it on tomorrow, and the prefetch should already
+# have happened.
+_KERNELS_CACHE = {"at": 0.0, "value": []}
+_KERNELS_TTL = 30.0
+# Overridable so the two-kernels case can be tested: a machine has whatever
+# kernels it has, and a test cannot install one.
+MODULES_DIR = os.environ.get("BROMURE_MODULES_DIR", "/lib/modules")
+BOOT_DIR = os.environ.get("BROMURE_BOOT_DIR", "/boot")
+
+
+def installed_kernels():
+    """Every kernel release installed on disk, sorted. Cached briefly.
+
+    `modules.dep` is the test that matters, and it is not pedantry: on this very
+    development machine `/lib/modules/6.8.0-142-generic` exists and contains only
+    a `build` symlink, because the *headers* package is installed for a kernel
+    that is not. A naive `/lib/modules/*` glob would report a phantom kernel and
+    have the host build a module nothing can ever load. `/boot/vmlinuz-*` is the
+    cross-check in the other direction.
+
+    Cached for 30 s because attestd rebuilds this status every second and the
+    answer changes only when somebody runs apt.
+    """
+    now = time.time()
+    if now - _KERNELS_CACHE["at"] < _KERNELS_TTL:
+        return list(_KERNELS_CACHE["value"])
+    found = set()
+    try:
+        for name in os.listdir(MODULES_DIR):
+            if os.path.exists(os.path.join(MODULES_DIR, name, "modules.dep")):
+                found.add(name)
+    except OSError:
+        pass
+    try:
+        for name in os.listdir(BOOT_DIR):
+            if name.startswith("vmlinuz-"):
+                release = name[len("vmlinuz-"):]
+                if os.path.isdir(os.path.join(MODULES_DIR, release)):
+                    found.add(release)
+    except OSError:
+        pass
+    value = sorted(found)
+    _KERNELS_CACHE.update(at=now, value=value)
+    return list(value)
 
 
 def build(sandbox_path=SANDBOX_STATUS, sentry_path=SENTRY_STATUS,
@@ -161,6 +220,11 @@ def build(sandbox_path=SANDBOX_STATUS, sentry_path=SENTRY_STATUS,
         # be guessed at again: `run_as.workdirs_writable` is the measured answer.
         "idmap": sandbox.get("idmap"),
         "session_ready": sandbox.get("session_ready"),
+        # Reported whenever the spec is active, sentry on or off: the host needs
+        # them to prefetch a module for a kernel it has not seen boot. See
+        # `installed_kernels`.
+        "sentry_kernel": os.uname().release,
+        "installed_kernels": installed_kernels(),
     }
 
 
@@ -192,7 +256,8 @@ def fingerprint(status):
         for key in ("filesystem", "degraded_reason", "run_as", "seccomp",
                     "sentry", "sentry_reason", "sentry_digest", "landlock_abi",
                     "lockdown", "server_pid", "server_restarts", "strict_applied",
-                    "build")
+                    "build",
+                    "sentry_kernel", "installed_kernels")
     }, sort_keys=True) + json.dumps(sorted(set(status.get("warnings") or [])))
 
 

@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bromure_openshell as osh  # noqa: E402
@@ -155,6 +156,146 @@ def build_locally():
 # Loading
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Asking the host for a module this kernel does not have
+# ---------------------------------------------------------------------------
+#
+# The modules are no longer bundled with the app: a CI job builds one per kernel
+# ABI and the host keeps a verified cache, staging into `$META/sentry/` the ones
+# it knows a workspace needs. It cannot know the kernel of a workspace it has
+# never booted, nor one that just `apt upgrade`d -- so when there is no module
+# for `uname -r`, the guest says so and waits, and the host fetches on seeing it.
+#
+# `waiting` is a distinct status for exactly that reason: the host ACTS on it.
+# `pending` would mean "a producer has not spoken yet"; this is "it has spoken
+# and is blocked on the other side".
+
+HOST_MODULE_WAIT_S = float(os.environ.get("BROMURE_SENTRY_WAIT_S", "45"))
+AWAIT_UNIT = "bromure-sentry-await"
+
+
+def kernel_inventory():
+    """(running, installed) -- the same answer bromure_sandbox_status gives.
+
+    Imported rather than duplicated: two implementations of "which kernels does
+    this guest have" would eventually disagree, and the host prefetches from one
+    of them.
+    """
+    try:
+        import bromure_sandbox_status
+        return kernel_release(), bromure_sandbox_status.installed_kernels()
+    except Exception:
+        return kernel_release(), []
+
+
+def announce_waiting():
+    """Publish `waiting` so the host fetches. Returns the status written."""
+    running, installed = kernel_inventory()
+    return write_status(
+        "waiting",
+        "no module for %s yet; asking the host" % running,
+        kernel=running, installed_kernels=installed,
+        staged=available_prebuilts(), lockdown=lockdown_state())
+
+
+def host_unavailable_marker():
+    """The host's "none is coming" note for this kernel, or None.
+
+    One line, written by the host as soon as it knows -- `no module published for
+    <kver> yet`, `no module catalog for this Bromure version (offline?)`. It is
+    removed again when the host later stages a module.
+
+    Staleness is deliberately not guarded against. The marker names a specific
+    kernel release, so one left from an earlier boot says "there was still no
+    module for THIS kernel", which is almost certainly still true; and the `.ko`
+    is checked first, so a marker the host forgot to remove cannot mask a module
+    that is actually there.
+    """
+    path = os.path.join(PREBUILT_DIR,
+                        "%s-%s.unavailable" % (MODULE_NAME, kernel_release()))
+    try:
+        with open(path) as handle:
+            return handle.read().strip()[:300] or "no reason given"
+    except OSError:
+        return None
+
+
+def wait_for_host_module(seconds=None):
+    """Poll for the host. Returns (path, host_says).
+
+      (path, None)    the host staged a module
+      (None, "...")   the host says none is coming, and why
+      (None, None)    the host said nothing before the timeout
+
+    The host writes tmp+rename in the same directory, so the final name appearing
+    means the bytes are all there. `vermagic` is still checked by the caller -- a
+    file that arrives for the wrong kernel is a mistake worth failing on by name
+    rather than discovering through a cryptic insmod error.
+
+    **The `.ko` is checked first on every pass**, so a module that arrives after
+    the marker still wins. The alternative ordering would turn a transient "not
+    yet" into a permanent no.
+
+    The timeout stays, and is for a host that says nothing at all: an older app
+    that does not write the marker, or one that is simply gone. Without it, this
+    waits forever on exactly the hosts least able to tell us anything.
+    """
+    total = HOST_MODULE_WAIT_S if seconds is None else seconds
+    started = time.time()
+    deadline = started + total
+    while time.time() < deadline:
+        path = prebuilt_module()
+        if path:
+            log("the host delivered a module for %s after %.1fs"
+                % (kernel_release(), time.time() - started))
+            return path, None
+        says = host_unavailable_marker()
+        if says:
+            log("the host says none is coming after %.1fs: %s"
+                % (time.time() - started, says))
+            return None, says
+        time.sleep(0.5)
+    return None, None
+
+
+def spawn_background_wait():
+    """Wait in a transient unit, so the session is not held up. True if started.
+
+    **Why this is conditional, and on what.** The wait is bounded at 45 s, and 45 s
+    is a long time to have no session -- it is also long enough to trip the host's
+    boot-phase budget. But starting the session first opens a window in which agent
+    code runs with nothing watching it, which is the one thing the sentry exists to
+    prevent.
+    
+    So the policy decides, using the knob that already exists:
+    
+    * `requirement: hard` -- the workspace demanded the sentry. A blind window
+      would break that promise, so the wait is INLINE and the boot is slower.
+    * anything else -- best effort. The session starts now and the sentry joins
+      when the host delivers, which is the right trade when the guarantee was
+      never absolute.
+    
+    Either way the status says `waiting`, so the host knows and can account for it.
+    """
+    setenv = ["--setenv=%s=%s" % (name, os.environ[name])
+              for name in ("BROMURE_META", "BROMURE_RUN_DIR", "BROMURE_HOST_CID",
+                           "BROMURE_SENTRY_WAIT_S", "BROMURE_SENTRY_NO_LOCKDOWN")
+              if name in os.environ]
+    subprocess.run(["systemctl", "reset-failed", AWAIT_UNIT],
+                   capture_output=True, timeout=30)
+    rc = subprocess.run(
+        ["systemd-run", "--unit=" + AWAIT_UNIT, "--collect", "-p", "Restart=no",
+         *setenv, "/usr/bin/python3", os.path.abspath(__file__),
+         "--await-module"],
+        capture_output=True, text=True, timeout=30)
+    if rc.returncode != 0:
+        log("could not start %s (%s); waiting inline instead"
+            % (AWAIT_UNIT, (rc.stderr or "").strip()[:120]))
+        return False
+    log("waiting for the host in %s; the session is not held up" % AWAIT_UNIT)
+    return True
+
+
 def already_loaded():
     return os.path.isdir("/sys/module/%s" % MODULE_NAME)
 
@@ -246,6 +387,13 @@ def main():
         log("must run as root")
         return 2
 
+    # `--await-module` is this same program, re-entered in a transient unit to do
+    # the waiting without holding up the session. It skips the "ask and spawn"
+    # step -- it IS the waiter -- and otherwise takes exactly the same path, so
+    # loading, lockdown and every status the host reads cannot drift between the
+    # two entry points.
+    awaiting = "--await-module" in sys.argv
+
     spec = {}
     try:
         with open(SPEC_PATH) as handle:
@@ -267,8 +415,15 @@ def main():
                      lockdown=lockdown_state(), kernel=kernel_release())
         return 0
 
-    path = prebuilt_module()
-    source = "prebuilt"
+    # The wait goes AFTER the already-loaded check: the inline path may have
+    # succeeded while this unit was starting, and waiting 45 s to discover the
+    # module is already in would be 45 s for nothing.
+    host_says = None
+    if awaiting:
+        path, host_says = wait_for_host_module()
+    else:
+        path = prebuilt_module()
+    source = "prebuilt (staged by the host on request)" if awaiting else "prebuilt"
     reason = None
     if path:
         magic = vermagic_of(path)
@@ -276,17 +431,45 @@ def main():
             log("prebuilt module vermagic %r does not match %s; rebuilding"
                 % (magic, kernel_release()))
             path = None
+    if not path and not awaiting:
+        # No module for this kernel. The host builds them per ABI now, so the
+        # first move is to ASK -- not to compile one here, which takes minutes
+        # and needs headers this guest may not have.
+        announce_waiting()
+        if sentry_spec.get("requirement") == "hard":
+            log("no module for %s; waiting inline (requirement: hard)"
+                % kernel_release())
+            path, host_says = wait_for_host_module()
+        elif spawn_background_wait():
+            # The unit we just started owns the rest of this. Returning leaves
+            # the status at `waiting`, which is the truth.
+            return 0
+        else:
+            path, host_says = wait_for_host_module()
+        if path:
+            source = "prebuilt (staged by the host on request)"
+
     if not path:
-        # This kernel has no prebuilt module. Either the guest apt-upgraded its
-        # kernel, or the image moved and no .ko was built for it.
+        # Asked and not delivered, or this is the background waiter and its wait
+        # is over. Build one here, which is slow but needs nobody else.
         staged = available_prebuilts()
         path, reason = build_locally()
         source = "built-locally"
         if not path:
-            reason = ("no prebuilt module for %s (staged: %s) and building one "
-                      "here failed: %s"
-                      % (kernel_release(),
-                         ", ".join(staged) if staged else "none", reason))
+            # The host's OWN words when it gave them, because "the host did not
+            # deliver one within 45s" is a guess and `no module published for
+            # 6.8.0-146-generic yet` is an answer. Only fall back to the timeout
+            # wording when the host said nothing at all.
+            if host_says:
+                why = "the host says: %s" % host_says
+            else:
+                why = ("the host did not answer within %.0fs (offline, or an "
+                       "older app that does not report this)"
+                       % HOST_MODULE_WAIT_S)
+            reason = ("no module for %s: %s; and building one here failed: %s. "
+                      "Staged: %s"
+                      % (kernel_release(), why, reason,
+                         ", ".join(staged) if staged else "none"))
 
     if not path:
         log("no module available: %s" % reason)

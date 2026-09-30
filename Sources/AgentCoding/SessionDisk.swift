@@ -664,10 +664,23 @@ public final class SessionDisk {
                             try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: dst.path)
                         }
                     }
-                    let sentrySrc = setupDir.appendingPathComponent("sentry-dist")
+                    // Modules come from the CDN (SentryModuleStore), not the
+                    // bundle: the verified cached module of every kernel this
+                    // workspace is known to have. A kernel the host hasn't seen
+                    // yet is fetched while the guest waits for it. The source
+                    // ships for the guest's last-resort local build.
+                    let sentrySrc = setupDir.appendingPathComponent("sentry-dist/src")
+                    try? fm.removeItem(at: sentryDest)
+                    try fm.createDirectory(at: sentryDest, withIntermediateDirectories: true)
                     if fm.fileExists(atPath: sentrySrc.path) {
-                        try? fm.removeItem(at: sentryDest)
-                        try fm.copyItem(at: sentrySrc, to: sentryDest)
+                        try fm.copyItem(at: sentrySrc, to: sentryDest.appendingPathComponent("src"))
+                    }
+                    if let hash = SentryModuleStore.shippedSourceHash(setupDir: setupDir) {
+                        let known = SentryModuleStore.shared.knownKernels(for: profile.id)
+                        let staged = SentryModuleStore.shared.stage(kernels: known, hash: hash, into: sentryDest)
+                        if staged.count < known.count {
+                            SentryModuleStore.log("\(profile.id.uuidString.prefix(8)): staged \(staged) of known \(known); the guest will wait for the rest")
+                        }
                     }
                     let data = spec.jsonData()
                     if (try? Data(contentsOf: specDest)) != data { try data.write(to: specDest, options: .atomic) }

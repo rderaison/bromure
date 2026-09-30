@@ -1625,16 +1625,106 @@ As contracted — `u32` big-endian length, then UTF-8 JSON — with additions:
 
 ### 4.7 Distribution
 
-**A prebuilt `.ko` per kernel release, shipped through the meta share.** No
-image bump.
+**A `.ko` per kernel ABI, built by CI and fetched by the host.** Not bundled with
+the app, not in git, and no image bump.
 
-`sentry/build.sh` runs at Bromure release time in a guest VM of the image and
+A daily job builds one module for every noble `linux-headers-6.8.0-*-generic` ABI
+and publishes it under a content hash of the source; the host verifies the
+catalog signature, keeps a local cache, and stages into `$META/sentry/` the
+modules for the kernels it knows a workspace has — under the same names as
+before, `bromure_sentry-<kver>.ko`, so nothing in the guest's discovery changed.
+`sentry-dist/src/` still travels with the tree for the local-rebuild fallback.
+
+#### Telling the host which kernels exist
+
+The host cannot know the kernel of a workspace it has never booted, nor one that
+just `apt upgrade`d. So `sandbox_status` reports, **whenever the spec is active
+and whether or not the sentry is enabled**:
+
+- `sentry_kernel` — `uname -r`;
+- `installed_kernels` — every kernel release installed on disk, sorted.
+
+Reported with the sentry *off* on purpose: a workspace that switches it on
+tomorrow should already have had its module prefetched, and the prefetch is the
+whole point.
+
+`installed_kernels` tests for `modules.dep`, not for a directory under
+`/lib/modules`, and that is not pedantry: on this project's own development
+machine `/lib/modules/6.8.0-142-generic` exists and contains nothing but a
+`build` symlink, because the *headers* package is installed for a kernel that is
+not. A naive glob would report a phantom kernel and have CI build a module
+nothing can ever load. `/boot/vmlinuz-*` is the cross-check in the other
+direction. Cached for 30 s, because attestd rebuilds the status every second and
+the answer changes only when somebody runs apt.
+
+#### Waiting for a module that does not exist yet
+
+When there is no module for `uname -r`, the guest asks rather than compiling. It
+publishes sentry status **`waiting`** — a state of its own, because the host
+*acts* on it: seeing `waiting` is what makes it fetch and stage. (`pending` means
+"a producer has not spoken yet"; this is "it has spoken and is blocked on the
+other side".) `waiting` had to be added to `VALID_SENTRY` or the status builder
+would coerce it to `off` and deadlock both sides.
+
+The wait is bounded at 45 s. **Whether it blocks the session depends on the
+policy, and that choice is the interesting part.** 45 s with no session is long
+enough to trip the host's boot-phase budget; but starting the session first opens
+a window in which agent code runs with nothing watching it, which is the one
+thing the sentry exists to prevent. So:
+
+| `sentry.requirement` | behaviour |
+|---|---|
+| `hard` | the wait is **inline**. The workspace demanded the sentry; a blind window would break that promise, and a slower boot is the honest price. |
+| anything else | the wait moves to a transient unit (`bromure-sentry-await`) and the session starts now. The sentry joins when the host delivers. |
+
+Either way the status says `waiting` immediately, so the host can both fetch and
+account for the delay. The background unit runs **the same code path** — it is
+this program re-entered with `--await-module` — so loading, lockdown and every
+status the host reads cannot drift between the two entry points. And it resolves
+its own `waiting`: on timeout it falls through to the local build and then to
+`unavailable`, because a `waiting` nobody ever resolves leaves the host fetching
+for ever.
+
+**The timeout is the fallback, not the mechanism.** Measured live: on a workspace
+whose kernel had no published module, the host knew within 5 s and a hard-mode
+guest still waited the full 45 — the shell took 50 s for a question that had been
+answered in 5. So the host writes
+`$META/sentry/bromure_sentry-<kver>.unavailable`, one line saying why, as soon as
+it knows, and removes it if it later stages a module. The wait ends on that
+marker as well as on the `.ko`, and the host's own line goes into the reason:
+
+    no module for 6.8.0-146-generic: the host says: no module published for
+    6.8.0-146-generic yet; and building one here failed: …
+
+which is an answer, where *"the host did not deliver one within 45s"* was a guess.
+The 45 s timeout stays for a host that says **nothing** — an older app that does
+not write the marker, or one that is simply gone — and its wording now says so
+rather than implying a refusal.
+
+Two orderings matter, and both are asserted:
+
+- **the `.ko` is checked first on every pass**, so a module that arrives after
+  the marker still wins. A host that said "none is coming" and then found one
+  must not be held to its earlier word;
+- **staleness is deliberately not guarded against.** The marker names a specific
+  kernel release, so one left from an earlier boot says "there was still no
+  module for *this* kernel", which is almost certainly still true — and because
+  the `.ko` wins, a marker the host forgot to remove cannot mask a module that is
+  there.
+
+Lockdown is still raised only *after* a successful load, in both paths.
+
+`sentry/build.sh` runs in CI (and still works in a guest VM by hand) and
 emits `sentry-dist/bromure_sentry-<kernel-release>.ko` plus the source. (Not
 under `sentry/`: kbuild's `make clean` deletes `*.ko` recursively beneath the
 module directory, which ate the release artifact once.) It pins the
 kernel's own compiler, `SOURCE_DATE_EPOCH` and `KBUILD_BUILD_*`, maps build
 paths out of the debug info, and `--verify` builds twice and compares —
-byte-identical. It also **refuses to ship a module built with
+byte-identical. **An externally set `SOURCE_DATE_EPOCH` now wins**: CI builds in a
+container with no git history, where `git log` returns nothing and the mtime
+fallback differs per machine — unreproducible exactly where reproducibility is
+being claimed. The caller knows the commit it is building; this must not overrule
+it. It also **refuses to ship a module built with
 `BROMURE_SENTRY_TESTABLE`**, so a testable build cannot reach users.
 
 Naming the file by kernel release means a guest that has apt-upgraded its kernel
