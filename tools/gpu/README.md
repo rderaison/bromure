@@ -90,8 +90,76 @@ image are selected. The application and its macOS 14 minimum are unchanged.
 
 For dependency integration, inspect the [UTM graphics architecture](https://github.com/utmapp/UTM/blob/main/Documentation/Graphics.md)
 and [dependency build recipes](https://github.com/utmapp/UTM/blob/main/scripts/build_dependencies.sh).
-The current recipes build WebKit's ANGLE with Xcode and virglrenderer with
-Meson plus libepoxy. Those libraries and their build tools are not installed on
-this test host. Keep the GL-only build separate from UTM's Vulkan/video stack
-and isolate renderer dependencies in the helper, rather than linking them into
-the macOS 14 app process.
+The recipes build WebKit's ANGLE with Xcode and virglrenderer with Meson plus
+libepoxy. The following standalone recipe now builds that GL-only subset,
+separate from UTM's Vulkan/video stack and the macOS 14 app process.
+
+## Renderer and sandboxed helper proof
+
+Install Xcode's Metal compiler if needed (`xcodebuild -downloadComponent MetalToolchain`),
+then build the standalone dependencies and probe:
+
+```sh
+bash tools/gpu/build-renderer-probe.sh
+/private/tmp/bromure-gpu/metal-probe
+bash tools/gpu/package-renderer-probe.sh /private/tmp/bromure-gpu
+```
+
+The build script fetches pinned WebKit/ANGLE, virglrenderer, libepoxy and pkgconf
+revisions and installs pinned Python build tools in a temporary virtual
+environment. `BROMURE_GPU_BUILD_ROOT` changes the output directory; source and
+tool environment overrides allow reusing already fetched checkouts. Changed
+source files are rejected except for the two checked, reproducible patches.
+The patches make ANGLE and libepoxy load the helper's relocatable dylibs via
+`@rpath`. SDK 27 uses `_LIBCPP_HARDENING_MODE_FAST` in place of the old libc++
+assertions definition. Vulkan, video and vtest are disabled.
+
+Packaging prints a unique helper executable path. The helper contains its own
+renderer libraries, upstream notices, macOS 27 minimum and App Sandbox
+entitlement, with no network, user-file or parent keychain-group entitlements.
+It is a standalone proof, not the application's production helper. To check
+its basic containment, create a non-sensitive sentinel outside its bundle and
+run the printed executable with `--sandbox-check /absolute/path/to/sentinel`.
+The host must confirm that the sentinel exists before running: an absent file
+is not a permission-denial test. The checks require EPERM/EACCES for file read
+and a loopback TCP connection attempt; merely failing to reach a server is
+insufficient. App Sandbox can allow socket creation while denying connect.
+
+Observed on the test host, including the packaged sandboxed helper:
+
+```text
+CONTAINMENT: outside sentinel file and network connection denied
+RENDERER: ANGLE (Apple, ANGLE Metal Renderer: Apple M5 Pro, Version 27.0.1 (Build 26A434))
+CAPSET 1: version 1, 308 bytes
+CAPSET 2: version 2, 1408 bytes
+NATIVE TEXTURE: Metal GPU blit to IOSurface; Mach-port import and red pixel verified
+PASS: ANGLE Metal, VirGL capsets, native scanout texture and IOSurface GPU blit
+```
+
+The probe forces the Metal hardware backend, renders a trusted clear, creates
+a VirGL BGRA scanout resource, obtains its native Metal texture, and GPU-blits
+it into an IOSurface. A same-process Mach-port import and one-pixel readback
+check correctness. The library's native texture isn't initially IOSurface
+backed, so the explicit GPU blit provides a usable host sharing path.
+Production must use asynchronous completion fences: the probe's `glFinish`
+and `waitUntilCompleted` cannot run on device or UI queues. No full guest frame
+readback or app presentation occurs here.
+
+This does not prove cross-process IPC, hostile-command containment, live guest
+3D rendering, actual display cadence, Chromium acceleration, or performance.
+The application backend remains legacy until those gates pass. No new renderer
+library is linked into Bromure, and its macOS 14 minimum is unchanged.
+
+## Installed image 403 inventory
+
+The Linux owner's headless prerequisite script ran against the read-only guest.
+The complete report is [image403-prerequisites.json](results/image403-prerequisites.json).
+Mesa packages and mesa-libgallium are `25.2.8-0ubuntu0.24.04.2`; the
+`virtio_gpu_dri.so` symlink resolves to `libdril_dri.so`, loads successfully and
+exports the expected DRI entry point. Mesa EGL/GLX and GBM load, but
+`libGLESv2.so.2`, mesa-utils, glxinfo and eglinfo are missing. Chromium is
+154.0.8037.57; Chrome 154.0.8037.92 is also installed. The graphics capability
+marker and new environment/diagnostic scripts are absent. Thus
+`readyForGuestProbe` is false despite working kernel binding and DRI packaging.
+The Linux owner is preparing the rebuilt-image prerequisites; image version
+and explicit capability gating still need coordination before backend selection.

@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "capabilities": null,
+  "packages": {
+    "chromium": {
+      "version": "154.0.8037.57-1xtradeb1.2404.1",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "google-chrome-stable": {
+      "version": "154.0.8037.92-1",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libegl-mesa0": {
+      "version": "25.2.8-0ubuntu0.24.04.2",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libegl1": {
+      "version": "1.7.0-1build1",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libgbm1": {
+      "version": "25.2.8-0ubuntu0.24.04.2",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libgl1-mesa-dri": {
+      "version": "25.2.8-0ubuntu0.24.04.2",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "libglx-mesa0": {
+      "version": "25.2.8-0ubuntu0.24.04.2",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "mesa-libgallium": {
+      "version": "25.2.8-0ubuntu0.24.04.2",
+      "architecture": "arm64",
+      "status": "installed"
+    },
+    "mesa-utils": {
+      "version": "",
+      "architecture": "",
+      "status": "not-installed"
+    }
+  },
+  "driDrivers": [
+    {
+      "path": "/usr/lib/aarch64-linux-gnu/dri/virtio_gpu_dri.so",
+      "exists": true,
+      "target": "/usr/lib/aarch64-linux-gnu/dri/libdril_dri.so",
+      "loadable": true,
+      "error": null
+    }
+  ],
+  "libraries": {
+    "libEGL.so.1": {
+      "loadable": true,
+      "error": null
+    },
+    "libEGL_mesa.so.0": {
+      "loadable": true,
+      "error": null
+    },
+    "libGLESv2.so.2": {
+      "loadable": false,
+      "error": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n  File \"/usr/lib/python3.12/ctypes/__init__.py\", line 379, in __init__\n    self._handle = _dlopen(self._name, mode)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^\nOSError: libGLESv2.so.2: cannot open shared object file: No such file or directory\n"
+    },
+    "libGLX_mesa.so.0": {
+      "loadable": true,
+      "error": null
+    },
+    "libgbm.so.1": {
+      "loadable": true,
+      "error": null
+    }
+  },
+  "tools": {
+    "glxinfo": null,
+    "eglinfo": null,
+    "Xorg": "/usr/bin/Xorg"
+  },
+  "browser": {
+    "exitCode": 0,
+    "stdout": "Chromium 154.0.8037.57 built on Ubuntu 24.04.5 LTS\n",
+    "stderr": "/usr/bin/chromium: 9: [: -lt: unexpected operator\n",
+    "command": "chromium-browser"
+  },
+  "guestFiles": {
+    "/usr/local/bin/config-agent.py": true,
+    "/usr/local/bin/graphics-env.sh": false,
+    "/usr/local/bin/graphics-diagnostics.py": false
+  },
+  "hostGPUVerified": null,
+  "note": "Packaging check only; run graphics-diagnostics.py in X, verify Chromium and host Metal separately.",
+  "issues": [
+    "Missing or invalid graphics capability marker",
+    "Cannot load libGLESv2.so.2",
+    "Missing executable glxinfo",
+    "Missing executable eglinfo",
+    "Missing or inaccessible guest file /usr/local/bin/graphics-env.sh",
+    "Missing or inaccessible guest file /usr/local/bin/graphics-diagnostics.py"
+  ],
+  "readyForGuestProbe": false
+}
