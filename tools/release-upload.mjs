@@ -33,10 +33,9 @@
  * --product selects the DO Spaces prefix and appcast endpoint:
  *   bromure     → releases/                + /api/v1/release
  *   bromure-ac  → releases-agentic-coding/ + /api/v1/release-agentic-coding
- *   bromure-sidecar → releases-sidecar/, no appcast (Bromure Sidecar has no
- *                 updater yet): the versioned DMG plus a stable
- *                 releases-sidecar/BromureSidecar.dmg for the download link.
- *                 Needs no SPARKLE_PRIVATE_KEY or RELEASE_AUTH_TOKEN.
+ *   bromure-sidecar → releases-sidecar/  + /api/v1/release-sidecar, plus a
+ *                 stable releases-sidecar/BromureSidecar.dmg for the
+ *                 download link (re-uploaded with every release).
  */
 
 import { createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
@@ -100,7 +99,7 @@ const PRODUCT_CONFIG = {
   },
   "bromure-sidecar": {
     spacesPrefix: "releases-sidecar",
-    apiURL: null,                        // no appcast: upload only
+    apiURL: process.env.RELEASE_API_URL || "https://bromure.io/api/v1/release-sidecar",
     latestKey: "releases-sidecar/BromureSidecar.dmg",
   },
 };
@@ -275,6 +274,11 @@ async function registerRelease(payload) {
   console.log(`[2/3] uploading to ${DO_SPACES_BUCKET}/${spacesKey}…`);
   const url = await uploadToSpaces(FILE, spacesKey);
   console.log(`      → ${url}`);
+  const latest = PRODUCT_CONFIG[PRODUCT].latestKey;
+  if (latest) {
+    // The stable download link (short cache — it moves with every release).
+    console.log(`      + ${await uploadToSpaces(FILE, latest, "public, max-age=300")}`);
+  }
 
   console.log(`[3/3] registering release with ${RELEASE_API_URL}…`);
   await registerRelease({

@@ -1,5 +1,6 @@
 import AppKit
 import ServiceManagement
+import Sparkle
 
 /// The menu-bar app: starts tmux, the control socket and the SSH server, and
 /// shows what's running. Quitting leaves the agents running in tmux; the
@@ -9,6 +10,9 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var sshError: String?
     private var refreshTimer: Timer?
+    /// Sparkle, in release builds only (see startUpdater).
+    private var updater: SPUStandardUpdaterController?
+    private let updateReminders = GentleUpdateReminders()
 
     static let portKey = "sshPort"
     /// Password sign-in with the Mac account's password. Off by default: the
@@ -62,8 +66,50 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.updateIcon() } }
             }
         }
+        startUpdater()
+        openAtLoginOnFirstLaunch()
         AgentsWindowController.shared.showIntroIfNeeded()
         AgentHostLog.log("Bromure Sidecar up (tmux \(Tmux.binary), ssh port \(port))")
+    }
+
+    // MARK: Updates and login
+
+    /// Sparkle checks the Sidecar channel daily. Only a Developer ID build
+    /// updates itself: a dev build (ad-hoc signed, run from .build) would
+    /// otherwise be replaced by the latest release.
+    private func startUpdater() {
+        guard Self.isDeveloperIDSigned else {
+            AgentHostLog.log("updates: off (not a Developer ID build)")
+            return
+        }
+        updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil,
+                                               userDriverDelegate: updateReminders)
+    }
+
+    static let isDeveloperIDSigned: Bool = {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &code) == errSecSuccess,
+              let code else { return false }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dict = info as? [String: Any] else { return false }
+        return dict[kSecCodeInfoTeamIdentifier as String] != nil
+    }()
+
+    /// Sidecar is how a Mac's agents stay reachable: it opens at login from
+    /// the first launch on. The menu's "Open at Login" turns it off.
+    private func openAtLoginOnFirstLaunch() {
+        let key = "login.defaulted"
+        guard !UserDefaults.standard.bool(forKey: key), Bundle.main.bundleURL.pathExtension == "app" else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        do { try SMAppService.mainApp.register() } catch {
+            AgentHostLog.log("login: couldn't register (\(error.localizedDescription))")
+        }
+    }
+
+    @objc private func checkForUpdates(_ sender: Any?) {
+        NSApp.activate(ignoringOtherApps: true)
+        updater?.checkForUpdates(sender)
     }
 
     private func startSSH() {
@@ -180,17 +226,25 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pw.state = passwordAuth ? .on : .off
         pw.toolTip = "Lets a device that isn't one of your bromure.io devices sign in with your Mac account's password."
         menu.addItem(pw)
-        let approvals = NSMenuItem(title: "Codex Approvals", action: nil, keyEquivalent: "")
+        let approvals = NSMenuItem(title: "Agent Approvals", action: nil, keyEquivalent: "")
         let approvalsMenu = NSMenu()
-        for mode in CodexApprovals.allCases {
-            let item = NSMenuItem(title: mode.title, action: #selector(setCodexApprovals(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = mode.rawValue
-            item.state = CodexApprovals.current == mode ? .on : .off
-            approvalsMenu.addItem(item)
+        for spec in AgentSpec.all {
+            let current = AgentApprovals.current(spec.id)
+            let agent = NSMenuItem(title: spec.name + (current == .ask ? "" : " — \(current == .full ? "never asks" : "auto")"),
+                                   action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for level in AgentApprovals.levels(spec.id) {
+                let item = NSMenuItem(title: level.title(spec.id), action: #selector(setApprovals(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = [spec.id, level.rawValue]
+                item.state = current == level ? .on : .off
+                sub.addItem(item)
+            }
+            agent.submenu = sub
+            approvalsMenu.addItem(agent)
         }
         approvalsMenu.addItem(.separator())
-        approvalsMenu.addItem(disabled("Applies to Codex sessions started or resumed from now on"))
+        approvalsMenu.addItem(disabled("Applies to sessions started or resumed from now on"))
         approvals.submenu = approvalsMenu
         menu.addItem(approvals)
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin(_:)), keyEquivalent: "")
@@ -198,6 +252,13 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
         menu.addItem(.separator())
+        if let updater {
+            let title = updateReminders.pendingVersion.map { "Install Update (\($0))…" } ?? "Check for Updates…"
+            let check = NSMenuItem(title: title, action: #selector(checkForUpdates(_:)), keyEquivalent: "")
+            check.target = self
+            check.isEnabled = updater.updater.canCheckForUpdates
+            menu.addItem(check)
+        }
         let quit = NSMenuItem(title: "Quit (agents keep running)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
     }
@@ -367,21 +428,24 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         P2PAccount.shared.complete(s)
     }
 
-    @objc private func setCodexApprovals(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let mode = CodexApprovals(rawValue: raw),
-              mode != CodexApprovals.current else { return }
-        if mode == .unrestricted {
+    @objc private func setApprovals(_ sender: NSMenuItem) {
+        guard let pair = sender.representedObject as? [String], pair.count == 2,
+              let level = AgentApprovals(rawValue: pair[1]) else { return }
+        let tool = pair[0]
+        guard level != AgentApprovals.current(tool) else { return }
+        let name = AgentSpec.spec(tool)?.name ?? tool
+        if level == .full {
             let alert = NSAlert()
             alert.alertStyle = .critical
-            alert.messageText = "Let Codex run anything without asking?"
-            alert.informativeText = "Codex will run commands on this Mac as you, with no confirmation and without Codex’s sandbox — nothing like a Bromure VM stands between the agent and your files, keys and accounts. A prompt injection in anything it reads could act with your full access."
-            alert.addButton(withTitle: "Never Ask, No Sandbox")
+            alert.messageText = "Let \(name) run anything without asking?"
+            alert.informativeText = "\(name) will run commands on this Mac as you, with no confirmation and no sandbox — nothing like a Bromure VM stands between the agent and your files, keys and accounts. A prompt injection in anything it reads could act with your full access."
+            alert.addButton(withTitle: "Never Ask")
             alert.addButton(withTitle: "Cancel")
             NSApp.activate(ignoringOtherApps: true)
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
-        UserDefaults.standard.set(mode.rawValue, forKey: CodexApprovals.key)
-        AgentHostLog.log("codex: approvals set to \(mode.rawValue)")
+        AgentApprovals.set(level, for: tool)
+        AgentHostLog.log("approvals: \(tool) set to \(level.rawValue)")
     }
 
     @objc private func togglePassword(_ sender: NSMenuItem) {
@@ -414,5 +478,28 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             AgentHostLog.log("open terminal: \(error.localizedDescription)")
         }
+    }
+}
+
+/// A menu-bar app has no window to put a scheduled update in front of the
+/// user: Sparkle's gentle reminders, surfaced as the menu's
+/// "Install Update (x)…" instead of a window popping up unannounced.
+final class GentleUpdateReminders: NSObject, SPUStandardUserDriverDelegate {
+    private(set) var pendingVersion: String?
+
+    var supportsGentleScheduledUpdateReminders: Bool { true }
+
+    func standardUserDriverShouldHandleShowingScheduledUpdate(_ update: SUAppcastItem,
+                                                              andInImmediateFocus immediateFocus: Bool) -> Bool {
+        immediateFocus
+    }
+
+    func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem,
+                                                   state: SPUUserUpdateState) {
+        if !handleShowingUpdate { pendingVersion = update.displayVersionString }
+    }
+
+    func standardUserDriverWillFinishUpdateSession() {
+        pendingVersion = nil
     }
 }

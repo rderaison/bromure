@@ -744,6 +744,7 @@ final class SessionEngine: @unchecked Sendable {
         default:
             cmd = tool
         }
+        for f in AgentApprovals.flags(tool) { cmd += " \(shellQuote(f))" }
         for a in extraArgs { cmd += " \(shellQuote(a))" }
         if let message { cmd += " \(shellQuote(HostExec.mapHome(message)))" }
         if let cloneURL {
@@ -769,7 +770,7 @@ final class SessionEngine: @unchecked Sendable {
             prefix + "env_vars=" + json(["TMUX", "TMUX_PANE"]),
             // Agent-to-agent traffic never waits on an approval prompt.
             prefix + "default_tools_approval_mode=" + json("approve"),
-        ] + CodexApprovals.current.overrides.map { $0.key + "=" + json($0.value) }).map { "-c " + shellQuote($0) }.joined(separator: " ")
+        ] + AgentApprovals.codexOverrides().map { $0.key + "=" + json($0.value) }).map { "-c " + shellQuote($0) }.joined(separator: " ")
     }
 
     /// Run `inner` under the user's interactive login shell (their PATH,
@@ -856,37 +857,73 @@ enum HostError: Error {
     }
 }
 
-/// How Codex asks before acting on this Mac — the user's choice in the
-/// Sidecar menu (Codex's own defaults unless they pick otherwise). Applied
-/// at each launch and resume as `-c` overrides; ~/.codex is never touched.
-enum CodexApprovals: String, CaseIterable {
-    /// Codex's defaults: it asks.
+
+/// How each agent asks before acting on this Mac — the user's choice per
+/// agent in the Sidecar menu (the agent's own default unless they pick
+/// otherwise). Applied as launch flags on every start and resume; the
+/// agents' own config files are never touched.
+enum AgentApprovals: String, CaseIterable {
+    /// The agent's default: it asks.
     case ask
-    /// Never asks; Codex's sandbox still confines commands (writes in the
-    /// session's folder only, no network).
-    case sandboxed
-    /// Never asks, no sandbox: what --dangerously-bypass-approvals-and-sandbox does.
-    case unrestricted
+    /// The agent's middle mode: routine work runs, risky actions still ask
+    /// (Codex: never asks, but its sandbox confines commands).
+    case auto
+    /// Never asks, no limits.
+    case full
 
-    static let key = "codex.approvals"
+    static func key(_ tool: String) -> String { "approvals.\(tool)" }
 
-    static var current: CodexApprovals {
-        UserDefaults.standard.string(forKey: key).flatMap(CodexApprovals.init(rawValue:)) ?? .ask
+    static func current(_ tool: String) -> AgentApprovals {
+        let d = UserDefaults.standard
+        if let raw = d.string(forKey: key(tool)), let v = AgentApprovals(rawValue: raw) { return v }
+        // fb916c3e stored Codex's under its own key.
+        if tool == "codex", let old = d.string(forKey: "codex.approvals") {
+            return old == "sandboxed" ? .auto : old == "unrestricted" ? .full : .ask
+        }
+        return .ask
     }
 
-    var overrides: [(key: String, value: String)] {
-        switch self {
-        case .ask: return []
-        case .sandboxed: return [("approval_policy", "never"), ("sandbox_mode", "workspace-write")]
-        case .unrestricted: return [("approval_policy", "never"), ("sandbox_mode", "danger-full-access")]
+    static func set(_ level: AgentApprovals, for tool: String) {
+        UserDefaults.standard.set(level.rawValue, forKey: key(tool))
+        if tool == "codex" { UserDefaults.standard.removeObject(forKey: "codex.approvals") }
+    }
+
+    /// The levels `tool` has (Oh My Pi has no middle mode).
+    static func levels(_ tool: String) -> [AgentApprovals] {
+        tool == "omp" ? [.ask, .full] : allCases
+    }
+
+    /// Flags after the agent's command. Codex's go in as `-c` overrides
+    /// (codexOverrides) so `codex resume` gets them too.
+    static func flags(_ tool: String) -> [String] {
+        switch (tool, current(tool)) {
+        case (_, .ask): return []
+        case ("claude", .auto): return ["--permission-mode", "auto"]
+        case ("claude", .full): return ["--dangerously-skip-permissions"]
+        case ("grok", .auto): return ["--permission-mode", "auto"]
+        case ("grok", .full): return ["--always-approve"]
+        case ("kimi", .auto): return ["--yolo"]
+        case ("kimi", .full): return ["--auto"]
+        case ("omp", .full): return ["--auto-approve"]
+        default: return []
         }
     }
 
-    var title: String {
-        switch self {
-        case .ask: return "Ask Before Acting (Codex Default)"
-        case .sandboxed: return "Never Ask, Keep Codex’s Sandbox"
-        case .unrestricted: return "Never Ask, No Sandbox"
+    static func codexOverrides() -> [(key: String, value: String)] {
+        switch current("codex") {
+        case .ask: return []
+        case .auto: return [("approval_policy", "never"), ("sandbox_mode", "workspace-write")]
+        case .full: return [("approval_policy", "never"), ("sandbox_mode", "danger-full-access")]
+        }
+    }
+
+    func title(_ tool: String) -> String {
+        switch (self, tool) {
+        case (.ask, _): return "Ask Before Acting (Default)"
+        case (.auto, "codex"): return "Never Ask, Keep Codex’s Sandbox"
+        case (.auto, "kimi"): return "Ask Only When Needed"
+        case (.auto, _): return "Auto Mode (Asks Only When Risky)"
+        case (.full, _): return "Never Ask, No Limits"
         }
     }
 }

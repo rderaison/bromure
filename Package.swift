@@ -112,6 +112,7 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
+                .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "Sources/AgentHost",
             exclude: ["Info.plist", "AgentHost.entitlements"],
