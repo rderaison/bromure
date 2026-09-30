@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <signal.h>
 
 struct renderer {
     EGLDisplay display;
@@ -15,6 +17,8 @@ struct renderer {
 
 extern int probe_shared_texture(void *native_texture);
 extern int probe_containment(const char *outside_file);
+extern int run_renderer_worker(int output_fd);
+extern void renderer_worker_fence(uint32_t fence);
 
 static virgl_renderer_gl_context create_context(void *cookie, int scanout,
                                                struct virgl_renderer_gl_ctx_param *param)
@@ -42,7 +46,7 @@ static int make_current(void *cookie, int scanout, virgl_renderer_gl_context con
 }
 
 static void *get_display(void *cookie) { return ((struct renderer *)cookie)->display; }
-static void write_fence(void *cookie, uint32_t fence) { (void)cookie; (void)fence; }
+static void write_fence(void *cookie, uint32_t fence) { (void)cookie; renderer_worker_fence(fence); }
 
 static void require(int success, const char *operation)
 {
@@ -54,9 +58,16 @@ static void require(int success, const char *operation)
 
 int main(int argc, char **argv)
 {
-    if (argc != 1 && !(argc == 3 && strcmp(argv[1], "--sandbox-check") == 0)) {
-        fputs("Usage: metal-probe [--sandbox-check outside-sentinel-file]\n", stderr);
+    int worker = argc == 2 && strcmp(argv[1], "--worker") == 0;
+    if (argc != 1 && !worker && !(argc == 3 && strcmp(argv[1], "--sandbox-check") == 0)) {
+        fputs("Usage: metal-probe [--worker | --sandbox-check outside-sentinel-file]\n", stderr);
         return 1;
+    }
+    int output_fd = -1;
+    if (worker) {
+        output_fd = dup(STDOUT_FILENO);
+        if (output_fd < 0 || dup2(STDERR_FILENO, STDOUT_FILENO) < 0) return 1;
+        signal(SIGPIPE, SIG_IGN);
     }
     if (argc == 3 && !probe_containment(argv[2])) return 1;
     struct renderer r = {0};
@@ -139,11 +150,13 @@ int main(int argc, char **argv)
             "GPU blit to IOSurface and shared-handle correctness");
     glDeleteFramebuffers(1, &framebuffer);
     virgl_renderer_resource_unref(1);
+    int worker_status = worker ? run_renderer_worker(output_fd) : 0;
     virgl_renderer_cleanup(&r);
     eglMakeCurrent(r.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(r.display, r.root);
     eglTerminate(r.display);
     puts("PASS: ANGLE Metal, VirGL capsets, native scanout texture and IOSurface GPU blit");
     puts("NOT TESTED: guest 3D submissions, presentation, helper IPC, adversarial containment, GPU timing or Chromium");
-    return 0;
+    if (output_fd >= 0) close(output_fd);
+    return worker_status;
 }

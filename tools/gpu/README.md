@@ -1,5 +1,41 @@
 # macOS custom Virtio feasibility probe
 
+## Guest rendering bridge result
+
+The optional sandboxed worker now handles capsets, contexts, bounded resources,
+backing snapshots, explicit upload/readback transfers, and immutable VirGL
+command submissions. Linux's version-zero capset request is supported. Resource
+count, dimensions, aggregate GPU allocation estimates, backing bytes, command
+lengths and pipe frames have finite limits. Private backing/reset/test commands
+are not forwarded from guest queues. Guest physical addresses stay in the VM
+process; the helper only receives owned bytes. Backing mappings are recreated
+per transfer and discarded immediately. Mesa staging-buffer transfers encoded
+inside SUBMIT_3D are synchronized only for explicit upload/readback operations.
+
+Run the packaged helper with the transport probe:
+
+```sh
+bash tools/gpu/build-transport-probe.sh
+/private/tmp/bromure-gpu-probe --boot-image "$HOME/Library/Application Support/Bromure" --renderer-helper /absolute/path/to/packaged/metal-probe
+```
+
+At the guest shell, mount `/proc`, load `virtio_gpu`, and run
+`guest-egl-smoke.py` with Python 3 (transfer the script through serial on the
+read-only probe). On image 403 the actual GBM/EGL guest context reported `virgl`,
+created a 64x64 framebuffer, submitted its clear to the host renderer, and read
+back `[255, 0, 0, 255]`. Software fallback is rejected by the script. Seven
+tests in `test-renderer-worker.py /absolute/path/to/packaged/metal-probe` cover
+partial frames, capsets, malformed lengths/versions, context quotas/reset,
+resource uploads, range overflow, command execution, actual GPU fence completion,
+native texture correctness and backing teardown.
+
+This is still a standalone bridge. Its synchronous IPC waits run on a device
+probe queue and its renderer worker; production must dispatch asynchronously
+without blocking device/UI queues. The worker waits for a real renderer fence
+before returning a successful fenced command. Display scanout, cross-process
+IOSurface presentation, app backend selection, browser validation, and hardware
+video decoding remain unfinished. No app acceleration is enabled by this probe.
+
 This probe validates the SDK configuration gate before implementing a renderer.
 Its default mode validates configuration only. The optional boot mode also
 checks stock guest driver binding, queues, guest RAM mapping and VM lifecycle.
@@ -8,8 +44,7 @@ Neither mode selects an accelerated app backend.
 Run from the repository root on an Apple Silicon macOS 27 host with SDK 27:
 
 ```sh
-xcrun swiftc -target arm64-apple-macosx14.0 -module-cache-path /tmp/bromure-gpu-modules tools/gpu/validate-custom-virtio.swift -o /tmp/bromure-gpu-probe
-codesign --force --sign - --entitlements tools/gpu/probe.entitlements /tmp/bromure-gpu-probe
+bash tools/gpu/build-transport-probe.sh
 /tmp/bromure-gpu-probe
 ```
 

@@ -1,12 +1,12 @@
 // SDK/guest-binding feasibility probe only: never enables acceleration.
 // Compile with SDK 27 while retaining the app's macOS 14 deployment target:
-// xcrun swiftc -target arm64-apple-macosx14.0 -module-cache-path /tmp/bromure-gpu-modules tools/gpu/validate-custom-virtio.swift -o /tmp/bromure-gpu-probe
-// codesign --force --sign - --entitlements tools/gpu/probe.entitlements /tmp/bromure-gpu-probe
+// bash tools/gpu/build-transport-probe.sh
 import Foundation
 import Virtualization
 
 @available(macOS 27.0, *)
 final class ProbeDelegate: NSObject, VZCustomVirtioDeviceConfigurationDelegate, VZCustomVirtioDeviceDelegate {
+    var renderer: RendererControlBridge?
     func customVirtioConfiguration(_ configuration: VZCustomVirtioDeviceConfiguration,
                                   didCreateDevice device: VZCustomVirtioDevice) {
         device.delegate = self
@@ -42,8 +42,10 @@ final class ProbeDelegate: NSObject, VZCustomVirtioDeviceConfigurationDelegate, 
                 print("REJECT descriptor length \(count)")
                 continue
             }
+            var failureHeader: Data?
             do {
                 let command = try element.readBytes(withExactLength: count)
+                failureHeader = Data(command.prefix(24))
                 let type = command.prefix(4).enumerated().reduce(UInt32(0)) {
                     $0 | (UInt32($1.element) << ($1.offset * 8))
                 }
@@ -52,6 +54,23 @@ final class ProbeDelegate: NSObject, VZCustomVirtioDeviceConfigurationDelegate, 
                 // GET_DISPLAY_INFO returns sixteen disabled scanouts. All other
                 // control commands receive ERR_UNSPEC; cursor has no response.
                 guard queue.queueIndex == 0 else { continue }
+                if let renderer, [UInt32(0x100), 0x102, 0x106, 0x107, 0x108, 0x109, 0x200, 0x201, 0x202, 0x203, 0x204, 0x205, 0x206, 0x207].contains(type) {
+                    let response = try renderer.forward(command, readGuest: { address, count in
+                        guard let mapping = device.guestMemoryMapping(atPhysicalAddress: address, length: count),
+                              mapping.length == count else { throw NSError(domain: "GuestMapping", code: 1) }
+                        return Data(bytes: mapping.mutableBytes, count: count)
+                    }, writeGuest: { address, data in
+                        guard let mapping = device.guestMemoryMapping(atPhysicalAddress: address, length: data.count),
+                              mapping.length == data.count else { throw NSError(domain: "GuestMapping", code: 1) }
+                        data.withUnsafeBytes { bytes in mapping.mutableBytes.copyMemory(from: bytes.baseAddress!, byteCount: data.count) }
+                    })
+                    guard response.count <= element.writeBuffersAvailableByteCount else {
+                        print("REJECT renderer response buffer too short"); continue
+                    }
+                    try element.write(response)
+                    print("HELPER RESPONSE 0x\(String(get32(response, at: 0), radix: 16)) bytes \(response.count)")
+                    continue
+                }
                 var response = Data(command.prefix(24))
                 let responseType: UInt32 = type == 0x100 && count == 24 ? 0x1101 : 0x1200
                 for index in 0..<4 { response[index] = UInt8((responseType >> (index * 8)) & 255) }
@@ -64,14 +83,28 @@ final class ProbeDelegate: NSObject, VZCustomVirtioDeviceConfigurationDelegate, 
                     continue
                 }
                 try element.write(response)
-            } catch { print("QUEUE ERROR: \(error)") }
+            } catch {
+                print("QUEUE ERROR: \(error)")
+                if var response = failureHeader, element.writeBuffersAvailableByteCount >= 24 {
+                    put32(0x1200, at: 0, into: &response)
+                    put32(get32(response, at: 4) & 1, at: 4, into: &response)
+                    put32(0, at: 20, into: &response)
+                    try? element.write(response)
+                }
+            }
         }
     }
 
     func customVirtioDeviceWillPause(_ device: VZCustomVirtioDevice) { print("DEVICE PAUSE") }
     func customVirtioDeviceWillResume(_ device: VZCustomVirtioDevice) { print("DEVICE RESUME") }
-    func customVirtioDeviceWillReset(_ device: VZCustomVirtioDevice) { print("DEVICE RESET") }
-    func customVirtioDeviceWillStop(_ device: VZCustomVirtioDevice) { print("DEVICE STOP") }
+    func customVirtioDeviceWillReset(_ device: VZCustomVirtioDevice) {
+        print("DEVICE RESET")
+        do { try renderer?.reset() }
+        catch { print("HELPER RESET FAILED: \(error)"); renderer?.stop() }
+    }
+    func customVirtioDeviceWillStop(_ device: VZCustomVirtioDevice) {
+        print("DEVICE STOP"); renderer?.stop()
+    }
 }
 
 // Retain both objects throughout an asynchronous boot probe.
@@ -91,15 +124,21 @@ func probe() throws {
     boot.variableStore = try VZEFIVariableStore(
         creatingVariableStoreAt: directory.appendingPathComponent("efi-vars"))
     let delegate = ProbeDelegate()
+    let arguments = CommandLine.arguments
+    if arguments.count == 5, arguments[3] == "--renderer-helper" {
+        delegate.renderer = try RendererControlBridge(executable: arguments[4])
+        print("HELPER READY: isolated control plane; no rendered scanout or Chromium")
+    }
     let gpu = VZCustomVirtioDeviceConfiguration()
     gpu.deviceID = 16
     gpu.pciClassID = 3
     gpu.pciSubclassID = 0
     gpu.virtioQueueCount = 2
+    if delegate.renderer != nil { gpu.optionalFeatures.subset0 |= 1 }
     // virtio_gpu_config: events_read, events_clear, num_scanouts, num_capsets.
     // One scanout, no 3D capsets; the probe does not advertise VIRGL support.
     gpu.deviceSpecificConfiguration = VZVirtioDeviceSpecificConfiguration(
-        configurationData: Data([0,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0]))
+        configurationData: Data([0,0,0,0, 0,0,0,0, 1,0,0,0, delegate.renderer == nil ? 0 : 2,0,0,0]))
     gpu.provider = VZCustomVirtioDeviceDelegateProvider(
         deviceQueue: DispatchQueue(label: "io.bromure.gpu-probe"), delegate: delegate)
     let config = VZVirtualMachineConfiguration()
@@ -108,7 +147,7 @@ func probe() throws {
     config.cpuCount = 2
     config.memorySize = 512 * 1024 * 1024
     config.customVirtioDevices = [gpu]
-    if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--boot-image" {
+    if [3, 5].contains(arguments.count), arguments[1] == "--boot-image" {
         let image = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
         let linux = VZLinuxBootLoader(kernelURL: image.appendingPathComponent("vmlinuz"))
         linux.initialRamdiskURL = image.appendingPathComponent("initrd")

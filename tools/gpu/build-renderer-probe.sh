@@ -111,7 +111,7 @@ cp "$epoxy/COPYING" "$prefix/licenses/libepoxy.txt"
 cp "$virgl/COPYING" "$prefix/licenses/virglrenderer.txt"
 xcrun clang -target arm64-apple-macosx27.0 -Wall -Wextra -Werror -fobjc-arc \
     "$include_angle" -I"$prefix/include" -I"$prefix/include/virgl" -I"$virgl/src" \
-    "$script_dir/validate-metal-renderer.c" "$script_dir/validate-shared-texture.m" \
+    "$script_dir/validate-metal-renderer.c" "$script_dir/renderer-worker.c" "$script_dir/validate-shared-texture.m" \
     -L"$prefix/lib" -lepoxy -lvirglrenderer -framework Foundation -framework Metal \
     -framework IOSurface -Wl,-rpath,"$prefix/lib" -o "$build_root/metal-probe"
 echo "Built $build_root/metal-probe; run on macOS 27 with access to the host GPU."
