@@ -2592,11 +2592,12 @@ final class RemoteHostWindow: NSWindow {
         NotificationCenter.default.addObserver(forName: .bromureShowChanges, object: nil, queue: .main) { [weak self] note in
             let files = note.object as? [String]
             let from = note.userInfo?["session"] as? UUID
+            let since = note.userInfo?["since"] as? Date
             MainActor.assumeIsolated {
                 guard let self, self.isKeyWindow else { return }
                 if let id = from ?? self.selectedSessionID, let s = self.controller.sessionStore.session(id),
                    SessionHome.hasFolder(s) {
-                    self.sessionReviews.open(sessionID: id, files: files)
+                    self.sessionReviews.open(sessionID: id, files: files, since: since)
                 } else {
                     self.setFilePaneOpen(true)
                 }
@@ -4115,7 +4116,7 @@ final class RemoteHostWindow: NSWindow {
             fetch: { [weak self] id, base, focus in
                 guard let self, let s = self.controller.sessionStore.session(id) else { return nil }
                 let cmd = TaskReviewData.sessionCommand(dir: SessionHome.guestPath(s.cwd), base: base,
-                                                        focusFile: focus)
+                                                        focusFiles: focus)
                 guard let out = try? await self.controller.guestExec(s.profileID, command: cmd, timeout: 30)
                 else { return nil }
                 return TaskReviewData.parse(out)

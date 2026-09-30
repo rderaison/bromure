@@ -3204,3 +3204,6 @@
 
 /* Chat: cached history shown while the latest loads */
 "Catching up…" = "Poniéndose al día…";
+
+/* Review: this turn */
+"Nothing has changed since this turn began." = "Nada ha cambiado desde que empezó este turno.";
