@@ -45,14 +45,57 @@ struct DroppedFile {
             return DroppedFile(name: url.lastPathComponent, data: data, isImage: isImg)
         }
         if p.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            // The drag's own format (public.jpeg…), not whatever "an image"
+            // resolves to first — the bytes as they were.
+            let typeID = p.registeredTypeIdentifiers.first { UTType($0)?.conforms(to: .image) == true }
+                ?? UTType.image.identifier
             let data: Data? = await withCheckedContinuation { cont in
-                p.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { d, _ in
+                p.loadDataRepresentation(forTypeIdentifier: typeID) { d, _ in
                     cont.resume(returning: d)
                 }
             }
             guard let data, data.count <= maxBytes else { return nil }
-            return DroppedFile(name: "pasted-image.png", data: data, isImage: true)
+            return DroppedFile(name: imageName(suggested: p.suggestedName, data: data, typeID: typeID),
+                               data: data, isImage: true)
         }
+        return nil
+    }
+
+    /// A name for image data dropped without a file: the name the drag
+    /// suggests ("whatisthis") when it has one, with the extension the BYTES
+    /// call for — it used to be "pasted-image.png" for everything, a JPEG
+    /// included. "pasted-image" only when nothing better is known.
+    static func imageName(suggested: String?, data: Data, typeID: String) -> String {
+        let ext = imageExtension(of: data)
+            ?? UTType(typeID)?.preferredFilenameExtension
+            ?? "png"
+        var base = (suggested ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+        if !base.isEmpty, let dot = base.lastIndex(of: "."),
+           UTType(filenameExtension: String(base[base.index(after: dot)...]))?.conforms(to: .image) == true {
+            base = String(base[..<dot])   // "photo.png" suggested for JPEG bytes → "photo.jpg"
+        }
+        if base.isEmpty { base = "pasted-image" }
+        return base + "." + ext
+    }
+
+    /// The image format the bytes are in, by their signature.
+    static func imageExtension(of data: Data) -> String? {
+        let b = [UInt8](data.prefix(16))
+        func has(_ sig: [UInt8], at o: Int = 0) -> Bool {
+            b.count >= o + sig.count && Array(b[o..<o + sig.count]) == sig
+        }
+        if has([0xFF, 0xD8, 0xFF]) { return "jpg" }
+        if has([0x89, 0x50, 0x4E, 0x47]) { return "png" }
+        if has([0x47, 0x49, 0x46, 0x38]) { return "gif" }
+        if has([0x52, 0x49, 0x46, 0x46]), has([0x57, 0x45, 0x42, 0x50], at: 8) { return "webp" }
+        if has([0x49, 0x49, 0x2A, 0x00]) || has([0x4D, 0x4D, 0x00, 0x2A]) { return "tiff" }
+        if has(Array("ftyp".utf8), at: 4) {
+            let brand = String(decoding: b.count >= 12 ? b[8..<12] : [], as: UTF8.self)
+            if ["heic", "heix", "mif1", "msf1", "hevc"].contains(brand) { return "heic" }
+            if brand == "avif" { return "avif" }
+        }
+        if has([0x42, 0x4D]) { return "bmp" }
         return nil
     }
 

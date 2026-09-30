@@ -5,7 +5,7 @@ import Testing
 // The host-side archive finished tasks' transcripts land in — written at
 // Done, read archive-first, removed with the card.
 
-@Suite("Task transcript archive")
+@Suite("Task transcript archive", .serialized)   // they share one directory override
 struct TaskTranscriptArchiveTests {
 
     private func withTempArchive(_ body: () throws -> Void) rethrows {
