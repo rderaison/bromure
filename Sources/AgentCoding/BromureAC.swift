@@ -14262,18 +14262,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func codexStandInAuth(for profileID: UUID) -> Data? {
         guard let engine = mitmEngine,
               let real = engine.codexSubscriptionStore.record(for: profileID) else { return nil }
-        let saltA = Data("codex-bogus-access:\(profileID)".utf8)
-        let saltR = Data("codex-bogus-refresh:\(profileID)".utf8)
-        let saltI = Data("codex-bogus-id:\(profileID)".utf8)
-        guard let bogusAccess = SubscriptionFakeMint.mintNoRefreshJWTFake(
-                realJWT: real.accessToken, salt: saltA),
-              let bogusID = SubscriptionFakeMint.mintNoRefreshJWTFake(
-                realJWT: real.idToken, salt: saltI) else {
+        guard let standIn = CodexStandIn.mint(real, profileID: profileID) else {
             FileHandle.standardError.write(Data(
                 "[codex-sub] seed skipped — stored tokens aren't JWT-shaped\n".utf8))
             return nil
         }
-        let bogusRefresh = SubscriptionFakeMint.mintCodexRefreshFake(real: real.refreshToken, salt: saltR)
+        let bogusAccess = standIn.access, bogusID = standIn.id, bogusRefresh = standIn.refresh
         engine.codexSubscriptionStore.registerBogusKey(bogusAccess, for: profileID)
 
         var tokens: [String: Any] = [
