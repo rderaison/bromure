@@ -239,6 +239,24 @@ struct SessionFailureTests {
         #expect(p?.selectedOption == 1)
     }
 
+    @Test("a numbered list in the agent's reply is not a dialog, whatever wording is around it")
+    func replyListIsNotADialog() {
+        let screen = """
+        ⏺ The picker used to hide "Do you want to proceed?" prompts; now they show.
+          When you want to test it, the Mac that hosts the VMs needs:
+          1. a Claude subscription login;
+          2. defaults write io.bromure.agentic-coding claude.accountFeatures -bool true;
+          3. a restart of Bromure and of a Claude workspace.
+          Then check /status, a normal conversation, remote control and artifacts.
+
+        ────────────────────────────────────────────────────────────
+        ❯\u{00a0}
+        ────────────────────────────────────────────────────────────
+          ? for shortcuts
+        """
+        #expect(TerminalPrompt.detect(inScreen: screen, agent: "claude") == nil)
+    }
+
     @Test("Codex's command approval becomes a card")
     func codexApproval() {
         let screen = """
