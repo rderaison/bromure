@@ -11818,7 +11818,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Review windows for sessions: their changes, comments for the agent.
     private(set) lazy var sessionReviews = SessionReviewWindowManager(
         context: SessionReviewWindowManager.Context(
-            session: { [weak self] id in self?.agentSessionStore.session(id) },
+            session: { [weak self] id in self?.sessionRecord(id) },
             fetch: { [weak self] id, base, focus in await self?.agentSessionEngine.fetchReview(id, base: base, focusFiles: focus) },
             addComment: { [weak self] id, text, file, line in
                 self?.agentSessionEngine.addReviewComment(id, text: text, file: file, line: line)
