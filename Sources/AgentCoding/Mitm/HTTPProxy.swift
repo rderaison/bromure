@@ -1874,6 +1874,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let serverFD = serverTLS.pumpFD
         // `upstreamFD` is the connect fd from above — same fd TLSClientStream wraps.
 
+        // Streaming to or from a model provider keeps the tab "working".
+        let beatPID = profileID
+        let isModelHost = TraceLevel.aiHosts.contains { host.lowercased().contains($0) }
+        let beat = ActivityBeat(fire: isModelHost ? { Self.liveActivity?(beatPID) } : nil)
         await withTaskGroup(of: Void.self) { group in
             let server = serverTLS
             let upstream = upstreamTLS
@@ -1881,13 +1885,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 Self.pumpDirection(
                     readFD: serverFD, readNB: { try server.readNB(maxBytes: 16 * 1024) },
                     writeFD: upstreamFD, writeNB: { try upstream.writeNB($0) },
-                    onChunk: { counters.addClient($0.count); c2uCollector?.feed($0) })
+                    onChunk: { counters.addClient($0.count); c2uCollector?.feed($0); beat.tick($0) })
             }
             group.addTask {   // upstream → client
                 Self.pumpDirection(
                     readFD: upstreamFD, readNB: { try upstream.readNB(maxBytes: 16 * 1024) },
                     writeFD: serverFD, writeNB: { try server.writeNB($0) },
-                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0) })
+                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0); beat.tick($0) })
             }
             await group.next()
             group.cancelAll()
@@ -1907,6 +1911,42 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                clientBytes: clientBytes,
                                upstreamBytes: upstreamBytes,
                                statusCode: statusCode)
+    }
+
+    /// A model provider's WebSocket carrying traffic: the agent is working.
+    /// Codex talks to OpenAI over one socket kept open for the whole session,
+    /// so a turn writes no new request records — and its tab read "Ready"
+    /// while it streamed. Set by the app to the same "working" signal the
+    /// request path drives.
+    nonisolated(unsafe) static var liveActivity: (@Sendable (UUID) -> Void)?
+
+    /// At most one activity signal every couple of seconds per socket.
+    final class ActivityBeat: @unchecked Sendable {
+        private let lock = NSLock()
+        private var last = Date.distantPast
+        private let fire: (() -> Void)?
+        init(fire: (() -> Void)?) { self.fire = fire }
+        /// A chunk of relayed frames. A lone ping or pong — a socket kept
+        /// alive while idle — isn't work.
+        func tick(_ chunk: Data) {
+            guard fire != nil, !Self.isKeepAlive(chunk) else { return }
+            tick()
+        }
+
+        static func isKeepAlive(_ chunk: Data) -> Bool {
+            guard let first = chunk.first, chunk.count < 64 else { return false }
+            let opcode = first & 0x0F
+            return opcode == 0x9 || opcode == 0xA
+        }
+
+        func tick() {
+            guard let fire else { return }
+            lock.lock()
+            let due = Date().timeIntervalSince(last) >= 2
+            if due { last = Date() }
+            lock.unlock()
+            if due { fire() }
+        }
     }
 
     /// One direction of the non-blocking WebSocket relay. Drains everything
