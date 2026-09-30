@@ -13,6 +13,7 @@ struct renderer {
     EGLDisplay display;
     EGLConfig config;
     EGLContext root;
+    EGLContext share_context;
 };
 
 extern int probe_shared_texture(void *native_texture);
@@ -29,13 +30,15 @@ static virgl_renderer_gl_context create_context(void *cookie, int scanout,
     EGLint attrs[] = {EGL_CONTEXT_MAJOR_VERSION_KHR, param->major_ver,
                      EGL_CONTEXT_MINOR_VERSION_KHR, param->minor_ver, EGL_NONE};
     EGLContext ctx = eglCreateContext(r->display, r->config,
-                                     param->shared ? r->root : EGL_NO_CONTEXT, attrs);
+                                     param->shared ? r->share_context : EGL_NO_CONTEXT, attrs);
+    if (!param->shared && ctx != EGL_NO_CONTEXT) r->share_context = ctx;
     return ctx == EGL_NO_CONTEXT ? NULL : ctx;
 }
 
 static void destroy_context(void *cookie, virgl_renderer_gl_context context)
 {
     struct renderer *r = cookie;
+    if (r->share_context == context) r->share_context = EGL_NO_CONTEXT;
     eglDestroyContext(r->display, context);
 }
 
@@ -57,7 +60,7 @@ static void require(int success, const char *operation)
     }
 }
 
-int main(int argc, char **argv)
+int renderer_probe_main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "--video-check") == 0) return probe_video_decoder() ? 0 : 1;
     int worker = argc == 2 && strcmp(argv[1], "--worker") == 0;
@@ -162,3 +165,10 @@ int main(int argc, char **argv)
     if (output_fd >= 0) close(output_fd);
     return worker_status;
 }
+
+#ifdef BROMURE_RENDERER_XPC
+extern int renderer_xpc_main(void);
+int main(void) { return renderer_xpc_main(); }
+#else
+int main(int argc, char **argv) { return renderer_probe_main(argc, argv); }
+#endif

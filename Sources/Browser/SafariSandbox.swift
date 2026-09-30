@@ -14,7 +14,8 @@ struct Bromure: ParsableCommand {
         commandName: "bromure",
         abstract: "Run a browser in an isolated, ephemeral VM.",
         subcommands: [Launch.self, Init.self, Run.self, Setup.self, Test.self, MCP.self, Enroll.self, Unenroll.self, ListEnrollments.self,
-                      InitFossImage.self, BuildProvisioner.self, VerifyImage.self, VerifyBrowsers.self],
+                      InitFossImage.self, BuildProvisioner.self, VerifyImage.self, VerifyBrowsers.self,
+                      GPUDemo.self, GPUBrowser.self],
         defaultSubcommand: Launch.self
     )
 
@@ -2345,11 +2346,26 @@ final class BrowserSession {
         // Non-native mode keeps the legacy behaviour where the guest sees
         // every key.
         vmView.capturesSystemKeys = !config.nativeChrome
-        vmView.automaticallyReconfiguresDisplay = true
+        vmView.automaticallyReconfiguresDisplay = warmVM.graphicsSession == nil
         self.vmView = vmView
+        MainActor.assumeIsolated {
+        if let graphics = warmVM.graphicsSession,
+           let gpuView = try? HostGPUFrameView(gpuFrame: vmView.bounds) {
+            gpuView.autoresizingMask = [.width, .height]
+            vmView.addSubview(gpuView)
+            graphics.observeFrames { [weak gpuView] surface in
+                DispatchQueue.main.async {
+                    if let surface { try? gpuView?.present(surface) }
+                    else { gpuView?.discardFrame() }
+                }
+            }
+        }
+
+
+        }
 
         let windowWidth = CGFloat(config.displayWidth) / 2
-        let windowHeight = CGFloat(config.displayHeight)
+        let windowHeight = CGFloat(config.displayHeight) / (warmVM.graphicsSession == nil ? 1 : 2)
 
         // Wrap vmView in a drop target that accepts file drags from macOS.
         // The drop target — and the VZ scanout — span the FULL framebuffer,

@@ -35,18 +35,29 @@ At the guest shell, mount `/proc`, load `virtio_gpu`, and run
 `guest-egl-smoke.py` with Python 3 (transfer the script through serial on the
 read-only probe). On image 403 the actual GBM/EGL guest context reported `virgl`,
 created a 64x64 framebuffer, submitted its clear to the host renderer, and read
-back `[255, 0, 0, 255]`. Software fallback is rejected by the script. Seven
+back `[255, 0, 0, 255]`. Software fallback is rejected by the script. Nine
 tests in `test-renderer-worker.py /absolute/path/to/packaged/metal-probe` cover
 partial frames, capsets, malformed lengths/versions, context quotas/reset,
 resource uploads, range overflow, command execution, actual GPU fence completion,
 native texture correctness and backing teardown.
 
-This is still a standalone bridge. Its synchronous IPC waits run on a device
-probe queue and its renderer worker; production must dispatch asynchronously
-without blocking device/UI queues. The worker waits for a real renderer fence
-before returning a successful fenced command. Display scanout, cross-process
-IOSurface presentation, app backend selection, browser validation, and hardware
-video decoding remain unfinished. No app acceleration is enabled by this probe.
+The application now uses an embedded sandboxed XPC service and a separate
+background processing queue. UI and custom-device queues do not wait on
+rendering. A local image graphics contract and successful renderer capability
+probe gate custom-device installation before boot. `VMPool` propagates the
+selected backend to the guest, and `BrowserSession` presents IOSurface frames
+through Metal with aspect-preserving scaling. `gpu-browser --storage-dir PATH`
+exercises the real browser VM and window; `gpu-demo` isolates renderer/display
+validation. One experimental GPU VM is supported per app process; additional
+VMs use the legacy device. Existing images without the contract use legacy GL.
+
+A rebuilt Ubuntu image booted through the actual app, Xorg/GLX reported VirGL
+acceleration, and the host received over 100 real scanout frames. A context
+sharing regression is covered by a buffer created before guest contexts, then
+uploaded/read from different contexts; the old implementation fails and the
+fixed implementation passes. Browser CDP still reports disabled GL with the
+current Chromium/ANGLE initialization, so browser GPU acceptance and guest
+hardware movie decoding are still required before enabling this by default.
 
 This probe validates the SDK configuration gate before implementing a renderer.
 Its default mode validates configuration only. The optional boot mode also

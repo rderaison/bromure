@@ -6,7 +6,7 @@ import Virtualization
 
 @available(macOS 27.0, *)
 final class ProbeDelegate: NSObject, VZCustomVirtioDeviceConfigurationDelegate, VZCustomVirtioDeviceDelegate {
-    var renderer: RendererControlBridge?
+    var renderer: RendererCommandProcessor?
     func customVirtioConfiguration(_ configuration: VZCustomVirtioDeviceConfiguration,
                                   didCreateDevice device: VZCustomVirtioDevice) {
         device.delegate = self
@@ -126,7 +126,7 @@ func probe() throws {
     let delegate = ProbeDelegate()
     let arguments = CommandLine.arguments
     if arguments.count == 5, arguments[3] == "--renderer-helper" {
-        delegate.renderer = try RendererControlBridge(executable: arguments[4])
+        delegate.renderer = try RendererCommandProcessor(executable: arguments[4])
         print("HELPER READY: isolated control plane; no rendered scanout or Chromium")
     }
     let gpu = VZCustomVirtioDeviceConfiguration()

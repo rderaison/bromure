@@ -206,6 +206,7 @@ extension LinuxImageManager {
             //    stale to `baseImageExists` (the catalog's exact version,
             //    which may lead or lag the constant around release week,
             //    is recorded in image-state.json instead).
+            try? fm.removeItem(at: graphicsCapabilitiesURL)
             try? fm.removeItem(at: linuxDiskURL)
             try fm.moveItem(at: scratchDisk, to: linuxDiskURL)
             try? fm.removeItem(at: linuxKernelURL)

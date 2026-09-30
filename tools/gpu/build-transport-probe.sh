@@ -8,6 +8,6 @@ trap 'rm -rf "$source_dir"' EXIT
 cp tools/gpu/validate-custom-virtio.swift "$source_dir/main.swift"
 xcrun swiftc -target arm64-apple-macosx14.0 \
   -module-cache-path "${TMPDIR:-/private/tmp}/bromure-gpu-modules" \
-  "$source_dir/main.swift" tools/gpu/RendererControlBridge.swift -o "$output"
+  "$source_dir/main.swift" Sources/SandboxEngine/RendererCommandProcessor.swift Sources/SandboxEngine/MacOS27RendererClient.swift -o "$output"
 codesign --force --sign - --entitlements tools/gpu/probe.entitlements "$output"
 printf '%s\n' "$output"

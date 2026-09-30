@@ -120,10 +120,47 @@ class WorkerTests(unittest.TestCase):
                          [0x1100] * 8 + [0x1205, 0x1205, 0x1100, 0x1205])
         self.assertEqual(replies[7][24:], pixels[:4])
 
+    def test_cross_context_buffer_upload_and_readback(self):
+        # Resources belong to VirGL's resource context, not the startup probe.
+        # Independent guest contexts must access the same underlying GL buffer.
+        payload = bytes(range(64))
+        private = lambda kind, offset, count, data=b"": command(
+            kind, struct.pack("<IQI", 9, offset, count) + data)
+        transfer = lambda direction: struct.pack("<14I", 43 | (13 << 16),
+            9, 0, 0, 0, 0, 0, 0, 0, 64, 1, 1, 0, direction)
+        upload, download = transfer(1), transfer(2)
+        replies = self.exchange([
+            command(0x204, struct.pack("<12I", 9, 0, 64, 16, 64, 1, 1, 1, 0, 0, 0, 0)),
+            command(0x200, bytes(72), context=7),
+            command(0x200, bytes(72), context=8),
+            command(0x202, struct.pack("<II", 9, 0), context=7),
+            command(0x202, struct.pack("<II", 9, 0), context=8),
+            private(0xffff0010, 64, 0), private(0xffff0011, 0, 64, payload),
+            command(0x207, struct.pack("<II", len(upload), 0) + upload, context=7, flags=1, fence=1),
+            private(0xffff0011, 0, 64, bytes(64)),
+            command(0x207, struct.pack("<II", len(download), 0) + download, context=8, flags=1, fence=2),
+            private(0xffff0012, 0, 64),
+        ])
+        self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies], [0x1100] * 11)
+        self.assertEqual(replies[-1][24:], payload)
+
     def test_truncated_and_oversize_frames(self):
         for payload in (b"\x18", struct.pack("<I", 23), struct.pack("<I", 65537),
                         struct.pack("<I", 24) + bytes(12)):
             self.assertEqual(self.exchange([], trailing=payload, expected_exit=1), [])
+
+    def test_display_scanout_and_flush(self):
+        replies = self.exchange([
+            command(0xffff0020, struct.pack("<II", 64, 64)), command(0x100),
+            command(0x101, struct.pack("<4I", 9, 1, 64, 64)),
+            command(0x103, struct.pack("<6I", 0, 0, 64, 64, 0, 9)),
+            command(0x104, struct.pack("<6I", 0, 0, 64, 64, 9, 0)),
+            command(0x103, struct.pack("<6I", 0, 0, 64, 64, 1, 9)),
+            command(0x104, struct.pack("<6I", 0, 0, 65, 64, 9, 0)),
+        ])
+        self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies],
+                         [0x1100, 0x1101, 0x1100, 0x1100, 0x1100, 0x1202, 0x1205])
+        self.assertEqual(struct.unpack_from("<III", replies[1], 32), (64, 64, 1))
 
 
 if __name__ == "__main__":

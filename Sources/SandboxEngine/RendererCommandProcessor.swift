@@ -1,13 +1,16 @@
 import Foundation
 import Darwin
+import IOSurface
 
-// Control-plane feasibility client, confined to the custom device's serial
-// queue. It has a strict deadline and never processes GPU rendering fences.
-// Production rendering needs an asynchronous request/completion interface.
-final class RendererControlBridge {
+// Bounded command processor confined to a background processing queue.
+// Guest memory is accessed only through fresh mappings on the device queue;
+// the sandboxed XPC renderer owns parsing, shaders and GPU fence waits.
+final class RendererCommandProcessor {
     private let process = Process()
     private let input = Pipe()
     private let output = Pipe()
+    private var transport: ((Data) throws -> Data)?
+    private var stopTransport: (() -> Void)?
     private struct GuestSpan { let address: UInt64; let count: Int }
     private var backing: [UInt32: [GuestSpan]] = [:]
 
@@ -50,9 +53,57 @@ final class RendererControlBridge {
         }
     }
 
+    @available(macOS 27.0, *)
+    init(client: MacOS27RendererClient, onFrame: @escaping (IOSurface) -> Void) throws {
+        stopTransport = { client.stop() }
+        transport = { command in
+            dispatchPrecondition(condition: .notOnQueue(.main))
+            let ready = DispatchSemaphore(value: 0)
+            let box = RendererReplyBox()
+            client.execute(command) { result in
+                box.lock.lock()
+                box.result = result.map { ($0.command, $0.surface) }
+                box.lock.unlock()
+                ready.signal()
+            }
+            guard ready.wait(timeout: .now() + 9) == .success else {
+                client.stop()
+                throw NSError(domain: "BromureRenderer", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Renderer completion timed out"])
+            }
+            box.lock.lock()
+            let result = box.result
+            box.lock.unlock()
+            guard let result else { throw NSError(domain: "BromureRenderer", code: 1) }
+            let (response, surface) = try result.get()
+            if let surface { onFrame(surface) }
+            return response
+        }
+        do {
+            for index: UInt32 in [0, 1] {
+                var command = Data(repeating: 0, count: 32)
+                put32(0x108, at: 0, into: &command); put32(index, at: 24, into: &command)
+                let response = try request(command)
+                guard response.count == 40, get32(response, at: 0) == 0x1102,
+                      get32(response, at: 24) == index + 1,
+                      get32(response, at: 28) > 0, get32(response, at: 32) > 0,
+                      get32(response, at: 32) <= 65512 else { throw failure("Invalid renderer capset") }
+            }
+        } catch { stop(); throw error }
+    }
+
+    func setDisplay(width: UInt32, height: UInt32) throws {
+        var command = Data(repeating: 0, count: 32)
+        put32(0xffff0020, at: 0, into: &command)
+        put32(width, at: 24, into: &command); put32(height, at: 28, into: &command)
+        let response = try request(command)
+        guard get32(response, at: 0) == 0x1100 else { throw failure("Display initialization failed") }
+    }
+
     deinit { stop() }
 
     func stop() {
+        stopTransport?()
         try? input.fileHandleForWriting.close()
         if process.isRunning { process.terminate() }
         try? output.fileHandleForReading.close()
@@ -73,7 +124,7 @@ final class RendererControlBridge {
                  writeGuest: (UInt64, Data) throws -> Void) throws -> Data {
         // Explicit allowlist: host-only reset is never reachable from a guest.
         guard snapshot.count >= 24, snapshot.count <= 65536,
-              [UInt32(0x100), 0x102, 0x106, 0x107, 0x108, 0x109, 0x200, 0x201, 0x202, 0x203, 0x204, 0x205, 0x206, 0x207].contains(get32(snapshot, at: 0)) else {
+              [UInt32(0x100), 0x101, 0x102, 0x103, 0x104, 0x105, 0x106, 0x107, 0x108, 0x109, 0x200, 0x201, 0x202, 0x203, 0x204, 0x205, 0x206, 0x207].contains(get32(snapshot, at: 0)) else {
             throw failure("Unsupported control command")
         }
         let type = get32(snapshot, at: 0)
@@ -100,6 +151,11 @@ final class RendererControlBridge {
             // ATTACH_BACKING cannot complete a GPU fence without submitting it.
             if get32(snapshot, at: 4) & 1 != 0 { throw failure("Fenced backing attach unsupported in probe") }
             return guestResponse
+        }
+        if type == 0x105, snapshot.count == 56 {
+            let id = get32(snapshot, at: 48)
+            try synchronizeBacking(id, download: false, readGuest: readGuest, writeGuest: writeGuest)
+            return try request(snapshot)
         }
         if [UInt32(0x205), 0x206].contains(type), snapshot.count == 72 {
             let id = get32(snapshot, at: 56)
@@ -207,6 +263,7 @@ final class RendererControlBridge {
     }
 
     private func request(_ command: Data) throws -> Data {
+        if let transport { return try transport(command) }
         guard process.isRunning, command.count <= 65536 else { throw failure("Renderer unavailable") }
         var frame = Data(repeating: 0, count: 4)
         put32(UInt32(command.count), at: 0, into: &frame)
@@ -269,4 +326,9 @@ func get64(_ data: Data, at offset: Int) -> UInt64 {
 }
 func put32(_ value: UInt32, at offset: Int, into data: inout Data) {
     for index in 0..<4 { data[offset + index] = UInt8((value >> (index * 8)) & 255) }
+}
+
+private final class RendererReplyBox {
+    let lock = NSLock()
+    var result: Result<(Data, IOSurface?), Error>?
 }

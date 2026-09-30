@@ -1,4 +1,4 @@
-// Bounded control-plane bridge. No shader/3D submissions or guest pointers.
+// Bounded VirGL renderer worker. Receives immutable bytes, never guest pointers.
 #include <virglrenderer.h>
 #include <virgl_hw.h>
 #include <stdint.h>
@@ -13,6 +13,7 @@
 enum { MAX_FRAME = 65536, MAX_CONTEXTS = 32 };
 enum { MAX_RESOURCES = 256 };
 extern int probe_shared_texture(void *native_texture);
+extern int renderer_capture_surface(void *native_texture);
 static uint32_t retired_fence;
 void renderer_worker_fence(uint32_t fence) { retired_fence = fence; }
 static int wait_for_gpu(uint32_t token, uint32_t context)
@@ -65,6 +66,7 @@ int run_renderer_worker(int output_fd)
     uint64_t resource_bytes[MAX_RESOURCES] = {0}, total_resource_bytes = 0;
     struct iovec backing[MAX_RESOURCES] = {0};
     uint64_t total_backing = 0;
+    uint32_t display_width = 0, display_height = 0, scanout_resource = 0;
     _Alignas(8) uint8_t request[MAX_FRAME], response[MAX_FRAME];
     uint8_t prefix[4];
     for (;;) {
@@ -86,9 +88,13 @@ int run_renderer_worker(int output_fd)
         if (flags & 1u) memcpy(response + 8, request + 8, 8);
         store32(response + 16, context);
         switch (type) {
-        case 0x100: // GET_DISPLAY_INFO: no active scanout in this bridge proof.
+        case 0x100: // GET_DISPLAY_INFO: geometry is configured by the host before VM boot.
             if (length != 24) break;
             response_length = 24 + 384;
+            if (display_width) {
+                store32(response + 32, display_width); store32(response + 36, display_height);
+                store32(response + 40, 1);
+            }
             result = 0x1101;
             break;
         case 0x108: { // GET_CAPSET_INFO
@@ -112,7 +118,7 @@ int run_renderer_worker(int output_fd)
             break;
         }
         case 0x200: { // CTX_CREATE
-            if (length != 96 || flags || !context || load32(request + 24) > 64 || load32(request + 28)) break;
+            if (length != 96 || flags || !context || context > 0x7fffffff || load32(request + 24) > 64 || load32(request + 28)) break;
             int slot = -1;
             for (int i = 0; i < MAX_CONTEXTS; ++i) {
                 if (contexts[i] == context) { slot = -2; break; }
@@ -135,23 +141,35 @@ int run_renderer_worker(int output_fd)
             }
             break;
         }
+        case 0x101: // RESOURCE_CREATE_2D
         case 0x204: { // RESOURCE_CREATE_3D: finite resource and dimension budgets.
-            if (length != 72) break;
+            if (length != (type == 0x101 ? 40u : 72u)) break;
             uint32_t id = load32(request + 24);
             int slot = -1;
             for (int i = 0; i < MAX_RESOURCES; ++i) {
                 if (resources[i] == id) { slot = -2; break; }
                 if (!resources[i] && slot == -1) slot = i;
             }
-            if (!id || slot == -2) { result = 0x1203; break; }
+            if (!id || id > 0x7fffffff || slot == -2) { result = 0x1203; break; }
             if (slot < 0) { result = 0x1201; break; }
-            struct virgl_renderer_resource_create_args args = {
+            struct virgl_renderer_resource_create_args args = {0};
+            if (type == 0x101) {
+                args = (struct virgl_renderer_resource_create_args){
+                    .handle = id, .target = 2, .format = load32(request + 28),
+                    .bind = VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SCANOUT,
+                    .width = load32(request + 32), .height = load32(request + 36),
+                    .depth = 1, .array_size = 1, .flags = 1,
+                };
+                if (args.format != 1 && args.format != 2) break;
+            } else {
+                args = (struct virgl_renderer_resource_create_args){
                 .handle = id, .target = load32(request + 28), .format = load32(request + 32),
                 .bind = load32(request + 36), .width = load32(request + 40),
                 .height = load32(request + 44), .depth = load32(request + 48),
                 .array_size = load32(request + 52), .last_level = load32(request + 56),
                 .nr_samples = load32(request + 60), .flags = load32(request + 64),
             };
+            }
             uint32_t max_width = args.target == 0 ? 16777216 : 8192;
             if (!args.width || args.width > max_width || !args.height || args.height > 8192 ||
                 !args.depth || args.depth > 256 || !args.array_size || args.array_size > 256 ||
@@ -183,6 +201,7 @@ int run_renderer_worker(int output_fd)
                 total_resource_bytes -= resource_bytes[slot]; resource_bytes[slot] = 0;
                 total_backing -= backing[slot].iov_len;
                 free(backing[slot].iov_base); backing[slot] = (struct iovec){0};
+                if (scanout_resource == id) scanout_resource = 0;
             } else {
                 for (int i = 0; i < MAX_CONTEXTS; ++i) if (contexts[i] == context && context) has_context = 1;
                 if (!has_context) { result = 0x1204; break; }
@@ -199,23 +218,55 @@ int run_renderer_worker(int output_fd)
             result = virgl_renderer_submit_cmd(request + 32, context, (length - 32) / 4) ? 0x1200 : 0x1100;
             break;
         }
+        case 0x105: // TRANSFER_TO_HOST_2D
         case 0x205: // TRANSFER_TO_HOST_3D
         case 0x206: { // TRANSFER_FROM_HOST_3D: explicit guest readback, never scanout.
-            if (length != 72) break;
-            uint32_t id = load32(request + 56);
+            if (length != (type == 0x105 ? 56u : 72u)) break;
+            uint32_t id = load32(request + (type == 0x105 ? 48 : 56));
             int slot = -1;
             for (int i = 0; i < MAX_RESOURCES; ++i) if (id && resources[i] == id) slot = i;
             if (slot < 0 || !backing[slot].iov_base) { result = 0x1203; break; }
             struct virgl_box box = {load32(request + 24), load32(request + 28), load32(request + 32),
                 load32(request + 36), load32(request + 40), load32(request + 44)};
-            uint64_t offset = load64(request + 48);
+            uint64_t offset = type == 0x105 ? 0 : load64(request + 48);
+            uint32_t level = type == 0x105 ? 0 : load32(request + 60);
+            uint32_t stride = type == 0x105 ? 0 : load32(request + 64);
+            uint32_t layer_stride = type == 0x105 ? 0 : load32(request + 68);
+            if (type == 0x105) {
+                box = (struct virgl_box){load32(request + 24), load32(request + 28), 0,
+                    load32(request + 32), load32(request + 36), 1};
+                offset = load64(request + 40); level = 0; stride = 0; layer_stride = 0;
+            }
             if (offset >= backing[slot].iov_len) break;
-            int error = type == 0x205 ?
-                virgl_renderer_transfer_write_iov(id, context, load32(request + 60),
-                    load32(request + 64), load32(request + 68), &box, offset, NULL, 0) :
-                virgl_renderer_transfer_read_iov(id, context, load32(request + 60),
-                    load32(request + 64), load32(request + 68), &box, offset, NULL, 0);
+            int error = type != 0x206 ?
+                virgl_renderer_transfer_write_iov(id, context, level, stride, layer_stride, &box, offset, NULL, 0) :
+                virgl_renderer_transfer_read_iov(id, context, level, stride, layer_stride, &box, offset, NULL, 0);
             result = error ? 0x1205 : 0x1100; break;
+        }
+        case 0x103: // SET_SCANOUT
+        case 0x104: { // RESOURCE_FLUSH
+            if (length != 48) break;
+            uint32_t id = load32(request + (type == 0x103 ? 44 : 40));
+            if (type == 0x103 && load32(request + 40)) { result = 0x1202; break; }
+            if (type == 0x103 && !id) { scanout_resource = 0; result = 0x1100; break; }
+            struct virgl_renderer_resource_info_ext info = {0};
+            if (!id || virgl_renderer_resource_get_info_ext(id, &info)) { result = 0x1203; break; }
+            uint32_t x = load32(request + 24), y = load32(request + 28);
+            uint32_t width = load32(request + 32), height = load32(request + 36);
+            if (x > info.base.width || y > info.base.height || width > info.base.width - x ||
+                height > info.base.height - y || !width || !height) break;
+            if (type == 0x103) {
+                // Cropped resources need a separate blit region contract.
+                if (x || y || width != info.base.width || height != info.base.height) break;
+                scanout_resource = id;
+            }
+            if (id == scanout_resource) {
+                if (++fence_token == 0) ++fence_token;
+                if (!wait_for_gpu(fence_token, 0)) return 1;
+                if (info.native_type != VIRGL_NATIVE_HANDLE_METAL_TEXTURE || !info.native_handle ||
+                    !renderer_capture_surface(info.native_handle)) { result = 0x1200; break; }
+            }
+            result = 0x1100; break;
         }
         case 0x107: { // RESOURCE_DETACH_BACKING
             if (length != 32) break;
@@ -268,6 +319,7 @@ int run_renderer_worker(int output_fd)
             memset(backing, 0, sizeof(backing)); total_backing = 0;
             memset(resources, 0, sizeof(resources)); memset(resource_bytes, 0, sizeof(resource_bytes));
             total_resource_bytes = 0; result = 0x1100;
+            scanout_resource = 0;
             break;
         case 0xffff0002: { // Trusted test only: verify a red 64x64 native texture.
             if (length != 32 || flags || context) break;
@@ -277,6 +329,22 @@ int run_renderer_worker(int output_fd)
                 info.native_type != VIRGL_NATIVE_HANDLE_METAL_TEXTURE || !info.native_handle ||
                 info.base.width != 64 || info.base.height != 64) break;
             result = probe_shared_texture(info.native_handle) ? 0x1100 : 0x1200;
+            break;
+        }
+        case 0xffff0003: { // Trusted host-side export; no guest-supplied native handles.
+            if (length != 32 || flags || context) break;
+            struct virgl_renderer_resource_info_ext info = {0};
+            if (virgl_renderer_resource_get_info_ext(load32(request + 24), &info) ||
+                info.native_type != VIRGL_NATIVE_HANDLE_METAL_TEXTURE || !info.native_handle) break;
+            result = renderer_capture_surface(info.native_handle) ? 0x1100 : 0x1200;
+            break;
+        }
+        case 0xffff0020: { // Host-only initial display geometry.
+            if (length != 32 || flags || context) break;
+            uint32_t width = load32(request + 24), height = load32(request + 28);
+            if (!width || !height || width > 8192 || height > 8192 || (uint64_t)width * height > 16777216) break;
+            if (total_resource_bytes) break;
+            display_width = width; display_height = height; result = 0x1100;
             break;
         }
         default:
