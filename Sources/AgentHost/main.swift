@@ -5,6 +5,7 @@ import AppKit
 //   __find <args>      GNU find's -printf subset, for the `find` shim (FindCommand)
 //   __mcp-delegation   the agents' delegation MCP server (see DelegationHub)
 //   __login <tool>     a headless sign-in's link and code, then cancel (a check)
+//   __menu-shot <png>  the menu's header row and the menu-bar mark, drawn offscreen
 //   __agents           the Manage Agents window alone (no services started)
 //   __remote-menu      what a plain SSH login gets: a terminal on the agents
 //   claude [args…]     start Claude here as a hosted session and attach
@@ -47,6 +48,36 @@ if args.count >= 2 {
         }
         AgentLogin.shared.cancel(args[2])
         Thread.sleep(forTimeInterval: 0.5)
+        exit(0)
+    case "__menu-shot" where args.count > 2:
+        MainActor.assumeIsolated {
+            _ = NSApplication.shared
+            let rows: [(SidecarMenuHeader.Status)] = [
+                .init(text: "Attached to ark as macdev2-native", tone: .good),
+                .init(text: "Waiting for approval on ark", tone: .busy),
+                .init(text: "Not signed in to bromure.io", tone: .idle),
+            ]
+            let canvas = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 54 * 3 + 40))
+            canvas.wantsLayer = true
+            canvas.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            for (i, st) in rows.enumerated() {
+                let v = SidecarMenuHeader.view(status: st)
+                v.frame.origin = NSPoint(x: 0, y: 40 + CGFloat(2 - i) * 54)
+                canvas.addSubview(v)
+            }
+            for (i, badge) in [false, true].enumerated() {
+                let iv = NSImageView(frame: NSRect(x: 14 + CGFloat(i) * 40, y: 10, width: 30, height: 20))
+                iv.image = SidecarMark.menuBarImage(badge: badge)
+                iv.contentTintColor = .labelColor
+                canvas.addSubview(iv)
+            }
+            let win = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            win.contentView = canvas
+            canvas.layoutSubtreeIfNeeded()
+            guard let rep = canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds) else { return }
+            canvas.cacheDisplay(in: canvas.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[2]))
+        }
         exit(0)
     case "__agents":
         MainActor.assumeIsolated {

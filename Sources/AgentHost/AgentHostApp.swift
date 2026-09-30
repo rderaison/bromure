@@ -10,18 +10,12 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var sshError: String?
     private var refreshTimer: Timer?
+    private var iconNeedsYou = false
     /// Sparkle, in release builds only (see startUpdater).
     private var updater: SPUStandardUpdaterController?
     private let updateReminders = GentleUpdateReminders()
 
     static let portKey = "sshPort"
-    /// Password sign-in with the Mac account's password. Off by default: the
-    /// account's device keys (synced from bromure.io) are how devices get in,
-    /// and the sshd is reachable only through the bromure.io relay anyway.
-    static let passwordKey = "passwordAuth"
-    private var passwordAuth: Bool {
-        UserDefaults.standard.object(forKey: Self.passwordKey) as? Bool ?? false
-    }
     static let defaultPort = 2223
     private var port: Int {
         let p = UserDefaults.standard.integer(forKey: Self.portKey)
@@ -30,6 +24,7 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AgentHostPaths.ensure()
+        UserDefaults.standard.removeObject(forKey: "passwordAuth")   // the retired password sign-in
         HostEnvironment.writeShims()
         HostEnvironment.captureLoginPath()
         ClaudeHooks.writeSettings()
@@ -51,7 +46,7 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Bromure Sidecar")
+        statusItem.button?.image = SidecarMark.menuBarImage(badge: false)
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -116,8 +111,10 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             // Loopback only: devices come in through the bromure.io relay,
             // which this Mac dials out to (P2PAccount). No inbound port.
+            // Keys only: the account's devices (synced from bromure.io) are
+            // the only way in — never the Mac account's password.
             try RemoteAccessServer.shared.start(.init(port: port, bindAddress: "127.0.0.1",
-                                                      passwordAuth: passwordAuth))
+                                                      passwordAuth: false))
             sshError = nil
         } catch {
             sshError = error.localizedDescription
@@ -130,137 +127,195 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let needsYou = snap.windows.contains {
             snap.agents[$0.index] != nil && ($0.status == "needsInput" || snap.prompting.contains($0.index))
         }
-        let name = needsYou ? "exclamationmark.bubble" : "terminal"
-        statusItem.button?.image = NSImage(systemSymbolName: name, accessibilityDescription: "Bromure Sidecar")
+        guard needsYou != iconNeedsYou || statusItem.button?.image == nil else { return }
+        iconNeedsYou = needsYou
+        statusItem.button?.image = SidecarMark.menuBarImage(badge: needsYou)
+        statusItem.button?.setAccessibilityLabel(needsYou ? "Bromure Sidecar — an agent needs you" : "Bromure Sidecar")
     }
 
     // MARK: Menu
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let header = NSMenuItem(title: "Bromure Sidecar", action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        menu.addItem(header)
-
         let account = P2PAccount.shared
-        if let sshError {
-            menu.addItem(disabled("SSH server stopped: \(sshError)"))
-        } else if account.enrolling {
-            menu.addItem(disabled("Signing in to bromure.io…"))
-        } else if account.isEnrolled {
-            menu.addItem(disabled("Reachable from your Bromure devices as “\(account.deviceName)”"))
-            menu.addItem(disabled("Through bromure.io — no open ports"))
-        } else {
-            let signIn = NSMenuItem(title: "Sign in to bromure.io…", action: #selector(signIn), keyEquivalent: "")
-            signIn.target = self
-            signIn.toolTip = "Enroll this Mac as one of your devices, so Bromure AC can reach its agents from anywhere."
-            menu.addItem(signIn)
-            let paste = NSMenuItem(title: "Paste Enrollment Link…", action: #selector(pasteLink), keyEquivalent: "")
-            paste.target = self
-            menu.addItem(paste)
-        }
-        if let err = account.lastError { menu.addItem(disabled(err)) }
-        menu.addItem(.separator())
-        addAttachItems(to: menu, account: account)
-        if sshError == nil {
-            if let fp = RemoteAccessServer.shared.hostKeyFingerprint()?.split(separator: " ").dropFirst().first {
-                let item = NSMenuItem(title: "Host key \(fp)", action: #selector(copyFingerprint(_:)), keyEquivalent: "")
-                item.representedObject = String(fp)
-                item.target = self
-                item.toolTip = "Click to copy — compare it with what Bromure AC shows when you add this Mac."
-                menu.addItem(item)
-            }
-        }
+        let linker = MachineLinker.shared
+
+        let header = NSMenuItem()
+        header.view = SidecarMenuHeader.view(status: connectionStatus(account: account, linker: linker))
+        menu.addItem(header)
         menu.addItem(.separator())
 
+        // Sessions
+        menu.addItem(section("Sessions"))
         let snap = SessionEngine.shared.snapshot()
         let live = snap.sessions.filter { $0.windowIndex != nil && $0.deletedAt == nil }
-        if live.isEmpty {
-            menu.addItem(disabled("No agents running"))
-        }
+        if live.isEmpty { menu.addItem(disabled("No agents running")) }
         for s in live {
             let w = snap.windows.first { $0.index == s.windowIndex }
             let status: String
             switch (snap.agents[s.windowIndex ?? -1] != nil, w?.status) {
-            case (false, _): status = s.launchingSince != nil ? "starting" : "exited"
-            case (true, "working"): status = "working"
-            case (true, "needsInput"): status = "needs you"
-            case (true, _) where snap.prompting.contains(s.windowIndex ?? -1): status = "needs you"
-            default: status = "idle"
+            case (false, _): status = s.launchingSince != nil ? "Starting" : "Exited"
+            case (true, "working"): status = "Working"
+            case (true, "needsInput"): status = "Needs you"
+            case (true, _) where snap.prompting.contains(s.windowIndex ?? -1): status = "Needs you"
+            default: status = "Idle"
             }
-            let item = NSMenuItem(title: "\(s.title) — \(status)", action: nil, keyEquivalent: "")
+            let agent = AgentSpec.spec(s.tool)
+            let item = labeled(s.title, detail: "\(agent?.name ?? s.tool) · \(status)")
+            item.image = agent?.logo.map { SidecarMark.sized($0, height: 15) }
             let sub = NSMenu()
             let open = NSMenuItem(title: "Open in Terminal", action: #selector(openInTerminal(_:)), keyEquivalent: "")
             open.representedObject = s.windowIndex
             open.target = self
+            open.image = symbol("terminal")
             sub.addItem(open)
             let end = NSMenuItem(title: "End Session", action: #selector(endSession(_:)), keyEquivalent: "")
             end.representedObject = s.id
             end.target = self
+            end.image = symbol("xmark.circle")
             sub.addItem(end)
             item.submenu = sub
             menu.addItem(item)
         }
+        menu.addItem(action("New Claude Session…", #selector(newSession), symbol: "plus.bubble", key: "n"))
         menu.addItem(.separator())
-        let new = NSMenuItem(title: "New Claude Session…", action: #selector(newSession), keyEquivalent: "n")
-        new.target = self
-        menu.addItem(new)
-        let agents = NSMenuItem(title: "Manage Agents…", action: #selector(manageAgents), keyEquivalent: "")
-        agents.target = self
-        menu.addItem(agents)
-        let install = NSMenuItem(title: "Install “bromure-claude” Command", action: #selector(installCommand), keyEquivalent: "")
-        install.target = self
-        install.toolTip = "Links ~/.local/bin/bromure-claude: run it in any folder to start Claude there as a hosted session."
-        menu.addItem(install)
-        if account.isEnrolled {
-            let out = NSMenuItem(title: "Sign Out of bromure.io", action: #selector(signOut), keyEquivalent: "")
-            out.target = self
-            menu.addItem(out)
+
+        // Connection
+        menu.addItem(section("Connection"))
+        if sshError != nil {
+            // The header says why; nothing to do here but quit and relaunch.
+        } else if account.enrolling {
+            menu.addItem(disabled("Waiting for bromure.io…"))
+        } else if !account.isEnrolled {
+            menu.addItem(action("Sign in to bromure.io…", #selector(signIn), symbol: "person.crop.circle.badge.checkmark"))
+            // ⌥: the manual path, when the browser can't hand the link back.
+            let paste = action("Paste Enrollment Link…", #selector(pasteLink), symbol: "doc.on.clipboard")
+            paste.isAlternate = true
+            paste.keyEquivalentModifierMask = .option
+            menu.addItem(paste)
         }
-        let rename = NSMenuItem(title: "Rename Machine (“\(ControlServer.machineName)”)…",
-                                action: #selector(renameMachine), keyEquivalent: "")
-        rename.target = self
-        menu.addItem(rename)
-        let pw = NSMenuItem(title: "Allow Sign-in with This Mac’s Password", action: #selector(togglePassword(_:)), keyEquivalent: "")
-        pw.target = self
-        pw.state = passwordAuth ? .on : .off
-        pw.toolTip = "Lets a device that isn't one of your bromure.io devices sign in with your Mac account's password."
-        menu.addItem(pw)
-        let approvals = NSMenuItem(title: "Agent Approvals", action: nil, keyEquivalent: "")
-        let approvalsMenu = NSMenu()
-        for spec in AgentSpec.all {
-            let current = AgentApprovals.current(spec.id)
-            let agent = NSMenuItem(title: spec.name + (current == .ask ? "" : " — \(current == .full ? "never asks" : "auto")"),
-                                   action: nil, keyEquivalent: "")
-            let sub = NSMenu()
-            for level in AgentApprovals.levels(spec.id) {
-                let item = NSMenuItem(title: level.title(spec.id), action: #selector(setApprovals(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = [spec.id, level.rawValue]
-                item.state = current == level ? .on : .off
-                sub.addItem(item)
-            }
-            agent.submenu = sub
-            approvalsMenu.addItem(agent)
-        }
-        approvalsMenu.addItem(.separator())
-        approvalsMenu.addItem(disabled("Applies to sessions started or resumed from now on"))
-        approvals.submenu = approvalsMenu
-        menu.addItem(approvals)
-        let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin(_:)), keyEquivalent: "")
-        login.target = self
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(login)
+        addAttachItems(to: menu, account: account)
         menu.addItem(.separator())
+
+        // Agents
+        menu.addItem(action("Manage Agents…", #selector(manageAgents), symbol: "square.and.arrow.down.on.square"))
+        menu.addItem(approvalsItem())
+        menu.addItem(settingsItem(account: account))
+        menu.addItem(.separator())
+
         if let updater {
             let title = updateReminders.pendingVersion.map { "Install Update (\($0))…" } ?? "Check for Updates…"
-            let check = NSMenuItem(title: title, action: #selector(checkForUpdates(_:)), keyEquivalent: "")
-            check.target = self
+            let check = action(title, #selector(checkForUpdates(_:)),
+                               symbol: updateReminders.pendingVersion == nil ? "arrow.triangle.2.circlepath" : "arrow.down.circle.fill")
             check.isEnabled = updater.updater.canCheckForUpdates
             menu.addItem(check)
         }
-        let quit = NSMenuItem(title: "Quit (agents keep running)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = labeled("Quit Bromure Sidecar", detail: "Agents keep running")
+        quit.action = #selector(NSApplication.terminate(_:))
+        quit.keyEquivalent = "q"
         menu.addItem(quit)
+    }
+
+    /// The header's one line: where this Mac's agents can be reached from.
+    private func connectionStatus(account: P2PAccount, linker: MachineLinker) -> SidecarMenuHeader.Status {
+        if let sshError { return .init(text: "Stopped — \(sshError)", tone: .error) }
+        if account.enrolling { return .init(text: "Signing in to bromure.io…", tone: .busy) }
+        if let t = linker.current {
+            if linker.isAwaitingApproval { return .init(text: "Waiting for approval on \(t.label)", tone: .busy) }
+            if linker.isLinked { return .init(text: "Attached to \(t.label) as \(ControlServer.machineName)", tone: .good) }
+            return .init(text: linker.error.map { "Can't reach \(t.label) — \($0)" } ?? "Attaching to \(t.label)…",
+                         tone: linker.error == nil ? .busy : .error)
+        }
+        if let err = account.lastError { return .init(text: err, tone: .error) }
+        return account.isEnrolled ? .init(text: "Not attached to a Bromure AC", tone: .idle)
+                                  : .init(text: "Not signed in to bromure.io", tone: .idle)
+    }
+
+    private func approvalsItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Agent Approvals", action: nil, keyEquivalent: "")
+        item.image = symbol("checkmark.shield")
+        let menu = NSMenu()
+        for spec in AgentSpec.all {
+            let current = AgentApprovals.current(spec.id)
+            let detail: String
+            switch current {
+            case .ask: detail = "Asks before acting"
+            case .auto: detail = spec.id == "codex" ? "Never asks · sandboxed" : "Asks only when risky"
+            case .full: detail = "Never asks"
+            }
+            let agent = labeled(spec.name, detail: detail)
+            agent.image = spec.logo.map { SidecarMark.sized($0, height: 15) }
+            let sub = NSMenu()
+            for level in AgentApprovals.levels(spec.id) {
+                let choice = NSMenuItem(title: level.title(spec.id), action: #selector(setApprovals(_:)), keyEquivalent: "")
+                choice.target = self
+                choice.representedObject = [spec.id, level.rawValue]
+                choice.state = current == level ? .on : .off
+                sub.addItem(choice)
+            }
+            agent.submenu = sub
+            menu.addItem(agent)
+        }
+        menu.addItem(.separator())
+        menu.addItem(disabled("Applies to sessions started or resumed from now on"))
+        item.submenu = menu
+        return item
+    }
+
+    private func settingsItem(account: P2PAccount) -> NSMenuItem {
+        let item = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        item.image = symbol("gearshape")
+        let menu = NSMenu()
+        menu.addItem(action("Rename “\(ControlServer.machineName)”…", #selector(renameMachine), symbol: "pencil"))
+        let login = action("Open at Login", #selector(toggleLogin(_:)), symbol: "power")
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(login)
+        let install = action("Install “bromure-claude” Command", #selector(installCommand), symbol: "chevron.left.forwardslash.chevron.right")
+        install.toolTip = "Links ~/.local/bin/bromure-claude: run it in any folder to start Claude there as a hosted session."
+        menu.addItem(install)
+        if sshError == nil, let fp = RemoteAccessServer.shared.hostKeyFingerprint()?.split(separator: " ").dropFirst().first {
+            let key = labeled("Copy Host Key Fingerprint", detail: String(fp))
+            key.action = #selector(copyFingerprint(_:))
+            key.target = self
+            key.representedObject = String(fp)
+            key.image = symbol("key")
+            key.toolTip = "Compare it with what Bromure AC shows when it adds this Mac."
+            menu.addItem(key)
+        }
+        if account.isEnrolled {
+            menu.addItem(.separator())
+            menu.addItem(action("Sign Out of bromure.io", #selector(signOut), symbol: "rectangle.portrait.and.arrow.right"))
+        }
+        item.submenu = menu
+        return item
+    }
+
+    // MARK: Menu items
+
+    private func section(_ title: String) -> NSMenuItem {
+        NSMenuItem.sectionHeader(title: title)
+    }
+
+    private func action(_ title: String, _ selector: Selector, symbol name: String? = nil, key: String = "") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
+        item.target = self
+        if let name { item.image = symbol(name) }
+        return item
+    }
+
+    /// A title with a quieter second line (a subtitle on macOS 14.4+).
+    private func labeled(_ title: String, detail: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        if #available(macOS 14.4, *) {
+            item.subtitle = detail
+        } else {
+            item.title = "\(title) — \(detail)"
+        }
+        return item
+    }
+
+    private func symbol(_ name: String) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)
     }
 
     private func disabled(_ title: String) -> NSMenuItem {
@@ -328,20 +383,14 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// account server), they're one more machine in its lists.
     private func addAttachItems(to menu: NSMenu, account: P2PAccount) {
         let linker = MachineLinker.shared
-        if let t = linker.current {
-            menu.addItem(disabled(linker.isAwaitingApproval ? "Waiting for approval on \(t.label)…"
-                                  : linker.isLinked ? "Attached to \(t.label)" : "Attaching to \(t.label)…"))
-            if !linker.isLinked, let err = linker.error { menu.addItem(disabled(err)) }
-            let d = NSMenuItem(title: "Detach", action: #selector(detach), keyEquivalent: "")
-            d.target = self
-            menu.addItem(d)
-        }
-        let item = NSMenuItem(title: linker.current == nil ? "Attach to Bromure AC" : "Attach Elsewhere", action: nil, keyEquivalent: "")
+        let item = NSMenuItem(title: linker.current == nil ? "Attach to Bromure AC" : "Switch Bromure AC", action: nil, keyEquivalent: "")
+        item.image = symbol("link")
         let sub = NSMenu()
         if FileManager.default.fileExists(atPath: MachineLinker.localControlSocket) {
             let local = NSMenuItem(title: "Bromure AC on This Mac", action: #selector(attachTo(_:)), keyEquivalent: "")
             local.representedObject = MachineLinker.Target.local
             local.target = self
+            local.image = symbol("desktopcomputer")
             local.state = linker.current == .local ? .on : .off
             sub.addItem(local)
         }
@@ -352,6 +401,7 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let i = NSMenuItem(title: d.name ?? d.id, action: #selector(attachTo(_:)), keyEquivalent: "")
                 i.representedObject = t
                 i.target = self
+                i.image = symbol("server.rack")
                 i.state = linker.current == t ? .on : .off
                 sub.addItem(i)
             }
@@ -359,6 +409,12 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if sub.items.isEmpty {
             sub.addItem(disabled(account.isEnrolled ? "No Bromure AC online" : "Sign in to bromure.io to see your servers"))
+        }
+        if linker.current != nil {
+            sub.addItem(.separator())
+            let d = NSMenuItem(title: "Detach", action: #selector(detach), keyEquivalent: "")
+            d.target = self
+            sub.addItem(d)
         }
         item.submenu = sub
         menu.addItem(item)
@@ -446,11 +502,6 @@ final class AgentHostApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         AgentApprovals.set(level, for: tool)
         AgentHostLog.log("approvals: \(tool) set to \(level.rawValue)")
-    }
-
-    @objc private func togglePassword(_ sender: NSMenuItem) {
-        UserDefaults.standard.set(!passwordAuth, forKey: Self.passwordKey)
-        startSSH()   // auth methods are fixed per listener: restart it
     }
 
     @objc private func toggleLogin(_ sender: NSMenuItem) {

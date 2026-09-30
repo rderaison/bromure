@@ -68,7 +68,7 @@ enum AgentHostPaths {
         let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: "migratedFromNative"),
               let legacy = UserDefaults(suiteName: "io.bromure.native") else { return }
-        for key in ["sshPort", "passwordAuth", "attach.target", "machineName", "p2p.published",
+        for key in ["sshPort", "attach.target", "machineName", "p2p.published",
                     "migratedFromAgentHost", "debugExec"] {
             if defaults.object(forKey: key) == nil, let v = legacy.object(forKey: key) { defaults.set(v, forKey: key) }
         }
@@ -90,7 +90,7 @@ enum AgentHostPaths {
         let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: "migratedFromAgentHost"),
               let legacy = UserDefaults(suiteName: "io.bromure.agent-host") else { return }
-        for key in ["sshPort", "passwordAuth", "attach.target", "machineName", "p2p.published"] {
+        for key in ["sshPort", "attach.target", "machineName", "p2p.published"] {
             if defaults.object(forKey: key) == nil, let v = legacy.object(forKey: key) { defaults.set(v, forKey: key) }
         }
         defaults.set(true, forKey: "migratedFromAgentHost")

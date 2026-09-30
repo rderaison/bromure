@@ -44,12 +44,16 @@ struct AgentSpec: Identifiable, Hashable {
     static func spec(_ id: String) -> AgentSpec? { all.first { $0.id == id } }
 
     /// The logo (Bromure AC's art: a template drawing, tinted by the view).
-    var logo: NSImage? {
+    var logo: NSImage? { Self.resourceImage("agents/\(id).svg") }
+
+    /// A template image from the SwiftPM resource bundle, looked up by hand:
+    /// `Bundle.module` traps when the bundle is missing.
+    static func resourceImage(_ path: String) -> NSImage? {
         let bundleName = "bromure_bromure-sidecar.bundle"
         let candidates = [Bundle.main.resourceURL, Bundle.main.bundleURL,
                           Bundle.main.executableURL?.deletingLastPathComponent()].compactMap { $0 }
         for base in candidates {
-            let url = base.appendingPathComponent(bundleName).appendingPathComponent("agents/\(id).svg")
+            let url = base.appendingPathComponent(bundleName).appendingPathComponent(path)
             if let img = NSImage(contentsOf: url) { img.isTemplate = true; return img }
         }
         return nil
