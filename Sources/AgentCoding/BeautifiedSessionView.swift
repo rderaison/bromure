@@ -2915,6 +2915,9 @@ struct TerminalPrompt: Equatable {
         "trust the files in this", "do you trust", "trust this folder",
         "trust this directory", "trust this workspace", "is this a project you created",
         "yes, i trust this folder", "trust the authors of", "quick safety check",
+        // Codex's onboarding ("You are running Codex in … allow Codex to work
+        // in this folder without asking for approval").
+        "allow codex to work in this folder", "you are running codex in",
     ]
 
     static func detect(inScreen screen: String, agent: String? = nil) -> TerminalPrompt? {
@@ -2971,10 +2974,28 @@ struct TerminalPrompt: Equatable {
             let isFile: (Substring) -> Bool = { $0.hasSuffix(".log") || $0.contains("/logs/") }
             let folder = trimmed.first(where: { $0.hasPrefix("/") && !$0.contains(" ") && !isFile($0[...]) })
                 ?? trimmed.joined(separator: " ").split(separator: " ")
-                    .first(where: { $0.hasPrefix("/home/") || $0.hasPrefix("/root/") })
+                    .first(where: { $0.hasPrefix("/home/") || $0.hasPrefix("/root/") || $0.hasPrefix("/Users/") })
                     .map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: ".,:;)")) }
                 ?? NSLocalizedString("this folder", comment: "prompt")
             let claudePicker = low.contains("yes, i trust this folder")
+            // Any other agent's trust dialog — Codex, Kimi, Grok, Oh My Pi,
+            // whatever each version words it as — is answered from its own
+            // numbered options: a card that only knew exact phrasings sat
+            // there "waiting for the agent's trust dialog" with nothing to click.
+            if !claudePicker {
+                let optionLines = trimmed.enumerated().filter { loginOption($0.element) != nil }
+                let options = optionLines.compactMap { loginOption($0.element) }
+                if options.count >= 2, options.map(\.index) == Array(1...options.count),
+                   let first = optionLines.first {
+                    let selected = optionLines.first { l in ["❯", "›", ">"].contains { unboxed(l.element).hasPrefix($0) } }
+                        .flatMap { loginOption($0.element)?.index }
+                    let asked = pickerTitle(trimmed, before: first.offset)
+                    return TerminalPrompt(kind: .picker, detail: folder,
+                                          title: asked.isEmpty
+                                              ? NSLocalizedString("Trust this folder?", comment: "prompt") : asked,
+                                          options: options, selectedOption: selected)
+                }
+            }
             let codexPicker = low.contains("yes, continue")
             // Kimi's picker defaults to "Trust this folder" (Enter picks it).
             let kimiPicker = low.contains("don't trust") && low.contains("trust this folder")
