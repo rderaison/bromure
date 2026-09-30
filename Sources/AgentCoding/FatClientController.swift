@@ -4364,9 +4364,21 @@ final class RemoteHostWindow: NSWindow {
 
     private func sessionStageDidChange() {
         guard sessionsFirst, let id = selectedSessionID else { return }
-        guard let s = controller.sessionStore.session(id) else { clearSessionStage(); return }
+        guard let s = controller.sessionStore.session(id) else {
+            // Missing from one snapshot (a machine poll that failed, a
+            // session restarting) isn't gone: only a few in a row clear the
+            // stage — otherwise the chat vanished under the user.
+            missingSessionSnapshots += 1
+            if missingSessionSnapshots >= Self.missingSnapshotsToClear { clearSessionStage() }
+            return
+        }
+        missingSessionSnapshots = 0
         presentSession(s)
     }
+
+    /// Consecutive snapshots the session on stage has been missing from.
+    private var missingSessionSnapshots = 0
+    private static let missingSnapshotsToClear = 3
 
     private func presentSession(_ s: AgentSession) {
         let model = controller.listModel
@@ -6352,6 +6364,20 @@ final class RemoteHostWindow: NSWindow {
             m.inlineTerminalSession = { [weak self] in
                 self?.termControllers[id]?.tmuxSessionName(forWindow: w)
             }
+            // /term: a scratch shell in the session's folder on the remote
+            // machine, over the same SSH attach path.
+            let scratchKey = "\(id.uuidString.prefix(8))w\(w)"
+            m.scratchSessionName = TerminalSessionController.scratchSession(scratchKey)
+            m.scratchTerminal = { [weak self, weak m] in
+                guard let self else { return nil }
+                let ctl = self.termControllers[id] ?? {
+                    let c = TerminalSessionController(profile: profile, remoteHost: self.controller.host.id)
+                    self.termControllers[id] = c
+                    return c
+                }()
+                let cwd = self.controller.sessionStore.session(profileID: id, windowIndex: w)?.cwd ?? "~"
+                return ctl.scratchView(key: scratchKey, cwd: cwd) { [weak m] in m?.scratchTerminalEnded() }
+            }
         }
         return m
     }
@@ -6422,7 +6448,13 @@ final class RemoteHostWindow: NSWindow {
                 }
             }
         }
-        if let id = shownWorkspace, shownWindowIndex == nil {
+        // A machine on stage follows its active tab (the mirror is 1:1). A
+        // session's chat or a room is pinned to its own windows: following
+        // the machine's active tab there swapped the chat under the user's
+        // typing whenever anything else moved that tab, and — with the stage
+        // just cleared — mounted the raw terminal of whatever was active.
+        if selectedSessionID == nil, roomController == nil,
+           let id = shownWorkspace, shownWindowIndex == nil {
             let idx = controller.tabsModel(for: id)?.activeTab?.index ?? 0
             mountTerminal(for: id, window: idx)
         }
