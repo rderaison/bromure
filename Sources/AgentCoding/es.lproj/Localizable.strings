@@ -3194,3 +3194,10 @@
 "Your environment" = "Tu entorno";
 "What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "Lo que los controles de seguridad de tus agentes deben saber: tu organización, los repositorios, dominios y servicios en los que confías. Uno por línea. El modo automático de Claude lo usa para distinguir el trabajo rutinario de las acciones arriesgadas.";
 "Applies to every workspace from its next launch." = "Se aplica a cada espacio de trabajo desde su próximo inicio.";
+
+/* Chat: scratch terminal (/term) */
+"Open a terminal here, in this session's folder" = "Abrir un terminal aquí, en la carpeta de esta sesión";
+"Drag to resize" = "Arrastra para cambiar el tamaño";
+"Hide — the shell keeps running (⌃`)" = "Ocultar: el shell sigue en marcha (⌃`)";
+"Close the terminal (ends the shell)" = "Cerrar el terminal (termina el shell)";
+"The terminal isn't available right now." = "El terminal no está disponible ahora mismo.";

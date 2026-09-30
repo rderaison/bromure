@@ -10,7 +10,7 @@ import SwiftUI
 // custom ones from the workspace.
 
 struct SlashCommand: Identifiable, Hashable {
-    enum Source: String { case builtIn, custom, skill }
+    enum Source: String { case builtIn, custom, skill, bromure }
     let name: String            // without the leading "/"
     let description: String
     let source: Source

@@ -601,6 +601,21 @@ final class SessionPane {
         m.inlineTerminalSession = { [weak self] in
             self?.terminalController?.tmuxSessionName(forWindow: windowIndex)
         }
+        // /term: a scratch shell of its own in this session's folder, on
+        // this machine — one per session window, kept while hidden.
+        let scratchKey = "\(profile.id.uuidString.prefix(8))w\(windowIndex)"
+        m.scratchSessionName = TerminalSessionController.scratchSession(scratchKey)
+        m.scratchTerminal = { [weak self, weak m] in
+            guard let self else { return nil }
+            if self.terminalController == nil {
+                self.terminalController = TerminalSessionController(profile: self.profile)
+            }
+            let cwd = self.acDelegate?.agentSessionStore
+                .session(profileID: self.profile.id, windowIndex: windowIndex)?.cwd ?? "~"
+            return self.terminalController?.scratchView(key: scratchKey, cwd: cwd) { [weak m] in
+                m?.scratchTerminalEnded()
+            }
+        }
         // Delegations this session is part of, for the panel above the
         // composer; the user can answer a delegate's question for the agent.
         m.delegationStore = acDelegate?.delegationStore
