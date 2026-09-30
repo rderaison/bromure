@@ -318,6 +318,7 @@ final class AgentSessionEngine {
             // the fresh stand-in in before it starts again, or it comes back
             // on the stale one and asks to sign in all over.
             if s.tool == .codex { await delegate.pushCodexAuth(profileID: s.profileID) }
+            if s.tool == .claude { await delegate.pushClaudeStandIn(profileID: s.profileID) }
             if let w = s.windowIndex {
                 _ = try? await delegate.guestExec(
                     profileID: s.profileID,

@@ -555,7 +555,11 @@ public final class SessionDisk {
         // swaps it for a live subscription OAuth Bearer token held on the host.
         // Only present when a subscription credential is registered (see
         // makeTokenPlan); otherwise the guest logs in interactively as before.
-        if let bogus = tokenPlan?.claudeSubscriptionBogusKey, profile.claudeGatewayBaseURL == nil {
+        // With account features on, Claude signs in with the OAuth stand-in
+        // (`~/.claude/.credentials.json`) instead — and an ANTHROPIC_API_KEY
+        // in the environment would win over it.
+        if let bogus = tokenPlan?.claudeSubscriptionBogusKey, profile.claudeGatewayBaseURL == nil,
+           tokenPlan?.claudeOAuthStandIn == nil {
             lines.append("export ANTHROPIC_API_KEY=\(shellQuote(bogus))")
         }
         // Claude on Anthropic itself (API key or subscription): the model(s)
