@@ -1939,6 +1939,12 @@ public final class SessionDisk {
             "[mcp_servers.delegation]",
             "command = \"python3\"",
             "args = [\(tomlQuote(delegationMCPShimGuestPath))]",
+            // Codex starts MCP servers with a filtered environment: without
+            // these the shim can't name its tmux window, the host can't tell
+            // which session is calling, and every call is refused ("no
+            // Bromure session identity"). TMUX too: `tmux display-message`
+            // finds its server through it.
+            "env_vars = [\"TMUX\", \"TMUX_PANE\"]",
             // Agent-to-agent traffic never waits on an approval prompt.
             "default_tools_approval_mode = \"approve\"",
             "",

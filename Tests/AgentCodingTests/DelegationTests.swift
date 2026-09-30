@@ -387,6 +387,11 @@ struct DelegationTests {
         #expect(claude.contains("bromure-delegation-mcp.py"))
         let codex = SessionDisk.codexMCPConfig(servers: [])
         #expect(codex.contains("[mcp_servers.delegation]"))
+        // Codex hands MCP servers a filtered environment; without the tmux
+        // variables the shim has no window to announce and every call fails.
+        let table = codex.components(separatedBy: "[mcp_servers.delegation]")[1]
+            .components(separatedBy: "\n\n")[0]
+        #expect(table.contains(#"env_vars = ["TMUX", "TMUX_PANE"]"#))
     }
 
     // MARK: Peers across workspaces

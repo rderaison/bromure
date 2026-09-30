@@ -1,0 +1,76 @@
+---
+title: "Profile Settings"
+description: "How to open a profile's settings window, how its eleven categories are organized, what Save and Cancel do, when a running session needs a restart, and how managed profiles appear."
+order: 7
+---
+
+# Profile Settings
+
+Almost everything that shapes a browsing session belongs to a profile: which browser runs, whether data is kept, what the VM may share with your Mac, which networks it can reach, whether traffic goes through a VPN, and how much is recorded. Each profile has its own settings window. This chapter is the reference for that window and for each of its eleven categories.
+
+A few things are not per-profile. VM memory and CPU, the keyboard layout baked into the image, display scale, the default network mode, and the automation server are app-wide and live in the Settings window (⌘,). See [App Settings](../08-app-settings/index.mdx).
+
+## Opening the settings window
+
+| From | How |
+|---|---|
+| **File menu** | **File › Edit Profile…**. The item is renamed after the front window's profile, for example **Edit “Work”…**. With no browser window in front, it edits the startup profile. |
+| **Profile chip** | Click the profile chip in the window's tab bar and choose **Edit “*profile*”…**. |
+| **New profile** | **File › New Profile…** (or **New Profile…** in the profile chip). After you click **Create**, the new profile's settings window opens so you can adjust it before its first session. |
+| **AppleScript** | `open profile settings "Work"`, optionally with `category "vpnAds"` to open on a given category. See [Automation](../14-automation.mdx). |
+
+Only one profile settings window exists at a time. Opening the settings of another profile closes the current window without saving it.
+
+## The settings window
+
+The window is titled **Profile Settings — *name*** (for example **Profile Settings — Work**). The left column lists the categories; the right column shows the selected category, with a heading and a one-line subtitle. **Cancel** (Esc) and **Save** (Return) sit at the bottom.
+
+<p align="center">
+  <img src="../images/profile-general.en.jpg" width="600" alt="The Profile Settings — Work window on its General category (the sidebar lists General, Performance, Media, File Transfer, Host Isolation, Network Isolation, Privacy & Safety, Extensions, VPN & Ads, Enterprise and Advanced; Cancel and Save at the bottom): Profile Name Work, Browser Chromium, Retain Browsing Data checked, and Window Color Blue, with the Home Page setting starting below" />
+</p>
+
+The categories, in sidebar order:
+
+| Category | What it configures |
+|---|---|
+| [General](general.mdx) | Name, browser (Chromium or Google Chrome), whether browsing data is kept, window color, home page, language, comments. |
+| [Performance](performance.mdx) | GPU acceleration, WebGL, zero-copy rasterization, smooth scrolling, strict site isolation. |
+| [Media](media.mdx) | Audio and volume, webcam and microphone sharing, device choice, webcam quality and effects. |
+| [File Transfer](file-transfer.mdx) | Uploads, downloads, and VirusTotal scanning of downloads. |
+| [Host Isolation](host-isolation.mdx) | Native tabs, shared clipboard, keyboard-layout matching, macOS passkeys and passwords, printing. |
+| [Network Isolation](network-isolation.mdx) | NAT or bridged network per profile, local-network isolation, allowed outgoing ports. |
+| [Privacy & Safety](privacy-safety.mdx) | Malware-site blocking, AI phishing detection, screen-capture blocking, sending links to other profiles, user agent. |
+| [Extensions](extensions.mdx) | Chrome extensions: the recommended ones and your own from the Chrome Web Store. |
+| [VPN & Ads](vpn-ads.mdx) | Cloudflare WARP, WireGuard, IKEv2 or OpenVPN inside the VM, and ad blocking. |
+| [Enterprise](enterprise.mdx) | Google Workspace (Chrome Enterprise Core) enrollment, a corporate HTTP proxy, custom root certificates. |
+| [Advanced](advanced.mdx) | Automation access, session recording, disk encryption. |
+
+## Save, Cancel and restarting a session
+
+Everything you change in the window is a draft until you click **Save**. **Cancel**, Esc, or closing the window with its close button discards the draft.
+
+If you click **Save** with **Scan Downloads with VirusTotal** on and no API key, the app shows **VirusTotal API Key Required** and does not save; clicking **OK** takes you to the **File Transfer** category.
+
+Settings are applied when a session starts. When you save a change to a profile that has an open window, the app asks **Restart session?** — "Settings have changed. Restart the browser session to apply them?" (or "Restart *n* browser sessions…" when several windows use the profile). **Restart** closes the window's VM and opens a fresh window of the profile; **Later** keeps the current session running with its old settings until you close it. Changing only the profile's name, window color or comments doesn't prompt; those aren't session settings.
+
+> **Note:** Restarting a session of a profile that doesn't keep browsing data discards everything in that window, exactly as closing it would.
+
+### Changes that take effect immediately
+
+A few actions don't wait for **Save** and aren't undone by **Cancel**:
+
+- **Delete Browsing Data…** in [General](general.mdx), after its confirmation.
+- Turning **Encrypt Browsing Data** on or off in [Advanced](advanced.mdx) when the profile already has saved data: confirming deletes that data at once.
+- VPN secrets in [VPN & Ads](vpn-ads.mdx) — IKEv2 passwords, shared secrets, client certificates and passphrases, and the OpenVPN password — are written to the macOS Keychain as you type or import them.
+- Accepting the Cloudflare WARP terms or the AI phishing-detection consent. Each is asked once per Mac.
+- Downloading an extension when you turn on a recommended extension or add a custom one.
+
+## Managed profiles
+
+Profiles delivered by your organization's Bromure control plane are read-only. The File menu item reads **View “*name*” Settings…**, the window is titled **Managed Profile — *name***, a banner says "This profile is managed by your organization. Settings are read-only.", every control is disabled, and the only button is **Close**. See [Enterprise Management](../13-enterprise.mdx).
+
+## Related chapters
+
+- [Profiles](../06-profiles.mdx) — creating, deleting and opening profiles.
+- [Concepts](../04-concepts.mdx) — ephemeral and persistent profiles, and what each session's VM shares with your Mac.
+- [App Settings](../08-app-settings/index.mdx) — the app-wide settings that apply to every profile.

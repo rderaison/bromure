@@ -1,0 +1,168 @@
+---
+title: "Concepts & Architecture"
+description: "How Bromure works: the host and the guest, one VM per window and the pre-warmed VM pool, the base image and APFS clones, ephemeral and persistent profiles, what persists, the host-guest services and their vsock ports, NAT and bridged networking, and idle suspend."
+order: 4
+---
+
+# Concepts & Architecture
+
+This chapter explains the moving parts behind a Bromure window: where the web page actually runs, what is created when you open a window and destroyed when you close it, what a profile keeps, how the window talks to your Mac, and how it reaches the network. You don't need any of this to browse, but it helps you choose the right profile settings and understand what Bromure does and doesn't protect. The vocabulary is collected in the [Glossary](16-glossary.mdx).
+
+## Host and guest
+
+Two computers are involved in every Bromure window:
+
+- The **host** is your Mac. It runs the Bromure app: the window frame, the native tab bar, the menus, the settings, the file drawer, and the services that connect the window to your Mac's clipboard, camera and keychain.
+- The **guest** is a small Linux virtual machine (Ubuntu 24.04) that Bromure runs with Apple's Virtualization framework. It runs the browser itself — Chromium or Google Chrome — full screen inside the window, with the page content, JavaScript, cookies, cache and downloads.
+
+What you see in a window is the guest's screen, drawn into a Mac window. Your keystrokes, clicks, trackpad gestures and scrolling are passed into the guest; the guest never gets direct access to your Mac.
+
+## One VM per window
+
+Each browser window has its own guest VM. Opening a window starts a VM; closing the window shuts it down and deletes it. Windows never share a VM, so they never share memory, cookies, cache or a file system.
+
+### The pre-warmed VM
+
+Booting a Linux VM takes several seconds, so Bromure keeps one VM booted in advance. When you open a window, Bromure:
+
+1. Takes the waiting VM.
+2. Applies the window's profile to it: which browser to start, the home page, the language, which host services to enable, network rules, VPN, and so on.
+3. Attaches the profile's data disk, if the profile is persistent.
+4. Starts the browser and shows the window.
+5. Immediately starts booting a replacement VM for the next window.
+
+That is why a new window usually appears in about a second, and why the first window after launching Bromure takes a little longer (the splash reads "Warming up a fresh VM"). While it waits, the pre-warmed VM is paused after about 30 seconds so it doesn't use CPU.
+
+Changing some app-wide settings — memory, CPU cores, display scale, network mode — replaces the waiting VM so the next window gets the new settings. Windows already open keep the settings they started with.
+
+### Resources
+
+Every VM gets the memory and CPU cores set in [Settings › Hardware](08-app-settings/hardware.mdx). Because each window is a whole VM, memory adds up: five open windows at 2 GB each can use up to 10 GB. When too many VMs are running, Bromure refuses to open another window with **Cannot open browser** — "Too many browser sessions are open. Close some windows and try again."
+
+### Idle suspend
+
+To save battery, Bromure can pause a window's VM when you aren't using it. A window counts as idle when, for 3 minutes, it isn't the front window, its network traffic has stopped, and it isn't using the camera or microphone. Whether an idle window is actually paused depends on **Energy Mode** in [Settings › Hardware](08-app-settings/hardware.mdx):
+
+| Energy Mode | Idle windows are paused |
+|---|---|
+| **High Power** | Never |
+| **Automatic** (default) | Only while macOS Low Power Mode is on |
+| **Low Power** | Always |
+
+A paused window resumes as soon as you bring it to the front.
+
+## The base image and APFS clones
+
+All windows start from one **base image** (also called the browser image): a Linux disk with the browser installed, stored at `~/Library/Application Support/Bromure/linux-base.img`, together with the Linux kernel (`vmlinuz`) and initial RAM disk (`initrd`). The base image is downloaded and personalized for your Mac during setup, and refreshed from time to time; see [Installation & First Run](02-installation.mdx).
+
+The base image contains:
+
+- Ubuntu 24.04 ("noble") for ARM64, with Chromium.
+- Google Chrome and the Cloudflare WARP client, installed as recommended packages.
+- Your Mac's fonts, your keyboard layout, your scrolling direction and your language, applied during personalization.
+- The small agents that talk to the host (listed under [Host–guest services](#hostguest-services)).
+
+A window never writes to the base image. Instead, its VM boots from an **APFS clone** of it: a copy-on-write copy made with the Mac file system's cloning feature. A clone is created instantly and takes no space at first; only the blocks the VM changes are stored separately. The clone lives in your temporary folder as `$TMPDIR/bromure/session-<id>.img` and is deleted when the window closes. This is what makes every window start clean: whatever the previous window did went into its own clone, and that clone is gone.
+
+Opening a window needs at least 1 GB of free disk space, so the clone has room to grow.
+
+## Profiles
+
+A **profile** is a named set of settings that decides what a window starts with: its browser, home page, color, language, which host services it may use, network isolation, VPN, and more. Every window belongs to exactly one profile, shown in the **profile chip** at the left of the tab bar. [Profiles](06-profiles.mdx) covers creating and managing them; [Profile Settings](07-profile-settings/index.mdx) lists every setting.
+
+### Ephemeral and persistent profiles
+
+The one setting that changes a profile's nature is **Retain Browsing Data** in the **General** category:
+
+- **Ephemeral profile** (**Retain Browsing Data** off). Nothing survives the window. Every window starts empty — no cookies, no history, no bookmarks — and is erased when it closes. You can open as many windows of an ephemeral profile as you like; each is its own VM. The built-in **Private Browsing** profile is ephemeral.
+- **Persistent profile** (**Retain Browsing Data** on). The profile has a **profile disk**: a separate 1 GB disk image, `~/Library/Application Support/Bromure/profiles/<UUID>/image/profile.img`, attached to the VM when the window opens. The browser keeps its user data there — bookmarks, history, cookies, saved passwords, and the open tabs if you choose to restore them. Everything else in the VM is still thrown away when the window closes. New profiles you create are persistent.
+
+A profile disk can be attached to only one VM at a time, so **a persistent profile has at most one window**. Opening it again brings the existing window to the front; use tabs inside it.
+
+### Encryption
+
+A persistent profile can encrypt its profile disk (**Encrypt Browsing Data** in the **Advanced** category). The disk is then encrypted with LUKS inside the guest, using a random key that Bromure generates and stores in your Mac's keychain. The disk file on your Mac is unreadable without that key. See [Advanced](07-profile-settings/advanced.mdx).
+
+### Managed profiles
+
+If your Mac is enrolled with an organization, you also get **managed profiles**, marked with a shield icon in the profile chip. Your organization defines all their settings, and you can view but not change or delete them. See [Enterprise](13-enterprise.mdx).
+
+## What persists
+
+| Item | Where it lives | Survives closing the window? | Survives quitting Bromure? |
+|---|---|---|---|
+| The window's VM and everything on its clone (system changes, cache, temporary files) | `$TMPDIR/bromure/session-<id>.img` | No | No |
+| Browsing data of an ephemeral profile | In the VM | No | No |
+| Browsing data of a persistent profile (bookmarks, history, cookies, passwords, tabs) | The profile disk, `profiles/<UUID>/image/profile.img` | Yes | Yes |
+| Files received in the file drawer | `$TMPDIR/bromure/`, until you save them to your Mac | No | No |
+| A session recording | With the window, until you save it | Only if you save it (Bromure offers to when you close the window) | Only if saved |
+| Profile settings | iCloud Drive (`profile.json`), or locally if iCloud Drive isn't available | Yes | Yes |
+| Encryption keys and VPN/proxy passwords | Your login keychain | Yes | Yes |
+| App settings (Settings window) | UserDefaults domain `io.bromure.app` | Yes | Yes |
+| The base image | `~/Library/Application Support/Bromure/` | Yes | Yes |
+
+Profile settings sync to your other Macs through iCloud Drive. Profile disks do not: they stay on the Mac where they were created.
+
+## Host–guest services
+
+Web content never reaches your Mac directly. Where a feature needs the host — the clipboard, file transfer, the camera — a small agent in the guest talks to a matching service in the Bromure app over a **vsock** connection: a private socket between the VM and its host that doesn't go through any network. Each service uses its own port, and most are enabled only when the profile turns the feature on. A service that is off simply isn't listening, so the guest has nothing to connect to.
+
+| Service | vsock port | What it does | Enabled by |
+|---|---|---|---|
+| Config agent | 5000 | Receives the profile's configuration when a window opens | Always, briefly |
+| Keyboard Layout | 5006 | Follows your Mac's current keyboard layout | **Match Keyboard Layout** |
+| CJK Input | 5007 | Bridges Chinese, Japanese and Korean input methods | Always |
+| File Transfer | 5100 | Uploads and downloads through the file drawer | **File Upload** / **File Download** |
+| CDP Automation | 5200 | Chrome DevTools Protocol access to the browser, used by native tabs and automation | **Native Tabs**, or **Enable Automation** in Settings › Automation |
+| Credentials | 5201 | macOS passkeys and passwords, with Touch ID | **Use macOS Passkeys** / **Use macOS Passwords** |
+| Link Sender | 5300 | Opens a link from the page in another profile or browser | **Send Link to Other Session** (always on for some managed profiles) |
+| Webcam | 5400 | Streams your Mac's camera (with effects) into the guest | **Share Webcam** |
+| File Picker | 5600 | Shows a Mac file picker for a page's upload dialog | **File Upload** / **File Download** |
+| WARP VPN | 5700 | Controls Cloudflare WARP | VPN mode **Cloudflare WARP** |
+| WireGuard VPN | 5701 | Controls WireGuard | VPN mode **WireGuard** |
+| IKEv2 VPN | 5702 | Controls IKEv2 | VPN mode **IKEv2** |
+| Network Refresh | 5703 | Renews the guest's network after your Mac's network changes | Always |
+| OpenVPN | 5704 | Controls OpenVPN | VPN mode **OpenVPN** |
+| Native Tab Bar | 5810 | Connects the Mac tab bar, bookmarks, history and printing to the browser | **Native Tabs** |
+| HTTP Trace | 5900 | Sends request records for session recording | **Session Recording** |
+| Phishing Analysis | 5950 | Sends pages for AI phishing analysis | **AI Phishing Detection** |
+
+The clipboard doesn't use vsock: when **Shared Clipboard** is on, Bromure attaches a standard virtual clipboard channel (the SPICE agent port) to the VM, and it isn't attached at all when the setting is off.
+
+To see which services a window is using, choose **View › VM Services**. The window shows one card per open window, with each service **Listening** (orange), **Connected** (green), or disabled. [Troubleshooting](15-troubleshooting.mdx) explains how to use it. The [Appendix](17-appendix.mdx#vsock-ports) has the complete port list.
+
+## Native tabs
+
+By default, the tab bar at the top of a window is a real macOS tab bar drawn by Bromure, and the browser in the guest runs without its own toolbar. Bromure and the browser keep the two in sync through the tab agent (vsock 5810), which also powers the **Bookmarks** and **History** menus and printing. This is **Native Tabs**, in the **Host Isolation** category.
+
+Browser extensions need the browser's own toolbar, so turning on **Enable Extensions** turns Native Tabs off; the window then shows Chromium's own tab strip and toolbar inside the guest.
+
+## Networking
+
+Each VM has one virtual network card. How it reaches the network is set app-wide in [Settings › Network](08-app-settings/network.mdx), and can be overridden per profile in [Network Isolation](07-profile-settings/network-isolation.mdx).
+
+### NAT (default)
+
+In **NAT** mode, the VM gets a private address on a small network that exists only between it and your Mac, and its traffic leaves through your Mac's connection. To websites, it looks like any other traffic from your Mac. Each window's VM is on its own network and can't reach the others.
+
+All of the VM's traffic passes through a filter in the Bromure app, which is what makes these profile settings possible:
+
+- **Isolate from Local Network** blocks connections to devices on your local network (printers, NAS, routers, other computers).
+- **Restrict Outgoing Ports** allows only the ports you list (80 and 443 by default); DNS is always allowed.
+- **DNS Servers** in Settings › Network overrides the DNS servers the guest uses.
+
+### Bridged
+
+In **Bridged** mode, the VM is connected directly to one of your Mac's network interfaces and appears on your network as a separate device, with its own address from your router. Use it when NAT doesn't work with your VPN, firewall or security software. Local-network isolation, port restriction and the DNS override are not available in bridged mode.
+
+### VPNs, proxies and DNS filtering
+
+VPNs run inside the guest, per profile: Cloudflare WARP, WireGuard, IKEv2 or OpenVPN. Only that profile's windows go through the VPN; the rest of your Mac is unaffected. A profile can instead use an HTTP proxy (in the **Enterprise** category), which turns off the VPN and ad blocking for that profile. Ad blocking and **Block Malware Sites** work at the DNS level inside the guest. See [VPN & Ads](07-profile-settings/vpn-ads.mdx) and [Privacy & Safety](07-profile-settings/privacy-safety.mdx).
+
+## Related chapters
+
+- [Installation & First Run](02-installation.mdx) — how the base image is installed and updated.
+- [Profiles](06-profiles.mdx) — creating and using profiles.
+- [Profile Settings](07-profile-settings/index.mdx) — every per-profile setting.
+- [App Settings](08-app-settings/index.mdx) — app-wide hardware, network and storage settings.
+- [Privacy & Security](12-privacy-security.mdx) — the security model end to end.

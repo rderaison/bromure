@@ -314,6 +314,10 @@ final class AgentSessionEngine {
         store.mutate(id) { $0.needsSignIn = nil; $0.lastError = nil }
         BACDebug.log("sessions", "relaunch “\(s.title)” after sign-in")
         Task { [weak self] in
+            // Codex reads its login from a file the host writes at boot: put
+            // the fresh stand-in in before it starts again, or it comes back
+            // on the stale one and asks to sign in all over.
+            if s.tool == .codex { await delegate.pushCodexAuth(profileID: s.profileID) }
             if let w = s.windowIndex {
                 _ = try? await delegate.guestExec(
                     profileID: s.profileID,
@@ -741,7 +745,16 @@ final class AgentSessionEngine {
     /// Flags a session's role adds to every launch of its agent (the
     /// Switchboard's MCP config), on top of any resume flags.
     static func roleFlags(for s: AgentSession) -> String {
-        s.isSwitchboard ? SwitchboardEngine.launchFlags(for: s.tool) : ""
+        [s.isSwitchboard ? SwitchboardEngine.launchFlags(for: s.tool) : "", autonomyFlags(for: s.tool)]
+            .filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// How an agent runs in a workspace: on its own, the VM (and the host's
+    /// egress policy) being the sandbox. Claude gets there through its auto
+    /// mode (settings.json); Codex has no such mode — without this it asked
+    /// to approve every command, and its own sandbox fought the VM's.
+    static func autonomyFlags(for tool: Profile.Tool) -> String {
+        tool == .codex ? "--dangerously-bypass-approvals-and-sandbox" : ""
     }
 
     /// `sharedFolder`: another session works in the same folder. With no

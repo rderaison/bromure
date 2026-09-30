@@ -1565,7 +1565,8 @@ struct RoomTimelineWindow: View {
         let sessions = controller.allMembers + [controller.switchboard].compactMap { $0 }
         RoomTimelineView(lanes: sessions.map {
             RoomTimelineView.Lane(id: $0.id, title: $0.title, tool: $0.tool,
-                                  timeline: store.timeline($0.id) ?? SessionTimeline(turns: []))
+                                  timeline: store.timeline($0.id) ?? SessionTimeline(turns: []),
+                                  nickname: $0.nickname.flatMap { $0.isEmpty ? nil : $0 })
         })
     }
 }

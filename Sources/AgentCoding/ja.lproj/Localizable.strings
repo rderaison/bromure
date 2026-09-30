@@ -3208,3 +3208,6 @@
 "Describe your environment" = "環境を説明する";
 "What your agents' safety checks should know about your world: your organization, your servers and what they're for, the repositories and domains you trust, what's safe to change. One fact per line. Claude's auto mode reads them to tell routine work from risky actions." = "エージェントの安全チェックが知っておくべきこと：組織、サーバーとその用途、信頼するリポジトリとドメイン、変更してよいもの。1 行に 1 つ。Claude の自動モードは、これを使って日常的な作業と危険な操作を見分けます。";
 "Variables" = "変数";
+
+/* Chat: an agent's folder-trust dialog */
+"Trust this folder?" = "このフォルダを信頼しますか？";

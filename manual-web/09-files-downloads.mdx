@@ -1,0 +1,135 @@
+---
+title: "Files & Downloads"
+description: "Moving files between your Mac and the isolated browser: the file drawer, uploading with the file picker and drag and drop, downloads, VirusTotal scanning and blocking, and where transferred files are kept."
+order: 9
+---
+
+# Files & Downloads
+
+The browser in a Bromure window has no access to your Mac's files, and your Mac has no access to what the browser downloads. Files cross between the two only through a dedicated channel that you turn on per profile, and every file that comes out of the browser waits in a quarantine area until you choose to save it. This chapter explains how uploads and downloads work, the file drawer where downloaded files appear, and the optional VirusTotal scan.
+
+## Turning file transfer on
+
+File transfer is off by default. Turn it on in the profile's [File Transfer](07-profile-settings/file-transfer.mdx) settings:
+
+| Setting | Description |
+|---|---|
+| **File Upload** | Lets you send files from your Mac to websites in this browser. Default: off. |
+| **File Download** | Lets you save files from websites to your Mac. Default: off. With it off, the browser blocks every download. |
+| **Scan Downloads with VirusTotal** | Checks downloaded files with VirusTotal before they reach your Mac. Needs a VirusTotal API key. Shown only when **File Download** is on. Default: off. |
+| **Block Threats** | Blocks files VirusTotal identifies as malicious. Default: on. |
+| **Block Unscannable Files** | Blocks files VirusTotal couldn't scan. Default: off. |
+
+As with other profile settings, changes apply to windows opened after you save (Bromure offers to restart an open window). When either **File Upload** or **File Download** is on, windows of that profile get the file drawer and its titlebar button.
+
+## The file drawer
+
+The file drawer is a panel on the right side of the window, 280 points wide. It lists the files that came out of the browser during this window's life.
+
+- **To open or close it**, click the sidebar button in the titlebar (tooltip **Toggle File Drawer**) or choose **View › Toggle File Drawer**. The window widens to make room for the drawer and shrinks back when you close it.
+- **It opens by itself** when a download starts arriving from the browser.
+
+The header reads **File Transfer**, with a small dot on the right: green when the transfer channel to the VM is connected, red when it isn't (for example, while the VM is still starting).
+
+With nothing downloaded yet, the drawer says **Downloads will appear here** — "Drag files out to save them to your Mac".
+
+### File rows
+
+Each downloaded file has a row, newest first, showing:
+
+- A green down-arrow icon (a file that came from the browser).
+- The file name, and a progress bar while the file is still arriving.
+- The file's size and its scan status (see [Scan status](#scan-status)).
+- On the right, when the file is ready: a **Save to Downloads** button, which becomes a green checkmark (**Saved — Show in Finder**) once saved.
+
+## Downloading files
+
+1. Download a file in the browser as you normally would.
+2. The browser saves it inside the VM. Bromure picks it up and copies it to your Mac, and the file drawer opens with the new row.
+3. When the row is ready (and, with VirusTotal on, the scan has finished), either:
+   - click **Save to Downloads** to copy it to your `~/Downloads` folder, or
+   - drag the row to a Finder window or the desktop.
+
+If a file with the same name already exists in `~/Downloads`, the copy is named `name (1).ext`, `name (2).ext`, and so on.
+
+After saving, click the green checkmark to reveal the file in Finder.
+
+A file can't be saved or dragged out while its scan is pending or running, or after it has been blocked.
+
+### Where downloads wait
+
+Until you save them, downloaded files are kept in a private folder for the window inside macOS's temporary folder (`$TMPDIR/bromure/session-…/`), not in your Downloads folder. That folder is deleted when the window closes, and anything left over from a crash is cleared the next time a window with file transfer opens. **Files you haven't saved are gone when the window closes**, so save what you need first.
+
+## Uploading files
+
+With **File Upload** on, there are two ways to give a web page a file.
+
+### With the file picker
+
+When a web page asks you to choose a file (an "Upload" or "Choose file" button), Bromure shows the standard macOS open panel, titled **Upload File**, instead of a Linux file dialog. Choose one file and click **Upload**. The file is copied into the VM and handed to the page as if you had picked it there. If the page accepts only certain types (for example images or PDFs), the panel lets you choose only those.
+
+The panel selects one file at a time.
+
+### With drag and drop
+
+Drag one or more files from Finder onto the page. The files are copied into the VM and dropped where you release them, so upload areas that say "drop files here" receive them. While you drag, drop areas under the pointer are highlighted.
+
+Uploaded files are copied into the VM only; the original files on your Mac are never exposed to the browser. The copies disappear with the VM when the window closes (for persistent profiles too — only the browser's own profile data is kept).
+
+## VirusTotal scanning
+
+With **Scan Downloads with VirusTotal** on, every downloaded file is checked with [VirusTotal](https://www.virustotal.com) before you can save it.
+
+### Setting it up
+
+1. Create a free VirusTotal account and copy your API key (https://www.virustotal.com/gui/join-us).
+2. In the profile's [File Transfer](07-profile-settings/file-transfer.mdx) settings, turn on **File Download**, then **Scan Downloads with VirusTotal**.
+3. Paste the key into **VirusTotal API Key** and click **Verify**. A green checkmark means the key works; a red cross means it doesn't (hover over it for the reason).
+4. Click **Save**.
+
+If you try to save the profile with scanning on and no key, Bromure shows **VirusTotal API Key Required** and takes you back to the File Transfer settings.
+
+### How a file is scanned
+
+1. Bromure computes the file's SHA-256 hash on your Mac and asks VirusTotal whether it already knows the file. Most common files are recognized this way, and nothing is uploaded.
+2. If VirusTotal doesn't know the file and it is 32 MB or smaller, Bromure uploads it and waits for the analysis, checking every 15 seconds for up to about five minutes.
+3. A file larger than 32 MB that VirusTotal doesn't already know can't be scanned.
+
+A file counts as a threat when at least one engine reports it as malicious or suspicious.
+
+The free VirusTotal service allows four requests per minute, so Bromure spaces its requests 15 seconds apart. Several downloads in a row are scanned one after another.
+
+> **Privacy:** A hash lookup tells VirusTotal only the file's fingerprint. An upload sends the whole file to VirusTotal, where it may be shared with security researchers. Don't enable scanning for a profile you use for confidential documents you download from private sources.
+
+### Scan status
+
+The status next to each file's size shows where the scan is:
+
+| Status | Meaning |
+|---|---|
+| **Pending** | Waiting to be scanned. |
+| **Scanning** | Being checked or analyzed. |
+| **Clean** (green) | No engine flagged the file. You can save it. |
+| ***n*/*m* engines** (red) | *n* of *m* engines flagged the file as malicious or suspicious. |
+| **Too large to scan** (orange) | The file is over 32 MB and unknown to VirusTotal. |
+| **Rate limited** (orange) | VirusTotal refused the request because of its rate limit. |
+| **Unknown file** (orange) | VirusTotal had no report for the file. |
+| **Scan failed** (orange) | The scan couldn't complete (network error, invalid key, and so on). |
+
+Without VirusTotal, files have no status and can be saved as soon as they arrive.
+
+### Blocking
+
+- With **Block Threats** on (the default), a file that any engine flags is deleted from the quarantine folder at once. Its row stays, marked **Threat: *n*/*m* engines** with a red shield, and it can't be saved or dragged out.
+- With **Block Unscannable Files** on, a file whose scan ended in an error (too large, rate limited, unknown, or failed) is deleted the same way and marked **Blocked: *reason***.
+
+With a blocking option off, a flagged or unscannable file keeps its warning status but can still be saved manually. Think twice before you do.
+
+Blocking applies to downloads only. Files you upload from your Mac are not scanned.
+
+## Related chapters
+
+- [File Transfer](07-profile-settings/file-transfer.mdx) — the per-profile settings reference.
+- [The Browser Window](05-browser-window.mdx) — the titlebar button and drag and drop.
+- [Privacy & Security](12-privacy-security.mdx) — what leaves your Mac, including VirusTotal requests.
+- [Concepts & Architecture](04-concepts.mdx) — the host–guest channels behind file transfer.

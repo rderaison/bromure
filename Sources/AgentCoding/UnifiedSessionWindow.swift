@@ -886,6 +886,15 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
         updateEmptyState()
         startSessionReconcile()
+        TranscriptSearchIndex.shared.onUpdate = { [weak self] ids in
+            // Sessions still called "<Agent> in <folder>" take the agent's
+            // own title for the conversation, or its first request.
+            guard let store = self?.acDelegate?.agentSessionStore else { return }
+            let index = TranscriptSearchIndex.shared
+            store.adoptTranscriptTitles(ids) { id in
+                index.entries[id].map { ($0.agentTitle, $0.firstPrompt) }
+            }
+        }
         TranscriptSearchIndex.shared.start()
         // Holding ⌘ shows each session's ⌘1–9 number in the sidebar.
         flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in

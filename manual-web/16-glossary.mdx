@@ -1,0 +1,157 @@
+---
+title: "Glossary"
+description: "Plain-language definitions of the terms used in Bromure's windows, menus, settings, command line, and this manual."
+order: 16
+---
+
+# Glossary
+
+This glossary defines the terms you meet in Bromure's windows and menus, in its settings, on its command line, and throughout this manual. Where the app uses two names for the same thing, both appear and point to one entry. When a term has a chapter that covers it in depth, a **See** link follows the definition.
+
+## A
+
+**Ad blocking** — The **Block Ads** option in a profile's **VPN & Ads** category. It filters advertising and tracking domains at the DNS level inside the guest, so blocked requests never leave the VM. It is turned off while the profile uses an HTTP proxy. See [VPN & Ads](07-profile-settings/vpn-ads.mdx).
+
+**AI Phishing Detection** — An optional, per-profile check (marked **Beta**) that sends pages you visit to the Bromure phishing-detection service for analysis and warns you when a page looks like phishing. It needs **Retain Browsing Data** and your explicit consent in the **AI Phishing Detection** window. See [Privacy & Safety](07-profile-settings/privacy-safety.mdx).
+
+**APFS clone** — A copy-on-write copy of a file made by the Mac's file system. It is created instantly and takes no space until one of the copies changes. Each window's VM boots from an APFS clone of the base image, deleted when the window closes. See [Concepts & Architecture](04-concepts.mdx#the-base-image-and-apfs-clones).
+
+**AppleScript** — Bromure's scripting dictionary: commands such as `create profile`, `list profiles`, `set profile setting` and `open profile settings`, usable from Script Editor, `osascript` and Shortcuts. See [Automation](14-automation.mdx).
+
+**Automation server** — An optional HTTP server built into Bromure (**Settings › Automation › Enable Automation**, port 9222 by default) that lets scripts list profiles, open and close windows, read session recordings, and drive the browser through a CDP proxy. See [Automation](14-automation.mdx).
+
+## B
+
+**Base image** — The Linux disk (Ubuntu 24.04 with Chromium, plus Google Chrome and Cloudflare WARP) that every window starts from, together with its kernel and initial RAM disk. Also called the *browser image*. It is downloaded and personalized during setup and refreshed from time to time. See [Installation & First Run](02-installation.mdx).
+
+**Block Screen Capture** — A profile setting that hides the profile's windows from screenshots, screen recordings and screen sharing. See [Privacy & Safety](07-profile-settings/privacy-safety.mdx).
+
+**Bridged mode** — A network mode in which the VM is connected directly to one of your Mac's network interfaces and appears on your network as a separate device. Local-network isolation, port restriction and the DNS override aren't available in this mode. Compare *NAT*. See [Network](08-app-settings/network.mdx).
+
+**Browser image** — See *Base image*.
+
+## C
+
+**Camera effects** — Overlays Bromure can add to the webcam video it sends into a window: a city and its local time, a name badge, a logo, and face swap. See [Camera & Effects](10-camera-effects.mdx).
+
+**CDP (Chrome DevTools Protocol)** — The protocol developer tools and automation libraries use to control Chromium. Bromure uses it internally for native tabs, and exposes it to your scripts through the automation server's CDP proxy. See [Automation](14-automation.mdx).
+
+**Chromium** — The open-source browser the base image is built around, and the default **Browser** for a profile. A profile can use **Google Chrome** instead. See [General](07-profile-settings/general.mdx).
+
+**Clone** — See *APFS clone*.
+
+**Corporate websites** — A list of sites an organization can set on a managed profile, marking what the profile is meant for. When a page in that profile leads to a site outside the list, Bromure either shows a banner or hands the link off to be opened outside the managed profile, as the organization chooses. See [Enterprise](13-enterprise.mdx).
+
+## D
+
+**Default Profile for Links** — The app setting (**Settings › General**) that chooses which profile opens links you click in other apps when Bromure is your default browser. **Ask Every Time** shows the link chooser instead. See [General](08-app-settings/general.mdx).
+
+## E
+
+**Energy Mode** — The app setting (**Settings › Hardware**) that decides when idle windows are paused to save battery: **High Power** (never), **Automatic** (only in macOS Low Power Mode; the default), or **Low Power** (always). See [Hardware](08-app-settings/hardware.mdx).
+
+**Enrollment** — Registering this Mac with an organization's Bromure control plane, using a six-word **enrollment code** from your administrator. An enrolled Mac receives managed profiles and keeps them in sync. See [Enterprise](13-enterprise.mdx).
+
+**Ephemeral profile** — A profile with **Retain Browsing Data** off. Nothing survives its windows, and it can have any number of windows at once. **Private Browsing** is ephemeral. Compare *Persistent profile*. See [Concepts & Architecture](04-concepts.mdx#ephemeral-and-persistent-profiles).
+
+## F
+
+**File drawer** — The panel on the right of a window that shows files moving between the window and your Mac: downloads waiting to be saved and uploads. Received files stay in a temporary folder until you save them. See [Files & Downloads](09-files-downloads.mdx).
+
+## G
+
+**Guest** — The Linux virtual machine that runs the browser for one window. Compare *Host*. See [Concepts & Architecture](04-concepts.mdx#host-and-guest).
+
+## H
+
+**Home page** — The page a new window of a profile opens with. It defaults to `https://bromure.io/hello`. See [General](07-profile-settings/general.mdx).
+
+**Host** — Your Mac, running the Bromure app. Compare *Guest*.
+
+**Host isolation** — The group of profile settings that controls what a window may share with your Mac: native tabs, the clipboard, keyboard-layout matching, macOS passkeys and passwords, and printing. See [Host Isolation](07-profile-settings/host-isolation.mdx).
+
+## I
+
+**Idle suspend** — Pausing a window's VM after 3 minutes without use (not in front, no network traffic, no camera or microphone), according to **Energy Mode**. The window resumes when you bring it to the front.
+
+**Image catalog** — The signed file (`img-catalog.json`) on `dl.bromure.io` that names the current prebuilt base image, its checksums, and the recommended packages to install in it. Bromure refuses a catalog whose signature doesn't verify. See [Installation & First Run](02-installation.mdx#the-prebuilt-image-download).
+
+**Image version** — The version of base image a given Bromure release expects, stored in `image-version` next to the image. When it doesn't match, Bromure reinstalls the image automatically at launch.
+
+**Isolate from Local Network** — A profile setting that blocks the window from reaching devices on your local network. It works in NAT mode only. See [Network Isolation](07-profile-settings/network-isolation.mdx).
+
+## L
+
+**Link chooser** — The **Choose where to open this link** dialog that asks which profile or other browser should open a link. See [Profiles](06-profiles.mdx).
+
+**Local build** — Building the base image on your Mac (about ten minutes) instead of downloading it. Bromure falls back to it automatically when the download fails; `bromure init --build-local` forces it.
+
+**LUKS** — The standard Linux disk-encryption format. **Encrypt Browsing Data** encrypts a persistent profile's disk with LUKS inside the guest, using a key kept in your Mac's keychain. See [Advanced](07-profile-settings/advanced.mdx).
+
+## M
+
+**Managed profile** — A profile delivered by your organization after enrollment. You can use it and view its settings, but not change or delete it; it shows a shield icon in the profile chip. See [Enterprise](13-enterprise.mdx).
+
+**MCP (Model Context Protocol)** — The protocol AI assistants use to call tools. `bromure mcp` runs an MCP server that lets an assistant open windows, navigate, read pages, and inspect session recordings through the automation server. See [Automation](14-automation.mdx).
+
+**mTLS (client certificate)** — A certificate a managed profile uses to prove its identity to your organization's sites. Bromure installs it in the profile's windows and replaces it in running windows when it is renewed. See [Enterprise](13-enterprise.mdx).
+
+## N
+
+**NAT** — The default network mode. The VM gets a private address on a network that exists only between it and your Mac, and its traffic leaves through your Mac's connection, through a filter that enforces the profile's network rules. Compare *Bridged mode*. See [Concepts & Architecture](04-concepts.mdx#networking).
+
+**Native Tabs** — The profile setting (on by default) that draws the window's tab bar as a macOS tab bar instead of showing the browser's own toolbar. It enables the **Bookmarks** and **History** menus and printing. It's turned off while extensions are enabled. See [Host Isolation](07-profile-settings/host-isolation.mdx).
+
+## P
+
+**Persistent profile** — A profile with **Retain Browsing Data** on. It has a profile disk that keeps bookmarks, history, cookies, passwords and tabs between windows, and it can have only one window at a time. New profiles are persistent. Compare *Ephemeral profile*.
+
+**Personalization** — The last part of installing the base image, done on your Mac: copying your Mac's fonts into the image, applying your keyboard layout, scrolling direction and language, installing recommended packages, and checking the file system.
+
+**Pre-warmed VM** — The VM Bromure keeps booted in advance so a new window opens in about a second. When a window takes it, Bromure starts warming the next one. See [Concepts & Architecture](04-concepts.mdx#the-pre-warmed-vm).
+
+**Private Browsing** — The ephemeral profile Bromure creates on first launch. It saves nothing and shares only the clipboard with your Mac. **File › New Private Window** (⇧⌘N) opens a window in it. See [Profiles](06-profiles.mdx).
+
+**Profile** — A named set of settings that decides what a window starts with and what it keeps. Every window belongs to one profile. See [Profiles](06-profiles.mdx).
+
+**Profile chip** — The pill at the left of a window's tab bar showing the window's profile, with a menu to open other profiles and to create, edit or delete them. See [The Browser Window](05-browser-window.mdx).
+
+**Profile disk** — The 1 GB disk image (`profile.img`) where a persistent profile keeps its browsing data. It stays on the Mac where it was created. See [Concepts & Architecture](04-concepts.mdx#ephemeral-and-persistent-profiles).
+
+## R
+
+**Recommended packages** — Software the image catalog asks Bromure to install into the base image on your Mac: in version 5.0.0, Google Chrome and the Cloudflare WARP client. Packages added later are installed only after you accept the **New packages are recommended to be installed** prompt. See [Installation & First Run](02-installation.mdx#the-new-packages-prompt).
+
+**Retain Browsing Data** — The **General** profile setting that makes a profile persistent. See *Persistent profile*.
+
+## S
+
+**Send Link to Other Session** — A profile setting that adds a command to the browser's link context menu for opening a link in a different profile, or in another browser on your Mac, through the link chooser. See [Profiles](06-profiles.mdx).
+
+**Session** — One browser window and its VM, from opening to closing. Settings, menus and alerts use *session* and *browser session* for this.
+
+**Session recording** — A record of every HTTP request a window makes (URLs, and optionally headers, form data and response bodies), viewable in the **Session Recording** window and exportable. Also called a *trace*. See [Session Recording](11-session-recording.mdx).
+
+**Sparkle** — The macOS framework Bromure uses to check for, download and install app updates. See [Installation & First Run](02-installation.mdx#app-updates).
+
+**Startup profile** — The profile a window opens in when you launch Bromure, click its Dock icon with no window open, or press ⌘N with no window in front: your most recently used profile.
+
+## T
+
+**Trace** — See *Session recording*.
+
+## V
+
+**VirusTotal** — An online malware-scanning service. With **Scan Downloads with VirusTotal** and your own API key, Bromure checks each downloaded file before you can save it, and can block threats and files it can't scan. See [Files & Downloads](09-files-downloads.mdx).
+
+**VM (virtual machine)** — A complete computer simulated by software. Bromure runs one Linux VM per window, with Apple's Virtualization framework.
+
+**VM Services** — The diagnostic window (**View › VM Services**) that shows, for each open window, which host–guest services are listening, connected or disabled. See [Troubleshooting](15-troubleshooting.mdx).
+
+**vsock** — A private socket between a VM and its host that doesn't use any network. Bromure's host–guest services each listen on their own vsock port. See [Concepts & Architecture](04-concepts.mdx#hostguest-services).
+
+## W
+
+**WARP** — Cloudflare's VPN service, one of the VPN modes a profile can use. Using it requires accepting Cloudflare's terms in the **Cloudflare WARP Terms of Service** window. See [VPN & Ads](07-profile-settings/vpn-ads.mdx).
+
+**Window color** — A profile's color, drawn as a thin border around its windows and shown in the profile chip and menus.

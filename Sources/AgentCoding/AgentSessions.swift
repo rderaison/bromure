@@ -386,6 +386,14 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
         return cut.trimmingCharacters(in: .punctuationCharacters) + "…"
     }
 
+    /// Whether `title` is one Bromure made up for `s` — the generic
+    /// "<Agent> in <folder>", or its first request — rather than the agent's
+    /// own name for the conversation or the user's.
+    static func isPlaceholderTitle(_ title: String, of s: AgentSession, firstPrompt: String?) -> Bool {
+        title.isEmpty || title == defaultTitle(tool: s.tool, cwd: s.cwd)
+            || (firstPrompt.map { title == AgentSession.title(fromMessage: $0) } ?? false)
+    }
+
     /// "Claude Code in clock" — for sessions nobody named.
     static func defaultTitle(tool: Profile.Tool, cwd: String) -> String {
         let folder = (cwd as NSString).lastPathComponent
@@ -475,6 +483,21 @@ final class AgentSessionStore {
         if let i = sessions.firstIndex(where: { $0.id == s.id }) { sessions[i] = s }
         else { sessions.insert(s, at: 0) }
         save()
+    }
+
+    /// Better names for sessions still called "<Agent> in <folder>": the
+    /// agent's own title for the conversation (Claude generates one), else
+    /// its first request. Never over a name the user gave, or one the agent
+    /// chose; a first-request title gives way to the agent's once it exists.
+    func adoptTranscriptTitles(_ ids: [UUID], lookup: (UUID) -> (agentTitle: String?, firstPrompt: String?)?) {
+        for id in ids {
+            guard let s = session(id), s.userTitled != true, let found = lookup(id) else { continue }
+            guard AgentSession.isPlaceholderTitle(s.title, of: s, firstPrompt: found.firstPrompt) else { continue }
+            let better = found.agentTitle
+                ?? found.firstPrompt.map { AgentSession.title(fromMessage: $0) }
+            guard let better, !better.isEmpty, better != s.title else { continue }
+            mutate(id) { $0.title = better }
+        }
     }
 
     func mutate(_ id: UUID, _ change: (inout AgentSession) -> Void) {

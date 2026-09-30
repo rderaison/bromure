@@ -38,6 +38,11 @@ final class AppState: @unchecked Sendable {
     var initSteps: [InitStep] = []
     var consoleLog: String = ""
 
+    /// Why the image is being (re)installed — only changes the setup
+    /// window's wording; every path runs the same install.
+    enum InstallReason { case firstRun, rebuild, refresh, update }
+    var installReason: InstallReason = .firstRun
+
     /// Last-observed managed-profile sync state, surfaced in Settings.
     var managedSyncStatus: String = ""
     var managedLastSyncedAt: Date?
@@ -120,6 +125,16 @@ final class AppState: @unchecked Sendable {
                 self.selectedProfileID = self.profileManager.allProfiles.first?.id
             }
         }
+    }
+
+    /// A state for offscreen renders (`bromure __shot-ui`): backed by a
+    /// scratch directory, with no migration, no default profile and no
+    /// managed-profile sync, so rendering never touches the user's profiles.
+    init(previewStorage dir: URL) {
+        self.storageDir = dir
+        self.imageManager = LinuxImageManager(storageDir: dir)
+        self.profileManager = ProfileManager(storageDir: dir, managedProfiles: false)
+        self.managedEnrollments = []
     }
 
     // MARK: - Managed profile sync
@@ -210,6 +225,7 @@ final class AppState: @unchecked Sendable {
             scheduleImageMaintenance()
         } else if imageManager.hasImageFiles {
             // Image files exist but version mismatch — auto-reinstall
+            installReason = .update
             deleteImageFiles()
             startInit()
         } else {
@@ -401,6 +417,7 @@ final class AppState: @unchecked Sendable {
         let oldPool = pool
         pool = nil
         Task { await oldPool?.shutdown() }
+        installReason = .refresh
         deleteImageFiles()
         startInit()
     }
@@ -422,6 +439,7 @@ final class AppState: @unchecked Sendable {
             "Not Now", comment: "Decline button of the new-postinstall-steps prompt"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
+        installReason = .update
         phase = .initializing(status: "Installing packages...", progress: nil)
         do {
             try await imageManager.applyPostinstallSteps(steps) { [weak self] event in
@@ -629,6 +647,7 @@ final class AppState: @unchecked Sendable {
         warmUpTask = nil
         initTask?.cancel()
         initTask = nil
+        installReason = .rebuild
 
         Task {
             // Close all browser sessions first

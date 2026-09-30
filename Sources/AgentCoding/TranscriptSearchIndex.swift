@@ -28,6 +28,11 @@ final class TranscriptSearchIndex {
         var turns: [Turn] = []
         /// Turns with their tool calls and model time (the flamegraph).
         var timeline = SessionTimeline(turns: [])
+        /// The agent's own name for the conversation: Claude's `/rename`
+        /// (custom-title), else the title it generated (ai-title).
+        var agentTitle: String? = nil
+        /// The user's first real request (no notices, no host asides).
+        var firstPrompt: String? = nil
         var modified: Date
     }
 
@@ -86,12 +91,41 @@ final class TranscriptSearchIndex {
                 for (id, e) in updates { self.entries[id] = e }
                 for id in self.entries.keys where !present.contains(id) { self.entries[id] = nil }
                 self.refreshing = false
+                if !updates.isEmpty { self.onUpdate?(Array(updates.keys)) }
             }
         }
     }
 
+    /// Called with the sessions whose entries were just re-read.
+    @ObservationIgnored var onUpdate: (([UUID]) -> Void)?
+
+    /// Claude's own title for the conversation, the latest one it logged:
+    /// a `/rename` (custom-title) wins over the generated ai-title.
+    nonisolated static func agentTitle(in data: Data) -> String? {
+        let raw = String(decoding: data, as: UTF8.self)
+        func last(_ type: String, _ key: String) -> String? {
+            guard let r = raw.range(of: "\"type\":\"\(type)\"", options: .backwards) else { return nil }
+            let start = raw[..<r.lowerBound].lastIndex(of: "\n").map { raw.index(after: $0) } ?? raw.startIndex
+            let end = raw[r.upperBound...].firstIndex(of: "\n") ?? raw.endIndex
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(raw[start..<end].utf8)) as? [String: Any],
+                  let t = (obj[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty
+            else { return nil }
+            return String(t.prefix(60))
+        }
+        return last("custom-title", "customTitle") ?? last("ai-title", "aiTitle")
+    }
+
+    /// A user message that is the user's own words — not a notice typed in
+    /// by the host, a relayed delegation, or a tool/system tag.
+    nonisolated static func isOwnWords(_ t: String) -> Bool {
+        let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !s.isEmpty && !s.hasPrefix("<") && !s.hasPrefix("[")
+            && !DelegationNotice.isHostAside(s) && DelegationNotice.strip(s) == nil
+    }
+
     nonisolated static func entry(_ data: Data, modified: Date) -> Entry {
         let items = AgentTranscript.parse(data)
+        var firstPrompt: String?
         var parts: [String] = []
         var last = ""
         var turns: [Turn] = []
@@ -100,6 +134,7 @@ final class TranscriptSearchIndex {
             switch item.kind {
             case .userText(let t):
                 parts.append(t)
+                if firstPrompt == nil, isOwnWords(t) { firstPrompt = t }
                 if let o = open, o.end > o.start { turns.append(o) }
                 open = item.timestamp.map { Turn(start: $0, end: $0) }
                 continue
@@ -114,7 +149,8 @@ final class TranscriptSearchIndex {
         return Entry(text: parts.joined(separator: "\n\n"),
                      lastReply: String(oneLine.prefix(160)),
                      tokens: tokens(in: data), model: model(in: data),
-                     turns: turns, timeline: SessionTimeline.build(items), modified: modified)
+                     turns: turns, timeline: SessionTimeline.build(items),
+                     agentTitle: agentTitle(in: data), firstPrompt: firstPrompt, modified: modified)
     }
 
     /// The last model the agent logged: Claude's per-message `"model"`,

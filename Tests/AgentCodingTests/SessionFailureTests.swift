@@ -78,6 +78,38 @@ struct SessionFailureTests {
         #expect(d.contains("exited with status") || d.contains("no model configured"))
     }
 
+    @Test("Codex's trust dialog, however it's worded, is answered from its own options")
+    func codexTrustDialogIsAnswerable() {
+        let screen = """
+          > You are running Codex in /Users/me/Devel/bromure
+
+            Since this folder is version controlled, you may wish to allow Codex to work in this folder without asking for approval.
+
+          › 1. Yes, allow Codex to work in this folder without asking for approval
+            2. No, ask me to approve edits and commands
+
+            Press enter to continue
+        """
+        let p = TerminalPrompt.detect(inScreen: screen, agent: "codex")
+        #expect(p?.kind == .picker)
+        #expect(p?.options.map(\.index) == [1, 2])
+        #expect(p?.options.first?.label.hasPrefix("Yes, allow Codex") == true)
+        #expect(p?.detail == "/Users/me/Devel/bromure")
+        #expect(p?.selectedOption == 1)
+        #expect(p?.keys(picking: 1) == ["Enter"])
+        // The older "Do you trust the contents…" wording too.
+        let older = """
+          You are in /home/ubuntu/proj
+          Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.
+          › 1. Yes, continue
+            2. No, quit
+          Press enter to continue
+        """
+        let q = TerminalPrompt.detect(inScreen: older, agent: "codex")
+        #expect(q?.kind == .picker)
+        #expect(q?.options.map(\.label) == ["Yes, continue", "No, quit"])
+    }
+
     @Test("Kimi's real trust dialog IS a trust prompt, answerable inline with Enter")
     func kimiTrustDialogIsAnswerable() throws {
         // Real capture (kimi 2.0.2) of the interactive dialog.
@@ -205,6 +237,38 @@ struct SessionFailureTests {
         #expect(p?.detail == "Bash command: rm -rf build")
         #expect(p?.options.map(\.label) == ["Yes", "Yes, and don't ask again for rm commands", "No"])
         #expect(p?.selectedOption == 1)
+    }
+
+    @Test("Codex's command approval becomes a card")
+    func codexApproval() {
+        let screen = """
+          Would you like to run the following command?
+
+          Reason: fetch the release notes
+
+          $ curl -sL https://example.com/notes
+
+        › 1. Yes, proceed (y)
+          2. Yes, and don't ask again for this command (a)
+          3. No, and tell Codex what to do differently (esc)
+
+          Press enter to confirm or esc to cancel
+        """
+        let p = TerminalPrompt.detect(inScreen: screen, agent: "codex")
+        #expect(p?.kind == .picker)
+        #expect(p?.title == "Would you like to run the following command?")
+        #expect(p?.options.count == 3)
+        #expect(p?.options.first?.label == "Yes, proceed (y)")
+        #expect(p?.selectedOption == 1)
+        #expect(p?.detail.contains("$ curl -sL https://example.com/notes") == true)
+    }
+
+    @Test("Codex starts on its own: no approvals, no sandbox of its own inside the VM")
+    @MainActor
+    func codexAutonomy() {
+        let s = AgentSession(profileID: UUID(), tool: .codex, title: "t")
+        #expect(AgentSessionEngine.roleFlags(for: s).contains("--dangerously-bypass-approvals-and-sandbox"))
+        #expect(AgentSessionEngine.roleFlags(for: AgentSession(profileID: UUID(), tool: .claude, title: "t")).isEmpty)
     }
 
     @Test("auto mode paused by its classifier (boxed dialog) becomes a card")

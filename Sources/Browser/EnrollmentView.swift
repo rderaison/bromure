@@ -14,8 +14,15 @@ struct EnrollmentView: View {
 
     @State private var code: String = ""
     @State private var serverURL: String = ""
-    @State private var deviceName: String = Host.current().localizedName ?? ""
+    @State private var deviceName: String
     @State private var inFlight: Bool = false
+
+    /// `deviceName` pre-fills the Device Name field (the Mac's name when nil).
+    init(state: AppState, deviceName: String? = nil, onDone: @escaping () -> Void) {
+        self.state = state
+        self.onDone = onDone
+        _deviceName = State(initialValue: deviceName ?? Host.current().localizedName ?? "")
+    }
     @State private var errorMessage: String?
 
     var body: some View {

@@ -70,8 +70,11 @@ final class SwitchboardEngine {
         switch tool {
         case .claude: return launchFlags
         case .codex:
+            // env_vars: Codex filters MCP servers' environment; the shim
+            // names its window from TMUX_PANE (see codexMCPConfig).
             return "-c mcp_servers.switchboard.command=\"python3\" "
-                + "-c mcp_servers.switchboard.args=[\"\(SessionDisk.switchboardMCPShimGuestPath)\"]"
+                + "-c mcp_servers.switchboard.args=[\"\(SessionDisk.switchboardMCPShimGuestPath)\"] "
+                + "-c mcp_servers.switchboard.env_vars=[\"TMUX\",\"TMUX_PANE\"]"
         default: return ""
         }
     }
