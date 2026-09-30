@@ -415,6 +415,10 @@ struct RoomTimelineView: View {
         let title: String
         let tool: Profile.Tool
         let timeline: SessionTimeline
+        /// The session's nickname ("@api"), what the room calls it by.
+        var nickname: String? = nil
+        /// The session in a hover line: its nickname when it has one.
+        var shortName: String { nickname.map { "@" + $0 } ?? title }
     }
     let lanes: [Lane]
     @State private var zoom: Double = 1
@@ -461,7 +465,7 @@ struct RoomTimelineView: View {
                     StatTile(value: "\(all.toolCalls)", caption: NSLocalizedString("tool calls", comment: "flamegraph"),
                              symbol: "wrench.and.screwdriver.fill", accent: SessionTimeline.Kind.shell.color)
                     if let busiest = withTurns.max(by: { $0.timeline.busy < $1.timeline.busy }) {
-                        StatTile(value: busiest.title, caption: NSLocalizedString("worked the most", comment: "room timeline"),
+                        StatTile(value: busiest.shortName, caption: NSLocalizedString("worked the most", comment: "room timeline"),
                                  symbol: "trophy.fill", accent: .orange)
                             .frame(maxWidth: 200)
                     }
@@ -518,8 +522,18 @@ struct RoomTimelineView: View {
                         AgentAvatar(tool: lane.tool, size: 18)
                         VStack(alignment: .leading, spacing: 0) {
                             Text(lane.title).font(.system(size: 11.5, weight: .medium)).lineLimit(1).truncationMode(.tail)
-                            Text(TimelineFormat.duration(lane.timeline.busy)).font(.system(size: 10)).monospacedDigit()
-                                .foregroundStyle(.secondary)
+                            HStack(spacing: 4) {
+                                if let nick = lane.nickname {
+                                    Text("@" + nick)
+                                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(Color.accentColor)
+                                        .lineLimit(1).truncationMode(.tail)
+                                    Text("·").font(.system(size: 10)).foregroundStyle(.tertiary)
+                                }
+                                Text(TimelineFormat.duration(lane.timeline.busy)).font(.system(size: 10)).monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize()
+                            }
                         }
                     }
                     .frame(width: Self.labelWidth, alignment: .leading)
@@ -538,7 +552,7 @@ struct RoomTimelineView: View {
                                     .offset(x: x(s.start), y: 4)
                                     .onHover { on in
                                         hovered = on ? s.id : (hovered == s.id ? nil : hovered)
-                                        hoverText = on ? "\(lane.title) · \(s.kind == .model ? s.kind.label : s.name)\(s.detail.isEmpty ? "" : " · \(s.detail)") — \(TimelineFormat.duration(s.duration)) · \(TimelineFormat.clock.string(from: s.start))" : nil
+                                        hoverText = on ? "\(lane.shortName) · \(s.kind == .model ? s.kind.label : s.name)\(s.detail.isEmpty ? "" : " · \(s.detail)") — \(TimelineFormat.duration(s.duration)) · \(TimelineFormat.clock.string(from: s.start))" : nil
                                     }
                             }
                         }
@@ -605,7 +619,9 @@ extension FlameGraphView {
                 ? AnyView(FlameGraphView(timeline: tl))
                 : AnyView(RoomTimelineView(lanes: room.map {
                     RoomTimelineView.Lane(id: UUID(), title: $0.title, tool: .claude,
-                                          timeline: SessionTimeline.build(AgentTranscript.parse($0.data, agent: agent)))
+                                          timeline: SessionTimeline.build(AgentTranscript.parse($0.data, agent: agent)),
+                                          // A stand-in nickname: the file's stem, as the room would show one.
+                                          nickname: String((($0.title as NSString).deletingPathExtension).prefix(10)))
                 }))
             // BROMURE_SHOT_WIDTH: a narrower surface (the popover, a small window).
             let w = CGFloat(Double(ProcessInfo.processInfo.environment["BROMURE_SHOT_WIDTH"] ?? "") ?? 1000)
