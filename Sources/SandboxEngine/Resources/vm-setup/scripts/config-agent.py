@@ -362,10 +362,23 @@ def resolve_user_agent(cfg):
     )
 
 
+def graphics_backend(cfg):
+    """Resolve the host-selected device backend, preserving legacy defaults.
+
+    A request for VirGL does not prove acceleration: the host must configure
+    the device before boot and verify the renderer separately. Profile GPU
+    policy takes precedence over device selection.
+    """
+    if cfg.get("graphicsBackend") == "virgl" and not cfg.get("disableGPU"):
+        return "virgl"
+    return "software"
+
+
 def write_chrome_env(cfg):
     """Build and write the chrome-env file."""
     env_file = "/tmp/bromure/chrome-env"
     lines = []
+    backend = graphics_backend(cfg)
 
     extra_flags = []
     enable_features = []
@@ -407,8 +420,10 @@ def write_chrome_env(cfg):
     if cfg.get("disableGPU"):
         extra_flags.append("--disable-gpu")
     else:
-        # GPU acceleration enabled — add GL/rasterization flags
-        if cfg.get("gpuAccel"):
+        # The selected VirGL device needs the GL path even if an older
+        # caller omits the preference flag. With the software backend these
+        # same flags still use llvmpipe, as they did before.
+        if cfg.get("gpuAccel") or backend == "virgl":
             extra_flags.append("--use-gl=angle")
             extra_flags.append("--use-angle=gl")
             extra_flags.append("--ignore-gpu-blocklist")
@@ -615,6 +630,10 @@ def write_chrome_env(cfg):
         raw = raw.strip()
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_.,:/+=-]*$", raw):
             lines.append(f"export {raw}")
+
+    # Device selection is authoritative, including disableGPU above. Do not
+    # let the generic environment passthrough accidentally override it.
+    lines.append(f"GRAPHICS_BACKEND={backend}")
 
     # MTU clamp for the primary NIC. Sourced from the host's
     # `vm.mtu` UserDefaults entry (default 1280). Applied in xinitrc

@@ -37,6 +37,16 @@ For `virgl`, the host MUST stop auto-appending `--disable-gpu-compositing` in `V
 
 Linux will emit `GRAPHICS_BACKEND=software|virgl` into `chrome-env`, and install a sourced graphics-environment helper used by xinitrc. Legacy hosts with no new field retain current behavior. A small capability file will identify guests with this config contract, and a diagnostic tool will report renderer/device evidence without claiming that launch flags prove acceleration. The macOS owner should arrange image version/capability gating before enabling `virgl`; image 403 ignores this new key and cannot be assumed compatible.
 
+**Linux contribution available on this branch**
+
+Backend selection and profile-policy precedence are implemented in `config-agent.py`. `graphics-env.sh` clears forced software GL for an explicit VirGL selection, and preserves the previous software/default and `NO_LIBGL_SOFTWARE` experiment behavior otherwise. The initial browser launch still disables Vulkan; no hardware-video support is advertised.
+
+The image builder installs the new scripts, `libegl1`, `libgles2`, `mesa-utils`, and `/etc/bromure/graphics-capabilities.json`. This file advertises configuration support only, not a successful accelerated device probe. These changes require a newly built image; downloading/personalising an existing image does not retrofit them. Image-version selection remains with the macOS owner to coordinate the rebuilt artifact and backend gating.
+
+From the chrome user's browser X session, run `DISPLAY=:0 /usr/local/bin/graphics-diagnostics.py --require-virgl` (with the session's actual XAUTHORITY if needed). It returns JSON and a nonzero status if the GLX probe fails, reports software rendering, or does not identify VirGL. `guestReportsVirgl` is guest-side evidence only; `hostGPUVerified` remains null. Verify Chromium's own selection and Metal activity separately. The diagnostic does not execute arbitrary chrome-env contents or report proxy credentials.
+
+Linux checks: `python3 -B -m unittest discover -s Tests/GuestGraphicsTests -v`, plus `sh -n` for each of the modified shell scripts. Tests exercise actual chrome-env generation and POSIX shell environment selection, including malformed backend values, profile GPU/WebGL policy and explicit developer overrides. No guest image has been baked or boot-tested here yet.
+
 **Delivery sequence and validation**
 
 1. Linux: implement backend-aware configuration and environment selection, install Mesa probing tools/capability marker, and run Linux unit/shell integration tests. Supply diagnostics for actual guest testing.

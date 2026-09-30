@@ -1,0 +1,6 @@
+{
+  "configVersion": 1,
+  "graphicsBackends": ["software", "virgl"],
+  "videoDecodeBackends": ["software"],
+  "diagnosticCommand": "/usr/local/bin/graphics-diagnostics.py"
+}

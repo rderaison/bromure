@@ -313,7 +313,7 @@ retry apt-get install -y -q --no-install-recommends \
     keyboard-configuration console-setup xkb-data \
     openbox xdotool \
     spice-vdagent \
-    libgl1-mesa-dri \
+    libgl1-mesa-dri libegl1 libgles2 mesa-utils \
     fonts-dejavu-core fonts-freefont-ttf fonts-liberation fonts-noto-color-emoji \
     adwaita-icon-theme \
     pipewire pipewire-pulse wireplumber pulseaudio-utils alsa-utils \
@@ -749,6 +749,10 @@ install_config   configs/Xwrapper.conf         /mnt/etc/X11/Xwrapper.config
 # ---------------------------------------------------------------------------
 
 install_config   scripts/resize-watcher.sh  /mnt/usr/local/bin/resize-watcher.sh 755
+install_config   scripts/graphics-env.sh /mnt/usr/local/bin/graphics-env.sh 644
+install_config   scripts/graphics-diagnostics.py /mnt/usr/local/bin/graphics-diagnostics.py 755
+mkdir -p /mnt/etc/bromure
+install_config   configs/graphics-capabilities.json /mnt/etc/bromure/graphics-capabilities.json 644
 install_config   scripts/apply-config.sh   /mnt/usr/local/bin/apply-config.sh 755
 install_config   scripts/install-mtls.sh   /mnt/usr/local/bin/install-mtls.sh 755
 install_config   scripts/on-boot.sh        /mnt/usr/local/bin/on-boot.sh 755
