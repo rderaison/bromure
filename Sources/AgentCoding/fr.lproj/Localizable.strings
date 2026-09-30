@@ -3199,3 +3199,6 @@
 "Hide — the shell keeps running (⌃`)" = "Masquer — le shell continue de tourner (⌃`)";
 "Close the terminal (ends the shell)" = "Fermer le terminal (termine le shell)";
 "The terminal isn't available right now." = "Le terminal n’est pas disponible pour le moment.";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "Mise à jour…";

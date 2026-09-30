@@ -3199,3 +3199,6 @@
 "Hide — the shell keeps running (⌃`)" = "隐藏——shell 继续运行 (⌃`)";
 "Close the terminal (ends the shell)" = "关闭终端（结束 shell）";
 "The terminal isn't available right now." = "终端暂时不可用。";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "正在同步最新内容…";

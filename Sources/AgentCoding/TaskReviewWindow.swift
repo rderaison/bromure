@@ -31,9 +31,21 @@ struct TaskReviewData: Equatable, Sendable {
 
     /// The review of a session's folder against `base`. New files the agent
     /// hasn't added to git yet are shown too (up to 40, under 200 KB each).
-    static func sessionCommand(dir: String, base: Base) -> String {
+    /// `focusFile`: an absolute path the review is about — the git checkout
+    /// holding it is diffed instead of `dir` (an agent working in a
+    /// worktree of the session's folder edits files `dir`'s diff never
+    /// shows); `dir` when it isn't in one.
+    static func sessionCommand(dir: String, base: Base, focusFile: String? = nil) -> String {
         func q(_ s: String) -> String {
             "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        let enter: String
+        if let f = focusFile, f.hasPrefix("/") {
+            let parent = (f as NSString).deletingLastPathComponent
+            enter = "d=$(git -C \(q(parent)) rev-parse --show-toplevel 2>/dev/null); "
+                + "[ -n \"$d\" ] || d=\(q(dir)); cd \"$d\" || exit 1"
+        } else {
+            enter = "cd \(q(dir)) || exit 1"
         }
         let setBase: String
         var withWorktree = true
@@ -47,7 +59,7 @@ struct TaskReviewData: Equatable, Sendable {
                 + "| while IFS= read -r f; do [ \"$(stat -c%s \"$f\" 2>/dev/null || echo 0)\" -lt 204800 ] "
                 + "&& git diff --no-index -- /dev/null \"$f\"; done; }"
             : "git diff \"$b\" HEAD -- 2>/dev/null"
-        return "cd \(q(dir)) || exit 1; \(setBase); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
+        return "\(enter); \(setBase); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
             + "echo ===LOG===; [ \"$b\" = HEAD ] || git log --oneline \"$b..HEAD\" 2>/dev/null | head -50; "
             + "echo ===STATUS===; git status --porcelain 2>/dev/null | head -100; "
             + "echo ===DIFF===; \(diff) | head -c 600000; true"
@@ -160,7 +172,7 @@ final class TaskReviewWindowManager {
                 comments: { t()?.comments ?? [] },
                 viewed: { t()?.reviewViewed ?? [:] },
                 plan: { t()?.plan },
-                fetch: { base in
+                fetch: { base, _ in
                     guard let task = t() else { return nil }
                     return await c.fetchReview(task, base)
                 },
