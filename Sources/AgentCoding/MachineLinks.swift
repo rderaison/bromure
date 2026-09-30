@@ -411,6 +411,15 @@ final class MachineLinkHub: @unchecked Sendable {
 
     // MARK: State
 
+    /// The machine stopped answering: keep what it last said (its sessions
+    /// stay listed), marked off — /state then shows no VM entry for it.
+    func markDisconnected(_ id: UUID) {
+        cond.lock()
+        fragments[id]?.connected = false
+        cond.unlock()
+        ACAutomationServer.noteMutation()
+    }
+
     func setFragment(_ id: UUID, _ f: Fragment?) {
         cond.lock()
         if names[id] != nil { fragments[id] = f }
@@ -486,6 +495,13 @@ final class AttachedMachine {
     /// The Mac's home folder, as it reports it (an absolute path, else nil).
     private(set) var home: String?
     private(set) var connected = false
+    /// Failed polls in a row. One slow reply (a request waits for a free link
+    /// over the relay) isn't the machine going away: it used to drop the
+    /// machine and every session of it from /state for a second, and a fat
+    /// client watching one of them lost its stage (another session, or the
+    /// bare terminal underneath).
+    private var failedPolls = 0
+    private static let failuresBeforeOffline = 3
     /// The machine's workspace entry from its last /state (the profile a
     /// local window builds for it).
     private(set) var workspace: [String: Any] = [:]
@@ -530,14 +546,18 @@ final class AttachedMachine {
         let id = self.id
         let r = await Task.detached { MachineLinkHub.shared.request(id, "GET", "/state", timeout: 10) }.value
         guard let r, r.status == 200 else {
-            if connected {
+            failedPolls += 1
+            if connected, failedPolls >= Self.failuresBeforeOffline {
+                // Gone for real: off, but its sessions stay listed (asleep)
+                // rather than vanishing from every client's stage.
                 connected = false
                 tabsModel.rosterLive = false
-                MachineLinkHub.shared.setFragment(id, nil)
+                MachineLinkHub.shared.markDisconnected(id)
                 onChange?()
             }
             return
         }
+        failedPolls = 0
         let wasConnected = connected
         let before = sessionStore.sessions
         connected = true
