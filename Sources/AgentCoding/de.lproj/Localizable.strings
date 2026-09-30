@@ -3192,3 +3192,13 @@
 "Your environment" = "Ihre Umgebung";
 "What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "Was die Sicherheitsprüfungen Ihrer Agenten wissen sollten: Ihre Organisation, die Repositories, Domains und Dienste, denen Sie vertrauen. Einer pro Zeile. Der Auto-Modus von Claude unterscheidet damit Routinearbeit von riskanten Aktionen.";
 "Applies to every workspace from its next launch." = "Gilt für jeden Workspace ab seinem nächsten Start.";
+
+/* Chat: scratch terminal (/term) */
+"Open a terminal here, in this session's folder" = "Hier ein Terminal öffnen, im Ordner dieser Sitzung";
+"Drag to resize" = "Zum Ändern der Größe ziehen";
+"Hide — the shell keeps running (⌃`)" = "Ausblenden – die Shell läuft weiter (⌃`)";
+"Close the terminal (ends the shell)" = "Terminal schließen (beendet die Shell)";
+"The terminal isn't available right now." = "Das Terminal ist gerade nicht verfügbar.";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "Wird aktualisiert…";

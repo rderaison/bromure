@@ -3192,3 +3192,13 @@
 "Your environment" = "你的环境";
 "What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "代理的安全检查需要了解的信息：你的组织，以及你信任的仓库、域名和服务。每行一条。Claude 的自动模式据此区分日常工作和有风险的操作。";
 "Applies to every workspace from its next launch." = "从每个工作区下次启动时生效。";
+
+/* Chat: scratch terminal (/term) */
+"Open a terminal here, in this session's folder" = "在此处打开终端，位于此会话的文件夹";
+"Drag to resize" = "拖动以调整大小";
+"Hide — the shell keeps running (⌃`)" = "隐藏——shell 继续运行 (⌃`)";
+"Close the terminal (ends the shell)" = "关闭终端（结束 shell）";
+"The terminal isn't available right now." = "终端暂时不可用。";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "正在同步最新内容…";

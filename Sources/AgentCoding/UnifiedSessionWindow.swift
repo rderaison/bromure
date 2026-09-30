@@ -1995,12 +1995,20 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Re-plan the surface for the selected session after its state changed
     /// (the views call back through `represent`; the reconcile tick and the
     /// app delegate on pane add/remove). No-op when nothing changed.
+    /// Ticks the session on stage has been missing from the store.
+    private var missingSessionTicks = 0
+
     func sessionStageDidChange() {
         guard let id = selectedSessionID else { return }
         guard let s = acDelegate?.sessionRecord(id) else {
-            clearSessionStage()
+            // Deleting a session clears the stage itself; here it's only
+            // missing — an attached machine's sessions can drop out of one
+            // poll. A few ticks in a row, not one, before the chat goes.
+            missingSessionTicks += 1
+            if missingSessionTicks >= 3 { missingSessionTicks = 0; clearSessionStage() }
             return
         }
+        missingSessionTicks = 0
         presentSession(s)
     }
 

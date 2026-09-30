@@ -518,6 +518,57 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The agent's slash commands for the "/" palette: built-ins at once,
     /// the user's own (custom commands, skills) once read from the guest.
     @Published var slashCommands: [SlashCommand] = []
+
+    // MARK: Scratch terminal (/term)
+
+    /// This session's scratch terminal — a shell of its own in the session's
+    /// folder, on the same machine — created on first use (nil: this chat
+    /// can't have one). Hiding it keeps it running.
+    var scratchTerminal: (() -> NSView?)?
+    /// The guest tmux session behind it (to end it for good).
+    var scratchSessionName: String?
+    /// The drawer is up.
+    @Published var terminalShown = false
+    /// A shell is running for it (shown or hidden).
+    @Published var terminalAlive = false
+    var canOpenTerminal: Bool { scratchTerminal != nil }
+
+    /// What the "/" palette lists: Bromure's own commands, then the agent's.
+    var paletteSlashCommands: [SlashCommand] {
+        (canOpenTerminal ? [Self.termCommand] : []) + slashCommands
+    }
+    static let termCommand = SlashCommand(
+        name: "term",
+        description: NSLocalizedString("Open a terminal here, in this session's folder", comment: "slash palette"),
+        source: .bromure, tag: "Bromure")
+    static func isTerminalCommand(_ text: String) -> Bool {
+        ["/term", "/terminal"].contains(text.lowercased())
+    }
+
+    func showTerminal() {
+        guard canOpenTerminal else { return }
+        terminalAlive = true
+        terminalShown = true
+    }
+
+    func hideTerminal() { terminalShown = false }
+
+    func toggleTerminal() { terminalShown ? hideTerminal() : showTerminal() }
+
+    /// End the shell: its tmux session goes, the surface follows.
+    func closeTerminal() {
+        terminalShown = false
+        terminalAlive = false
+        guard let name = scratchSessionName else { return }
+        let q = "'" + name.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        Task { [provider] in _ = await provider.execGuest("tmux kill-session -t \(q) 2>/dev/null; true", timeout: 10) }
+    }
+
+    /// The shell ended on its own (`exit`): fold the drawer away.
+    func scratchTerminalEnded() {
+        terminalShown = false
+        terminalAlive = false
+    }
     @Published var agentDisplayName: String = ""
     /// Every transcript read is handed here too (the session's local copy,
     /// readable once the machine sleeps).
@@ -898,19 +949,55 @@ final class BeautifiedSessionModel: ObservableObject {
         guard pollTask == nil else { return }
         // Shown again (a room, a click back): start from what was downloaded
         // last time; the first read then only asks for what's new.
+        var restored = false
         if buffers.isEmpty, let key = provider.historyCacheKey, let hit = Self.historyCache[key] {
             buffers[hit.path] = hit.buffer
             bufferOrder = [hit.path]
             currentPath = hit.path
             parseDirty = true
+            restored = true
         }
+        // The history on hand shows at once — over a tunnel the first poll
+        // (terminal scan, then the fetch) is seconds away — with a quiet
+        // "catching up" until that poll brings it current.
+        if restored || !parsedItems.isEmpty { catchingUp = true }
         pollTask = Task { [weak self] in
+            if restored { await self?.showCached() }
             while !Task.isCancelled {
                 await self?.poll()
+                if self?.catchingUp == true { self?.catchingUp = false }
                 let busy = self?.working ?? false
-                try? await Task.sleep(nanoseconds: busy ? 400_000_000 : 1_200_000_000)
+                let background = self?.background ?? false
+                try? await Task.sleep(nanoseconds: background ? 5_000_000_000 : busy ? 400_000_000 : 1_200_000_000)
             }
         }
+    }
+
+    /// The downloaded history, parsed and shown before any network round trip.
+    private func showCached() async {
+        let parsed = await parseCurrent()
+        guard !parsed.isEmpty else { return }
+        applyParsed(parsed)
+        rebuild()
+        if loading { loading = false }
+    }
+
+    /// Showing what's on hand while the first read of this showing lands.
+    @Published var catchingUp = false
+
+    /// Off stage but kept warm (the fat client keeps a few recent chats):
+    /// the transcript keeps streaming, slowly, so coming back is a render
+    /// rather than a download. No terminal scans meanwhile.
+    private(set) var background = false
+
+    func setBackground(_ on: Bool) {
+        guard background != on else { return }
+        background = on
+        guard !on else { return }
+        // Back on stage: read now, not at the end of a slow sleep.
+        pollTask?.cancel()
+        pollTask = nil
+        start()
     }
 
     func stop() {
@@ -958,8 +1045,9 @@ final class BeautifiedSessionModel: ObservableObject {
         let isWorking = provider.isWorking() || seedHolds()
         // Terminal-state scan FIRST and unconditionally: a trust/login prompt (or
         // an auth error) can be on screen before any transcript store exists, so
-        // it must not sit behind the transcript fetch's early return.
-        await scanTerminal()
+        // it must not sit behind the transcript fetch's early return. (Kept
+        // warm off stage: skipped — nobody sees its cards until it's back.)
+        if !background { await scanTerminal() }
         let known: TranscriptCursor? = currentPath.flatMap { p in buffers[p].map { (p, $0.end) } }
         // Published fields are written only when they change: every write
         // re-renders the whole chat (transcript included), and a poll runs
@@ -1341,6 +1429,12 @@ final class BeautifiedSessionModel: ObservableObject {
         let raw = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         let atts = pendingAttachments
         guard !raw.isEmpty || !atts.isEmpty, !sending else { return }
+        // /term is Bromure's, not the agent's: the terminal drawer opens.
+        if atts.isEmpty, Self.isTerminalCommand(raw), canOpenTerminal {
+            composerText = ""
+            showTerminal()
+            return
+        }
         // A slash command: the TUI answers on screen, not in the transcript.
         let isCommand = raw.hasPrefix("/") && atts.isEmpty && !raw.contains("\n")
         dismissCommandOutput()
@@ -1772,6 +1866,10 @@ private struct DelegationPanelHost: View {
 private final class TailFollow {
     /// Follow the tail through layout drift.
     var sticky = true
+    /// The tail marker's last reported position (nil: unloaded by the lazy
+    /// stack). The watchdog reads it: a view stuck blank reports nothing
+    /// new, so the preference callback alone never gets to fix it.
+    var lastMarker: CGFloat?
     /// The user is scrolling this transcript: a wheel or drag over it
     /// just now (a wheel notch scrolls on for a few frames after it).
     var userScrolling: Bool {
@@ -1791,6 +1889,23 @@ private final class TailFollow {
             lastEvent = UserEvent(at: Date(), window: e.window, location: e.locationInWindow)
             return e
         }
+    }
+}
+
+/// "Catching up…" over a chat shown from its cached history.
+private struct CatchingUpPill: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.mini)
+            Text(NSLocalizedString("Catching up…", comment: "beautified: cached history shown, fetching the latest"))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(.regularMaterial))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+        .shadow(color: .black.opacity(0.10), radius: 6, y: 2)
     }
 }
 
@@ -1862,6 +1977,9 @@ struct BeautifiedSessionView: View {
     /// Keeps the tail on show through layout drift until the user scrolls
     /// (a reference: flipping it must not re-render the view).
     @State private var tailFollow = TailFollow()
+    /// ⌃` → this chat's terminal drawer, when the keys are inside this chat.
+    @State private var terminalHotkey = ChatTerminalHotkey()
+    @State private var chatHeight: CGFloat = 0
     private static let scrollSpace = "beautified-scroll"
 
     /// What's typed after a leading "/" — the palette shows for it until a
@@ -1888,8 +2006,8 @@ struct BeautifiedSessionView: View {
     private var mentionMode: Bool { paletteQuery == nil && mentionQuery != nil }
     private var paletteCommands: [SlashCommand] {
         if mentionMode { return mentionMatches }
-        guard let q = paletteQuery, !model.slashCommands.isEmpty else { return [] }
-        return SlashCommandCatalog.matches(q, in: model.slashCommands)
+        guard let q = paletteQuery, !model.paletteSlashCommands.isEmpty else { return [] }
+        return SlashCommandCatalog.matches(q, in: model.paletteSlashCommands)
     }
     private var paletteVisible: Bool { !paletteCommands.isEmpty }
     private var paletteCurrent: SlashCommand? {
@@ -1955,7 +2073,28 @@ struct BeautifiedSessionView: View {
             if parts != .transcript { composerParts }
         }
         .animation(.easeOut(duration: 0.15), value: paletteVisible)
+        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: model.terminalShown)
         .onChange(of: paletteQuery) { _, _ in paletteIndex = 0 }
+        .background {
+            GeometryReader { g in
+                Color.clear
+                    .onAppear { chatHeight = g.size.height }
+                    .onChange(of: g.size.height) { _, h in chatHeight = h }
+            }
+        }
+        .background(ChatFrameAnchor(box: terminalHotkey.anchor))
+        .onAppear {
+            guard parts != .composer else { return }
+            terminalHotkey.install { [weak model] in
+                guard let model, model.canOpenTerminal else { return false }
+                if model.terminalShown { hideTerminalAndRefocus() } else { model.showTerminal() }
+                return true
+            }
+        }
+        .onDisappear { terminalHotkey.remove() }
+        .onChange(of: model.terminalShown) { _, shown in
+            if !shown { terminalHotkey.focusComposer() }
+        }
         // A chat surface, not a terminal: opaque so it never picks up the
         // window's terminal-translucency (which reads as a gray scrim here).
         // The canvas tone — the composer card is the white thing on it.
@@ -1998,6 +2137,16 @@ struct BeautifiedSessionView: View {
                         .opacity(liveResizing ? 1 : 0)
                         .allowsHitTesting(false)
                 }
+                // Shown from what was on hand; the latest round is on its way.
+                .overlay(alignment: .top) {
+                    if model.catchingUp, !model.items.isEmpty {
+                        CatchingUpPill()
+                            .padding(.top, 8)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                            .allowsHitTesting(false)
+                    }
+                }
+                .animation(.easeOut(duration: 0.2), value: model.catchingUp)
                 .clipped()
                 .background {
                     GeometryReader { g in
@@ -2033,6 +2182,17 @@ struct BeautifiedSessionView: View {
             // which change with every mirror push — only the panel should
             // re-render then, not the whole transcript above it.
             if delegations { DelegationPanelHost(model: model) }
+            // /term: a shell in this session's folder, right above the composer.
+            if model.terminalShown {
+                ScratchTerminalDrawer(model: model,
+                                      maxHeight: max(160, chatHeight * 0.72),
+                                      onHide: { hideTerminalAndRefocus() })
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+    }
+
+    private func hideTerminalAndRefocus() {
+        model.hideTerminal()
     }
 
     @ViewBuilder
@@ -2294,6 +2454,7 @@ struct BeautifiedSessionView: View {
                     model.debugGeometry["viewport"] = h
                 }
                 .onPreferenceChange(TailOffsetKey.self) { marker in
+                    tailFollow.lastMarker = marker
                     // Following the tail and the user didn't scroll: the
                     // tail moved because rows were measured — go again.
                     // (See `TailFollow`.)
@@ -2330,6 +2491,23 @@ struct BeautifiedSessionView: View {
                     // Snap back to the tail.
                     if viewportHeight > 0, contentHeight > viewportHeight, tailY < viewportHeight - 40 {
                         proxy.scrollTo(Self.tailID, anchor: .bottom)
+                    }
+                }
+                .task {
+                    // Watchdog: following the tail, yet the tail isn't on
+                    // screen (unloaded, or the offset drifted past it) and
+                    // nothing re-reports — the chat sat blank until the user
+                    // scrolled. Look again every beat; never while the user
+                    // scrolls, never once they've scrolled up to read.
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+                        let v = viewportHeight
+                        guard tailFollow.sticky, !tailFollow.userScrolling, v > 0, !liveResizing else { continue }
+                        let m = tailFollow.lastMarker
+                        if m == nil || m! > v + 2 || m! < v - 40 {
+                            model.debugGeometry["watchdog"] = (model.debugGeometry["watchdog"] ?? 0) + 1
+                            proxy.scrollTo(Self.tailID, anchor: .bottom)
+                        }
                     }
                 }
                 .onChange(of: model.commandOutput) { _, _ in scrollToTail(proxy) }
@@ -3013,7 +3191,7 @@ private struct CommandCard: View {
 /// of an interactive command. The surface is the same one the Linux view
 /// mounts — one tmux client, re-parented — and goes back to being unmounted
 /// when the card folds.
-private struct InlineTerminalView: NSViewRepresentable {
+struct InlineTerminalView: NSViewRepresentable {
     let terminal: NSView
 
     func makeNSView(context: Context) -> NSView {

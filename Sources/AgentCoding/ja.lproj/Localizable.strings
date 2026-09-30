@@ -3192,3 +3192,13 @@
 "Your environment" = "あなたの環境";
 "What your agents' safety checks should know: your organization, the repositories, domains and services you trust. One per line. Claude's auto mode uses it to tell routine work from risky actions." = "エージェントの安全チェックが知っておくべきこと：組織、信頼するリポジトリ、ドメイン、サービス。1 行に 1 つ。Claude の自動モードは、これを使って日常的な作業と危険な操作を見分けます。";
 "Applies to every workspace from its next launch." = "各ワークスペースの次回起動から適用されます。";
+
+/* Chat: scratch terminal (/term) */
+"Open a terminal here, in this session's folder" = "このセッションのフォルダでターミナルを開く";
+"Drag to resize" = "ドラッグしてサイズを変更";
+"Hide — the shell keeps running (⌃`)" = "隠す — シェルは動き続けます (⌃`)";
+"Close the terminal (ends the shell)" = "ターミナルを閉じる (シェルを終了)";
+"The terminal isn't available right now." = "ターミナルは現在使用できません。";
+
+/* Chat: cached history shown while the latest loads */
+"Catching up…" = "最新の内容を取得中…";

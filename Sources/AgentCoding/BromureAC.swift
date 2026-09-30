@@ -170,6 +170,13 @@ struct BromureAC: ParsableCommand {
             }
             FlameGraphView.renderSnapshot(transcript: data, agent: args.count > 2 ? args[2] : nil, to: args[0])
         }
+        // The chat's /term drawer, offline (a stand-in for the live surface).
+        //   bromure-ac __shot-term [out.png] [--dark]
+        if filtered.first == "__shot-term" {
+            let args = Array(filtered.dropFirst()).filter { !$0.hasPrefix("--") }
+            ScratchTerminalDrawer.renderSnapshot(to: args.first ?? "/tmp/bromure-term.png",
+                                                 dark: filtered.contains("--dark"))
+        }
         // A display-MCP chart card, rendered offline and snapshotted.
         //   bromure-ac __shot-chart [out.png] [spec.json] [--dark]
         if filtered.first == "__shot-chart" {
@@ -11812,7 +11819,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private(set) lazy var sessionReviews = SessionReviewWindowManager(
         context: SessionReviewWindowManager.Context(
             session: { [weak self] id in self?.agentSessionStore.session(id) },
-            fetch: { [weak self] id, base in await self?.agentSessionEngine.fetchReview(id, base: base) },
+            fetch: { [weak self] id, base, focus in await self?.agentSessionEngine.fetchReview(id, base: base, focusFile: focus) },
             addComment: { [weak self] id, text, file, line in
                 self?.agentSessionEngine.addReviewComment(id, text: text, file: file, line: line)
             },

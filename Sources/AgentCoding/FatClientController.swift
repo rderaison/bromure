@@ -2648,6 +2648,9 @@ final class RemoteHostWindow: NSWindow {
             popOutWindows[id]?.close()   // willClose → reapPopOut retires the controller
         }
         controller.stop()
+        for (_, m) in warmChats { m.stop() }
+        warmChats.removeAll()
+        warmChatOrder.removeAll()
         gridView?.retireAll()
         for (_, c) in termControllers { c.retireAll() }
         termControllers.removeAll()
@@ -4146,9 +4149,10 @@ final class RemoteHostWindow: NSWindow {
     private lazy var sessionReviews = SessionReviewWindowManager(
         context: SessionReviewWindowManager.Context(
             session: { [weak self] id in self?.controller.sessionStore.session(id) },
-            fetch: { [weak self] id, base in
+            fetch: { [weak self] id, base, focus in
                 guard let self, let s = self.controller.sessionStore.session(id) else { return nil }
-                let cmd = TaskReviewData.sessionCommand(dir: SessionHome.guestPath(s.cwd), base: base)
+                let cmd = TaskReviewData.sessionCommand(dir: SessionHome.guestPath(s.cwd), base: base,
+                                                        focusFile: focus)
                 guard let out = try? await self.controller.guestExec(s.profileID, command: cmd, timeout: 30)
                 else { return nil }
                 return TaskReviewData.parse(out)
@@ -4401,9 +4405,21 @@ final class RemoteHostWindow: NSWindow {
 
     private func sessionStageDidChange() {
         guard sessionsFirst, let id = selectedSessionID else { return }
-        guard let s = controller.sessionStore.session(id) else { clearSessionStage(); return }
+        guard let s = controller.sessionStore.session(id) else {
+            // Missing from one snapshot (a machine poll that failed, a
+            // session restarting) isn't gone: only a few in a row clear the
+            // stage — otherwise the chat vanished under the user.
+            missingSessionSnapshots += 1
+            if missingSessionSnapshots >= Self.missingSnapshotsToClear { clearSessionStage() }
+            return
+        }
+        missingSessionSnapshots = 0
         presentSession(s)
     }
+
+    /// Consecutive snapshots the session on stage has been missing from.
+    private var missingSessionSnapshots = 0
+    private static let missingSnapshotsToClear = 3
 
     private func presentSession(_ s: AgentSession) {
         let model = controller.listModel
@@ -6372,11 +6388,21 @@ final class RemoteHostWindow: NSWindow {
         }
         unmountBeautified()
         mountedTermView?.removeFromSuperview(); mountedTermView = nil
-        let m = makeRemoteChatModel(id: id, window: idx)
+        // A chat shown lately is still warm (kept streaming off stage):
+        // reuse it — switching back is a render, not a download.
+        let key = "\(id.uuidString):\(idx)"
+        let m: BeautifiedSessionModel
+        if let warm = warmChats.removeValue(forKey: key) {
+            warmChatOrder.removeAll { $0 == key }
+            m = warm
+            m.setBackground(false)
+        } else {
+            m = makeRemoteChatModel(id: id, window: idx)
+            m.start()
+        }
         beautifiedModel = m
         beautifiedWorkspace = id
         beautifiedTabIndex = tabIndex
-        m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         // A long conversation's fitting height (thousands of points) must
         // never become the window's minimum.
@@ -6465,12 +6491,43 @@ final class RemoteHostWindow: NSWindow {
             m.inlineTerminalSession = { [weak self] in
                 self?.termControllers[id]?.tmuxSessionName(forWindow: w)
             }
+            // /term: a scratch shell in the session's folder on the remote
+            // machine, over the same SSH attach path.
+            let scratchKey = "\(id.uuidString.prefix(8))w\(w)"
+            m.scratchSessionName = TerminalSessionController.scratchSession(scratchKey)
+            m.scratchTerminal = { [weak self, weak m] in
+                guard let self else { return nil }
+                let ctl = self.termControllers[id] ?? {
+                    let c = TerminalSessionController(profile: profile, remoteHost: self.controller.host.id)
+                    self.termControllers[id] = c
+                    return c
+                }()
+                let cwd = self.controller.sessionStore.session(profileID: id, windowIndex: w)?.cwd ?? "~"
+                return ctl.scratchView(key: scratchKey, cwd: cwd) { [weak m] in m?.scratchTerminalEnded() }
+            }
         }
         return m
     }
 
+    /// Chats recently on stage, kept streaming in the background (see
+    /// `BeautifiedSessionModel.setBackground`), most recent last.
+    private var warmChats: [String: BeautifiedSessionModel] = [:]
+    private var warmChatOrder: [String] = []
+    private static let warmChatLimit = 4
+
     private func unmountBeautified() {
-        beautifiedModel?.stop()
+        if let m = beautifiedModel, let id = beautifiedWorkspace, let idx = beautifiedTabIndex {
+            let key = "\(id.uuidString):\(idx)"
+            m.setBackground(true)
+            warmChats[key] = m
+            warmChatOrder.removeAll { $0 == key }
+            warmChatOrder.append(key)
+            while warmChatOrder.count > Self.warmChatLimit {
+                warmChats.removeValue(forKey: warmChatOrder.removeFirst())?.stop()
+            }
+        } else {
+            beautifiedModel?.stop()
+        }
         beautifiedModel = nil
         beautifiedWorkspace = nil
         beautifiedTabIndex = nil
@@ -6535,7 +6592,13 @@ final class RemoteHostWindow: NSWindow {
                 }
             }
         }
-        if let id = shownWorkspace, shownWindowIndex == nil {
+        // A machine on stage follows its active tab (the mirror is 1:1). A
+        // session's chat or a room is pinned to its own windows: following
+        // the machine's active tab there swapped the chat under the user's
+        // typing whenever anything else moved that tab, and — with the stage
+        // just cleared — mounted the raw terminal of whatever was active.
+        if selectedSessionID == nil, roomController == nil,
+           let id = shownWorkspace, shownWindowIndex == nil {
             let idx = controller.tabsModel(for: id)?.activeTab?.index ?? 0
             mountTerminal(for: id, window: idx)
         }
