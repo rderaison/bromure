@@ -1475,11 +1475,32 @@ final class DelegationEngine {
     /// ended without delivering stays open — its parent hears once, and a
     /// steer or an answer resumes the agent right where it was. A request's
     /// peer is nobody's to watch: it lives its own life.
+    /// Open delegations whose other session hasn't been found since when.
+    private var missingSince: [UUID: Date] = [:]
+    /// How long a session may be out of view (its Mac restarting, asleep,
+    /// reconnecting) before its delegations end.
+    static let missingGrace: TimeInterval = 300
+
     private func watchChildren() {
+        let now = Date()
         for d in store.delegations where d.status.isOpen {
-            guard let child = sessions.session(d.childSessionID), !child.isDeleted else {
+            if let child = sessions.session(d.childSessionID), child.isDeleted {
+                missingSince[d.id] = nil
                 fail(d, d.isRequest ? "the peer's session was deleted" : "the delegate's session was deleted"); continue
             }
+            guard let child = sessions.session(d.childSessionID) else {
+                // Not found isn't deleted: an attached Mac restarting or
+                // reconnecting takes all its sessions out of view for a
+                // moment. Only a long absence ends the delegation.
+                let since = missingSince[d.id] ?? now
+                missingSince[d.id] = since
+                if now.timeIntervalSince(since) > Self.missingGrace {
+                    missingSince[d.id] = nil
+                    fail(d, d.isRequest ? "the peer's session is gone" : "the delegate's session is gone")
+                }
+                continue
+            }
+            missingSince[d.id] = nil
             if d.isRequest { continue }
             if d.status == .starting {
                 if child.windowIndex != nil, !child.isLaunching {
