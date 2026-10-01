@@ -751,6 +751,7 @@ install_config   configs/Xwrapper.conf         /mnt/etc/X11/Xwrapper.config
 # ---------------------------------------------------------------------------
 
 install_config   scripts/resize-watcher.sh  /mnt/usr/local/bin/resize-watcher.sh 755
+install_config   scripts/resize-watcher.py  /mnt/usr/local/bin/resize-watcher.py 755
 install_config   scripts/graphics-env.sh /mnt/usr/local/bin/graphics-env.sh 644
 install_config   scripts/graphics-diagnostics.py /mnt/usr/local/bin/graphics-diagnostics.py 755
 install_config   scripts/graphics-prerequisites.py /mnt/usr/local/bin/graphics-prerequisites.py 755

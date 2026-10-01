@@ -76,6 +76,28 @@ Host integration must be validated with actual AppKit clicks reaching Linux and
 DOM events, including drag, right-click, resize and native-chrome cropping;
 guest XWarpPointer alone does not test this direction.
 
+**Guest resize notifications**
+
+`resize-watcher.sh` remains the xinitrc entry point and executes
+`resize-watcher.py`. The Python watcher subscribes to X11 RandR screen, CRTC,
+output/property and resource changes using the existing libX11/libXrandr
+libraries. It coalesces updates to at most 30 Hz. Idle operation waits on the
+X connection and checks only the config file's metadata once per second;
+there is no idle xrandr subprocess polling. Claim-time config changes also
+trigger reevaluation.
+
+Only an active output is eligible. On the custom-GPU path the watcher retains
+the selected active output or selects the sole active output; ambiguous initial
+multi-output layouts are left alone. It follows the preferred mode and makes
+that output primary at `(0,0)`, matching the root framebuffer size when there
+is only one active output. Connected-but-inactive built-in outputs are never
+enabled. The software path keeps its previous layout policy. High-Hz GTF modes
+remain supported with preferred-mode fallback; obsolete generated modes are
+retired. Tests cover burst coalescing, idle behavior, software/high-Hz fallback,
+the real Virtual-2/Virtual-1-1 layout and stale root geometry. A private Xvfb
+test also validated the ctypes connection and receipt of a real RandR event;
+custom Virtio live resizing still requires macOS guest acceptance.
+
 **Delivery sequence and validation**
 
 1. Linux: implement backend-aware configuration and environment selection, install Mesa probing tools/capability marker, and run Linux unit/shell integration tests. Supply diagnostics for actual guest testing.
