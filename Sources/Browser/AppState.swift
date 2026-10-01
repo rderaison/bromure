@@ -525,6 +525,12 @@ final class AppState: @unchecked Sendable {
         return String(s)
     }
 
+    func setMetalRendererEnabled(_ enabled: Bool) {
+        guard MetalRendererPreference.isSupported, MetalRendererPreference.isEnabled != enabled else { return }
+        MetalRendererPreference.isEnabled = enabled
+        restartPool()
+    }
+
     /// Shut down the current pool and start a fresh one with updated config.
     /// No-op if an image build is in progress (no base image to warm up).
     func restartPool() {

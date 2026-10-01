@@ -13,6 +13,7 @@ final class RendererCommandProcessor {
     private var stopTransport: (() -> Void)?
     private struct GuestSpan { let address: UInt64; let count: Int }
     private var backing: [UInt32: [GuestSpan]] = [:]
+    private var cursorResources: [UInt32: (width: Int, height: Int, format: UInt32)] = [:]
 
     init(executable: String) throws {
         process.executableURL = URL(fileURLWithPath: executable)
@@ -116,7 +117,7 @@ final class RendererCommandProcessor {
         guard response.count == 24, get32(response, at: 0) == 0x1100 else {
             throw failure("Renderer reset failed")
         }
-        backing.removeAll()
+        backing.removeAll(); cursorResources.removeAll()
     }
 
     func forward(_ snapshot: Data,
@@ -225,7 +226,41 @@ final class RendererCommandProcessor {
         if [UInt32(0x102), 0x107].contains(type), snapshot.count == 32, get32(response, at: 0) == 0x1100 {
             backing.removeValue(forKey: get32(snapshot, at: 24))
         }
+        if [UInt32(0x101), 0x204].contains(type), get32(response, at: 0) == 0x1100 {
+            let offset = type == 0x101 ? 32 : 40
+            let width = Int(get32(snapshot, at: offset)), height = Int(get32(snapshot, at: offset + 4))
+            let format = get32(snapshot, at: type == 0x101 ? 28 : 32)
+            if width > 0 && height > 0 && width <= 64 && height <= 64 && [UInt32(1), 2].contains(format) {
+                cursorResources[get32(snapshot, at: 24)] = (width, height, format)
+            }
+        }
+        if type == 0x102, get32(response, at: 0) == 0x1100 { cursorResources.removeValue(forKey: get32(snapshot, at: 24)) }
         return response
+    }
+
+    /// Cursor images are small CPU-authored guest buffers, distinct from scanout.
+    /// Snapshot only the validated 64x64 image, never export guest/native handles.
+    func cursorImage(resource: UInt32, readGuest: (UInt64, Int) throws -> Data) throws -> (Data, Int, Int) {
+        guard let info = cursorResources[resource], let spans = backing[resource] else {
+            throw failure("Invalid cursor resource")
+        }
+        let size = info.width * info.height * 4
+        var image = Data()
+        for span in spans {
+            let remaining = size - image.count
+            if remaining == 0 { break }
+            let count = min(remaining, span.count)
+            let bytes = try readGuest(span.address, count)
+            guard bytes.count == count else { throw failure("Short cursor image") }
+            image.append(bytes)
+        }
+        guard image.count == size else { throw failure("Short cursor backing") }
+        // virtio BGRA -> AppKit RGBA; XRGB cursors are opaque.
+        for i in stride(from: 0, to: image.count, by: 4) {
+            let blue = image[i]; image[i] = image[i + 2]; image[i + 2] = blue
+            if info.format == 2 { image[i + 3] = 255 }
+        }
+        return (image, info.width, info.height)
     }
 
     private func synchronizeBacking(_ id: UInt32, download: Bool,

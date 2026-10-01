@@ -2,11 +2,23 @@ import Foundation
 import IOSurface
 import Virtualization
 
+public struct HostGPUCursor {
+    public let rgba: Data
+    public let width: Int
+    public let height: Int
+    public let hotX: Int
+    public let hotY: Int
+}
+
 /// The stable app-facing interface keeps macOS 27 device types out of WarmVM.
 public protocol HostGraphicsSession: AnyObject {
     var backendName: String { get }
+    var isRendererRunning: Bool { get }
     var deliveredFrameCount: Int { get }
+    var deliveredCursorCount: Int { get }
+    var cursorMoveCount: Int { get }
     func observeFrames(_ observer: @escaping (IOSurface?) -> Void)
+    func observeCursor(_ observer: @escaping (HostGPUCursor?) -> Void)
     func resizeDisplay(width: Int, height: Int)
     func stop()
 }
@@ -15,6 +27,7 @@ public protocol HostGraphicsSession: AnyObject {
 public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
     VZCustomVirtioDeviceConfigurationDelegate, VZCustomVirtioDeviceDelegate {
     public let backendName = "virgl"
+    public var isRendererRunning: Bool { client.isRunning }
     public let configuration: VZCustomVirtioDeviceConfiguration
     private let client: MacOS27RendererClient
     private let deviceQueue = DispatchQueue(label: "io.bromure.gpu.device")
@@ -33,29 +46,22 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
     private var pendingBytes = 0
     private var observer: ((IOSurface?) -> Void)?
     private var latestFrame: IOSurface?
+    private var cursorObserver: ((HostGPUCursor?) -> Void)?
+    private var latestCursor: HostGPUCursor?
     private let frameCounterLock = NSLock()
     private var frameCounter = 0
+    private var cursorCounter = 0
+    private var moveCounter = 0
+    public var deliveredCursorCount: Int { frameCounterLock.lock(); defer { frameCounterLock.unlock() }; return cursorCounter }
+    public var cursorMoveCount: Int { frameCounterLock.lock(); defer { frameCounterLock.unlock() }; return moveCounter }
     public var deliveredFrameCount: Int {
         frameCounterLock.lock(); defer { frameCounterLock.unlock() }; return frameCounter
     }
-    private static let ownership = NSLock()
-    private static var owned = false
-    private var ownsRenderer = false
-
     private init(width: Int, height: Int) throws {
-        Self.ownership.lock()
-        if Self.owned { Self.ownership.unlock(); throw Self.failure("Experimental renderer already in use") }
-        Self.owned = true
-        Self.ownership.unlock()
-        do { client = try MacOS27RendererClient() }
-        catch {
-            Self.ownership.lock(); Self.owned = false; Self.ownership.unlock()
-            throw error
-        }
+        client = try MacOS27RendererClient()
         configuration = VZCustomVirtioDeviceConfiguration()
         super.init()
         displaySize = (width, height)
-        ownsRenderer = true
         configuration.deviceID = 16
         configuration.pciClassID = 3
         configuration.pciSubclassID = 0
@@ -94,7 +100,6 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
 
     deinit {
         client.stop()
-        if ownsRenderer { Self.ownership.lock(); Self.owned = false; Self.ownership.unlock() }
     }
 
     public func observeFrames(_ observer: @escaping (IOSurface?) -> Void) {
@@ -102,6 +107,10 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
             self.observer = observer
             if !paused { observer(latestFrame) }
         }
+    }
+
+    public func observeCursor(_ observer: @escaping (HostGPUCursor?) -> Void) {
+        deviceQueue.async { [self] in cursorObserver = observer; if !paused { observer(latestCursor) } }
     }
 
     public func resizeDisplay(width: Int, height: Int) {
@@ -140,16 +149,11 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         state.lock(); stopped = true; generation += 1; paused = false; state.broadcast(); state.unlock()
         pending.removeAll(); completions.removeAll(); pendingBytes = 0
         latestFrame = nil; observer?(nil)
+        latestCursor = nil; cursorObserver?(nil)
         device = nil
         client.stop()
         processingQueue.async { [self] in processor?.stop(); processor = nil }
-        if ownsRenderer {
-            ownsRenderer = false
-            // Let the disconnected embedded service finish exiting before reuse.
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-                Self.ownership.lock(); Self.owned = false; Self.ownership.unlock()
-            }
-        }
+
     }
 
     public func customVirtioConfiguration(_ configuration: VZCustomVirtioDeviceConfiguration,
@@ -162,6 +166,14 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         guard !stopped else { return }
         while let element = queue.nextElement() {
             let count = element.readBuffersAvailableByteCount
+            if queue.queueIndex == 1 {
+                // Cursor commands have no writable reply and a fixed wire size.
+                if count == 56, pending.count < 256, pendingBytes <= 16777216 - count,
+                   let snapshot = try? element.readBytes(withExactLength: count) {
+                    handleCursor(snapshot, element: element, device: device)
+                } else { element.returnToQueue() }
+                continue
+            }
             guard queue.queueIndex == 0, count >= 24, count <= 1048576,
                   pending.count < 256, pendingBytes <= 16777216 - count else {
                 element.returnToQueue(); continue
@@ -211,6 +223,43 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         }
     }
 
+    private func handleCursor(_ snapshot: Data, element: VZVirtioQueueElement, device: VZCustomVirtioDevice) {
+        let type = get32(snapshot, at: 0)
+        guard [UInt32(0x300), 0x301].contains(type), get32(snapshot, at: 24) == 0 else {
+            element.returnToQueue(); return
+        }
+        let token = UUID(), epoch = generation
+        pending[token] = element; pendingBytes += snapshot.count
+        processingQueue.async { [self] in
+            var cursor: HostGPUCursor?
+            let update = type == 0x300
+            if update, get32(snapshot, at: 40) != 0 {
+                do {
+                    guard let processor else { throw Self.failure("Renderer stopped") }
+                    let (pixels, width, height) = try processor.cursorImage(resource: get32(snapshot, at: 40)) { address, length in
+                        try self.withMapping(device, epoch: epoch, address: address, length: length) { mapping in
+                            Data(bytes: mapping.mutableBytes, count: length)
+                        }
+                    }
+                    let hotX = Int(get32(snapshot, at: 44)), hotY = Int(get32(snapshot, at: 48))
+                    guard hotX < width, hotY < height else { throw Self.failure("Invalid cursor hotspot") }
+                    cursor = HostGPUCursor(rgba: pixels, width: width, height: height, hotX: hotX, hotY: hotY)
+                } catch { print("[GPU] Cursor update failed: \(error)") }
+            }
+            deviceQueue.async { [self] in
+                guard !stopped, generation == epoch, pending[token] != nil else { return }
+                pendingBytes -= snapshot.count
+                frameCounterLock.lock()
+                if update && cursor != nil { cursorCounter += 1 }
+                if !update { moveCounter += 1 }
+                frameCounterLock.unlock()
+                if update { latestCursor = cursor; if !paused { cursorObserver?(cursor) } }
+                if paused { completions[token] = Data() }
+                else { complete(token, response: Data()) }
+            }
+        }
+    }
+
     private func withMapping<T>(_ device: VZCustomVirtioDevice, epoch: Int, address: UInt64, length: Int,
                                 body: (VZGuestMemoryMapping) throws -> T) throws -> T {
         while true {
@@ -244,12 +293,14 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         for (token, response) in completions { complete(token, response: response) }
         completions.removeAll()
         observer?(latestFrame)
+        cursorObserver?(latestCursor)
     }
     public func customVirtioDeviceWillReset(_ device: VZCustomVirtioDevice) {
         state.lock(); generation += 1; state.broadcast(); state.unlock()
         let epoch = generation
         pending.removeAll(); completions.removeAll(); pendingBytes = 0
         latestFrame = nil; observer?(nil)
+        latestCursor = nil; cursorObserver?(nil)
         processingQueue.async { [self] in
             processingGeneration = epoch
             do { try processor?.reset() }

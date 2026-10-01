@@ -168,8 +168,8 @@ int renderer_probe_main(int argc, char **argv)
 }
 
 #ifdef BROMURE_RENDERER_XPC
-extern int renderer_xpc_main(void);
-int main(void) { return renderer_xpc_main(); }
+extern int renderer_xpc_main(int argc, char **argv);
+int main(int argc, char **argv) { return renderer_xpc_main(argc, argv); }
 #else
 int main(int argc, char **argv) { return renderer_probe_main(argc, argv); }
 #endif

@@ -150,6 +150,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var bookmarksStaticItemCount = 0
     /// The History menu, rebuilt from the key window's session on each open.
     private weak var historyMenu: NSMenu?
+    private weak var graphicsMenu: NSMenu?
+    private weak var graphicsMenuItem: NSMenuItem?
+    private var graphicsMenuTimer: Timer?
+    private var graphicsMenuOpen = false
     private var consentWindow: NSWindow?
     private var enrollmentWindow: NSWindow?
     /// Sparkle auto-updater. Retained strongly — if this deallocates, scheduled
@@ -882,7 +886,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     // MARK: - Menu
 
-    private func setupMenu() {
+    func setupMenu() {
         let mainMenu = NSMenu()
 
         // App menu
@@ -1071,7 +1075,60 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         mainMenu.addItem(windowItem)
         NSApp.windowsMenu = windowMenu
 
+        let graphics = NSMenu(title: "GPU")
+        graphics.autoenablesItems = false
+        graphics.delegate = self
+        let graphicsItem = NSMenuItem(title: "GPU", action: nil, keyEquivalent: "")
+        graphicsItem.submenu = graphics
+        mainMenu.addItem(graphicsItem)
+        self.graphicsMenu = graphics
+        self.graphicsMenuItem = graphicsItem
         NSApp.mainMenu = mainMenu
+        MainActor.assumeIsolated { updateGraphicsMenu() }
+        graphicsMenuTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateGraphicsMenu() }
+        }
+        graphicsMenuTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @MainActor private func updateGraphicsMenu() {
+        guard let menu = graphicsMenu else { return }
+        let open = sessions.filter { !$0.closing && $0.window.isVisible }
+        let active = keyWindowSession() ?? open.last
+        let renderer = active?.usesMetalRenderer == true ? "Metal" : "Software"
+        let title = active == nil ? "GPU" : renderer
+        graphicsMenuItem?.title = title
+        menu.title = title
+        guard !graphicsMenuOpen else { return }
+        menu.removeAllItems()
+        let status = NSMenuItem(title: active == nil ? "No browser window active" : "Renderer: " + renderer,
+                                action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        menu.addItem(status)
+        menu.addItem(.separator())
+        let toggle = NSMenuItem(title: "Use Metal Renderer", action: #selector(toggleMetalRendererAction(_:)), keyEquivalent: "")
+        toggle.target = self
+        toggle.isEnabled = MetalRendererPreference.isSupported
+        toggle.state = MetalRendererPreference.isSupported && MetalRendererPreference.isEnabled ? .on : .off
+        toggle.toolTip = MetalRendererPreference.isSupported ? "Applies to new browser windows." : "Requires macOS 27 or later."
+        menu.addItem(toggle)
+        if open.count > 1 {
+            menu.addItem(.separator())
+            for session in open {
+                let name = session.profile?.name ?? session.window.title
+                let item = NSMenuItem(title: name + ": " + (session.usesMetalRenderer ? "Metal" : "Software"), action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+        }
+    }
+
+    @MainActor @objc private func toggleMetalRendererAction(_ sender: Any?) {
+        guard MetalRendererPreference.isSupported else { return }
+        state.setMetalRendererEnabled(!MetalRendererPreference.isEnabled)
+        updateGraphicsMenu()
     }
 
     // MARK: - Actions
@@ -1186,12 +1243,22 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     // MARK: - Bookmarks menu mirroring (NSMenuDelegate)
 
+    @MainActor @objc func menuWillOpen(_ menu: NSMenu) {
+        if menu === graphicsMenu { graphicsMenuOpen = true }
+    }
+
+    @MainActor @objc func menuDidClose(_ menu: NSMenu) {
+        if menu === graphicsMenu { graphicsMenuOpen = false; updateGraphicsMenu() }
+    }
+
     @MainActor @objc func menuNeedsUpdate(_ menu: NSMenu) {
         // Paint immediately from the key window's cache (no flicker on
         // reopen), then refresh from the guest for next time. A menu-bar
         // menu won't repaint after this returns, so the cache is also warmed
         // when the bridge connects — that's what makes the first open show.
-        if menu === bookmarksMenu {
+        if menu === graphicsMenu {
+            updateGraphicsMenu()
+        } else if menu === bookmarksMenu {
             rebuildBookmarksMenu()
             guard let session = keyWindowSession() else { return }
             Task { @MainActor in
@@ -2300,6 +2367,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 final class BrowserSession {
     let id = UUID()
     private var warmVM: VMPool.WarmVM?
+    var usesMetalRenderer: Bool {
+        guard !closing, let graphics = warmVM?.graphicsSession else { return false }
+        return graphics.isRendererRunning && graphics.backendName == "virgl" && graphics.deliveredFrameCount > 0
+    }
     let window: NSWindow
     private var vmView: VZVirtualMachineView?
     var onClosed: ((BrowserSession) -> Void)?
@@ -2390,6 +2461,9 @@ final class BrowserSession {
                 graphics?.resizeDisplay(width: width, height: height)
             }
             vmView.addSubview(gpuView)
+            graphics.observeCursor { [weak gpuView] cursor in
+                DispatchQueue.main.async { gpuView?.presentCursor(cursor) }
+            }
             graphics.observeFrames { [weak gpuView] surface in
                 DispatchQueue.main.async {
                     if let surface { try? gpuView?.present(surface) }

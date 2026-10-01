@@ -12,17 +12,19 @@ if [[ -z "$renderer" && ${BROMURE_BUILD_GPU_RENDERER:-auto} != 0 && $(uname -m) 
     package_log=$(mktemp "$root/renderer-package.XXXXXX")
     bash "$script_dir/package-renderer-xpc.sh" "$root" > "$package_log"
     probe=$(tail -n 1 "$package_log")
-    renderer="$(dirname "$(dirname "$probe")")/XPCServices/io.bromure.gpu.renderer.xpc"
+    renderer="$(dirname "$(dirname "$probe")")/XPCServices/io.bromure.gpu.renderer.broker.xpc"
 fi
 [[ -n "$renderer" ]] || exit 0
 [[ -x "$renderer/Contents/MacOS/renderer" ]] || { echo 'Invalid renderer XPC bundle' >&2; exit 1; }
 codesign --verify --deep --strict "$renderer"
 mkdir -p "$contents/XPCServices"
-service="$contents/XPCServices/io.bromure.gpu.renderer.xpc"
+service="$contents/XPCServices/io.bromure.gpu.renderer.broker.xpc"
 ditto "$renderer" "$service"
 for library in "$service/Contents/Frameworks/"*.dylib; do
     codesign --force --options runtime --sign "$identity" "$library"
 done
+codesign --force --options runtime --sign "$identity" \
+    --entitlements "$script_dir/worker-inherit.entitlements" "$service/Contents/MacOS/renderer-worker"
 codesign --force --options runtime --sign "$identity" \
     --entitlements "$script_dir/helper-probe.entitlements" "$service"
 codesign --verify --deep --strict "$service"

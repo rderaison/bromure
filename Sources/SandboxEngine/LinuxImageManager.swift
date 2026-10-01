@@ -54,18 +54,22 @@ public final class LinuxImageManager {
             && fm.fileExists(atPath: linuxInitrdURL.path)
     }
 
-    /// Written only after a local image build installs the guest graphics contract.
+    /// Written after a local build or postinstall validates the guest graphics contract.
     public var graphicsCapabilitiesURL: URL {
         storageDir.appendingPathComponent("graphics-capabilities.json")
     }
 
     public var supportsExperimentalVirgl: Bool {
-        guard hasBootFiles,
-              let data = try? Data(contentsOf: graphicsCapabilitiesURL), data.count <= 8192,
+        guard hasBootFiles, let data = try? Data(contentsOf: graphicsCapabilitiesURL) else { return false }
+        return Self.validGraphicsCapabilities(data)
+    }
+
+    static func validGraphicsCapabilities(_ data: Data) -> Bool {
+        guard data.count <= 8192,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               json["configVersion"] as? Int == 1,
               let backends = json["graphicsBackends"] as? [String] else { return false }
-        return backends.contains("virgl")
+        return backends.contains("software") && backends.contains("virgl")
     }
 
     /// Whether a valid Linux base image exists and matches the current image version.

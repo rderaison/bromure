@@ -21,13 +21,16 @@ public final class MacOS27RendererClient {
     private var pending: [UUID: (Result<Reply, Error>) -> Void] = [:]
     private var pendingBytes = 0
     private var stopped = false
+    private let statusLock = NSLock()
+    private var running = true
+    public var isRunning: Bool { statusLock.lock(); defer { statusLock.unlock() }; return running }
 
     public init(bundle: Bundle = .main) throws {
-        let service = bundle.bundleURL.appendingPathComponent("Contents/XPCServices/io.bromure.gpu.renderer.xpc")
+        let service = bundle.bundleURL.appendingPathComponent("Contents/XPCServices/io.bromure.gpu.renderer.broker.xpc")
         guard FileManager.default.fileExists(atPath: service.path) else {
             throw Self.failure("Embedded GPU renderer is missing")
         }
-        connection = NSXPCConnection(serviceName: "io.bromure.gpu.renderer")
+        connection = NSXPCConnection(serviceName: "io.bromure.gpu.renderer.broker")
         connection.remoteObjectInterface = NSXPCInterface(with: RendererServiceProtocol.self)
         connection.invalidationHandler = { [weak self] in self?.stop() }
         connection.interruptionHandler = { [weak self] in self?.stop() }
@@ -88,6 +91,7 @@ public final class MacOS27RendererClient {
     private func failAll(_ error: Error) {
         guard !stopped else { return }
         stopped = true
+        statusLock.lock(); running = false; statusLock.unlock()
         let callbacks = Array(pending.values)
         pending.removeAll(); pendingBytes = 0
         for callback in callbacks { callback(.failure(error)) }

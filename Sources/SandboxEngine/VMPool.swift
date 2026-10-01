@@ -120,7 +120,7 @@ public final class VMPool {
         self.isolatePeers = isolatePeers
         self.requireImageVersion = requireImageVersion
         self.pinnedOctet = pinnedOctet
-        self.experimentalGPU = experimentalGPU ?? (UserDefaults.standard.object(forKey: "vm.experimentalGPU") as? Bool ?? true)
+        self.experimentalGPU = experimentalGPU ?? MetalRendererPreference.isEnabled
     }
 
     /// Pre-warm a VM by booting it to an idle shell prompt.

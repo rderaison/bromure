@@ -9,6 +9,8 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
     private let commands: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
     private var texture: MTLTexture?
+    private var guestCursor: NSCursor = .arrow
+    public private(set) var nativeCursorImageCount = 0
     private var inFlight = 0
     public var guestDisplayScale: Double = 1
     public var displaySizeChanged: ((Int, Int) -> Void)?
@@ -52,6 +54,33 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
     required init(coder: NSCoder) { fatalError("Use init(gpuFrame:)") }
 
     public override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    public override func resetCursorRects() { addCursorRect(bounds, cursor: guestCursor) }
+
+    public func presentCursor(_ cursor: HostGPUCursor?) {
+        guard let cursor else {
+            let image = NSImage(size: NSSize(width: 1, height: 1))
+            guestCursor = NSCursor(image: image, hotSpot: .zero)
+            window?.invalidateCursorRects(for: self)
+            return
+        }
+        guard cursor.width > 0, cursor.height > 0, cursor.width <= 64, cursor.height <= 64,
+              cursor.rgba.count == cursor.width * cursor.height * 4,
+              let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: cursor.width,
+                  pixelsHigh: cursor.height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                  isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: cursor.width * 4, bitsPerPixel: 32),
+              let data = bitmap.bitmapData else { return }
+        cursor.rgba.copyBytes(to: data, count: cursor.rgba.count)
+        let scale = max(guestDisplayScale, 1)
+        let image = NSImage(size: NSSize(width: Double(cursor.width) / scale, height: Double(cursor.height) / scale))
+        image.addRepresentation(bitmap)
+        guestCursor = NSCursor(image: image, hotSpot: NSPoint(x: Double(cursor.hotX) / scale, y: Double(cursor.hotY) / scale))
+        nativeCursorImageCount += 1
+        window?.invalidateCursorRects(for: self)
+        if let window, window.isKeyWindow, bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)) {
+            guestCursor.set()
+        }
+    }
 
     public func present(_ surface: IOSurface) throws {
         let width = IOSurfaceGetWidth(surface), height = IOSurfaceGetHeight(surface)

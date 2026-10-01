@@ -10,6 +10,7 @@ struct GPUBrowser: ParsableCommand {
         abstract: "Run a browser with the experimental sandboxed VirGL/Metal device.")
     @Option(name: .long) var storageDir: String
     @Option(name: .long) var seconds: Int = 120
+    @Option(name: .customLong("simultaneous-vms")) var simultaneousVMs: Int = 1
     @Option(name: .long) var guestProbe: String?
     @Option(name: .long) var chromeFlags: String?
     @Option(name: .long) var saveUpdatedImage: String?
@@ -17,12 +18,17 @@ struct GPUBrowser: ParsableCommand {
     @Flag(name: .long) var interactive = false
     @Flag(name: .long) var nativeChrome = false
     @Flag(name: .long) var resizeCheck = false
+    @Flag(name: .long) var cursorCheck = false
+    @Flag(name: .long) var menuCheck = false
+    @Flag(name: .long, help: "Verify postinstall imports the validated guest graphics marker in the selected test image.")
+    var postinstallCheck = false
     @Flag(name: .long, help: "Benchmark Apple’s built-in Virtio graphics device without the custom VirGL renderer.")
     var appleVirtioGPU = false
     @Option(name: .long) var checkTimeout: Int = 30
     @Option(name: .long) var url: String = "chrome://gpu"
 
     func validate() throws {
+        guard (1...4).contains(simultaneousVMs) else { throw ValidationError("Simultaneous VMs must be between 1 and 4") }
         guard (1...3600).contains(seconds) else { throw ValidationError("Invalid duration") }
         guard (1...3600).contains(checkTimeout), checkTimeout <= seconds else { throw ValidationError("Invalid check timeout") }
         if let saveUpdatedImage, FileManager.default.fileExists(atPath: saveUpdatedImage) {
@@ -50,6 +56,18 @@ struct GPUBrowser: ParsableCommand {
     }
 
     @MainActor private func browse() async throws {
+        if postinstallCheck {
+            let manager = LinuxImageManager(storageDir: URL(fileURLWithPath: storageDir))
+            try await manager.applyPostinstallSteps([
+                PostinstallStep(uuid: UUID().uuidString, seq: 0,
+                                description: "Verify graphics metadata export", command: ":")
+            ]) { print(String(describing: $0)) }
+            guard manager.supportsExperimentalVirgl else {
+                throw ValidationError("Postinstall did not import a validated graphics marker")
+            }
+            print("BROMURE_POSTINSTALL_GRAPHICS_PASS")
+            return
+        }
         NSApplication.shared.setActivationPolicy(.regular)
         var config = VMConfig()
         config.homePage = url
@@ -77,6 +95,18 @@ struct GPUBrowser: ParsableCommand {
         let session = BrowserSession(warmVM: warm, config: config)
         if saveUpdatedImage != nil { warm.vm.delegate = nil }
         session.show()
+        var additional: [(VMPool, VMPool.WarmVM, BrowserSession)] = []
+        for _ in 1..<simultaneousVMs {
+            let extraPool = VMPool(config: config, storageDir: URL(fileURLWithPath: storageDir), experimentalGPU: !appleVirtioGPU)
+            try await extraPool.warmUp()
+            guard let extra = await extraPool.claim(config: config),
+                  appleVirtioGPU ? extra.graphicsSession == nil : extra.graphicsSession?.backendName == "virgl" else {
+                await extraPool.shutdown(); throw ValidationError("Additional VM did not select the GPU")
+            }
+            let extraSession = BrowserSession(warmVM: extra, config: config)
+            extraSession.show()
+            additional.append((extraPool, extra, extraSession))
+        }
         NSApplication.shared.activate(ignoringOtherApps: true)
         let acceptanceTask: Task<Bool, Never>? = requireGPUCheck ? Task {
             await warm.serialWaiter.probe(for: "BROMURE_GPU_ACCEPTANCE_PASS", timeout: TimeInterval(checkTimeout))
@@ -110,9 +140,37 @@ struct GPUBrowser: ParsableCommand {
             NSApplication.shared.updateWindows()
             try await Task.sleep(for: .milliseconds(2))
         }
+        let menuOK: Bool
+        if menuCheck {
+            let delegate = GUIAppDelegate(state: AppState(previewStorage: FileManager.default.temporaryDirectory.appendingPathComponent("bromure-menu-check-" + UUID().uuidString)))
+            delegate.sessions = [session] + additional.map { $0.2 }
+            delegate.setupMenu()
+            let item = NSApp.mainMenu?.items.last
+            let toggle = item?.submenu?.items.first(where: { $0.title == "Use Metal Renderer" })
+            menuOK = item?.title == (appleVirtioGPU ? "Software" : "Metal") && toggle?.isEnabled == MetalRendererPreference.isSupported
+            print("[GPU browser] Menu renderer: \(item?.title ?? "missing"), Metal option enabled: \(toggle?.isEnabled ?? false)")
+        } else { menuOK = true }
         let frames = warm.graphicsSession?.deliveredFrameCount ?? 0
         let accepted = await acceptanceTask?.value ?? true
         print("[GPU browser] Frames delivered: \(frames)")
+        print("[GPU browser] Cursor images: \(warm.graphicsSession?.deliveredCursorCount ?? 0), cursor moves: \(warm.graphicsSession?.cursorMoveCount ?? 0)")
+        func cursorImages(in view: NSView) -> Int {
+            if let frame = view as? HostGPUFrameView { return frame.nativeCursorImageCount }
+            return view.subviews.reduce(0) { $0 + cursorImages(in: $1) }
+        }
+        let hostCursorImages = session.window.contentView.map { cursorImages(in: $0) } ?? 0
+        print("[GPU browser] Native host cursor images: \(hostCursorImages)")
+        let cursorOK = !cursorCheck || ((warm.graphicsSession?.deliveredCursorCount ?? 0) > 0 &&
+                                       (warm.graphicsSession?.cursorMoveCount ?? 0) > 0 && hostCursorImages > 0)
+        var additionalOK = true
+        for (index, (extraPool, extra, extraSession)) in additional.enumerated() {
+            let extraFrames = extra.graphicsSession?.deliveredFrameCount ?? 0
+            print("[GPU browser] VM \(index + 2) backend=\(extra.graphicsSession?.backendName ?? "apple") frames=\(extraFrames)")
+            additionalOK = additionalOK && (appleVirtioGPU || extraFrames > 0)
+            await extraPool.retire(extra); await extraPool.shutdown()
+            withExtendedLifetime(extraSession) {}
+        }
+
         do {
         if let saveUpdatedImage {
             // Keep the developer image snapshot alive until our explicit retirement.
@@ -148,6 +206,6 @@ struct GPUBrowser: ParsableCommand {
         await pool.retire(warm)
         await pool.shutdown()
         withExtendedLifetime(session) {}
-        guard appleVirtioGPU || frames > 0, accepted else { throw ValidationError("Browser GPU acceptance failed") }
+        guard appleVirtioGPU || frames > 0, accepted, additionalOK, cursorOK, menuOK else { throw ValidationError("Browser GPU acceptance failed") }
     }
 }

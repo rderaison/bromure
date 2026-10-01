@@ -376,7 +376,14 @@ reply:
             if (result >= 0x1100 && result < 0x1200) result = 0x1200;
         }
         store32(response, result);
-        store32(prefix, response_length);
+        uint32_t wire_length = response_length;
+#ifdef BROMURE_RENDERER_XPC
+        extern int renderer_worker_publish_surface(void);
+        int exported = renderer_worker_publish_surface();
+        if (exported < 0) return 1;
+        if (exported) wire_length |= 0x80000000u;
+#endif
+        store32(prefix, wire_length);
         if (!write_exact(output_fd, prefix, 4) || !write_exact(output_fd, response, response_length)) return 1;
     }
 }
