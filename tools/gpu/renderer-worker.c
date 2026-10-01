@@ -39,6 +39,18 @@ static void store32(uint8_t *p, uint32_t value)
 { for (unsigned i = 0; i < 4; ++i) p[i] = (uint8_t)(value >> (i * 8)); }
 static uint64_t load64(const uint8_t *p) { return load32(p) | (uint64_t)load32(p + 4) << 32; }
 
+// Grow reservations in bounded 256-MiB steps for real live allocations.
+// The guest cannot exceed the same RAM and absolute ceilings used for geometry.
+static int grow_pool(uint64_t required, uint64_t *limit, uint64_t ram_ceiling, uint64_t hard_ceiling)
+{
+    if (required <= *limit) return 1;
+    uint64_t ceiling = ram_ceiling < hard_ceiling ? ram_ceiling : hard_ceiling;
+    if (required > ceiling) return 0;
+    uint64_t quantum = 268435456;
+    *limit = (required + quantum - 1) / quantum * quantum;
+    return 1;
+}
+
 // Distinguish clean EOF from truncated frames. Never trust a short pipe read.
 static int read_exact(int fd, uint8_t *buffer, size_t count)
 {
@@ -212,7 +224,7 @@ int run_renderer_worker(int output_fd)
                 (uint64_t)args.width * args.height * args.depth * args.array_size * texel_bytes *
                 (args.last_level ? 2 : 1) * (args.nr_samples ? args.nr_samples : 1);
             if (budget < 65536) budget = 65536;
-            if (budget > resource_limit || total_resource_bytes + budget > gpu_limit) {
+            if (budget > resource_limit || !grow_pool(total_resource_bytes + budget, &gpu_limit, ram_ceiling, 4294967296ULL)) {
                 os_log_error(OS_LOG_DEFAULT, "GPU resource budget exceeded id=%u format=%u size=%ux%u estimate=%llu live=%llu", id, args.format, args.width, args.height, (unsigned long long)budget, (unsigned long long)total_resource_bytes);
                 result = 0x1201; break;
             }
@@ -330,7 +342,7 @@ int run_renderer_worker(int output_fd)
             if (slot < 0) { result = 0x1203; break; }
             if (type == 0xffff0010) {
                 if (length != 40 || count || !offset || offset > 134217728 || backing[slot].iov_base ||
-                    total_backing + offset > staging_limit) break;
+                    !grow_pool(total_backing + offset, &staging_limit, ram_ceiling, 2147483648ULL)) break;
                 backing[slot].iov_base = calloc(1, (size_t)offset);
                 if (!backing[slot].iov_base) { result = 0x1201; break; }
                 backing[slot].iov_len = (size_t)offset;

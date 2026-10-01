@@ -87,7 +87,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_retina_buffer_and_backing_budget(self):
         # Buffer width is bytes, not texels. Browser staging buffers at 5K
-        # legitimately exceed16MiB; keep256MiB each and separate1GiB GPU/staging limits.
+        # legitimately exceed16MiB; keep256MiB each and separate bounded GPU/staging pools.
         size = 34447360
         commands = []
         for i in range(1, 10):
@@ -127,6 +127,51 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<Q", replies[300], 32)[0], 300 * 65536)
         self.assertEqual(struct.unpack_from("<I", replies[-1], 24)[0], 0)
         self.assertEqual(struct.unpack_from("<Q", replies[-1], 32)[0], 0)
+
+    def test_live_pools_grow_above_one_gib_and_release(self):
+        # Real browsing/resize can retain >1GiB despite a modest scanout.
+        # Allocate both Metal storage and host staging, then check accounting.
+        import os
+        ram_ceiling = max(1073741824, os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // 8 // 268435456 * 268435456)
+        if ram_ceiling <= 1073741824:
+            self.skipTest("Host RAM policy caps pools at1GiB")
+        size = 67108864
+        commands = []
+        for i in range(1, 18):
+            commands += [command(0x204, struct.pack("<12I", i, 0, 64, 16, size, 1, 1, 1, 0, 0, 0, 0)),
+                         command(0xffff0010, struct.pack("<IQI", i, size, 0))]
+        commands += [command(0xffff0030)]
+        commands += [command(0x102, struct.pack("<II", i, 0)) for i in range(1, 18)]
+        commands += [command(0xffff0030)]
+        replies = self.exchange(commands)
+        self.assertTrue(all(struct.unpack_from("<I", r)[0] == 0x1100 for r in replies))
+        stats = replies[34]
+        self.assertEqual(struct.unpack_from("<Q", stats, 32)[0], 17 * size)
+        self.assertEqual(struct.unpack_from("<Q", stats, 40)[0], 17 * size)
+        gpu, staging = struct.unpack_from("<QQ", stats, 64)
+        self.assertEqual((gpu, staging), (1342177280, 1342177280))
+        self.assertEqual(struct.unpack_from("<QQ", replies[-1], 32), (0, 0))
+
+    def test_demand_growth_stops_at_staging_ceiling(self):
+        import os
+        ram_ceiling = max(1073741824, os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // 8 // 268435456 * 268435456)
+        ceiling = min(ram_ceiling, 2147483648)
+        size = 134217728
+        count = ceiling // size
+        commands = []
+        for i in range(1, count + 2):
+            commands += [command(0x204, struct.pack("<12I", i, 0, 64, 16, size, 1, 1, 1, 0, 0, 0, 0)),
+                         command(0xffff0010, struct.pack("<IQI", i, size, 0))]
+        commands += [command(0xffff0030)]
+        commands += [command(0x102, struct.pack("<II", i, 0)) for i in range(1, count + 2)]
+        commands += [command(0xffff0030)]
+        replies = self.exchange(commands)
+        self.assertTrue(all(struct.unpack_from("<I", r)[0] == 0x1100 for r in replies[:count * 2]))
+        self.assertNotEqual(struct.unpack_from("<I", replies[count * 2 + 1])[0], 0x1100)
+        stats = replies[count * 2 + 2]
+        self.assertEqual(struct.unpack_from("<Q", stats, 40)[0], ceiling)
+        self.assertEqual(struct.unpack_from("<Q", stats, 72)[0], ceiling)
+        self.assertEqual(struct.unpack_from("<QQ", replies[-1], 32), (0, 0))
 
     def test_context_budget(self):
         replies = self.exchange([command(0x200, bytes(72), context=i)
