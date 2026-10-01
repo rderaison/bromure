@@ -50,4 +50,4 @@ for name in ('libEGL_mesa.so.0', 'libGLX_mesa.so.0', 'libgbm.so.1', 'dri/virtio_
     ctypes.CDLL(str(root/name))
 ctypes.CDLL('/opt/bromure/chromium-vaapi/libva.so.2')
 PY
-printf '%s\n' 'mesa=25.2.8' 'video=h264-8bit-progressive' 'chromium-vaapi-rgb-abi=1' > /opt/bromure/mesa-virgl/graphics-build.txt
+printf '%s\n' 'mesa=25.2.8' 'video=h264-8bit-progressive' 'chromium-vaapi-rgb-abi=1' 'virgl-bitstream-range=1' > /opt/bromure/mesa-virgl/graphics-build.txt
