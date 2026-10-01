@@ -24,7 +24,7 @@ and monotonic_ns are receipt times, not event-generation times. Synthetic sent
 Configure events are logged but cannot change trusted geometry.
 
 The diagnostic exits after --seconds (1..3600), --max-events, or SIGTERM/SIGINT.
-A hard watchdog exits 124 five seconds later if Xlib or the output blocks. JSON
+A hard SIGALRM watchdog terminates five seconds later if Xlib/output blocks. JSON
 must be redirected to a file/regularly drained pipe. Missing extensions or parse
 errors fail explicitly; there is no racing XQueryPointer fallback.
 Protocol layouts: X11/Xproto.h, extensions/XI2proto.h, randrproto.h, record.h.
@@ -33,7 +33,6 @@ Protocol layouts: X11/Xproto.h, extensions/XI2proto.h, randrproto.h, record.h.
 import argparse
 import ctypes as C
 import json
-import os
 import select
 import signal
 import struct
@@ -348,7 +347,9 @@ def main():
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGALRM, lambda signum, frame: os._exit(124))
+    # The kernel default also terminates a blocked native Xlib call. A Python
+    # alarm handler would wait for that call to return before it could run.
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
     signal.alarm(args.seconds + 5)
     observer = None
     try:

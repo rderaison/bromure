@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 import select
 import shutil
+import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -82,6 +84,30 @@ class DecoderTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("Xvfb") and shutil.which("xrandr"), "needs Xvfb and xrandr")
 class LiveTests(unittest.TestCase):
+    def test_watchdog_terminates_blocked_native_xlib_handshake(self):
+        # A private fake X server accepts the connection but never answers the
+        # setup handshake. This really blocks XOpenDisplay, not Python sleep.
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            server.settimeout(3)
+            display_number = server.getsockname()[1] - 6000
+            self.assertGreaterEqual(display_number, 0)
+            env = {**os.environ, "DISPLAY": f"127.0.0.1:{display_number}"}
+            process = subprocess.Popen([sys.executable, str(SCRIPT), "--seconds", "1"],
+                                       env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                connection, _ = server.accept()
+                with connection:
+                    connection.settimeout(2)
+                    self.assertTrue(connection.recv(12))
+                    process.communicate(timeout=8)
+                    self.assertEqual(process.returncode, -signal.SIGALRM)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=3)
+
     def test_real_buttons_resize_and_other_client_delivery(self):
         read_fd, write_fd = os.pipe()
         with tempfile.TemporaryFile() as server_log:
