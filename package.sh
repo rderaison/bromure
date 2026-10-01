@@ -53,7 +53,7 @@ esac
 #   APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
 #   ./package.sh [bromure|bromure-ac]
 
-DEVELOPER_ID="${DEVELOPER_ID:-}"
+DEVELOPER_ID="${DEVELOPER_ID:-${CODESIGN_IDENTITY:-}}"
 APPLE_ID="${APPLE_ID:-}"
 TEAM_ID="${TEAM_ID:-}"
 APP_PASSWORD="${APP_PASSWORD:-}"
