@@ -1235,6 +1235,11 @@ final class BeautifiedSessionModel: ObservableObject {
         // happens to carry a needle is the conversation, not a banner. The
         // transcript holds the same words in that case.
         if let f = newFailure, transcriptEchoes(f.detail) { newFailure = nil }
+        // A failed sign-in means the model can't answer at all: once it has
+        // answered since the latest prompt, any auth wording on screen is
+        // something it printed or ran (a grep through this very detector
+        // raised the card), not the agent's state.
+        if newFailure?.kind == .auth, SessionFailure.modelAnswered(since: parsedItems) { newFailure = nil }
         guard newPrompt != prompt || newFailure != failure else { return }
         let wasLogin = prompt?.kind == .login
         withAnimation(.easeOut(duration: 0.2)) {
@@ -2808,6 +2813,23 @@ struct SessionFailure: Equatable {
 
     static func detect(inScreen screen: String) -> SessionFailure? {
         detect(tail: terminalTail(screen))
+    }
+
+    /// Whether the model has answered since the user's latest prompt — a
+    /// call, a thought, or text that isn't itself an auth error (Claude logs
+    /// "API Error: 401 …" as an assistant message).
+    static func modelAnswered(since items: [TranscriptItem]) -> Bool {
+        for item in items.reversed() {
+            switch item.kind {
+            case .userText: return false
+            case .toolUse, .thinking, .question, .todo: return true
+            case .assistantText(let t):
+                let low = t.lowercased()
+                if !authNeedles.contains(where: { low.contains($0) }) { return true }
+            default: continue
+            }
+        }
+        return false
     }
 
     /// Scan a pre-split terminal tail (shared with `TerminalScan`, which splits
