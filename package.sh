@@ -410,8 +410,11 @@ MOUNT_DIR=$(echo "$ATTACH_OUTPUT" | grep "/Volumes/$APP_NAME" | awk -F'\t' '{pri
 # Wait for Finder to register the volume
 sleep 2
 
-# Use AppleScript to set icon size, positions, and background
-if [[ ${BROMURE_DMG_FINDER_LAYOUT:-1} == 1 ]]; then
+# Write Finder settings directly for automation without Apple Events, or use
+# Finder on an interactive desktop. Both paths use the same release layout.
+if [[ -n ${BROMURE_DMG_LAYOUT_PYTHON:-} ]]; then
+    "$BROMURE_DMG_LAYOUT_PYTHON" "$SCRIPT_DIR/tools/dmg-layout.py" "$MOUNT_DIR" "$APP_NAME"
+elif [[ ${BROMURE_DMG_FINDER_LAYOUT:-1} == 1 ]]; then
 if ! osascript <<APPLESCRIPT
 tell application "Finder"
     tell disk "$APP_NAME"
