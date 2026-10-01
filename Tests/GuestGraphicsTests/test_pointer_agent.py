@@ -94,6 +94,53 @@ class PointerAgentTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(events, [(3, 0, 0), (3, 1, 0), (0, 0, 0)])
 
+    def test_partial_frame_reconnect_discards_fragment_and_replays_full_frame(self):
+        pressed = b'{"x":0,"y":0,"buttons":1}\n'
+        replay = b'{"x":1,"y":1,"buttons":3}\n'
+        released = b'{"x":1,"y":1,"buttons":0}\n'
+        for split in range(1, len(replay)):
+            with self.subTest(split=split), tempfile.TemporaryFile() as output:
+                pointer = agent.Pointer(output.fileno())
+                # Use the same uinput device across two independent streams.
+                # Every possible incomplete prefix must die with the old one.
+                for stream in (pressed + replay[:split], replay + released):
+                    sender, receiver = socket.socketpair()
+                    with sender, receiver:
+                        sender.sendall(stream)
+                        sender.shutdown(socket.SHUT_WR)
+                        agent.handle_connection(receiver, pointer)
+                    self.assertEqual(pointer.buttons, 0)
+                output.seek(0)
+                events = [event[2:] for event in agent.EVENT.iter_unpack(output.read())]
+                positions = [event[2] for event in events
+                             if event[:2] == (agent.EV_ABS, agent.ABS_X)]
+                self.assertEqual(positions, [0, 65535, 65535])
+                presses = [event[1] for event in events
+                           if event[0] == agent.EV_KEY and event[2] == 1]
+                self.assertEqual(presses, [0x110, 0x110, 0x111])
+
+    def test_overflow_disconnect_then_reset_snapshot_leaves_buttons_released(self):
+        # Model the host overflow contract: already-written complete frames
+        # and an incomplete tail, then disconnect and reconnect with buttons=0.
+        # This tests receiver recovery, not the host's queue size enforcement.
+        backlog = b''.join(json.dumps({"x": 0.5, "y": 0.5,
+                                      "buttons": 1 + i % 7}).encode() + b'\n'
+                           for i in range(256))
+        with tempfile.TemporaryFile() as output:
+            pointer = agent.Pointer(output.fileno())
+            for stream in (backlog + b'{"x":', b'{"x":1,"y":1,"buttons":0}\n'):
+                sender, receiver = socket.socketpair()
+                with sender, receiver:
+                    sender.sendall(stream)
+                    sender.shutdown(socket.SHUT_WR)
+                    agent.handle_connection(receiver, pointer)
+                self.assertEqual(pointer.buttons, 0)
+            output.seek(0)
+            events = [event[2:] for event in agent.EVENT.iter_unpack(output.read())]
+            self.assertEqual(events[-7:], [(1, 0x110, 0), (1, 0x111, 0),
+                                          (1, 0x112, 0), (0, 0, 0),
+                                          (3, 0, 65535), (3, 1, 65535), (0, 0, 0)])
+
     def test_uinput_device_has_only_absolute_axes_and_three_buttons(self):
         with patch.object(agent.subprocess, "run"), \
                 patch.object(agent.os, "open", return_value=42), \
