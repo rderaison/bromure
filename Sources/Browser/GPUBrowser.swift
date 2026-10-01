@@ -25,6 +25,11 @@ struct GPUBrowser: ParsableCommand {
     @Flag(name: .long) var menuCheck = false
     @Flag(name: .long) var inputCheck = false
     @Flag(name: .long) var frameTrace = false
+    @Flag(name: .long) var stressCheck = false
+    @Option(name: .long) var stressVcpus: Int?
+    @Flag(name: .long) var withoutAudio = false
+    @Flag(name: .long) var outputOnlyAudio = false
+    @Flag(name: .long) var allowOlderTestImage = false
     @Flag(name: .long, help: "Check a profile opt-out against a Metal-prewarmed pool.") var profileMetalOffCheck = false
     @Flag(name: .long, help: "Verify postinstall imports the validated guest graphics marker in the selected test image.")
     var postinstallCheck = false
@@ -51,7 +56,9 @@ struct GPUBrowser: ParsableCommand {
         setbuf(stdout, nil)
         var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
         arguments["vm.displayScale"] = displayScale
-        if frameTrace { arguments["vm.traceGPUFrames"] = true }
+        arguments["vm.traceGPUFrames"] = frameTrace
+        if withoutAudio { arguments["vm.gpuTestOmitSoundDevice"] = true }
+        if outputOnlyAudio { arguments["vm.gpuTestOutputOnlySoundDevice"] = true }
         if let chromeFlags { arguments["vm.extraChromeFlags"] = chromeFlags }
         UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         guard #available(macOS 27.0, *) else { throw ValidationError("Requires macOS 27") }
@@ -78,12 +85,14 @@ struct GPUBrowser: ParsableCommand {
         }
         NSApplication.shared.setActivationPolicy(.regular)
         var config = VMConfig()
+        if let stressVcpus { config.cpuCount = max(1, min(stressVcpus, 12)) }
+        if withoutAudio { config.enableAudio = false }
         config.homePage = url
         config.enableGPU = true
         config.enableWebGL = true
         config.nativeChrome = nativeChrome
         if nativeChrome { config.nativeChromeInset = VMConfig.defaultNativeChromeInset(forDisplayScale: VMConfig.resolvedDisplayScale()) }
-        let pool = VMPool(config: config, storageDir: URL(fileURLWithPath: storageDir), experimentalGPU: !appleVirtioGPU)
+        let pool = VMPool(config: config, storageDir: URL(fileURLWithPath: storageDir), requireImageVersion: !allowOlderTestImage, experimentalGPU: !appleVirtioGPU)
         try await pool.warmUp()
         if profileMetalOffCheck {
             let legacy = try JSONDecoder().decode(ProfileSettings.self, from: Data("{}".utf8))
@@ -105,7 +114,7 @@ struct GPUBrowser: ParsableCommand {
             throw ValidationError("VM did not select the experimental GPU")
         }
         if profileMetalOffCheck { print("BROMURE_PROFILE_METAL_OFF_PASS") }
-        warm.serialWaiter.observer = { text in print(text, terminator: "") }
+        warm.serialWaiter.observer = { text in print("[VM 1] " + text, terminator: "") }
         if interactive {
             let serial = warm.serialInput.fileHandleForWriting
             FileHandle.standardInput.readabilityHandler = { input in
@@ -118,48 +127,53 @@ struct GPUBrowser: ParsableCommand {
         let session = BrowserSession(warmVM: warm, config: config)
         if saveUpdatedImage != nil { warm.vm.delegate = nil }
         session.show()
-        if frameTrace { print("[GPU browser] Test window id: \(session.window.windowNumber)") }
+        if frameTrace || stressCheck { print("[GPU browser] Test window id: \(session.window.windowNumber)") }
         var additional: [(VMPool, VMPool.WarmVM, BrowserSession)] = []
-        for _ in 1..<simultaneousVMs {
-            let extraPool = VMPool(config: config, storageDir: URL(fileURLWithPath: storageDir), experimentalGPU: !appleVirtioGPU)
+        for vmIndex in 1..<simultaneousVMs {
+            let extraPool = VMPool(config: config, storageDir: URL(fileURLWithPath: storageDir), requireImageVersion: !allowOlderTestImage, experimentalGPU: !appleVirtioGPU)
             try await extraPool.warmUp()
             guard let extra = await extraPool.claim(config: config),
                   expectsLegacy ? extra.graphicsSession == nil : extra.graphicsSession?.backendName == "virgl" else {
                 await extraPool.shutdown(); throw ValidationError("Additional VM did not select the GPU")
             }
+            extra.serialWaiter.observer = { text in print("[VM \(vmIndex + 1)] " + text, terminator: "") }
             let extraSession = BrowserSession(warmVM: extra, config: config)
             extraSession.show()
+            if frameTrace || stressCheck { print("[GPU browser] Test window id: \(extraSession.window.windowNumber)") }
             additional.append((extraPool, extra, extraSession))
         }
         NSApplication.shared.activate(ignoringOtherApps: true)
-        let acceptanceTask: Task<Bool, Never>? = requireGPUCheck ? Task {
-            await warm.serialWaiter.probe(for: "BROMURE_GPU_ACCEPTANCE_PASS", timeout: TimeInterval(checkTimeout))
-        } : nil
-        defer { acceptanceTask?.cancel() }
+        let acceptanceTasks: [Task<Bool, Never>] = requireGPUCheck ? ([warm] + additional.map { $0.1 }).map { vm in
+            Task { await vm.serialWaiter.probe(for: "BROMURE_GPU_ACCEPTANCE_PASS", timeout: TimeInterval(checkTimeout)) }
+        } : []
+        defer { acceptanceTasks.forEach { $0.cancel() } }
         let diagnosticTask = Task { @MainActor in
             do { try await Task.sleep(for: .seconds(12)) } catch { return }
             guard warm.vm.state == .running else { return }
             if let guestProbe, let script = try? Data(contentsOf: URL(fileURLWithPath: guestProbe)) {
                 let encoded = script.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
                 let command = "base64 -d > /tmp/bromure-gpu-probe.py <<'BROMURE_GPU_PROBE_EOF'\n" + encoded + "\nBROMURE_GPU_PROBE_EOF\npython3 /tmp/bromure-gpu-probe.py\n"
-                warm.serialInput.fileHandleForWriting.write(Data(command.utf8))
+                for (index, vm) in ([warm] + additional.map { $0.1 }).enumerated() {
+                    vm.serialInput.fileHandleForWriting.write(Data(("export BROMURE_TEST_VM=\(index + 1)\n" + command).utf8))
+                }
             }
             let diagnostic = "echo BROMURE_GPU_DIAGNOSTIC; DISPLAY=:0 XAUTHORITY=/home/chrome/.Xauthority /usr/local/bin/graphics-diagnostics.py; python3 -c 'import runpy,json,urllib.request; m=runpy.run_path(\"/usr/local/bin/tab-agent.py\"); v=json.load(urllib.request.urlopen(\"http://127.0.0.1:9222/json/version\")); print(json.dumps(m[\"cdp_ws_call\"](v[\"webSocketDebuggerUrl\"],\"SystemInfo.getInfo\")))'; cat /tmp/startx.log | grep -E '(GL implementation|EGL|egl|ANGLE|Gpu|gpu_process|GL context)' | tail -30; echo BROMURE_GPU_DIAGNOSTIC_END\n"
             warm.serialInput.fileHandleForWriting.write(Data(diagnostic.utf8))
         }
         defer { diagnosticTask.cancel() }
         let deadline = Date().addingTimeInterval(TimeInterval(seconds))
-        let resizeAt = Date().addingTimeInterval(28)
+        var resizeAt = Date().addingTimeInterval(28)
         var resized = false
         var resizeStep = 0
         let resizeStart = session.window.contentView?.bounds.size ?? NSSize(width: 960, height: 540)
         let clickAt = Date().addingTimeInterval(20)
         var clicked = false
         var clickedAfterResize = false
+        var clickedDuringResize = false
         var lastBudgetLog = Date()
         while Date() < deadline, warm.vm.state != .stopped {
             if Date().timeIntervalSince(lastBudgetLog) >= 10 {
-                warm.graphicsSession?.logResourceUsage(); lastBudgetLog = Date()
+                for vm in [warm] + additional.map({ $0.1 }) { vm.graphicsSession?.logResourceUsage() }; lastBudgetLog = Date()
             }
             if inputCheck, resized, !clickedAfterResize, Date() >= resizeAt.addingTimeInterval(7) {
                 clicked = false; clickedAfterResize = true
@@ -171,20 +185,42 @@ struct GPUBrowser: ParsableCommand {
                 let point = content.convert(NSPoint(x: content.bounds.midX, y: content.bounds.midY), to: nil)
                 let target = content.hitTest(content.convert(point, from: nil))
                 print("[GPU browser] Host click target: \(String(describing: target.map { type(of: $0) }))")
-                for kind in [NSEvent.EventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
-                    if let event = NSEvent.mouseEvent(with: kind, location: point, modifierFlags: [],
-                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: session.window.windowNumber,
+                for clickSession in stressCheck ? [session] + additional.map({ $0.2 }) : [session] {
+                    guard let clickContent = clickSession.window.contentView else { continue }
+                    clickSession.window.makeKeyAndOrderFront(nil)
+                    clickContent.layoutSubtreeIfNeeded()
+                    let center = NSPoint(x:clickContent.bounds.midX,y:clickContent.bounds.midY)
+                    let target = clickContent.hitTest(center) ?? clickContent
+                    let visible = target.visibleRect
+                    let offCenter = stressCheck && clickedDuringResize
+                    let point = target.convert(NSPoint(x:visible.minX + visible.width * (offCenter ? 0.25 : 0.5),
+                                                       y:visible.minY + visible.height * (offCenter ? 0.65 : 0.5)), to:nil)
+                    for kind in [NSEvent.EventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
+                        if let event = NSEvent.mouseEvent(with: kind, location: point, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: clickSession.window.windowNumber,
                         context: nil, eventNumber: 1, clickCount: 1, pressure: kind == .leftMouseDown ? 1 : 0) {
-                        NSApplication.shared.sendEvent(event)
+                            NSApplication.shared.sendEvent(event)
+                        }
                     }
                 }
             }
+            if stressCheck, resized, Date() >= resizeAt.addingTimeInterval(12) {
+                resized = false; resizeStep = 0; resizeAt = Date()
+                // Repeated trusted geometry changes while independent guests browse.
+            }
             if resizeCheck, !resized, Date() >= resizeAt.addingTimeInterval(Double(resizeStep) / 20) {
                 resizeStep += 1
+                if stressCheck, inputCheck, resizeStep == 8, !clickedDuringResize {
+                    clickedDuringResize = true
+                    clicked = false
+                }
                 let fraction = Double(resizeStep) / 16
                 let width = resizeStart.width + (Double(resizeWidth) - resizeStart.width) * fraction
                 let height = resizeStart.height + (Double(resizeHeight) - resizeStart.height) * fraction
-                session.window.setContentSize(NSSize(width: width, height: height))
+                for resizeSession in stressCheck ? [session] + additional.map({ $0.2 }) : [session] {
+                    let wave = stressCheck ? sin(Date().timeIntervalSince1970 / 2) * 100 : 0
+                    resizeSession.window.setContentSize(NSSize(width: max(640, width + wave), height: max(400, height + wave / 2)))
+                }
                 resized = resizeStep == 16
                 print("[GPU browser] Resize step \(resizeStep): \(Int(width))x\(Int(height)) points frames=\(warm.graphicsSession?.deliveredFrameCount ?? 0)")
             }
@@ -206,7 +242,8 @@ struct GPUBrowser: ParsableCommand {
             print("[GPU browser] Menu renderer: \(item?.title ?? "missing"), Metal option enabled: \(toggle?.isEnabled ?? false)")
         } else { menuOK = true }
         let frames = warm.graphicsSession?.deliveredFrameCount ?? 0
-        let accepted = await acceptanceTask?.value ?? true
+        var accepted = true
+        for task in acceptanceTasks { let passed = await task.value; accepted = accepted && passed }
         print("[GPU browser] Frames delivered: \(frames)")
         print("[GPU browser] Cursor images: \(warm.graphicsSession?.deliveredCursorCount ?? 0), cursor moves: \(warm.graphicsSession?.cursorMoveCount ?? 0)")
         func cursorImages(in view: NSView) -> Int {

@@ -60,6 +60,9 @@ public final class GuestPointerBridge {
                 _ = outgoing.enqueue(x: value.0, y: value.1, buttons: 0)
                 connect(); return
             }
+            if value.3, UserDefaults.standard.bool(forKey: "vm.traceGPUFrames") {
+                print("[GPU pointer packet] bridge=\(ObjectIdentifier(self)) t=\(ProcessInfo.processInfo.systemUptime) json={\"x\":\(value.0),\"y\":\(value.1),\"buttons\":\(value.2)}")
+            }
         }
         guard isConnected, descriptor >= 0 else { connect(); return }
         do {

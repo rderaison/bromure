@@ -337,8 +337,10 @@ public final class LinuxImageManager {
         let inputStream = VZVirtioSoundDeviceInputStreamConfiguration()
         inputStream.source = VZHostAudioInputStreamSource()
 
-        audio.streams = [outputStream, inputStream]
-        vzConfig.audioDevices = [audio]
+        audio.streams = UserDefaults.standard.bool(forKey: "vm.gpuTestOutputOnlySoundDevice")
+            ? [outputStream] : [outputStream, inputStream]
+        // Developer acceptance can omit sound hardware to isolate VZ stalls.
+        vzConfig.audioDevices = UserDefaults.standard.bool(forKey: "vm.gpuTestOmitSoundDevice") ? [] : [audio]
 
         // Input
         vzConfig.keyboards = [VZUSBKeyboardConfiguration()]

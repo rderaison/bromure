@@ -5867,6 +5867,9 @@ final class PrecisionScrollVMView: VZVirtualMachineView {
         let p = convert(event.locationInWindow, from: nil)
         let normalized = gpuFrameView?.normalizedGuestPoint(convert(p, to: gpuFrameView))
             ?? (x: Double(p.x / max(bounds.width, 1)), y: Double(1 - p.y / max(bounds.height, 1)))
+        if down != nil, UserDefaults.standard.bool(forKey: "vm.traceGPUFrames") {
+            print("[GPU pointer] window=\(window?.windowNumber ?? -1) bridge=\(ObjectIdentifier(bridge)) buttons=\(pointerButtons) t=\(ProcessInfo.processInfo.systemUptime) point=\(p) bounds=\(bounds) normalized=\(normalized) active=\(String(describing: gpuFrameView?.activeScanoutSize)) retained=\(gpuFrameView?.isHoldingResizeFrame ?? false) crop=\(gpuFrameView?.hiddenTopRows ?? 0)")
+        }
         bridge.send(x: normalized.x, y: normalized.y, buttons: pointerButtons, immediately: down != nil)
         return true
     }
