@@ -15,6 +15,9 @@ final class RendererCommandProcessor {
     private var backing: [UInt32: [GuestSpan]] = [:]
     private var cursorResources: [UInt32: (width: Int, height: Int, format: UInt32)] = [:]
     private var rejectedCommandCount = 0
+    private var bufferSizes: [UInt32: Int] = [:]
+    private var uploadedBytes: UInt64 = 0
+    private var uploadRequests: UInt64 = 0
 
     init(executable: String) throws {
         process.executableURL = URL(fileURLWithPath: executable)
@@ -130,6 +133,7 @@ final class RendererCommandProcessor {
     }
 
     func logResourceUsage() {
+        NSLog("[GPU upload] bytes=%llu requests=%llu", uploadedBytes, uploadRequests)
         var command = Data(repeating: 0, count: 24)
         put32(0xffff0030, at: 0, into: &command)
         guard let stats = try? request(command), stats.count >= 64 else { return }
@@ -146,7 +150,7 @@ final class RendererCommandProcessor {
         guard response.count == 24, get32(response, at: 0) == 0x1100 else {
             throw failure("Renderer reset failed")
         }
-        backing.removeAll(); cursorResources.removeAll()
+        backing.removeAll(); cursorResources.removeAll(); bufferSizes.removeAll()
     }
 
     func forward(_ snapshot: Data,
@@ -191,20 +195,13 @@ final class RendererCommandProcessor {
             let id = get32(snapshot, at: 56)
             if let spans = backing[id] {
                 if type == 0x205 {
-                    var offset: UInt64 = 0
-                    for span in spans {
-                        var consumed = 0
-                        while consumed < span.count {
-                            let count = min(65496, span.count - consumed)
-                            let chunk = try readGuest(span.address + UInt64(consumed), count)
-                            guard chunk.count == count else { throw failure("Short guest upload") }
-                            var upload = backingCommand(0xffff0011, id: id, offset: offset, count: count)
-                            upload.append(chunk)
-                            let reply = try request(upload)
-                            guard get32(reply, at: 0) == 0x1100 else { throw failure("Renderer upload rejected") }
-                            offset += UInt64(count); consumed += count
-                        }
-                    }
+                    let range: Range<Int>?
+                    if bufferSizes[id] != nil {
+                        let begin = get64(snapshot, at: 48), length = UInt64(get32(snapshot, at: 36))
+                        guard begin <= UInt64(Int.max), length <= UInt64(Int.max) - begin else { throw failure("Invalid buffer transfer range") }
+                        range = Int(begin)..<Int(begin + length)
+                    } else { range = nil }
+                    try synchronizeBacking(id, download: false, range: range, readGuest: readGuest, writeGuest: writeGuest)
                 }
                 let response = try request(snapshot)
                 if type == 0x206, get32(response, at: 0) == 0x1100 {
@@ -227,7 +224,7 @@ final class RendererCommandProcessor {
         }
         if type == 0x207, snapshot.count >= 32,
            Int(get32(snapshot, at: 24)) == snapshot.count - 32 {
-            var uploads = Set<UInt32>(), downloads = Set<UInt32>(), offset = 32
+            var uploads = Set<UInt32>(), downloads = Set<UInt32>(), bufferUploads: [UInt32: [Range<Int>]] = [:], offset = 32
             while offset + 4 <= snapshot.count {
                 let header = get32(snapshot, at: offset), words = Int(header >> 16)
                 guard words <= (snapshot.count - offset - 4) / 4 else { throw failure("Truncated VirGL command") }
@@ -239,12 +236,19 @@ final class RendererCommandProcessor {
                 } else if kind == 43, words >= 13 {
                     let resource = get32(snapshot, at: offset + 4)
                     if get32(snapshot, at: offset + 13 * 4) == 2 { downloads.insert(resource) }
-                    else { uploads.insert(resource) }
+                    else if bufferSizes[resource] != nil {
+                        let begin = Int(get32(snapshot, at: offset + 12 * 4))
+                        let length = Int(get32(snapshot, at: offset + 9 * 4))
+                        bufferUploads[resource, default: []].append(begin..<(begin + length))
+                    } else { uploads.insert(resource) }
                 }
                 offset += (words + 1) * 4
             }
             guard offset == snapshot.count else { throw failure("Unaligned VirGL command") }
             for id in uploads { try synchronizeBacking(id, download: false, readGuest: readGuest, writeGuest: writeGuest) }
+            for (id, ranges) in bufferUploads where !uploads.contains(id) {
+                for range in ranges { try synchronizeBacking(id, download: false, range: range, readGuest: readGuest, writeGuest: writeGuest) }
+            }
             let response = try request(snapshot)
             if get32(response, at: 0) == 0x1100 {
                 for id in downloads { try synchronizeBacking(id, download: true, readGuest: readGuest, writeGuest: writeGuest) }
@@ -255,6 +259,10 @@ final class RendererCommandProcessor {
         if [UInt32(0x102), 0x107].contains(type), snapshot.count == 32, get32(response, at: 0) == 0x1100 {
             backing.removeValue(forKey: get32(snapshot, at: 24))
         }
+        if type == 0x204, get32(response, at: 0) == 0x1100, get32(snapshot, at: 28) == 0 {
+            bufferSizes[get32(snapshot, at: 24)] = Int(get32(snapshot, at: 40))
+        }
+        if type == 0x102, get32(response, at: 0) == 0x1100 { bufferSizes.removeValue(forKey: get32(snapshot, at: 24)) }
         if [UInt32(0x101), 0x204].contains(type), get32(response, at: 0) == 0x1100 {
             let offset = type == 0x101 ? 32 : 40
             let width = Int(get32(snapshot, at: offset)), height = Int(get32(snapshot, at: offset + 4))
@@ -296,21 +304,29 @@ final class RendererCommandProcessor {
         return (image, info.width, info.height)
     }
 
-    private func synchronizeBacking(_ id: UInt32, download: Bool,
+    private func synchronizeBacking(_ id: UInt32, download: Bool, range: Range<Int>? = nil,
                                     readGuest: (UInt64, Int) throws -> Data,
                                     writeGuest: (UInt64, Data) throws -> Void) throws {
         guard let spans = backing[id] else { throw failure("Missing transfer backing") }
-        var offset: UInt64 = 0
+        let total = spans.reduce(0) { $0 + $1.count }
+        let selected = range ?? 0..<total
+        guard selected.lowerBound >= 0, selected.upperBound <= total else { throw failure("Transfer exceeds backing") }
+        var spanStart = 0
         for span in spans {
-            var consumed = 0
-            while consumed < span.count {
-                let count = min(65496, span.count - consumed)
+            let begin = max(selected.lowerBound, spanStart), end = min(selected.upperBound, spanStart + span.count)
+            defer { spanStart += span.count }
+            if begin >= end { continue }
+            var consumed = begin - spanStart
+            var offset = UInt64(begin)
+            while consumed < end - spanStart {
+                let count = min(65496, end - spanStart - consumed)
                 var command = backingCommand(download ? 0xffff0012 : 0xffff0011,
                                              id: id, offset: offset, count: count)
                 if !download {
                     let bytes = try readGuest(span.address + UInt64(consumed), count)
                     guard bytes.count == count else { throw failure("Short guest upload") }
                     command.append(bytes)
+                    uploadedBytes += UInt64(count); uploadRequests += 1
                 }
                 let response = try request(command)
                 guard get32(response, at: 0) == 0x1100,
