@@ -16,7 +16,7 @@ prerequisites = load_script("graphics-prerequisites")
 
 
 class GraphicsPrerequisitesTests(unittest.TestCase):
-    def report(self, capabilities=None, missing_library=None, browser_exit=0):
+    def report(self, capabilities=None, missing_library=None, browser_exit=0, missing_guest=None):
         marker = capabilities or VM_SETUP / "configs/graphics-capabilities.json"
 
         def library(name, symbol=None, search_path=None):
@@ -30,7 +30,7 @@ class GraphicsPrerequisitesTests(unittest.TestCase):
                 patch.object(prerequisites, "video_prerequisites", return_value=None), \
                 patch.object(prerequisites, "package_inventory", return_value={}), \
                 patch.object(prerequisites.shutil, "which", side_effect=lambda name: "/bin/" + name), \
-                patch.object(prerequisites.os, "access", return_value=True), \
+                patch.object(prerequisites.os, "access", side_effect=lambda path, mode: path != missing_guest), \
                 patch.object(prerequisites, "run_command", return_value={
                     "exitCode": browser_exit, "stdout": "Chromium test", "stderr": ""}):
             return prerequisites.collect_report("chromium-browser")
@@ -97,6 +97,21 @@ class GraphicsPrerequisitesTests(unittest.TestCase):
         self.assertTrue(prerequisites.probe_library(libc, "malloc")["loadable"])
         self.assertFalse(prerequisites.probe_library(libc, "__bromure_missing_symbol")["loadable"])
         self.assertFalse(prerequisites.probe_library("/nonexistent/bromure.so")["loadable"])
+
+    def test_pointer_prerequisites_are_required_only_when_advertised(self):
+        missing = "/usr/local/bin/pointer-agent.py"
+        self.assertFalse(self.report(missing_guest=missing)["readyForGuestProbe"])
+        self.assertFalse(self.report(missing_guest="/etc/systemd/system/bromure-pointer-agent.service")["readyForGuestProbe"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.json"
+            marker = json.loads((VM_SETUP / "configs/graphics-capabilities.json").read_text())
+            marker.pop("pointerProtocolVersion")
+            marker.pop("pointerPort")
+            path.write_text(json.dumps(marker))
+            self.assertTrue(self.report(capabilities=path, missing_guest=missing)["readyForGuestProbe"])
+            marker.update(pointerProtocolVersion=1, pointerPort=1)
+            path.write_text(json.dumps(marker))
+            self.assertFalse(self.report(capabilities=path)["readyForGuestProbe"])
 
 
 if __name__ == "__main__":

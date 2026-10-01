@@ -539,6 +539,7 @@ EOS
 bromure_agent_unit file-agent            chrome file-agent.py
 bromure_agent_unit webcam-agent          root   webcam-agent.py
 bromure_agent_unit precision-scroll-agent root  precision-scroll-agent.py
+bromure_agent_unit pointer-agent         root   pointer-agent.py
 bromure_agent_unit warp-agent            root   warp-agent.py
 bromure_agent_unit wireguard-agent       root   wireguard-agent.py
 bromure_agent_unit ikev2-agent           root   ikev2-agent.py
@@ -549,7 +550,7 @@ bromure_agent_unit cjk-input-agent       chrome cjk-input-agent.py
 
 systemctl enable bromure-onboot.service bromure-config-agent.service \
     bromure-file-agent.service bromure-webcam-agent.service \
-    bromure-precision-scroll-agent.service bromure-warp-agent.service \
+    bromure-precision-scroll-agent.service bromure-pointer-agent.service bromure-warp-agent.service \
     bromure-wireguard-agent.service bromure-ikev2-agent.service \
     bromure-openvpn-agent.service bromure-network-refresh-agent.service \
     bromure-keyboard-agent.service bromure-cjk-input-agent.service \
@@ -835,6 +836,7 @@ install_config scripts/link-agent.py        /mnt/usr/local/bin/link-agent.py    
 install_config scripts/mtls-reload-agent.py /mnt/usr/local/bin/mtls-reload-agent.py 755
 install_config scripts/webcam-agent.py      /mnt/usr/local/bin/webcam-agent.py      755
 install_config scripts/precision-scroll-agent.py      /mnt/usr/local/bin/precision-scroll-agent.py      755
+install_config scripts/pointer-agent.py      /mnt/usr/local/bin/pointer-agent.py      755
 install_config scripts/warp-agent.py        /mnt/usr/local/bin/warp-agent.py        755
 install_config scripts/wireguard-agent.py  /mnt/usr/local/bin/wireguard-agent.py  755
 install_config scripts/ikev2-agent.py     /mnt/usr/local/bin/ikev2-agent.py     755

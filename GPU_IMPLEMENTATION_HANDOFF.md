@@ -51,6 +51,31 @@ From the chrome user's browser X session, run `DISPLAY=:0 /usr/local/bin/graphic
 
 Linux checks: `python3 -B -m unittest discover -s Tests/GuestGraphicsTests -v`, plus `sh -n` for each of the modified shell scripts. Tests exercise actual chrome-env generation and POSIX shell environment selection, including malformed backend values, profile GPU/WebGL policy and explicit developer overrides. This Linux workspace cannot boot VZ; the macOS owner built and tested the guest on the actual host.
 
+**Custom-GPU pointer protocol (version 1)**
+
+The custom display has a separate host-to-guest pointer path because VZ's USB
+screen-coordinate pointer did not deliver raw input while its built-in scanout
+was inactive. `pointer-agent.py` runs as root through
+`bromure-pointer-agent.service` on current Ubuntu images; it uses the stock
+`uinput` module. Existing software sessions keep their VZ pointer and keyboard.
+
+Host CID 2 connects to vsock port 5821 and sends newline-delimited JSON
+`{"x":0.5,"y":0.5,"buttons":1}`. Each message is a complete state snapshot;
+left/right/middle use bits 1/2/4. Coordinates are normalized over the full active
+X screen, top-left origin, including any hidden native-chrome inset. The host
+accounts for crop and letterboxing once before normalization. Finite values are
+clamped to [0,1] and mapped to ABS_X/Y in [0,65535]. The agent emits only those
+axes, three mouse buttons and SYN_REPORT. Wheel and keyboard paths are separate.
+
+Messages are limited to 1024 bytes excluding newline. Invalid fields, duplicate
+keys, nonfinite coordinates and oversized streams disconnect the sender; held
+buttons are released on every disconnect. `pointerProtocolVersion: 1` and
+`pointerPort: 5821` advertise installation in the image marker; the prerequisite
+check then requires the script and service. Older markers omit these fields.
+Host integration must be validated with actual AppKit clicks reaching Linux and
+DOM events, including drag, right-click, resize and native-chrome cropping;
+guest XWarpPointer alone does not test this direction.
+
 **Delivery sequence and validation**
 
 1. Linux: implement backend-aware configuration and environment selection, install Mesa probing tools/capability marker, and run Linux unit/shell integration tests. Supply diagnostics for actual guest testing.

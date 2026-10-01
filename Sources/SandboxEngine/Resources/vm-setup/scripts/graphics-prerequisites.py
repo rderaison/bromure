@@ -110,6 +110,12 @@ def contract_issues(capabilities):
         return ["Capability marker does not support software and virgl"]
     if not isinstance(capabilities.get("videoDecodeBackends", []), list):
         return ["Invalid video backend capability list"]
+    if "pointerProtocolVersion" in capabilities:
+        if (type(capabilities["pointerProtocolVersion"]) is not int
+                or capabilities["pointerProtocolVersion"] != 1
+                or type(capabilities.get("pointerPort")) is not int
+                or capabilities["pointerPort"] != 5821):
+            return ["Unsupported pointer configuration contract"]
     return []
 
 
@@ -190,6 +196,12 @@ def collect_report(browser):
         "videoPrerequisites": video_prerequisites(capabilities),
         "note": "Packaging check only; run graphics-diagnostics.py in X, verify Chromium and host Metal separately.",
     }
+    # Additive marker: older/software images without this protocol stay valid.
+    if isinstance(capabilities, dict) and "pointerProtocolVersion" in capabilities:
+        report["guestFiles"]["/usr/local/bin/pointer-agent.py"] = os.access(
+            "/usr/local/bin/pointer-agent.py", os.X_OK)
+        report["guestFiles"]["/etc/systemd/system/bromure-pointer-agent.service"] = os.access(
+            "/etc/systemd/system/bromure-pointer-agent.service", os.R_OK)
     report["issues"] = readiness_issues(report)
     report["readyForGuestProbe"] = not report["issues"]
     return report
