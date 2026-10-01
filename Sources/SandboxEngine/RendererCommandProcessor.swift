@@ -18,6 +18,7 @@ final class RendererCommandProcessor {
     private var bufferSizes: [UInt32: Int] = [:]
     private var uploadedBytes: UInt64 = 0
     private var uploadRequests: UInt64 = 0
+    var backingUploadStatistics: (bytes: UInt64, requests: UInt64) { (uploadedBytes, uploadRequests) }
 
     init(executable: String) throws {
         process.executableURL = URL(fileURLWithPath: executable)
@@ -193,38 +194,21 @@ final class RendererCommandProcessor {
         }
         if [UInt32(0x205), 0x206].contains(type), snapshot.count == 72 {
             let id = get32(snapshot, at: 56)
-            if let spans = backing[id] {
+            if backing[id] != nil {
+                let range = bufferSizes[id] == nil ? nil : try backingRange(id, offset: get64(snapshot, at: 48), count: get32(snapshot, at: 36))
                 if type == 0x205 {
-                    let range: Range<Int>?
-                    if bufferSizes[id] != nil {
-                        let begin = get64(snapshot, at: 48), length = UInt64(get32(snapshot, at: 36))
-                        guard begin <= UInt64(Int.max), length <= UInt64(Int.max) - begin else { throw failure("Invalid buffer transfer range") }
-                        range = Int(begin)..<Int(begin + length)
-                    } else { range = nil }
                     try synchronizeBacking(id, download: false, range: range, readGuest: readGuest, writeGuest: writeGuest)
                 }
                 let response = try request(snapshot)
                 if type == 0x206, get32(response, at: 0) == 0x1100 {
-                    var offset: UInt64 = 0
-                    for span in spans {
-                        var consumed = 0
-                        while consumed < span.count {
-                            let count = min(65512, span.count - consumed)
-                            let reply = try request(backingCommand(0xffff0012, id: id, offset: offset, count: count))
-                            guard reply.count == 24 + count, get32(reply, at: 0) == 0x1100 else {
-                                throw failure("Renderer readback rejected")
-                            }
-                            try writeGuest(span.address + UInt64(consumed), Data(reply.dropFirst(24)))
-                            offset += UInt64(count); consumed += count
-                        }
-                    }
+                    try synchronizeBacking(id, download: true, range: range, readGuest: readGuest, writeGuest: writeGuest)
                 }
                 return response
             }
         }
         if type == 0x207, snapshot.count >= 32,
            Int(get32(snapshot, at: 24)) == snapshot.count - 32 {
-            var uploads = Set<UInt32>(), downloads = Set<UInt32>(), bufferUploads: [UInt32: [Range<Int>]] = [:], offset = 32
+            var uploads = Set<UInt32>(), downloads = Set<UInt32>(), bufferUploads: [UInt32: [Range<Int>]] = [:], bufferDownloads: [UInt32: [Range<Int>]] = [:], offset = 32
             while offset + 4 <= snapshot.count {
                 let header = get32(snapshot, at: offset), words = Int(header >> 16)
                 guard words <= (snapshot.count - offset - 4) / 4 else { throw failure("Truncated VirGL command") }
@@ -235,12 +219,12 @@ final class RendererCommandProcessor {
                     else { uploads.insert(resource) }
                 } else if kind == 43, words >= 13 {
                     let resource = get32(snapshot, at: offset + 4)
-                    if get32(snapshot, at: offset + 13 * 4) == 2 { downloads.insert(resource) }
-                    else if bufferSizes[resource] != nil {
-                        let begin = Int(get32(snapshot, at: offset + 12 * 4))
-                        let length = Int(get32(snapshot, at: offset + 9 * 4))
-                        bufferUploads[resource, default: []].append(begin..<(begin + length))
-                    } else { uploads.insert(resource) }
+                    if bufferSizes[resource] != nil {
+                        let range = try backingRange(resource, offset: UInt64(get32(snapshot, at: offset + 12 * 4)), count: get32(snapshot, at: offset + 9 * 4))
+                        if get32(snapshot, at: offset + 13 * 4) == 2 { bufferDownloads[resource, default: []].append(range) }
+                        else { bufferUploads[resource, default: []].append(range) }
+                    } else if get32(snapshot, at: offset + 13 * 4) == 2 { downloads.insert(resource) }
+                    else { uploads.insert(resource) }
                 }
                 offset += (words + 1) * 4
             }
@@ -252,6 +236,9 @@ final class RendererCommandProcessor {
             let response = try request(snapshot)
             if get32(response, at: 0) == 0x1100 {
                 for id in downloads { try synchronizeBacking(id, download: true, readGuest: readGuest, writeGuest: writeGuest) }
+                for (id, ranges) in bufferDownloads where !downloads.contains(id) {
+                    for range in ranges { try synchronizeBacking(id, download: true, range: range, readGuest: readGuest, writeGuest: writeGuest) }
+                }
             }
             return response
         }
@@ -304,6 +291,13 @@ final class RendererCommandProcessor {
         return (image, info.width, info.height)
     }
 
+    private func backingRange(_ id: UInt32, offset: UInt64, count: UInt32) throws -> Range<Int> {
+        guard let spans = backing[id] else { throw failure("Missing transfer backing") }
+        let total = UInt64(spans.reduce(0) { $0 + $1.count })
+        guard offset <= total, UInt64(count) <= total - offset else { throw failure("Transfer exceeds backing") }
+        return Int(offset)..<Int(offset + UInt64(count))
+    }
+
     private func synchronizeBacking(_ id: UInt32, download: Bool, range: Range<Int>? = nil,
                                     readGuest: (UInt64, Int) throws -> Data,
                                     writeGuest: (UInt64, Data) throws -> Void) throws {
@@ -311,29 +305,44 @@ final class RendererCommandProcessor {
         let total = spans.reduce(0) { $0 + $1.count }
         let selected = range ?? 0..<total
         guard selected.lowerBound >= 0, selected.upperBound <= total else { throw failure("Transfer exceeds backing") }
-        var spanStart = 0
-        for span in spans {
-            let begin = max(selected.lowerBound, spanStart), end = min(selected.upperBound, spanStart + span.count)
-            defer { spanStart += span.count }
-            if begin >= end { continue }
-            var consumed = begin - spanStart
-            var offset = UInt64(begin)
-            while consumed < end - spanStart {
-                let count = min(65496, end - spanStart - consumed)
-                var command = backingCommand(download ? 0xffff0012 : 0xffff0011,
-                                             id: id, offset: offset, count: count)
-                if !download {
-                    let bytes = try readGuest(span.address + UInt64(consumed), count)
-                    guard bytes.count == count else { throw failure("Short guest upload") }
-                    command.append(bytes)
-                    uploadedBytes += UInt64(count); uploadRequests += 1
-                }
+        // Guest scatter/gather boundaries do not require separate IPC messages.
+        // Gather at most one bounded wire payload, then preserve each guest span
+        // when reading/writing memory. Never retain guest mappings across requests.
+        var spanIndex = 0, spanStart = 0, offset = selected.lowerBound
+        while spanIndex < spans.count, spanStart + spans[spanIndex].count <= offset {
+            spanStart += spans[spanIndex].count; spanIndex += 1
+        }
+        while offset < selected.upperBound {
+            let count = min(65496, selected.upperBound - offset)
+            var command = backingCommand(download ? 0xffff0012 : 0xffff0011,
+                                         id: id, offset: UInt64(offset), count: count)
+            var downloaded = Data()
+            if download {
                 let response = try request(command)
-                guard get32(response, at: 0) == 0x1100,
-                      response.count == 24 + (download ? count : 0) else { throw failure("Backing transfer failed") }
-                if download { try writeGuest(span.address + UInt64(consumed), Data(response.dropFirst(24))) }
-                offset += UInt64(count); consumed += count
+                guard get32(response, at: 0) == 0x1100, response.count == 24 + count else { throw failure("Backing transfer failed") }
+                downloaded = Data(response.dropFirst(24))
             }
+            var consumed = 0
+            while consumed < count {
+                guard spanIndex < spans.count else { throw failure("Short transfer backing") }
+                let span = spans[spanIndex], within = offset + consumed - spanStart
+                let part = min(count - consumed, span.count - within)
+                if download {
+                    try writeGuest(span.address + UInt64(within), downloaded.subdata(in: consumed..<consumed + part))
+                } else {
+                    let bytes = try readGuest(span.address + UInt64(within), part)
+                    guard bytes.count == part else { throw failure("Short guest upload") }
+                    command.append(bytes)
+                }
+                consumed += part
+                if within + part == span.count { spanStart += span.count; spanIndex += 1 }
+            }
+            if !download {
+                let response = try request(command)
+                guard get32(response, at: 0) == 0x1100, response.count == 24 else { throw failure("Backing transfer failed") }
+                uploadedBytes += UInt64(count); uploadRequests += 1
+            }
+            offset += count
         }
     }
 
