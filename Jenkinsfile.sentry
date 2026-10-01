@@ -64,9 +64,24 @@ pipeline {
     stages {
         stage('Pick sources') {
             steps {
+                // Release tags pick the older sources to build for. The SCM
+                // credential is only bound during Checkout SCM, so bind the same
+                // deploy key for this fetch (as Jenkinsfile.resolv-stub does for
+                // its push); kube-builder-a is an ephemeral pod with no
+                // known_hosts, hence accept-new.
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: '993ae120-54c2-45af-bdd0-2303d982cac7',
+                    keyFileVariable: 'SSH_KEY')]) {
+                    sh '''
+                        set -eu
+                        export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+                        git fetch --tags --force --quiet origin
+                    '''
+                }
                 sh '''
                     set -eu
-                    git fetch --tags --force --quiet origin || true
+                    n_tags=$(git tag -l 'agentic-coding-v*' | wc -l)
+                    [ "$n_tags" -gt 0 ] || echo "WARNING: no release tags visible; building for this checkout's source only"
                     rm -rf sentry-ci && mkdir -p sentry-ci
                     : > sentry-ci/sources
                     add_source() {   # ref label
