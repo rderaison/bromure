@@ -22,3 +22,7 @@ axes[-1].set_xlabel('Median batch time in milliseconds, logarithmic scale — lo
 fig.suptitle('Bromure GPU vs Apple VZ and native macOS',fontsize=15)
 fig.savefig(root/'comparison.png',dpi=180)
 fig.savefig(root/'comparison.svg')
+
+# Matplotlib leaves spaces at line ends inside SVG path attributes.
+svg=root/'comparison.svg'
+svg.write_text('\n'.join(line.rstrip() for line in svg.read_text().splitlines())+'\n')
