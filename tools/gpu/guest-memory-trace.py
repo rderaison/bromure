@@ -66,12 +66,20 @@ def cgroup_memory(pid):
 def snapshot_process(pid, detailed):
     base = PROC / str(pid)
     argv = read(base / 'cmdline').split('\0')
-    name = Path(argv[0]).name.lower()
-    if not any(token in name for token in ('chrome', 'chromium')):
+    try:
+        executable = os.readlink(base / 'exe')
+    except OSError:
+        executable = None
+    names = [Path(value).name.lower() for value in (argv[0], executable or '')]
+    # Zygote children may use /proc/self/exe as argv[0]. Record their actual
+    # executable, with an explicit GPU-role fallback if exe access is denied.
+    if not (any(token in name for name in names for token in ('chrome', 'chromium'))
+            or '--type=gpu-process' in argv):
         return None
     start = identity(read(base / 'stat'))
     status = fields(read(base / 'status'))
-    data = dict(pid=pid, start_ticks=start, executable=argv[0],
+    data = dict(pid=pid, start_ticks=start, executable=executable or argv[0],
+                argv0=argv[0],
                 role=[x for x in argv if x.startswith(('--type=', '--utility-sub-type='))],
                 status_kib={k: v for k, v in status.items()
                             if k.startswith(('Vm', 'Rss'))},

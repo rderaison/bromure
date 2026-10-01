@@ -47,6 +47,13 @@ class MemoryTraceTests(unittest.TestCase):
             self.assertIn('error', result['cgroup_memory'])
             (base / 'cmdline').write_text('/bin/unrelated\0')
             self.assertIsNone(trace.snapshot_process(42, True))
+            (base / 'cmdline').write_text('/proc/self/exe\0--type=gpu-process\0')
+            self.assertEqual(trace.snapshot_process(42, False)['role'],
+                             ['--type=gpu-process'])
+            (base / 'cmdline').write_text('/proc/self/exe\0--type=utility\0')
+            (base / 'exe').symlink_to('/usr/lib/chromium/chromium')
+            self.assertEqual(trace.snapshot_process(42, False)['executable'],
+                             '/usr/lib/chromium/chromium')
 
     def test_pid_reuse_rejected(self):
         from unittest.mock import patch
