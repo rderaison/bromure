@@ -60,9 +60,9 @@ The render node is selected from the negotiated Virtio VirGL feature, rather
 than assuming a fixed render-node number. Feature switches are merged so later
 configuration cannot discard the video prerequisites.
 
-The local rebuilt image retains version 403. The capability sidecar gates GPU
+The earlier local acceptance image retains version 403. Production builds now stamp version 500. The capability sidecar gates GPU
 selection; existing downloaded 403 images without that sidecar retain software.
-This is a local integration result, not a published browser image update.
+Jenkinsfile.browser-image builds the GPU-ready guest stack and checks the version and graphics contract before publishing. The version bump is not itself a published browser image update.
 
 ## Verification
 
@@ -127,8 +127,8 @@ headless packaging; signing, notarization and stapling still run normally.
 The GPU menu reports the effective renderer for the active window and lists
 individual renderers when multiple windows are open. **Use Metal Renderer** also
 appears in Hardware settings; it applies to newly created VMs and is disabled
-before macOS 27. A rebuilt image keeps version 403 and the stock software Mesa
-stack. Download postinstall exports its graphics marker only after the guest's
+before macOS 27. New production images use version 500 and retain the stock
+software Mesa stack alongside the patched graphics stack. Download postinstall exports its graphics marker only after the guest's
 headless prerequisite check succeeds; old images without that contract remain
 software. Older applications ignore the optional marker.
 
@@ -161,7 +161,7 @@ Scanout crops are honored and primary display alpha is opaque. Guest input uses
 pointer protocol 1 on vsock 5821, with motion coalescing and immediate button
 transitions. Images lacking the pointer marker remain on the legacy software
 path in this host build. Older applications may continue using the stock guest
-Mesa/software path of rebuilt 403 images.
+Mesa/software path of the updated images.
 
 Run `guest-pointer-check.py` through `gpu-browser --native-chrome --input-check
 --resize-check --seconds 55` to check actual AppKit-to-guest clicks and coordinates
