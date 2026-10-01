@@ -109,6 +109,12 @@ class LiveTests(unittest.TestCase):
                     process.communicate(timeout=3)
 
     def test_real_buttons_resize_and_other_client_delivery(self):
+        self.check_live_trace(motion=False)
+
+    def test_motion_and_stationary_release_across_resize(self):
+        self.check_live_trace(motion=True)
+
+    def check_live_trace(self, motion):
         read_fd, write_fd = os.pipe()
         with tempfile.TemporaryFile() as server_log:
             server = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0",
@@ -138,7 +144,8 @@ class LiveTests(unittest.TestCase):
                 x.XSelectInput(display, x.XDefaultRootWindow(display), (1 << 2) | (1 << 3))
                 x.XSync(display, 0)
                 with tempfile.TemporaryFile(mode="w+") as output:
-                    observer = subprocess.Popen([sys.executable, str(SCRIPT), "--seconds", "3"],
+                    observer = subprocess.Popen([sys.executable, str(SCRIPT), "--seconds", "3"] +
+                                                (["--motion"] if motion else []),
                                                 env=env, stdout=output, stderr=subprocess.PIPE, text=True)
                     # Wait for actual ready marker, not an assumed startup delay.
                     deadline = time.monotonic() + 2
@@ -156,9 +163,19 @@ class LiveTests(unittest.TestCase):
                         xt.XTestFakeButtonEvent(display, 1, 0, 0)
                         x.XSync(display, 0)
 
-                    click(271, 319)
+                    if motion:
+                        xt.XTestFakeMotionEvent(display, 0, 271, 319, 0)
+                        xt.XTestFakeButtonEvent(display, 1, 1, 0)
+                        x.XSync(display, 0)
+                    else:
+                        click(271, 319)
                     subprocess.run(["xrandr", "--output", "screen", "--off", "--fb", "800x600"],
                                    env=env, check=True, capture_output=True, timeout=3)
+                    if motion:
+                        # A button-only event after RandR must not be mistaken
+                        # for fresh absolute motion against the new root size.
+                        xt.XTestFakeButtonEvent(display, 1, 0, 0)
+                        x.XSync(display, 0)
                     click(199, 249)
                     _, stderr = observer.communicate(timeout=9)
                     self.assertEqual(observer.returncode, 0, stderr)
@@ -170,7 +187,20 @@ class LiveTests(unittest.TestCase):
                 self.assertEqual([(r["root_x"], r["root_y"]) for r in buttons],
                                  [(271, 319)] * 2 + [(199, 249)] * 2)
                 self.assertEqual([(r["root_width"], r["root_height"]) for r in buttons],
-                                 [(1024, 768)] * 2 + [(800, 600)] * 2)
+                                 [(1024, 768)] * (1 if motion else 2) +
+                                 [(800, 600)] * (3 if motion else 2))
+                self.assertEqual(next(r for r in rows if r["event"] == "ready")["motion_capture"], motion)
+                motions = [r for r in rows if r["event"] == "core_motion"]
+                if motion:
+                    self.assertTrue(any((r["root_x"], r["root_y"]) == (271, 319)
+                                        and r["ordinal"] < buttons[0]["ordinal"] for r in motions))
+                    self.assertTrue(any((r["root_x"], r["root_y"]) == (199, 249)
+                                        and buttons[1]["ordinal"] < r["ordinal"] < buttons[2]["ordinal"]
+                                        for r in motions))
+                    self.assertFalse(any(buttons[0]["ordinal"] < r["ordinal"] < buttons[1]["ordinal"]
+                                         for r in motions))
+                else:
+                    self.assertEqual(motions, [])
                 self.assertTrue(any(r["event"] == "root_configure" for r in rows))
                 self.assertTrue(any(r["event"] == "randr_screen" for r in rows))
                 xi = [r for r in rows if r["event"] == "xi2_raw_button"]

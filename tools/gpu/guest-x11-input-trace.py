@@ -12,6 +12,10 @@ ordinal is server observation order, not a merge of two read queues. XI2 raw
 buttons are supplementary on a separate stream (xi_ordinal); they carry no
 coordinates and MUST NOT be used to order geometry against core buttons.
 No grabs, focus changes, pointer queries, window creation or browser access.
+Use --motion to include core MotionNotify in the SAME ordered RECORD stream.
+This observes X pointer motion, not kernel evdev axes or the originating device.
+The ready marker states whether motion capture was enabled. Without that flag,
+absence of core_motion records is not evidence of absence of pointer movement.
 
 root_x/y and root_width/height are X root pixels, NOT CSS pixels or host points.
 Root dimensions are the latest preceding root Configure event (initially the
@@ -135,11 +139,13 @@ class Stream:
                 self.geometry_ordinal = self.ordinal
                 self.ready = True
                 row.update(event="ready", units="X root pixels", root=self.root)
-            elif kind in (4, 5) and client_id == 0:
-                row.update(event="core_button", action="down" if kind == 4 else "up",
-                           button=data[1], event_time_ms=get("I", 4)[0],
+            elif kind in (4, 5, 6) and client_id == 0:
+                row.update(event="core_motion" if kind == 6 else "core_button",
+                           event_time_ms=get("I", 4)[0],
                            root_x=get("h", 20)[0], root_y=get("h", 22)[0],
                            wire_root=get("I", 8)[0], state=get("H", 28)[0])
+                if kind != 6:
+                    row.update(action="down" if kind == 4 else "up", button=data[1])
             elif kind == 22 and get("I", 8)[0] == self.root:
                 width, height = get("HH", 20)
                 row.update(event="root_configure", width=width, height=height,
@@ -168,7 +174,11 @@ class Stream:
 
 
 class Observer:
-    def __init__(self, emit):
+    def __init__(self, emit, motion=False):
+        def emit_with_capture_mode(row):
+            if row.get("event") == "ready":
+                row["motion_capture"] = motion
+            emit(row)
         self.x = C.CDLL("libX11.so.6")
         self.xt = C.CDLL("libXtst.so.6")
         self.xi = C.CDLL("libXi.so.6")
@@ -225,7 +235,7 @@ class Observer:
             if self.xi.XIQueryVersion(self.control, C.byref(major), C.byref(minor)) != 0:
                 raise RuntimeError("XI2.1 unavailable")
             root = self.x.XDefaultRootWindow(self.control)
-            self.stream = Stream(root, rr_base.value, xi_opcode.value, emit)
+            self.stream = Stream(root, rr_base.value, xi_opcode.value, emit_with_capture_mode)
             self.x.XSelectInput(self.control, root, 1 << 17)  # StructureNotify only.
             self.rr.XRRSelectInput(self.control, root, 7)  # Screen, CRTC, output.
             bits = (C.c_ubyte * 3)(0, 128, 1)  # XI_RawButtonPress/Release.
@@ -240,7 +250,7 @@ class Observer:
             # the last device event even on an otherwise completely idle Xvfb.
             ranges[0].core_requests = Range8(127, 127)
             ranges[0].core_replies = Range8(14, 14)  # Initial root GetGeometry.
-            ranges[0].device_events = Range8(4, 5)  # Global pre-delivery core buttons.
+            ranges[0].device_events = Range8(4, 6 if motion else 5)
             ranges[0].delivered_events = Range8(22, 22)  # Our root ConfigureNotify.
             # Xorg RECORD does not reliably record variable-length XI2 events.
             # Read raw cookies separately; never attach guessed geometry to them.
@@ -326,6 +336,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--seconds", type=int, default=300, choices=range(1, 3601), metavar="1..3600")
     parser.add_argument("--max-events", type=int, default=100000)
+    parser.add_argument("--motion", action="store_true", help="also record ordered core pointer motion")
     args = parser.parse_args()
     if not 1 <= args.max_events <= 1000000:
         parser.error("--max-events must be 1..1000000")
@@ -354,7 +365,7 @@ def main():
     observer = None
     try:
         deadline = time.monotonic() + args.seconds
-        observer = Observer(emit)
+        observer = Observer(emit, motion=args.motion)
         while not stopped and time.monotonic() < deadline:
             observer.poll(min(0.1, max(0, deadline - time.monotonic())))
         if not observer.stream.ready:
