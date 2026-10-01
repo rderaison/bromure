@@ -19,6 +19,7 @@ printf '%s  %s\n' 097842f3e49d996868b38688db87b006f7d4541e93ce86d2f341d8b3e7be7c
 tar -xJf "$archive" -C "$build"
 patch -d "$build/mesa-25.2.8" -p1 < "$assets/mesa-virgl-video-export.patch"
 patch -d "$build/mesa-25.2.8" -p1 < "$assets/mesa-virgl-video-compositor.patch"
+patch -d "$build/mesa-25.2.8" -p1 < "$assets/mesa-virgl-fence-reference.patch"
 [ -x "$build/venv/bin/python3" ] || python3 -m venv "$build/venv"
 "$build/venv/bin/pip" install --disable-pip-version-check meson==1.11.2 ninja==1.13.0 Mako==1.3.12 MarkupSafe==3.0.3 PyYAML==6.0.3 packaging==26.3
 export PATH="$build/venv/bin:$PATH"
@@ -50,4 +51,4 @@ for name in ('libEGL_mesa.so.0', 'libGLX_mesa.so.0', 'libgbm.so.1', 'dri/virtio_
     ctypes.CDLL(str(root/name))
 ctypes.CDLL('/opt/bromure/chromium-vaapi/libva.so.2')
 PY
-printf '%s\n' 'mesa=25.2.8' 'video=h264-8bit-progressive' 'chromium-vaapi-rgb-abi=1' 'virgl-bitstream-range=1' > /opt/bromure/mesa-virgl/graphics-build.txt
+printf '%s\n' 'mesa=25.2.8' 'video=h264-8bit-progressive' 'chromium-vaapi-rgb-abi=1' 'virgl-bitstream-range=1' 'virgl-fence-reference=1' > /opt/bromure/mesa-virgl/graphics-build.txt

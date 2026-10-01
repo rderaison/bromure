@@ -1,0 +1,22 @@
+diff --git a/src/gallium/drivers/virgl/virgl_context.c b/src/gallium/drivers/virgl/virgl_context.c
+--- a/src/gallium/drivers/virgl/virgl_context.c
++++ b/src/gallium/drivers/virgl/virgl_context.c
+@@ -1096,8 +1096,17 @@ static void virgl_flush_from_st(struct pipe_context *ctx,
+                                enum pipe_flush_flags flags)
+ {
+    struct virgl_context *vctx = virgl_context(ctx);
++   struct virgl_screen *rs = virgl_screen(ctx->screen);
++   struct pipe_fence_handle *new_fence = NULL;
+ 
+-   virgl_flush_eq(vctx, vctx, fence);
++   /* pipe_context::flush replaces a referenced fence. The winsys submission
++    * writes a fresh owned fence directly, so never pass the caller's old
++    * reference through to it (VA reuses surface->pipe_fence for VPP). */
++   virgl_flush_eq(vctx, vctx, fence ? &new_fence : NULL);
++   if (fence) {
++      rs->vws->fence_reference(rs->vws, fence, new_fence);
++      rs->vws->fence_reference(rs->vws, &new_fence, NULL);
++   }
+ }
+ 
+ static struct pipe_sampler_view *virgl_create_sampler_view(struct pipe_context *ctx,
