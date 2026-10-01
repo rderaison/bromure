@@ -24,29 +24,31 @@ IOSurfaceRef renderer_take_surface(void)
     return surface;
 }
 
-int renderer_capture_surface(void *native_texture)
+int renderer_capture_surface_region(void *native_texture, uint32_t x, uint32_t y,
+                                    uint32_t width, uint32_t height)
 {
     @autoreleasepool {
         id<MTLTexture> source = (__bridge id<MTLTexture>)native_texture;
-        if (!source || !source.width || !source.height || source.width > 8192 || source.height > 8192 ||
+        if (!source || !width || !height || source.width > 8192 || source.height > 8192 ||
+            x > source.width || y > source.height || width > source.width - x || height > source.height - y ||
             source.pixelFormat != MTLPixelFormatBGRA8Unorm) return 0;
         NSDictionary *properties = @{
-            (id)kIOSurfaceWidth: @(source.width), (id)kIOSurfaceHeight: @(source.height),
+            (id)kIOSurfaceWidth: @(width), (id)kIOSurfaceHeight: @(height),
             (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfacePixelFormat: @(0x42475241),
         };
         IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef)properties);
         if (!surface) return 0;
         MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
             texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-            width:source.width height:source.height mipmapped:NO];
+            width:width height:height mipmapped:NO];
         descriptor.storageMode = MTLStorageModeShared;
         descriptor.usage = MTLTextureUsageShaderRead;
         id<MTLTexture> destination = [source.device newTextureWithDescriptor:descriptor iosurface:surface plane:0];
         id<MTLCommandBuffer> command = [[source.device newCommandQueue] commandBuffer];
         id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
         if (!destination || !command || !blit) { CFRelease(surface); return 0; }
-        [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
-                  sourceSize:MTLSizeMake(source.width, source.height, 1)
+        [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x, y, 0)
+                  sourceSize:MTLSizeMake(width, height, 1)
                    toTexture:destination destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
         [blit endEncoding]; [command commit]; [command waitUntilCompleted];
         if (command.status != MTLCommandBufferStatusCompleted) { CFRelease(surface); return 0; }
@@ -56,6 +58,14 @@ int renderer_capture_surface(void *native_texture)
         pthread_mutex_unlock(&surface_lock);
         return 1;
     }
+}
+
+int renderer_capture_surface(void *native_texture)
+{
+    id<MTLTexture> source = (__bridge id<MTLTexture>)native_texture;
+    if (!source || source.width > 8192 || source.height > 8192) return 0;
+    return renderer_capture_surface_region(native_texture, 0, 0,
+                                            (uint32_t)source.width, (uint32_t)source.height);
 }
 
 int probe_containment(const char *outside_file)

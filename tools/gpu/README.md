@@ -81,7 +81,7 @@ The renderer requires VideoToolbox hardware decoding and verifies its
 `UsingHardwareAcceleratedVideoDecoder` property; its frame counter supplies host
 evidence independently of Chromium's GPU status page.
 
-Twelve worker checks cover bounded frames, resources and contexts, fences,
+Nineteen worker checks cover bounded frames, resources and contexts, fences,
 cross-context sharing, MSAA resolve, native scanout, uploads and live resize.
 Fifteen Linux-runnable guest checks cover policy, feature merging and the graphics
 contract. Native fences and decoded-plane synchronisation run on renderer threads,
@@ -140,3 +140,41 @@ checks independent rendering and cursor presentation. On an isolated test image,
 Final worker benchmark measurements are in
 `benchmarks/results/per-vm-workers.json`; historical native/Apple VZ comparisons
 remain in `benchmarks/results/comparison.json`.
+
+
+### Display budgets and October 2026 regression checks
+
+GPU storage and CPU staging have separate bounded budgets. Both start at 1 GiB
+and grow from trusted host display geometry in 256 MiB steps, capped by one eighth
+of physical host RAM per pool (with a 1 GiB minimum). Absolute ceilings are 4 GiB
+for estimated GPU storage and 2 GiB for staging. At 6K 6016×3384 the requested GPU
+budget is 1.5 GiB; UHD 8K 7680×4320 requests 2 GiB GPU and 1.5 GiB staging. Ordinary
+resources remain limited to 256 MiB; host displays above 16 megapixels permit 512 MiB
+resources so four-sample 8K depth attachments fit. Buffers measure width in bytes,
+while texture geometry is bounded separately. Current maximum display area is
+33,554,432 pixels with each dimension at most 8192. Budget estimates are not an
+exact process-memory ceiling; surfaces and library overhead consume memory too.
+
+The worker supports 4096 live resource slots, while byte budgets still apply.
+Full queues leave descriptors pending and resume draining after completion.
+Scanout crops are honored and primary display alpha is opaque. Guest input uses
+pointer protocol 1 on vsock 5821, with motion coalescing and immediate button
+transitions. Images lacking the pointer marker remain on the legacy software
+path in this host build. Older applications may continue using the stock guest
+Mesa/software path of rebuilt 403 images.
+
+Run `guest-pointer-check.py` through `gpu-browser --native-chrome --input-check
+--resize-check --seconds 55` to check actual AppKit-to-guest clicks and coordinates
+before/after resize. Use `--display-scale 2` for Retina testing. The CLI emits
+allocation high-water/current accounting. Saved website regression evidence is
+in `results/2026-10-01-website-regression.txt`: Slashdot, Apple H264 hardware
+playback, Google, YouTube AV1 playback, and Google after video at 5120×2948, with
+continuous resize and no rejected GPU commands. GPU allocation accounting fell
+from 931,404,704 bytes peak to 327,788,544; staging fell from 481,398,784 to 190,246,912.
+6K/8K allocations are tested against the real Metal worker; physical 6K/8K screen
+playback and runtime on macOS 26 remain separate unverified cases.
+
+40 Linux packaging/pointer/resize tests and 19 Metal worker tests pass. The
+release browser builds. A broader Swift test attempt is blocked by pre-existing
+MLXEngine newCache calls missing `try` at lines 557, 568, 580; no AgentCoding source
+was changed for this GPU work.

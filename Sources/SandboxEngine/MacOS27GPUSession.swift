@@ -17,6 +17,7 @@ public protocol HostGraphicsSession: AnyObject {
     var deliveredFrameCount: Int { get }
     var deliveredCursorCount: Int { get }
     var cursorMoveCount: Int { get }
+    func logResourceUsage()
     func observeFrames(_ observer: @escaping (IOSurface?) -> Void)
     func observeCursor(_ observer: @escaping (HostGPUCursor?) -> Void)
     func resizeDisplay(width: Int, height: Int)
@@ -102,6 +103,10 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         client.stop()
     }
 
+    public func logResourceUsage() {
+        processingQueue.async { [weak self] in self?.processor?.logResourceUsage() }
+    }
+
     public func observeFrames(_ observer: @escaping (IOSurface?) -> Void) {
         deviceQueue.async { [self] in
             self.observer = observer
@@ -147,7 +152,7 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
     private func terminate() {
         guard !stopped else { return }
         state.lock(); stopped = true; generation += 1; paused = false; state.broadcast(); state.unlock()
-        pending.removeAll(); completions.removeAll(); pendingBytes = 0
+        pending.removeAll(); completions.removeAll(); pendingBytes = 0; notifiedQueues.removeAll()
         latestFrame = nil; observer?(nil)
         latestCursor = nil; cursorObserver?(nil)
         device = nil
@@ -162,9 +167,15 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         device.delegate = self
     }
 
+    private var notifiedQueues: [Int: VZVirtioQueue] = [:]
+
     public func customVirtioDevice(_ device: VZCustomVirtioDevice, didReceiveNotificationFor queue: VZVirtioQueue) {
         guard !stopped else { return }
-        while let element = queue.nextElement() {
+        notifiedQueues[Int(queue.queueIndex)] = queue
+        // Leave descriptors in the virtqueue until capacity is available.
+        // Returning an unprocessed descriptor silently loses GPU commands.
+        while pending.count < 256, pendingBytes <= 16777216 - 1048576,
+              let element = queue.nextElement() {
             let count = element.readBuffersAvailableByteCount
             if queue.queueIndex == 1 {
                 // Cursor commands have no writable reply and a fixed wire size.
@@ -283,6 +294,12 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
         guard let element = pending.removeValue(forKey: token) else { return }
         if response.count <= element.writeBuffersAvailableByteCount { try? element.write(response) }
         element.returnToQueue()
+        deviceQueue.async { [weak self] in
+            guard let self, !self.stopped, !self.paused, let device = self.device else { return }
+            for queue in self.notifiedQueues.values {
+                self.customVirtioDevice(device, didReceiveNotificationFor: queue)
+            }
+        }
     }
 
     public func customVirtioDeviceWillPause(_ device: VZCustomVirtioDevice) {
@@ -298,7 +315,7 @@ public final class MacOS27GPUSession: NSObject, HostGraphicsSession,
     public func customVirtioDeviceWillReset(_ device: VZCustomVirtioDevice) {
         state.lock(); generation += 1; state.broadcast(); state.unlock()
         let epoch = generation
-        pending.removeAll(); completions.removeAll(); pendingBytes = 0
+        pending.removeAll(); completions.removeAll(); pendingBytes = 0; notifiedQueues.removeAll()
         latestFrame = nil; observer?(nil)
         latestCursor = nil; cursorObserver?(nil)
         processingQueue.async { [self] in

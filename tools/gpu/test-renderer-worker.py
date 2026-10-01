@@ -60,6 +60,74 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies],
                          [0x1100, 0x1204, 0x1100, 0x1204, 0x1100, 0x1100, 0x1100, 0x1100])
 
+    def test_fullscreen_depth_budget(self):
+        # User's 5K fullscreen depth attachment: 4 bytes, not fallback 32.
+        for samples in (0, 4):
+            with self.subTest(samples=samples):
+                replies = self.exchange([
+                    command(0x204, struct.pack("<12I", 9, 2, 20, 1,
+                                              5120, 2948, 1, 1, 0, samples, 0, 0)),
+                    command(0xffff0030),
+                    command(0x102, struct.pack("<II", 9, 0)),
+                ])
+                self.assertEqual(struct.unpack_from("<I", replies[0])[0], 0x1100)
+                self.assertEqual(struct.unpack_from("<Q", replies[1], 32)[0],
+                                 5120 * 2948 * 4 * max(samples, 1))
+                self.assertEqual(struct.unpack_from("<I", replies[2])[0], 0x1100)
+
+    def test_fullscreen_depth_byte_limit_preserved(self):
+        replies = self.exchange([
+            command(0x204, struct.pack("<12I", 9, 2, 20, 1,
+                                      5120, 2948, 1, 1, 0, 8, 0, 0)),
+            command(0xffff0030),
+        ])
+        self.assertEqual(struct.unpack_from("<I", replies[0])[0], 0x1201)
+        self.assertEqual(struct.unpack_from("<I", replies[1], 24)[0], 0)
+        self.assertEqual(struct.unpack_from("<Q", replies[1], 32)[0], 0)
+
+    def test_retina_buffer_and_backing_budget(self):
+        # Buffer width is bytes, not texels. Browser staging buffers at 5K
+        # legitimately exceed16MiB; keep256MiB each and separate1GiB GPU/staging limits.
+        size = 34447360
+        commands = []
+        for i in range(1, 10):
+            commands += [command(0x204, struct.pack("<12I", i, 0, 64, 16,
+                                                   size, 1, 1, 1, 0, 0, 0, 0)),
+                         command(0xffff0010, struct.pack("<IQI", i, size, 0))]
+        replies = self.exchange(commands)
+        self.assertTrue(all(struct.unpack_from("<I", r)[0] == 0x1100 for r in replies))
+
+    def test_6k_8k_adaptive_depth_budget(self):
+        for width, height in ((6016, 3384), (7680, 4320)):
+            with self.subTest(width=width):
+                replies = self.exchange([
+                    command(0xffff0020, struct.pack("<II", width, height)),
+                    command(0x204, struct.pack("<12I", 9, 2, 20, 1,
+                                              width, height, 1, 1, 0, 4, 0, 0)),
+                    command(0xffff0030),
+                ])
+                self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies], [0x1100] * 3)
+                self.assertEqual(struct.unpack_from("<Q", replies[2], 32)[0], width * height * 16)
+                gpu, staging, resource = struct.unpack_from("<QQQ", replies[2], 64)
+                self.assertTrue(1073741824 <= gpu <= 4294967296)
+                self.assertTrue(1073741824 <= staging <= 2147483648)
+                self.assertEqual(resource, 536870912)
+
+    def test_browser_resource_count(self):
+        # Real page browsing needs >256 small live resources, well below 1 GiB.
+        commands = [command(0x204, struct.pack("<12I", i, 0, 64, 16,
+                                               64, 1, 1, 1, 0, 0, 0, 0))
+                    for i in range(1, 301)]
+        commands += [command(0xffff0030)]
+        commands += [command(0x102, struct.pack("<II", i, 0)) for i in range(1, 301)]
+        commands += [command(0xffff0030)]
+        replies = self.exchange(commands)
+        self.assertTrue(all(struct.unpack_from("<I", r)[0] == 0x1100 for r in replies))
+        self.assertEqual(struct.unpack_from("<I", replies[300], 24)[0], 300)
+        self.assertEqual(struct.unpack_from("<Q", replies[300], 32)[0], 300 * 65536)
+        self.assertEqual(struct.unpack_from("<I", replies[-1], 24)[0], 0)
+        self.assertEqual(struct.unpack_from("<Q", replies[-1], 32)[0], 0)
+
     def test_context_budget(self):
         replies = self.exchange([command(0x200, bytes(72), context=i)
                                  for i in range(1, 34)])
@@ -206,6 +274,16 @@ class WorkerTests(unittest.TestCase):
                          [0x1100, 0x1100, 0x1100, 0x1101, 0x1100, 0x1205, 0x1101])
         self.assertEqual(struct.unpack_from("<III", replies[3], 32), (128, 96, 1))
         self.assertEqual(struct.unpack_from("<III", replies[6], 32), (128, 96, 1))
+
+    def test_cropped_scanout_bounds(self):
+        replies = self.exchange([
+            command(0x101, struct.pack("<4I", 9, 1, 64, 64)),
+            command(0x103, struct.pack("<6I", 8, 12, 32, 24, 0, 9)),
+            command(0x104, struct.pack("<6I", 8, 12, 32, 24, 9, 0)),
+            command(0x103, struct.pack("<6I", 33, 12, 32, 24, 0, 9)),
+        ])
+        self.assertEqual([struct.unpack_from("<I", r)[0] for r in replies],
+                         [0x1100, 0x1100, 0x1100, 0x1205])
 
     def test_display_scanout_and_flush(self):
         replies = self.exchange([

@@ -10,6 +10,7 @@ struct GPUBrowser: ParsableCommand {
         abstract: "Run a browser with the experimental sandboxed VirGL/Metal device.")
     @Option(name: .long) var storageDir: String
     @Option(name: .long) var seconds: Int = 120
+    @Option(name: .long) var displayScale: Int = 2
     @Option(name: .customLong("simultaneous-vms")) var simultaneousVMs: Int = 1
     @Option(name: .long) var guestProbe: String?
     @Option(name: .long) var chromeFlags: String?
@@ -18,8 +19,11 @@ struct GPUBrowser: ParsableCommand {
     @Flag(name: .long) var interactive = false
     @Flag(name: .long) var nativeChrome = false
     @Flag(name: .long) var resizeCheck = false
+    @Option(name: .long) var resizeWidth: Int = 800
+    @Option(name: .long) var resizeHeight: Int = 500
     @Flag(name: .long) var cursorCheck = false
     @Flag(name: .long) var menuCheck = false
+    @Flag(name: .long) var inputCheck = false
     @Flag(name: .long, help: "Verify postinstall imports the validated guest graphics marker in the selected test image.")
     var postinstallCheck = false
     @Flag(name: .long, help: "Benchmark Apple’s built-in Virtio graphics device without the custom VirGL renderer.")
@@ -28,6 +32,8 @@ struct GPUBrowser: ParsableCommand {
     @Option(name: .long) var url: String = "chrome://gpu"
 
     func validate() throws {
+        guard (1...2).contains(displayScale) else { throw ValidationError("Invalid display scale") }
+        guard (64...4096).contains(resizeWidth), (64...4096).contains(resizeHeight) else { throw ValidationError("Invalid resize dimensions") }
         guard (1...4).contains(simultaneousVMs) else { throw ValidationError("Simultaneous VMs must be between 1 and 4") }
         guard (1...3600).contains(seconds) else { throw ValidationError("Invalid duration") }
         guard (1...3600).contains(checkTimeout), checkTimeout <= seconds else { throw ValidationError("Invalid check timeout") }
@@ -41,11 +47,10 @@ struct GPUBrowser: ParsableCommand {
 
     func run() throws {
         setbuf(stdout, nil)
-        if let chromeFlags {
-            var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
-            arguments["vm.extraChromeFlags"] = chromeFlags
-            UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
-        }
+        var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        arguments["vm.displayScale"] = displayScale
+        if let chromeFlags { arguments["vm.extraChromeFlags"] = chromeFlags }
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         guard #available(macOS 27.0, *) else { throw ValidationError("Requires macOS 27") }
         let options = self
         Task { @MainActor in
@@ -127,11 +132,42 @@ struct GPUBrowser: ParsableCommand {
         let deadline = Date().addingTimeInterval(TimeInterval(seconds))
         let resizeAt = Date().addingTimeInterval(28)
         var resized = false
+        var resizeStep = 0
+        let resizeStart = session.window.contentView?.bounds.size ?? NSSize(width: 960, height: 540)
+        let clickAt = Date().addingTimeInterval(20)
+        var clicked = false
+        var clickedAfterResize = false
+        var lastBudgetLog = Date()
         while Date() < deadline, warm.vm.state != .stopped {
-            if resizeCheck, !resized, Date() >= resizeAt {
-                session.window.setContentSize(NSSize(width: 800, height: 500))
-                resized = true
-                print("[GPU browser] Resize requested: 800x500 points")
+            if Date().timeIntervalSince(lastBudgetLog) >= 10 {
+                warm.graphicsSession?.logResourceUsage(); lastBudgetLog = Date()
+            }
+            if inputCheck, resized, !clickedAfterResize, Date() >= resizeAt.addingTimeInterval(7) {
+                clicked = false; clickedAfterResize = true
+            }
+            if inputCheck, !clicked, Date() >= clickAt, let content = session.window.contentView {
+                clicked = true
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                session.window.makeKeyAndOrderFront(nil)
+                let point = content.convert(NSPoint(x: content.bounds.midX, y: content.bounds.midY), to: nil)
+                let target = content.hitTest(content.convert(point, from: nil))
+                print("[GPU browser] Host click target: \(String(describing: target.map { type(of: $0) }))")
+                for kind in [NSEvent.EventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
+                    if let event = NSEvent.mouseEvent(with: kind, location: point, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: session.window.windowNumber,
+                        context: nil, eventNumber: 1, clickCount: 1, pressure: kind == .leftMouseDown ? 1 : 0) {
+                        NSApplication.shared.sendEvent(event)
+                    }
+                }
+            }
+            if resizeCheck, !resized, Date() >= resizeAt.addingTimeInterval(Double(resizeStep) / 20) {
+                resizeStep += 1
+                let fraction = Double(resizeStep) / 16
+                let width = resizeStart.width + (Double(resizeWidth) - resizeStart.width) * fraction
+                let height = resizeStart.height + (Double(resizeHeight) - resizeStart.height) * fraction
+                session.window.setContentSize(NSSize(width: width, height: height))
+                resized = resizeStep == 16
+                print("[GPU browser] Resize step \(resizeStep): \(Int(width))x\(Int(height)) points frames=\(warm.graphicsSession?.deliveredFrameCount ?? 0)")
             }
             while let event = NSApplication.shared.nextEvent(matching: .any, until: .distantPast,
                                                              inMode: .default, dequeue: true) {

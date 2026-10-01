@@ -14,6 +14,7 @@ final class RendererCommandProcessor {
     private struct GuestSpan { let address: UInt64; let count: Int }
     private var backing: [UInt32: [GuestSpan]] = [:]
     private var cursorResources: [UInt32: (width: Int, height: Int, format: UInt32)] = [:]
+    private var rejectedCommandCount = 0
 
     init(executable: String) throws {
         process.executableURL = URL(fileURLWithPath: executable)
@@ -57,7 +58,7 @@ final class RendererCommandProcessor {
     @available(macOS 27.0, *)
     init(client: MacOS27RendererClient, onFrame: @escaping (IOSurface) -> Void) throws {
         stopTransport = { client.stop() }
-        transport = { command in
+        transport = { [weak self] command in
             dispatchPrecondition(condition: .notOnQueue(.main))
             let ready = DispatchSemaphore(value: 0)
             let box = RendererReplyBox()
@@ -77,6 +78,24 @@ final class RendererCommandProcessor {
             box.lock.unlock()
             guard let result else { throw NSError(domain: "BromureRenderer", code: 1) }
             let (response, surface) = try result.get()
+            if response.count >= 4 {
+                let status = response.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
+                if status >= 0x1200, let self {
+                    self.rejectedCommandCount += 1
+                    if self.rejectedCommandCount <= 40 {
+                        let kind = command.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
+                        NSLog("[GPU renderer] command=0x%x response=0x%x bytes=%d rejected=%d", kind, status, command.count, self.rejectedCommandCount)
+                        if status == 0x1201, self.rejectedCommandCount <= 4 {
+                            var diagnostic = Data(repeating: 0, count: 24)
+                            put32(0xffff0030, at: 0, into: &diagnostic)
+                            if let stats = try? self.request(diagnostic), stats.count >= 40 {
+                                let bytes = stats.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 32, as: UInt64.self).littleEndian }
+                                NSLog("[GPU renderer] live resources=%u contexts=%u accounted bytes=%llu", get32(stats, at: 24), get32(stats, at: 28), bytes)
+                            }
+                        }
+                    }
+                }
+            }
             if let surface { onFrame(surface) }
             return response
         }
@@ -108,6 +127,16 @@ final class RendererCommandProcessor {
         try? input.fileHandleForWriting.close()
         if process.isRunning { process.terminate() }
         try? output.fileHandleForReading.close()
+    }
+
+    func logResourceUsage() {
+        var command = Data(repeating: 0, count: 24)
+        put32(0xffff0030, at: 0, into: &command)
+        guard let stats = try? request(command), stats.count >= 64 else { return }
+        NSLog("[GPU budget] resources=%u GPU=%llu staging=%llu peakGPU=%llu peakStaging=%llu",
+              get32(stats, at: 24), get64(stats, at: 32), get64(stats, at: 40),
+              get64(stats, at: 48), get64(stats, at: 56))
+        if stats.count >= 88 { NSLog("[GPU budget] limits GPU=%llu staging=%llu resource=%llu", get64(stats, at: 64), get64(stats, at: 72), get64(stats, at: 80)) }
     }
 
     func reset() throws {

@@ -11,11 +11,13 @@
 #include <errno.h>
 #include <time.h>
 #include <sys/uio.h>
+#include <sys/sysctl.h>
 
 enum { MAX_FRAME = 65536, MAX_REQUEST = 1048576, MAX_CONTEXTS = 32 };
-enum { MAX_RESOURCES = 256 };
+enum { MAX_RESOURCES = 4096 };
 extern int probe_shared_texture(void *native_texture);
 extern int renderer_capture_surface(void *native_texture);
+extern int renderer_capture_surface_region(void *native_texture, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 static uint32_t retired_fence;
 void renderer_worker_fence(uint32_t fence) { retired_fence = fence; }
 static int wait_for_gpu(uint32_t token, uint32_t context)
@@ -66,9 +68,17 @@ int run_renderer_worker(int output_fd)
     uint32_t contexts[MAX_CONTEXTS] = {0};
     uint32_t resources[MAX_RESOURCES] = {0}, fence_token = 0;
     uint64_t resource_bytes[MAX_RESOURCES] = {0}, total_resource_bytes = 0;
+    uint64_t peak_resource_bytes = 0, peak_backing_bytes = 0;
     struct iovec backing[MAX_RESOURCES] = {0};
     uint64_t total_backing = 0;
+    uint64_t gpu_limit = 1073741824, staging_limit = 1073741824, resource_limit = 268435456;
+    uint64_t physical_memory = 8589934592; size_t memory_size = sizeof(physical_memory);
+    if (sysctlbyname("hw.memsize", &physical_memory, &memory_size, NULL, 0)) physical_memory = 8589934592;
+    // Both pools are bounded by one eighth of host RAM, with a 1 GiB floor.
+    uint64_t ram_ceiling = physical_memory / 8 / 268435456 * 268435456;
+    if (ram_ceiling < 1073741824) ram_ceiling = 1073741824;
     uint32_t display_width = 0, display_height = 0, scanout_resource = 0;
+    uint32_t scanout_x = 0, scanout_y = 0, scanout_width = 0, scanout_height = 0;
     // One ordered worker per process; keep the bounded submission buffer off the stack.
     _Alignas(8) static uint8_t request[MAX_REQUEST];
     _Alignas(8) uint8_t response[MAX_FRAME];
@@ -156,7 +166,10 @@ int run_renderer_worker(int output_fd)
                 if (!resources[i] && slot == -1) slot = i;
             }
             if (!id || id > 0x7fffffff || slot == -2) { result = 0x1203; break; }
-            if (slot < 0) { result = 0x1201; break; }
+            if (slot < 0) {
+                os_log_error(OS_LOG_DEFAULT, "GPU resource slots exhausted id=%u limit=%u bytes=%llu", id, MAX_RESOURCES, (unsigned long long)total_resource_bytes);
+                result = 0x1201; break;
+            }
             struct virgl_renderer_resource_create_args args = {0};
             if (type == 0x101) {
                 args = (struct virgl_renderer_resource_create_args){
@@ -175,11 +188,11 @@ int run_renderer_worker(int output_fd)
                 .nr_samples = load32(request + 60), .flags = load32(request + 64),
             };
             }
-            uint32_t max_width = args.target == 0 ? 16777216 : 8192;
+            uint32_t max_width = args.target == 0 ? resource_limit : 8192;
             if (!args.width || args.width > max_width || !args.height || args.height > 8192 ||
                 !args.depth || args.depth > 256 || !args.array_size || args.array_size > 256 ||
                 args.last_level > 13 || args.nr_samples > 8 || args.flags & ~1u ||
-                (uint64_t)args.width * args.height * args.depth * args.array_size > 16777216) break;
+                (args.target != 0 && (uint64_t)args.width * args.height * args.depth * args.array_size > 33554432)) break;
             // Account common browser formats by storage size. A worst-case
             // fallback bounds other formats; only mipmapped resources double.
             uint32_t texel_bytes = 32;
@@ -189,16 +202,25 @@ int run_renderer_worker(int output_fd)
                 texel_bytes = 4;
             else if (args.format == VIRGL_FORMAT_R8_UNORM) texel_bytes = 1;
             else if (args.format == VIRGL_FORMAT_R8G8_UNORM) texel_bytes = 2;
+            else if (args.format == VIRGL_FORMAT_Z16_UNORM) texel_bytes = 2;
+            else if (args.format == VIRGL_FORMAT_S8_UINT) texel_bytes = 1;
+            else if (args.format == VIRGL_FORMAT_Z32_UNORM || args.format == VIRGL_FORMAT_Z32_FLOAT ||
+                     args.format == VIRGL_FORMAT_Z24_UNORM_S8_UINT || args.format == VIRGL_FORMAT_S8_UINT_Z24_UNORM ||
+                     args.format == VIRGL_FORMAT_Z24X8_UNORM || args.format == VIRGL_FORMAT_X8Z24_UNORM)
+                texel_bytes = 4;
             uint64_t budget = args.target == 0 ? args.width :
                 (uint64_t)args.width * args.height * args.depth * args.array_size * texel_bytes *
                 (args.last_level ? 2 : 1) * (args.nr_samples ? args.nr_samples : 1);
             if (budget < 65536) budget = 65536;
-            if (budget > 268435456 || total_resource_bytes + budget > 1073741824) {
+            if (budget > resource_limit || total_resource_bytes + budget > gpu_limit) {
+                os_log_error(OS_LOG_DEFAULT, "GPU resource budget exceeded id=%u format=%u size=%ux%u estimate=%llu live=%llu", id, args.format, args.width, args.height, (unsigned long long)budget, (unsigned long long)total_resource_bytes);
                 result = 0x1201; break;
             }
             if (virgl_renderer_resource_create(&args, NULL, 0)) { result = 0x1200; break; }
             resources[slot] = id; resource_bytes[slot] = budget;
-            total_resource_bytes += budget; result = 0x1100;
+            total_resource_bytes += budget;
+            if (total_resource_bytes > peak_resource_bytes) peak_resource_bytes = total_resource_bytes;
+            result = 0x1100;
             break;
         }
         case 0x102: // RESOURCE_UNREF
@@ -269,15 +291,16 @@ int run_renderer_worker(int output_fd)
             if (x > info.base.width || y > info.base.height || width > info.base.width - x ||
                 height > info.base.height - y || !width || !height) break;
             if (type == 0x103) {
-                // Cropped resources need a separate blit region contract.
-                if (x || y || width != info.base.width || height != info.base.height) break;
                 scanout_resource = id;
+                scanout_x = x; scanout_y = y;
+                scanout_width = width; scanout_height = height;
             }
             if (id == scanout_resource) {
                 if (++fence_token == 0) ++fence_token;
                 if (!wait_for_gpu(fence_token, 0)) return 1;
                 if (info.native_type != VIRGL_NATIVE_HANDLE_METAL_TEXTURE || !info.native_handle ||
-                    !renderer_capture_surface(info.native_handle)) { result = 0x1200; break; }
+                    !renderer_capture_surface_region(info.native_handle, scanout_x, scanout_y,
+                                                     scanout_width, scanout_height)) { result = 0x1200; break; }
             }
             result = 0x1100; break;
         }
@@ -293,6 +316,7 @@ int run_renderer_worker(int output_fd)
             result = 0x1100; break;
         }
         case 0xffff0010: // Host-sanitized backing allocation: no guest addresses.
+            // GPU storage and CPU staging each have a separate resolution-aware ceiling.
         case 0xffff0011: // Host-snapshotted backing upload.
         case 0xffff0012: { // Explicit readback chunk for guest API requests.
             if (length < 40 || flags || context) break;
@@ -303,7 +327,7 @@ int run_renderer_worker(int output_fd)
             if (slot < 0) { result = 0x1203; break; }
             if (type == 0xffff0010) {
                 if (length != 40 || count || !offset || offset > 134217728 || backing[slot].iov_base ||
-                    total_backing + offset > 268435456) break;
+                    total_backing + offset > staging_limit) break;
                 backing[slot].iov_base = calloc(1, (size_t)offset);
                 if (!backing[slot].iov_base) { result = 0x1201; break; }
                 backing[slot].iov_len = (size_t)offset;
@@ -311,6 +335,7 @@ int run_renderer_worker(int output_fd)
                     free(backing[slot].iov_base); backing[slot] = (struct iovec){0}; break;
                 }
                 total_backing += offset;
+                if (total_backing > peak_backing_bytes) peak_backing_bytes = total_backing;
             } else {
                 if (!backing[slot].iov_base || !count || offset > backing[slot].iov_len ||
                     count > backing[slot].iov_len - offset) break;
@@ -356,7 +381,42 @@ int run_renderer_worker(int output_fd)
             if (length != 32 || flags || context) break;
             uint32_t width = load32(request + 24), height = load32(request + 28);
             if (!width || !height || width > 8192 || height > 8192 || (uint64_t)width * height > 33554432) break;
+            uint64_t pixels = (uint64_t)width * height, quantum = 268435456;
+            uint64_t wanted_gpu = (pixels * 64 + quantum - 1) / quantum * quantum;
+            uint64_t wanted_staging = (pixels * 48 + quantum - 1) / quantum * quantum;
+            if (wanted_gpu > 4294967296ULL) wanted_gpu = 4294967296ULL;
+            if (wanted_staging > 2147483648ULL) wanted_staging = 2147483648ULL;
+            if (wanted_gpu > ram_ceiling) wanted_gpu = ram_ceiling;
+            if (wanted_staging > ram_ceiling) wanted_staging = ram_ceiling;
+            // Preserve capacity while shrinking; resources release naturally.
+            if (wanted_gpu > gpu_limit) gpu_limit = wanted_gpu;
+            if (wanted_staging > staging_limit) staging_limit = wanted_staging;
+            if (pixels > 16777216) resource_limit = 536870912;
             display_width = width; display_height = height; result = 0x1100;
+            break;
+        }
+        case 0xffff0030: { // Host-only diagnostics, excluded from guest allowlist.
+            if (length != 24 || flags || context) break;
+            uint32_t live_resources = 0, live_contexts = 0;
+            for (int i = 0; i < MAX_RESOURCES; ++i) if (resources[i]) ++live_resources;
+            for (int i = 0; i < MAX_CONTEXTS; ++i) if (contexts[i]) ++live_contexts;
+            store32(response + 24, live_resources);
+            store32(response + 28, live_contexts);
+            store32(response + 32, (uint32_t)total_resource_bytes);
+            store32(response + 36, (uint32_t)(total_resource_bytes >> 32));
+            store32(response + 40, (uint32_t)total_backing);
+            store32(response + 44, (uint32_t)(total_backing >> 32));
+            store32(response + 48, (uint32_t)peak_resource_bytes);
+            store32(response + 52, (uint32_t)(peak_resource_bytes >> 32));
+            store32(response + 56, (uint32_t)peak_backing_bytes);
+            store32(response + 60, (uint32_t)(peak_backing_bytes >> 32));
+            store32(response + 64, (uint32_t)gpu_limit);
+            store32(response + 68, (uint32_t)(gpu_limit >> 32));
+            store32(response + 72, (uint32_t)staging_limit);
+            store32(response + 76, (uint32_t)(staging_limit >> 32));
+            store32(response + 80, (uint32_t)resource_limit);
+            store32(response + 84, (uint32_t)(resource_limit >> 32));
+            response_length = 88; result = 0x1100;
             break;
         }
         default:

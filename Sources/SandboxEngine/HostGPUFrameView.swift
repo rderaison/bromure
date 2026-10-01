@@ -12,9 +12,11 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
     private var guestCursor: NSCursor = .arrow
     public private(set) var nativeCursorImageCount = 0
     private var inFlight = 0
+    private var redrawPending = false
     public var guestDisplayScale: Double = 1
     public var displaySizeChanged: ((Int, Int) -> Void)?
     private var resizeTask: DispatchWorkItem?
+    private var pendingDisplaySize: (Int, Int)?
     public private(set) var presentedFrameCount = 0
 
     public init(gpuFrame frame: NSRect) throws {
@@ -33,7 +35,8 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
         }
         fragment float4 frame_fragment(Vertex value [[stage_in]], texture2d<float> source [[texture(0)]]) {
             constexpr sampler sample(filter::linear, address::clamp_to_edge);
-            return source.sample(sample, value.uv);
+            // The primary scanout is opaque; XRGB's fourth byte is padding.
+            return float4(source.sample(sample, value.uv).rgb, 1.0);
         }
         """, options: nil)
         let descriptor = MTLRenderPipelineDescriptor()
@@ -101,20 +104,51 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
         needsDisplay = true
     }
 
+    public func normalizedGuestPoint(_ point: NSPoint) -> (x: Double, y: Double) {
+        guard let texture else {
+            return (Double(point.x / max(bounds.width, 1)), Double(1 - point.y / max(bounds.height, 1)))
+        }
+        let scale = min(bounds.width / CGFloat(texture.width), bounds.height / CGFloat(texture.height))
+        let width = CGFloat(texture.width) * scale, height = CGFloat(texture.height) * scale
+        let left = (bounds.width - width) / 2, bottom = (bounds.height - height) / 2
+        return (Double((point.x - left) / max(width, 1)), Double(1 - (point.y - bottom) / max(height, 1)))
+    }
+
     public func discardFrame() { texture = nil; needsDisplay = true }
 
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         guard size.width.isFinite, size.height.isFinite else { return }
-        resizeTask?.cancel()
-        let width = Int(min(max(view.bounds.width * guestDisplayScale, 64), 8192))
-        let height = Int(min(max(view.bounds.height * guestDisplayScale, 64), 8192))
-        let task = DispatchWorkItem { [weak self] in self?.displaySizeChanged?(width, height) }
+        scheduleDisplayResize()
+    }
+
+    public override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsDisplay = true
+        scheduleDisplayResize()
+    }
+
+    private func scheduleDisplayResize() {
+        let width = Int(min(max(bounds.width * guestDisplayScale, 64), 8192))
+        let height = Int(min(max(bounds.height * guestDisplayScale, 64), 8192))
+        pendingDisplaySize = (width, height)
+        guard resizeTask == nil else { return }
+        let task = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.resizeTask = nil
+            if let size = self.pendingDisplaySize {
+                self.pendingDisplaySize = nil
+                self.displaySizeChanged?(size.0, size.1)
+            }
+        }
         resizeTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: task)
+        // Throttle/coalesce while dragging; debounce would defer every update
+        // until the drag ends and leave the guest displaying a frozen image.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30.0, execute: task)
     }
 
     public func draw(in view: MTKView) {
-        guard inFlight < 3, let pass = currentRenderPassDescriptor, let drawable = currentDrawable,
+        if inFlight >= 3 { redrawPending = true; return }
+        guard let pass = currentRenderPassDescriptor, let drawable = currentDrawable,
               let command = commands.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return }
         if let texture {
             let scale = min(Double(drawable.texture.width) / Double(texture.width),
@@ -133,8 +167,13 @@ public final class HostGPUFrameView: MTKView, MTKViewDelegate {
         command.addCompletedHandler { [weak self] result in
             let completed = result.status == .completed
             DispatchQueue.main.async {
-                self?.inFlight -= 1
-                if completed { self?.presentedFrameCount += 1 }
+                guard let self else { return }
+                self.inFlight -= 1
+                if completed { self.presentedFrameCount += 1 }
+                if self.redrawPending {
+                    self.redrawPending = false
+                    self.needsDisplay = true
+                }
             }
         }
         command.commit()

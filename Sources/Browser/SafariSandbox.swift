@@ -1097,9 +1097,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         guard let menu = graphicsMenu else { return }
         let open = sessions.filter { !$0.closing && $0.window.isVisible }
         let active = keyWindowSession() ?? open.last
-        let renderer = active?.usesMetalRenderer == true ? "Metal" : "Software"
+        let renderer = active?.rendererDisplayName ?? "Software"
         let title = active == nil ? "GPU" : renderer
         graphicsMenuItem?.title = title
+        graphicsMenuItem?.image = active?.usesMetalRenderer == true ? MetalRendererBadge.image(size: 18) : nil
         menu.title = title
         guard !graphicsMenuOpen else { return }
         menu.removeAllItems()
@@ -1118,7 +1119,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             menu.addItem(.separator())
             for session in open {
                 let name = session.profile?.name ?? session.window.title
-                let item = NSMenuItem(title: name + ": " + (session.usesMetalRenderer ? "Metal" : "Software"), action: nil, keyEquivalent: "")
+                let item = NSMenuItem(title: name + ": " + session.rendererDisplayName, action: nil, keyEquivalent: "")
                 item.isEnabled = false
                 menu.addItem(item)
             }
@@ -2365,6 +2366,12 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 /// This is a plain Swift class (not NSObject) to avoid VZ dispatch source
 /// lifetime issues with ObjC ivar destruction.
 final class BrowserSession {
+    var rendererDisplayName: String {
+        guard let graphics = warmVM?.graphicsSession else { return "Software" }
+        if !graphics.isRendererRunning { return "GPU unavailable" }
+        return usesMetalRenderer ? "Metal" : "Starting GPU"
+    }
+
     let id = UUID()
     private var warmVM: VMPool.WarmVM?
     var usesMetalRenderer: Bool {
@@ -2415,6 +2422,7 @@ final class BrowserSession {
     private var cjkInputBridge: CJKInputBridge?
     private var gestureBridge: GestureBridge?
     private(set) var scrollBridge: PrecisionScrollBridge?
+    private var pointerBridge: GuestPointerBridge?
     private(set) var autoSuspend: VMAutoSuspend?
     private var traceWindow: NSWindow?
     private var traceRecordButton: NSButton?
@@ -2423,6 +2431,10 @@ final class BrowserSession {
     private var warpPulseTimer: Timer?
     private var effectsPanel: NSWindow?
     private var effectsAccessory: NSTitlebarAccessoryViewController?
+    private var rendererStatusTimer: Timer?
+    private var rendererStatusLabel: NSTextField?
+    private var rendererStatusIcon: NSImageView?
+    private var rendererStatusContainer: NSView?
     private var splitView: NSSplitView?
     private var drawerHost: NSView?
     fileprivate var hasFileTransfer = false
@@ -2461,6 +2473,7 @@ final class BrowserSession {
                 graphics?.resizeDisplay(width: width, height: height)
             }
             vmView.addSubview(gpuView)
+            vmView.gpuFrameView = gpuView
             graphics.observeCursor { [weak gpuView] cursor in
                 DispatchQueue.main.async { gpuView?.presentCursor(cursor) }
             }
@@ -2497,7 +2510,7 @@ final class BrowserSession {
         let cropperOrDropTarget: NSView
         let croppingCropper: NativeChromeCropper?
         if config.nativeChromeInset > 0 {
-            let dpr = max(CGFloat(VMConfig.detectDisplayScale()), 1)
+            let dpr = max(CGFloat(VMConfig.resolvedDisplayScale()), 1)
             let insetPts = CGFloat(config.nativeChromeInset) / dpr
 
             let cropper = NativeChromeCropper()
@@ -2598,6 +2611,7 @@ final class BrowserSession {
             window.sharingType = .none
         }
         self.window = window
+        MainActor.assumeIsolated { installRendererStatus() }
 
         // Filter macOS-generated key-repeat events targeting this VM
         // window. VZ's USB HID path forwards every keyDown — including
@@ -3372,6 +3386,15 @@ final class BrowserSession {
                 dropTarget.onMagnify = { [weak bridge] delta, guestX, guestY in
                     bridge?.sendPinchZoom(magnification: delta, guestX: guestX, guestY: guestY)
                 }
+            }
+        }
+
+        if warmVM.graphicsSession != nil, let dev = linkSocketDevice {
+            MainActor.assumeIsolated {
+                let bridge = GuestPointerBridge(socketDevice: dev)
+                self.pointerBridge = bridge
+                vmView.pointerBridge = bridge
+                self.window.acceptsMouseMovedEvents = true
             }
         }
 
@@ -4278,6 +4301,53 @@ final class BrowserSession {
         drawerHost?.isHidden == false
     }
 
+    @MainActor private func installRendererStatus() {
+        guard warmVM?.graphicsSession != nil else { return }
+        let label = NSTextField(labelWithString: "GPU")
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.alignment = .center
+        label.frame = NSRect(x: 0, y: 0, width: 100, height: 22)
+        let accessory = NSTitlebarAccessoryViewController()
+        let icon = NSImageView(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+        icon.image = MetalRendererBadge.image()
+        icon.setAccessibilityLabel("Metal acceleration enabled")
+        let badge = NSStackView(views: [icon, label])
+        badge.orientation = .horizontal
+        badge.spacing = 4
+        badge.frame = NSRect(x: 0, y: 0, width: 100, height: 22)
+        accessory.view = badge
+        rendererStatusContainer = badge
+        rendererStatusIcon = icon
+        accessory.layoutAttribute = .trailing
+        window.addTitlebarAccessoryViewController(accessory)
+        rendererStatusLabel = label
+        updateRendererStatus()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, !self.closing else { timer.invalidate(); return }
+                self.updateRendererStatus()
+            }
+        }
+        rendererStatusTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @MainActor private func updateRendererStatus() {
+        guard let label = rendererStatusLabel else { return }
+        rendererStatusContainer?.isHidden = warmVM?.graphicsSession == nil
+        rendererStatusIcon?.isHidden = !usesMetalRenderer
+        label.isHidden = usesMetalRenderer
+        rendererStatusIcon?.toolTip = "Metal GPU acceleration is active for this window."
+        if let graphics = warmVM?.graphicsSession {
+            label.stringValue = !graphics.isRendererRunning ? "GPU unavailable" : usesMetalRenderer ? "Metal GPU" : "Starting GPU…"
+            label.toolTip = graphics.isRendererRunning ? "This window uses the Metal-backed renderer. Choose Use Metal Renderer in the GPU menu or Settings → Hardware for newly opened windows." : "The renderer stopped. Close and reopen this window to restart it."
+        } else {
+            label.stringValue = ""
+            label.isHidden = true
+            label.toolTip = nil
+        }
+    }
+
     func show() {
         window.center()
         let offset = CGFloat((BrowserSession.windowCount - 1) % 5) * 25
@@ -4335,6 +4405,8 @@ final class BrowserSession {
             // Before the CDP bridge: closes the direct wheel socket and
             // stops its reconnect loop, which would otherwise poll the
             // (stopped) pool forever from the retired session.
+            pointerBridge?.stop()
+            pointerBridge = nil
             scrollBridge?.stop()
             scrollBridge = nil
             cdpBridge?.stop()
@@ -5765,6 +5837,47 @@ final class NativeChromeCropper: NSView {
 /// wheels), whose clicky deltas the USB path already represents fine.
 final class PrecisionScrollVMView: VZVirtualMachineView {
     weak var scrollBridge: PrecisionScrollBridge?
+    weak var pointerBridge: GuestPointerBridge?
+    weak var gpuFrameView: HostGPUFrameView?
+    private var pointerButtons = 0
+    private var pointerTracking: NSTrackingArea?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        pointerBridge != nil || super.acceptsFirstMouse(for: event)
+    }
+
+
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerTracking { removeTrackingArea(pointerTracking) }
+        guard pointerBridge != nil else { return }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        pointerTracking = area
+    }
+
+    private func sendPointer(_ event: NSEvent, button: Int = 0, down: Bool? = nil) -> Bool {
+        guard let bridge = pointerBridge else { return false }
+        guard inputReady else { return true }
+        if let down {
+            if down { pointerButtons |= button } else { pointerButtons &= ~button }
+        }
+        let p = convert(event.locationInWindow, from: nil)
+        let normalized = gpuFrameView?.normalizedGuestPoint(convert(p, to: gpuFrameView))
+            ?? (x: Double(p.x / max(bounds.width, 1)), y: Double(1 - p.y / max(bounds.height, 1)))
+        bridge.send(x: normalized.x, y: normalized.y, buttons: pointerButtons, immediately: down != nil)
+        return true
+    }
+
+    override func mouseMoved(with event: NSEvent) { if !sendPointer(event) { super.mouseMoved(with: event) } }
+    override func mouseDragged(with event: NSEvent) { if !sendPointer(event) { super.mouseDragged(with: event) } }
+    override func rightMouseDragged(with event: NSEvent) { if !sendPointer(event) { super.rightMouseDragged(with: event) } }
+    override func otherMouseDragged(with event: NSEvent) { if !sendPointer(event) { super.otherMouseDragged(with: event) } }
+    override func mouseUp(with event: NSEvent) { if !sendPointer(event, button: 1, down: false) { super.mouseUp(with: event) } }
+    override func rightMouseUp(with event: NSEvent) { if !sendPointer(event, button: 2, down: false) { super.rightMouseUp(with: event) } }
+    override func otherMouseUp(with event: NSEvent) { if !sendPointer(event, button: 4, down: false) { super.otherMouseUp(with: event) } }
+
 
     /// When true, the view declines first-responder status so the
     /// native-tabs address bar can win the focus race after ⌘T / ⌘L. The
@@ -5789,7 +5902,7 @@ final class PrecisionScrollVMView: VZVirtualMachineView {
 
     override var acceptsFirstResponder: Bool {
         if declinesFirstResponder || !inputReady { return false }
-        return super.acceptsFirstResponder
+        return pointerBridge != nil || super.acceptsFirstResponder
     }
 
     override func resignFirstResponder() -> Bool {
@@ -5810,17 +5923,18 @@ final class PrecisionScrollVMView: VZVirtualMachineView {
         // the guest before the native tab bar exists wedges focus handling.
         guard inputReady else { return }
         declinesFirstResponder = false
-        super.mouseDown(with: event)
+        window?.makeFirstResponder(self)
+        if !sendPointer(event, button: 1, down: true) { super.mouseDown(with: event) }
     }
 
     override func rightMouseDown(with event: NSEvent) {
         guard inputReady else { return }
-        super.rightMouseDown(with: event)
+        if !sendPointer(event, button: 2, down: true) { super.rightMouseDown(with: event) }
     }
 
     override func otherMouseDown(with event: NSEvent) {
         guard inputReady else { return }
-        super.otherMouseDown(with: event)
+        if !sendPointer(event, button: 4, down: true) { super.otherMouseDown(with: event) }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

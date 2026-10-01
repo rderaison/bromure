@@ -61,7 +61,9 @@ public final class LinuxImageManager {
 
     public var supportsExperimentalVirgl: Bool {
         guard hasBootFiles, let data = try? Data(contentsOf: graphicsCapabilitiesURL) else { return false }
-        return Self.validGraphicsCapabilities(data)
+        guard Self.validGraphicsCapabilities(data),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return json["pointerProtocolVersion"] as? Int == 1 && json["pointerPort"] as? Int == 5821
     }
 
     static func validGraphicsCapabilities(_ data: Data) -> Bool {
