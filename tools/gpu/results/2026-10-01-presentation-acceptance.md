@@ -16,7 +16,7 @@ Profile editor Performance now includes Metal Renderer, enabled by default inclu
 - Real-worker cursor fixture preserves alpha 0/128/255 for formats 1 and 2 and checks BGRA conversion.
 - Real Metal/IOSurface handoff fixtures check texture contents, bounded deadlines, changed and unchanged geometry, reset, legitimate black, partial repaint, native chrome exclusion, scalar tails, 5K/8K allocations.
 - Live uniform-content resize with host input: accepted resized frames retain the painted center; 40 own-window screenshots contain zero black centers. Maximum actual captured scanout was 5120×1988 (host screen constrained window height). This is center evidence, not exhaustive verification of every onscreen pixel.
-- Native-crop host-to-DOM clicks pass before and after resize.
+- Native-crop host-to-DOM clicks pass before and after resize. Final Developer ID signed production bundle repeats this test: 62 accepted painted-fixture frames, zero black centers, zero rejected GPU commands, 26 native cursor images. Notarization is tracked separately from this runtime test.
 - Live profile opt-out test prewarms Metal, decodes an older profile (default on), round-trips explicit off, claims the off profile, and verifies a separate legacy VM with no custom graphics session. Guest reports llvmpipe.
 - Release product builds successfully. Full Swift test target remains blocked by existing unrelated AgentCoding MLX newCache errors; profile serialization assertions also run in the live developer acceptance command.
 - Actual macOS 26 host runtime testing remains unavailable; eligibility guard and legacy path on macOS 27 are verified.
