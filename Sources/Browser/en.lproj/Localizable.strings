@@ -798,3 +798,9 @@
 "Copy the console output" = "Copy the console output";
 "Hide Details" = "Hide Details";
 "Show Details" = "Show Details";
+
+/* Open New Windows With */
+"Open New Windows With" = "Open New Windows With";
+"The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window." = "The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window.";
+"Last Used Profile" = "Last Used Profile";
+"Open New Windows with \U201C%@\U201D" = "Open New Windows with \U201C%@\U201D";

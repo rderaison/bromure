@@ -252,7 +252,7 @@ enum ManualShots {
             "vm.energyMode": EnergyMode.default.rawValue,
             "phishingAnalysis.serverURL": PhishingAnalysisBridge.defaultServerBaseURL.absoluteString,
             "automation.enabled": false, "automation.port": 9222, "automation.bindAddress": "127.0.0.1",
-            "links.defaultProfileID": "",
+            "links.defaultProfileID": "", AppState.launchProfileKey: "",
         ]
         mask.merge(defaults) { current, _ in current }
         UserDefaults.standard.setVolatileDomain(mask, forName: UserDefaults.argumentDomain)

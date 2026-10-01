@@ -69,6 +69,16 @@ final class AppState: @unchecked Sendable {
     let profileManager: ProfileManager
     var selectedProfileID: UUID?
 
+    /// Preference: the profile a new window opens with when no browser
+    /// window is in front (launch, Dock click, ⌘N). Empty = the profile
+    /// used most recently. Set in Settings › General or the profile chip.
+    static let launchProfileKey = "launch.defaultProfileID"
+
+    var launchProfileID: UUID? {
+        get { UserDefaults.standard.string(forKey: Self.launchProfileKey).flatMap(UUID.init(uuidString:)) }
+        set { UserDefaults.standard.set(newValue?.uuidString ?? "", forKey: Self.launchProfileKey) }
+    }
+
     /// Called by the app delegate when sessions need to be closed for image rebuild.
     var onCloseAllSessions: (() async -> Void)?
     var onPoolReady: (() -> Void)?

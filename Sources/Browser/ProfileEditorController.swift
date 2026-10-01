@@ -222,6 +222,9 @@ final class ProfileEditorController {
         if state.selectedProfileID == id {
             state.selectedProfileID = state.profileManager.allProfiles.first?.id
         }
+        if state.launchProfileID == id {
+            state.launchProfileID = nil  // back to the last-used profile
+        }
         state.profileVersion += 1
     }
 }

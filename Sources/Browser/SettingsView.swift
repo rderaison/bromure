@@ -61,6 +61,7 @@ struct SettingsView: View {
     @AppStorage("automation.port") private var automationPort = 9222
     @AppStorage("automation.bindAddress") private var automationBindAddress = "127.0.0.1"
     @AppStorage("links.defaultProfileID") private var defaultProfileID = ""
+    @AppStorage(AppState.launchProfileKey) private var launchProfileID = ""
 
     var state: AppState?
 
@@ -406,6 +407,22 @@ struct SettingsView: View {
     private var generalView: some View {
         VStack(alignment: .leading, spacing: 20) {
             sectionHeader("General", subtitle: "App-wide preferences")
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Open New Windows With").font(.headline)
+                Text("The profile Bromure opens when you launch it, click its Dock icon, or press \u{2318}N with no browser window in front. \u{201C}Last Used Profile\u{201D} picks the one you used most recently. You can also set this from the profile menu in any window.")
+                    .settingDescription()
+                Picker("", selection: $launchProfileID) {
+                    Text("Last Used Profile").tag("")
+                    ForEach(state?.profileManager.allProfiles ?? []) { profile in
+                        Text(profile.name).tag(profile.id.uuidString)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 260)
+            }
+
+            Divider()
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Default Profile for Links").font(.headline)

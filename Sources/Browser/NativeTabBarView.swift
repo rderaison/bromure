@@ -113,6 +113,7 @@ final class NativeTabBarModel {
     /// The profile this window runs. nil for profile-less (automation)
     /// sessions, which show no chip.
     var profileName: String?
+    var profileID: UUID?
     var profileColor: ProfileColor?
     var profileIsManaged = false
 
