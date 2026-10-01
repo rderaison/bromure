@@ -11245,6 +11245,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for h in targets { openRemoteHost(h) }
     }
 
+        // "peer:<name>": one of this account's servers, reached through
+        // bromure.io (direct or relayed) the way the connect window dials it.
+        if spec.hasPrefix("peer:") {
+            let name = String(spec.dropFirst(5))
+            Task { @MainActor [weak self] in
+                guard let cp = ControlPlaneClient.current() else {
+                    FatClientLog.log("autoOpen: not signed in to bromure.io"); return
+                }
+                do {
+                    let servers = try await cp.client.listDevices(bearer: cp.bearer).filter { !$0.isSelf && !$0.revoked }
+                    FatClientLog.log("autoOpen: bromure.io servers: \(servers.map(\.displayName))")
+                    guard let s = servers.first(where: { $0.displayName.caseInsensitiveCompare(name) == .orderedSame })
+                    else { return }
+                    self?.openRemoteHost(RemoteConnectModel.peerHost(for: s))
+                } catch {
+                    FatClientLog.log("autoOpen: directory failed: \(error)")
+                }
+            }
+            return
+        }
     func saveAutomation(_ automation: ScheduledAutomation) {
         scheduledAutomationStore.upsert(automation)
         scheduledAutomationEngine.tick()

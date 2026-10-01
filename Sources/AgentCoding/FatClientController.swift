@@ -4910,6 +4910,12 @@ final class RemoteHostWindow: NSWindow {
                 },
                 "automations": controller.automationStore.automations.map {
                     ["id": $0.id.uuidString, "name": $0.name] as [String: Any]
+                "chat": beautifiedModel.map { m -> [String: Any] in
+                    var st = m.debugHistoryState()
+                    st["prompts"] = BeautifiedSessionModel.userPrompts(in: m.items)
+                    st["working"] = m.working
+                    return st
+                } ?? [:],
                 },
                 "shownWorkspace": shownWorkspace?.uuidString ?? "",
                 "bootCue": bootCueWorkspace?.uuidString ?? "",
